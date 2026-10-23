@@ -90,6 +90,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
+  session_artifact_library: { since: 'v1' },
   session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
@@ -158,6 +159,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_agents: { since: 'v1' },
   session_agent_trace: { since: 'v1' },
   scheduled_task_session_reuse: { since: 'v1' },
+  // Scheduled tasks accept a `gate`: a command run at each fire outside the
+  // model, so a quiet watch costs no turn. Clients that send `gate` to an
+  // older daemon would have it silently dropped on POST.
+  scheduled_task_gate: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
@@ -767,6 +772,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_shell_command',
     (toggles) => toggles.sessionShellCommandEnabled === true,
+  ],
+  [
+    'session_artifact_library',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [
     'session_artifacts_persistence',

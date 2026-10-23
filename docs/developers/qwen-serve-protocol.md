@@ -220,7 +220,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'auth_provider_install', 'workspace_memory',
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
- 'session_supported_commands', 'session_tasks', 'session_monitor_tool_correlation', 'session_stats',
+ 'session_supported_commands', 'session_tasks', 'scheduled_task_gate', 'session_monitor_tool_correlation', 'session_stats',
  'session_lsp', 'session_resources', 'session_status',
  'session_close', 'session_metadata', 'session_organization',
  'session_archive', 'mcp_guardrails',
@@ -594,6 +594,39 @@ operator diagnostic snapshot documented below.
 `daemon_update` advertises the process-global `GET /daemon/update`,
 `POST /daemon/update/prepare`, and `POST /daemon/update/restart` surface.
 
+`scheduled_task_gate` advertises the optional `gate` on `POST` and
+`PATCH /scheduled-tasks`, and `gate` and `gateStatus` on task views. A gate is
+a shell command the owning session runs at each fire, outside the model:
+exit 0 with output delivers the fire with that output attached, exit 0 with
+nothing on stdout skips it, and a non-zero exit is reported when the gate
+starts failing, not at every fire.
+`gateStatus.lastOutcome` is `quiet`, `delivered`, `failed` or `blocked`.
+
+- A gate needs a recurring task: `POST` with `recurring: false`, or a `PATCH`
+  that sets a gate on a one-shot or turns a gated task one-shot, answers 400
+  `gate_requires_recurring`; a task already in that state keeps its other
+  edits. A malformed gate (empty on `POST`, only a comment, over 2048
+  characters, a NUL character or an unpaired UTF-16 surrogate, a shell wrapper
+  such as `bash -c '…'`, or
+  any part backgrounded with `&`) answers 400 `invalid_gate`.
+  The `&` check is lexical and best-effort; where unsure it refuses (an `&` in
+  a comment, a heredoc body or `(( … ))`), and a gate that gets past it is
+  reported `failed` when it exits with nothing on stdout while a background
+  part still holds its stdout (outside the bwrap shell sandbox, whose PID
+  namespace ends that part with the command).
+  On `PATCH`, `gate: null` or `gate: ""` clears the gate and its `condition`.
+- A legacy task guarded by a `condition` refuses any `gate` key in a `PATCH`
+  with 409 `task_legacy_unsupported`, so a client sends `gate` only when it
+  changes it.
+- A gate written through these routes carries no confirmation from the
+  session. It runs unattended only where a `monitor` call of the same command
+  would run without asking: under a saved `Monitor(...)` or `Bash(...)` allow
+  rule, as a read-only command, or in an auto or yolo session. A deny rule
+  blocks it in every mode and plan mode blocks it; a blocked fire settles
+  `blocked`.
+- Clients must not send `gate` to a daemon without this tag: such a daemon
+  drops it on `POST` and answers a gate-only `PATCH` with 400 `empty_patch`.
+
 **Conditional tags.** These feature tags are advertised only when their deployment toggle, runtime wiring, or availability condition is active. Tag presence means the documented behavior is available; absence means either an older daemon predating the tag or a current daemon where that condition is false. Currently:
 
 <!-- conditional-serve-features:start -->
@@ -619,6 +652,7 @@ operator diagnostic snapshot documented below.
 | `standalone_sessions_v1`                 | the daemon has installed the complete standalone-session runtime, lifecycle coordinator, durable deletion journal, managed-directory implementation, and `/standalone/sessions` route family. Direct embeds without the complete dependency graph omit both the routes and this tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `standalone_session_options_v1`          | the complete standalone-session runtime is installed (same condition as `standalone_sessions_v1`), so the read-only, sessionless `GET /standalone/session-options` route is registered on the internal Conversations runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `session_artifacts_persistence`          | session artifact persistence is wired for the runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `session_artifact_library`               | Session artifact persistence is wired; supports trusted workspace-owner reads/removal of live, cold, and archived registrations via `/workspaces/:workspace/session/:id/artifact-library`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `session_sources`                        | session source persistence is wired for the runtime. Registers metadata-only workspace files, uploaded attachments, and HTTP(S) links through the live session owner.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `session_generation`                     | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `scheduled_task_session_reuse`           | durable scheduled-task session management is active and every managed daemon runtime has installed the callback that lets a task explicitly bind to its current existing session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -3079,6 +3113,23 @@ Return aggregate persisted session counts for the selected workspace without cha
 `active`, `archived`, and `total` count user-visible local JSONL sessions; internal daemon host sessions and workspace-agent task sessions (`sourceType` `agent-host` and `agent`) are excluded from these counts and from every session listing; a person still opens an agent session by id. `live` is the matching user-visible in-memory bridge count and is omitted for a registered untrusted secondary workspace because that persisted-only read must not query live state. `expensive` is always `true` and `cost` is always `"disk_scan"`; clients must call this endpoint infrequently rather than poll it. If the scan reaches its safety limit or cannot classify every candidate file, the response adds `"truncated": true` and the persisted counts are lower bounds. Missing storage returns zero persisted counts. The plural route uses the same workspace selector and trust policy as the plural session catalog; an untrusted primary still returns `403 untrusted_workspace`.
 
 The TypeScript daemon SDK exposes the plural route through `workspaceById(...)` or `workspaceByCwd(...)`, followed by `getWorkspaceSessionInfo()`.
+
+### Workspace session artifact library
+
+`session_artifact_library` advertises these persisted-workspace-scoped endpoints:
+
+| Method | Route                                                             | Result                                                                                               |
+| ------ | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| GET    | `/workspaces/:workspace/session/:id/artifact-library`             | The session artifact envelope, including persisted registrations for unloaded and archived sessions. |
+| DELETE | `/workspaces/:workspace/session/:id/artifact-library/:artifactId` | The artifact mutation result. An already-absent registration returns `changes: []`.                  |
+
+The workspace selector resolves to a trusted runtime. Both routes reject ambiguous live owners and a live owner in another runtime before accessing artifacts. They participate in the internal runtime activity barrier; reads hold the shared session archive barrier and removals hold it exclusively. Neither route loads an agent or unarchives the session. Deletion requires daemon operator authority through the strict mutation gate; it does not require `X-Qwen-Client-Id`. The existing client-owned artifact endpoints keep their authorization rules.
+
+Cold reads replay persisted artifact records and return metadata and locators such as workspace-relative `workspacePath`, `managedId` or `url`. They preserve recorded timestamps and report per-artifact compatibility warnings without marking successful persistence unavailable. `limits.maxArtifacts` describes the live store's registration limit; a cold projection does not evict historical registrations to enforce that limit.
+
+Cold deletion appends a durable explicit tombstone. It preserves workspace files and releases unreferenced daemon-managed web-preview snapshot references using the existing best-effort cleanup. Live deletion can return HTTP 200 with `changes: []`, `warnings` and `warningDetails` if persistence fails; callers must inspect the result and retain the registration. Cold write failures are returned as errors.
+
+Both routes return `409 artifact_library_unavailable` when artifact persistence is disabled. Unknown sessions return `404 session_not_found`; foreign-project storage is treated as not found, and ambiguous or non-regular storage returns `409 session_storage_conflict`. Incomplete conversation records or a non-authoritative mutation journal return `409 session_transcript_corrupt`, distinct from a concurrent writer's `session_transcript_changed`. Reads above 64 MiB return 413. Cold managed-execution mutation returns `409 artifact_mutation_requires_managed_authority`. Existing workspace ownership and lifecycle error responses also apply.
 
 ### `GET /workspace/:id/sessions` and `GET /workspaces/:workspace/sessions`
 

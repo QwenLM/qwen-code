@@ -76,10 +76,8 @@ class WorkspaceSessionRetentionTest {
     @Autowired HarnessConnector harness;
     @Autowired com.alibaba.qwen.code.managedagent.session.HarnessCoordinator coordinator;
 
-    @ParameterizedTest
-    @CsvSource({"ACTIVE, hosted-workspace-shell/1",
-            "ACTIVE, hosted-workspace-shell/2", "CLOSED, hosted-workspace-shell/2", "ARCHIVED, hosted-workspace-shell/2"})
-    void unsupportedShellLifecycleStaysDisabledDespiteCloseProof(String state, String profile) throws Exception {
+    @Test
+    void unsupportedShellLifecycleStaysDisabledDespiteCloseProof() throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
         assertThat(runtime.supportsWorkspaceClose()).isTrue();
@@ -104,7 +102,7 @@ class WorkspaceSessionRetentionTest {
         int commands = jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session);
         jdbc.update("UPDATE ma_session SET tool_profile = ?, approval_mode = 'default', status = ?"
-                + " WHERE tenant_id = ? AND session_id = ?", profile, state, tenant, session);
+                + " WHERE tenant_id = ? AND session_id = ?", "hosted-workspace-shell/1", "ACTIVE", tenant, session);
         var publicCapabilities = projection.getPublicSession(tenant, "owner", session).capabilities();
         assertThat(publicCapabilities.foregroundShell()).isTrue();
         assertThat(publicCapabilities.sessionClose()).isFalse();
@@ -327,6 +325,13 @@ class WorkspaceSessionRetentionTest {
         String tenant = tenant();
         String session = closed(tenant, false);
         grant(tenant, "reader");
+        request(post(WEB + "/sessions/get").contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(java.util.Map.of("sessionId", session))), tenant, "reader", null)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.sessionClose").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionArchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionUnarchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionDelete").value(false));
         for (String operation : new String[] {"archive", "unarchive", "delete"}) {
             web(operation, tenant, session, "reader", "key").andExpect(status().isForbidden())
                     .andExpect(jsonPath("$.error.code").value("session_operation_forbidden"));

@@ -383,6 +383,21 @@ vi.mock('./server/git-branch-ops.js', () => ({
       : Promise.resolve(),
 }));
 
+// Observe the prompt route's binding hand-off without running the real
+// pipeline (which would query the platform). Only this export is replaced;
+// the backfill route registration stays real via importOriginal.
+const bindSessionPrsFromReviewPromptMock = vi.hoisted(() =>
+  vi.fn(async () => {}),
+);
+vi.mock('./routes/session-pr-backfill.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('./routes/session-pr-backfill.js')>();
+  return {
+    ...original,
+    bindSessionPrsFromReviewPrompt: bindSessionPrsFromReviewPromptMock,
+  };
+});
+
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
   port: 4170,
@@ -670,6 +685,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_tasks',
   'session_agents',
   'session_agent_trace',
+  'scheduled_task_gate',
   'session_monitor_tool_correlation',
   'session_stats',
   'session_lsp',
@@ -805,7 +821,12 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [feature, 'workspace_skills_config_runtime'];
     }
     if (feature === 'session_artifacts') {
-      return [feature, 'session_artifacts_persistence', 'session_sources'];
+      return [
+        feature,
+        'session_artifacts_persistence',
+        'session_artifact_library',
+        'session_sources',
+      ];
     }
     if (feature === 'mcp_guardrail_events') {
       return [feature, 'external_tool_guard'];
@@ -3712,6 +3733,7 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'session_artifacts_persistence' ||
+          feature === 'session_artifact_library' ||
           feature === 'session_sources'
         ) {
           expect(
@@ -20183,6 +20205,148 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
       expect(bridge.promptCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.promptCalls[0]?.req.sessionId).toBe('session-A');
+    });
+
+    it('hands the first text block of an admitted /review prompt to the binder', async () => {
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: '/review 42 --comment' }] });
+      expect(res.status).toBe(202);
+      // Allow the fire-and-forget bind hand-off to run.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bindSessionPrsFromReviewPromptMock).toHaveBeenCalledWith(
+        expect.objectContaining({ workspaceCwd: expect.any(String) }),
+        'session-A',
+        '/review 42 --comment',
+        expect.objectContaining({
+          archiveCoordinator: expect.anything(),
+        }),
+      );
+    });
+
+    it('does not hand a /review line from a later text block to the binder', async () => {
+      // @-imported file content and other later blocks can quote `/review N`
+      // without requesting one; only the first text block is the user prompt.
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'please look' },
+            { type: 'text', text: '/review 42' },
+          ],
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bindSessionPrsFromReviewPromptMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'session-A',
+        'please look',
+        expect.anything(),
+      );
+      expect(bindSessionPrsFromReviewPromptMock).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'session-A',
+        expect.stringContaining('/review'),
+        expect.anything(),
+      );
+    });
+
+    it('does not hand a /review prompt to the binder in an untrusted workspace', async () => {
+      // Direct app tests default to an untrusted primary workspace; the
+      // route's own gate must keep the bind out even before the helper runs.
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: '/review 42' }] });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bindSessionPrsFromReviewPromptMock).not.toHaveBeenCalled();
+    });
+
+    it('keeps the 202 response when the binder rejects', async () => {
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      bindSessionPrsFromReviewPromptMock.mockRejectedValueOnce(
+        new Error('draining'),
+      );
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: '/review 42' }] });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('keeps the 202 response when the binder never settles', async () => {
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      bindSessionPrsFromReviewPromptMock.mockImplementationOnce(
+        () => new Promise(() => {}),
+      );
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: '/review 42' }] });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('does not bind a channel-relayed /review prompt', async () => {
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: '/review 42' }],
+          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bindSessionPrsFromReviewPromptMock).not.toHaveBeenCalled();
     });
 
     it('400 when the prompt carries more than 256 media blocks', async () => {
@@ -40977,6 +41141,45 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
         bridge: fakeBridge(),
       }),
     ).toThrow(/Non-loopback HTTP\(S\).*code execution/);
+  });
+
+  it('rejects an embedded loopback port wildcard without a token', () => {
+    const wildOpts = {
+      ...baseOpts,
+      allowOrigins: ['http://127.0.0.1:*'],
+    };
+    expect(() =>
+      createServeApp(wildOpts, () => 4170, {
+        bridge: fakeBridge(),
+      }),
+    ).toThrow(/loopback port wildcard/i);
+  });
+
+  it('serves an ephemeral loopback origin through the port wildcard', async () => {
+    const app = createServeApp(
+      {
+        ...baseOpts,
+        token: 'secret',
+        allowOrigins: ['http://127.0.0.1:*'],
+      },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .options('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://127.0.0.1:54321')
+      .set('Access-Control-Request-Method', 'GET');
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://127.0.0.1:54321',
+    );
+    const foreign = await request(app)
+      .options('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:54321')
+      .set('Access-Control-Request-Method', 'GET');
+    expect(foreign.status).toBe(403);
   });
 
   it('preserves tokenless browser-extension origins for local automation', async () => {

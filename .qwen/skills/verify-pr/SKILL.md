@@ -1,6 +1,6 @@
 ---
 name: verify-pr
-description: This skill should be used to run a sandboxed deep verification of a qwen-code PR — "/verify-pr <n>", "深度验证这个 PR", A/B load-bearing proof against the base build, mock-free harnesses with wire oracles, and targeted gates — producing tmp/pr<n>-verify-<ts>/report.md plus a machine-readable verdict. Designed for the token-free CI verify job; also usable locally.
+description: This skill should be used to run a sandboxed deep verification of a qwen-code PR — "/verify-pr <n>", "/verify-pr <n> --publish" (local round that also posts the report comment), "深度验证这个 PR", "验证这个 PR 并把报告发到评论", A/B load-bearing proof against the base build, mock-free harnesses with wire oracles, and targeted gates — producing tmp/pr<n>-verify-<ts>/report.md plus a machine-readable verdict. Designed for the token-free CI verify job; also usable locally.
 ---
 
 # PR Deep Verification
@@ -130,6 +130,21 @@ guess (a remote is only usable when its URL matches the intended
 number,title,body,author,baseRefOid,headRefOid,commits` — work in an isolated worktree, and keep everything else identical;
 posting is governed by the maintainer-driven local publish rule below.
 
+**Local argument contract.** `/verify-pr <n>` proves the change and posts
+nothing. `/verify-pr <n> --publish` is the one-line form of a maintainer
+round that also publishes the result: identical verification, then the local
+publish rules below. It takes no further arguments to turn on the deliverables
+— the local publish rule owns the report body, its Chinese summary, the image
+evidence and the asset host — so do not ask the maintainer to restate them and
+do not treat a request without those words as a thinner report.
+`--assets-branch <branch>` overrides the assets branch; the default and the
+`$QWEN_VERIFY_ASSETS_BRANCH` override are resolved in the local publish rule
+below. Only a coordinate like this is defaultable — posting stays a
+per-invocation request, because it writes to the PR.
+`--repo <owner>/<repo>` is still resolved as below: the flag does not license
+an `origin` fallback, but a maintainer checkout whose `origin` already is the
+intended `owner/repo` is a match to confirm, not a guess to avoid.
+
 **Do not assume `HEAD^1`/`HEAD^2` locally.** Those hold only for a merge-ref
 checkout; on a plain PR-head checkout `HEAD^1` is just the head's parent and
 `HEAD^2` usually does not exist, so the A/B would silently compare the wrong
@@ -190,16 +205,23 @@ treat the round as a production change.
 
 **Maintainer-driven local publish (only on explicit request).** "Never
 post" yields when the maintainer running the local round explicitly asks
-for a PR comment. Confirm the image host before publishing (a fork assets
+for a PR comment; `--publish` in the invocation is that request, and needs
+nothing restated. Confirm the image host before publishing (a fork assets
 branch with raw.githubusercontent.com URLs renders inline; follow the
-fork's existing branch-naming convention rather than inventing one). Upload
-blobs with `gh api -X PUT repos/.../contents/<path> --input -` carrying a
+branch-naming convention the repository already carries rather than
+inventing one). Resolve the branch as `--assets-branch`, else
+`$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation` — the name the
+existing assets branches already use — so a maintainer with a stable host
+sets the variable once instead of passing the flag every round. Upload blobs
+with `gh api -X PUT repos/.../contents/<path> --input -` carrying a
 JSON payload — `-f content="$(base64 …)"` blows past ARG_MAX around 100 KB.
 Keep the report.md contract in the comment body: verdict line first,
 collapsed `<details>` Chinese summary immediately after, images referenced
 by the same kebab-case names the files carry. The local path has no
 publisher enforcing the fail/mismatch rule, so state the verdict word from
-`verdict.txt` verbatim and keep the counts honest yourself.
+`verdict.txt` verbatim and keep the counts honest yourself. Posting is not
+the end: the guard and the read-back below still apply on this path, because
+neither the workflow publisher nor a CI re-run covers it.
 
 **Guard the post against what landed during the round.** At round start,
 record the head OID, the PR state, and the id plus `updated_at` of every

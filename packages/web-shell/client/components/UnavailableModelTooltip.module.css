@@ -1,0 +1,43 @@
+.card:global([data-web-shell-toolbar-popover]) {
+  box-sizing: border-box;
+  width: min(280px, calc(100vw - 24px));
+  min-width: min(240px, calc(100vw - 24px));
+  padding: 14px 16px;
+  gap: 10px;
+  overflow: visible;
+  border-radius: 12px;
+}
+
+.header {
+  min-width: 0;
+  gap: 6px;
+}
+
+.header :global([data-slot='popover-title']) {
+  color: var(--popover-foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.header :global([data-slot='popover-description']) {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.host {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.host[hidden] {
+  display: none;
+}

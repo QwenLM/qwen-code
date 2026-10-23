@@ -209,6 +209,30 @@ describe('foldLiveEvent task card (subagent roster parity)', () => {
 });
 
 describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
+  it('preserves separate recall content when displayed paste placeholders match', () => {
+    const event = {
+      type: 'user',
+      text: '[Pasted Content 1200 chars]',
+      recallText: 'first body'.padEnd(1200, 'x'),
+    } as const;
+    let items = foldLiveEvent([], event);
+    items = foldLiveEvent(items, event);
+    expect(items).toHaveLength(1);
+    items = foldLiveEvent(items, {
+      ...event,
+      recallText: 'second body'.padEnd(1200, 'y'),
+    });
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({
+      text: event.text,
+      recallText: event.recallText,
+    });
+    expect(items[1]).toMatchObject({
+      text: event.text,
+      recallText: 'second body'.padEnd(1200, 'y'),
+    });
+  });
+
   it('carries promptId and sentToModel onto the user item (R1-16)', () => {
     const items = foldLiveEvent([assistant('hi')], {
       type: 'user',
