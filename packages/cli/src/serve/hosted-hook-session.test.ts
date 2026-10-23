@@ -89,6 +89,9 @@ const pin = {
 };
 const options = { baseUrl: 'http://127.0.0.1:9999', token: 'test' };
 const signal = () => new AbortController().signal;
+// Admission and occurrence settlement run on the broker's async path; a
+// fixed 1 s budget flakes on a loaded host long before anything is wrong.
+const HOOK_SETTLE_TIMEOUT_MS = isSlowTestHost() ? 30_000 : 10_000;
 
 beforeEach(async () => {
   hostedHookDebug.mockClear();
@@ -1351,7 +1354,7 @@ it('waits for Runtime admission before acknowledging an async Hook', async () =>
       return result;
     });
   await vi.waitFor(() => expect(finish).toBeDefined(), {
-    timeout: isSlowTestHost() ? 30_000 : 1_000,
+    timeout: HOOK_SETTLE_TIMEOUT_MS,
   });
   expect(completed).toBe(false);
   finish!({ success: true, outcome: 'success', duration: 0 });
@@ -1389,7 +1392,7 @@ it('rejects a changed input while the same occurrence is still running', async (
     signal(),
   );
   await vi.waitFor(() => expect(finish).toBeDefined(), {
-    timeout: isSlowTestHost() ? 30_000 : 1_000,
+    timeout: HOOK_SETTLE_TIMEOUT_MS,
   });
   await expect(
     hooks.fire(
@@ -1422,7 +1425,7 @@ it('rejects another tool input order while the same occurrence is still running'
     HOSTED_TOOL_INPUT_ORDER,
   );
   await vi.waitFor(() => expect(finish).toBeDefined(), {
-    timeout: isSlowTestHost() ? 30_000 : 1_000,
+    timeout: HOOK_SETTLE_TIMEOUT_MS,
   });
   await expect(
     hooks.fire(HookEventName.PreToolUse, 'call-1', fields, signal()),
@@ -1449,7 +1452,7 @@ it('cancels an active occurrence and does not dispatch later sequential hooks', 
     });
   const firing = hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
   await vi.waitFor(() => expect(finish).toBeDefined(), {
-    timeout: isSlowTestHost() ? 30_000 : 1_000,
+    timeout: HOOK_SETTLE_TIMEOUT_MS,
   });
   const cancelled = await hooks.status('call-1', true);
   expect(cancelled.cancelRequested).toBe(true);
@@ -1562,7 +1565,7 @@ it('cancels a detached child after its async marker has admitted it', async () =
           .filter((record) => !record.recordId.startsWith('hook-plan-'))
           .map((record) => record.run.state),
       ).toEqual(['cancelled']),
-    { timeout: isSlowTestHost() ? 30_000 : 1_000 },
+    { timeout: HOOK_SETTLE_TIMEOUT_MS },
   );
   expect(
     requests.filter((request) => request.kind === 'hook-cancel').length,
@@ -2106,7 +2109,7 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
         expect(
           requests.filter((request) => request.kind === 'hook-execute'),
         ).toHaveLength(1),
-      { timeout: isSlowTestHost() ? 30_000 : 1_000 },
+      { timeout: HOOK_SETTLE_TIMEOUT_MS },
     );
     abort.abort();
     expect(await outcome).toBeInstanceOf(HostedHookRecoveryRequiredError);

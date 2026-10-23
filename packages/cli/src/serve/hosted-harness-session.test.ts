@@ -6490,23 +6490,26 @@ describe('Hosted Harness no-tool session', () => {
         },
         { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
       );
-      await vi.waitFor(async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
-            tenantId: 'tenant',
-            workspaceId: 'workspace',
-            sessionId: SESSION_ID,
-          },
-        );
-        const settled = journal.events.filter(
-          (event) =>
-            event.kind === 'turn.settled' &&
-            event.payload['turnId'] === inputId,
-        );
-        expect(settled).toHaveLength(1);
-        expect(settled[0]!.payload['outcome']).toBe('error');
-      });
+      await vi.waitFor(
+        async () => {
+          const journal = await LocalJsonlManagedSessionJournalStore.read(
+            path.join(state.root, `${SESSION_ID}.jsonl`),
+            {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+          );
+          const settled = journal.events.filter(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === inputId,
+          );
+          expect(settled).toHaveLength(1);
+          expect(settled[0]!.payload['outcome']).toBe('error');
+        },
+        { timeout: SETTLE_TIMEOUT_MS },
+      );
       expect(state.model).not.toHaveBeenCalled();
       await headers(supertest(server).delete(`/session/${SESSION_ID}`));
     },
