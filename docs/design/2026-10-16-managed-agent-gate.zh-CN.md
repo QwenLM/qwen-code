@@ -143,9 +143,11 @@ fork 代码留在托管 runner 上，在那里跑全量也不需要任何 secret
 
 ### 失败上报
 
-`main-ci-failure-issue.yml` 也监听 `Managed Agent gate`，合入后快闸变红会和其他 main
-失败一样开去重的 autofix issue。`qwen-triage-finalize.yml` 用 `Managed Agent gate`
-替换了 `SDK Java`——后者自 #14205 起已没有 `pull_request` 触发。
+`main-ci-failure-issue.yml` 也监听 `Managed Agent gate`，合入后快闸变红会记录到每个
+workflow 共用的一个 open issue；找到匹配的已关闭 issue 时会重新打开。新汇总单使用
+`scope/ci-cd` 和 `status/needs-triage` 标签供人工分诊，不自动指派 autofix。
+`qwen-triage-finalize.yml` 用 `Managed Agent gate` 替换了 `SDK Java`——后者自 #14205
+起已没有 `pull_request` 触发。
 
 ## 成本
 
