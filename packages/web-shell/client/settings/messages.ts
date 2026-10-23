@@ -20,7 +20,8 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.description.general.outputLanguage':
     'Language the model replies in. Leave empty to follow your input language (auto). Changes rewrite the session’s output-language.md and apply to the running session.',
   'settings.placeholder.general.outputLanguage': 'auto (follow input)',
-  'settings.option.general.outputLanguage.useCustom': 'Use "{value}"',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `Use "${v?.value ?? ''}"`,
   'settings.label.ui.accessibility.enableLoadingPhrases':
     'Enable Loading Phrases',
   'settings.description.ui.accessibility.enableLoadingPhrases':
@@ -243,7 +244,8 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.description.general.outputLanguage':
     '模型回复使用的语言。留空表示自动跟随你的输入语言（auto）。修改会重写当前会话读取的 output-language.md，并立即作用于当前会话。',
   'settings.placeholder.general.outputLanguage': '自动（跟随输入）',
-  'settings.option.general.outputLanguage.useCustom': '使用“{value}”',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `使用“${v?.value ?? ''}”`,
   'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
   'settings.description.general.preventSystemSleep':
     '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',

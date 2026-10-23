@@ -671,6 +671,10 @@ describe('SettingsMessage user-scope editing', () => {
       )!.set!.call(input, 'Klingon');
       input!.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    const custom = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((node) => node.textContent === 'Use "Klingon"');
+    expect(custom).toBeTruthy();
     await act(async () => {
       input!.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
@@ -679,6 +683,77 @@ describe('SettingsMessage user-scope editing', () => {
     });
 
     expect(onOutputLanguageChange).toHaveBeenCalledWith('Klingon');
+  });
+
+  it('ignores a second commit while a save is in flight', async () => {
+    let resolveSave: ((applied: boolean) => void) | undefined;
+    const onOutputLanguageChange = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    const container = renderPanel(
+      makeState([outputLanguageSetting('English')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    const typeAndEnter = async (value: string) => {
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(input, value);
+        input!.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        input!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+        await Promise.resolve();
+      });
+    };
+
+    await typeAndEnter('German');
+    expect(onOutputLanguageChange).toHaveBeenCalledTimes(1);
+
+    await typeAndEnter('Russian');
+    expect(onOutputLanguageChange).toHaveBeenCalledTimes(1);
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('German');
+
+    await act(async () => {
+      resolveSave?.(true);
+      await Promise.resolve();
+    });
+  });
+
+  it('keeps focus in the input when a suggestion is pressed', async () => {
+    const container = renderPanel(
+      makeState([outputLanguageSetting('auto')], vi.fn()),
+      { onOutputLanguageChange: vi.fn() },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    await act(async () => {
+      input!.focus();
+      await Promise.resolve();
+    });
+
+    const list = document.querySelector('[role="listbox"]');
+    expect(list).toBeTruthy();
+    const event = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      list!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
   });
 
   it('keeps the exact typed language when Enter does not follow navigation', async () => {
