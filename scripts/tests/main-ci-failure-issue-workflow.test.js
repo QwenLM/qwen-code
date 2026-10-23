@@ -425,10 +425,14 @@ printf '%s\\n' '${liveAttempt}'
 
   describe('workflow issue reuse', () => {
     const writer = jobs.file_issue.steps.find((step) => step.id === 'issue');
-    const run = (issues, failLookup = false) => {
+    const run = (issues, opts = {}) => {
+      const { failLookup = false, failEdit = false } = opts;
       const tmp = mkdtempSync(join(tmpdir(), 'ci-issue-reuse-'));
       try {
-        writeFileSync(join(tmp, 'issues.json'), JSON.stringify(issues));
+        writeFileSync(
+          join(tmp, 'issues.json'),
+          typeof issues === 'string' ? issues : JSON.stringify(issues),
+        );
         writeFileSync(
           join(tmp, 'gh'),
           `#!/usr/bin/env bash
@@ -439,6 +443,12 @@ if [[ "$1" == api ]]; then
   ${failLookup ? 'exit 1' : `cat '${tmp}/issues.json'`}
 elif [[ "$1 $2" == 'issue create' ]]; then
   echo 'https://github.com/QwenLM/qwen-code/issues/999'
+${
+  failEdit
+    ? `elif [[ "$1 $2" == 'issue edit' ]]; then
+  exit 1`
+    : ''
+}
 fi
 `,
         );
@@ -529,9 +539,40 @@ fi
     });
 
     it('does not create an issue when lookup fails', () => {
-      const result = run([], true);
+      const result = run([], { failLookup: true });
       expect(result.status).not.toBe(0);
       expect(result.calls).not.toMatch(/issue (create|comment)/);
+    });
+
+    it('publishes the issue url and the recurrence comment when the label retirement fails', () => {
+      // Under bash -e a failed cosmetic edit aborts the step; report_pr still
+      // needs the tracking-issue link, and the comment is the only record of
+      // that red main run.
+      const result = run([{ number: 42, title: 'Main CI failed: SDK Java' }], {
+        failEdit: true,
+      });
+      expect(result.calls).toContain('issue edit 42');
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+      );
+      expect(result.calls).toContain('issue comment 42');
+    });
+
+    it('merges every lookup page before choosing the oldest match', () => {
+      // `--paginate` emits one JSON document per page; without `jq -s … add`
+      // only the last page would be considered.
+      const result = run(
+        JSON.stringify([{ number: 50, title: 'Main CI failed: SDK Java' }]) +
+          JSON.stringify([
+            { number: 42, title: 'Main CI failed: SDK Java on abc123' },
+          ]),
+      );
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+      );
+      expect(result.calls).not.toContain('issue create');
     });
 
     it('serializes lookup and write per workflow and reuses the failure renderer', () => {
@@ -1143,7 +1184,6 @@ fi
       actions: 'read',
       checks: 'read',
       contents: 'read',
-      issues: 'read',
       'pull-requests': 'read',
     });
     expect(privilegedJobs[0][1].needs).toEqual(['analyze', 'rerun_infra']);

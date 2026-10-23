@@ -56,8 +56,6 @@ jobs:
       # runner lost the server, the disk filled) is rerun, not filed.
       checks: 'read'
       contents: 'read'
-      # Find an issue that already tracks this failure.
-      issues: 'read'
       pull-requests: 'read'
     outputs:
       infra_only: '${{ steps.infra.outputs.infra_only }}'
@@ -370,12 +368,15 @@ jobs:
           body_file="${RUNNER_TEMP}/issue-body.md"
           printf '%s\n\nRun attempt: %s\n' "${ISSUE_BODY}" "${RUN_ATTEMPT}" > "${body_file}"
           if [[ -n "${existing_issue}" ]]; then
+            # The url and the comment go out before the cosmetic edit: under
+            # bash -e a failed label retirement aborts the step, and report_pr
+            # must still find the tracking-issue link.
+            echo "issue_url=https://github.com/${REPO}/issues/${existing_issue}" >> "${GITHUB_OUTPUT}"
+            gh issue comment "${existing_issue}" --repo "${REPO}" --body-file "${body_file}"
             # Retire the legacy single-failure route when adopting its issue.
             # Leave assignments and any already-running repair untouched.
             gh issue edit "${existing_issue}" --repo "${REPO}" \
               --remove-label 'status/ready-for-agent' --remove-label 'autofix/approved'
-            gh issue comment "${existing_issue}" --repo "${REPO}" --body-file "${body_file}"
-            echo "issue_url=https://github.com/${REPO}/issues/${existing_issue}" >> "${GITHUB_OUTPUT}"
           else
             # A workflow aggregate may contain unrelated failures, so it needs
             # triage rather than automatic assignment to a single repair agent.
