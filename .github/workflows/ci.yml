@@ -857,6 +857,14 @@ jobs:
       - name: 'Publish Test Report (for non-forks)'
         if: |-
           ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
+        # The parser rejects the whole step when any matched file is not
+        # well-formed XML, and vitest's JUnit writer can leave
+        # packages/cli/junit.xml truncated at the tail when the suite exits
+        # mid-write: #15305 (attempt 1) failed at line 47397 and #15261 at
+        # 47232 with "Invalid character in entity name", while both runs'
+        # tests had passed. The report is advisory (`fail-on-error: false`),
+        # so a broken artifact must not turn a green suite red.
+        continue-on-error: true
         uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
         with:
           name: 'Test Results (ubuntu-latest, Node 22.x)'
@@ -1947,6 +1955,7 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        id: 'install'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
@@ -2010,9 +2019,11 @@ jobs:
       # Unlike macOS, whose E2E legs run this file in full, no other Windows
       # lane runs the Hosted cases, so this one runs all of them and fails if
       # any is skipped. It runs after the unit tests so that a Hosted failure
-      # cannot hide their results.
+      # cannot hide their results, but only after a successful install: without
+      # node_modules and dist the suite cannot even collect and the red is then
+      # attributed to a test file that never ran.
       - name: 'Hosted process suite'
-        if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ !cancelled() && steps.install.outcome == 'success' && needs.classify_pr.outputs.skip_ci != 'true' }}"
         timeout-minutes: 10
         run: |-
           npm run test:integration:hosted:sandbox:none -- --reporter=default --reporter=json --outputFile.json=hosted-process-suite.json
