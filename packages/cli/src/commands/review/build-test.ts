@@ -345,7 +345,12 @@ export function buildRunEnv(
  * kernel's OOM killer started taking processes.
  *
  * The tree is read while it is still a tree: the walk runs before anything in
- * it dies, so nothing has been reparented yet. Same process group as before,
+ * it dies, so nothing has been reparented yet. The `stat` files go through
+ * `cat`, which skips one whose process exited after the glob; awk handed the
+ * files itself stops at the first it cannot open (mawk, gawk and busybox awk
+ * all do), and every process listed after it — the command's own, the newest,
+ * are listed last — went unkilled whenever anything older exited during the
+ * walk, as it does on any busy machine. Same process group as before,
  * so a signal to the caller's group still reaches every process directly.
  * The command runs as a background job, which a POSIX shell starts with
  * SIGINT ignored — hence the INT trap, without which a Ctrl+C would leave the
@@ -355,7 +360,8 @@ export const REAPING_SHELL = `cmd=$1
 shift
 reap() {
   { if [ -r /proc/self/stat ]; then
-      awk '{ s = $0; sub(/^.*\\) /, "", s); split(s, f, " "); print $1, f[2] }' /proc/[0-9]*/stat 2>/dev/null
+      cat /proc/[0-9]*/stat 2>/dev/null |
+        awk '{ s = $0; sub(/^.*\\) /, "", s); split(s, f, " "); print $1, f[2] }'
     else
       ps -A -o pid= -o ppid=
     fi; } |

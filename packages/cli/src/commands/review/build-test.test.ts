@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { isolateOperatorReviewSettings } from './lib/test-utils.js';
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   writeFileSync,
@@ -228,6 +229,44 @@ describe.skipIf(process.platform === 'win32')(
       expect(r.exitCode).toBeNull();
       expect(await gone(await pidIn(pidFile))).toBe(true);
     });
+
+    it.skipIf(!existsSync('/proc/self/stat'))(
+      'kills the whole tree while older processes exit during the walk',
+      async () => {
+        // awk stops at the first file it cannot open (mawk, gawk and busybox
+        // awk all do), and a process that exits between the glob and the read
+        // leaves exactly that. The command's processes are the newest and are
+        // listed last, so on a busy machine every one of them was missed.
+        const churn = spawn(
+          '/bin/sh',
+          ['-c', 'while :; do sleep 1 & sleep 0.002; done'],
+          { stdio: 'ignore', detached: true },
+        );
+        try {
+          // The deadline is shorter than a churn process lives, so what exits
+          // during the walk started before the command did.
+          await new Promise((r) => setTimeout(r, 700));
+          const pidFile = join(dir, 'pid');
+          const r = run(
+            `for n in 1 2 3 4; do sleep 300 & echo $! >> ${pidFile}; done; wait`,
+            dir,
+            600,
+          );
+          expect(r.timedOut).toBe(true);
+          const pids = readFileSync(pidFile, 'utf8')
+            .trim()
+            .split('\n')
+            .map(Number);
+          expect(pids).toHaveLength(4);
+          // Every one checked, so a miss kills the rest too (see `gone`).
+          const missed: number[] = [];
+          for (const pid of pids) if (!(await gone(pid))) missed.push(pid);
+          expect(missed).toEqual([]);
+        } finally {
+          process.kill(-churn.pid!, 'SIGKILL');
+        }
+      },
+    );
 
     it("keeps the command's own exit status", () => {
       expect(run('exit 3', dir, 30_000).exitCode).toBe(3);
