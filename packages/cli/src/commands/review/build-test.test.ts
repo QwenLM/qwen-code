@@ -2205,6 +2205,36 @@ describe('runBuildTest', () => {
     expect(rep.note).not.toContain('Correlate');
   });
 
+  it('reports a build killed from outside (exit 137, no banner) as infrastructure', () => {
+    // npm passes the script's 137 through; the OOM killer prints nothing.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => ({
+        command,
+        exitCode: command.startsWith('npm run build') ? 137 : 0,
+        seconds: 1,
+        timedOut: false,
+        output: command.startsWith('npm run build') ? 'Killed' : '',
+      }),
+    });
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('was killed (SIGKILL)');
+    expect(rep.note).toContain('infrastructure result');
+    expect(rep.note).not.toContain('Correlate');
+  });
+
   it('does not widen and retry a build that ran out of heap, whatever module its output names', () => {
     writeFileSync(
       join(root, 'package.json'),

@@ -27,7 +27,7 @@ import {
 } from './workspaces.js';
 import { resolveTestScope, type TestScope } from './workspace-scope.js';
 import { DEFAULT_WHOLE_CALL_BUDGET_S } from './build-budget.js';
-import { ranOutOfHeap } from './heap.js';
+import { killedFromOutside, ranOutOfHeap } from './heap.js';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
 
 /**
@@ -1047,9 +1047,10 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     // would look like a too-small build set and trigger a retry — another full
     // deadline, and another, up to the attempt cap. A timeout is infrastructure, not
     // a graph gap: report it and stop, the same way the install path does.
-    // Nor must a heap death, for the same reason: its partial output can name
-    // a module too, and the retry would only run out of heap again.
-    const infraKill = failure.timedOut || ranOutOfHeap(failure);
+    // Nor must a heap death or an outside kill, for the same reason: their
+    // partial output can name a module too, and a retry would only die again.
+    const infraKill =
+      failure.timedOut || ranOutOfHeap(failure) || killedFromOutside(failure);
     const missing = infraKill
       ? []
       : unresolvedWorkspaceDeps(failure.output, packages).filter((name) => {
@@ -1072,9 +1073,13 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
                 'finding; otherwise it is an infrastructure result — report it as informational.'
               : 'That is an infrastructure result, not a defect in the diff — report it as ' +
                 'informational.')
-          : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
-            'compile error in a file the PR changed is a Critical; one in a file it did not ' +
-            'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
+          : killedFromOutside(failure)
+            ? `\`${failure.command}\` was killed (SIGKILL) — most often the kernel's OOM ` +
+              'killer or a memory cap. That is an infrastructure result, not a defect in the ' +
+              'diff — report it as informational.'
+            : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
+              'compile error in a file the PR changed is a Critical; one in a file it did not ' +
+              'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
       results.buildSet = (
         rootBuildSkipped ? set.filter((d) => d !== '.') : set
       ).filter((d) => !notBuilt.includes(d));

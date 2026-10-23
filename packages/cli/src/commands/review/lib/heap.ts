@@ -34,3 +34,17 @@ export function ranOutOfHeap(r: {
 }): boolean {
   return r.exitCode !== 0 && (r.heapExhausted ?? heapBannerIn(r.output));
 }
+
+/**
+ * Whether a command was SIGKILLed by something other than its deadline:
+ * exit 137 (128 + 9, which npm passes through from the script it ran), or no
+ * status at all when the shell around it was the process killed. Most often
+ * the kernel's OOM killer or a container's memory cap — the death that
+ * prints no heap banner.
+ */
+export function killedFromOutside(r: {
+  exitCode: number | null;
+  timedOut: boolean;
+}): boolean {
+  return !r.timedOut && (r.exitCode === 137 || r.exitCode === null);
+}
