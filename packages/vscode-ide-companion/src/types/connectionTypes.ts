@@ -21,6 +21,10 @@ export interface PendingRequest<T = unknown> {
   method: string;
 }
 
+export interface PromptSubmissionOptions {
+  submittedPrompt?: string;
+}
+
 export interface AcpConnectionCallbacks {
   onSessionUpdate: (data: SessionNotification) => void;
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{

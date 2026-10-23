@@ -299,6 +299,7 @@ export class DaemonSessionClient {
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
+  private generatedUiReadGeneration = 0;
   private cancelling?: Promise<void>;
   private readonly promptLimit: number;
   private readonly attachmentCache = new Map<
@@ -839,6 +840,7 @@ export class DaemonSessionClient {
    */
   private async reattach(): Promise<void> {
     if (this.reattaching) return this.reattaching;
+    const generatedUiGeneration = ++this.generatedUiReadGeneration;
     // Send no clientId so the bridge issues a fresh registration rather than
     // validating the stale one. Keep the original context explicit: workspace
     // restore resolves by cwd, while standalone restore must use its dedicated
@@ -883,7 +885,10 @@ export class DaemonSessionClient {
           this.session.worktreeState = session.worktreeState;
         }
       }
-      // Refresh only the client identity; leave the SSE cursor and ACP state intact.
+      // Refresh attachment identity and capabilities without moving the SSE cursor.
+      if (generatedUiGeneration === this.generatedUiReadGeneration) {
+        this.session.generatedUi = session.generatedUi;
+      }
       this.session.clientId = session.clientId;
     });
     try {
@@ -1197,8 +1202,42 @@ export class DaemonSessionClient {
     });
   }
 
-  context(): Promise<DaemonSessionContextStatus> {
-    return this.client.sessionContext(this.sessionId, this.clientId);
+  async context(): Promise<DaemonSessionContextStatus> {
+    const generation = ++this.generatedUiReadGeneration;
+    try {
+      const status = await this.client.sessionContext(
+        this.sessionId,
+        this.clientId,
+      );
+      if (generation === this.generatedUiReadGeneration) {
+        const value = status.state._meta?.['generatedUi'];
+        this.session.generatedUi = undefined;
+        if (
+          status.v === 1 &&
+          status.sessionId === this.sessionId &&
+          value &&
+          typeof value === 'object' &&
+          !Array.isArray(value) &&
+          'version' in value &&
+          value.version === 1 &&
+          'enabled' in value &&
+          typeof value.enabled === 'boolean'
+        ) {
+          this.session.generatedUi = {
+            version: 1,
+            enabled: value.enabled,
+            ...('reason' in value && typeof value.reason === 'string'
+              ? { reason: value.reason }
+              : {}),
+          };
+        }
+      }
+      return status;
+    } catch (error) {
+      if (generation === this.generatedUiReadGeneration)
+        this.session.generatedUi = undefined;
+      throw error;
+    }
   }
 
   status(): Promise<DaemonSessionSummary> {

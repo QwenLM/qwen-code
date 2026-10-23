@@ -22,7 +22,7 @@ public final class ManagedSessionStoreModels {
     /** The agent-instructions bound the publisher and both verifiers
      * must agree on (admission, publish, verify, recovery read). */
     public static final int MAX_AGENT_INSTRUCTIONS_BYTES = 64 * 1024;
-    public static final int MAX_AGENT_SKILLS_BYTES = 48 * 1024;
+    public static final int MAX_AGENT_SKILLS_BYTES = 2 * 1024 * 1024;
     public static final int MAX_RESOURCES_PER_TRANSACTION = 1024;
     public static final int MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
     public static final int MAX_TRANSACTION_EVENTS = 256;
@@ -37,9 +37,7 @@ public final class ManagedSessionStoreModels {
     public static final long MIN_LEASE_MILLIS = 1_000;
     public static final long MAX_LEASE_MILLIS = 300_000;
     public static final long MAX_SAFE_COUNTER = 9_007_199_254_740_990L;
-    /** Character widths of the head's activation columns (migration V36);
-     * a wider payload blanks the columns so authorization reads the journal.
-     * Character-based, matching the {@code .length()} checks on both writers. */
+    /** Commit-side character limits keep activation payloads representable in the head. */
     public static final int MAX_ACTIVATION_ID_CHARS = 512;
     public static final int MAX_ACTIVATION_PHASE_CHARS = 32;
     public static final String ERROR_WRITER_CONFLICT =
@@ -71,7 +69,9 @@ public final class ManagedSessionStoreModels {
 
     public static int inlineResourceBytes(String kind) {
         return switch (kind) {
+            case "managed-checkpoint" -> MAX_EVENT_BYTES;
             case "managed-input" -> MAX_ATTACHMENT_INPUT_BYTES;
+            case "managed-agent-skills" -> MAX_AGENT_SKILLS_BYTES;
             case "hosted-model-request" -> MAX_MODEL_REQUEST_BYTES;
             default -> MAX_INLINE_RESOURCE_BYTES;
         };

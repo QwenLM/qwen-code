@@ -28,6 +28,7 @@ import {
   useExportCompletion,
   type ExportCompletionResult,
 } from '../hooks/useExportCompletion.js';
+import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 import { LoadedSettings } from '../../config/settings.js';
@@ -55,6 +56,7 @@ vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
 vi.mock('../hooks/useExportCompletion.js');
+vi.mock('../utils/clipboardUtils.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
 }));
@@ -293,6 +295,67 @@ describe('InputPrompt suggestion mouse routing', () => {
     unmount();
   });
 
+  it('drops a clipboard read that resolves after a mouse suggestion accept', async () => {
+    let resolveRead: (value: string | null) => void = () => {};
+    vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+    vi.mocked(clipboardUtils.readClipboardText).mockImplementation(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+    const reverseSearchCompletion = {
+      suggestions: [{ label: 'recalled prompt', value: 'recalled prompt' }],
+      activeSuggestionIndex: 0,
+      visibleStartIndex: 0,
+      showSuggestions: true,
+      isLoadingSuggestions: false,
+      navigateUp: vi.fn(),
+      navigateDown: vi.fn(),
+      // The reverse-search accept replaces the buffer wholesale.
+      handleAutocomplete: vi.fn(() => mockBuffer.setText('recalled prompt')),
+      resetCompletionState: vi.fn(),
+      setActiveSuggestionIndex: vi.fn(),
+    };
+    vi.mocked(useReverseSearchCompletion).mockReturnValue(
+      reverseSearchCompletion,
+    );
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      stdin.write(process.platform === 'win32' ? '\x1Bv' : '\x16');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stdin.write('\x12');
+      await Promise.resolve();
+    });
+    expect(captured.props).not.toBeNull();
+
+    act(() => {
+      (captured.props!['onSelectIndex'] as (index: number) => void)(0);
+    });
+    expect(reverseSearchCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+
+    await act(async () => {
+      resolveRead('clipboard payload');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The accept replaced the buffer, so the late read must not land in the
+    // recalled entry.
+    expect(mockBuffer.insert).not.toHaveBeenCalledWith(
+      'clipboard payload',
+      expect.anything(),
+    );
+    unmount();
+  });
+
   it('uses the startup VP decision for suggestion mouse when the raw setting is unset', () => {
     const { unmount } = renderWithProviders(
       <VirtualViewportContext.Provider value={true}>
@@ -342,6 +405,8 @@ describe('InputPrompt suggestion mouse routing', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/skills', {
       deferUntilIdle: false,
       submittedPrompt: '/skills',
+      displayText: '/skills',
+      humanInput: { text: '/skills' },
     });
     unmount();
   });

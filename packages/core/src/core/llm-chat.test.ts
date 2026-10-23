@@ -17,6 +17,7 @@ import type {
   GenerateContentResponse,
   Part,
   SendMessageParameters,
+  Tool,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
@@ -76,6 +77,13 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
+import { selectForkHistory } from '../tools/agent/fork-subagent.js';
+import { composePostCompactHistory } from '../services/postCompactAttachments.js';
+import { detectTurnInterruption } from './turn-interruption.js';
+import {
+  markApiHistoryDirectoryContext,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
 import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
 import { wrapUserPromptSubmitContext } from '../hooks/user-prompt-submit-context.js';
@@ -869,6 +877,51 @@ describe('LlmChat', async () => {
     });
   });
 
+  describe('setTools', () => {
+    const toolNamed = (name: string): Tool => ({
+      functionDeclarations: [{ name, description: `${name} description` }],
+    });
+
+    // `setTools` is the only writer of `generationConfig.tools`, and nothing
+    // else in this suite reaches it — the ACP-level suites only assert that a
+    // *mocked* `setTools` was called. Without this pin, dropping the write
+    // left all 592 tests green while every request went out tool-less.
+    it('writes the declarations into the config sent to the model', () => {
+      const isolatedChat = newChat({ chatConfig: {} });
+
+      isolatedChat.setTools([toolNamed('read_file')]);
+
+      expect(isolatedChat['generationConfig'].tools).toEqual([
+        toolNamed('read_file'),
+      ]);
+    });
+
+    it('replaces the previous declarations instead of appending to them', () => {
+      const isolatedChat = newChat({
+        chatConfig: { tools: [toolNamed('stale_tool')] },
+      });
+
+      isolatedChat.setTools([toolNamed('read_file'), toolNamed('shell')]);
+
+      expect(isolatedChat['generationConfig'].tools).toEqual([
+        toolNamed('read_file'),
+        toolNamed('shell'),
+      ]);
+    });
+
+    // A tool-restricted registry refresh hands `setTools` an empty list, so
+    // the clear has to land rather than keep advertising stale declarations.
+    it('clears previously-set declarations when given an empty list', () => {
+      const isolatedChat = newChat({
+        chatConfig: { tools: [toolNamed('stale_tool')] },
+      });
+
+      isolatedChat.setTools([]);
+
+      expect(isolatedChat['generationConfig'].tools).toEqual([]);
+    });
+  });
+
   describe('prepared model request recovery', () => {
     it('awaits durability after normalization and before the first provider call', async () => {
       let release!: () => void;
@@ -1161,6 +1214,53 @@ describe('LlmChat', async () => {
       } finally {
         vi.unstubAllEnvs();
       }
+    });
+
+    it('keeps anonymous input outside context after a saved request JSON round trip', async () => {
+      const compacted = await composePostCompactHistory([], 'Summary.');
+      const input = userText(
+        'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+      );
+      const route = { model: 'test-model', authType: AuthType.USE_GEMINI };
+      mockGeneratorConfig();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: route,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [...compacted, input],
+          config: {},
+        },
+        history: [...compacted, input],
+        contextPrefixLength: 2,
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(route),
+        promptTokensForClamp: 15,
+      };
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'done' }])),
+      );
+      await drain(
+        await chat.sendPreparedMessageStream(
+          JSON.parse(JSON.stringify(saved)),
+          'prompt',
+          new AbortController().signal,
+          async (prepared) => {
+            expect(prepared.contextPrefixLength).toBe(2);
+            expect(detectTurnInterruption(chat.getHistory())).toEqual({
+              kind: 'interrupted_prompt',
+              parts: input.parts,
+            });
+          },
+        ),
+      );
+      expect(streamMock().mock.calls[0][0]).toMatchObject(saved.request);
     });
 
     it('keeps externalized images live while refusing lossy prepared replay', async () => {
@@ -5115,9 +5215,200 @@ describe('LlmChat', async () => {
       throw new Error('unexpected deep clone');
     });
 
+  describe('directory context recovery', () => {
+    it.each([false, true])(
+      'only replays context after a structural reminder when real input is pending (%s)',
+      (realInput) => {
+        const input = realInput ? [userText('Unanswered real input')] : [];
+        const contexts = [
+          markApiHistoryDirectoryContext(userText('Directory changed.')),
+          markApiHistoryDirectoryContext(userText('Directory structure.')),
+        ];
+        const history = [
+          userText('review'),
+          modelText('done'),
+          userText('<system-reminder>\nNew MCP tools.\n</system-reminder>'),
+          ...input,
+          ...contexts,
+        ];
+        const serialized = JSON.stringify(history);
+        chat.setHistory(history);
+        expect(detectTurnInterruption(chat.getHistory())).toEqual(
+          realInput
+            ? {
+                kind: 'interrupted_prompt',
+                parts: [...input, ...contexts].flatMap(
+                  (entry) => entry.parts ?? [],
+                ),
+              }
+            : { kind: 'none' },
+        );
+        expect(JSON.stringify(chat.getHistory())).toBe(serialized);
+      },
+    );
+
+    it.each(['before', 'after'])(
+      'replays exactly the entries strip removes when real input is %s directory context',
+      (position) => {
+        const contexts = [
+          markApiHistoryDirectoryContext(userText('Directory changed.')),
+          markApiHistoryDirectoryContext(userText('Directory structure.')),
+        ];
+        const input = userText('Unanswered real input');
+        const entries =
+          position === 'before' ? [input, ...contexts] : [...contexts, input];
+        const kept = [
+          userText('review'),
+          modelText('done'),
+          userText('<system-reminder>\nNew MCP tools.\n</system-reminder>'),
+        ];
+        chat.setHistory([...kept, ...entries]);
+        const interruption = detectTurnInterruption(chat.getHistory());
+        expect(interruption.kind).toBe('interrupted_prompt');
+        const stripped = chat.stripOrphanedUserEntriesFromHistory();
+        expect(stripped).toEqual(entries);
+        if (interruption.kind === 'interrupted_prompt') {
+          expect(interruption.parts).toEqual(
+            stripped.flatMap((entry) => entry.parts ?? []),
+          );
+        }
+        expect(chat.getHistory()).toEqual(kept);
+      },
+    );
+
+    it('recovers tool results repaired into a directory entry without duplicating them', () => {
+      chat.setHistory([
+        userText('review'),
+        content('model', fnCall('read_file', {}, 'pending')),
+        markApiHistoryDirectoryContext(userText('Directory changed.')),
+        markApiHistoryDirectoryContext(userText('Directory structure.')),
+      ]);
+      expect(chat.repairOrphanedToolUseTurns().injected).toHaveLength(1);
+      const interruption = detectTurnInterruption(chat.getHistory());
+      expect(interruption.kind).toBe('interrupted_prompt');
+      if (interruption.kind === 'interrupted_prompt') {
+        expect(
+          interruption.parts.filter((part) => part.functionResponse),
+        ).toEqual([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ id: 'pending' }),
+          }),
+        ]);
+      }
+      expect(chat.repairOrphanedToolUseTurns().injected).toEqual([]);
+    });
+
+    it.each([false, true])(
+      'only keeps a merged context marker when all entries are internal (%s)',
+      (realInput) => {
+        const following = userText('Following text');
+        if (!realInput) markApiHistoryDirectoryContext(following);
+        chat.setHistory([
+          userText('review'),
+          modelText('done'),
+          markApiHistoryDirectoryContext(userText('Directory context')),
+          following,
+        ]);
+        expect(detectTurnInterruption(chat.getHistory(true)).kind).toBe(
+          realInput ? 'interrupted_prompt' : 'none',
+        );
+      },
+    );
+
+    it.each(['clean', 'prompt-before', 'prompt-after', 'tool'] as const)(
+      'preserves the %s verdict through recovery copies without changing history',
+      (scenario) => {
+        const directories = Array.from({ length: 60 }, (_, index) =>
+          markApiHistoryDirectoryContext(
+            userText(`Directory context ${index}`),
+          ),
+        );
+        const input = userText('Unanswered real input');
+        const history = [userText('review'), modelText('done')];
+        if (scenario === 'prompt-before') history.push(input);
+        if (scenario === 'tool') {
+          history.push(content('model', fnCall('read_file', {}, 'pending')));
+        }
+        history.push(...directories);
+        if (scenario === 'prompt-after') history.push(input);
+        const serialized = JSON.stringify(history);
+        chat.setHistory(history);
+
+        for (const [index, copy] of [
+          chat.getHistory(),
+          chat.getHistoryShallow(),
+          chat.getHistoryForRecovery(50),
+        ].entries()) {
+          const boundedPrompt = index === 2 && scenario === 'prompt-after';
+          expect(JSON.stringify(copy)).toBe(
+            boundedPrompt ? JSON.stringify(history.slice(-50)) : serialized,
+          );
+          const result = detectTurnInterruption(copy);
+          if (scenario === 'clean') {
+            expect(result.kind).toBe('none');
+          } else if (scenario === 'tool') {
+            expect(result).toEqual({
+              kind: 'interrupted_turn',
+              danglingCalls: [{ callId: 'pending', name: 'read_file' }],
+            });
+          } else {
+            expect(result).toEqual({
+              kind: 'interrupted_prompt',
+              parts: history
+                .slice(boundedPrompt ? -50 : 2)
+                .flatMap((entry) => entry.parts ?? []),
+            });
+          }
+        }
+      },
+    );
+
+    it('keeps real input recoverable even if it reuses a marked entry', () => {
+      const input = markApiHistoryDirectoryContext(
+        userText('Directory context'),
+      );
+      markApiHistoryPrompt(input, 'real-prompt');
+      chat.setHistory([userText('review'), modelText('done'), input]);
+      expect(detectTurnInterruption(chat.getHistory())).toEqual({
+        kind: 'interrupted_prompt',
+        parts: input.parts,
+      });
+    });
+  });
+
   describe('completed tool boundary', () => {
     const result = content('user', fnResponse('update_goal', {}, 'ended'));
     const fresh = () => structuredClone(result);
+
+    it.each([
+      [0, 0, undefined],
+      [1, 1, 69],
+      [49, 49, 21],
+      [50, 50, 20],
+      [100, 70, 0],
+    ] as const)(
+      'windows meaningful history with count %s without crossing the completed boundary',
+      (count, length, first) => {
+        const history = [
+          userText('Completed goal.'),
+          content('model', fnCall('update_goal', {}, 'ended')),
+          fresh(),
+          ...Array.from({ length: 70 }, (_, i) =>
+            i % 2 ? modelText(`Entry ${i}`) : userText(`Entry ${i}`),
+          ),
+        ];
+        chat.setHistory(history, ['ended']);
+        const window = chat.getHistoryForRecovery(count);
+        expect(window).toHaveLength(length);
+        expect(window[0]?.parts).toEqual(
+          first === undefined ? undefined : [{ text: `Entry ${first}` }],
+        );
+        expect(window.at(-1)?.parts).toEqual(
+          length ? [{ text: 'Entry 69' }] : undefined,
+        );
+        expect(chat.getHistory()).toEqual(history);
+      },
+    );
 
     it.each(['summary', 'fast'] as const)(
       'preserves and records completed boundaries through %s compression',
@@ -10407,6 +10698,122 @@ describe('LlmChat', async () => {
   });
 
   describe('stripOrphanedUserEntriesFromHistory', () => {
+    const compressedWithImage = () =>
+      composePostCompactHistory(
+        [
+          {
+            role: 'user',
+            parts: [{ inlineData: { mimeType: 'image/png', data: 'AA==' } }],
+          },
+        ],
+        'Summary.',
+        { maxFiles: 0 },
+      );
+    it('keeps real turns in numeric forks before attachment curation merges them', async () => {
+      const compacted = await composePostCompactHistory([], 'Summary.', {
+        maxFiles: 0,
+        planModeActive: true,
+      });
+      const pending = userText('A real follow-up.');
+      const done = modelText('Done.');
+      chat.setHistory([...compacted, pending, done]);
+      expect(selectForkHistory(chat.getHistoryForForkWindow(), 1)).toEqual([
+        pending,
+        done,
+      ]);
+      expect(JSON.stringify(chat.getHistory())).toBe(
+        JSON.stringify([...compacted, pending, done]),
+      );
+      chat.setHistory(compacted);
+      expect(JSON.stringify(chat.getHistoryForForkWindow())).toBe(
+        JSON.stringify(compacted),
+      );
+    });
+
+    it('preserves the original compressed layout in constructors and history replacement', async () => {
+      const compacted = await compressedWithImage();
+      const wire = JSON.stringify(compacted);
+      const restored = new LlmChat(mockConfig, {}, compacted);
+      for (const target of [restored, chat]) {
+        target.setHistory(compacted);
+        expect(detectTurnInterruption(target.getHistory())).toEqual({
+          kind: 'none',
+        });
+        expect(target.stripOrphanedUserEntriesFromHistory()).toEqual([]);
+        expect(JSON.stringify(target.getHistory())).toBe(wire);
+      }
+      expect(compacted).toHaveLength(3);
+      restored.truncateHistory(2);
+      const input = userText('Real failed input after truncation.');
+      restored.addHistory(input);
+      expect(restored.stripOrphanedUserEntriesFromHistory()).toEqual([input]);
+    });
+
+    it.each([
+      '<background-tasks>\nExplain this tag.',
+      'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+    ])(
+      'preserves context while replaying real heading-shaped input: %s',
+      async (text) => {
+        const compacted = await compressedWithImage();
+        const pending = userText(text);
+        chat.setHistory([...compacted, pending]);
+        expect(detectTurnInterruption(chat.getHistory())).toEqual({
+          kind: 'interrupted_prompt',
+          parts: pending.parts,
+        });
+        expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([pending]);
+        expect(chat.getHistory()).toEqual(compacted);
+        expect(detectTurnInterruption(chat.getHistory())).toEqual({
+          kind: 'none',
+        });
+      },
+    );
+
+    it.each([0, 48, 49, 60, 200])(
+      'keeps recovery consistent with full history and retains all %s notifications and agent replies',
+      async (count) => {
+        const compacted = await compressedWithImage();
+        const notifications = Array.from({ length: count }, () =>
+          userText('<task-notification>Done.</task-notification>'),
+        );
+        const agent = userText(
+          formatAgentMessageModelText({
+            displayText: 'done',
+            author: { agentId: 'agent-1', name: 'worker' },
+            runId: 'run-1',
+            status: 'completed',
+          }),
+        );
+        const pending = userText('Real failed input.');
+        const call = content('model', fnCall('read_file', {}, 'pending-call'));
+        const tails = [
+          notifications,
+          [pending, ...notifications],
+          [pending, ...notifications, agent],
+          [pending, ...notifications, agent, ...notifications],
+          [call, ...notifications, agent],
+        ];
+        const expectedKinds = [
+          'none',
+          'interrupted_prompt',
+          'none',
+          count ? 'interrupted_prompt' : 'none',
+          'interrupted_turn',
+        ];
+        for (const [index, tail] of tails.entries()) {
+          chat.setHistory([...compacted, ...tail]);
+          const full = detectTurnInterruption(chat.getHistory());
+          const window = chat.getHistoryForRecovery(50);
+          expect(window).toHaveLength(tail.length);
+          const bounded = detectTurnInterruption(window);
+          expect(full.kind).toBe(expectedKinds[index]);
+          expect(bounded.kind).toBe(full.kind);
+          expect(bounded).toEqual(full);
+        }
+      },
+    );
+
     const earlier = () => [
       userText('earlier prompt'),
       modelText('earlier response'),
@@ -12312,6 +12719,65 @@ describe('LlmChat', async () => {
       expect(chat.getHistory()).toHaveLength(3);
       expect(chat.getHistory()[0]).toEqual(userText('summary'));
       expect(chat.getLastPromptTokenCount()).toBe(200);
+    });
+
+    it('awaits the Managed checkpoint including pending input before applying compressed history', async () => {
+      const compress = mockCompressionService('compressed');
+      const before = [userText('old question'), modelText('old answer')];
+      chat.setHistory(before);
+      let release: () => void = () => {};
+      let observed: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        observed = resolve;
+      });
+      const observer = vi.fn(async () => {
+        observed();
+        await gate;
+      });
+      chat.setCompressionObserver(observer, { restoreRecentFiles: false });
+      const pending = userText('new question');
+      markApiHistoryPrompt(pending, 'hosted');
+      const running = chat.tryCompress('hosted', false, undefined, {
+        pendingUserMessage: pending,
+      });
+      await ready;
+      expect(chat.getHistory()).toEqual(before);
+      expect(observer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          compressedHistory: [
+            userText('summary'),
+            modelText('ok'),
+            userText('latest'),
+            pending,
+          ],
+          summaryPrefixLength: 3,
+          promptIds: [null, null, null, 'hosted'],
+        }),
+      );
+      expect(compress.mock.calls[0][1].restoreRecentFiles).toBe(false);
+      release();
+      await running;
+      expect(chat.getHistory()).toEqual([
+        userText('summary'),
+        modelText('ok'),
+        userText('latest'),
+      ]);
+    });
+
+    it('keeps live history unchanged when the Managed compression checkpoint is refused', async () => {
+      mockCompressionService('compressed');
+      const before = [userText('old question'), modelText('old answer')];
+      chat.setHistory(before);
+      chat.setCompressionObserver(async () => {
+        throw new Error('checkpoint refused');
+      });
+      await expect(chat.tryCompress('hosted', true)).rejects.toThrow(
+        'checkpoint refused',
+      );
+      expect(chat.getHistory()).toEqual(before);
     });
 
     it('mirrors lastPromptTokenCount to the global telemetry only when wired', async () => {
