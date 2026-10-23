@@ -581,13 +581,10 @@ Web Shell-created gated task across a daemon restart.
    and review-request filters.
 4. **Step 3**: skills — `/autofix-pr` (`--once`, then watch mode) and the
    reviewer watch that runs `/qreview` or a verification pass per event.
-5. **Separate design — managed automations**: a `gate` on the managed
-   schedule record (TypeScript and Java validators, digest, DTOs, OpenAPI,
-   contract fixtures, a `ma_schedule` migration), a Runtime "gate probe"
-   operation run from `fire_run` before the claim with a derived durable
-   identity, `skipped/gate_quiet` and `skipped/gate_failed` occurrences with a
-   failure streak, definition-time approval, and FG11-style fault gates for a
-   lost reply, a crash and an unknown outcome.
+5. **Managed automations**: the same gate on the managed schedule record,
+   run as a Runtime probe before the claim under identities derived from
+   the occurrence — designed and implemented in
+   [managed automation gate](2026-10-22-managed-automation-gate.md).
 
 ## 12. Open questions
 
