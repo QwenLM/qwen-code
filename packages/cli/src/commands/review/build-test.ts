@@ -349,10 +349,18 @@ export function buildRunEnv(
  * The command runs as a background job, which a POSIX shell starts with
  * SIGINT ignored — hence the INT trap, without which a Ctrl+C would leave the
  * suite running. Its exit status is the command's, as under `sh -c`.
+ *
+ * The traps go in before the job starts, so a signal can no longer land
+ * between the job's start and the traps and kill only the shell. What is left
+ * is the step between the fork and `c=$!`; a signal there finds `c` empty and
+ * reaps nothing. Reading `$!` in the trap instead would close that too, but
+ * zsh, which macOS can install as `/bin/sh`, expands `$!` to 0 before any job,
+ * and the walk from pid 0 is every process on the machine.
  */
 export const REAPING_SHELL = `cmd=$1
 shift
 reap() {
+  [ -n "$1" ] || return 0
   { if [ -r /proc/self/stat ]; then
       awk '{ s = $0; sub(/^.*\\) /, "", s); split(s, f, " "); print $1, f[2] }' /proc/[0-9]*/stat 2>/dev/null
     else
@@ -367,10 +375,11 @@ reap() {
       }' |
     xargs kill -KILL 2>/dev/null
 }
-( eval "$cmd" ) &
-c=$!
+c=
 trap 'reap "$c"; trap - TERM; kill -TERM $$' TERM
 trap 'reap "$c"; trap - INT; kill -INT $$' INT
+( eval "$cmd" ) &
+c=$!
 wait "$c"`;
 
 /**
