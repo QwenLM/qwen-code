@@ -6,7 +6,10 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
@@ -17,14 +20,17 @@ import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.URI;
 import java.security.Principal;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +47,37 @@ final class HostedGateTestSupport {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private HostedGateTestSupport() {
+    }
+
+    static String quote(String text) {
+        return "'" + text.replace("'", "'\"'\"'") + "'";
+    }
+
+    static String camel(String key) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < key.length(); i++) {
+            char c = key.charAt(i);
+            if (c == '_' && i + 1 < key.length()) {
+                out.append(Character.toUpperCase(key.charAt(++i)));
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    // Keep a newly admitted close invisible until the fixture owns its claim.
+    static OperationRecord admitAndClaimClose(TransactionTemplate transactions,
+            ManagedAgentStore store, String tenant, String sessionId,
+            String key, String owner) {
+        return transactions.execute(ignored -> {
+            var admission = store.beginWorkspaceLifecycle(tenant, sessionId,
+                    OperationKind.CLOSE, "actor", DigestUtils.sha256Hex("actor"),
+                    key, "sha256:" + DigestUtils.sha256Hex(key), true, 2);
+            return store.claimOperation(tenant, sessionId,
+                    admission.operation().operationId(), owner,
+                    Duration.ofMinutes(10)).orElseThrow();
+        });
     }
 
     // The tenant-pinned authentication filter (FG6e's and FG8's probes
@@ -298,5 +335,21 @@ final class HostedGateTestSupport {
         var records = extensionRecords(jdbc, tenant, sessionId, domain);
         assertThat(records).as(domain + " records").hasSize(1);
         return records.getFirst();
+    }
+
+    // The Harness-private routes identify the caller by the client id its
+    // attach minted and the process generation it attached to; the connector
+    // keeps both on its private attachment ref for the Session. Null when
+    // Spring holds no attachment to it.
+    static HarnessSessionRef attachment(HarnessConnector connector,
+            String sessionId) {
+        for (Object value : ((Map<?, ?>) ReflectionTestUtils.getField(
+                connector, "attachments")).values()) {
+            if (value instanceof HarnessSessionRef ref
+                    && sessionId.equals(ref.getHarnessSessionId())) {
+                return ref;
+            }
+        }
+        return null;
     }
 }

@@ -447,7 +447,16 @@ class SurfaceAdmissionAcceptanceTest {
                 if (entry.capabilities().contains(Capability.ACTION_RESPOND)) {
                     expect(entry, OPERATOR, 202, "action_response");
                     expect(entry, OWNER_RANK, 202, "action_response");
-                } else if (entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)) {
+                } else if (entry.capabilities().contains(Capability.MCP_MANAGEMENT)) {
+                    if (entry == SurfaceRegistry.PUBLIC_MCP_MANAGEMENT || entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
+                        expectAdmitted(entry, OPERATOR);
+                        expectAdmitted(entry, OWNER_RANK);
+                    } else {
+                        expect(entry, OPERATOR, 409, "unsupported_feature");
+                        expect(entry, OWNER_RANK, 409, "unsupported_feature");
+                    }
+                } else if (entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)) {
                     expect(entry, OPERATOR, 409, "unsupported_feature");
                     expect(entry, OWNER_RANK, 409, "unsupported_feature");
                 } else {
@@ -459,7 +468,9 @@ class SurfaceAdmissionAcceptanceTest {
                 // stay invisible so an unauthenticated caller learns
                 // nothing about the bound Session.
                 boolean actorRequired = entry.capabilities().contains(Capability.SESSION_CWD_CHANGE)
-                        || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE);
+                        || entry.capabilities().contains(Capability.MCP_MANAGEMENT)
+                        || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION);
                 expect(entry, null, actorRequired ? 401 : 404,
                         actorRequired
                                 ? "actor_required" : "session_not_found");
@@ -1454,7 +1465,8 @@ class SurfaceAdmissionAcceptanceTest {
         String session = artifactArm ? ARTIFACT_SESSION : bound;
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
-        variables.put("operationId", "op_0000000000000000");
+        variables.put("operationId", entry.capabilities().contains(Capability.MCP_MANAGEMENT)
+                ? "11111111-1111-4111-8111-111111111111" : "op_0000000000000000");
         variables.put("taskId", entry.capabilities().contains(
                 Capability.TASK_CANCEL) ? settledTask
                 : "task_0000000000000000");
@@ -1562,16 +1574,26 @@ class SurfaceAdmissionAcceptanceTest {
                             + "\",\"sessionId\":\"" + session
                             + "\",\"input\":[{\"type\":\"text\","
                             + "\"text\":\"probe\"}]}";
-            case SESSION_RENAME -> "{\"title\":\"probe\"}";
+            case SESSION_RENAME -> publicSurface ? "{\"title\":\"probe\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"title\":\"probe\","
+                            + "\"idempotencyKey\":\"" + nextKey() + "\"}";
             case SESSION_CWD_CHANGE -> publicSurface
                     ? "{\"cwd_relative\":\"probe\","
                             + "\"expected_context_revision\":1}"
                     : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
                             + nextKey() + "\",\"cwdRelative\":\"probe\","
                             + "\"expectedContextRevision\":1}";
+            case SESSION_CONTEXT_COMPRESSION -> publicSurface
+                    ? "{\"expected_compaction_revision\":0}"
+                    : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
+                            + nextKey() + "\",\"expectedCompactionRevision\":0}";
             case SESSION_LIST -> "{}";
             case SESSION_GET -> "{\"sessionId\":\"" + session + "\"}";
-            case TRANSCRIPT_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_RECOVERY_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_RECOVERY_RECHECK -> publicSurface
+                    ? "{\"turnId\":\"turn_0000000000000000\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"turnId\":\"turn_0000000000000000\"}";
+            case TRANSCRIPT_QUERY, ITEM_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case TAIL_EVENTS -> "{\"sessionId\":\"" + session
                     + "\",\"afterSequence\":0}";
             case TASK_LIST -> "{\"sessionId\":\"" + session + "\"}";
@@ -1619,6 +1641,16 @@ class SurfaceAdmissionAcceptanceTest {
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
             case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";
+            case MCP_MANAGEMENT -> {
+                if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
+                    yield "{\"sessionId\":\"" + session + "\"}";
+                }
+                if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT_OPERATION) {
+                    yield "{\"sessionId\":\"" + session + "\",\"operationId\":\"11111111-1111-4111-8111-111111111111\"}";
+                }
+                yield "{" + (publicSurface ? "" : "\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"mcp-management\",")
+                        + "\"action\":\"restart\",\"serverId\":\"docs\",\"expectedRevision\":0}";
+            }
             case SESSION_APPROVAL_CHANGE -> "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"approval-change\",\"approvalMode\":\"yolo\",\"expectedRevision\":0}";
             case SESSION_MODEL_CHANGE -> "{\"sessionId\":\"" + session
@@ -1843,8 +1875,7 @@ class SurfaceAdmissionAcceptanceTest {
                     mock(ToolExecutionRepository.class),
                     mock(RuntimeBindingRepository.class),
                     new ToolPublicationStore.Capacity(1024L * 1024 * 1024,
-                            1024L * 1024 * 1024, 1024L * 1024 * 1024, 4),
-                    false);
+                            1024L * 1024 * 1024, 1024L * 1024 * 1024, 4));
         }
 
         /**

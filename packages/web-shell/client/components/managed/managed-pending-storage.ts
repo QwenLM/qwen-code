@@ -1,36 +1,24 @@
+import {
+  runIndexedDbRequest,
+  type IndexedDbSchema,
+} from '../../utils/indexeddb';
+
 const DATABASE = 'qwen-managed-pending';
 const STORE = 'requests';
 const INLINE_BYTES = 128 * 1024;
 
-async function request<T>(
+const SCHEMA: IndexedDbSchema = {
+  name: DATABASE,
+  version: 1,
+  store: STORE,
+  blockedMessage: 'Pending request database is blocked.',
+};
+
+function request<T>(
   mode: IDBTransactionMode,
   run: (store: IDBObjectStore) => IDBRequest<T>,
 ): Promise<T> {
-  const db = await new Promise<IDBDatabase>((resolve, reject) => {
-    const opening = indexedDB.open(DATABASE, 1);
-    let blocked = false;
-    opening.onupgradeneeded = () => opening.result.createObjectStore(STORE);
-    opening.onsuccess = () => {
-      if (blocked) opening.result.close();
-      else resolve(opening.result);
-    };
-    opening.onerror = () => reject(opening.error);
-    opening.onblocked = () => {
-      blocked = true;
-      reject(new Error('Pending request database is blocked.'));
-    };
-  });
-  try {
-    return await new Promise<T>((resolve, reject) => {
-      const transaction = db.transaction(STORE, mode);
-      const operation = run(transaction.objectStore(STORE));
-      transaction.oncomplete = () => resolve(operation.result);
-      transaction.onabort = () => reject(transaction.error);
-      transaction.onerror = () => reject(transaction.error);
-    });
-  } finally {
-    db.close();
-  }
+  return runIndexedDbRequest(indexedDB, SCHEMA, mode, run);
 }
 
 function reference(value: unknown): string | undefined {

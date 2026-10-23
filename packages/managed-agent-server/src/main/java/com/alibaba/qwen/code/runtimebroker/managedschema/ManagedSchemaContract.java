@@ -48,6 +48,7 @@ public final class ManagedSchemaContract {
         UNARCHIVE,
         RENAME,
         CWD_CHANGE,
+        CONTEXT_COMPRESSION,
         ACTION_RESPONSE,
         TASK_CANCEL,
         CHILD_SESSION_START,
