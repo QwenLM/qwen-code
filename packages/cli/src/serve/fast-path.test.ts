@@ -1393,7 +1393,7 @@ describe('serve fast path environment bootstrap', () => {
     'never applies QWEN_SERVER_TOKEN from the workspace %s before the daemon starts',
     async (envRelPath) => {
       delete process.env['QWEN_SERVER_TOKEN'];
-      delete process.env['QWEN_SERVE_RATE_LIMIT'];
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
       vi.stubEnv('qwen_server_token', undefined);
       useTempQwenHome();
       tempWorkspace = realpathSync(
@@ -1408,8 +1408,10 @@ describe('serve fast path environment bootstrap', () => {
           'qwen_server_token=from-workspace-env-lower',
           // Positive control: the file is read and merged under the default
           // (trust-disabled) configuration; only the token keys are
-          // rejected.
-          'QWEN_SERVE_RATE_LIMIT=7',
+          // rejected. The control is an inert marker: a QWEN_SERVE_* knob
+          // could join the same exclusion list one day and turn this
+          // evidence into a second false alarm.
+          'FAST_PATH_REFERENCED_TOKEN=7',
         ].join('\n'),
       );
       process.chdir(tempWorkspace);
@@ -1419,7 +1421,7 @@ describe('serve fast path environment bootstrap', () => {
 
         expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
         expect(process.env['qwen_server_token']).toBeUndefined();
-        expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('7');
+        expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('7');
       } finally {
         vi.unstubAllEnvs();
       }
@@ -1529,59 +1531,41 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 
-  it('never applies QWEN_SERVER_TOKEN from workspace settings.env without the full settings loader', async () => {
-    delete process.env['QWEN_SERVER_TOKEN'];
-    delete process.env['QWEN_SERVE_RATE_LIMIT'];
-    useTempQwenHome();
-    tempWorkspace = realpathSync(
-      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-env-')),
-    );
-    mkdirSync(join(tempWorkspace, '.qwen'));
-    writeFileSync(
-      join(tempWorkspace, '.qwen', 'settings.json'),
-      JSON.stringify({
-        env: {
-          QWEN_SERVER_TOKEN: 'from-workspace-settings-env',
-          // Positive control: settings.env is merged and applied; only the
-          // token key is rejected.
-          QWEN_SERVE_RATE_LIMIT: '7',
-        },
-      }),
-    );
-    process.chdir(tempWorkspace);
+  it.each(['workspace', 'home'])(
+    'never applies QWEN_SERVER_TOKEN from %s settings.env without the full settings loader',
+    async (scope) => {
+      delete process.env['QWEN_SERVER_TOKEN'];
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), `qws-fast-path-settings-env-${scope}-`)),
+      );
+      const settingsDir =
+        scope === 'home' ? qwenHome : join(tempWorkspace, '.qwen');
+      mkdirSync(settingsDir, { recursive: true });
+      writeFileSync(
+        join(settingsDir, 'settings.json'),
+        JSON.stringify({
+          env: {
+            QWEN_SERVER_TOKEN: `from-${scope}-settings-env`,
+            // Positive control: settings.env is merged and applied at both
+            // scopes; only the token key is rejected. A home `.env` is an
+            // operator channel for the bearer, a home settings.json is not.
+            // The control is an inert marker: a QWEN_SERVE_* knob could
+            // join the same exclusion list one day and turn this evidence
+            // into a second false alarm.
+            FAST_PATH_REFERENCED_TOKEN: '7',
+          },
+        }),
+      );
+      process.chdir(tempWorkspace);
 
-    await bootstrapServeFastPathEnvironment(tempWorkspace);
+      await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
-    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('7');
-  });
-
-  it('never applies QWEN_SERVER_TOKEN from home settings.env without the full settings loader', async () => {
-    delete process.env['QWEN_SERVER_TOKEN'];
-    delete process.env['QWEN_SERVE_RATE_LIMIT'];
-    const qwenHome = useTempQwenHome();
-    writeFileSync(
-      join(qwenHome, 'settings.json'),
-      JSON.stringify({
-        env: {
-          QWEN_SERVER_TOKEN: 'from-home-settings-env',
-          // Positive control: the home settings.env is merged and applied;
-          // only the token key is rejected. A home `.env` is an operator
-          // channel for the bearer, a home settings.json is not.
-          QWEN_SERVE_RATE_LIMIT: '7',
-        },
-      }),
-    );
-    tempWorkspace = realpathSync(
-      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-home-settings-env-')),
-    );
-    process.chdir(tempWorkspace);
-
-    await bootstrapServeFastPathEnvironment(tempWorkspace);
-
-    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
-    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('7');
-  });
+      expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('7');
+    },
+  );
 
   it('pre-resolves home env overrides in the same order as the full loader', () => {
     delete process.env['QWEN_HOME'];
@@ -2181,7 +2165,7 @@ describe('serve fast path environment bootstrap', () => {
 
   it('never applies QWEN_SERVER_TOKEN from a trusted workspace .env under folder trust', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
-    delete process.env['QWEN_SERVE_RATE_LIMIT'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trusted-token-')),
@@ -2203,14 +2187,17 @@ describe('serve fast path environment bootstrap', () => {
       [
         'QWEN_SERVER_TOKEN=from-trusted-workspace-env',
         // Positive control: the trusted workspace's .env loads; trust never
-        // waives the project-scope exclusion for the daemon bearer.
-        'QWEN_SERVE_RATE_LIMIT=7',
+        // waives the project-scope exclusion for the daemon bearer. The
+        // control is an inert marker: a QWEN_SERVE_* knob could join the
+        // same exclusion list one day and turn this evidence into a second
+        // false alarm.
+        'FAST_PATH_REFERENCED_TOKEN=7',
       ].join('\n'),
     );
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('7');
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('7');
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
