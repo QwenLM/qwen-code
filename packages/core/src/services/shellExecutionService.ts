@@ -262,6 +262,13 @@ export interface ShellExecutionResult {
    * `output` is a retained prefix rather than the whole stream.
    */
   outputCaptureLimitExceeded?: boolean;
+  /**
+   * `streamStdout` only: the process exited, but its stdout was still open
+   * when the post-exit drain ran out — something it started in the
+   * background still holds it, and what that prints is not in the result.
+   * A held stderr alone does not set it.
+   */
+  stdoutHeldAfterExit?: boolean;
 }
 
 /** A handle for an ongoing shell execution. */
@@ -1048,6 +1055,7 @@ export class ShellExecutionService {
         let drainTimer: NodeJS.Timeout | null = null;
         let remainingDrainMs = POST_EXIT_STREAM_DRAIN_MS;
         let drainStartedAt = 0;
+        let stdoutHeld = false;
         let pendingCaptureWrites = 0;
         let stdoutEnded = false;
         let stderrEnded = false;
@@ -1065,12 +1073,14 @@ export class ShellExecutionService {
             return;
           }
           if (remainingDrainMs <= 0) {
+            stdoutHeld = !stdoutEnded;
             void handleExit(recordedExit.code, recordedExit.signal);
             return;
           }
           drainStartedAt = performance.now();
           drainTimer = setTimeout(() => {
             drainTimer = null;
+            stdoutHeld = !stdoutEnded;
             const recorded = recordedExit;
             if (recorded) void handleExit(recorded.code, recorded.signal);
           }, remainingDrainMs);
@@ -1368,6 +1378,7 @@ export class ShellExecutionService {
             aborted: abortSignal.aborted,
             pid: undefined,
             executionMethod: 'child_process',
+            ...(stdoutHeld ? { stdoutHeldAfterExit: true } : {}),
           });
         };
 
@@ -1441,7 +1452,9 @@ export class ShellExecutionService {
 
         child.stdout?.on('data', stdoutHandler);
         child.stderr?.on('data', stderrHandler);
-        if (rawCapture) {
+        if (rawCapture || streamStdout) {
+          // streamStdout reads the stdout end too: the drain reports a
+          // stdout still held, not a held stderr.
           child.stdout?.on('end', () => {
             stdoutEnded = true;
           });

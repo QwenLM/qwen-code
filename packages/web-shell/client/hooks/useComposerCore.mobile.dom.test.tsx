@@ -1031,7 +1031,11 @@ describe('mobile composer draft attachment restore', () => {
       });
     };
     const onSubmit = vi.fn(() => false);
-    const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work' });
+    const mounted = await mount({
+      onSubmit,
+      atWorkspaceCwd: '/work',
+      persistFileReferences: true,
+    });
     await tick();
     const image = { data: 'mobile migration-X', media_type: 'image/png' };
     typeText('submitted draft');
