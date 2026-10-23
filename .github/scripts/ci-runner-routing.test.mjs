@@ -759,10 +759,17 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       'assign',
       'pull_request_target',
       ['workflow_dispatch'],
+      ['self-hosted', 'linux', 'ARM64', 'ecs-light-arm64'],
     ],
   ];
 
-  for (const [file, jobName, prEvent, otherEvents] of lanes) {
+  for (const [
+    file,
+    jobName,
+    prEvent,
+    otherEvents,
+    labels = ECS_LABELS,
+  ] of lanes) {
     const doc = parse(readFileSync(join(workflowsDir, file), 'utf8'));
     const job = doc.jobs[jobName];
     const runsOn = String(job['runs-on']);
@@ -771,12 +778,12 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
 
     it(`${file} ${jobName}: trusted PRs and non-PR triggers reach the pool`, () => {
       assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
-      assert.deepEqual(route(prEvent, true, 'NONE'), ECS_LABELS);
+      assert.deepEqual(route(prEvent, true, 'NONE'), labels);
       for (const assoc of TRUSTED) {
-        assert.deepEqual(route(prEvent, false, assoc), ECS_LABELS, assoc);
+        assert.deepEqual(route(prEvent, false, assoc), labels, assoc);
       }
       for (const eventName of otherEvents) {
-        assert.deepEqual(route(eventName, false, ''), ECS_LABELS, eventName);
+        assert.deepEqual(route(eventName, false, ''), labels, eventName);
       }
     });
 
@@ -912,7 +919,15 @@ describe('control-plane jobs moved off the hosted queue', () => {
   // every trigger, fork-raised events included; the kill-switch wins.
   const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
   const HOSTED_LABELS = ['ubuntu-latest'];
+  const ARM_LABELS = ['self-hosted', 'linux', 'ARM64', 'ecs-light-arm64'];
   const jobs = [
+    ['pr-self-report-label.yml', 'label', ['pull_request_target'], ARM_LABELS],
+    [
+      'comment-attachment-guard.yml',
+      'remove-suspicious-attachments',
+      ['issue_comment', 'pull_request_review_comment', 'pull_request_review'],
+      ARM_LABELS,
+    ],
     [
       'qwen-code-pr-review.yml',
       'delay-automatic-review',
@@ -932,7 +947,7 @@ describe('control-plane jobs moved off the hosted queue', () => {
     ],
   ];
 
-  for (const [file, jobName, events] of jobs) {
+  for (const [file, jobName, events, labels = ECS_LABELS] of jobs) {
     const job = parse(readFileSync(join(workflowsDir, file), 'utf8')).jobs[
       jobName
     ];
@@ -947,7 +962,7 @@ describe('control-plane jobs moved off the hosted queue', () => {
       assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
       for (const eventName of events) {
         for (const assoc of ASSOCIATIONS) {
-          assert.deepEqual(route(eventName, assoc), ECS_LABELS, eventName);
+          assert.deepEqual(route(eventName, assoc), labels, eventName);
         }
       }
     });
