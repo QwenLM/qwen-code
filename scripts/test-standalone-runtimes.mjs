@@ -12,6 +12,15 @@ import { createHash } from 'node:crypto';
 import childProcess, { spawnSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  fetchVerifiedArchive,
+  sweepRuntimeCache,
+} from './lib/runtime-archive-cache.js';
+import {
+  BUN_VERSION,
+  NODE_VERSION,
+  RUNTIME_ARCHIVE_DIGESTS,
+} from './lib/standalone-runtime-pins.js';
 
 const script = fileURLToPath(import.meta.url);
 const repo = path.dirname(path.dirname(script));
@@ -35,7 +44,7 @@ async function worker(root, node, bun, expectedHost) {
   assert.equal(host, expectedHost);
   assert.equal(
     host === 'bun' ? process.versions.bun : process.version,
-    host === 'bun' ? '1.3.14' : 'v24.19.0',
+    host === 'bun' ? BUN_VERSION : `v${NODE_VERSION}`,
   );
   console.log(
     JSON.stringify({
@@ -316,7 +325,7 @@ async function worker(root, node, bun, expectedHost) {
         run('gzip', ['-1', '-f', uncompressedArchive]);
         sums = `${sha(archive)}  ${filename}\n`;
       };
-      const pack = (source, version = '1.2.3') => {
+      const writePayload = (source, version = '1.2.3') => {
         fs.writeFileSync(
           path.join(payload, 'manifest.json'),
           JSON.stringify({
@@ -327,6 +336,9 @@ async function worker(root, node, bun, expectedHost) {
           }),
         );
         fs.writeFileSync(cli, source);
+      };
+      const pack = (source, version) => {
+        writePayload(source, version);
         packArchive();
       };
       pack(
@@ -480,12 +492,15 @@ async function worker(root, node, bun, expectedHost) {
       }
       delete process.env.NODE_OPTIONS;
       delete process.env.BUN_OPTIONS;
-      for (const mode of ['direct', 'prepared']) {
-        for (const actualVersion of ['0.0.9', '9.9.9']) {
+      // Both update paths consume the same archive. Build each payload once;
+      // repeatedly compressing real runtime binaries can exhaust CI's budget.
+      for (const actualVersion of ['0.0.9', '9.9.9']) {
+        phase = `${runtime}/mismatch/${actualVersion}`;
+        pack(
+          `if(process.env.QWEN_UPDATE_TEST_ENV!=='preserved')process.exit(19);console.log(${JSON.stringify(actualVersion)});`,
+        );
+        for (const mode of ['direct', 'prepared']) {
           phase = `${runtime}/${mode}/mismatch/${actualVersion}`;
-          pack(
-            `if(process.env.QWEN_UPDATE_TEST_ENV!=='preserved')process.exit(19);console.log(${JSON.stringify(actualVersion)});`,
-          );
           const dir = path.join(root, `${runtime}-${mode}-${actualVersion}`);
           const live = installFixture(dir, {
             version: '1.0.0',
@@ -525,12 +540,15 @@ async function worker(root, node, bun, expectedHost) {
             }),
           );
         }
-        for (const [requested, manifest, actual] of [
-          ['v1.2.3', '1.2.3', 'v1.2.3'],
-          ['1.2.3-rc.1', '1.2.3-rc.1', 'v1.2.3-rc.1'],
-        ]) {
+      }
+      for (const [requested, manifest, actual] of [
+        ['v1.2.3', '1.2.3', 'v1.2.3'],
+        ['1.2.3-rc.1', '1.2.3-rc.1', 'v1.2.3-rc.1'],
+      ]) {
+        phase = `${runtime}/normalized/${requested}`;
+        pack(`console.log(${JSON.stringify(actual)});`, manifest);
+        for (const mode of ['direct', 'prepared']) {
           phase = `${runtime}/${mode}/normalized/${requested}`;
-          pack(`console.log(${JSON.stringify(actual)});`, manifest);
           const dir = path.join(root, `${runtime}-${mode}-${requested}`);
           const live = installFixture(dir, {
             version: '1.0.0',
@@ -585,22 +603,23 @@ async function worker(root, node, bun, expectedHost) {
         'utf8',
       );
       fs.writeFileSync(launcher, wrapper);
-      for (const mode of ['direct', 'prepared']) {
-        for (const actualVersion of ['1.2.3', '0.0.9', '9.9.9']) {
+      for (const actualVersion of ['1.2.3', '0.0.9', '9.9.9']) {
+        phase = `${runtime}/ambient/${actualVersion}`;
+        const ambientVersion = actualVersion === '1.2.3' ? '9.9.9' : '1.2.3';
+        fs.writeFileSync(
+          path.join(payload, 'lib/package.json'),
+          JSON.stringify({
+            name: '@qwen-code/qwen-code',
+            type: 'module',
+            version: actualVersion,
+          }),
+        );
+        pack(
+          `console.log(process.env.CLI_VERSION || ${JSON.stringify(actualVersion)});`,
+        );
+        for (const mode of ['direct', 'prepared']) {
           phase = `${runtime}/${mode}/ambient/${actualVersion}`;
           const legStarted = performance.now();
-          const ambientVersion = actualVersion === '1.2.3' ? '9.9.9' : '1.2.3';
-          fs.writeFileSync(
-            path.join(payload, 'lib/package.json'),
-            JSON.stringify({
-              name: '@qwen-code/qwen-code',
-              type: 'module',
-              version: actualVersion,
-            }),
-          );
-          pack(
-            `console.log(process.env.CLI_VERSION || ${JSON.stringify(actualVersion)});`,
-          );
           const controlEnv = { ...process.env };
           for (const key of Object.keys(controlEnv))
             if (
@@ -727,28 +746,27 @@ async function worker(root, node, bun, expectedHost) {
           );
         }
       }
-      for (const mode of ['direct', 'prepared']) {
-        for (const state of ['missing', 'syntax-error', 'launcher-error']) {
+      for (const state of ['missing', 'syntax-error', 'launcher-error']) {
+        phase = `${runtime}/${state}`;
+        fs.writeFileSync(launcher, wrapper);
+        fs.writeFileSync(
+          path.join(payload, 'lib/package.json'),
+          JSON.stringify({ type: 'module', version: '1.2.3' }),
+        );
+        writePayload(
+          state === 'launcher-error'
+            ? 'console.log("1.2.3");'
+            : 'export const invalid = ;',
+        );
+        if (state === 'launcher-error') {
+          fs.writeFileSync(launcher, 'export const invalid = ;');
+        }
+        if (state === 'missing') {
+          fs.rmSync(cli);
+        }
+        packArchive();
+        for (const mode of ['direct', 'prepared']) {
           phase = `${runtime}/${mode}/${state}`;
-          fs.writeFileSync(launcher, wrapper);
-          fs.writeFileSync(
-            path.join(payload, 'lib/package.json'),
-            JSON.stringify({ type: 'module', version: '1.2.3' }),
-          );
-          pack(
-            state === 'launcher-error'
-              ? 'console.log("1.2.3");'
-              : 'export const invalid = ;',
-          );
-          if (state === 'launcher-error') {
-            fs.writeFileSync(launcher, 'export const invalid = ;');
-          }
-          if (state === 'missing') {
-            fs.rmSync(cli);
-          }
-          if (state !== 'syntax-error') {
-            packArchive();
-          }
           if (state !== 'launcher-error')
             assert.equal(
               run(binaries[runtime], [launcher, '--version']),
@@ -935,19 +953,28 @@ async function ci() {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-tools-'),
   );
-  const download = async (url) => {
-    const response = await fetch(url, { signal: AbortSignal.timeout(300_000) });
-    assert.equal(response.status, 200, `runtime download: ${url}`);
-    return Buffer.from(await response.arrayBuffer());
+  // Persistent runners point this at a host-wide directory, so each archive
+  // is downloaded once per host instead of on every run.
+  const cacheDir = process.env.QWEN_STANDALONE_RUNTIME_CACHE;
+  const used = [];
+  const fetchArchive = (url, filename, pin) => {
+    used.push(filename);
+    return fetchVerifiedArchive(url, filename, pin, { cacheDir });
   };
   try {
     let node = process.env.PINNED_NODE;
     let bun = process.env.PINNED_BUN;
+    const platform = `${process.platform}-${process.arch}`;
+    const digests = RUNTIME_ARCHIVE_DIGESTS[platform];
+    assert(
+      digests || (node && bun),
+      `no pinned runtime archives for ${platform}; set PINNED_NODE and PINNED_BUN`,
+    );
     if (!node) {
-      const filename = `node-v24.19.0-${process.platform}-${process.arch}.tar.gz`;
+      const filename = `node-v${NODE_VERSION}-${process.platform}-${process.arch}.tar.gz`;
       const base =
         process.env.QWEN_TEST_NODE_BASE_URL ||
-        'https://nodejs.org/dist/v24.19.0/';
+        `https://nodejs.org/dist/v${NODE_VERSION}/`;
       const source = new URL(base);
       assert.equal(source.protocol, 'https:', 'runtime source must use HTTPS');
       assert.equal(
@@ -956,36 +983,26 @@ async function ci() {
         'runtime source must not contain credentials',
       );
       assert(base.endsWith('/'), 'runtime source must end with /');
-      const sums = (await download(base + 'SHASUMS256.txt')).toString();
-      const expected = sums
-        .split('\n')
-        .find((line) => line.endsWith('  ' + filename))
-        ?.split(' ')[0];
-      assert.match(expected || '', /^[a-f0-9]{64}$/);
-      const bytes = await download(base + filename);
-      assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+      const bytes = await fetchArchive(base + filename, filename, {
+        digest: (data) => createHash('sha256').update(data).digest('hex'),
+        expected: digests.node,
+      });
       const archive = path.join(root, 'node.tgz');
       fs.writeFileSync(archive, bytes);
       run('tar', ['-xzf', archive, '-C', root]);
       node = path.join(root, filename.slice(0, -7), 'bin/node');
     }
     if (!bun) {
-      const name = `@oven/bun-${process.platform}-${process.arch === 'arm64' ? 'aarch64' : process.arch}`;
-      const metadata = JSON.parse(
-        (
-          await download(`https://registry.npmjs.org/${name}/1.3.14`)
-        ).toString(),
-      );
-      assert.equal(metadata.name, name);
-      assert.equal(metadata.version, '1.3.14');
-      assert.equal(
-        new URL(metadata.dist.tarball).origin,
-        'https://registry.npmjs.org',
-      );
-      const bytes = await download(metadata.dist.tarball);
-      assert.equal(
-        'sha512-' + createHash('sha512').update(bytes).digest('base64'),
-        metadata.dist.integrity,
+      const name = `bun-${process.platform}-${process.arch === 'arm64' ? 'aarch64' : process.arch}`;
+      const filename = `${name}-${BUN_VERSION}.tgz`;
+      const bytes = await fetchArchive(
+        `https://registry.npmjs.org/@oven/${name}/-/${filename}`,
+        filename,
+        {
+          digest: (data) =>
+            'sha512-' + createHash('sha512').update(data).digest('base64'),
+          expected: digests.bun,
+        },
       );
       const dir = path.join(root, 'bun');
       fs.mkdirSync(dir);
@@ -994,10 +1011,13 @@ async function ci() {
       run('tar', ['-xzf', archive, '-C', dir]);
       bun = path.join(dir, 'package/bin/bun');
     }
+    // Only now: sweeping after the first archive would remove the second one
+    // if neither had been used for a week.
+    if (cacheDir) sweepRuntimeCache(cacheDir, used);
     const result = spawnSync(node, [script], {
       env: { ...process.env, PINNED_NODE: node, PINNED_BUN: bun },
       stdio: 'inherit',
-      timeout: 600_000,
+      timeout: 1_200_000,
     });
     assert.equal(result.error, undefined);
     assert.equal(result.signal, null);
@@ -1022,8 +1042,8 @@ if (process.argv[2] === '--ci') {
     'process.execPath',
   ]);
   const bun = run(process.env.PINNED_BUN || 'bun', ['-p', 'process.execPath']);
-  assert.equal(run(node, ['--version']), 'v24.19.0');
-  assert.equal(run(bun, ['--version']), '1.3.14');
+  assert.equal(run(node, ['--version']), `v${NODE_VERSION}`);
+  assert.equal(run(bun, ['--version']), BUN_VERSION);
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-test-'),
   );
@@ -1069,7 +1089,8 @@ if (process.argv[2] === '--ci') {
           cwd: root,
           env,
           encoding: 'utf8',
-          timeout: 300_000,
+          // This bounds the whole sequential matrix, not an individual probe.
+          timeout: 600_000,
           maxBuffer: 8 * 1024 * 1024,
         },
       );

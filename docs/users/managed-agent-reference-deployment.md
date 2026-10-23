@@ -85,7 +85,7 @@ This base configuration supports text-only Hosted Sessions. Keep the listener on
 bin/qwen-managed-agent-bootstrap
 ```
 
-The generated `harness.env` and `server.env` are shell-sourceable and also valid systemd `EnvironmentFile`s. Pass `--directory /etc/qwen-managed-agent` for the systemd layout, fill in `SPRING_DATASOURCE_PASSWORD`, and adjust ownership to the service account.
+The token and digest are written only to `harness.env`: `server.env` names that file through `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`, and the control plane reads both values from it. It refuses to start when the file is set together with `QWEN_MANAGED_AGENT_HARNESS_TOKEN` or `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST`, so a rotation changes one file. The generated `harness.env` and `server.env` are shell-sourceable and also valid systemd `EnvironmentFile`s. Pass `--directory /etc/qwen-managed-agent` for the systemd layout, fill in `SPRING_DATASOURCE_PASSWORD`, and adjust ownership to the service account.
 
 ## Preflight check
 
@@ -116,7 +116,7 @@ export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/opt/qwen-code/dist/cli.js'
 export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 ```
 
-Before admitting file, Shell, or child Git work, complete the native storage registration and mount-identity verification described under “Verified physical Workspace recovery” in `docs/server-reference.md`. An unregistered or ambiguous mount must remain unavailable. Public Shell and v2 capability advertisement stay disabled until their separate qualification completes.
+Before admitting file, Shell, or child Git work, complete the native storage registration and mount-identity verification described under “Verified physical Workspace recovery” in `docs/server-reference.md`. An unregistered or ambiguous mount must remain unavailable. Public Shell execution remains disabled by default. Shell lifecycle v2 is advertised by default; an explicit lifecycle list replaces the default, and an empty list disables it. MCP lifecycle still requires explicit inclusion. Capability advertisement does not establish deployment qualification.
 
 ## Upgrade
 
