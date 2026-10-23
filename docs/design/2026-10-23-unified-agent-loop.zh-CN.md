@@ -185,7 +185,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 // 现有 loop，保持不变
 ```
 
-现有 loop 作为 `else` 分支保留，在该设置存在期间不做重构。尚未迁移的入口忽略这个设置，设置的说明会列出它覆盖的入口。`qwen serve` 启动的 ACP 子进程读取同一份设置，所以 ACP 迁移后，daemon 和 Web Shell 也会遵循这个设置。
+现有 loop 作为 `else` 分支保留，在该设置存在期间不做重构。尚未迁移的入口忽略这个设置，设置的说明会列出它覆盖的入口。`qwen serve` 启动的 ACP 子进程读取同一份设置，所以 ACP 迁移后，daemon 和 Web Shell 也会遵循这个设置。在此之前，Web Shell 设置面板不显示这个设置，因为它在那里不起作用。
 
 ### Headless 迁到共享 loop（PR 1）
 

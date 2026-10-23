@@ -185,7 +185,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 // current loop, unchanged
 ```
 
-The current loop stays as the `else` branch and is not refactored while the setting exists. A surface that has not moved yet ignores the setting, and the setting's description names the surfaces it covers. ACP children started by `qwen serve` read the same settings, so the daemon and Web Shell follow the setting once ACP moves.
+The current loop stays as the `else` branch and is not refactored while the setting exists. A surface that has not moved yet ignores the setting, and the setting's description names the surfaces it covers. ACP children started by `qwen serve` read the same settings, so the daemon and Web Shell follow the setting once ACP moves. Until then the Web Shell settings panel leaves the setting out, since there it would be a toggle with no effect.
 
 ### Headless on the shared loop (PR 1)
 
