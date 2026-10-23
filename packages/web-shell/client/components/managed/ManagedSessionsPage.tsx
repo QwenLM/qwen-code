@@ -1088,6 +1088,12 @@ function ManagedSessionsContent({
   }
 
   const summary = detail.summary;
+  const attachmentCapability = useRef({ sessionId, enabled: false });
+  if (attachmentCapability.current.sessionId !== sessionId)
+    attachmentCapability.current = { sessionId, enabled: false };
+  if (summary)
+    attachmentCapability.current.enabled =
+      summary.capabilities.inputAttachments === true;
   const mcpManagerAvailable = Boolean(
     interactive &&
       provider.mcpManagement &&
@@ -2097,9 +2103,7 @@ function ManagedSessionsContent({
                 workspaceFeaturesEnabled={false}
                 fileReferenceActions={referenceActions}
                 persistFileReferences
-                attachmentsEnabled={
-                  summary?.capabilities.inputAttachments === true
-                }
+                attachmentsEnabled={attachmentCapability.current.enabled}
                 visibleToolbarActions={
                   interactive
                     ? [
