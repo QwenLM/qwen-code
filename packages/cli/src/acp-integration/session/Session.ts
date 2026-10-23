@@ -1952,6 +1952,8 @@ interface CronFire {
   modelServiceId?: string;
   groupId?: string;
   name?: string;
+  /** A gated fire's task prompt; `prompt` is then the gate's delivered text. */
+  taskPrompt?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
 }
@@ -11016,7 +11018,7 @@ export class Session implements SessionContext {
           // the built prompt, whose first line is the execution-context
           // header. Same shape the manual-run route gives its children.
           name: scheduledTaskRunSessionName(
-            job.name ?? job.prompt,
+            job.name ?? job.taskPrompt ?? job.prompt,
             triggeredAt,
           ),
           ...(job.id

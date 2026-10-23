@@ -6540,6 +6540,58 @@ describe('Session', () => {
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 
+  it('titles a gated per-run fire’s fresh session from the task prompt, not the gate’s text', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            taskPrompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt:
+              'Summarize new PR comments\n\nGate output. The task’s gate command printed this.',
+            taskPrompt: 'Summarize new PR comments',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+      sessionId: 'child-session',
+    });
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        expect.objectContaining({
+          prompt: expect.stringContaining('Gate output.'),
+          name: expect.stringMatching(
+            /^Summarize new PR comments · \d{2}-\d{2} \d{2}:\d{2}$/,
+          ),
+        }),
+      );
+    });
+  });
+
   it('runs a per-run scheduled task in the task session when the daemon cannot create a fresh one', async () => {
     const recordOrder: string[] = [];
     mockChatRecordingService.recordSessionApprovalMode.mockImplementationOnce(

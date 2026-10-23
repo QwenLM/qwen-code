@@ -123,6 +123,8 @@ describe('CronScheduler gate', () => {
     // The stored job keeps its own prompt; only the delivered copy carries
     // the output.
     expect(job.prompt).toBe('Handle the events below.');
+    // The task's own prompt rides along, to title a fresh per-run session.
+    expect(fired[0]!.taskPrompt).toBe('Handle the events below.');
     expect(job.gateStatus).toMatchObject({
       lastOutcome: 'delivered',
       quietSinceDelivery: 0,

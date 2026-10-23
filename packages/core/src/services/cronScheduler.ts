@@ -116,6 +116,12 @@ export interface CronJob {
   groupId?: string;
   /** Human-readable task label used to name a fresh per-run session. */
   name?: string;
+  /**
+   * On a gated fire only: the task's own prompt, while `prompt` carries the
+   * text the gate delivered (its output, or a failure notice). A fresh
+   * per-run session is titled from this, as a manual run's is.
+   */
+  taskPrompt?: string;
   delivery?: CronTaskDelivery;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
@@ -1599,7 +1605,7 @@ export class CronScheduler {
     }
     if (text === null) return false;
     // The consumer annotates the run by this stamp (a per-run session).
-    onFire({ ...job, lastFiredAt: at, prompt: text });
+    onFire({ ...job, lastFiredAt: at, prompt: text, taskPrompt: job.prompt });
     return true;
   }
 

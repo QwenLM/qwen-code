@@ -256,7 +256,11 @@ export function appendCronRun(
   entry: CronTaskRun,
 ): CronTaskRun[] {
   const base = Array.isArray(runs) ? runs : [];
-  const next = [...base, entry];
+  // In time order: a gated fire is booked when its gate settles, under its
+  // own slot, which can be older than a manual run booked meanwhile.
+  let at = base.length;
+  while (at > 0 && base[at - 1]!.at > entry.at) at--;
+  const next = [...base.slice(0, at), entry, ...base.slice(at)];
   return next.length > MAX_TASK_RUNS
     ? next.slice(next.length - MAX_TASK_RUNS)
     : next;
