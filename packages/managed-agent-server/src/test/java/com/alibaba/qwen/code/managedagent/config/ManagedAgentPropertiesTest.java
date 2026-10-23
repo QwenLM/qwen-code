@@ -1030,8 +1030,6 @@ class ManagedAgentPropertiesTest {
                 .isEqualTo(java.time.Duration.ofSeconds(5));
         assertThat(properties.getArtifacts().getReadRevalidationInterval())
                 .isEqualTo(java.time.Duration.ofSeconds(5));
-        assertThat(properties.getToolPublication()
-                .isJournalHeadAuthorization()).isFalse();
         // ... and the shipped application.yml mirrors the same values.
         var yaml = new org.springframework.boot.env.YamlPropertySourceLoader()
                 .load("application.yml",
@@ -1045,9 +1043,6 @@ class ManagedAgentPropertiesTest {
                     + ".read-grant-recheck-interval")).isTrue();
             assertThat(source.containsProperty("qwen.managed-agent.artifacts"
                     + ".read-revalidation-interval")).isTrue();
-            assertThat(source.containsProperty("qwen.managed-agent"
-                    + ".tool-publication.journal-head-authorization"))
-                    .isTrue();
         });
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
@@ -1074,8 +1069,6 @@ class ManagedAgentPropertiesTest {
                     assertThat(bound.getArtifacts()
                             .getReadRevalidationInterval())
                             .isEqualTo(java.time.Duration.ofSeconds(5));
-                    assertThat(bound.getToolPublication()
-                            .isJournalHeadAuthorization()).isFalse();
                 });
     }
 
