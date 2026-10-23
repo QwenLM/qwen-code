@@ -745,7 +745,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         requiresArg: true,
         description:
-          'Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN.',
+          'Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN; prefer the variable, since this option puts the credential in the process list.',
       })
       .option('writer-idle-timeout-ms', {
         type: 'number',

@@ -36,8 +36,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private static final Logger LOG = LoggerFactory.getLogger(
             ManagedAgentProperties.class);
 
-    private static final Set<String> HARNESS_CREDENTIAL_KEYS =
-            Set.of("QWEN_SERVER_TOKEN", "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST");
+    // The keys the Harness reads from its environment file, which both of
+    // its readers must take the same way.
+    private static final Set<String> STRICT_HARNESS_KEYS = Set.of("QWEN_SERVER_TOKEN",
+            "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", "QWEN_MANAGED_RUNTIME_BROKER_URL",
+            "QWEN_MANAGED_RUNTIME_BROKER_TOKEN");
     // `-` stays last, where it is literal inside the character class.
     private static final String CREDENTIAL_PUNCTUATION = "._:/+=-";
     private static final Pattern PLAIN_CREDENTIAL =
@@ -65,6 +68,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private String trustedActorHeader = "";
     // Validation may run more than once; the file is read only the first time.
     private boolean harnessCredentialsApplied;
+    private String harnessBrokerUrl = "";
     // Null on a plain `new`; the sweep then falls back to magnitude bands.
     private Environment environment;
 
@@ -197,14 +201,30 @@ public class ManagedAgentProperties implements EnvironmentAware {
         Map<String, String> values = readHarnessEnvironmentFile(file);
         String token = credential(values, "QWEN_SERVER_TOKEN", file);
         String digest = credential(values, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", file);
+        // Optional: a text-only deployment has no Broker to share a token with.
+        String brokerToken = values.get("QWEN_MANAGED_RUNTIME_BROKER_TOKEN");
+        boolean sharesBrokerToken = StringUtils.isNotBlank(brokerToken);
+        if (sharesBrokerToken && StringUtils.isNotBlank(runtimeBroker.getToken())) {
+            throw new IllegalStateException("Configure the Runtime Broker token either in"
+                    + " harness.credentials-file or directly, not both");
+        }
         harness.setToken(token);
         harness.setCapabilityDigest(digest);
+        if (sharesBrokerToken) {
+            runtimeBroker.setToken(brokerToken);
+        }
+        harnessBrokerUrl = values.getOrDefault("QWEN_MANAGED_RUNTIME_BROKER_URL", "");
         harnessCredentialsApplied = true;
     }
 
     /** Whether startup validation has bound the credentials from the Harness credentials file. */
     public boolean harnessCredentialsApplied() {
         return harnessCredentialsApplied;
+    }
+
+    /** The Broker URL the Harness credentials file gives the Harness, or empty; read with the credentials. */
+    public String harnessBrokerUrl() {
+        return harnessBrokerUrl;
     }
 
     // systemd and a shell `source` both read this file for the Harness, so
@@ -239,9 +259,9 @@ public class ManagedAgentProperties implements EnvironmentAware {
             }
             String key = line.substring(0, separator).strip();
             String value = line.substring(separator + 1);
-            boolean credential = HARNESS_CREDENTIAL_KEYS.contains(key);
+            boolean strict = STRICT_HARNESS_KEYS.contains(key);
             // A shell runs `KEY = value` or `KEY= value` as a command instead.
-            if (credential && (key.length() != separator || !value.equals(value.stripLeading()))) {
+            if (strict && (key.length() != separator || !value.equals(value.stripLeading()))) {
                 throw unsupportedCredentialLine(file, index, "whitespace around `=` in " + key);
             }
             value = value.strip();
@@ -261,7 +281,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
             }
             // Both readers take these characters literally anywhere in a
             // value; a shell gives others, such as `;`, `&` or `~`, meaning.
-            if (credential && !PLAIN_CREDENTIAL.matcher(value).matches()) {
+            if (strict && !PLAIN_CREDENTIAL.matcher(value).matches()) {
                 throw unsupportedCredentialLine(file, index,
                         "a character other than letters, digits and `" + CREDENTIAL_PUNCTUATION + "` in " + key);
             }

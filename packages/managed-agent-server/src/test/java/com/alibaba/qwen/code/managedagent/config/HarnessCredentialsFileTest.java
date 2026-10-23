@@ -181,6 +181,53 @@ class HarnessCredentialsFileTest {
     }
 
     @Test
+    void sharesTheBrokerTokenWhenTheFileCarriesIt(@TempDir Path directory) throws IOException {
+        String credentials = "QWEN_SERVER_TOKEN=" + TOKEN + "\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + DIGEST + "\n";
+        Path shared = Files.writeString(directory.resolve("shared.env"), credentials
+                + "QWEN_MANAGED_RUNTIME_BROKER_URL=http://127.0.0.1:4182\n"
+                + "QWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker-token\n");
+        ManagedAgentProperties fromFile = withFile(shared);
+        fromFile.validateWorkspaceFiles();
+        assertThat(fromFile.getRuntimeBroker().getToken()).isEqualTo("broker-token");
+        // Preflight compares the URL with the address the Broker binds.
+        assertThat(fromFile.harnessBrokerUrl()).isEqualTo("http://127.0.0.1:4182");
+
+        ManagedAgentProperties twice = withFile(shared);
+        twice.getRuntimeBroker().setToken("direct-token");
+        assertThatThrownBy(twice::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Configure the Runtime Broker token either in"
+                        + " harness.credentials-file or directly, not both");
+        assertThat(twice.getHarness().getToken()).isEmpty();
+        assertThat(twice.harnessBrokerUrl()).isEmpty();
+        assertThat(twice.harnessCredentialsApplied()).isFalse();
+
+        // Without the key, for example on a text-only deployment, the direct value stays in charge.
+        Path textOnly = Files.writeString(directory.resolve("text-only.env"), credentials);
+        ManagedAgentProperties direct = withFile(textOnly);
+        direct.getRuntimeBroker().setToken("direct-token");
+        direct.validateWorkspaceFiles();
+        assertThat(direct.getRuntimeBroker().getToken()).isEqualTo("direct-token");
+
+        // The Harness reads these lines too, so they are held to the same rules as the other two.
+        for (String[] refused : new String[][] {
+            {"QWEN_MANAGED_RUNTIME_BROKER_TOKEN =broker-token",
+                "whitespace around `=` in QWEN_MANAGED_RUNTIME_BROKER_TOKEN"},
+            {"QWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker&token",
+                "a character other than letters, digits and `._:/+=-` in QWEN_MANAGED_RUNTIME_BROKER_TOKEN"},
+            {"QWEN_MANAGED_RUNTIME_BROKER_URL =http://127.0.0.1:4182",
+                "whitespace around `=` in QWEN_MANAGED_RUNTIME_BROKER_URL"},
+            {"QWEN_MANAGED_RUNTIME_BROKER_URL=http://h;rm",
+                "a character other than letters, digits and `._:/+=-` in QWEN_MANAGED_RUNTIME_BROKER_URL"},
+        }) {
+            Path file = Files.writeString(directory.resolve("refused.env"), credentials + refused[0] + "\n");
+            assertThatThrownBy(withFile(file)::validateWorkspaceFiles).as(refused[0])
+                    .hasMessageStartingWith(
+                            "Hosted Harness credentials file " + file + " line 3 uses " + refused[1] + ";");
+        }
+    }
+
+    @Test
     void leavesDirectCredentialsAloneWithoutAFile() {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setToken(TOKEN);

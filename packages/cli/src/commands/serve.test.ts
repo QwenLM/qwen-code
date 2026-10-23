@@ -107,7 +107,7 @@ describe('serve command args', () => {
     );
     expect(help).toContain(
       squash(
-        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN. --',
+        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN; prefer the variable, since this option puts the credential in the process list. --',
       ),
     );
     expect(help).not.toContain('ReservedBroker');

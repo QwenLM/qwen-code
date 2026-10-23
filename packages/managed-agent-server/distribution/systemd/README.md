@@ -43,15 +43,22 @@ for `server.env`.
 The Harness token and capability digest live only in `harness.env`:
 `server.env` points `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` at it, and
 the control plane refuses to start when that file is set together with
-`QWEN_MANAGED_AGENT_HARNESS_TOKEN` or `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST`.
-Keep each credential in `harness.env` as `KEY=value` on one line, with LF line
-endings, no whitespace around the `=`, and only letters, digits and `._:/+=-`
-in the value, and start comments with `#`. The control plane refuses anything
-else, such as a continuation, a `;` comment or text after a closing quote,
-since systemd or a shell would read it differently.
-If the Harness reports a port other than 4170 because the
-requested one was in use, update `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` in
-`server.env` before starting the control plane.
+`QWEN_MANAGED_AGENT_HARNESS_TOKEN` or `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST`,
+or when its Broker token is set together with
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`.
+Keep each credential, and the Broker URL, in `harness.env` as `KEY=value` on
+one line, with LF line endings, no whitespace around the `=`, and only letters,
+digits and `._:/+=-` in the value, and start comments with `#`. The control
+plane refuses anything else, such as a continuation, a `;` comment or text
+after a closing quote, since systemd or a shell would read it differently.
+For the tool path, uncomment `QWEN_MANAGED_RUNTIME_BROKER_URL` and
+`QWEN_MANAGED_RUNTIME_BROKER_TOKEN` in `harness.env`. The control plane reads
+the same token from it, so `server.env` carries no Broker token. On an upgraded
+host, replace a `QWEN_HOSTED_HARNESS_BROKER_ARGS` line with these two: nothing
+reads it any more. The Harness never moves off port 4170: if the port is in
+use, it exits instead of running where `QWEN_MANAGED_AGENT_HARNESS_BASE_URL`
+cannot reach it, and systemd restarts it every 5 seconds;
+`journalctl -u qwen-hosted-harness` shows the port message.
 The Session Store needs no setting of its own: the control plane derives its
 URL from its own listener, which does not follow the Harness port, and its
 workspace ID from `QWEN_MANAGED_AGENT_WORKSPACE_CWD`, the directory created

@@ -21,10 +21,13 @@ import org.springframework.core.io.Resource;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.SocketTimeoutException;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -579,9 +582,28 @@ public final class ManagedAgentPreflight {
             checks.add(new Check("broker", Status.SKIP, "disabled", null));
             return checks;
         }
+        String file = properties.getHarness().getCredentialsFile();
+        // Startup reads the file only while the Harness is enabled.
+        boolean readsFile = properties.getHarness().isEnabled()
+                && StringUtils.isNotBlank(file);
         if (StringUtils.isBlank(broker.getToken())) {
+            String fix;
+            if (!readsFile) {
+                fix = "set QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN";
+            } else if (properties.harnessCredentialsApplied()) {
+                // The Harness takes both from the file, or neither.
+                fix = "set QWEN_MANAGED_RUNTIME_BROKER_URL and"
+                        + " QWEN_MANAGED_RUNTIME_BROKER_TOKEN in " + file;
+            } else {
+                fix = "credentials were not read from " + file
+                        + "; see the validation row";
+            }
             checks.add(new Check("broker", Status.FAIL, "token is empty",
-                    "set QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN"));
+                    fix));
+        }
+        if (readsFile && properties.harnessCredentialsApplied()) {
+            checks.add(harnessBrokerUrlCheck(
+                    properties.harnessBrokerUrl(), broker, file));
         }
         if (StringUtils.isBlank(broker.getCredentialKeyId())
                 || StringUtils.isBlank(broker.getCredentialKey())) {
@@ -621,6 +643,59 @@ public final class ManagedAgentPreflight {
                     "use local-process or static"));
         }
         return checks;
+    }
+
+    // The Harness takes its Broker URL from its own environment file, which
+    // nothing else reconciles with the address the Broker binds.
+    static Check harnessBrokerUrlCheck(String url,
+            ManagedAgentProperties.RuntimeBroker broker, String file) {
+        String address = broker.getHost() + ":" + broker.getPort();
+        if (StringUtils.isBlank(url)) {
+            return new Check("broker-url", Status.WARN,
+                    file + " gives the Hosted Harness no Broker URL",
+                    "set QWEN_MANAGED_RUNTIME_BROKER_URL and"
+                            + " QWEN_MANAGED_RUNTIME_BROKER_TOKEN in " + file
+                            + ", unless the Harness command line sets them");
+        }
+        String fix = "point QWEN_MANAGED_RUNTIME_BROKER_URL in " + file
+                + " at " + address;
+        URI uri;
+        try {
+            uri = new URI(url);
+        } catch (URISyntaxException error) {
+            return new Check("broker-url", Status.FAIL,
+                    "the Hosted Harness Broker URL is not a URL", fix);
+        }
+        int port = uri.getPort();
+        if (port < 0) {
+            port = "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+        }
+        if (uri.getHost() == null || port != broker.getPort()
+                || !reaches(uri.getHost(), broker.getHost())) {
+            return new Check("broker-url", Status.FAIL,
+                    "the Hosted Harness dials " + url
+                            + " but the Broker listens on " + address,
+                    fix);
+        }
+        return new Check("broker-url", Status.PASS, url, null);
+    }
+
+    // A wildcard bind accepts every address, a loopback bind every loopback
+    // address.
+    private static boolean reaches(String host, String bindHost) {
+        try {
+            InetAddress bind = InetAddress.getByName(bindHost);
+            for (InetAddress address : InetAddress.getAllByName(host)) {
+                if (bind.isAnyLocalAddress() || address.equals(bind)
+                        || address.isLoopbackAddress()
+                        && bind.isLoopbackAddress()) {
+                    return true;
+                }
+            }
+        } catch (UnknownHostException error) {
+            return false;
+        }
+        return false;
     }
 
     private static Check workspaceCheck(ManagedAgentProperties properties) {

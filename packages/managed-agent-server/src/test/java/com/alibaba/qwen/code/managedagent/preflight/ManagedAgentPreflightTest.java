@@ -530,6 +530,78 @@ class ManagedAgentPreflightTest {
                 + placeholderDigest,
                 ManagedAgentPreflight.harnessCheck(
                         fromFile(placeholderDigest, "http://127.0.0.1:1")).fix());
+        properties.getRuntimeBroker().setEnabled(true);
+        assertEquals("set QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN",
+                ManagedAgentPreflight.brokerChecks(properties).get(0).fix());
+        // A file startup has not read gets no advice to edit it.
+        properties.getHarness().setCredentialsFile("/etc/harness.env");
+        assertEquals("credentials were not read from /etc/harness.env;"
+                + " see the validation row",
+                ManagedAgentPreflight.brokerChecks(properties).get(0).fix());
+        // Nor does one it never reads, while the Harness is disabled.
+        properties.getHarness().setEnabled(false);
+        assertEquals("set QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN",
+                ManagedAgentPreflight.brokerChecks(properties).get(0).fix());
+        // The Harness takes the Broker URL and token from the file together.
+        Path textOnly = credentialsFile(directory, "token", DIGEST);
+        ManagedAgentProperties bound = fromFile(textOnly, "http://127.0.0.1:1");
+        bound.getRuntimeBroker().setEnabled(true);
+        List<ManagedAgentPreflight.Check> checks =
+                ManagedAgentPreflight.brokerChecks(bound);
+        assertEquals("set QWEN_MANAGED_RUNTIME_BROKER_URL and"
+                + " QWEN_MANAGED_RUNTIME_BROKER_TOKEN in " + textOnly,
+                checks.get(0).fix());
+        assertEquals(ManagedAgentPreflight.Status.WARN, checks.get(1).status());
+        assertEquals(textOnly + " gives the Hosted Harness no Broker URL",
+                checks.get(1).detail());
+    }
+
+    @Test
+    void comparesTheHarnessBrokerUrlWithTheBrokerAddress(
+            @TempDir Path directory) throws IOException {
+        Path file = Files.writeString(directory.resolve("harness.env"),
+                "QWEN_SERVER_TOKEN=token\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST="
+                        + DIGEST + "\nQWEN_MANAGED_RUNTIME_BROKER_URL="
+                        + "http://127.0.0.1:4182\nQWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker\n");
+        ManagedAgentProperties properties = fromFile(file, "http://127.0.0.1:1");
+        ManagedAgentProperties.RuntimeBroker broker =
+                properties.getRuntimeBroker();
+        broker.setEnabled(true);
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlRow(properties).status());
+        // The Broker moved through its own settings; the file still names 4182.
+        broker.setPort(4200);
+        ManagedAgentPreflight.Check moved = urlRow(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, moved.status());
+        assertEquals("the Hosted Harness dials http://127.0.0.1:4182"
+                + " but the Broker listens on 127.0.0.1:4200", moved.detail());
+        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in " + file
+                + " at 127.0.0.1:4200", moved.fix());
+        broker.setPort(4182);
+        broker.setHost("192.0.2.7");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                urlRow(properties).status());
+        // A wildcard bind accepts the loopback URL.
+        broker.setHost("0.0.0.0");
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlRow(properties).status());
+        broker.setHost("127.0.0.1");
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.harnessBrokerUrlCheck(
+                        "http://localhost:4182", broker, "f").status());
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.harnessBrokerUrlCheck(
+                        "http://127.0.0.1", broker, "f").status());
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.harnessBrokerUrlCheck(
+                        "127.0.0.1:4182", broker, "f").status());
+    }
+
+    private static ManagedAgentPreflight.Check urlRow(
+            ManagedAgentProperties properties) {
+        return ManagedAgentPreflight.brokerChecks(properties).stream()
+                .filter(check -> check.name().equals("broker-url"))
+                .findFirst().orElseThrow();
     }
 
     @Test
