@@ -1663,6 +1663,12 @@ const SETTINGS_SCHEMA = {
             description:
               'Mod tool input dialect. Defaults to native; claude exposes the supported Bash/Edit/Write input subset.',
           },
+          unsupportedEvents: {
+            type: 'string',
+            enum: ['skip', 'reject'],
+            description:
+              'Hooks for Claude Code events Qwen Code does not support. Defaults to skip, which reports them at startup; reject fails initialization instead.',
+          },
           options: {
             type: 'object',
             additionalProperties: {
@@ -1678,7 +1684,7 @@ const SETTINGS_SCHEMA = {
       },
     },
     description:
-      'Mod options and tool dialect keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
+      'Mod options, tool dialect and unsupported-event policy keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
     showInDialog: false,
   },
 
