@@ -251,6 +251,20 @@ describe.skipIf(process.platform === 'win32')(
       expect(signal).toBe('SIGINT');
       expect(await gone(pid)).toBe(true);
     });
+
+    it('installs its traps before it starts the command, and reads `$c`, never `$!`', () => {
+      // A signal between the job's start and the traps would kill only the
+      // shell and leave the job running. And zsh expands `$!` to 0 before
+      // any job: a trap reading it could walk from pid 0, which is every
+      // process on the machine.
+      const lines = REAPING_SHELL.split('\n');
+      const job = lines.indexOf('( eval "$cmd" ) &');
+      const traps = lines.flatMap((l, i) => (l.startsWith('trap ') ? [i] : []));
+      expect(job).toBeGreaterThan(-1);
+      expect(traps).toHaveLength(2);
+      for (const i of traps) expect(i).toBeLessThan(job);
+      expect(REAPING_SHELL).not.toContain('"$!"');
+    });
   },
 );
 
