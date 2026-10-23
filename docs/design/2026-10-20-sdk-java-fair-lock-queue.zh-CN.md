@@ -92,9 +92,13 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 test job 现在遵循同一规则。它的测试套件以前也在锁内。run 39754414693 的
 full 档 Java 21 leg 就是记录：89 分钟里有约 81 分钟在排队等锁，只有约
 6 分钟持锁跑 Maven，因此把整个 job 当成持锁阶段会指向错误的环节。
-run 39831684300 的 fast 档 leg 随后在锁外跑了约 21 分钟 Maven —— 这正是
-本规则要移除的持锁。它的 Maven 运行现在从基于 `~/.m2` 播种的 job 本地仓库
-解析，只有写回才取锁。
+run 39831684300 的 fast 档 leg 随后在锁外跑了约 21 分钟 Maven，随后以
+队列票号 275 耗尽 5400 秒写回等待并变红 —— 当时 main 分支 leg 仍在运行
+改动前的长持锁代码，这正是本规则要消除的混合机群过渡代价。自托管的套件
+step 的 Maven 运行现在从基于 `~/.m2` 播种的 job 本地仓库解析，只有写回
+才取锁。该 job 后续的 Maven step 有意继续使用宿主共享仓库：它们都不解析
+本 step 安装的内部 SDK 产物，因此将来若有 step 需要该产物，必须自己加上
+job 本地后缀。
 
 未能到达写回是刻意致命的（与只发警告的复制失败不同）：`lock not acquired
 within` 是重跑分类器匹配的基础设施特征，锁被卡住的宿主机不能在什么都没
@@ -106,11 +110,16 @@ within` 是重跑分类器匹配的基础设施特征，锁被卡住的宿主机
 
 这把锁早于本改动：#10552 引入它是为了针对宿主机争用来串行化本套件，而不是
 为了保护缓存。套件在锁外运行现在是池上的稳态 —— MariaDB 和两个
-EventTransport 通道早已如此 —— 而对宿主机 CPU/内存争用的保护，是 #10552
-同时落地的 CI 条件计时预算（`DaemonSessionClientTest` 的
-`ASYNC_WAIT_SECONDS = CI ? 60 : 1`、`TIMEOUT_UPPER_BOUND_MILLIS = CI ? 5000 : 900`、
-`STALLED_RESPONSE_REQUEST_TIMEOUT = CI ? 3000 : 150`）。重新串行化需要新的
-设计；本文档刻意不引入第二把锁。
+EventTransport 通道早已如此。#10552 同时落地的 CI 条件计时预算
+（`DaemonSessionClientTest` 的 `ASYNC_WAIT_SECONDS = CI ? 60 : 1`、
+`TIMEOUT_UPPER_BOUND_MILLIS = CI ? 5000 : 900`、
+`STALLED_RESPONSE_REQUEST_TIMEOUT = CI ? 3000 : 150`）只放宽 SDK 模块的
+延迟窗口，并不约束内存。这个池子此前曾把一次构建 OOM 掉，而 full 档现在
+可以把至多三条 test leg 放到同一台宿主机上。这一风险是有意接受的：重新
+串行化需要新的设计，本文档刻意不引入第二把锁。被 OOM 杀掉的 Surefire
+fork 会报 "The forked VM terminated without properly saying goodbye"，
+重跑分类器尚未把该特征视为基础设施问题；补充该特征已作为本改动之外的
+后续工作跟踪。
 
 ### fast 档优先
 

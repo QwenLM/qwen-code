@@ -109,9 +109,14 @@ The full-tier Java 21 leg of run 39754414693 is the record: its 89 minutes
 were ~81 minutes queueing for the lock and ~6 minutes holding it for its
 Maven runs, so treating the whole job as the hold pointed at the wrong phase.
 The fast-tier leg of run 39831684300 then ran ~21 minutes of Maven outside the
-lock — the hold this rule removes. Its Maven runs now resolve from the
-job-local repository seeded from `~/.m2`, and only its write-back takes the
-lock.
+lock, then exhausted its 5400 s write-back wait as ticket 275 and went red
+while main-branch legs still ran the pre-change long-hold code — the
+mixed-fleet transition cost this rule removes. The self-hosted suite step's
+Maven runs now resolve from the job-local repository seeded from `~/.m2`, and
+only its write-back takes the lock. The job's later Maven steps deliberately
+keep the host-shared repository: none of them resolves the in-house SDK
+artifact this step installs, so a future step that needs one must add the
+job-local suffix itself.
 
 Failing to reach the write-back is deliberately fatal, unlike a failed copy,
 which only warns: `lock not acquired within` is the infrastructure signature
@@ -126,13 +131,17 @@ not spending lock budget on a failed run.
 The lock predates this change: #10552 added it to serialize this suite against
 host contention, not to protect the cache. Running the suite unlocked is now
 the steady state on the pool — the MariaDB and both EventTransport lanes
-already do — and the protection against host CPU/RAM contention is the
-CI-conditional timing budgets #10552 landed with it
+already do. The CI-conditional timing budgets #10552 landed with it
 (`DaemonSessionClientTest`'s `ASYNC_WAIT_SECONDS = CI ? 60 : 1`,
 `TIMEOUT_UPPER_BOUND_MILLIS = CI ? 5000 : 900`, and
-`STALLED_RESPONSE_REQUEST_TIMEOUT = CI ? 3000 : 150`). Re-serializing the
-suite would need a new design; this document deliberately does not add a
-second lock.
+`STALLED_RESPONSE_REQUEST_TIMEOUT = CI ? 3000 : 150`) only widen latency
+windows in the SDK module; they do not bound memory. This pool has OOMed a
+build before, and the full tier can now put up to three test legs on one
+host. That risk is accepted: re-serializing the suite would need a new
+design, and this document deliberately does not add a second lock. An
+OOM-killed Surefire fork reports "The forked VM terminated without properly
+saying goodbye", which the rerun classifiers do not yet treat as
+infrastructure; that signature is tracked as a follow-up outside this change.
 
 ### Fast-tier priority
 

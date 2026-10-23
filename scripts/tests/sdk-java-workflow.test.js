@@ -192,7 +192,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     // so a fix to one copy cannot leave the other with a wider prune list or
     // a missing -links 1 delta.
     const writeBacks = lockedSteps.map((locked) => {
-      const at = locked.run.indexOf('mkdir -p "${HOME}/.m2/repository"');
+      const at = locked.run.indexOf('# Close the cache loop inside that lock');
       expect(at, locked.name).toBeGreaterThan(-1);
       return locked.run.slice(at).trimEnd();
     });
@@ -264,41 +264,133 @@ describe('SDK Java self-hosted workflow guards', () => {
     'breaks the resolver tracking files out of the host-cache hardlinks',
     () => {
       const seedLine = 'cp -aln "${HOME}/.m2/repository"';
-      const sites = Object.values(parse(workflow).jobs)
-        .flatMap((candidate) => candidate.steps ?? [])
-        .filter((candidate) => candidate.run?.includes(seedLine));
-      // Every pool job that seeds the host cache shares this exposure.
-      expect(sites).toHaveLength(4);
-      for (const site of sites) {
-        const seedAt = site.run.indexOf(seedLine);
-        const mvnAt = site.run.slice(seedAt).search(/\n\s*mvn /);
-        expect(mvnAt, site.name).toBeGreaterThan(-1);
-        const seed = site.run.slice(seedAt, seedAt + mvnAt);
+      const guardLine =
+        "find \"${RUNNER_TEMP}/m2-repo\" -type f -links +1 \\( -name '_remote.repositories' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' -o -name 'maven-metadata-*.xml' \\) -delete 2>/dev/null || true";
+      const reference = parse(
+        readFileSync(
+          '.github/workflows/release-managed-agent-reference.yml',
+          'utf8',
+        ),
+      );
+      const pool = [
+        { source: 'sdk-java.yml', jobs: parse(workflow).jobs },
+        {
+          source: 'release-managed-agent-reference.yml',
+          jobs: reference.jobs,
+        },
+      ];
+      const seeds = pool.flatMap(({ source, jobs }) =>
+        Object.values(jobs)
+          .flatMap((candidate) => candidate.steps ?? [])
+          .filter((candidate) => candidate.run?.includes(seedLine))
+          .map((site) => {
+            const lines = site.run.split('\n');
+            const at = lines.findIndex((line) => line.includes(seedLine));
+            expect(at, site.name).toBeGreaterThan(-1);
+            const guardAt = lines.findIndex(
+              (line, index) => index > at && line.trim() === guardLine,
+            );
+            expect(guardAt, site.name).toBeGreaterThan(at);
+            // Only comments may sit between the seed and the guard; a command
+            // there is how one copy drifts while the others are fixed.
+            expect(
+              lines
+                .slice(at + 1, guardAt)
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .every((line) => line.startsWith('#')),
+              site.name,
+            ).toBe(true);
+            return {
+              source,
+              name: site.name,
+              seed: [lines[at], lines[guardAt]]
+                .map((line) => line.trim())
+                .join('\n'),
+            };
+          }),
+      );
+      // Every pool job that seeds the host cache shares this exposure: four
+      // in sdk-java.yml plus the reference workflow's Build Java components.
+      expect(seeds).toHaveLength(5);
+      const sdkJavaSeeds = seeds
+        .filter((seed) => seed.source === 'sdk-java.yml')
+        .map((seed) => seed.seed);
+      expect(sdkJavaSeeds).toHaveLength(4);
+      for (const seed of sdkJavaSeeds) expect(seed).toBe(sdkJavaSeeds[0]);
+
+      for (const { name, seed } of seeds) {
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-m2-metadata-'));
         const home = join(dir, 'home');
         const runnerTemp = join(dir, 'runner-temp');
-        const relative = join('g', 'a', '1.0', 'x.lastUpdated');
-        const hostFile = join(home, '.m2', 'repository', relative);
-        const jobFile = join(runnerTemp, 'm2-repo', relative);
-        mkdirSync(dirname(hostFile), { recursive: true });
+        const hostRepo = join(home, '.m2', 'repository');
+        const tracking = [
+          join('g', 'a', '1.0', 'x.lastUpdated'),
+          join('g', 'a', '1.0', '_remote.repositories'),
+          join('g', 'a', '1.0', 'resolver-status.properties'),
+          join('g', 'a', '1.0', 'maven-metadata-central.xml'),
+        ];
+        const artifact = join('g', 'a', '1.0', 'a-1.0.jar');
+        for (const relative of [...tracking, artifact]) {
+          const hostFile = join(hostRepo, relative);
+          mkdirSync(dirname(hostFile), { recursive: true });
+          writeFileSync(hostFile, 'host-before\n');
+        }
         mkdirSync(runnerTemp, { recursive: true });
-        writeFileSync(hostFile, 'host-before\n');
         try {
+          const env = { ...process.env, HOME: home };
+          // Positive control: the seed alone must create hardlinks. Without
+          // this the negative control below would pass on a copy that never
+          // linked at all.
+          const controlTemp = join(dir, 'runner-temp-control');
+          mkdirSync(controlTemp, { recursive: true });
+          const control = spawnSync('bash', ['-e', '-c', seed.split('\n')[0]], {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...env,
+              RUNNER_TEMP: controlTemp,
+              repo: join(controlTemp, 'm2-repo'),
+            },
+          });
+          expect(control.error, name).toBeUndefined();
+          expect(control.status, name + control.stderr).toBe(0);
+          expect(
+            statSync(join(controlTemp, 'm2-repo', artifact)).ino,
+            name,
+          ).toBe(statSync(join(hostRepo, artifact)).ino);
+
           const result = spawnSync('bash', ['-e', '-c', seed], {
             encoding: 'utf8',
             timeout: 5000,
-            env: { ...process.env, HOME: home, RUNNER_TEMP: runnerTemp },
+            env: {
+              ...env,
+              RUNNER_TEMP: runnerTemp,
+              repo: join(runnerTemp, 'm2-repo'),
+            },
           });
-          expect(result.error, site.name).toBeUndefined();
-          expect(result.status, site.name + result.stderr).toBe(0);
-          // Maven truncates and rewrites this tracking file in place; the
+          expect(result.error, name).toBeUndefined();
+          expect(result.status, name + result.stderr).toBe(0);
+          // Maven truncates and rewrites these tracking files in place; the
           // job-local path must no longer be the host inode.
-          writeFileSync(jobFile, 'job-after\n');
-          expect(readFileSync(hostFile, 'utf8'), site.name).toBe(
+          for (const relative of tracking) {
+            const hostFile = join(hostRepo, relative);
+            const jobFile = join(runnerTemp, 'm2-repo', relative);
+            writeFileSync(jobFile, 'job-after\n');
+            expect(readFileSync(hostFile, 'utf8'), name).toBe('host-before\n');
+            expect(statSync(jobFile).ino, name).not.toBe(
+              statSync(hostFile).ino,
+            );
+          }
+          // A non-tracking artifact must stay linked: widening the -delete to
+          // the whole tree would silently turn the warm start into a copy.
+          const hostArtifact = join(hostRepo, artifact);
+          const jobArtifact = join(runnerTemp, 'm2-repo', artifact);
+          expect(readFileSync(hostArtifact, 'utf8'), name).toBe(
             'host-before\n',
           );
-          expect(statSync(jobFile).ino, site.name).not.toBe(
-            statSync(hostFile).ino,
+          expect(statSync(jobArtifact).ino, name).toBe(
+            statSync(hostArtifact).ino,
           );
         } finally {
           rmSync(dir, { recursive: true, force: true });

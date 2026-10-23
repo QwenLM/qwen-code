@@ -234,6 +234,9 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         working-directory: 'packages/sdk-java/qwencode'
         env:
+          # The suite resolves from the job-local repo. The job's later Maven
+          # steps (Checkstyle, release artifacts) deliberately keep the
+          # host-shared ~/.m2 and must not need an artifact this step installs.
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
           MATRIX_JAVA: '${{ matrix.java }}'
           TIER: '${{ inputs.tier }}'
@@ -251,7 +254,10 @@ jobs:
           # 2026-10-22 the full-tier Java 21 leg of run 39754414693 spent
           # ~81 minutes queueing and only ~6 minutes holding this lock for
           # its Maven runs; the fast-tier leg of run 39831684300 then ran
-          # ~21 minutes of Maven outside the lock — the hold this removes.
+          # ~21 minutes of Maven outside the lock, then exhausted its 5400 s
+          # write-back wait as queue ticket 275 and went red while main-branch
+          # legs still ran the pre-change long-hold code — the mixed-fleet
+          # transition cost this change removes.
           mvn --batch-mode --no-transfer-progress clean test
           if [ "${MATRIX_JAVA}" = "21" ]; then
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
