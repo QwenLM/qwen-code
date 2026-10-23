@@ -25,9 +25,14 @@ export interface ModSource {
 export type ModOption = string | number | boolean | string[];
 export type ModOptions = Record<string, ModOption>;
 export type ModToolDialect = 'native' | 'claude';
+export type ModUnsupportedEvents = 'skip' | 'reject';
 export type ModPluginConfigs = Record<
   string,
-  { options?: ModOptions; toolDialect?: ModToolDialect }
+  {
+    options?: ModOptions;
+    toolDialect?: ModToolDialect;
+    unsupportedEvents?: ModUnsupportedEvents;
+  }
 >;
 
 export interface ModDependency {
@@ -58,6 +63,7 @@ export interface ModPlugin {
   source: ModSource;
   options: ModOptions;
   toolDialect?: ModToolDialect;
+  unsupportedEvents?: ModUnsupportedEvents;
 }
 
 export interface ModLog {
@@ -71,6 +77,7 @@ export type ModRequest =
       plugins: ModPlugin[];
       cwd: string;
       surface: 'terminal' | null;
+      version: string;
     }
   | {
       type: 'command';

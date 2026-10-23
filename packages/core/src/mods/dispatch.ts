@@ -12,14 +12,22 @@ import {
   validToolCheck,
 } from './tool-events.js';
 
-export type ModEvent =
-  | 'session.start'
-  | 'session.end'
-  | 'command.run'
-  | 'command.register'
-  | 'tool.call'
-  | 'tool.check'
-  | 'ui.log';
+export const MOD_METHODS = [
+  'command.register',
+  'session.version',
+  'ui.log',
+] as const;
+export const MOD_EVENTS = [
+  'command.register',
+  'command.run',
+  'session.end',
+  'session.start',
+  'session.version',
+  'tool.call',
+  'tool.check',
+  'ui.log',
+] as const;
+export type ModEvent = (typeof MOD_EVENTS)[number];
 export type ModInput = Record<string, unknown>;
 export interface ModFrame {
   plugin: number;
@@ -121,6 +129,9 @@ export function validateResult(event: ModEvent, value: unknown): void {
     if (valid && event === 'command.register' && !('deny' in value))
       valid =
         record(value['value']) && typeof value['value']['command'] === 'string';
+    if (valid && event === 'session.version' && !('deny' in value))
+      valid =
+        record(value['value']) && typeof value['value']['version'] === 'string';
   }
   if (!valid) throw new Error('Unsupported ' + event + ' result fields.');
 }

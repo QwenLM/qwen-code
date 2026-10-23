@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CLAUDE_CODE_EVENTS } from './claude-events.js';
 import { MOD_MAX_DEPTH } from './types.js';
 
 // Executed only inside QuickJS. The factory's handles stay private to the host.
@@ -29,7 +30,8 @@ export const MOD_GUEST_FACTORY = String.raw`
   const hasOwn = Object.hasOwn;
   const hooks = [];
   const runs = new Map();
-  const events = ['session.start', 'session.end', 'command.run', 'command.register', 'ui.log', 'tool.call', 'tool.check'];
+  const known = new Set(${JSON.stringify(CLAUDE_CODE_EVENTS)});
+  const knownNamespaces = new Set([...known].map(e => e.slice(0, e.indexOf('.'))));
   let registering = false;
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const frozen = value => {
@@ -76,9 +78,10 @@ export const MOD_GUEST_FACTORY = String.raw`
   const on = (event, matcher, handler) => {
     if (!registering) throw new Error('on() is only available during register()');
     if (typeof matcher === 'function' && handler === undefined) { handler = matcher; matcher = undefined; }
+    const name = typeof event === 'string' ? event.replace(/^!/, '') : '';
+    // A known event Qwen does not run yet registers without ever matching.
     if (typeof event !== 'string' || event === '!*' || event.startsWith('!!') ||
-        !events.some(e => patternMatches(event, e)) ||
-        !events.includes(event.replace(/^!/, '')) && !/^!?([a-z]+\.\*|\*)$/.test(event)) {
+        !known.has(name) && name !== '*' && !(/^[a-z]+\.\*$/.test(name) && knownNamespaces.has(name.slice(0, -2)))) {
       throw new Error('Mod event not supported: ' + event);
     }
     if (typeof handler !== 'function') throw new Error('Mod hook must be a function');
@@ -102,6 +105,7 @@ export const MOD_GUEST_FACTORY = String.raw`
     const invoke = (name, value) => call(id, frames, name, value);
     const namespaces = {
       command: { register: spec => invoke('command.register', spec) },
+      session: { version: () => invoke('session.version', {}) },
       ui: { log: (text, options = {}) => {
         if (!object(options) || keys(options).some(k => k !== 'to')) throw new Error('Invalid Mod log');
         void invoke('ui.log', { text: String(text), to: options.to ?? 'transcript' }).catch(() => {});
