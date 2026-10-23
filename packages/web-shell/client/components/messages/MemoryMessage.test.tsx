@@ -26,6 +26,25 @@ const memory = vi.hoisted(() => ({
   reload: vi.fn(),
 }));
 
+const autoMemory = vi.hoisted(() => ({
+  status: undefined as unknown,
+  entries: [] as unknown[],
+  loading: false,
+  error: undefined as unknown,
+  readAutoMemoryFile: vi.fn(),
+  openAutoMemoryFolder: vi.fn(),
+}));
+
+const settingsState = vi.hoisted(() => ({
+  settings: [] as unknown[],
+  setValue: vi.fn(),
+  reload: vi.fn(),
+}));
+
+const connectionState = vi.hoisted(() => ({
+  capabilities: { features: [] as string[] },
+}));
+
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
     await importOriginal<
@@ -42,6 +61,20 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
       reload: memory.reload,
       writeMemory: memory.writeMemory,
     }),
+    useAutoMemory: () => ({
+      status: autoMemory.status,
+      entries: autoMemory.entries,
+      loading: autoMemory.loading,
+      error: autoMemory.error,
+      readAutoMemoryFile: autoMemory.readAutoMemoryFile,
+      openAutoMemoryFolder: autoMemory.openAutoMemoryFolder,
+    }),
+    useSettings: () => ({
+      settings: settingsState.settings,
+      setValue: settingsState.setValue,
+      reload: settingsState.reload,
+    }),
+    useConnection: () => connectionState,
   };
 });
 
@@ -111,6 +144,18 @@ beforeEach(() => {
   memory.readMemoryFile.mockReset();
   memory.writeMemory.mockReset();
   memory.reload.mockReset().mockResolvedValue(undefined);
+  autoMemory.status = undefined;
+  autoMemory.entries = [];
+  autoMemory.loading = false;
+  autoMemory.error = undefined;
+  autoMemory.readAutoMemoryFile.mockReset();
+  autoMemory.openAutoMemoryFolder.mockReset();
+  settingsState.settings = [];
+  settingsState.setValue.mockReset().mockResolvedValue(undefined);
+  settingsState.reload.mockReset().mockResolvedValue(undefined);
+  // The suite exercises the Auto tab, so the default daemon advertises
+  // the matching capability; the gate test overrides this per case.
+  connectionState.capabilities.features = ['workspace_auto_memory'];
 });
 
 afterEach(() => {
@@ -278,5 +323,79 @@ describe('MemoryMessage', () => {
       mode: 'replace',
       content: 'a\r\nb\r\n',
     });
+  });
+});
+
+describe('MemoryMessage auto tab', () => {
+  const PROJECT_ENTRY = {
+    kind: 'auto_memory_file',
+    scope: 'project',
+    path: '/workspace/.qwen/auto-memory/project/notes.md',
+    title: 'Build notes',
+    bytes: 512,
+    modifiedAt: '2026-10-14T12:00:00.000Z',
+  };
+
+  it('opens the auto-memory panel and switches back to file tabs', async () => {
+    autoMemory.status = {
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      userDir: '/home/u/.qwen/auto-memory',
+      projectDir: '/workspace/.qwen/auto-memory',
+      entries: [PROJECT_ENTRY],
+      totalBytes: 512,
+      fileCount: 1,
+    };
+    autoMemory.entries = [PROJECT_ENTRY];
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MemoryMessage />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    // The third tab carries the auto-memory panel.
+    act(() => button('Auto memory').click());
+    await flush();
+    expect(container.textContent).toContain('Project memory');
+    expect(container.textContent).toContain('Build notes');
+    const editButton = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Edit',
+    );
+    expect(editButton).toBeUndefined();
+
+    act(() => button('Project').click());
+    await flush();
+    expect(container.textContent).toContain('QWEN.md');
+    expect(button('Edit')).toBeDefined();
+  });
+
+  it('hides the Auto tab when the daemon lacks the workspace_auto_memory tag', async () => {
+    connectionState.capabilities.features = [];
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MemoryMessage />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(buttons.some((item) => item.textContent === 'Auto memory')).toBe(
+      false,
+    );
+    expect(container.textContent).not.toContain('Project memory');
   });
 });

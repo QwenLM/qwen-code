@@ -142,6 +142,9 @@ import type {
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonAutoMemoryScope,
+  DaemonAutoMemoryFileContent,
+  DaemonWorkspaceAutoMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceAcpStatusResult,
@@ -2660,6 +2663,49 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /workspace/memory');
         }
         return (await res.json()) as DaemonWriteMemoryResult;
+      },
+    );
+  }
+
+  /**
+   * List the daemon's managed auto-memory entries: the per-project
+   * memory directory of the bound workspace plus the shared user
+   * memory directory. Read-only; both roots live outside the bound
+   * workspace, so this route — not `readWorkspaceFile` — is the only
+   * way to browse them. Returns `initialized: false` with empty
+   * `entries` when neither directory has been created yet.
+   */
+  async workspaceAutoMemory(): Promise<DaemonWorkspaceAutoMemoryStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auto-memory`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/auto-memory');
+        }
+        return (await res.json()) as DaemonWorkspaceAutoMemoryStatus;
+      },
+    );
+  }
+
+  /**
+   * Read one managed auto-memory entry by absolute path. The path must
+   * resolve inside one of the daemon's auto-memory roots — the daemon
+   * re-validates server-side and answers 400/404 otherwise.
+   */
+  async workspaceAutoMemoryFile(
+    filePath: string,
+  ): Promise<DaemonAutoMemoryFileContent> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auto-memory/file?path=${encodeURIComponent(
+        filePath,
+      )}`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/auto-memory/file');
+        }
+        return (await res.json()) as DaemonAutoMemoryFileContent;
       },
     );
   }
@@ -7435,6 +7481,29 @@ export class WorkspaceDaemonClient {
       '/open',
       'POST /workspaces/:workspace/open',
       { method: 'POST', body: { target: 'terminal' }, mode: 'rest' },
+    );
+  }
+
+  /**
+   * Ask the daemon host to open the managed auto-memory directory for
+   * this workspace in the host's OS file manager. The daemon resolves
+   * the path itself — `scope: 'project'` selects the per-workspace
+   * memory directory, `scope: 'user'` the shared `~/.qwen/memories`.
+   * 404 `auto_memory_dir_not_found` when the directory does not exist
+   * yet; 501 `local_path_open_unavailable` on headless hosts.
+   */
+  async openAutoMemoryFolderLocally(
+    scope: DaemonAutoMemoryScope = 'project',
+  ): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/open',
+      'POST /workspaces/:workspace/open',
+      {
+        method: 'POST',
+        body: { target: 'auto-memory', autoMemoryScope: scope },
+        mode: 'rest',
+      },
     );
   }
 

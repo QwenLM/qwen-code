@@ -2274,6 +2274,10 @@ export const DAEMON_ERROR_KINDS = [
   'model_stream_interrupted',
   // Tool-call loop protection stopped the current turn.
   'loop_detected',
+  // A workspace auto-memory root could not be listed or stat'ed
+  // (reported per root in the auto-memory status `errors` cells).
+  'readdir_failed',
+  'stat_failed',
 ] as const;
 
 export type DaemonErrorKind = (typeof DAEMON_ERROR_KINDS)[number];
@@ -2671,6 +2675,67 @@ export interface DaemonWorkspaceMemoryStatus {
   fileCount: number;
   ruleCount: number;
   errors?: DaemonStatusCell[];
+}
+
+/**
+ * Scope of a managed auto-memory entry: `project` is the per-workspace
+ * directory under `~/.qwen/projects/.../memory`, `user` is the shared
+ * `~/.qwen/memories` directory. Both live OUTSIDE the bound workspace.
+ */
+export type DaemonAutoMemoryScope = 'project' | 'user';
+
+export interface DaemonAutoMemoryFile {
+  kind: 'auto_memory_file';
+  scope: DaemonAutoMemoryScope;
+  /** Absolute path — pass back to `workspaceAutoMemoryFile()`. */
+  path: string;
+  title: string;
+  description?: string;
+  type?: string;
+  category?: string;
+  bytes: number;
+  /** ISO timestamp of the file's last modification. */
+  modifiedAt: string;
+}
+
+/**
+ * Managed auto-memory listing returned from
+ * `GET /workspace/auto-memory`. The directories sit outside the bound
+ * workspace, so this route (not `readWorkspaceFile`) is the way to
+ * browse them. `initialized: false` and empty `entries` until a
+ * directory has been created.
+ */
+export interface DaemonWorkspaceAutoMemoryStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  /** Root directory of `user`-scoped entries (may not exist yet). */
+  userDir: string;
+  /** Root directory of `project`-scoped entries (may not exist yet). */
+  projectDir: string;
+  entries: DaemonAutoMemoryFile[];
+  totalBytes: number;
+  fileCount: number;
+  errors?: DaemonStatusCell[];
+}
+
+/**
+ * Body of `GET /workspace/auto-memory/file?path=...`. The path is
+ * re-validated by the daemon against its auto-memory roots; `content`
+ * is absent for BOM'd or non-UTF-8 files and for reads that raced a
+ * write. The `content`-absence contract matches
+ * `DaemonWorkspaceMemoryFile.content`; unlike that type, `truncated`
+ * here is set only for the daemon's read cap — a read that raced a
+ * write returns neither `content` nor `truncated`, so clients must
+ * treat a content-less response as retryable.
+ */
+export interface DaemonAutoMemoryFileContent {
+  scope: DaemonAutoMemoryScope;
+  path: string;
+  bytes: number;
+  modifiedAt?: string;
+  content?: string;
+  truncated?: boolean;
 }
 
 /**
