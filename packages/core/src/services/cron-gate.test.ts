@@ -565,7 +565,7 @@ describe('gateCommandError', () => {
     expect(gateCommandError(gate)).toBeNull();
   });
 
-  it.each([
+  it.each<[string, string, string]>([
     ['a trailing &', 'echo done &', 'must not background'],
     // A literal backslash, then a backgrounding `&`.
     [
@@ -662,12 +662,11 @@ describe('gateCommandError', () => {
     // Whitespace bash does not count as a blank still leaves the newline a
     // separator.
     ...['\v', '\f', '\u00a0', '\r ', '\r\r'].map(
-      (blank) =>
-        [
-          `a command after a wrapper script and ${JSON.stringify(blank)} then a newline`,
-          `bash -c 'echo hi'${blank}\nrm -rf /tmp/x`,
-          'inside the shell wrapper',
-        ] as const,
+      (blank): [string, string, string] => [
+        `a command after a wrapper script and ${JSON.stringify(blank)} then a newline`,
+        `bash -c 'echo hi'${blank}\nrm -rf /tmp/x`,
+        'inside the shell wrapper',
+      ],
     ),
     [
       'a command after a wrapper script with an open quote',
