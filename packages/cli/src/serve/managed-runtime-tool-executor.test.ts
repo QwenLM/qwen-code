@@ -168,6 +168,41 @@ describe.skipIf(process.platform === 'win32')(
       strayGroups.delete(pgid);
     });
 
+    it('records a gate probe’s group like a Shell’s, so an SSH foreground stop reaches what it leaves behind', async () => {
+      // The probe's script starts a child it does not wait for; on an SSH
+      // Runtime the group is stopped at completion, as for a Shell call.
+      await writeFile(
+        path.join(workspace, 'probe.sh'),
+        'sleep 30 >/dev/null 2>&1 &\nsleep 0.5\necho started\n',
+      );
+      const tools = createManagedToolSet(workspace, 'session-b');
+      const exec = new ManagedToolExecutor(
+        async () => tools,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { ledger, sshForegroundOnly: true, groupEvidenceTimeoutMs: 2_000 },
+      );
+      const input = { gate: 'sh ./probe.sh' };
+      const running = exec.execute(
+        reference('gate-1', input),
+        'managed_automation_gate',
+        input,
+      );
+      const pgid = await recordedGroup();
+      strayGroups.add(pgid);
+      const result = await running;
+      expect(result.executionStatus).toBe('success');
+      expect(JSON.stringify(result.responseParts)).toContain('started');
+      expect(processGroupLiveness(pgid)).toBe('gone');
+      await exec.close();
+      strayGroups.delete(pgid);
+    });
+
     it('settles a cancel only once the whole process group is gone', async () => {
       const exec = executor();
       const input = {
