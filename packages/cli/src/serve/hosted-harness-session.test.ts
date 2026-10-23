@@ -16581,7 +16581,7 @@ describe('Hosted Harness no-tool session', () => {
           'read_file',
           'write_file',
           'edit',
-          ...(profile.includes('shell') ? ['run_shell_command'] : []),
+          ...(profile.includes('shell') ? ['run_shell_command', 'glob'] : []),
         ]);
       };
       const created = await headers(supertest(server).post('/session'))
