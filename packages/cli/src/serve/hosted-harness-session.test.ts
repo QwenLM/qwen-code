@@ -38371,12 +38371,18 @@ describe('Hosted Harness stored definitions', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    // #15341: a bare `vi.waitFor` inherits vitest's 1s default, which a
+    // contended ECS runner cannot meet; every other hosted wait in this file
+    // already carries an explicit budget.
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'read only',
