@@ -192,6 +192,10 @@ jobs:
           SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
           AUTHOR_ASSOCIATION: '${{ github.event.pull_request.author_association }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
+          # Optional fleet selector: 'hosted' forces github.com-hosted runners,
+          # 'arm64' routes to the experimental ARM64 ECS fleet, anything else
+          # keeps the x64 ecs-qwen fleet. Empty/unset keeps current behavior.
+          LINUX_RUNNER_FLEET: '${{ vars.LINUX_RUNNER_FLEET }}'
           EVENT_NAME: '${{ github.event_name }}'
           DISPATCH_LINUX_RUNNER: '${{ github.event.inputs.linux_runner }}'
         run: |-
@@ -200,6 +204,8 @@ jobs:
           case "${AUTHOR_ASSOCIATION}" in
             OWNER|MEMBER|COLLABORATOR) trusted_author=true ;;
           esac
+          # Dispatch input wins over the fleet variable; MAINTAINER_ECS_RUNNER_
+          # DISABLED=true still hard-forces hosted runners everywhere.
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
               ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
@@ -209,8 +215,14 @@ jobs:
               # fleet that self-identifies as ARM64.
               ubuntu_runner='["self-hosted", "linux", "arm64"]'
             fi
-          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ) ]]; then
-            ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+          elif [[ "${ECS_DISABLED}" == "true" || "${LINUX_RUNNER_FLEET}" == "hosted" ]]; then
+            ubuntu_runner='["ubuntu-latest"]'
+          elif [[ "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ]]; then
+            if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
+              ubuntu_runner='["self-hosted", "linux", "arm64"]'
+            else
+              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+            fi
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
