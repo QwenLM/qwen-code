@@ -34,9 +34,14 @@ import {
   ApprovalMode,
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
+  LoopReason,
   LoopType,
   getToolCallFingerprint,
   CronScheduler,
+  Storage,
+  readCronTasks,
+  updateCronTasks,
+  withTaskGate,
   AUTONOMOUS_SENTINEL_CRON,
   AUTONOMOUS_SENTINEL_DYNAMIC,
   LOOP_SENTINEL_CRON,
@@ -3362,18 +3367,14 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(1);
-    // The consecutive guard is always-on, so the headless message must flag it
-    // as always-on and must NOT suggest the skipLoopDetection escape hatch,
-    // which cannot disable it.
+    // The consecutive guard runs before the skipLoopDetection gate, so the
+    // headless message must point at model.loopProtection, which governs it,
+    // and must NOT suggest skipLoopDetection, which cannot disable it.
     expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'always-on guard and cannot be disabled via `model.skipLoopDetection`',
-      ),
+      expect.stringContaining('Set `model.loopProtection` to "warn"'),
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
-      ),
+      expect.stringContaining('`model.skipLoopDetection`'),
     );
   });
 
@@ -3485,6 +3486,77 @@ describe('runNonInteractive', () => {
       expect.stringContaining(
         'Set the `model.skipLoopDetection` setting to true',
       ),
+    );
+  });
+
+  it('names the cause when the stop carries its loop reason', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Partial work' },
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.TURN_TOOL_CALL_CAP,
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 4,
+          toolCallLimit: 3,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Long turn',
+      'prompt-id-turn-cap-reason',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+      ),
+    );
+    // The reason replaces the hedged hint that lists every cause.
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('A per-turn tool-call cap was reached'),
+    );
+  });
+
+  it('offers the skipLoopDetection escape for the heuristic global duplicate', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.REPEATED_CALL,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Repeat',
+      'prompt-id-global-dup-reason',
+    );
+
+    // The heuristic detector runs only with skipLoopDetection: false, so the
+    // always-on hint the provider-id breaker gets would be wrong here.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '`model.skipLoopDetection` to true to disable this check',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('always-on guard'),
     );
   });
 
@@ -3680,6 +3752,7 @@ describe('runNonInteractive', () => {
       mockSettings,
       'Use a tool',
       'prompt-id-2',
+      { humanInput: { text: 'ultracode use a tool' } },
     );
 
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
@@ -3701,6 +3774,7 @@ describe('runNonInteractive', () => {
         type: SendMessageType.UserQuery,
         modelOverride: undefined,
         submittedPrompt: 'Use a tool',
+        humanInput: { text: 'ultracode use a tool' },
       },
     );
     // Verify second call (after tool execution) has type: ToolResult
@@ -5071,6 +5145,11 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(LoopType.GLOBAL_TOOL_CALL_DUPLICATE),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the provider replayed a tool call id that had already run',
+      ),
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -8795,6 +8874,261 @@ describe('runNonInteractive', () => {
     );
     expect(predicate({ prompt: 'regular cron job' } as CronJob)).toBe(false);
   });
+
+  it('exits once the final fire of a gated session job settles quietly', async () => {
+    // An expiring recurring job (like a one-shot) leaves the scheduler before
+    // its gate runs; a quiet gate then reaches no consumer, so the hold-open
+    // must be re-checked from the gate's settlement or the run pins forever.
+    setupMetricsMock();
+    let settleGate:
+      | ((result: { kind: 'quiet'; durationMs: number }) => void)
+      | undefined;
+    const scheduler = new CronScheduler(null, 60_000, {
+      runGate: () =>
+        new Promise((resolve) => {
+          settleGate = resolve;
+        }),
+    });
+    const job = scheduler.create('* * * * *', 'gated', true, 'true');
+    job.gateApproved = true;
+    // Park the job past the wall clock so the scheduler's own 1 s tick never
+    // fires it; the test ticks it explicitly, past its expiry.
+    job.lastFiredAt = Date.now() + 10 * 60_000;
+    const startSpy = vi.spyOn(scheduler, 'start');
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'ok' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    let finished = false;
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'test',
+      'p-cron-gate-final',
+    ).then(() => {
+      finished = true;
+    });
+    await vi.waitFor(() => expect(startSpy).toHaveBeenCalled());
+    expect(scheduler.sessionSize).toBe(1);
+
+    const slot = job.lastFiredAt + 120_000;
+    scheduler.tick(new Date(slot - (slot % 60_000) + 59_000));
+    await vi.waitFor(() => expect(settleGate).toBeDefined());
+    // Final fire: gone from the map, still counted while its gate runs.
+    expect(scheduler.list()).toHaveLength(0);
+    expect(scheduler.sessionSize).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(finished).toBe(false);
+
+    settleGate!({ kind: 'quiet', durationMs: 1 });
+    await run;
+    expect(scheduler.sessionSize).toBe(0);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds open for a durable gated catch-up until its gate delivers', async () => {
+    // Durable jobs never pin the headless run, but start() flushes an
+    // overdue catch-up whose stamp lands before its gate decides: stopping
+    // the scheduler there would abort the gate and lose the slot for good.
+    setupMetricsMock();
+    const tmpDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'headless-gated-catch-up-'),
+    );
+    Storage.setRuntimeBaseDir(tmpDir);
+    const createdAt = Date.now() - 3 * 60 * 60_000;
+    await updateCronTasks(tmpDir, () => [
+      withTaskGate(
+        {
+          id: 'cu1',
+          cron: '0 * * * *',
+          prompt: 'overdue',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+        },
+        './probe.sh',
+      ),
+    ]);
+    let settleGate:
+      | ((result: {
+          kind: 'output';
+          stdout: string;
+          truncated: boolean;
+          durationMs: number;
+        }) => void)
+      | undefined;
+    const scheduler = new CronScheduler(tmpDir, undefined, {
+      runGate: () =>
+        new Promise((resolve) => {
+          settleGate = resolve;
+        }),
+    });
+    try {
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'ok' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+
+      let finished = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'p-cron-gate-catch-up',
+      ).then(() => {
+        finished = true;
+      });
+      await vi.waitFor(() => expect(settleGate).toBeDefined());
+      expect(scheduler.sessionSize).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(finished).toBe(false);
+
+      settleGate!({
+        kind: 'output',
+        stdout: 'event: comment\n',
+        truncated: false,
+        durationMs: 1,
+      });
+      await run;
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        JSON.stringify(mockLlmClient.sendMessageStream.mock.calls[1]![0]),
+      ).toContain('<gate-output>\\nevent: comment\\n</gate-output>');
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      const [task] = await readCronTasks(tmpDir);
+      expect(task?.runs).toEqual([
+        expect.objectContaining({ kind: 'catch-up', gate: 'delivered' }),
+      ]);
+    } finally {
+      scheduler.destroy();
+      await (scheduler as unknown as { pendingRelease: Promise<unknown> })
+        .pendingRelease;
+      Storage.setRuntimeBaseDir(null);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each<[string, (scheduler: CronScheduler, root: string) => Promise<void>]>([
+    [
+      'deleted',
+      async (scheduler) => {
+        await scheduler.delete('cu1');
+      },
+    ],
+    [
+      'disabled on disk',
+      async (scheduler, root) => {
+        await updateCronTasks(root, (tasks) =>
+          tasks.map((t) => ({ ...t, enabled: false })),
+        );
+        // The reload the tasks-file watcher runs after its debounce.
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(false);
+      },
+    ],
+  ])(
+    'exits when the durable catch-up it holds open for is %s mid-gate',
+    async (_what, cancel) => {
+      // The hold-open waits on the running gate; cancelling it leaves nothing
+      // to wait for, and its settlement delivers nothing, so the run must
+      // re-check from there instead of pinning with an idle scheduler.
+      setupMetricsMock();
+      const tmpDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'headless-gated-cancel-'),
+      );
+      Storage.setRuntimeBaseDir(tmpDir);
+      const createdAt = Date.now() - 3 * 60 * 60_000;
+      await updateCronTasks(tmpDir, () => [
+        withTaskGate(
+          {
+            id: 'cu1',
+            cron: '0 * * * *',
+            prompt: 'overdue',
+            recurring: true,
+            createdAt,
+            lastFiredAt: createdAt,
+          },
+          './probe.sh',
+        ),
+      ]);
+      let gateSignal: AbortSignal | undefined;
+      // Like the real runner: a cancelled command settles as failed.
+      const scheduler = new CronScheduler(tmpDir, undefined, {
+        runGate: (_gate, { signal }) =>
+          new Promise((resolve) => {
+            gateSignal = signal;
+            signal.addEventListener('abort', () =>
+              resolve({
+                kind: 'failed',
+                detail: 'was cancelled',
+                stderr: '',
+                durationMs: 1,
+              }),
+            );
+          }),
+      });
+      try {
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockLlmClient.sendMessageStream.mockImplementation(() =>
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'ok' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+
+        let finished = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'p-cron-gate-cancel',
+        ).then(() => {
+          finished = true;
+        });
+        await vi.waitFor(() => expect(gateSignal).toBeDefined());
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(finished).toBe(false);
+
+        await cancel(scheduler, tmpDir);
+        expect(gateSignal!.aborted).toBe(true);
+        await vi.waitFor(() => expect(finished).toBe(true), { timeout: 1000 });
+        await run;
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      } finally {
+        scheduler.destroy();
+        await (scheduler as unknown as { pendingRelease: Promise<unknown> })
+          .pendingRelease;
+        Storage.setRuntimeBaseDir(null);
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   describe('--json-schema structured output', () => {
     // Helper: walk an emitted event and extract the first tool_use_id when

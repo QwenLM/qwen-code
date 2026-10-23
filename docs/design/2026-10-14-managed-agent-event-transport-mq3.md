@@ -2,6 +2,16 @@
 
 [English](2026-10-14-managed-agent-event-transport-mq3.md) | [简体中文](2026-10-14-managed-agent-event-transport-mq3.zh-CN.md)
 
+> **Wake recovery update (2026-10-19):** The earlier source-ledger-only
+> fallback described here is superseded by the
+> [Hosted SQL wake scan](2026-10-18-hosted-wake-recovery.md). It discovers
+> committed, unconsumed monitor/background Shell, channel, child/workflow,
+> automation and Session-message inputs after writer loss. Public foreground
+> Turns still belong to their dispatcher; private CSI and other sources retain
+> their existing recovery paths. Real MQ-on and deployed/cross-platform scan
+> acceptance remain unverified. The historical MQ gates below do not prove this
+> new scan; its fault acceptance is specified in the linked design.
+
 > **Status:** Implemented as a gate. This is phase **MQ3** of the cross-node
 > EventTransport design
 > ([2026-10-04-managed-agent-event-transport](2026-10-04-managed-agent-event-transport.md),
@@ -140,9 +150,9 @@ text; 4 and 7 are as-built properties the rows rest on.
    so a fix inverts it. (§8: "transport consumers idle" holds only for nodes
    already running.)
 4. **A claim is never rolled back.** A crash after the claim burns that
-   notice; the Session recovers through the ledger of its input's source,
-   with the gaps recorded in
-   [#14116](https://github.com/QwenLM/qwen-code/issues/14116).
+   notice. The original source-ledger fallback is superseded for eligible
+   committed wakes by the [Hosted SQL scan](2026-10-18-hosted-wake-recovery.md);
+   the historical MQ3 gate does not establish that new scan's MQ-on acceptance.
 5. **No epoch fence.** A stale wake is refused by a live writer or by the
    watermark; on a free Session with a higher sequence it loads it — harmless,
    because the wake pump runs only what the journal holds.
@@ -163,7 +173,8 @@ text; 4 and 7 are as-built properties the rows rest on.
 ## Scope boundaries
 
 - No production change. Findings 1–3 and 6 are recorded here for follow-up;
-  finding 4's source gaps stay with #14116.
+  finding 4's later recovery implementation and remaining acceptance are
+  described in the Hosted wake design linked above.
 - No sharding of the bootstrap lane, no shorter broker channel expiry and no
   producer buffer in this phase.
 - Workspace-bound Sessions, tools and the runtime broker are not exercised:

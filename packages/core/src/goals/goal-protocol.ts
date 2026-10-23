@@ -45,7 +45,7 @@ export const GOAL_DEFAULT_TOKEN_BUDGET = 30_000_000;
 
 /** The `lastReason` a Goal stops with when `tokensUsed` reaches its budget. */
 export function goalTokenBudgetReason(tokenBudget: number): string {
-  return `The Goal spent its autonomous token budget (${tokenBudget.toLocaleString('en-US')} tokens). Resume the Goal to authorize another budget window, or clear it.`;
+  return `The Goal spent its autonomous token budget (${tokenBudget.toLocaleString('en-US')} ${tokenBudget === 1 ? 'token' : 'tokens'}). Resume the Goal to authorize another budget window, or clear it.`;
 }
 
 /**

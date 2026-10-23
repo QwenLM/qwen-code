@@ -11,9 +11,16 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
-import { useComposerCore, type UseComposerCoreReturn } from './useComposerCore';
+import {
+  useComposerCore,
+  type ComposerSubmitCommit,
+  type UseComposerCoreOptions,
+  type UseComposerCoreReturn,
+} from './useComposerCore';
 import type { WebShellComposerInput } from '../customization';
 import { TOUCH_COMPOSER_QUERY } from './useIsTouchComposer';
+import { createFakeIndexedDB } from '../test/fake-indexeddb';
+import { getComposerDraftSession } from './composer-draft-session';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -52,6 +59,8 @@ function Harness({
   atWorkspaceCwd,
   expanded = false,
   shellModeEnabled,
+  persistFileReferences,
+  attachmentsEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
@@ -61,6 +70,8 @@ function Harness({
   atWorkspaceCwd?: string;
   expanded?: boolean;
   shellModeEnabled?: boolean;
+  persistFileReferences?: boolean;
+  attachmentsEnabled?: boolean;
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -72,6 +83,8 @@ function Harness({
     sessionId,
     atWorkspaceCwd,
     shellModeEnabled,
+    persistFileReferences,
+    attachmentsEnabled,
   });
   latest = composer;
 
@@ -116,6 +129,8 @@ async function mount({
   atWorkspaceCwd,
   expanded = false,
   shellModeEnabled,
+  persistFileReferences,
+  attachmentsEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -124,12 +139,15 @@ async function mount({
   atWorkspaceCwd?: string;
   expanded?: boolean;
   shellModeEnabled?: boolean;
+  persistFileReferences?: boolean;
+  attachmentsEnabled?: boolean;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
   let currentSessionId = sessionId;
   let currentWorkspaceCwd = atWorkspaceCwd;
+  let currentAttachmentsEnabled = attachmentsEnabled;
   let currentComposerInput = composerInput;
   let currentComposerInputVersion = composerInput ? 1 : 0;
   const render = () => {
@@ -147,6 +165,8 @@ async function mount({
             atWorkspaceCwd={currentWorkspaceCwd}
             expanded={expanded}
             shellModeEnabled={shellModeEnabled}
+            persistFileReferences={persistFileReferences}
+            attachmentsEnabled={currentAttachmentsEnabled}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -165,9 +185,11 @@ async function mount({
     switchSession(
       nextSessionId: string | undefined,
       nextWorkspaceCwd: string | undefined,
+      nextAttachmentsEnabled = currentAttachmentsEnabled,
     ) {
       currentSessionId = nextSessionId;
       currentWorkspaceCwd = nextWorkspaceCwd;
+      currentAttachmentsEnabled = nextAttachmentsEnabled;
       act(() => render());
     },
   };
@@ -184,6 +206,37 @@ function typeText(text: string) {
     } as React.ChangeEvent<HTMLTextAreaElement>);
   });
 }
+
+it('hoists live desktop references when a touch composer joins the draft', async () => {
+  mockTouchDevice();
+  const tag = {
+    id: 'file:notes',
+    kind: 'file' as const,
+    value: 'notes',
+    serialized: '@notes',
+  };
+  const shared = getComposerDraftSession(
+    getSessionDraftKey('desktop'),
+    {
+      text: 'read @notes',
+      inlineTags: [{ start: 5, end: 11, tag }],
+      tags: [],
+      inputAnnotations: [],
+    },
+    null,
+  );
+  const leave = shared.subscribe(() => {});
+  try {
+    await mount({ sessionId: 'desktop', persistFileReferences: true });
+    expect(latest!.getText()).toBe('read ');
+    expect(latest!.composerTags).toEqual([tag]);
+    act(() => shared.setContent({ ...shared.content, text: 'edit @notes' }));
+    expect(latest!.getText()).toBe('edit ');
+    expect(latest!.composerTags).toEqual([tag]);
+  } finally {
+    leave();
+  }
+});
 
 afterEach(() => {
   act(() => root?.unmount());
@@ -215,6 +268,7 @@ afterEach(() => {
   }
   window.history.replaceState({}, '', '/');
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('useComposerCore mobile textarea backend', () => {
@@ -224,6 +278,90 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.mobileComposer).not.toBeNull();
     expect(container!.querySelector('textarea')).not.toBeNull();
     expect(document.querySelector('.cm-editor')).toBeNull();
+  });
+
+  it('keeps selected-file metadata through a mobile draft remount', async () => {
+    mockTouchDevice();
+    const tag = {
+      id: 'file:a',
+      kind: 'file' as const,
+      value: 'a.ts',
+      serialized: '@a.ts',
+      metadata: {
+        managedFile: { text: '\uFEFForiginal\r\nbytes', source: 'session-a' },
+      },
+    };
+    await mount({ sessionId: 'session-a', persistFileReferences: true });
+    typeText('explain');
+    act(() => latest!.addTags([tag], { placement: 'inline' }));
+    act(() => window.dispatchEvent(new Event('pagehide')));
+    act(() => root!.unmount());
+    root = null;
+    container?.remove();
+    container = null;
+    const { onSubmit } = await mount({
+      sessionId: 'session-a',
+      persistFileReferences: true,
+    });
+    expect(latest!.composerTags).toEqual([tag]);
+    act(() => latest!.submitText());
+    expect(onSubmit.mock.calls[0]?.[4]).toMatchObject({
+      inputAnnotations: [
+        expect.objectContaining({
+          reference: expect.objectContaining({ metadata: tag.metadata }),
+        }),
+      ],
+    });
+  });
+
+  it('keeps restored inline snapshots when mobile adds another top file', async () => {
+    mockTouchDevice();
+    const inline = {
+      id: 'file:inline',
+      kind: 'file',
+      serialized: '@inline.ts',
+      metadata: { managedFile: { text: 'inline selected bytes' } },
+    };
+    localStorage.setItem(
+      getSessionDraftKey('session-a'),
+      '\0qwen-file-draft:1:' +
+        JSON.stringify({
+          text: '@inline.ts explain',
+          inlineTags: [{ start: 0, end: 10, tag: inline }],
+          tags: [],
+        }),
+    );
+    const { onSubmit } = await mount({
+      sessionId: 'session-a',
+      persistFileReferences: true,
+    });
+    act(() =>
+      latest!.addTags(
+        [
+          {
+            id: 'file:top',
+            kind: 'file',
+            serialized: '@top.ts',
+            metadata: { managedFile: { text: 'top selected bytes' } },
+          },
+        ],
+        { placement: 'top' },
+      ),
+    );
+    act(() => latest!.submitText());
+    expect(onSubmit.mock.calls[0]?.[4]).toMatchObject({
+      inputAnnotations: expect.arrayContaining([
+        expect.objectContaining({
+          reference: expect.objectContaining({
+            id: 'file:inline',
+            metadata: inline.metadata,
+          }),
+        }),
+        expect.objectContaining({
+          reference: expect.objectContaining({ id: 'file:top' }),
+        }),
+      ]),
+    });
   });
 
   it('stays off on non-touch devices: CodeMirror mounts, mobileComposer is null', async () => {
@@ -874,4 +1012,292 @@ describe('useComposerCore mobile textarea backend', () => {
     );
     vi.useRealTimers();
   });
+});
+
+describe('mobile composer draft attachment restore', () => {
+  it.each([
+    'switch',
+    'new pending',
+    'unmount',
+    'text',
+    'edit before allocation',
+  ])('handles migrated mobile draft acceptance after %s', async (action) => {
+    mockTouchDevice();
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const tick = async () => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    };
+    const onSubmit = vi.fn(() => false);
+    const mounted = await mount({
+      onSubmit,
+      atWorkspaceCwd: '/work',
+      persistFileReferences: true,
+    });
+    await tick();
+    const image = { data: 'mobile migration-X', media_type: 'image/png' };
+    typeText('submitted draft');
+    act(() => {
+      latest!.handle.restoreImages([image]);
+      latest!.submitText();
+    });
+    const call = onSubmit.mock.calls[0] as unknown as [
+      string,
+      unknown,
+      unknown,
+      ComposerSubmitCommit,
+      import('./useComposerCore').ComposerSubmitMetadata,
+    ];
+    const editedBefore = action === 'edit before allocation';
+    if (editedBefore) typeText('new unsent draft');
+    await call[4].retainDraftDuringSessionCreation!(async (allocated) => {
+      allocated('created-session');
+      mounted.switchSession('created-session', '/work');
+      await tick();
+      expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+        !editedBefore,
+      );
+      if (action === 'text') typeText('new unsent draft');
+      if (action === 'unmount') act(() => root!.unmount());
+      else
+        mounted.switchSession(
+          action === 'new pending' ? undefined : 'session-b',
+          '/work',
+        );
+      act(() => call[3]());
+      await tick();
+    });
+    const keepDraft = editedBefore || action === 'text';
+    expect(
+      fake.stores
+        .get('attachments')
+        ?.get(getSessionDraftKey('created-session')),
+    ).toEqual(keepDraft ? { images: [image], files: [] } : undefined);
+    if (action === 'unmount') {
+      container!.remove();
+      await mount({ sessionId: 'created-session', atWorkspaceCwd: '/work' });
+    } else mounted.switchSession('created-session', '/work');
+    await tick();
+    expect(latest!.getText()).toBe(keepDraft ? 'new unsent draft' : '');
+    expect(latest!.pastedImages).toEqual(keepDraft ? [image] : []);
+  });
+
+  it('shares text, attachments and clear between mobile views of the same session', async () => {
+    mockTouchDevice();
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    const views = {} as Record<
+      'main' | 'pane' | 'other',
+      UseComposerCoreReturn
+    >;
+    function Composer({ slot }: { slot: keyof typeof views }) {
+      const composer = useComposerCore({
+        sessionId: slot === 'other' ? 'session-b' : 'session-a',
+        commands: [],
+        onSubmit: vi.fn(),
+        editorTheme: {},
+      });
+      views[slot] = composer;
+      const mobile = composer.mobileComposer!;
+      return (
+        <textarea
+          ref={mobile.textareaRef}
+          value={mobile.value}
+          onChange={mobile.onChange}
+        />
+      );
+    }
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <Composer slot="main" />
+          <Composer slot="pane" />
+          <Composer slot="other" />
+        </I18nProvider>,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const otherImage = { data: 'other-mobile', media_type: 'image/png' };
+    act(() => {
+      views.other.setText('other draft');
+      views.other.handle.restoreImages([otherImage]);
+    });
+    const image = { data: 'shared-mobile', media_type: 'image/png' };
+    act(() => {
+      views.main.setText('shared text');
+      views.main.handle.restoreImages([image]);
+    });
+    expect(views.pane.mobileComposer?.value).toBe('shared text');
+    expect(views.pane.pastedImages).toEqual([image]);
+    expect(views.other.getText()).toBe('other draft');
+    expect(views.other.pastedImages).toEqual([otherImage]);
+    act(() => views.pane.setText('updated in pane'));
+    expect(views.main.getText()).toBe('updated in pane');
+    act(() => views.pane.handle.clear());
+    expect(views.main.getText()).toBe('');
+    expect(views.main.pastedImages).toEqual([]);
+    expect(views.other.getText()).toBe('other draft');
+    expect(views.other.pastedImages).toEqual([otherImage]);
+  });
+
+  it.each(['attachment', 'text'])(
+    'preserves a newer remounted draft when the old mobile instance accepts (%s edit)',
+    async (edit) => {
+      mockTouchDevice();
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', fake.factory);
+      const tick = async () => {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+      };
+      let commit: ComposerSubmitCommit | undefined;
+      const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+        (_text, _images, _files, accepted) => {
+          commit = accepted;
+          return false;
+        },
+      );
+      const x = { data: 'mobile-X', media_type: 'image/png' };
+      const y = { data: 'mobile-Y', media_type: 'image/png' };
+      await mount({ sessionId: 'a', onSubmit });
+      await tick();
+      typeText('same text');
+      act(() => {
+        latest!.handle.restoreImages([x]);
+        latest!.submitText();
+      });
+      act(() => root!.unmount());
+      container!.remove();
+      await mount({ sessionId: 'a' });
+      await tick();
+      if (edit === 'text') typeText('new unsent text');
+      else act(() => latest!.handle.restoreImages([y]));
+      await tick();
+      expect(localStorage.getItem(getSessionDraftKey('a'))).toBe('same text');
+      act(() => commit!());
+      await tick();
+      expect(localStorage.getItem(getSessionDraftKey('a'))).toBe('same text');
+      expect(
+        fake.stores.get('attachments')?.get(getSessionDraftKey('a')),
+      ).toEqual({
+        images: edit === 'text' ? [x] : [x, y],
+        files: [],
+      });
+      act(() => root!.unmount());
+      container!.remove();
+      await mount({ sessionId: 'a' });
+      await tick();
+      expect(latest!.getText()).toBe(
+        edit === 'text' ? 'new unsent text' : 'same text',
+      );
+      expect(latest!.pastedImages).toEqual(edit === 'text' ? [x] : [x, y]);
+    },
+  );
+
+  it('clears attachments when capability changes on the same mobile draft', async () => {
+    mockTouchDevice();
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const mounted = await mount({ sessionId: 'a', attachmentsEnabled: true });
+    act(() =>
+      latest!.handle.restoreImages([
+        { data: 'mobile', media_type: 'image/png' },
+      ]),
+    );
+    mounted.switchSession('a', undefined, false);
+    expect(latest!.pastedImages).toEqual([]);
+    mounted.switchSession('a', undefined, true);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(fake.stores.get('attachments')?.has(getSessionDraftKey('a'))).toBe(
+      false,
+    );
+    expect(latest!.pastedImages).toEqual([]);
+  });
+
+  it('preserves the outgoing mobile archive during an atomic capability switch', async () => {
+    mockTouchDevice();
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    fake.db.createObjectStore('attachments');
+    const file = { name: 'A.txt', media_type: 'text/plain', text: 'A file' };
+    fake.db.seed('attachments', getSessionDraftKey('a'), {
+      images: [],
+      files: [file],
+    });
+    const mounted = await mount({ sessionId: 'a', attachmentsEnabled: true });
+    const tick = async () => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    };
+    await tick();
+    mounted.switchSession('b', '/work/b', false);
+    await tick();
+    mounted.switchSession('a', undefined, true);
+    await tick();
+    expect(latest!.pastedFiles).toEqual([file]);
+    expect(
+      fake.stores.get('attachments')?.get(getSessionDraftKey('a')),
+    ).toEqual({ images: [], files: [file] });
+  });
+
+  it.each(['send', 'metadata', 'switch', 'edit', 'unmount'])(
+    'handles waiting host input after %s',
+    async (action) => {
+      mockTouchDevice();
+      const fake = createFakeIndexedDB({ deferGets: true });
+      vi.stubGlobal('indexedDB', fake.factory);
+      fake.db.createObjectStore('attachments');
+      const image = { data: 'mobile archived image', media_type: 'image/png' };
+      fake.db.seed('attachments', getSessionDraftKey('a'), {
+        images: [image],
+        files: [],
+      });
+      const onSubmit = vi.fn();
+      const mounted = await mount({
+        sessionId: 'a',
+        composerInput: { text: 'mobile host prompt', submit: true },
+        onSubmit,
+      });
+      const tick = async () => {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        });
+      };
+      await tick();
+      expect(latest!.mobileComposer).not.toBeNull();
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(latest!.canSubmit).toBe(false);
+      if (action === 'switch') mounted.switchSession('b', undefined);
+      else if (action === 'metadata') mounted.switchSession('a', '/work');
+      else if (action === 'edit') typeText('new user mobile text');
+      else if (action === 'unmount') act(() => root?.unmount());
+      await tick();
+      fake.releaseLoads();
+      await tick();
+      if (action === 'send' || action === 'metadata') {
+        expect(onSubmit).toHaveBeenCalledTimes(1);
+        expect(onSubmit.mock.calls[0].slice(0, 2)).toEqual([
+          'mobile host prompt',
+          [image],
+        ]);
+        expect(
+          fake.stores.get('attachments')?.has(getSessionDraftKey('a')),
+        ).toBe(false);
+      } else {
+        expect(onSubmit).not.toHaveBeenCalled();
+        if (action === 'edit') {
+          expect(latest!.getText()).toBe('new user mobile text');
+          expect(latest!.pastedImages).toEqual([image]);
+        }
+      }
+    },
+  );
 });
