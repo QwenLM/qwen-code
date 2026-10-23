@@ -1,4 +1,13 @@
 import {
+  MANAGED_LIFECYCLE_MESSAGES_EN,
+  MANAGED_LIFECYCLE_MESSAGES_ZH,
+} from './components/managed/managed-lifecycle-messages.js';
+import { plural } from './utils/plural.js';
+import {
+  MESSAGE_DELETION_MESSAGES_EN,
+  MESSAGE_DELETION_MESSAGES_ZH,
+} from './components/message-deletion-messages.js';
+import {
   TRAJECTORY_EXECUTION_MESSAGES_EN,
   TRAJECTORY_EXECUTION_MESSAGES_ZH,
 } from './trajectory/execution-messages.js';
@@ -6,6 +15,10 @@ import {
   FILES_MESSAGES_EN,
   FILES_MESSAGES_ZH,
 } from './components/artifacts/files-messages.js';
+import {
+  TOKEN_USAGE_MESSAGES_EN,
+  TOKEN_USAGE_MESSAGES_ZH,
+} from './components/artifacts/token-usage-messages.js';
 import {
   createContext,
   useContext,
@@ -48,6 +61,11 @@ import {
   WORKSPACE_REGISTRATION_MESSAGES_ZH,
 } from './components/managed/managed-workspace-messages.js';
 
+import {
+  MANAGED_MCP_MESSAGES_EN,
+  MANAGED_MCP_MESSAGES_ZH,
+} from './components/managed/managed-mcp-messages.js';
+
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
@@ -57,13 +75,6 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
-
-/** English count plus its noun, pluralised the regular way. */
-function plural(count: string | number | undefined, noun: string): string {
-  const value = typeof count === 'number' ? count : Number(count ?? 0);
-  const safe = Number.isFinite(value) ? value : 0;
-  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
-}
 
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
@@ -139,6 +150,10 @@ const EN: Messages = {
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
   'managed.executionMode': 'Execution mode',
+  'workspace.executionDaemon': 'Local (daemon)',
+  'workspace.executionManaged': 'Managed (Managed Agent)',
+  'workspace.executionHint':
+    'New tasks in this workspace use the selected service.',
   'managed.localMode': 'Local',
   'managed.managedMode': 'Managed',
   'managed.sessions': 'Managed sessions',
@@ -148,6 +163,8 @@ const EN: Messages = {
   'managed.empty': 'No managed tasks yet.',
   'managed.loading': 'Loading…',
   'managed.more': 'Load more',
+  'managed.titleSearch': 'Search session titles',
+  'managed.titleSearchPlaceholder': 'Filter by title…',
   'managed.prompt': 'Message the managed agent',
   'managed.runtime': 'Environment',
   'managed.unavailable': 'Managed Agents is unavailable on this daemon.',
@@ -216,6 +233,15 @@ const EN: Messages = {
   'managed.result.close': 'Close output',
   'managed.result.refresh': 'Refresh output',
   'managed.phase.created': 'Created',
+  'managed.creationSkillsFromSettings':
+    'Enabled Skills on the Skills page are added to new Managed sessions. Existing sessions keep their original Skills.',
+  'managed.creationSkillsManage': 'Manage Skills',
+  'managed.creationSkillsPinned': (v) =>
+    `${v?.count ?? 0} Skills are saved with this creation request.`,
+  'managed.creationSkillsSourceChanged':
+    'The Skills source changed. Retry with the selected source.',
+  'managed.creationSkillsUnavailable':
+    'Enabled Skills could not be loaded for this Managed session.',
   'managed.workspaceCreateTitle': 'Create a Workspace session',
   'managed.workspaceLabel': 'Workspace',
   'managed.modelPreset': 'Model / Agent preset',
@@ -224,6 +250,9 @@ const EN: Messages = {
     'Choose the initial model and Agent preset. Supported conversations can change model while idle.',
   'managed.workspaceChoose': 'Choose a Workspace',
   'managed.workspaceDirectory': 'Relative directory',
+  'managed.workspaceWorkingDirectory': 'Working directory',
+  'managed.workspaceWorkingDirectoryDescription':
+    'Choose where this session starts within the Workspace. Use . for the Workspace root.',
   'managed.cwd.change': 'Change directory',
   'managed.cwd.path': 'Directory relative to Workspace root',
   'managed.cwd.description':
@@ -266,6 +295,8 @@ const EN: Messages = {
   'managed.approvalChange.reload': 'Reload policies',
   'managed.approvalChange.nextTurn':
     'Approval policy changes apply to the next turn.',
+  'managed.approvalChange.live':
+    'Approval policy changes apply to subsequent tool calls in this turn.',
   'managed.approvalChange.changing': 'Changing approval policy…',
   'managed.approvalChange.unconfirmed':
     'Approval change is not confirmed. Continue confirming the original request.',
@@ -303,9 +334,11 @@ const EN: Messages = {
     'This session does not support changing its approval policy.',
   'managed.newWorkspaceDescription':
     'Choose an existing project directory, or name a new empty workspace.',
-  'managed.workspaceDirectoryRoot': 'Authorized Linux directories',
+  'managed.workspaceDirectoryRoot': 'Authorized directories',
+  'managed.localDirectoryHint':
+    'Choose an existing project on this computer. Workspace setup is automatic.',
   'managed.workspaceDirectoryHint':
-    'Choose an existing project on the Linux execution host within this authorized root.',
+    'Choose an existing project on the execution host within this authorized root.',
   'managed.workspaceChooseDirectory': 'Choose existing directory',
   'managed.workspaceDirectoryScope':
     'Choose a directory inside the selected root.',
@@ -870,6 +903,12 @@ const EN: Messages = {
     'Unable to preview this workbook. It may be damaged, password protected, too complex, or unsupported by this browser. You can download the original.',
   'excel.timeout':
     'This workbook took too long to preview. Download the original to open it.',
+  'docx.tooLarge':
+    'DOCX preview supports files up to 10 MiB. Download the original to open it.',
+  'docx.invalid':
+    'Unable to preview this DOCX document. You can download the original.',
+  'docx.timeout':
+    'This document took too long to preview. Download the original or try again.',
   'artifact.openLink': 'Open link',
   'artifact.longDocument': 'File is large. Source is shown by default.',
   'artifact.renderFullPreview': 'Render full preview',
@@ -1014,6 +1053,12 @@ const EN: Messages = {
   'composerAdd.extensions.empty': 'No extensions are enabled',
   'composerAdd.mcp.label': 'MCP',
   'composerAdd.mcp.empty': 'No MCP servers are available',
+  'managed.mcp.catalog': (v) =>
+    `Catalog snapshot: ${plural(v?.tools, 'tool')} (${v?.toolsState}); ${plural(v?.resources, 'resource')} (${v?.resourcesState}); ${plural(v?.prompts, 'prompt')} (${v?.promptsState})`,
+  'managed.mcp.discovery.complete': 'complete',
+  'managed.mcp.discovery.partial': 'partial',
+  'managed.mcp.discovery.failed': 'failed',
+  'managed.mcp.discovery.stale': 'stale',
   'composerAdd.skills.label': 'Skills',
   'composerAdd.plan.label': 'Plan mode',
   'composerAdd.plan.description': 'Plan first, run after you approve',
@@ -1190,9 +1235,10 @@ const EN: Messages = {
   'markdownTable.selection.average': 'Average',
   'markdownTable.selection.min': 'Min',
   'markdownTable.selection.max': 'Max',
-  'markdownTable.copyTsv': 'Copy TSV',
-  'markdownTable.copyTsvHint': 'Copy as TSV for pasting into spreadsheet apps',
-  'markdownTable.copyVisible': 'Copy table',
+  'markdownTable.copyTsv': 'Copy text',
+  'markdownTable.copyTsvHint': 'Copy text for pasting into spreadsheet apps',
+  'markdownTable.copyVisible': 'Copy',
+  'markdownTable.copyMarkdown': 'Copy Markdown',
   'markdownTable.customColumns': 'Custom columns',
   'markdownTable.customColumns.tableSection': 'Columns shown in the table',
   'markdownTable.customColumns.detailSection': 'Fields shown in expanded rows',
@@ -1758,6 +1804,7 @@ const EN: Messages = {
   'scheduledTasks.repeats': 'Repeats',
   'scheduledTasks.runsOnce': 'Runs once',
   'scheduledTasks.lastFired': (v) => `Last run: ${v?.when ?? ''}`,
+  'scheduledTasks.lastChecked': (v) => `Last checked: ${v?.when ?? ''}`,
   'scheduledTasks.runNow': 'Run now',
   'scheduledTasks.enable': 'Enable',
   'scheduledTasks.disable': 'Disable',
@@ -1777,6 +1824,8 @@ const EN: Messages = {
   'scheduledTasks.error.workspaceUnavailable':
     'The selected workspace is unavailable or untrusted',
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
+  'scheduledTasks.error.gateUnavailable':
+    'This daemon does not accept gate changes; undo the gate change, or reconnect to a daemon that supports gate commands',
   'scheduledTasks.error.promptTooLong': (v) =>
     `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
   'scheduledTasks.error.goalActive':
@@ -1833,12 +1882,20 @@ const EN: Messages = {
   'scheduledTasks.group.hint': 'Each run conversation is placed in this group.',
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
-  'scheduledTasks.condition': 'Precondition (optional)',
-  'scheduledTasks.conditionPlaceholder':
-    'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
-  'scheduledTasks.condition.hint':
-    "Checked in this task's own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.",
-  'scheduledTasks.condition.cardPrefix': 'If:',
+  'scheduledTasks.gate': 'Gate command (optional)',
+  'scheduledTasks.gatePlaceholder':
+    'e.g. ./check-pr.sh 15057 — a command that prints only what changed',
+  'scheduledTasks.gate.hint':
+    'Runs from the project directory before each scheduled fire, outside the model. Exit 0 with output wakes the session with that output attached as data; exit 0 with nothing on stdout skips the fire with no turn; a non-zero exit reports only its stderr, and only when the gate starts failing. It runs unattended only where the session would run the same command without asking — a saved Monitor(…) or Bash(…) rule, a read-only command, or an auto or yolo session; otherwise every fire is blocked.',
+  'scheduledTasks.gate.cardPrefix': 'Gate:',
+  'scheduledTasks.gate.notRunYet': 'gate not run yet',
+  'scheduledTasks.gate.neverDelivered': 'never',
+  'scheduledTasks.gate.lastFailed': 'last run failed',
+  'scheduledTasks.gate.lastBlocked': 'blocked',
+  'scheduledTasks.gate.status': (v) =>
+    `quiet ×${v?.quiet ?? 0} · last delivered ${v?.delivered ?? 'never'} · ${v?.failures ?? 0} ${v?.failures === 1 ? 'failure' : 'failures'}`,
+  'scheduledTasks.runKind.gateFailed': 'gate failed',
+  'scheduledTasks.runKind.gateBlocked': 'gate blocked',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
   'turnOutputs.imagePreview': 'Image Preview',
   'turnOutputs.viewChanges': 'View changes',
@@ -2412,6 +2469,20 @@ const EN: Messages = {
     'Model response stream was interrupted. Please retry.',
   'error.loopDetected':
     'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
+  'error.loopDetected.explicitCap': (vars) =>
+    `This turn reached the limit of ${vars?.limit} tool calls set by model.maxToolCallsPerTurn, so it was stopped. Your session is still open—raise the limit in your settings, or send a new instruction to continue.`,
+  'error.loopDetected.backstop': (vars) =>
+    `This turn reached the safety limit of ${vars?.limit} tool calls, so it was stopped. Your session is still open—send a new instruction to continue, or set model.maxToolCallsPerTurn to choose a different limit.`,
+  'error.loopDetected.stuckRepetition': (vars) =>
+    `After more than ${vars?.limit} tool calls, the model kept repeating the same call, so this turn was stopped. Your session is still open—try a different or more specific instruction.`,
+  'error.loopDetected.repeatedCall':
+    'The model kept repeating the same tool call during this turn, so it was stopped. Your session is still open—try a different or more specific instruction.',
+  'error.loopDetected.providerDuplicateId':
+    'The model service sent a tool call that had already run, so this turn was stopped instead of running it again. Your session is still open—send a new message to continue.',
+  'error.loopDetected.invalidToolParams':
+    'The model kept sending invalid arguments to the same tool, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
+  'error.loopDetected.repeatedToolFailure':
+    'The same tool kept failing for the same reason after a reminder, so this turn was stopped. Your session is still open—check the errors above, or try a different approach.',
   'shell.command': 'Shell Command',
   'shell.result.timedOut': 'Timed out',
   'shell.result.notices': 'Notices',
@@ -3174,6 +3245,9 @@ const EN: Messages = {
   'model.footer': 'Enter select, ↑↓ navigate, Esc close',
   'model.searchHint': 'Press / to search',
   'model.fastHint': 'for suggestions and side tasks',
+  'model.refresh': 'Refresh models',
+  'model.refreshing': 'Refreshing models…',
+  'model.refreshFailed': (v) => `Unable to refresh models: ${v?.error ?? ''}`,
   'model.noMatch': (v) => `No model matching "${v?.query ?? ''}"`,
   'model.unavailable':
     'Models are unavailable; the daemon default will be used.',
@@ -3236,11 +3310,19 @@ const EN: Messages = {
   'skills.install.error.folderRequired': 'Enter a folder path.',
   'skills.install.error.githubRequired': 'Enter a GitHub SKILL.md URL.',
   'skills.install.error.invalidName':
-    'The skill name is missing or contains unsupported characters.',
+    'Enter a name such as my-skill using only ASCII letters, digits, dots, underscores, or hyphens.',
   'skills.install.error.manifestMissing':
     'The package must contain a SKILL.md file at its root.',
   'skills.install.error.invalidPackage':
-    'The skill package is invalid. Check its structure and SKILL.md content.',
+    'Correct the reported file or package structure, then upload the skill again.',
+  'skills.install.error.frontmatter':
+    'Put the opening --- on the first line of SKILL.md (remove any leading blank lines), and add a closing --- after the YAML fields.',
+  'skills.install.error.invalidManifest':
+    'Open SKILL.md, correct the field reported above, then upload the skill again.',
+  'skills.install.error.nameMismatch':
+    'Make the entered skill name match the name in SKILL.md, then upload the skill again.',
+  'skills.install.error.unsafePath':
+    'Use a regular skill directory and files instead of symbolic links, and check the reported installation path.',
   'skills.install.error.zipTooLarge': 'The ZIP file must not exceed 6 MB.',
   'skills.install.error.invalidFolder': 'Enter a valid local skill folder.',
   'skills.install.error.githubFailed':
@@ -3382,6 +3464,20 @@ const EN: Messages = {
   'contextUsage.compress': 'Compress context',
   'contextUsage.compressing': 'Compressing…',
   'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
+  'contextUsage.compressedUnknown':
+    'Compression completed. Context usage will be observed on the next turn.',
+  'managed.compression.unconfirmed':
+    'Compression is unconfirmed. Check its status before continuing.',
+  'managed.compression.recoveryBlocked': 'Compression is waiting for recovery.',
+  'managed.compression.confirm': 'Check compression status',
+  'managed.compression.storage':
+    'Could not save the compression request. Compression was not started.',
+  'managed.compression.storageUpdate':
+    'Could not save the latest compression status. Check it again after refreshing.',
+  'managed.compression.conflict':
+    'The context changed. Review its latest state and try again.',
+  'managed.compression.busy':
+    'The session is busy. Wait until it is idle before compressing.',
   'contextUsage.compressCancelled':
     'Cancellation requested. Refresh to check current usage.',
   'contextUsage.compressInterrupted':
@@ -3390,7 +3486,7 @@ const EN: Messages = {
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
-    'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
+    'Requires an idle, connected session with permission to compress context.',
   'contextCompression.result': (v) =>
     `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
@@ -3403,38 +3499,12 @@ const EN: Messages = {
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'contextUsage.unknown':
     'Context usage has not been observed for this session yet.',
-  'tokenUsage.avgLatency': 'Avg latency',
-  'tokenUsage.cached': 'Cached input',
-  'tokenUsage.firstTokenLatency': (v) =>
-    `First-token latency ${v?.duration ?? ''}`,
-  'tokenUsage.generationTime': (v) => `Generation ${v?.duration ?? ''}`,
-  'tokenUsage.input': 'Input',
-  'tokenUsage.loadError': 'Failed to load token usage.',
-  'tokenUsage.models': 'By model',
-  'tokenUsage.noData': 'No API calls in this session yet.',
-  'tokenUsage.noSubagents': 'No subagent calls in this session yet.',
-  'tokenUsage.noTools': 'No tool calls in this session yet.',
-  'tokenUsage.open': 'Session token usage',
-  'tokenUsage.output': 'Total output',
-  'tokenUsage.outputSpeed': (v) => `Output speed ${v?.rate ?? ''} tok/s`,
-  'tokenUsage.refresh': 'Refresh',
-  'tokenUsage.requests': 'Requests',
-  'tokenUsage.retry': 'Retry',
-  'tokenUsage.subagents': 'Subagents',
-  'tokenUsage.thoughts': 'Reasoning (included in total output)',
-  'tokenUsage.title': 'Token Usage',
-  'tokenUsage.toolRow': (v) =>
-    `${v?.count ?? 0} calls · ${v?.rate ?? 0}% ok · ${v?.duration ?? ''}`,
-  'tokenUsage.tools': 'Tools',
-  'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
-  'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
+  ...TOKEN_USAGE_MESSAGES_EN,
   'trajectory.title': 'Trajectory',
   'trajectory.description': 'View time and tokens',
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
-  'trajectory.truncated':
-    'Showing the most recent records; earlier history is not loaded.',
   'trajectory.loadingPages': (v) =>
     `Loading records… (${v?.pages ?? 0} ${Number(v?.pages) === 1 ? 'page' : 'pages'} so far)`,
   'trajectory.olderFailed': (v) =>
@@ -3445,8 +3515,6 @@ const EN: Messages = {
     `Could not read the transcript: ${v?.message ?? ''}`,
   'trajectory.partial':
     'Part of this transcript could not be read, so some records are missing.',
-  'trajectory.totals': (v) =>
-    `Loaded window · ${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')}`,
   'trajectory.turn': (v) => `Turn ${v?.index ?? 0}`,
   'trajectory.turnPartial': (v) => `Turn ${v?.index ?? 0} (continued)`,
   'trajectory.turnSummary': (v) =>
@@ -3499,12 +3567,6 @@ const EN: Messages = {
     `Showing ${v?.from ?? ''}–${v?.to ?? ''} of ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) =>
     `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
-  'trajectory.metric.elapsed': 'Elapsed span',
-  'trajectory.metric.active': 'Active coverage',
-  'trajectory.metric.main': 'Main model total',
-  'trajectory.metric.help': 'Metric definitions',
-  'trajectory.metric.scope':
-    'Counts cover projected rows in the loaded window, including loaded subagent records. Selection and zoom do not change them.',
   'trajectory.metric.elapsed.help':
     'Elapsed span: earliest recorded start to latest end, including gaps; plotted records only.',
   'trajectory.metric.active.help':
@@ -3513,14 +3575,8 @@ const EN: Messages = {
     'Main model total: sum of main-session model request durations, excluding subagent requests and tools. Failed attempts may count.',
   'trajectory.metric.missing.help':
     'Unplotted requests and tools remain in the list. An em dash means unrecorded; zero is a measured zero.',
-  'trajectory.failures': (v) =>
-    `Failed requests ${v?.requests ?? 0} · failed tools ${v?.tools ?? 0}`,
-  'trajectory.unrecorded': 'unrecorded',
   'trajectory.unplotted': (v) =>
     `Unplotted: ${v?.starts ?? 0} without start · ${v?.timing ?? 0} without duration`,
-  'trajectory.missingStart': (v) =>
-    `${v?.count ?? 0} timed records have no start`,
-  'trajectory.missingTiming': (v) => `${v?.count ?? 0} tools have no duration`,
   'trajectory.noStart':
     'Recorded durations have no start time, so no bars can be plotted.',
   'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
@@ -3528,24 +3584,13 @@ const EN: Messages = {
     'History may have changed while disconnected. Refresh the latest window to update.',
   'trajectory.lifecycleIncomplete':
     'Lifecycle details may be incomplete or outside the retained limit.',
-  'trajectory.selected.label': 'Selected',
-  'trajectory.selected.none': 'Choose a record',
-  'trajectory.selected.noTiming': 'no request or tool timing',
   'trajectory.inspector.title': 'Record details',
-  'trajectory.inspector.open': 'View details',
   'trajectory.inspector.close': 'Close details',
   'trajectory.inspector.selectRecord': 'Select a record to inspect.',
-  'trajectory.inspector.selectRowInTurn':
-    'Turn selected. Select a record to inspect.',
   'trajectory.inspector.stale':
     'The record window changed. Select a record again.',
   'trajectory.inspector.hiddenByRange':
     'This record is outside the selected time.',
-  'trajectory.inspector.tab.summary': 'Summary',
-  'trajectory.inspector.tab.input': 'Input',
-  'trajectory.inspector.tab.output': 'Output',
-  'trajectory.inspector.tab.metrics': 'Metrics',
-  'trajectory.inspector.tab.body': 'Body',
   'trajectory.inspector.model': 'Model',
   'trajectory.inspector.status': 'Status',
   'trajectory.inspector.permissionTitle': 'Title',
@@ -3559,22 +3604,10 @@ const EN: Messages = {
   'trajectory.inspector.start': 'Recorded start',
   'trajectory.inspector.end': 'Calculated end',
   'trajectory.inspector.ttft': 'First token',
-  'trajectory.inspector.afterFirst': 'After first token',
   'trajectory.inspector.invalidTtft':
     'Recorded first-token timing is inconsistent',
-  'trajectory.inspector.inputTokens': 'Input tokens',
-  'trajectory.inspector.outputTokens': 'Output tokens',
-  'trajectory.inspector.cachedTokens':
-    'Cached input tokens (included in input)',
   'trajectory.inspector.tool': 'Tool',
   'trajectory.inspector.callId': 'Call ID',
-  'trajectory.inspector.details': 'Recorded details',
-  'trajectory.inspector.preview': 'Recorded preview',
-  'trajectory.inspector.input': 'Recorded input',
-  'trajectory.inspector.output': 'Recorded output',
-  'trajectory.inspector.contentFallback':
-    'Tool content (no separate raw output)',
-  'trajectory.inspector.body': 'Recorded text',
   'trajectory.inspector.kind': 'Kind',
   'trajectory.inspector.images': 'Image types',
   'trajectory.inspector.files': 'Files',
@@ -3584,8 +3617,7 @@ const EN: Messages = {
   'trajectory.inspector.truncated': 'Content truncated',
   'trajectory.inspector.formatFailed': 'Could not format recorded field',
   'trajectory.inspector.expand': 'Show more',
-  'trajectory.inspector.copy': 'Copy displayed content',
-  'trajectory.inspector.copied': 'Copied displayed content',
+  'trajectory.inspector.copied': 'Copied',
   'trajectory.inspector.copyFailed': 'Could not copy content',
   'trajectory.mode.group': 'Time scale',
   'trajectory.mode.active': 'Active time, idle removed',
@@ -3764,6 +3796,8 @@ const EN: Messages = {
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
   'userMessage.edit': 'Edit message',
+  'message.moreActions': 'More message actions',
+  ...MESSAGE_DELETION_MESSAGES_EN,
   'userMessage.editSubmit': 'Send',
   'userMessage.editSending': 'Sending…',
   'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
@@ -3901,6 +3935,21 @@ const EN: Messages = {
   'tasks.shortcut.cancelConfirm': 'Esc cancel',
   'tasks.detail.workingDir': 'Working dir',
   'tasks.detail.outputFile': 'Output file',
+  'tasks.detail.startedAt': 'Started',
+  'tasks.detail.endedAt': 'Ended',
+  'tasks.detail.totalDuration': 'Total duration',
+  'tasks.detail.residentMemory': 'Resident memory',
+  'tasks.detail.output': 'Output',
+  'tasks.detail.outputSize': (v) => `: ${v?.size ?? ''}`,
+  'tasks.detail.outputEmpty': 'No output yet',
+  'tasks.detail.outputNone': 'No output',
+  'tasks.detail.runtimeUnavailable': 'Task details are no longer available',
+  'tasks.detail.outputPartial':
+    'Output is available, but file details could not be read',
+  'tasks.detail.outputRefreshFailed': 'Could not refresh output. ',
+  'tasks.detail.outputTruncated': 'Showing the end only',
+  'tasks.detail.outputUnavailable': 'Output unavailable',
+  'tasks.detail.lastWrite': 'Last write',
   'tasks.detail.command': 'Command',
   'tasks.detail.events': (v) => `${v?.count ?? 0} events`,
   'tasks.detail.exit': (v) => `exit ${v?.exitCode ?? ''}`,
@@ -4481,7 +4530,9 @@ const EN: Messages = {
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
+  ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
+  ...MANAGED_MCP_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -4552,6 +4603,9 @@ const ZH: Messages = {
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
   'managed.executionMode': '执行方式',
+  'workspace.executionDaemon': '本地（daemon）',
+  'workspace.executionManaged': '托管（Managed Agent）',
+  'workspace.executionHint': '此工作区中新建的任务将使用所选服务。',
   'managed.localMode': '本地',
   'managed.managedMode': '托管',
   'managed.sessions': '托管会话',
@@ -4561,6 +4615,8 @@ const ZH: Messages = {
   'managed.empty': '暂无托管任务。',
   'managed.loading': '加载中…',
   'managed.more': '加载更多',
+  'managed.titleSearch': '搜索会话标题',
+  'managed.titleSearchPlaceholder': '按标题筛选…',
   'managed.prompt': '向托管 Agent 发送消息',
   'managed.runtime': '执行环境',
   'managed.unavailable': '当前 daemon 未启用托管 Agent。',
@@ -4622,6 +4678,15 @@ const ZH: Messages = {
   'managed.result.close': '关闭输出',
   'managed.result.refresh': '刷新输出',
   'managed.phase.created': '已创建',
+  'managed.creationSkillsFromSettings':
+    '技能页面中已启用的 Skills 会用于新建 Managed 会话。已有会话保留创建时的 Skills。',
+  'managed.creationSkillsManage': '管理 Skills',
+  'managed.creationSkillsPinned': (v) =>
+    `本次创建请求已保存 ${v?.count ?? 0} 个 Skills。`,
+  'managed.creationSkillsSourceChanged':
+    'Skills 来源已变化，请按当前选择重试。',
+  'managed.creationSkillsUnavailable':
+    '无法为此 Managed 会话加载已启用的 Skills。',
   'managed.workspaceCreateTitle': '创建工作区会话',
   'managed.workspaceLabel': '工作区',
   'managed.modelPreset': '模型 / Agent 预设',
@@ -4630,6 +4695,9 @@ const ZH: Messages = {
     '选择初始模型和 Agent 预设；支持的会话可在空闲时切换模型。',
   'managed.workspaceChoose': '选择工作区',
   'managed.workspaceDirectory': '相对目录',
+  'managed.workspaceWorkingDirectory': '工作目录',
+  'managed.workspaceWorkingDirectoryDescription':
+    '选择此会话在工作区内的起始目录，使用 . 表示工作区根目录。',
   'managed.cwd.change': '切换目录',
   'managed.cwd.path': '相对于 Workspace 根目录的路径',
   'managed.cwd.description':
@@ -4663,6 +4731,7 @@ const ZH: Messages = {
   'managed.approvalChange.optionsError': '加载审批策略失败。',
   'managed.approvalChange.reload': '重新加载策略',
   'managed.approvalChange.nextTurn': '审批策略变更从下一轮生效。',
+  'managed.approvalChange.live': '审批策略变更对当前轮后续工具调用生效。',
   'managed.approvalChange.changing': '正在切换审批策略…',
   'managed.approvalChange.unconfirmed':
     '审批策略切换尚未确认，请继续确认原请求。',
@@ -4692,9 +4761,11 @@ const ZH: Messages = {
   'managed.approvalFixed': '当前会话不支持更改审批策略。',
   'managed.newWorkspaceDescription':
     '选择已有项目目录，或输入名称创建空工作区。',
-  'managed.workspaceDirectoryRoot': '已授权的 Linux 目录',
+  'managed.workspaceDirectoryRoot': '已授权的目录',
+  'managed.localDirectoryHint':
+    '选择这台电脑上已有的项目目录，工作区登记和授权会自动完成。',
   'managed.workspaceDirectoryHint':
-    '选择此授权根目录内、位于 Linux 执行机器上的已有项目。',
+    '选择此授权根目录内、位于执行机器上的已有项目。',
   'managed.workspaceChooseDirectory': '选择已有目录',
   'managed.workspaceDirectoryScope': '请选择已选根目录中的目录。',
   'managed.newWorkspaceName': '工作区名称',
@@ -5313,6 +5384,9 @@ const ZH: Messages = {
   'excel.invalid':
     '无法预览此工作簿，文件可能已损坏、受密码保护、复杂度过高，或当前浏览器不支持。你可以下载原文件。',
   'excel.timeout': '工作簿预览超时，请下载原文件打开。',
+  'docx.tooLarge': 'DOCX 预览支持最大 10 MiB 的文件，请下载原文件打开。',
+  'docx.invalid': '无法预览此 DOCX 文档，你可以下载原文件。',
+  'docx.timeout': '文档预览超时，你可以下载原文件或重试。',
   'artifact.openLink': '打开链接',
   'artifact.longDocument': '文件过大，默认展示源码。',
   'artifact.renderFullPreview': '完整排版预览',
@@ -5448,6 +5522,12 @@ const ZH: Messages = {
   'composerAdd.extensions.empty': '没有已启用的扩展',
   'composerAdd.mcp.label': 'MCP',
   'composerAdd.mcp.empty': '没有可用的 MCP 服务',
+  'managed.mcp.catalog': (v) =>
+    `目录快照：${v?.tools} 个工具（${v?.toolsState}）；${v?.resources} 个资源（${v?.resourcesState}）；${v?.prompts} 个提示（${v?.promptsState}）`,
+  'managed.mcp.discovery.complete': '已完成',
+  'managed.mcp.discovery.partial': '部分完成',
+  'managed.mcp.discovery.failed': '失败',
+  'managed.mcp.discovery.stale': '已过期',
   'composerAdd.skills.label': '技能',
   'composerAdd.plan.label': '计划模式',
   'composerAdd.plan.description': '先出计划，批准后再执行',
@@ -5602,9 +5682,10 @@ const ZH: Messages = {
   'markdownTable.selection.average': '平均',
   'markdownTable.selection.min': '最小',
   'markdownTable.selection.max': '最大',
-  'markdownTable.copyTsv': '复制 TSV',
-  'markdownTable.copyTsvHint': '复制为 TSV，可粘贴到 Excel 等表格应用',
-  'markdownTable.copyVisible': '复制表格',
+  'markdownTable.copyTsv': '复制文本',
+  'markdownTable.copyTsvHint': '复制文本，可粘贴到 Excel 等表格应用',
+  'markdownTable.copyVisible': '复制',
+  'markdownTable.copyMarkdown': '复制 Markdown',
   'markdownTable.customColumns': '自定义列',
   'markdownTable.customColumns.tableSection': '显示在表格列的信息',
   'markdownTable.customColumns.detailSection': '显示在折叠面板的信息',
@@ -6125,6 +6206,7 @@ const ZH: Messages = {
   'scheduledTasks.repeats': '重复',
   'scheduledTasks.runsOnce': '仅一次',
   'scheduledTasks.lastFired': (v) => `上次运行：${v?.when ?? ''}`,
+  'scheduledTasks.lastChecked': (v) => `上次检查：${v?.when ?? ''}`,
   'scheduledTasks.runNow': '立即运行',
   'scheduledTasks.enable': '启用',
   'scheduledTasks.disable': '停用',
@@ -6143,6 +6225,8 @@ const ZH: Messages = {
   'scheduledTasks.error.invalidSchedule': '计划无效',
   'scheduledTasks.error.workspaceUnavailable': '所选工作区不可用或不受信任',
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
+  'scheduledTasks.error.gateUnavailable':
+    '当前 daemon 不接受闸门修改：请撤销对闸门的修改，或重新连接支持闸门命令的 daemon',
   'scheduledTasks.error.promptTooLong': (v) =>
     `提示词超过 ${v?.max ?? 100_000} 字符限制`,
   'scheduledTasks.error.goalActive': '目标运行期间无法启动定时任务。',
@@ -6196,12 +6280,20 @@ const ZH: Messages = {
   'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
-  'scheduledTasks.condition': '前置条件（可选）',
-  'scheduledTasks.conditionPlaceholder':
-    '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
-  'scheduledTasks.condition.hint':
-    '每次触发前，先在本任务自己的会话中检查该条件。只有判定为"是"，才会新建会话执行命令；否则跳过本次运行。',
-  'scheduledTasks.condition.cardPrefix': '若：',
+  'scheduledTasks.gate': '闸门命令（可选）',
+  'scheduledTasks.gatePlaceholder':
+    '例如：./check-pr.sh 15057 —— 一条只打印变化的命令',
+  'scheduledTasks.gate.hint':
+    '每次定时触发前在模型之外、从项目目录运行。退出码 0 且有输出时唤醒会话，并把输出作为数据附上；退出码 0 且 stdout 为空则跳过本次触发、不产生回合；非零退出只报告其 stderr，且只在闸门开始失败时报告。只有在会话本身不经询问就会运行这条命令时(已保存的 Monitor(…) 或 Bash(…) 规则、只读命令，或 auto/yolo 模式)才会无人值守运行，否则每次触发都会被阻止。',
+  'scheduledTasks.gate.cardPrefix': '闸门：',
+  'scheduledTasks.gate.notRunYet': '闸门尚未运行',
+  'scheduledTasks.gate.neverDelivered': '从未',
+  'scheduledTasks.gate.lastFailed': '上次运行失败',
+  'scheduledTasks.gate.lastBlocked': '被阻止',
+  'scheduledTasks.gate.status': (v) =>
+    `安静 ×${v?.quiet ?? 0} · 上次投递 ${v?.delivered ?? '从未'} · 失败 ${v?.failures ?? 0} 次`,
+  'scheduledTasks.runKind.gateFailed': '闸门失败',
+  'scheduledTasks.runKind.gateBlocked': '闸门被阻止',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'turnOutputs.imagePreview': '图片预览',
   'turnOutputs.viewChanges': '查看更改',
@@ -6725,6 +6817,20 @@ const ZH: Messages = {
   'error.modelStreamInterrupted': '模型响应流已中断，请重试。',
   'error.loopDetected':
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
+  'error.loopDetected.explicitCap': (vars) =>
+    `本轮工具调用达到了 model.maxToolCallsPerTurn 设定的上限（${vars?.limit} 次），因此系统停止了本轮操作。会话并未结束，你可以在设置中调高上限，或发送新的指令继续。`,
+  'error.loopDetected.backstop': (vars) =>
+    `本轮工具调用达到了 ${vars?.limit} 次的安全上限，因此系统停止了本轮操作。会话并未结束，你可以发送新的指令继续，也可以通过 model.maxToolCallsPerTurn 设定其他上限。`,
+  'error.loopDetected.stuckRepetition': (vars) =>
+    `工具调用超过 ${vars?.limit} 次后，模型仍在重复同一个调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。`,
+  'error.loopDetected.repeatedCall':
+    '模型在本轮中反复发起同一个工具调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。',
+  'error.loopDetected.providerDuplicateId':
+    '模型服务发来了一个已经执行过的工具调用，为避免重复执行，系统停止了本轮操作。会话并未结束，你可以发送新消息继续。',
+  'error.loopDetected.invalidToolParams':
+    '模型反复向同一个工具传入无效参数，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
+  'error.loopDetected.repeatedToolFailure':
+    '同一个工具在收到提醒后仍因相同原因失败，因此系统停止了本轮操作。会话并未结束，你可以查看上面的错误，或换一种方式。',
   'shell.command': 'Shell 命令',
   'shell.result.timedOut': '执行超时',
   'shell.result.notices': '提示',
@@ -7428,6 +7534,9 @@ const ZH: Messages = {
   'model.footer': 'Enter 选择，↑↓ 导航，Esc 关闭',
   'model.searchHint': '按 / 搜索',
   'model.fastHint': '用于建议和旁路任务',
+  'model.refresh': '刷新模型列表',
+  'model.refreshing': '正在刷新模型…',
+  'model.refreshFailed': (v) => `刷新模型失败：${v?.error ?? ''}`,
   'model.noMatch': (v) => `没有匹配 "${v?.query ?? ''}" 的模型`,
   'model.unavailable': '模型列表暂不可用，将使用守护进程默认模型。',
   'model.none': '没有可用模型',
@@ -7486,11 +7595,20 @@ const ZH: Messages = {
   'skills.install.error.authentication': '上传技能需要身份认证。',
   'skills.install.error.folderRequired': '请输入文件夹路径。',
   'skills.install.error.githubRequired': '请输入 GitHub SKILL.md 地址。',
-  'skills.install.error.invalidName': '技能名称缺失或包含不支持的字符。',
+  'skills.install.error.invalidName':
+    '请输入仅含英文字母、数字、点、下划线或连字符的名称，例如 my-skill。',
   'skills.install.error.manifestMissing':
     '技能包根目录中必须包含 SKILL.md 文件。',
   'skills.install.error.invalidPackage':
-    '技能包无效，请检查目录结构和 SKILL.md 内容。',
+    '请修正上述文件或技能包目录结构，然后重新上传。',
+  'skills.install.error.frontmatter':
+    '请让 SKILL.md 第一行直接以 --- 开始（删除前面的空行），并在 YAML 字段后添加结束标记 ---。',
+  'skills.install.error.invalidManifest':
+    '请打开 SKILL.md，修正上述字段后重新上传。',
+  'skills.install.error.nameMismatch':
+    '请将输入的技能名称与 SKILL.md 中的 name 保持一致，然后重新上传。',
+  'skills.install.error.unsafePath':
+    '请使用普通技能目录和文件，避免符号链接，并检查上述安装路径。',
   'skills.install.error.zipTooLarge': 'ZIP 文件不能超过 6 MB。',
   'skills.install.error.invalidFolder': '请输入有效的本地技能文件夹路径。',
   'skills.install.error.githubFailed':
@@ -7624,6 +7742,16 @@ const ZH: Messages = {
   'contextUsage.compress': '手动压缩',
   'contextUsage.compressing': '正在压缩…',
   'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
+  'contextUsage.compressedUnknown': '压缩完成，下一轮会重新观测上下文用量。',
+  'managed.compression.unconfirmed':
+    '尚未确认压缩结果，请先查询状态再继续操作。',
+  'managed.compression.recoveryBlocked': '压缩正在等待恢复。',
+  'managed.compression.confirm': '查询压缩状态',
+  'managed.compression.storage': '无法保存压缩请求，尚未开始压缩。',
+  'managed.compression.storageUpdate':
+    '无法保存最新压缩状态，刷新后请重新查询。',
+  'managed.compression.conflict': '上下文已变化，请确认最新状态后重试。',
+  'managed.compression.busy': '会话忙碌，请等待空闲后再压缩。',
   'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
   'contextUsage.compressInterrupted':
     '压缩期间连接发生变化，请刷新查看当前使用量。',
@@ -7631,7 +7759,7 @@ const ZH: Messages = {
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
-    '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
+    '会话连接正常、空闲且有上下文压缩权限时可用。',
   'contextCompression.result': (v) =>
     `上下文已压缩 ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
@@ -7642,42 +7770,16 @@ const ZH: Messages = {
   'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
-  'tokenUsage.avgLatency': '平均延迟',
-  'tokenUsage.cached': '缓存输入',
-  'tokenUsage.firstTokenLatency': (v) => `首 token 延迟 ${v?.duration ?? ''}`,
-  'tokenUsage.generationTime': (v) => `生成 ${v?.duration ?? ''}`,
-  'tokenUsage.input': '输入',
-  'tokenUsage.loadError': 'Token 消耗加载失败。',
-  'tokenUsage.models': '按模型',
-  'tokenUsage.noData': '本会话还没有 API 调用。',
-  'tokenUsage.noSubagents': '本会话还没有子 agent 调用。',
-  'tokenUsage.noTools': '本会话还没有工具调用。',
-  'tokenUsage.open': '会话 Token 消耗',
-  'tokenUsage.output': '总输出',
-  'tokenUsage.outputSpeed': (v) => `输出速度 ${v?.rate ?? ''} tok/s`,
-  'tokenUsage.refresh': '刷新',
-  'tokenUsage.requests': '请求',
-  'tokenUsage.retry': '重试',
-  'tokenUsage.subagents': '子agent',
-  'tokenUsage.thoughts': '思考（包含在总输出中）',
-  'tokenUsage.title': 'Token 消耗',
-  'tokenUsage.toolRow': (v) =>
-    `${v?.count ?? 0} 次 · 成功率 ${v?.rate ?? 0}% · ${v?.duration ?? ''}`,
-  'tokenUsage.tools': '工具',
-  'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
-  'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
+  ...TOKEN_USAGE_MESSAGES_ZH,
   'trajectory.title': '轨迹',
   'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
-  'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
   'trajectory.loadingPages': (v) => `正在读取记录…（已 ${v?.pages ?? 0} 页）`,
   'trajectory.olderFailed': (v) => `更早的记录没有读到：${v?.message ?? ''}`,
   'trajectory.olderPartial': '更早的记录只读到一部分，所以没有显示。',
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
-  'trajectory.totals': (v) =>
-    `已加载窗口 · ${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 请求 · ${v?.tools ?? 0} 工具`,
   'trajectory.turn': (v) => `第 ${v?.index ?? 0} 轮`,
   'trajectory.turnPartial': (v) => `第 ${v?.index ?? 0} 轮（接上文）`,
   'trajectory.turnSummary': (v) =>
@@ -7728,12 +7830,6 @@ const ZH: Messages = {
   'trajectory.zoom.status': (v) =>
     `显示 ${v?.from ?? ''}–${v?.to ?? ''}，共 ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
-  'trajectory.metric.elapsed': '执行跨度',
-  'trajectory.metric.active': '活跃覆盖',
-  'trajectory.metric.main': '主模型请求累计',
-  'trajectory.metric.help': '指标说明',
-  'trajectory.metric.scope':
-    '计数针对已加载窗口内投影后的记录，包含已加载的子代理记录；时间框选和缩放不改变总计。',
   'trajectory.metric.elapsed.help':
     '执行跨度：已记录开始到结束的跨度，含间隔；仅覆盖可绘制记录。',
   'trajectory.metric.active.help':
@@ -7742,32 +7838,17 @@ const ZH: Messages = {
     '主模型请求累计：主会话模型请求耗时之和，不含子代理请求和工具；可能包含失败尝试。',
   'trajectory.metric.missing.help':
     '未绘制的请求和工具仍保留在列表。破折号表示未记录，零表示真实零值。',
-  'trajectory.failures': (v) =>
-    `失败请求 ${v?.requests ?? 0} · 失败工具 ${v?.tools ?? 0}`,
-  'trajectory.unrecorded': '未记录',
   'trajectory.unplotted': (v) =>
     `未绘制：有耗时无起点 ${v?.starts ?? 0} 条 · 无耗时 ${v?.timing ?? 0} 条`,
-  'trajectory.missingStart': (v) => `${v?.count ?? 0} 条有耗时记录缺少起点`,
-  'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
   'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
   'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
   'trajectory.historyGap': '断线期间历史记录可能已变化，请刷新最新窗口。',
   'trajectory.lifecycleIncomplete': '生命周期详情可能不完整或超出保留上限。',
-  'trajectory.selected.label': '所选',
-  'trajectory.selected.none': '请选择一条记录',
-  'trajectory.selected.noTiming': '无请求或工具计时',
   'trajectory.inspector.title': '记录详情',
-  'trajectory.inspector.open': '查看详情',
   'trajectory.inspector.close': '关闭详情',
   'trajectory.inspector.selectRecord': '请选择一条记录查看。',
-  'trajectory.inspector.selectRowInTurn': '已选择轮次，请选择一条记录查看。',
   'trajectory.inspector.stale': '记录窗口已更新，请重新选择记录。',
   'trajectory.inspector.hiddenByRange': '此记录不在所选时间内。',
-  'trajectory.inspector.tab.summary': '摘要',
-  'trajectory.inspector.tab.input': '输入',
-  'trajectory.inspector.tab.output': '输出',
-  'trajectory.inspector.tab.metrics': '指标',
-  'trajectory.inspector.tab.body': '正文',
   'trajectory.inspector.model': '模型',
   'trajectory.inspector.status': '状态',
   'trajectory.inspector.permissionTitle': '标题',
@@ -7781,19 +7862,9 @@ const ZH: Messages = {
   'trajectory.inspector.start': '记录起点',
   'trajectory.inspector.end': '推算结束',
   'trajectory.inspector.ttft': '首 token',
-  'trajectory.inspector.afterFirst': '首 token 后耗时',
   'trajectory.inspector.invalidTtft': '记录的首 token 时间与总耗时不一致',
-  'trajectory.inspector.inputTokens': '输入 token',
-  'trajectory.inspector.outputTokens': '输出 token',
-  'trajectory.inspector.cachedTokens': '缓存输入 token（包含在输入中）',
   'trajectory.inspector.tool': '工具',
   'trajectory.inspector.callId': '调用 ID',
-  'trajectory.inspector.details': '记录详情',
-  'trajectory.inspector.preview': '记录预览',
-  'trajectory.inspector.input': '记录输入',
-  'trajectory.inspector.output': '记录输出',
-  'trajectory.inspector.contentFallback': '工具内容（无独立原始输出）',
-  'trajectory.inspector.body': '记录正文',
   'trajectory.inspector.kind': '类型',
   'trajectory.inspector.images': '图片类型',
   'trajectory.inspector.files': '文件',
@@ -7803,8 +7874,7 @@ const ZH: Messages = {
   'trajectory.inspector.truncated': '内容已截断',
   'trajectory.inspector.formatFailed': '无法格式化这项记录',
   'trajectory.inspector.expand': '展开更多',
-  'trajectory.inspector.copy': '复制显示内容',
-  'trajectory.inspector.copied': '已复制显示内容',
+  'trajectory.inspector.copied': '已复制',
   'trajectory.inspector.copyFailed': '无法复制内容',
   'trajectory.mode.group': '时间模式',
   'trajectory.mode.active': '活跃时间，去除间隔',
@@ -7974,6 +8044,8 @@ const ZH: Messages = {
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
   'userMessage.edit': '编辑消息',
+  'message.moreActions': '更多操作',
+  ...MESSAGE_DELETION_MESSAGES_ZH,
   'userMessage.editSubmit': '发送',
   'userMessage.editSending': '发送中…',
   'userMessage.editBusy': '请先等待当前轮次结束再编辑。',
@@ -8092,6 +8164,20 @@ const ZH: Messages = {
   'tasks.shortcut.cancelConfirm': 'Esc 取消',
   'tasks.detail.workingDir': '工作目录',
   'tasks.detail.outputFile': '输出文件',
+  'tasks.detail.startedAt': '开始时间',
+  'tasks.detail.endedAt': '结束时间',
+  'tasks.detail.totalDuration': '总时长',
+  'tasks.detail.residentMemory': '常驻内存',
+  'tasks.detail.output': '输出',
+  'tasks.detail.outputSize': (v) => `：${v?.size ?? ''}`,
+  'tasks.detail.outputEmpty': '暂无输出',
+  'tasks.detail.outputNone': '无输出',
+  'tasks.detail.runtimeUnavailable': '任务详情已不可用',
+  'tasks.detail.outputPartial': '输出可用，但无法读取文件信息',
+  'tasks.detail.outputRefreshFailed': '无法刷新输出。',
+  'tasks.detail.outputTruncated': '仅显示末尾',
+  'tasks.detail.outputUnavailable': '无法读取输出',
+  'tasks.detail.lastWrite': '最后写入',
   'tasks.detail.command': '命令',
   'tasks.detail.events': (v) => `${v?.count ?? 0} 个事件`,
   'tasks.detail.exit': (v) => `退出码 ${v?.exitCode ?? ''}`,
@@ -8631,7 +8717,9 @@ const ZH: Messages = {
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
+  ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
+  ...MANAGED_MCP_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,

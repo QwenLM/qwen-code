@@ -21,6 +21,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import wrapAnsi from 'wrap-ansi';
 import { useRenderer, useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
@@ -570,16 +571,6 @@ export function OpenTuiDiffDialog({
       alive = false;
     };
   }, [sandboxed]);
-  if (sandboxed) {
-    return (
-      <Shell title="Diff" onClose={onClose}>
-        <text fg={C.dim}>
-          Diff preview unavailable in tool sandbox. Run git diff through the
-          Shell tool.
-        </text>
-      </Shell>
-    );
-  }
   return (
     <Shell title="Diff" onClose={onClose} bodyLayout={bodyLayout}>
       <scrollbox
@@ -588,8 +579,21 @@ export function OpenTuiDiffDialog({
         marginTop={bodyLayout.compact ? 0 : 1}
         flexShrink={1}
         stickyScroll={false}
+        focused
       >
-        {lines.length === 0 ? (
+        {sandboxed ? (
+          wrapAnsi(
+            'Diff preview unavailable in tool sandbox. Run git diff through the Shell tool.',
+            Math.max(1, dialogContentWidth(width) - 1),
+            { hard: true, trim: false },
+          )
+            .split('\n')
+            .map((line, index) => (
+              <text key={index} height={1} flexShrink={0} fg={C.dim}>
+                {line}
+              </text>
+            ))
+        ) : lines.length === 0 ? (
           <text fg={C.dim}>{'no working-tree changes'}</text>
         ) : (
           lines.map((l, i) => (

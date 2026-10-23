@@ -95,6 +95,12 @@ daemon intentionally rejects arbitrary browser `Origin` requests.
 
 ## Rendering Responsibilities
 
+Web Shell highlights line-leading slash tokens such as `/review` in user
+messages with the same blue, bold treatment as the composer. Highlighting is
+derived from the recorded text, so it also applies when reopening a session.
+It is a syntax cue, not confirmation that a command exists or executed.
+Message text, clickable URLs, and annotated reference chips are preserved.
+
 The shared transcript model is semantic, not visual. UI clients decide how to
 render:
 

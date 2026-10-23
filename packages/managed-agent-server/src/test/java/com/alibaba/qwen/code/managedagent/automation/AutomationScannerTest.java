@@ -1071,8 +1071,8 @@ class AutomationScannerTest {
         assertThat(claim.attempts()).isEqualTo(1);
         assertThat(claim.lastError()).isEqualTo("connection lost");
         assertThat(claim.trigger()).isEqualTo(AutomationScanner.TRIGGER_MANUAL);
-        // The same key asked again re-drives the claim at once: the caller
-        // is answered what the Harness now says, under the same run id.
+        // The first same-key retry after a lost answer re-drives the claim:
+        // the caller is answered what the Harness now says.
         var asked = service.run(tenant, ACTOR, id, "lost-1");
         assertThat(asked.replayed()).isTrue();
         assertThat(asked.body().outcome()).isEqualTo("fired");
@@ -1103,6 +1103,95 @@ class AutomationScannerTest {
                 .isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
         assertThat(ledger.findSchedule(tenant, id).orElseThrow().leaseOwner())
                 .isNull();
+    }
+
+    @Test
+    void aRetryInsideTheDeferWindowDoesNotSpendTheScannerBudget() {
+        PublicAutomation automation = define("0 2 * * *", "allow", "none",
+                null, true);
+        String id = automation.id();
+        ScheduleRow held = ledger.findSchedule(tenant, id).orElseThrow();
+        long seedFence = ledger.claim(tenant, id, "seed",
+                clock.get() + 60_000, clock.get());
+        assertThat(seedFence).isPositive();
+        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+                .decision(held, "manual:seeded", null,
+                        AutomationScanner.TRIGGER_MANUAL,
+                        AutomationLedgerStore.OUTCOME_FIRING, null, seedFence,
+                        clock.get()), "seed")).isPresent();
+        assertThat(ledger.deferOccurrence(tenant, id, "manual:seeded", 63,
+                clock.get() + 30_000, "seeded", "seed", seedFence,
+                clock.get())).isTrue();
+        ledger.release(tenant, id, "seed", seedFence, clock.get());
+        // One more fire would take attempts to MAX_FIRE_ATTEMPTS and settle
+        // the claim unknown; the guard answers 503 without reaching it.
+        fake.failNextFire = new DaemonException("must not fire");
+        assertThatThrownBy(() -> service.run(tenant, ACTOR, id, "seeded"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_operation_unknown");
+                });
+        assertThat(fake.fires()).isZero();
+        AutomationLedgerStore.OccurrenceRow after = ledger.findOccurrence(
+                tenant, id, "manual:seeded").orElseThrow();
+        assertThat(after.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
+        assertThat(after.attempts()).isEqualTo(63);
+    }
+
+    @Test
+    void aDeferredRetryAnswersTheRecordedWorkspaceCode() {
+        PublicAutomation automation = define("0 2 * * *", "allow", "none",
+                null, true);
+        String id = automation.id();
+        seedDeferred(id, "manual:workspace", 2,
+                "fire failed with HTTP 409: {\"error\":\"workspace_busy\","
+                        + "\"code\":\"workspace_busy\"}");
+        fake.failNextFire = new DaemonException("must not fire");
+        assertThatThrownBy(() -> service.run(tenant, ACTOR, id, "workspace"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode()).isEqualTo("workspace_busy");
+                });
+        assertThat(fake.fires()).isZero();
+    }
+
+    @Test
+    void aDeferredRetryKeepsAFinalRefusalFinal() {
+        PublicAutomation automation = define("0 2 * * *", "allow", "none",
+                null, true);
+        String id = automation.id();
+        seedDeferred(id, "manual:blocked", 2,
+                "fire failed with HTTP 409: {\"error\":\"hosted_session_blocked\","
+                        + "\"code\":\"hosted_session_blocked\"}");
+        fake.failNextFire = new DaemonException("must not fire");
+        assertThatThrownBy(() -> service.run(tenant, ACTOR, id, "blocked"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("hosted_session_blocked");
+                });
+        assertThat(fake.fires()).isZero();
+    }
+
+    private void seedDeferred(String id, String occurrenceKey, int attempts,
+            String lastError) {
+        ScheduleRow held = ledger.findSchedule(tenant, id).orElseThrow();
+        long fence = ledger.claim(tenant, id, "seed",
+                clock.get() + 60_000, clock.get());
+        assertThat(fence).isPositive();
+        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+                .decision(held, occurrenceKey, null,
+                        AutomationScanner.TRIGGER_MANUAL,
+                        AutomationLedgerStore.OUTCOME_FIRING, null, fence,
+                        clock.get()), "seed")).isPresent();
+        assertThat(ledger.deferOccurrence(tenant, id, occurrenceKey, attempts,
+                clock.get() + 30_000, lastError, "seed", fence,
+                clock.get())).isTrue();
+        ledger.release(tenant, id, "seed", fence, clock.get());
     }
 
     @Test

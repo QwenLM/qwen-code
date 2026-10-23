@@ -5,7 +5,12 @@
  */
 
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
+import { isInteractiveInvocation } from '../utils/interactive-mode.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
+import {
+  isLoopProtectionMode,
+  type LoopProtectionMode,
+} from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   type ModelProposedGoalsMode,
@@ -76,6 +81,7 @@ import { loadSettings, SettingScope } from './settings.js';
 import { getSettingsSchema } from './settingsSchema.js';
 import { resolveHookSettingsForConfig } from './hook-settings.js';
 import { createBundledMem0Server } from './mem0-settings.js';
+import { prepareBundledGeneratedUi } from './generated-ui-settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -111,6 +117,7 @@ import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
+import { daemonCommand } from '../commands/daemon.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { agentsCommand } from '../commands/agents.js';
 import { batchCommand } from '../commands/batch.js';
@@ -893,6 +900,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(boardCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
+    // Register `qwen daemon` (local daemon inspection and control)
+    .command(daemonCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
     // Register `qwen agents` (join a coordinator; session_send MCP server)
@@ -946,6 +955,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
+      result._[0] === 'daemon' ||
       result._[0] === 'agents' ||
       result._[0] === 'board' ||
       result._[0] === 'batch' ||
@@ -955,13 +965,14 @@ export async function parseArguments(): Promise<CliArgs> {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
-    // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
-    // execution and exit. Returning here would let the main interactive flow
-    // run, which would prompt for stdin input despite the user having already
-    // invoked a subcommand. `batch` must be here for a second reason: the main
-    // flow below relaunches the process for a larger heap, and a second parse
-    // would run the subcommand handler again — submitting (and billing) a
-    // duplicate batch job whose id the user never sees.
+    // MCP/Extensions/Auth/Hooks/Channel/Review/Daemon/Batch commands handle
+    // their own execution and exit. Returning here would let the main
+    // interactive flow run, which would prompt for stdin input despite the
+    // user having already invoked a subcommand. `batch` must be here for a
+    // second reason: the main flow below relaunches the process for a larger
+    // heap, and a second parse would run the subcommand handler again —
+    // submitting (and billing) a duplicate batch job whose id the user never
+    // sees.
     process.exit(process.exitCode ?? 0);
   }
 
@@ -1652,6 +1663,25 @@ function warnAboutOutputStyle(warning: string): void {
   console.error(`WARNING: ${warning}`);
 }
 
+// Reported once per value for the same reason as the output-style warnings.
+const loopProtectionWarningsShown = new Set<string>();
+
+/**
+ * Resolves `model.loopProtection`. An invalid value (a typo or the wrong
+ * case) falls back to the default with a warning, so a user who asked for
+ * `stop` learns that the turn will not stop.
+ */
+function resolveLoopProtection(value: unknown): LoopProtectionMode | undefined {
+  if (value === undefined || isLoopProtectionMode(value)) return value;
+  const warning = `Invalid model.loopProtection value ${JSON.stringify(value)}: expected "warn", "stop" or "off"; using the default "warn".`;
+  if (loopProtectionWarningsShown.has(warning)) return undefined;
+  loopProtectionWarningsShown.add(warning);
+  debugLogger.warn(warning);
+  // eslint-disable-next-line no-console
+  console.error(`WARNING: ${warning}`);
+  return undefined;
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1958,31 +1988,7 @@ export async function loadCliConfig(
     throw err;
   }
 
-  // Interactive mode determination with priority:
-  // 1. If promptInteractive (-i flag) is provided, it is explicitly interactive
-  // 2. If outputFormat is stream-json or json (no matter input-format) along with query or prompt, it is non-interactive
-  // 3. If no query or prompt is provided, check isTTY: TTY means interactive, non-TTY means non-interactive
-  const hasQuery = !!argv.query;
-  const hasPrompt = !!argv.prompt;
-  let interactive: boolean;
-  if (argv.promptInteractive) {
-    // Priority 1: Explicit -i flag means interactive
-    interactive = true;
-  } else if (
-    (outputFormat === OutputFormat.STREAM_JSON ||
-      outputFormat === OutputFormat.JSON) &&
-    (hasQuery || hasPrompt)
-  ) {
-    // Priority 2: JSON/stream-json output with query/prompt means non-interactive
-    interactive = false;
-  } else if (!hasQuery && !hasPrompt) {
-    // Priority 3: No query or prompt means interactive only if TTY (format arguments ignored)
-    interactive = process.stdin.isTTY ?? false;
-  } else {
-    // Default: If we have query/prompt but output format is TEXT, assume non-interactive
-    // (fallback for edge cases where query/prompt is provided with TEXT output)
-    interactive = false;
-  }
+  const interactive = isInteractiveInvocation(argv);
   // ── Unified permissions construction ─────────────────────────────────────
   // All permission sources are merged here, before constructing Config.
   // The resulting three arrays are the single source of truth that Config /
@@ -2516,7 +2522,7 @@ export async function loadCliConfig(
   // pipe default while interactive and protocol-driven modes keep PTY.
   const isExplicitOneShotPrompt =
     !interactive &&
-    hasPrompt &&
+    Boolean(argv.prompt) &&
     !isAcpMode &&
     !(argv.inputFile ?? settings.dualOutput?.inputFile) &&
     inputFormat !== InputFormat.STREAM_JSON;
@@ -2643,6 +2649,17 @@ export async function loadCliConfig(
     mcpToolIdleTimeoutMs: settings.mcp?.toolIdleTimeoutMs,
     mcpServers,
     topTierMcpServers,
+    bundledGeneratedUi: prepareBundledGeneratedUi(
+      settings.experimental?.generatedUi,
+      !bareMode &&
+        !safeMode &&
+        !sshWorkspace &&
+        !agentHostReadOnly &&
+        !provisionalWorkspace &&
+        !sandboxEnabled &&
+        !sandboxConfig &&
+        hostPolicy?.executionEngine !== 'managed',
+    ),
     pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
@@ -2799,6 +2816,8 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
+    workflowKeywordTriggerEnabled:
+      settings.ui?.disableWorkflowKeywordTrigger !== true,
     workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
     workflowNameOnly: settings.tools?.workflowNameOnly,
     modelProposedGoals: normalizeModelProposedGoals(
@@ -2813,6 +2832,7 @@ export async function loadCliConfig(
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
+    loopProtection: resolveLoopProtection(settings.model?.loopProtection),
     maxToolCallsPerTurn: settings.model?.maxToolCallsPerTurn,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,

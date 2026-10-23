@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitReceipt;
@@ -25,12 +26,14 @@ import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DeadlockLoserDataAccessException;
@@ -41,6 +44,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -69,6 +73,7 @@ import java.util.regex.Pattern;
 public class ManagedSessionStore {
     private static final int STORAGE_VERSION = 1;
     private static final ObjectMapper CSI_JSON = new ObjectMapper();
+    private static final RequestDigests INITIAL_DIGESTS = new RequestDigests();
     private static final ObjectMapper CSI_TERMINAL_JSON = CSI_JSON.copy().enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -381,6 +386,40 @@ public class ManagedSessionStore {
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
     }
 
+    @Transactional
+    public java.util.Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
+            ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
+        if (request.kind() != null) {
+            throw invalid("Approval queries do not accept lifecycle authority.");
+        }
+        authorizeOrdinary(tenantId, sessionId, writerToken, request);
+        var rows = jdbc.queryForList("SELECT agent_id, agent_definition_digest, tool_profile, workspace_id,"
+                + " approval_mode, selected_approval_mode, approval_revision FROM ma_session"
+                + " WHERE tenant_id=? AND session_id=? FOR UPDATE", tenantId, sessionId);
+        if (rows.size() != 1) {
+            throw conflict("managed_session_scope_conflict", "The Managed Session is missing.");
+        }
+        var row = rows.getFirst();
+        String profile = (String) row.get("tool_profile");
+        if (row.get("workspace_id") == null
+                || ("qwen-code".equals(row.get("agent_id"))
+                        ? row.get("agent_definition_digest") != null : row.get("agent_definition_digest") == null)
+                || !(com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES.equals(profile)
+                        || com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
+            return null;
+        }
+        String mode = (String) row.get("selected_approval_mode");
+        if (mode == null) {
+            mode = (String) row.get("approval_mode");
+        }
+        long revision = ((Number) row.get("approval_revision")).longValue();
+        if (!com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.supportsApprovalMode(mode)
+                || revision < 0 || revision > 9_007_199_254_740_991L) {
+            throw conflict("approval_selection_conflict", "The approval selection is invalid.");
+        }
+        return java.util.Map.of("mode", mode, "revision", revision);
+    }
+
     // An ordinary write against a v2-claimed Session must fail with the
     // claim's name, and the read that names it must never walk the three
     // cliffs the earlier probes hit: no plain consistent read ahead of the
@@ -585,7 +624,7 @@ public class ManagedSessionStore {
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
                     STORAGE_VERSION,
                     request.writerId(),
@@ -600,7 +639,7 @@ public class ManagedSessionStore {
         }
         try {
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
                             .harnessDrainKey(tenantId),
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
@@ -979,13 +1018,29 @@ public class ManagedSessionStore {
         var hostedReferences = new HashMap<String, JsonNode>();
         java.util.function.Function<String, StoredResource> reader = resourceId -> resourceCache.computeIfAbsent(resourceId,
                 id -> storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, id));
-        java.util.function.Function<String, StoredResource> closureReader = resourceId -> {
-            if (!declaredResources.contains(resourceId)) {
-                throw invalid("Hosted nested reference is absent from the transaction census.");
+        ManagedHostedRecoveryRecords.HistoricalResources closureReader = new ManagedHostedRecoveryRecords.HistoricalResources() {
+            @Override
+            public StoredResource apply(String resourceId) {
+                if (!declaredResources.contains(resourceId)) {
+                    throw invalid("Hosted nested reference is absent from the transaction census.");
+                }
+                return reader.apply(resourceId);
             }
-            return reader.apply(resourceId);
+
+            @Override
+            public void checkpointHistory(JsonNode ref) {
+                validateCheckpointHistory(ref, tenantId, request.workspaceId(), sessionId,
+                        head.journalRevision(), declaredResources, reader);
+            }
         };
         for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
+            if (ManagedCheckpointHistory.KIND.equals(resource.kind())) {
+                ObjectNode ref = CSI_JSON.valueToTree(resource);
+                ref.remove("bytesBase64");
+                closureReader.checkpointHistory(ref);
+            } else if ("managed-checkpoint".equals(resource.kind())) {
+                validatePagedCheckpoint(closureReader.apply(resource.resourceId()), tenantId, request.workspaceId(), sessionId, closureReader);
+            }
             if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {
                 ManagedHostedRecoveryRecords.validateResource(closureReader.apply(resource.resourceId()), tenantId,
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
@@ -1006,6 +1061,10 @@ public class ManagedSessionStore {
                         sessionId,
                         closureReader,
                         hostedReferences);
+                if ("hosted.cleanup".equals(event.path("kind").asText())) {
+                    HostedCleanupReferences.apply(jdbc, tenantId, request.workspaceId(), sessionId,
+                            event.path("payload"), reader, revision, now.getTime());
+                }
             }
         }
         boolean v2 = authority != null && jdbc.queryForObject(
@@ -1117,22 +1176,7 @@ public class ManagedSessionStore {
                 validated.recordDigest(), now.getTime());
         ActivationChange activation = activationChange(
                 applied.lastActivation());
-        // A payload wider than the columns blanks them instead of
-        // failing the commit: authorization then reads the journal
-        // directly, exactly as before the columns existed.
-        boolean fits = activation == null
-                || (activation.id() == null || activation.id().length()
-                        <= ManagedSessionStoreModels.MAX_ACTIVATION_ID_CHARS)
-                        && (activation.phase() == null
-                                || activation.phase().length()
-                                        <= ManagedSessionStoreModels.MAX_ACTIVATION_PHASE_CHARS);
-        // activation_head_revision stamps which journal revision the
-        // columns reflect, so a head written by a binary that does not
-        // maintain the columns is detected (stamp lags journal_revision)
-        // and rescanned instead of trusted. A commit that keeps the
-        // existing columns advances their stamp only when they were
-        // current at the previous revision — re-stamping a skewed set
-        // would certify it as fresh.
+        // Never certify a skewed activation projection as current.
         Long activationHeadRevision = head.activationHeadRevision();
         if (activation != null || (activationHeadRevision != null
                 && activationHeadRevision == head.journalRevision())) {
@@ -1144,6 +1188,7 @@ public class ManagedSessionStore {
                         + " journal_revision = ?, committed_sequence = ?,"
                         + " wake_pending = wake_pending OR ?,"
                         + " wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END,"
+                        + " cleanup_head_revision = CASE WHEN cleanup_head_revision = ? THEN ? ELSE cleanup_head_revision END,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
                         + " latest_checkpoint_resource_id = COALESCE(?,"
                         + " latest_checkpoint_resource_id),"
@@ -1155,17 +1200,17 @@ public class ManagedSessionStore {
                         + " AND session_id = ?",
                 revision, request.lastSequence(),
                 wakeInput,
-                head.journalRevision(), revision, request.commitDigest(),
+                head.journalRevision(), revision, head.journalRevision(), revision, request.commitDigest(),
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(),
                 activation == null ? head.activationId()
-                        : fits ? activation.id() : null,
+                        : activation.id(),
                 activation == null ? head.activationPhase()
-                        : fits ? activation.phase() : null,
+                        : activation.phase(),
                 activation == null ? head.activationEventEpoch()
-                        : fits ? activation.epoch() : null,
+                        : Long.valueOf(activation.epoch()),
                 activation == null ? head.activationExpiresAt()
-                        : fits ? activation.expiresAt() : null,
+                        : activation.expiresAt(),
                 activationHeadRevision, Math.max(head.storageVersion(), promotes ? 2 : 1), now.getTime(), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
@@ -1297,6 +1342,169 @@ public class ManagedSessionStore {
                 : transactions.get(transactions.size() - 1)
                         .journalRevision();
         return new TransactionPage(transactions, nextRevision, hasMore);
+    }
+
+    /** Proves only an untouched initial journal; it never opens or fences a writer. */
+    @Transactional(propagation = Propagation.NOT_SUPPORTED, readOnly = true)
+    public boolean hasPristineInitialJournal(String tenantId, String sessionId, String workspaceId) {
+        try {
+            HeadRow head = requireHead(tenantId, sessionId);
+            if (!Set.of("ACTIVE", "SEALED").contains(head.state())
+                    || !"READY".equals(head.recoveryStatus()) || head.storageVersion() != STORAGE_VERSION
+                    || head.compactedThroughRevision() != 0 || head.latestCheckpointResourceId() != null
+                    || head.journalRevision() < 1 || head.committedSequence() < 0
+                    || workspaceId != null && !workspaceId.equals(head.workspaceId())) {
+                return false;
+            }
+            var rows = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns()
+                            + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                            + " ORDER BY journal_revision", transactionMapper, tenantId, sessionId);
+            long revision = 0;
+            long sequence = 0;
+            long activationEpoch = 0;
+            String digest = null;
+            for (TransactionRow row : rows) {
+                if (row.journalRevision() != ++revision || !head.workspaceId().equals(row.workspaceId())
+                        || row.latestCheckpointResourceId() != null || row.activationEpoch() < activationEpoch
+                        || !Objects.equals(digest, row.previousCommitDigest())) {
+                    return false;
+                }
+                storedTransaction(row);
+                validateUtf8JsonLines(row.recordBytes(), revision == 1 ? 2 : row.eventCount() + 1);
+                String[] lines = new String(row.recordBytes(), StandardCharsets.UTF_8).split("\n");
+                if (revision == 1) {
+                    if (!"session.create".equals(row.operation()) || row.eventCount() != 0
+                            || row.firstSequence() != 0 || row.lastSequence() != 0 || lines.length != 2
+                            || row.commitDigest() != null || row.eventsDigest() != null || row.activationEpoch() != 0
+                            || !("session.create:" + sessionId).equals(row.transactionId())
+                            || !row.transactionId().equals(row.commandId())
+                            || !row.recordDigest().equals(row.contentDigest())) {
+                        return false;
+                    }
+                    JsonNode engine = CSI_TERMINAL_JSON.readTree(lines[0]);
+                    JsonNode header = CSI_TERMINAL_JSON.readTree(lines[1]);
+                    JsonNode value = header.path("managedSession");
+                    requireInitialResource(value.path("definitionRef"), head, "managed-definition");
+                    requireInitialResource(value.path("rootSnapshotRef"), head, "managed-root");
+                    if (!"session_execution_engine".equals(engine.path("subtype").asText())
+                            || !"managed".equals(engine.path("systemPayload").path("engine").asText())
+                            || !sessionId.equals(engine.path("sessionId").asText())
+                            || !"managed_session_header_v1".equals(header.path("subtype").asText())
+                            || !sessionId.equals(header.path("sessionId").asText())
+                            || value.size() != 7 || value.path("formatVersion").asInt() != STORAGE_VERSION
+                            || !"managed-session/1".equals(value.path("minimumReader").asText())
+                            || !"managed".equals(value.path("engine").asText())
+                            || !"hosted-harness".equals(value.path("createdBy").asText())
+                            || value.has("baseTranscriptProof") || !initialScope(value, head)) {
+                        return false;
+                    }
+                } else {
+                    if (row.eventCount() < 1 || lines.length != row.eventCount() + 1
+                            || row.firstSequence() != sequence + 1
+                            || row.lastSequence() != sequence + row.eventCount() || row.commitDigest() == null) {
+                        return false;
+                    }
+                    var events = CSI_JSON.createArrayNode();
+                    boolean activationChanged = false;
+                    for (int index = 0; index < row.eventCount(); index++) {
+                        JsonNode record = CSI_TERMINAL_JSON.readTree(lines[index]);
+                        JsonNode event = record.path("managedSession");
+                        JsonNode payload = event.path("payload");
+                        String kind = event.path("kind").asText();
+                        if (!sessionId.equals(record.path("sessionId").asText())
+                                || !"managed_session_event_v1".equals(record.path("subtype").asText())
+                                || event.path("v").asInt() != STORAGE_VERSION
+                                || event.path("sequence").asLong(-1) != ++sequence || !initialScope(event, head)
+                                || !("activation.changed".equals(kind)
+                                        && "activation".equals(payload.path("subject").path("type").asText())
+                                        && payload.path("activationId").isTextual()
+                                        && payload.path("activationId").equals(payload.path("subject").path("scopeId"))
+                                        && payload.path("activationId").equals(payload.path("subject").path("activationId"))
+                                        && payload.path("epoch").equals(payload.path("subject").path("epoch"))
+                                        && payload.path("epoch").asLong() > 0
+                                        && payload.path("epoch").asLong() == row.activationEpoch()
+                                        || "domain.committed".equals(kind)
+                                                && "session_metadata".equals(payload.path("domain").asText()))) {
+                            return false;
+                        }
+                        if ("domain.committed".equals(kind)) {
+                            requireInitialResource(payload.path("recordRef"), head, "managed-session_metadata");
+                        } else {
+                            activationChanged = true;
+                            if (!payload.path("installRef").isNull()) {
+                                requireInitialResource(payload.path("installRef"), head, "managed-activation-install");
+                            }
+                            if (!payload.path("boundaryRef").isNull()) {
+                                requireInitialResource(payload.path("boundaryRef"), head, "managed-activation-boundary");
+                            }
+                        }
+                        events.add(event);
+                    }
+                    if (!activationChanged && row.activationEpoch() != activationEpoch) {
+                        return false;
+                    }
+                    JsonNode markerRecord = CSI_TERMINAL_JSON.readTree(lines[lines.length - 1]);
+                    JsonNode marker = markerRecord.path("managedSession");
+                    if (!"managed_session_commit_v1".equals(markerRecord.path("subtype").asText())
+                            || !sessionId.equals(markerRecord.path("sessionId").asText())
+                            || !row.transactionId().equals(marker.path("transactionId").asText())
+                            || !row.commandId().equals(marker.path("commandId").asText())
+                            || !row.operation().equals(marker.path("operation").asText())
+                            || !row.contentDigest().equals(marker.path("contentDigest").asText())
+                            || row.firstSequence() != marker.path("firstSequence").asLong(-1)
+                            || row.lastSequence() != marker.path("lastSequence").asLong(-1)
+                            || row.eventCount() != marker.path("eventCount").asInt(-1)
+                            || !row.eventsDigest().equals(marker.path("eventsDigest").asText())
+                            || !INITIAL_DIGESTS.digest(CSI_JSON.convertValue(events, Object.class))
+                                    .equals("sha256:" + row.eventsDigest())
+                            || !INITIAL_DIGESTS.digest(CSI_JSON.convertValue(marker, Object.class))
+                                    .equals("sha256:" + row.commitDigest())
+                            || !Objects.equals(digest, marker.path("previousCommitDigest").isNull()
+                                    ? null : marker.path("previousCommitDigest").asText())) {
+                        return false;
+                    }
+                }
+                digest = row.commitDigest();
+                activationEpoch = row.activationEpoch();
+            }
+            return revision == head.journalRevision() && sequence == head.committedSequence()
+                    && activationEpoch == head.activationEpoch()
+                    && Objects.equals(digest, head.lastCommitDigest()) && head.equals(requireHead(tenantId, sessionId));
+        } catch (IOException | RuntimeException unverified) {
+            return false;
+        }
+    }
+
+    private static boolean initialScope(JsonNode value, HeadRow head) {
+        JsonNode key = value.path("sessionKey");
+        return head.tenantId().equals(key.path("tenantId").asText())
+                && head.workspaceId().equals(key.path("workspaceId").asText())
+                && head.sessionId().equals(key.path("sessionId").asText());
+    }
+
+    private void requireInitialResource(JsonNode ref, HeadRow head, String kind) throws IOException {
+        WorkspaceRecoveryReader.validateRef(ref);
+        String scope = sessionScopeKey(head.tenantId(), head.sessionId());
+        var resources = jdbc.query("SELECT " + ManagedSchemaProjection.RESOURCE.columns()
+                        + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND resource_id = ?",
+                resourceMapper, resourceKey(scope, ref.path("resourceId").asText()), scope, ref.path("resourceId").asText());
+        if (resources.size() != 1) {
+            throw journalCorrupt();
+        }
+        ResourceRow resource = resources.getFirst();
+        requireResourceScope(resource, head.tenantId(), head.workspaceId(), head.sessionId(), ref.path("resourceId").asText());
+        if (!"MYSQL_INLINE".equals(resource.storageKind()) || !kind.equals(resource.kind())
+                || !kind.equals(ref.path("kind").asText()) || resource.schemaVersion() != ref.path("schemaVersion").asInt()
+                || resource.byteLength() != ref.path("byteLength").asLong() || !resource.digest().equals(ref.path("digest").asText())) {
+            throw journalCorrupt();
+        }
+        verifyStoredResource(resource);
+        if ("managed-definition".equals(kind)) {
+            JsonNode definition = CSI_TERMINAL_JSON.readTree(resource.bytes());
+            if (definition == null || !definition.isObject()) {
+                throw journalCorrupt();
+            }
+        }
     }
 
     public StoredResource readResource(String tenantId, String workspaceId,
@@ -2042,6 +2250,114 @@ public class ManagedSessionStore {
         return request;
     }
 
+    private void validatePagedCheckpoint(StoredResource stored, String tenant, String workspace, String session,
+            ManagedHostedRecoveryRecords.HistoricalResources resources) {
+        JsonNode body = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
+        if (body == null || !ManagedCheckpointHistory.paged(body)) {
+            return;
+        }
+        if (!ManagedCheckpointHistory.PROFILE.equals(body.path("storageProfile").asText())) {
+            throw invalid("Unsupported checkpoint storage profile.");
+        }
+        JsonNode history = body.path("history");
+        ManagedExtensionRecords.closed(history, Set.of("ref", "toolCount", "bindingCount"), "checkpoint history");
+        resources.checkpointHistory(history.path("ref"));
+        StoredResource page = resources.apply(history.path("ref").path("resourceId").asText());
+        JsonNode saved = ManagedCheckpointHistory.page(page.bytes());
+        if (!saved.path("sessionKey").equals(body.path("identity").path("sessionKey"))
+                || !saved.path("turnId").equals(body.path("identity").path("turnId"))
+                || !saved.path("promptId").equals(body.path("identity").path("promptId"))
+                || !saved.path("toolCount").equals(history.path("toolCount"))
+                || !saved.path("bindingCount").equals(history.path("bindingCount"))) {
+            throw invalid("Checkpoint history identity or coverage conflicts.");
+        }
+    }
+
+    private void validateCheckpointHistory(JsonNode ref, String tenant, String workspace, String session,
+            long previousRevision, Set<String> declared, java.util.function.Function<String, StoredResource> resources) {
+        try {
+            ManagedCheckpointHistory.pageRef(ref);
+            StoredResource stored = resources.apply(ref.path("resourceId").asText());
+            requireCheckpointResource(ref, stored);
+            JsonNode page = ManagedCheckpointHistory.page(stored.bytes());
+            JsonNode key = page.path("sessionKey");
+            if (!tenant.equals(key.path("tenantId").asText()) || !workspace.equals(key.path("workspaceId").asText())
+                    || !session.equals(key.path("sessionId").asText())) {
+                throw invalid("Checkpoint history belongs to another Session.");
+            }
+            Long origin = priorCheckpointResourceRevision(tenant, workspace, session, stored.resourceId(), previousRevision);
+            long ceiling = origin == null ? previousRevision : origin;
+            for (JsonNode nested : checkpointReferences(page)) {
+                StoredResource dependency = resources.apply(nested.path("resourceId").asText());
+                requireCheckpointResource(nested, dependency);
+                Long owned = priorCheckpointResourceRevision(tenant, workspace, session, dependency.resourceId(), ceiling);
+                if (owned == null && (origin != null || !declared.contains(dependency.resourceId()))) {
+                    throw invalid("Checkpoint history dependency has no committed owner.");
+                }
+            }
+            long tools = page.path("toolCount").longValue() - page.path("items").size();
+            long bindings = page.path("bindingCount").longValue() - page.path("bindings").size();
+            JsonNode previous = page.path("previous");
+            if (tools < 0 || bindings < 0) {
+                throw invalid("Checkpoint history count conflicts.");
+            }
+            if (previous.isNull()) {
+                if (tools != 0 || bindings != 0) {
+                    throw invalid("Checkpoint history predecessor is missing.");
+                }
+            } else {
+                JsonNode predecessor = ManagedCheckpointHistory.page(resources.apply(previous.path("resourceId").asText()).bytes());
+                if (!predecessor.path("sessionKey").equals(key)
+                        || !predecessor.path("turnId").equals(page.path("turnId"))
+                        || !predecessor.path("promptId").equals(page.path("promptId"))
+                        || predecessor.path("toolCount").longValue() != tools
+                        || predecessor.path("bindingCount").longValue() != bindings) {
+                    throw invalid("Checkpoint history predecessor conflicts.");
+                }
+            }
+        } catch (IllegalArgumentException | com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException error) {
+            throw invalid("Invalid checkpoint history page.");
+        }
+    }
+
+    private static void requireCheckpointResource(JsonNode ref, StoredResource stored) {
+        ManagedExtensionRecords.durableRef(ref, "checkpoint history dependency");
+        if (!stored.kind().equals(ref.path("kind").asText())
+                || stored.schemaVersion() != ref.path("schemaVersion").intValue()
+                || stored.byteLength() != ref.path("byteLength").longValue()
+                || !stored.digest().equals(ref.path("digest").asText())
+                || stored.bytes() == null || stored.bytes().length != stored.byteLength()
+                || !ToolPublicationContract.sha256(stored.bytes()).equals(stored.digest())) {
+            throw invalid("Checkpoint history resource metadata conflicts.");
+        }
+    }
+
+    private static List<JsonNode> checkpointReferences(JsonNode value) {
+        List<JsonNode> result = new ArrayList<>();
+        if (value.isObject() && value.has("resourceId")) {
+            result.add(value);
+        } else if (value.isContainerNode()) {
+            for (JsonNode child : value) {
+                result.addAll(checkpointReferences(child));
+            }
+        }
+        return result;
+    }
+
+    private Long priorCheckpointResourceRevision(String tenant, String workspace, String session,
+            String resourceId, long maximum) {
+        String scope = sessionScopeKey(tenant, session);
+        List<Long> origins = jdbc.query("SELECT x.owner_revision FROM ma_resource_ref x JOIN ma_session_journal_tx t"
+                        + " ON t.tenant_id = x.tenant_id AND t.workspace_id = x.workspace_id AND t.session_id = x.session_id"
+                        + " AND t.journal_revision = x.owner_revision WHERE x.resource_key = ? AND x.session_scope_key = ?"
+                        + " AND x.tenant_id = ? AND x.workspace_id = ? AND x.session_id = ? AND x.resource_id = ?"
+                        + " AND x.owner_kind = 'JOURNAL' AND x.owner_key = ? AND x.owner_revision = x.journal_revision"
+                        + " AND x.owner_revision <= ? ORDER BY x.owner_revision LIMIT 1",
+                (row, index) -> row.getLong(1), resourceKey(scope, resourceId), scope, tenant, workspace, session,
+                resourceId, scope, maximum);
+        return origins.isEmpty() ? null : origins.getFirst();
+    }
+
     private void commitResources(String scopeKey, String tenantId,
             String sessionId, CommitTransactionRequest request,
             long revision, Timestamp now,
@@ -2334,8 +2650,7 @@ public class ManagedSessionStore {
     /**
      * Converts the last activation.changed payload of a committed transaction, so the head row can
      * answer authorization reads without rescanning the journal. The payload was already parsed by
-     * the extension record pass of this commit. Text fields read with the same leniency as the
-     * authorization scans, so the two never disagree.
+     * the extension record pass of this commit.
      */
     private static ActivationChange activationChange(JsonNode payload) {
         if (payload == null) {

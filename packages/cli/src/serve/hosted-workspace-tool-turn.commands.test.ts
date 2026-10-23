@@ -1710,6 +1710,114 @@ it('bounds a member message with the member-message wrapper budget (b3c)', async
   expect(commands.command(commandIdOf('call-big'))).toBeUndefined();
 });
 
+it.each([
+  [
+    'bob',
+    'Hosted send_message to a member exceeds the 65536-byte inline Session Store limit once encoded (byte_limit) although it fits the 32768-byte member wrapper; shorten escape-dense content and retry.',
+  ],
+  [
+    '*',
+    'Hosted send_message to a member exceeds the 65536-byte inline Session Store limit once encoded (byte_limit) although it fits the 32768-byte member wrapper; shorten escape-dense content and retry.',
+  ],
+  [
+    'parent',
+    'Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.',
+  ],
+])(
+  'refuses an encoded message overflow to %s without opening a delivery (#14062)',
+  async (to, expectedError) => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+    );
+    const message = JSON.stringify(Array.from({ length: 6500 }, () => 'aa'));
+    const responses = await execute(createTurn(), [
+      call({ to, message }, 'call-dense', 'send_message'),
+    ]);
+    expect(responses).toEqual([
+      expect.objectContaining({
+        functionResponse: expect.objectContaining({
+          id: 'call-dense',
+          name: 'send_message',
+          response: expect.objectContaining({
+            error: expectedError,
+          }),
+        }),
+      }),
+    ]);
+    for (const domain of ['session_command', 'session_message'] as const)
+      expect(session.authority.extensionRecordsInDomain(domain)).toHaveLength(
+        0,
+      );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    const history = await session.sink.project();
+    expect(history.map((record) => record.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history[1].message?.parts).toEqual([
+      { functionResponse: responses[0].functionResponse },
+    ]);
+  },
+);
+
+// These direct-call cases isolate domain validation; the suite's permissive
+// transcript predicate does not prove that a real oversized record fits.
+it.each([
+  ['x'.repeat(65_536), 'once encoded (byte_limit)'],
+  ['x'.repeat(65_537), 'message exceeds 65536 bytes.'],
+  ['中'.repeat(21_846), 'message exceeds 65536 bytes.'],
+])(
+  'bounds member-to-parent UTF-8 content (#14062)',
+  async (message, reason) => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+    );
+    const responses = await execute(createTurn(), [
+      call({ to: 'parent', message }, 'call-raw', 'send_message'),
+    ]);
+    expect(texts(responses)).toContain(reason);
+    expect(
+      session.authority.extensionRecordsInDomain('session_message'),
+    ).toHaveLength(0);
+  },
+);
+
+it('preserves a recipient refusal when encoding also overflows (#14062)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const responses = await execute(createTurn(), [
+    call(
+      { to: 'alice', message: '"'.repeat(20_000) },
+      'call-self-dense',
+      'send_message',
+    ),
+  ]);
+  expect(texts(responses)).toContain(
+    'A member cannot send a message to itself',
+  );
+  expect(texts(responses)).not.toContain('once encoded');
+});
+
+it('refuses an initial command batch before opening any commands (#14062)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const responses = await execute(createTurn(), [
+    call({ to: 'bob', message: '"'.repeat(20_000) }, 'dense', 'send_message'),
+    call({}, 'board', 'task_list'),
+  ]);
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual([
+    'dense',
+    'board',
+  ]);
+  expect(texts(responses)).toContain('another call in the batch');
+  expect(
+    session.authority.extensionRecordsInDomain('session_command'),
+  ).toHaveLength(0);
+});
+
 it('refuses member messages in plan mode while the leader stays open (b3c)', async () => {
   await seedFirstInput(
     teamMemberPreamble({ name: 'alice', teamName: 'review' }, true) + 'work',

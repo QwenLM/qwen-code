@@ -57,10 +57,12 @@ import java.util.concurrent.ExecutorService;
  * succeed once this replica refreshes; past the budget that wait
  * is published as recovery_blocked with the
  * hosted_harness_generation_mismatch code), and the daemon's own
- * hosted_lifecycle_recovery_required refusal while it settles a
- * previous prompt (past the budget that wait is published as
- * recovery_blocked with its own code). A cwd change is settled
- * without Harness or worker involvement — a read-only mount probe
+ * recovery or busy refusal while it settles a previous prompt —
+ * hosted_lifecycle_recovery_required for its cleanup debt and
+ * hosted_turn_active while a turn, MCP call or hook is still
+ * draining (past the budget that wait is published as
+ * recovery_blocked with the refusal's own code). A cwd change is
+ * settled without Harness or worker involvement — a read-only mount probe
  * and one revision-CAS commit. A structural probe refusal or a
  * moved fact is a terminal failure that is never retried; a
  * momentary probe failure retries through the same dispatch
@@ -92,13 +94,14 @@ public class SessionLifecycleCoordinator {
     // unsettled, instead of wedging the Session behind the open-operation
     // barrier forever (review round 9, R9-4).
     private static final int SETTLED_COMPLETION_BUDGET_FACTOR = 4;
-    // The daemon refuses a lifecycle phase until the cleanup debt of a
-    // previous prompt is settled. That refusal names its own wait: the
-    // debt clears through the daemon's recovery, not by anything the
-    // caller changes, so it must neither be read as a permanent hook
-    // refusal nor spend the close's retry budget.
-    private static final String HOSTED_LIFECYCLE_RECOVERY_REQUIRED =
-            "hosted_lifecycle_recovery_required";
+    // The daemon refuses a lifecycle phase while it is still busy with the
+    // previous prompt: hosted_lifecycle_recovery_required names its cleanup
+    // debt, and hosted_turn_active names a turn, MCP call or hook that is
+    // still draining. Both clear through the daemon's own work, not by
+    // anything the caller changes, so neither is a permanent hook refusal
+    // or spends the close's retry budget.
+    private static final Set<String> SELF_CLEARING_DAEMON_REFUSALS =
+            Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active");
     private final AgentStateStore store;
     private com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore lifecycle;
 
@@ -278,7 +281,7 @@ public class SessionLifecycleCoordinator {
             // original worker can change; it keeps its failure code through
             // every attempt and through the terminal record.
             String blocked = null;
-            boolean hostedRecoveryWait = false;
+            String daemonWaitCode = null;
             String failureCode = "session_lifecycle_delivery_failed";
             if (cause instanceof HostedHarnessCapabilityMismatchException mismatch) {
                 failureCode = mismatch.getCode();
@@ -302,9 +305,10 @@ public class SessionLifecycleCoordinator {
             if ((cause instanceof DaemonHttpException
                     || cause instanceof com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException)
                     && operationIsLifecycle(claimed)) {
-                if (HOSTED_LIFECYCLE_RECOVERY_REQUIRED.equals(
-                        daemonRefusalCode(cause))) {
-                    hostedRecoveryWait = true;
+                String refusal = daemonRefusalCode(cause);
+                if (refusal != null
+                        && SELF_CLEARING_DAEMON_REFUSALS.contains(refusal)) {
+                    daemonWaitCode = refusal;
                 } else {
                     blocked = cause instanceof DaemonHttpException httpError
                             && httpError.getErrorCode() != null
@@ -327,12 +331,13 @@ public class SessionLifecycleCoordinator {
             // Harness — the connector adopts the new generation on that
             // signal (G3), so the next attempt renegotiates and the close
             // can still succeed; only a Harness that restarts between every
-            // attempt keeps the wait alive — and the daemon's recovery
-            // refusal while it settles the previous prompt, which clears
-            // through its own recovery rather than by this retry changing
-            // anything. All three reschedule through the budget-exempt
-            // baseline, and past the budget all three are published as
-            // recovery_blocked with their own code: an unbounded wait has
+            // attempt keeps the wait alive — and the daemon's recovery or
+            // busy refusal while it settles the previous prompt, which
+            // clears through its own work rather than by this retry
+            // changing anything. All three reschedule through the
+            // budget-exempt baseline, and past the budget all three are
+            // published as recovery_blocked with their own code: an
+            // unbounded wait has
             // to stay visible, because none of these rows is otherwise
             // distinguishable from a healthy pending retry.
             // A cwd change never reaches settle(): the close-specific
@@ -370,7 +375,7 @@ public class SessionLifecycleCoordinator {
                             * SETTLED_COMPLETION_BUDGET_FACTOR
                     : adjustedAttempts >= maxOperationRetries;
             if (!cwdChange && budgetSpent && valid.get() && !exemptWait
-                    && !staleBoot && !hostedRecoveryWait) {
+                    && !staleBoot && daemonWaitCode == null) {
                 String terminalCode = settleReachedHarness
                         ? "session_close_completion_unsettled" : failureCode;
                 if (writerLive) {
@@ -509,17 +514,17 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         "hosted_harness_generation_mismatch",
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get() && hostedRecoveryWait
+            } else if (valid.get() && daemonWaitCode != null
                     && claimed.attemptCount() >= maxOperationRetries) {
-                // The daemon's recovery wait is published the same way: the
-                // row reads recovery_blocked with the daemon's own code and
+                // The daemon's wait is published the same way: the row
+                // reads recovery_blocked with the refusal's own code and
                 // the recovery scan still re-drives it, so the close resumes
-                // once the daemon has settled the prompt it owed.
+                // once the daemon has settled the work it owed.
                 store.blockLifecycleOperation(tenantId, sessionId,
                         operationId, owner, claimed.claimGeneration(),
-                        HOSTED_LIFECYCLE_RECOVERY_REQUIRED,
+                        daemonWaitCode,
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get() && (exemptWait || staleBoot || hostedRecoveryWait)) {
+            } else if (valid.get() && (exemptWait || staleBoot || daemonWaitCode != null)) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(),
                         Math.addExact(clock.millis(), delay), true);
@@ -745,9 +750,14 @@ public class SessionLifecycleCoordinator {
                 try {
                     harness.prepareLifecycleResources(operation);
                     if (com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.SHELL.equals(profile)) {
-                        runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
-                                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.authority(operation))
-                                .toCompletableFuture().join();
+                        var authority = com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.authority(operation);
+                        if (store.hasMcpServers(session)) {
+                            runtimeWarmer.prepareWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
+                                    .toCompletableFuture().join();
+                        } else {
+                            runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
+                                    .toCompletableFuture().join();
+                        }
                     }
                     harness.settleLifecycleResources(operation);
                     runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),

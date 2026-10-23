@@ -80,7 +80,7 @@ async function makeApp(
   const app = express();
   const credentials = new CredentialStore(options.token);
   credentials.addPairingToken('device', 'pairing');
-  credentials.addWebShellToken('web-shell-device');
+  credentials.addWebShellToken('paired-device', 'web-shell-device');
   app.use((req, res, next) => {
     if (options.secondary)
       tagListener(
