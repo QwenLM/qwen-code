@@ -292,7 +292,7 @@ public class WorkspaceProfileLifecycleVerifier {
             byte[] payload = input.path("payloadJson").textValue().getBytes(StandardCharsets.UTF_8);
             JsonNode call = ToolPublicationContract.readJson(payload);
             if (call.size() == 2 && call.path("input").isObject()
-                    && List.of("read_file", "write_file", "edit", "glob", "managed_mcp_call").contains(call.path("toolName").asText())) {
+                    && List.of("read_file", "write_file", "edit", "glob", "web_fetch", "managed_mcp_call").contains(call.path("toolName").asText())) {
                 inputs.add(input.path("runtimeSessionId").textValue() + ":sha256:" + ToolPublicationContract.sha256(payload));
             }
         }
