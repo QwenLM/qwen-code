@@ -3425,6 +3425,23 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     expectCompressed(result);
   });
 
+  it('drops a summary cut off mid-snapshot after an analysis that quotes a whole example snapshot', async () => {
+    // Without setting closed <analysis> blocks aside, the example's closing
+    // tag would stand in for the one the real snapshot never wrote.
+    mockVllmBackend(WINDOW, false, {
+      text:
+        '<analysis>The format is <state_snapshot>...</state_snapshot>.</analysis>\n' +
+        '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+    });
+
+    const result = await compressChars(182_000, 45_000);
+
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+  });
+
   it('keeps a complete summary that uses no snapshot tags', async () => {
     mockVllmBackend(WINDOW, false, { text: 'Goal: port the parser. Done.' });
 
@@ -3731,6 +3748,26 @@ describe('issue #9455: compression requests fit the receiving window', () => {
 
     expectCompressed(result);
     expect(result.info.newTokenCount).toBeLessThan(10_000);
+  });
+
+  it('names a reduced request as the reason it estimates the post-compression count', async () => {
+    // The provider's usage describes the reduced request, not the history
+    // it replaces, so it is set aside on purpose; the log says so instead of
+    // reporting it missing.
+    const logger = { warn: vi.fn(), debug: vi.fn() };
+    (
+      mockConfig as unknown as { getDebugLogger: () => typeof logger }
+    ).getDebugLogger = () => logger;
+    mockBackend();
+    const history = toolSession(60, 12_000);
+
+    await compressHistory(history, estimateContentTokens(history) + 1_000);
+
+    const lines = logger.debug.mock.calls.map((args) => String(args[0]));
+    expect(lines.some((l) => l.includes('reduced compression request'))).toBe(
+      true,
+    );
+    expect(lines.some((l) => l.includes('usage metadata missing'))).toBe(false);
   });
 
   it('fails locally with INPUT_TOO_LARGE when nothing fits the window', async () => {

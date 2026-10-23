@@ -9,6 +9,7 @@ import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { stripSystemReminderBlocks } from '../core/environmentContext.js';
+import { escapeUserMessageTags } from '../utils/xml.js';
 import {
   MCP_RESOURCE_HEADER_PREFIX,
   opensAttachedContent,
@@ -569,6 +570,9 @@ export function condenseToUserMessages(
   maxChars: number,
   imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
 ): Content[] | undefined {
+  // The kept turns are first chosen to leave the quotes a quarter of the room
+  // (a share of characters, not a chars-to-tokens conversion), up to the total
+  // cap; the quotes then take whatever the kept turns actually leave.
   const quoteBudget = Math.min(
     CONDENSED_USER_MESSAGES_MAX_CHARS,
     Math.floor(maxChars / 4),
@@ -735,7 +739,9 @@ function keptTurnsStart(
 // carries both (input steered in while tools ran) still contributes its text.
 // Injected `<system-reminder>` blocks ride user turns too but are not the
 // user's words; left in, they can fill a capped quote ahead of the prompt.
-// Attached content is named, not quoted: it is not what the user said.
+// Attached content is named, not quoted: it is not what the user said. Tags
+// that would close a quote's envelope or open another are escaped here, before
+// any quote is measured, so the budgets count the escaped text.
 function userMessageTexts(history: Content[]): string[] {
   const texts: string[] = [];
   for (const content of history) {
@@ -749,9 +755,11 @@ function userMessageTexts(history: Content[]): string[] {
         .map((part) => part.text)
         .join('\n'),
     ).trim();
-    const text = [typed, attachedContentNote(parts.slice(attachedFrom))]
-      .filter(Boolean)
-      .join('\n');
+    const text = escapeUserMessageTags(
+      [typed, attachedContentNote(parts.slice(attachedFrom))]
+        .filter(Boolean)
+        .join('\n'),
+    );
     if (text) texts.push(text);
   }
   return texts;

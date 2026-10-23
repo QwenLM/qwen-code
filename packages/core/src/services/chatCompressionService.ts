@@ -1726,7 +1726,9 @@ export class ChatCompressionService {
               `[chat-compression] ${
                 usedCacheSharing
                   ? 'cache-sharing token accounting'
-                  : 'usage metadata missing'
+                  : coldInputReduced
+                    ? 'reduced compression request'
+                    : 'usage metadata missing'
               }; estimated ` +
                 `post-compression token count by preserving the ` +
                 `API-reported non-visible remainder ` +

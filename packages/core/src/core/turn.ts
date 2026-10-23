@@ -492,8 +492,9 @@ export enum CompressionStatus {
   /**
    * The compression request could not leave the summary a usable output
    * budget in the receiving model's window, even after tool output was
-   * truncated and older turns were condensed to the user's messages, so it
-   * was not sent (#9455).
+   * truncated and older turns were condensed to the user's messages (#9455).
+   * Either it was refused before it was sent, or the provider rejected it for
+   * context length and no retry would fit, so the retry was not sent.
    */
   COMPRESSION_FAILED_INPUT_TOO_LARGE,
 }
