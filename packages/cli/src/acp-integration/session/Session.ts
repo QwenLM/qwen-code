@@ -17,7 +17,13 @@ import {
   LoopReason,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
-import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import {
+  INCOMPLETE_ARGS_EDIT_REJECTION,
+  isToolCallConcurrencySafe,
+  TRUNCATION_EDIT_REJECTION,
+} from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
+import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
@@ -2731,6 +2737,13 @@ export class Session implements SessionContext {
     string,
     Promise<{ recordId: string; created: boolean; deferred?: boolean }>
   >();
+
+  /**
+   * Model calls from a response the output limit cut off — the facts
+   * `turn.ts` puts on `wasOutputTruncated`. This executor bypasses the
+   * scheduler, so `runTool` applies the scheduler's partial-edit guard itself.
+   */
+  readonly #outputTruncatedCalls = new WeakSet<FunctionCall>();
 
   /**
    * Call ids of the ask_user_question being re-hung by the current restore
@@ -9767,10 +9780,14 @@ export class Session implements SessionContext {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       return { responseStream: null, stopReason: 'end_turn' };
     }
+    const outputTruncatedCalls = this.#outputTruncatedCalls;
     const responseStream = (async function* () {
       let committed = false;
       let receivedChunk = false;
       let memoryDeliveryStateInvalidated = false;
+      // As in `turn.ts`: a max-tokens finish marks the calls of the current
+      // attempt, and a retry or fallback starts a new attempt.
+      let attemptCalls: FunctionCall[] = [];
       const commitMemoryDelivery = () => {
         llmClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
         if (memoryDeliveryStateInvalidated) {
@@ -9782,6 +9799,13 @@ export class Session implements SessionContext {
         for await (const event of sourceStream) {
           if (event.type === StreamEventType.CHUNK) {
             receivedChunk = true;
+            attemptCalls.push(...(event.value.functionCalls ?? []));
+            if (
+              event.value.candidates?.[0]?.finishReason ===
+              FinishReason.MAX_TOKENS
+            ) {
+              for (const call of attemptCalls) outputTruncatedCalls.add(call);
+            }
           } else if (event.type === StreamEventType.COMPRESSED) {
             llmClient.resetManagedAutoMemoryAfterCompression();
             memoryDeliveryStateInvalidated = true;
@@ -9790,6 +9814,7 @@ export class Session implements SessionContext {
             event.type === StreamEventType.MODEL_FALLBACK
           ) {
             receivedChunk = false;
+            attemptCalls = [];
           }
           yield event;
         }
@@ -15309,6 +15334,31 @@ export class Session implements SessionContext {
             {
               status: 'error',
               errorType: ToolErrorType.EXECUTION_DENIED,
+              executionStatus: 'not_started',
+            },
+          );
+        }
+
+        // ---- Partial edit: the scheduler's guard, at the scheduler's step ----
+        // Repaired arguments can be schema-valid and still hold only part of
+        // the content, so an Edit-kind call is refused instead of written.
+        const outputTruncated = this.#outputTruncatedCalls.has(fc);
+        if (
+          (outputTruncated || toolCallArgumentsWereIncomplete(fc)) &&
+          tool.kind === Kind.Edit
+        ) {
+          return earlyErrorResponse(
+            new Error(
+              outputTruncated
+                ? TRUNCATION_EDIT_REJECTION
+                : INCOMPLETE_ARGS_EDIT_REJECTION,
+            ),
+            toolName,
+            {
+              status: 'error',
+              errorType: outputTruncated
+                ? ToolErrorType.OUTPUT_TRUNCATED
+                : ToolErrorType.INVALID_TOOL_PARAMS,
               executionStatus: 'not_started',
             },
           );

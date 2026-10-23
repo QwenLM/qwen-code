@@ -508,7 +508,7 @@ const TRUNCATION_PARAM_GUIDANCE =
   'first write_file with a skeleton/partial content, ' +
   'then use edit to add the remaining sections incrementally.';
 
-const TRUNCATION_EDIT_REJECTION =
+export const TRUNCATION_EDIT_REJECTION =
   'Your previous response was truncated due to max_tokens limit, ' +
   'which produced incomplete file content. ' +
   'The tool call has been rejected to prevent writing ' +
@@ -534,7 +534,7 @@ const INCOMPLETE_ARGS_PARAM_GUIDANCE =
   "particular, do not nest one call's argument object inside another's.";
 
 /** Edit rejection when the output limit was *not* the cause. */
-const INCOMPLETE_ARGS_EDIT_REJECTION =
+export const INCOMPLETE_ARGS_EDIT_REJECTION =
   "This tool call's arguments arrived incomplete, so the file content would " +
   'have been partial. The response did not come close to the max_tokens limit, ' +
   'so this was malformed generation rather than truncation. The tool call has ' +
