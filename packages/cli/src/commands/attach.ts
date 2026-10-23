@@ -21,7 +21,8 @@ import {
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { listenerIdentityVerified } from './daemon.js';
+import { ignoreBrokenPipe, writeStderrLine } from '../utils/stdioHelpers.js';
 
 interface AttachArgs {
   port?: number;
@@ -54,10 +55,20 @@ export function selectAttachRecord(
 export function resolveAttachToken(
   record: DaemonDiscoveryRecord,
   explicit: string | undefined,
+  identityVerified: (
+    record: DaemonDiscoveryRecord,
+  ) => boolean = listenerIdentityVerified,
 ): { token?: string; error?: string } {
   if (record.auth !== 'bearer') return {};
+  const explicitToken = explicit?.trim();
+  if (explicitToken) return { token: explicitToken };
+  if (!identityVerified(record)) {
+    return {
+      error:
+        'listener identity unverified; not sending an ambient bearer token',
+    };
+  }
   const token =
-    explicit?.trim() ||
     process.env['QWEN_SERVER_TOKEN']?.trim() ||
     readDaemonToken(record.port, record.pid);
   return token
@@ -78,6 +89,7 @@ export function resolveAttachWorkspace(
 }
 
 async function handleAttach(argv: AttachArgs): Promise<void> {
+  ignoreBrokenPipe();
   const target = selectAttachRecord(readDaemonDiscoveries().entries, argv.port);
   if (!target.record) {
     writeStderrLine(`qwen attach: ${target.error}`);
@@ -94,7 +106,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
 
   const client = new DaemonClient({
     baseUrl: target.record.url,
-    token: resolved.token,
+    token: resolved.token ?? '',
   });
   let session: DaemonSessionClient;
   try {
@@ -118,6 +130,9 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   }
 
   let atLineStart = true;
+  let terminalClosed = false;
+  let promptInFlight = 0;
+  let notifyTurnSettled: () => void = () => {};
   const writeText = (text: string): void => {
     const safe = sanitizeTerminalText(text);
     if (safe.length === 0) return;
@@ -130,6 +145,10 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     atLineStart = true;
   };
   const renderEvent = (event: DaemonEvent): void => {
+    if (event.type === 'turn_complete' || event.type === 'turn_error') {
+      endLine();
+      notifyTurnSettled();
+    }
     for (const item of normalizeDaemonEvent(event, {
       clientId: session.clientId,
       suppressOwnUserEcho: true,
@@ -139,9 +158,10 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
         item.type === 'thought.text.delta'
       ) {
         writeText(item.text);
-      } else if (item.type === 'assistant.done') {
+      } else if (item.type === 'prompt.cancelled') {
         endLine();
       } else if (item.type === 'permission.request') {
+        endLine();
         const title = sanitizeTerminalText(item.title);
         const options = item.options
           .map((option) => sanitizeTerminalText(option.label))
@@ -150,6 +170,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
           `qwen attach: approval required: ${title}. Approve in Web Shell.${options ? ` Options: ${options}` : ''}`,
         );
       } else if (item.type === 'error') {
+        endLine();
         writeStderrLine(`qwen attach: ${sanitizeTerminalText(item.text)}`);
       }
     }
@@ -162,7 +183,6 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   endLine();
 
   const subscriptionAbort = new AbortController();
-  let terminalClosed = false;
   let shuttingDown = false;
   const iterator = session.events({ signal: subscriptionAbort.signal });
   const eventsDone = (async () => {
@@ -189,6 +209,9 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     output: process.stdout,
     terminal: true,
   });
+  notifyTurnSettled = (): void => {
+    if (!terminalClosed && promptInFlight === 0) rl.prompt();
+  };
   const shutdown = (): void => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -207,6 +230,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
       rl.prompt();
       return;
     }
+    promptInFlight += 1;
     void session
       .prompt({ prompt: [{ type: 'text', text }] })
       .catch((error: unknown) => {
@@ -219,6 +243,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
         }
       })
       .finally(() => {
+        promptInFlight -= 1;
         if (!terminalClosed) {
           endLine();
           rl.prompt();
@@ -236,6 +261,9 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     process.removeListener('SIGINT', shutdown);
     rl.close();
     void iterator.return(undefined).catch(() => {});
+    if (!session.hasActivePrompt && promptInFlight === 0) {
+      await session.detach().catch(() => {});
+    }
   }
 }
 

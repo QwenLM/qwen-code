@@ -22,13 +22,14 @@ qwen attach --session <session-id> [--port <port>] [--workspace <path>] [--token
 - Load the session with `DaemonSessionClient.load`, passing the target workspace when it is known.
 - Render the load replay snapshot (`compactedReplay` and `liveJournal`) before starting the SSE subscription, so history and an in-flight turn are visible on attach.
 - Subscribe to `GET /session/:id/events` before accepting stdin, so model-switch, lifecycle, and prompt response events are not missed.
-- Render sanitized `assistant.text.delta` and `thought.text.delta` to stdout; `assistant.done` and prompt settlement end the line; normalized errors go to stderr.
+- Render sanitized `assistant.text.delta` and `thought.text.delta` to stdout; turn settlement (`turn_complete`/`turn_error`) and prompt settlement end the line; normalized errors go to stderr.
 - Each non-empty stdin line is sent as a single text content block through `POST /session/:id/prompt`.
-- Ctrl+C or Ctrl+D closes the local subscription and exits without closing the daemon session. Detaching does not cancel a prompt the daemon has already accepted; an in-flight turn continues server-side.
+- Ctrl+C or Ctrl+D closes the local subscription and exits without closing the daemon session. Detaching does not cancel an already accepted prompt; an in-flight turn continues server-side. When no turn is in flight, exit releases this client's daemon registration.
 
 ## Security
 
 - The token is resolved from the explicit flag, the environment, or the pid-scoped sidecar; it is never printed.
+- Ambient `QWEN_SERVER_TOKEN` and sidecar tokens are sent only after `listenerIdentityVerified` confirms the recorded daemon owns the listener; an explicit `--token` is operator-supplied and remains allowed. An `auth: none` daemon is never sent an ambient token.
 - Assistant, thought, permission, and error text is passed through `sanitizeTerminalText` before terminal output, so model-provided escape sequences cannot clear the screen or write the clipboard.
 - The command uses the SDK's bearer-aware HTTP/SSE transport, so redirects and daemon auth follow the existing client contract.
 

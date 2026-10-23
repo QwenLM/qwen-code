@@ -86,16 +86,23 @@ describe('qwen attach token resolution', () => {
   });
 
   it('uses the explicit token for a bearer daemon', () => {
-    expect(resolveAttachToken(bearer(), '  secret  ')).toEqual({
+    expect(resolveAttachToken(bearer(), '  secret  ', () => false)).toEqual({
       token: 'secret',
     });
   });
 
   it('falls back to QWEN_SERVER_TOKEN', () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', '  env-secret  ');
-    expect(resolveAttachToken(bearer(), undefined)).toEqual({
+    expect(resolveAttachToken(bearer(), undefined, () => true)).toEqual({
       token: 'env-secret',
     });
+  });
+
+  it('refuses an ambient token for an unverified listener', () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-secret');
+    const result = resolveAttachToken(bearer(), undefined, () => false);
+    expect(result.token).toBeUndefined();
+    expect(result.error).toContain('unverified');
   });
 
   it('reads the pid-scoped sidecar written by daemon start --save-token', () => {
@@ -104,7 +111,7 @@ describe('qwen attach token resolution', () => {
     try {
       const record = bearer();
       writeDaemonToken(record.port, record.pid, 'sidecar-secret');
-      expect(resolveAttachToken(record, undefined)).toEqual({
+      expect(resolveAttachToken(record, undefined, () => true)).toEqual({
         token: 'sidecar-secret',
       });
     } finally {
@@ -113,7 +120,7 @@ describe('qwen attach token resolution', () => {
   });
 
   it('explains how to supply a missing bearer token', () => {
-    const result = resolveAttachToken(bearer(), undefined);
+    const result = resolveAttachToken(bearer(), undefined, () => true);
     expect(result.token).toBeUndefined();
     expect(result.error).toContain('--token');
     expect(result.error).toContain('QWEN_SERVER_TOKEN');
