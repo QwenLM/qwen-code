@@ -439,7 +439,7 @@ public final class JdbcCsiExecutionAdmission {
                                     && "checkpoint.committed".equals(value.path("managedSession").path("kind").textValue()))
                             .findFirst().orElseThrow(JdbcCsiExecutionAdmission::unavailable);
                     JsonNode ref = record.path("managedSession").path("payload").path("stateRef");
-                    JsonNode state = CsiNativeActivationProof.readObject(JdbcCsiActivationAdmission.resource(connection, original, ref, revision, read));
+                    JsonNode state = CsiNativeActivationProof.readCheckpoint(ref, JdbcCsiActivationAdmission.checkpointReader(connection, original, revision, read));
                     boolean contains = false;
                     boolean allInProgress = true;
                     for (JsonNode item : state.path("tools").path("items")) {

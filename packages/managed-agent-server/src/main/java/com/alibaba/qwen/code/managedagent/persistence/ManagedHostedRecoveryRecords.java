@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.HttpStatus;
 
@@ -17,6 +18,10 @@ import java.util.function.Function;
 public final class ManagedHostedRecoveryRecords {
     public static final Set<String> KINDS = Set.of("hosted-approval-continuation",
             "hosted-model-request", "hosted-turn-cleanup");
+
+    public interface HistoricalResources extends Function<String, StoredResource> {
+        void checkpointHistory(JsonNode ref);
+    }
 
     private ManagedHostedRecoveryRecords() {}
 
@@ -149,7 +154,11 @@ public final class ManagedHostedRecoveryRecords {
                     && stored.schemaVersion() == node.get("schemaVersion").asInt()
                     && stored.byteLength() == node.get("byteLength").asLong()
                     && stored.digest().equals(node.get("digest").asText()), "Hosted nested resource conflicts.");
-            if (KINDS.contains(stored.kind()) || List.of("managed-action-options", "managed-checkpoint", "managed-definition",
+            if (ManagedCheckpointHistory.KIND.equals(stored.kind()) && resources instanceof HistoricalResources historical) {
+                historical.checkpointHistory(node);
+                return;
+            }
+            if (KINDS.contains(stored.kind()) || List.of("managed-action-options", "managed-checkpoint", ManagedCheckpointHistory.KIND, "managed-definition",
                     "managed-hook-plan", "managed-hook-message-chunks", "managed-message-chunks").contains(stored.kind())
                     || ManagedExtensionRecords.DOMAINS.stream().anyMatch(domain -> ("managed-" + domain).equals(stored.kind()))) {
                 JsonNode body = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
@@ -215,13 +224,36 @@ public final class ManagedHostedRecoveryRecords {
             return;
         }
         boolean model = "hosted-model-request".equals(kind);
-        ManagedExtensionRecords.closed(body, model
+        Set<String> fields = new HashSet<>(model
                 ? Set.of("v", "sessionKey", "promptId", "definitionRef", "rootSnapshotRef", "sourceActivation",
                         "sourceBootId", "sourceEventEpoch", "messageId", "round", "throughSequence",
                         "pendingToolResults", "workspaceContext", "prepared", "requestDigest")
                 : Set.of("v", "sessionKey", "promptId", "definitionRef", "rootSnapshotRef", "sourceActivation",
-                        "runtime", "batchId", "assistantRef", "model", "round", "stage", "approvalOrdinal", "actionId", "calls"),
-                "Hosted recovery descriptor");
+                        "runtime", "batchId", "assistantRef", "model", "round", "stage", "approvalOrdinal", "actionId", "calls"));
+        if (!model && body.has("publicChildModel")) {
+            fields.add("publicChildModel");
+            JsonNode child = body.get("publicChildModel");
+            ManagedExtensionRecords.closed(child, Set.of("modelId", "route"), "public child model");
+            ManagedExtensionRecords.id(child.get("modelId"), "modelId");
+            JsonNode route = child.get("route");
+            Set<String> routeFields = new HashSet<>(Set.of("authType", "endpointDigest", "providerPin"));
+            if (route.has("origin")) {
+                routeFields.add("origin");
+                JsonNode origin = route.get("origin");
+                ManagedExtensionRecords.closed(origin, Set.of("modelId", "authType", "endpointDigest", "providerPin"), "public child model origin");
+                ManagedExtensionRecords.id(origin.get("modelId"), "modelId");
+                require(origin.path("authType").isTextual() && origin.path("authType").asText().matches("[a-z][a-z0-9_-]{0,63}"), "Invalid public child origin auth type.");
+                for (String hash : List.of("endpointDigest", "providerPin")) {
+                    require(origin.path(hash).isTextual() && origin.path(hash).asText().matches("[a-f0-9]{64}"), "Invalid public child origin digest.");
+                }
+            }
+            ManagedExtensionRecords.closed(route, routeFields, "public child route");
+            require(route.path("authType").isTextual() && route.path("authType").asText().matches("[a-z][a-z0-9_-]{0,63}"), "Invalid public child auth type.");
+            for (String hash : List.of("endpointDigest", "providerPin")) {
+                require(route.path(hash).isTextual() && route.path(hash).asText().matches("[a-f0-9]{64}"), "Invalid public child route digest.");
+            }
+        }
+        ManagedExtensionRecords.closed(body, fields, "Hosted recovery descriptor");
         JsonNode source = body.get("sourceActivation");
         ManagedExtensionRecords.closed(source, Set.of("activationId", "epoch"), "source activation");
         ManagedExtensionRecords.id(source.get("activationId"), "activationId");
@@ -276,8 +308,16 @@ public final class ManagedHostedRecoveryRecords {
             require(body.path("calls").isArray() && !body.path("calls").isEmpty(), "Native batch is empty.");
             ManagedExtensionRecords.count(body.get("approvalOrdinal"), 0, body.path("calls").size() - 1, "approvalOrdinal");
             for (JsonNode call : body.get("calls")) {
-                ManagedExtensionRecords.closed(call, Set.of("call", "runtimeCallId", "inputRef", "definitionRef",
-                        "requestDigest", "argsDigest", "prepareKey", "prepareReference", "partIndex", "refusal", "actionId"), "native batch member");
+                Set<String> callFields = new HashSet<>(Set.of("call", "runtimeCallId", "inputRef", "definitionRef",
+                        "requestDigest", "argsDigest", "prepareKey", "prepareReference", "partIndex", "refusal", "actionId"));
+                if (body.has("publicChildModel") && call.has("publicationId")) {
+                    callFields.add("publicationId");
+                    require("run_shell_command".equals(call.path("call").path("name").asText())
+                            && (call.get("publicationId").isNull() || (call.get("publicationId").isTextual()
+                                    && call.get("publicationId").asText().matches("[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"))),
+                            "Invalid public Shell publication identity.");
+                }
+                ManagedExtensionRecords.closed(call, callFields, "native batch member");
                 ManagedExtensionRecords.durableRef(call.get("inputRef"), "inputRef");
                 ManagedExtensionRecords.durableRef(call.get("definitionRef"), "definitionRef");
             }

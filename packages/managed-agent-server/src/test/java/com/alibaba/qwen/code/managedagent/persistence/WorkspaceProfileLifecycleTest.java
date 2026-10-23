@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Clock;
@@ -79,6 +80,69 @@ class WorkspaceProfileLifecycleTest {
         assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.RenewWriterRequest("workspace", "cleanup", writer.writerGeneration(), 60_000L))))
                 .isInstanceOf(ManagedAgentException.class);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"hosted-workspace-shell/1,CLOSE", "hosted-workspace-shell/1,DELETE",
+            "hosted-workspace-mcp/1,CLOSE", "hosted-workspace-mcp/1,DELETE"})
+    void initialAdmissionPreservesTheLiveWriterForOneHandoff(String profile, OperationKind kind) {
+        var f = fixture();
+        var journal = new ManagedSessionStore(f.jdbc);
+        String token = "w".repeat(32);
+        var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, token,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 1000L)));
+        long original = writer.leaseUntil();
+        var operation = admit(f, profile, kind);
+        long retained = f.jdbc.queryForObject("SELECT writer_lease_until FROM ma_session_head", Long.class);
+        assertThat(retained).isGreaterThan(original + 30_000);
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, token,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "resident", writer.writerGeneration(), 60_000L))))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced"));
+        var replay = f.transactions.execute(ignored -> f.store.beginWorkspaceLifecycle("tenant", f.session, kind,
+                "owner", "a".repeat(64), "operation", "digest", true, 2));
+        assertThat(replay.replayed()).isTrue();
+        assertThat(f.jdbc.queryForObject("SELECT writer_lease_until FROM ma_session_head", Long.class)).isEqualTo(retained);
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(3)).until(() ->
+                f.jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class) > original);
+        var authority = WorkspaceLifecycleStore.authority(operation);
+        var renewed = f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, token,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "resident", writer.writerGeneration(), 60_000L), authority));
+        assertThat(renewed.writerGeneration()).isEqualTo(writer.writerGeneration());
+        assertThat(renewed.journalRevision()).isEqualTo(writer.journalRevision());
+        f.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle("tenant", f.session, token,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "resident", writer.writerGeneration(),
+                        kind.name().toLowerCase(java.util.Locale.ROOT)), authority));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2})
+    void admissionNeverRevivesAnExpiredWriter(int protocol) {
+        var f = fixture();
+        var journal = new ManagedSessionStore(f.jdbc);
+        f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "expired", 60_000L)));
+        f.jdbc.update("UPDATE ma_session_head SET writer_lease_until = 0");
+        f.jdbc.update("UPDATE ma_session SET tool_profile = ?", protocol == 2 ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.FILES);
+        f.transactions.execute(ignored -> f.store.beginWorkspaceLifecycle("tenant", f.session, OperationKind.CLOSE,
+                "owner", "a".repeat(64), "close", "digest", true, protocol));
+        assertThat(f.jdbc.queryForObject("SELECT writer_lease_until FROM ma_session_head", Long.class)).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
+    void newClaimsNeverRefreshTheAdmissionHandoff(String profile) {
+        var f = fixture();
+        var journal = new ManagedSessionStore(f.jdbc);
+        f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 1000L)));
+        var first = admit(f, profile, OperationKind.CLOSE);
+        long retained = f.jdbc.queryForObject("SELECT writer_lease_until FROM ma_session_head", Long.class);
+        f.transactions.execute(ignored -> f.store.renewLifecycleOperation("tenant", f.session, first.operationId(),
+                first.leaseOwner(), first.claimGeneration(), Duration.ofSeconds(30)));
+        f.jdbc.update("UPDATE ma_operation SET claim_until = 0");
+        f.transactions.execute(ignored -> f.store.claimOperation("tenant", f.session, first.operationId(),
+                "next-server", Duration.ofSeconds(30)).orElseThrow());
+        assertThat(f.jdbc.queryForObject("SELECT writer_lease_until FROM ma_session_head", Long.class)).isEqualTo(retained);
     }
 
     @ParameterizedTest
@@ -216,14 +280,16 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"read_file", "write_file", "edit", "glob", "wrong_digest", "wrong_runtime", "wrong_harness",
+    @ValueSource(strings = {"read_file", "write_file", "edit", "glob", "web_fetch", "wrong_digest", "wrong_runtime", "wrong_harness",
             "shell", "v3", "publication", "unreferenced", "corrupt", "unsettled"})
     void shellProfileNativeFileInputsRequireOriginalIdentityAndKnownSettlement(String mode) throws Exception {
         var f = fixture();
         var binding = f.bindings.findOrCreate(new RuntimeProvisionRequest(f.scope(), f.session));
-        String tool = java.util.List.of("read_file", "write_file", "edit", "glob").contains(mode) ? mode
+        String tool = java.util.List.of("read_file", "write_file", "edit", "glob", "web_fetch").contains(mode) ? mode
                 : "shell".equals(mode) ? "run_shell_command" : "read_file";
-        String payload = f.json.writeValueAsString(Map.of("toolName", tool, "input", Map.of("file_path", "proof.txt")));
+        Map<String, String> input = "web_fetch".equals(tool)
+                ? Map.of("url", "https://example.com/docs", "prompt", "Summarize") : Map.of("file_path", "proof.txt");
+        String payload = f.json.writeValueAsString(Map.of("toolName", tool, "input", input));
         String requestDigest = "sha256:" + ("wrong_digest".equals(mode) ? "a".repeat(64)
                 : ToolPublicationContract.sha256(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         var reference = new java.util.HashMap<String, Object>(Map.of("sessionId", "original-owner", "promptId", "turn-1",
@@ -256,7 +322,7 @@ class WorkspaceProfileLifecycleTest {
                 beans.getBeanProvider(ManagedToolResultStore.class));
         Runnable verify = () -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation,
                 java.util.List.of(binding), WorkspaceToolProfiles.SHELL));
-        if (java.util.List.of("read_file", "write_file", "edit", "glob").contains(mode)) {
+        if (java.util.List.of("read_file", "write_file", "edit", "glob", "web_fetch").contains(mode)) {
             verify.run();
         } else {
             assertThatThrownBy(verify::run).isInstanceOf(ManagedAgentException.class);

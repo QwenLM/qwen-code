@@ -5,21 +5,29 @@
  */
 
 import { isDeepStrictEqual } from 'node:util';
-import { MOD_TIMEOUT_MS, MOD_MAX_BYTES } from './types.js';
+import { MOD_TIMEOUT_MS, MOD_MAX_BYTES, MOD_MAX_DEPTH } from './types.js';
 import {
   validateToolInput,
   validToolResult,
   validToolCheck,
 } from './tool-events.js';
 
-export type ModEvent =
-  | 'session.start'
-  | 'session.end'
-  | 'command.run'
-  | 'command.register'
-  | 'tool.call'
-  | 'tool.check'
-  | 'ui.log';
+export const MOD_METHODS = [
+  'command.register',
+  'session.version',
+  'ui.log',
+] as const;
+export const MOD_EVENTS = [
+  'command.register',
+  'command.run',
+  'session.end',
+  'session.start',
+  'session.version',
+  'tool.call',
+  'tool.check',
+  'ui.log',
+] as const;
+export type ModEvent = (typeof MOD_EVENTS)[number];
 export type ModInput = Record<string, unknown>;
 export interface ModFrame {
   plugin: number;
@@ -32,6 +40,30 @@ export interface ModOrigin {
 export const engineOrigin: ModOrigin = { plugin: 'engine', tier: 'core' };
 export const record = (value: unknown): value is ModInput =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
+
+// Counts nesting without walking a value, so one too deep for V8 or QuickJS
+// to traverse is refused before anything traverses it.
+export function jsonDepth(json: string): number {
+  let depth = 0;
+  let deepest = 0;
+  let quoted = false;
+  for (let i = 0; i < json.length; i++) {
+    const code = json.charCodeAt(i);
+    if (quoted) {
+      if (code === 0x5c) i++;
+      else if (code === 0x22) quoted = false;
+    } else if (code === 0x22) quoted = true;
+    else if (code === 0x7b || code === 0x5b)
+      deepest = Math.max(deepest, ++depth);
+    else if (code === 0x7d || code === 0x5d) depth--;
+  }
+  return deepest;
+}
+
+export function assertModDepth(json: string, label: string): void {
+  if (jsonDepth(json) > MOD_MAX_DEPTH)
+    throw new Error(`${label} nests deeper than ${MOD_MAX_DEPTH} levels.`);
+}
 
 export function validateInput(
   event: ModEvent,
@@ -97,6 +129,9 @@ export function validateResult(event: ModEvent, value: unknown): void {
     if (valid && event === 'command.register' && !('deny' in value))
       valid =
         record(value['value']) && typeof value['value']['command'] === 'string';
+    if (valid && event === 'session.version' && !('deny' in value))
+      valid =
+        record(value['value']) && typeof value['value']['version'] === 'string';
   }
   if (!valid) throw new Error('Unsupported ' + event + ' result fields.');
 }
@@ -123,12 +158,21 @@ export class ModBudget {
   get expired(): boolean {
     return this.remainingMs <= 0;
   }
-  async lend<T>(run: () => Promise<T>): Promise<T> {
+  get lending(): boolean {
+    return this.pauses > 0;
+  }
+  pause(): void {
     if (!this.pauses++) this.left -= performance.now() - this.since;
+  }
+  resume(): void {
+    if (!--this.pauses) this.since = performance.now();
+  }
+  async lend<T>(run: () => Promise<T>): Promise<T> {
+    this.pause();
     try {
       return await run();
     } finally {
-      if (!--this.pauses) this.since = performance.now();
+      this.resume();
     }
   }
 }

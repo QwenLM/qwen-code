@@ -77,6 +77,13 @@ public final class ManagedAgentPreflight {
      * Runs the checks and returns a process exit code: 0 unless a check fails.
      */
     public static int run(String[] args) {
+        List<Check> checks = checks(args);
+        print(checks);
+        return checks.stream().anyMatch(check ->
+                check.status() == Status.FAIL) ? 1 : 0;
+    }
+
+    static List<Check> checks(String[] args) {
         List<Check> checks = new ArrayList<>();
         ConfigurableEnvironment environment = baseEnvironment(args);
         List<String> locations = configLocations(args, environment);
@@ -88,6 +95,7 @@ public final class ManagedAgentPreflight {
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
         checks.add(harnessCheck(properties));
+        checks.add(credentialsFileCheck(properties));
         checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
@@ -108,9 +116,7 @@ public final class ManagedAgentPreflight {
                 : new Check("capacity", Status.SKIP,
                         "database check did not pass; capacity not measured",
                         null));
-        print(checks);
-        return checks.stream().anyMatch(check ->
-                check.status() == Status.FAIL) ? 1 : 0;
+        return checks;
     }
 
     static ConfigurableEnvironment baseEnvironment(String[] args) {
@@ -252,25 +258,38 @@ public final class ManagedAgentPreflight {
             return new Check("config", Status.FAIL,
                     path + " is not readable", "chmod 600 " + path);
         }
+        String content;
         try {
-            String content = Files.readString(file, StandardCharsets.UTF_8);
-            boolean secrets = content.contains("credential-key")
-                    || content.contains("signing-key")
-                    || content.contains("password");
+            content = Files.readString(file, StandardCharsets.UTF_8);
+        } catch (IOException error) {
+            return new Check("config", Status.WARN,
+                    path + ": cannot inspect permissions", null);
+        }
+        boolean secrets = content.contains("credential-key")
+                || content.contains("signing-key")
+                || content.contains("password");
+        return secrets ? sharedSecretFileCheck("config", file, path)
+                : new Check("config", Status.PASS, path, null);
+    }
+
+    // One policy for every file that holds a secret: WARN, not FAIL, when
+    // anyone but its owner can read it, so the operator sees the chmod.
+    private static Check sharedSecretFileCheck(String row, Path file,
+            String path) {
+        try {
             Set<PosixFilePermission> permissions =
                     Files.getPosixFilePermissions(file);
-            if (secrets && (permissions.contains(PosixFilePermission.GROUP_READ)
-                    || permissions.contains(
-                    PosixFilePermission.OTHERS_READ))) {
-                return new Check("config", Status.WARN,
+            if (permissions.contains(PosixFilePermission.GROUP_READ)
+                    || permissions.contains(PosixFilePermission.OTHERS_READ)) {
+                return new Check(row, Status.WARN,
                         path + " is group- or world-readable",
                         "chmod 600 " + path);
             }
         } catch (IOException | UnsupportedOperationException error) {
-            return new Check("config", Status.WARN,
+            return new Check(row, Status.WARN,
                     path + ": cannot inspect permissions", null);
         }
-        return new Check("config", Status.PASS, path, null);
+        return new Check(row, Status.PASS, path, null);
     }
 
     private static Check keyRingCheck(ManagedAgentProperties properties) {
@@ -349,19 +368,79 @@ public final class ManagedAgentPreflight {
                 null);
     }
 
+    static Check credentialsFileCheck(ManagedAgentProperties properties) {
+        ManagedAgentProperties.Harness harness = properties.getHarness();
+        if (!harness.isEnabled()) {
+            return new Check("credentials", Status.SKIP, "disabled", null);
+        }
+        String file = harness.getCredentialsFile();
+        if (StringUtils.isBlank(file)) {
+            return new Check("credentials", Status.SKIP,
+                    StringUtils.isBlank(harness.getToken())
+                            ? "no Harness credentials configured"
+                            : "Harness credentials configured directly",
+                    null);
+        }
+        Path path;
+        try {
+            path = Path.of(file);
+        } catch (RuntimeException error) {
+            return new Check("credentials", Status.WARN,
+                    file + ": cannot inspect permissions", null);
+        }
+        // The server reads the file as its service account at startup.
+        if (!Files.isReadable(path)) {
+            return new Check("credentials", Status.FAIL,
+                    file + " is not readable",
+                    "chown it to the service account, then chmod 600 "
+                            + file);
+        }
+        return sharedSecretFileCheck("credentials", path, file);
+    }
+
     static Check harnessCheck(ManagedAgentProperties properties) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
         if (!harness.isEnabled()) {
             return new Check("harness", Status.SKIP, "disabled", null);
         }
+        String file = harness.getCredentialsFile();
+        // Probing with whatever startup left bound would test credentials
+        // it just refused.
+        if (StringUtils.isNotBlank(file)
+                && !properties.harnessCredentialsApplied()) {
+            return new Check("harness", Status.SKIP,
+                    "credentials were not read from " + file
+                            + "; see the validation row",
+                    null);
+        }
+        String tokenSetting = StringUtils.isBlank(file)
+                ? "QWEN_MANAGED_AGENT_HARNESS_TOKEN"
+                : "QWEN_SERVER_TOKEN in " + file;
         if (StringUtils.isBlank(harness.getToken())) {
             return new Check("harness", Status.FAIL, "token is empty",
-                    "set QWEN_MANAGED_AGENT_HARNESS_TOKEN");
+                    "set " + tokenSetting);
+        }
+        // The shipped templates' placeholder works as a token, but anyone
+        // can read it in the distribution.
+        if (harness.getToken().startsWith("replace-")) {
+            return new Check("harness", Status.FAIL,
+                    "token is still the shipped template placeholder",
+                    "set " + tokenSetting);
         }
         if (!isDigest(harness.getCapabilityDigest())) {
             return new Check("harness", Status.FAIL,
                     "capability digest is not sha256:<64 lowercase hex>",
-                    "set QWEN_MANAGED_AGENT_CAPABILITY_DIGEST");
+                    "set " + (StringUtils.isBlank(file)
+                            ? "QWEN_MANAGED_AGENT_CAPABILITY_DIGEST"
+                            : "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST in "
+                                    + file));
+        }
+        if (harness.getPool().isEnabled()) {
+            if (!properties.getSessionStore().isEnabled() || StringUtils.isBlank(properties.getSessionStore().getBindingKey())) {
+                return new Check("harness", Status.FAIL, "pool Session Store or binding key is missing", "enable session-store with a binding key");
+            }
+            return new Check("harness", Status.SKIP, "pool endpoints negotiate identity and TLS through the configured discovery source",
+                    "verify individual Harness pool readiness after startup");
         }
         String baseUrl = harness.getBaseUrl();
         if (StringUtils.isBlank(baseUrl)) {
@@ -385,7 +464,7 @@ public final class ManagedAgentPreflight {
                 return new Check("harness", Status.FAIL,
                         url + " rejected the configured token ("
                                 + response.statusCode() + ")",
-                        "set QWEN_MANAGED_AGENT_HARNESS_TOKEN to the token the"
+                        "set " + tokenSetting + " to the token the"
                                 + " Harness accepts");
             }
             if (response.statusCode() != 200) {

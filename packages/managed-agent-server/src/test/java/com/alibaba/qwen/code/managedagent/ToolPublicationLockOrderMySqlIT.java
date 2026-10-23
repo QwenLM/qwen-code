@@ -29,7 +29,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -75,8 +74,8 @@ class ToolPublicationLockOrderMySqlIT {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @ParameterizedTest
-    @CsvSource({"reserve,false", "reserve,true", "renew,false", "renew,true"})
-    void publicationSeesJournalCommittedAfterPlacementDiscovery(String operation, boolean headAuthorization) throws Exception {
+    @ValueSource(strings = {"reserve", "renew"})
+    void publicationSeesJournalCommittedAfterPlacementDiscovery(String operation) throws Exception {
         String url = System.getProperty("mysql.url");
         if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
             throw new IllegalArgumentException("A MySQL test database URL is required");
@@ -90,7 +89,7 @@ class ToolPublicationLockOrderMySqlIT {
             var source = new OwnerPauseDataSource(new DriverManagerDataSource(
                     url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
             Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
-            var journal = PublicationJournalFixture.create(source, headAuthorization);
+            var journal = PublicationJournalFixture.create(source);
             if ("renew".equals(operation)) {
                 journal.reserve();
             }
@@ -137,7 +136,7 @@ class ToolPublicationLockOrderMySqlIT {
             var source = new OwnerPauseDataSource(new DriverManagerDataSource(
                     url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
             Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
-            var journal = PublicationJournalFixture.create(source, false);
+            var journal = PublicationJournalFixture.create(source);
             JsonNode reserved = journal.reserve();
             var transaction = new TransactionTemplate(journal.manager);
             if (operation.endsWith("renew")) {
@@ -378,7 +377,7 @@ class ToolPublicationLockOrderMySqlIT {
             var source = new OwnerPauseDataSource(new DriverManagerDataSource(
                     url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
             Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
-            var journal = PublicationJournalFixture.create(source, false);
+            var journal = PublicationJournalFixture.create(source);
             JsonNode reserved = journal.reserve();
             var transaction = new TransactionTemplate(journal.manager);
             long deadlocksBefore = MySqlLockProbe.innodbDeadlocks(admin);
