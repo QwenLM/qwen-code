@@ -107,7 +107,9 @@ public enum ManagedSchemaProjection {
             "tenant_id, schedule_id, session_id, workspace_id, actor_id, record_revision, "
                     + "definition_revision, definition_digest, goal, cron, timezone, session_mode, "
                     + "overlap, catch_up, catch_up_limit, enabled, state, blocked_reason, armed_at, "
-                    + "watermark_slot, lease_owner, lease_until, fence, gmt_create, gmt_modified"),
+                    + "watermark_slot, lease_owner, lease_until, fence, gmt_create, gmt_modified, "
+                    + "gate, gate_last_outcome, gate_last_at, gate_quiet_since_delivery, "
+                    + "gate_failures, gate_last_error"),
     SCHEDULE_OCCURRENCE(
             "tenant_id, schedule_id, occurrence_key, run_id, session_id, slot, trigger_kind, "
                     + "outcome, reason, definition_revision, fence, attempts, next_retry_at, last_error, "

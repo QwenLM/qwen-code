@@ -236,6 +236,7 @@ import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   AutomationNotFoundError,
   AutomationOperationConflictError,
+  AutomationGateUnsupportedError,
   AutomationQuotaError,
   AutomationRetiredError,
   AutomationRevisionStaleError,
@@ -244,7 +245,13 @@ import {
   isAutomationTrigger,
 } from './hosted-automation-session.js';
 import {
+  createHostedAutomationGateRelease,
+  createHostedAutomationGateRunner,
+  type HostedAutomationGateRunnerOptions,
+} from './hosted-automation-gate.js';
+import {
   AUTOMATION_INPUT_SOURCE,
+  AutomationGateInvalidError,
   automationInputId,
   MANAGED_AUTOMATION_LIMITS,
   automationRunId,
@@ -666,11 +673,9 @@ async function hostedApprovalForTurn(
   const live =
     session.stores &&
     !session.definition?.['lineage'] &&
-    [
-      'hosted-workspace-files/1',
-      'hosted-workspace-shell/1',
-      'hosted-workspace-shell/2',
-    ].includes(session.toolProfile ?? '');
+    ['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
+      session.toolProfile ?? '',
+    );
   return {
     settings,
     waiters: session.waiters,
@@ -1658,6 +1663,20 @@ function unsettledInputs(session: HostedSession): Set<string> {
 function unsettledPromptId(session: HostedSession): string | undefined {
   const unsettled = unsettledInputs(session);
   return unsettled.size === 1 ? [...unsettled][0] : undefined;
+}
+
+/** A Session's gate runner and the release for probes it no longer asks. */
+function gateOptions(options: HostedAutomationGateRunnerOptions): {
+  gate: ReturnType<typeof createHostedAutomationGateRunner>;
+  releaseGate: ReturnType<typeof createHostedAutomationGateRelease>;
+} {
+  // One memory of started probes for both, so the release of a revision
+  // that went stale can ask about a probe the runner started.
+  const shared = { ...options, startedProbes: new Map<string, string>() };
+  return {
+    gate: createHostedAutomationGateRunner(shared),
+    releaseGate: createHostedAutomationGateRelease(shared),
+  };
 }
 
 // A pruned-to-empty carry must persist as a delete, not as no write at
@@ -3909,6 +3928,7 @@ export function registerHostedHarnessSessionRoutes(
   const heldResources = (session: HostedSession): number =>
     Number(Boolean(session.hooks)) +
     Number(Boolean(session.mcp)) +
+    Number(Boolean(session.automations?.hasPendingGateReleases)) +
     Number(Boolean(session.shell?.publisher)) +
     Number(Boolean(session.backgroundLane?.publisher)) +
     session.heldRuntimeTurns.size +
@@ -5912,6 +5932,23 @@ export function registerHostedHarnessSessionRoutes(
           sink: managed.sink,
         },
         managed.authority.sessionHeader.sessionKey,
+        {
+          // The gate probe runs in the Workspace Runtime through the
+          // Broker; a Harness without one blocks every gated fire.
+          ...(brokerOptions
+            ? gateOptions({
+                broker: {
+                  ...brokerOptions,
+                  lifecycleAuthority: () => session.lifecycle,
+                },
+                sessionKey: managed.authority.sessionHeader.sessionKey,
+                toolProfile: () => session.toolProfile,
+              })
+            : {}),
+          shellAvailable: () =>
+            isHostedWorkspaceShellProfile(session.toolProfile),
+          hooksConfigured: () => session.hooks !== undefined,
+        },
       );
       // H5b: every hosted Session owns its channel funnel — a channel input
       // needs no Runtime, and its reply plans from the settled turn alone.
@@ -7671,16 +7708,11 @@ export function registerHostedHarnessSessionRoutes(
         (!session.approval ||
           !(
             session.agentDefinition
-              ? [
-                  'hosted-workspace-files/1',
-                  'hosted-workspace-shell/1',
-                  'hosted-workspace-shell/2',
-                ]
+              ? ['hosted-workspace-files/1', 'hosted-workspace-shell/1']
               : [
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-files/2',
-                  'hosted-workspace-shell/2',
                 ]
           ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
@@ -7689,11 +7721,9 @@ export function registerHostedHarnessSessionRoutes(
         throw new Error('Approval selection is unavailable for this Session.');
       if (
         approvalSelection?.planMode &&
-        (![
-          'hosted-workspace-files/1',
-          'hosted-workspace-shell/1',
-          'hosted-workspace-shell/2',
-        ].includes(session.toolProfile ?? '') ||
+        (!['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
+          session.toolProfile ?? '',
+        ) ||
           (session.childDepth ?? 0) !== 0 ||
           session.mcp ||
           session.hooks)
@@ -12006,6 +12036,7 @@ export function registerHostedHarnessSessionRoutes(
       catchUp: schedule.catchUp,
       catchUpLimit: schedule.catchUpLimit,
       enabled: schedule.enabled,
+      gate: schedule.gate,
       state: schedule.run.state,
     });
     const runSummary = (run: AutomationRun) => ({
@@ -12082,9 +12113,12 @@ export function registerHostedHarnessSessionRoutes(
             firedAt: firedAt as number,
           });
           result = {
-            run: runSummary(fired.run),
-            inputId: fired.inputId,
+            // A gate that withheld the fire claimed nothing: no run.
+            ...(fired.run === undefined
+              ? { run: null }
+              : { run: runSummary(fired.run), inputId: fired.inputId }),
             replayed: fired.replayed,
+            ...(fired.gate === undefined ? {} : { gate: fired.gate }),
           };
           break;
         }
@@ -12206,6 +12240,16 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 404, 'automation_not_found', undefined, message);
       if (cause instanceof AutomationQuotaError)
         return error(res, 409, 'automation_count_limit', undefined, message);
+      if (cause instanceof AutomationGateUnsupportedError)
+        return error(
+          res,
+          409,
+          'automation_gate_unsupported',
+          undefined,
+          message,
+        );
+      if (cause instanceof AutomationGateInvalidError)
+        return error(res, 400, 'automation_gate_invalid', undefined, message);
       if (cause instanceof ManagedSessionModeGateError)
         return error(res, 409, 'automation_mode_disabled', undefined, message);
       // Typed classification, no message substrings: a dead writer is not a

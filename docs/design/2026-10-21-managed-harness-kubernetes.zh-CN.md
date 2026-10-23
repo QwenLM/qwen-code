@@ -190,6 +190,8 @@ Harness 镜像需要专用 launcher、挂载 Secret 读取、探针 helper 和 p
 
 Pool 模式要求 HMAC binding key 和显式实例身份。`qwp1` grant 绑定 scope、owner digest 和 placement epoch；凭证认证不会在 tenant guard 前查询 SQL，变更路径在锁住 root 后重新校验当前归属，再获取 head。V1 基线使本地行默认保持 `UNASSIGNED`。首版 pool 拒绝已有私有 CSI 配置，CSI closure inventory 也明确要求未分配归属。
 
+自动化 gate 探测的释放债务计入持有资源，即使 fire 请求已经返回错误也不能交接。重试证明释放成功后，原本空闲的归属才可交接。如果有界释放键缓存溢出，该 Session 在关闭前始终不具备交接资格：遗忘键不代表对应 Runtime 已释放。
+
 进程的禁止新开工截止点先于 SQL quiesce。忙碌的驻留 Session 可以保持 SQL `ACTIVE`，避免打断既有 Hook activation 转换；进程门禁仍拒绝新开工。只有通过保守的本地资源空闲检查后，Harness 才调用私有 Store `writers:quiesce-ownership`，停止 activation 续期、释放附件 activation，再调用 `writers:release-ownership`。后者在同一事务写入有界 `hosted_harness_release` 控制记录/资源、seal 精确 head，并将归属标为 `RELEASED`。这个终态标记在继任者 CAS 前就隔离所有旧 epoch 变更，也支持通过索引清理所有者客户端。不推进 journal、不产生业务生命周期事件。普通 domain commit 不能伪造这个保留回执。回执通过 `ma_resource_ref` 固定资源；即使继任者已经更新归属，精确重试也不会重新获取旧 writer。
 
 SDK 保持 Java 11 兼容，并接受可选 `SSLContext`。Pool 配置从挂载文件读取 PKCS12 key/trust store；EndpointSlice 的 HTTPS 连接仍校验端点 SAN。静态回环端点支持确定性本地测试。发现 watch 有界，在不确定状态后重新 list，始终不会替换为本地默认地址。
