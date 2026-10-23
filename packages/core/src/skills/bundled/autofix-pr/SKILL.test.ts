@@ -53,52 +53,66 @@ async function decide(
 }
 
 describe('bundled autofix-pr skill', () => {
-  it('auto-approves reading the PR, and leaves every shell write to the approval mode', async () => {
+  it('grants no shell command: every one follows the approval mode', async () => {
     const pm = grantedManager();
     const shell = (command: string) =>
       decide(pm, 'run_shell_command', { command });
 
-    await expect(shell('gh pr view 7 --json number,url')).resolves.toBe(
-      'allow',
-    );
-    // The helpers are not granted: the permission matcher reads a leading
-    // `"${QWEN_CODE_CLI:-qwen}"` as an empty word, so no rule can name them
-    // without also naming any command behind another expansion. In the
-    // default mode each helper call, the push included, asks first.
+    // The helpers cannot be named alone (the matcher reads a leading
+    // `"${QWEN_CODE_CLI:-qwen}"` as an empty word), and an allow rule for
+    // a read-only command such as `gh pr view *` would also admit command
+    // substitution, redirections and environment prefixes behind it.
     for (const command of [
       `"\${QWEN_CODE_CLI:-qwen}" autofix-pr push 7`,
+      'gh pr view 7 --json number,url',
+      'gh pr view "$(id)"',
+      'gh pr view 7 > ~/.bashrc',
+      'BROWSER="touch /tmp/x" gh pr view 7 --web',
       'git push origin HEAD:feat',
       'gh pr comment 7 --body hi',
-      'gh api -X POST repos/o/r/issues/7/comments -f body=hi',
       'gh run rerun 50 --failed',
-      'gh pr view 7; gh pr merge 7',
     ]) {
       await expect(shell(command)).resolves.toBe('ask');
     }
   });
 
-  it('may write its plan and brief files only, and leaves the dialogs alone', async () => {
+  it('may write its brief and plan only, and leaves the dialogs alone', async () => {
     const pm = grantedManager();
+    const write = (file: string) =>
+      decide(pm, 'write_file', { file_path: `${PROJECT}/${file}` });
+    await expect(write('.qwen/tmp/autofix-pr-7-plan.json')).resolves.toBe(
+      'allow',
+    );
+    await expect(write('.qwen/tmp/autofix-pr-7-brief.md')).resolves.toBe(
+      'allow',
+    );
+    // The helpers' own files decide where a push goes and what was handled.
+    for (const file of [
+      '.qwen/tmp/autofix-pr-7-state.json',
+      '.qwen/tmp/autofix-pr-7-gate.json',
+      '.qwen/tmp/autofix-pr-7/src/a.ts',
+      '.qwen/tmp/autofix-pr-7/../../settings.json',
+      'src/a.ts',
+    ]) {
+      await expect(write(file)).resolves.toBe('ask');
+    }
     await expect(
-      decide(pm, 'write_file', {
-        file_path: `${PROJECT}/.qwen/tmp/autofix-pr-7-plan.json`,
+      decide(pm, 'read_file', {
+        file_path: `${PROJECT}/.qwen/tmp/autofix-pr-7-state.json`,
       }),
     ).resolves.toBe('allow');
-    await expect(
-      decide(pm, 'write_file', { file_path: `${PROJECT}/src/a.ts` }),
-    ).resolves.toBe('ask');
-    await expect(
-      decide(pm, 'write_file', { file_path: `${PROJECT}/.qwen/settings.json` }),
-    ).resolves.toBe('ask');
 
     const { config } = loadSkill();
     // The start confirmation must show: a session allow rule would answer
     // ask_user_question without its dialog.
     expect(config.allowedTools).not.toContain('ask_user_question');
-    // Creating the scheduled task is confirmed once, with its gate command.
+    // Creating and deleting scheduled tasks stays confirmed.
     expect(config.allowedTools).not.toContain('cron_create');
-    expect(config.allowedTools).not.toContain('run_shell_command');
+    expect(config.allowedTools).not.toContain('cron_delete');
     expect(config.allowedTools).not.toContain('agent');
+    expect(
+      config.allowedTools?.some((rule) => rule.startsWith('run_shell_command')),
+    ).toBe(false);
   });
 
   it('routes every PR write through a helper and keeps PR text as data', () => {

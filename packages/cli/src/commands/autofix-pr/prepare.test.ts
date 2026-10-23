@@ -418,11 +418,87 @@ describe('runPrepare (real git)', () => {
     execFileSync('git', ['worktree', 'remove', '--force', paths.worktreePath], {
       cwd: clone,
     });
-    writeState(paths.statePath, { ...state, handledCommentIds: ['C1'] });
+    const budgets = {
+      handledChecks: [`Test@${headSha}@#5`],
+      rerunChecks: [`run:1:2:push:Test@${headSha}`],
+      handledConflictSha: headSha,
+      pushCount: 4,
+      summarizedSha: headSha,
+    };
+    writeState(paths.statePath, {
+      ...state,
+      handledCommentIds: ['C1'],
+      ...budgets,
+    });
     runPrepare({ pr: 7, repo: 'o/r' });
     expect(existsSync(paths.worktreePath)).toBe(true);
-    expect(readState(paths.statePath)!.handledCommentIds).toEqual(['C1']);
+    // The history and the budgets survive: a removed worktree must not
+    // reset the push count or the re-runs already spent.
+    expect(readState(paths.statePath)).toMatchObject({
+      handledCommentIds: ['C1'],
+      ...budgets,
+    });
     expect(lastReport()).toMatchObject({ resumed: false });
+  });
+
+  it("reports whether the PR's author could push, and whether this runs sandboxed", () => {
+    const savedSandbox = process.env['SANDBOX'];
+    delete process.env['SANDBOX'];
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+      // The user's own PR.
+      expect(lastReport()).toMatchObject({
+        authorCanPush: true,
+        sandboxed: false,
+      });
+      const paths = autofixPrPaths(clone, 7);
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', paths.worktreePath],
+        {
+          cwd: clone,
+        },
+      );
+      execFileSync('git', ['branch', '-D', paths.branch], { cwd: clone });
+      rmSync(paths.statePath);
+      let permission = 'read';
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr') {
+          return JSON.stringify(
+            prView({ headRefOid: headSha, author: { login: 'outsider' } }),
+          );
+        }
+        if (args[0] === 'repo') return JSON.stringify(writable);
+        if (args[0] === 'config') return 'https';
+        if (args[0] === 'api') {
+          expect(args[1]).toBe('repos/o/r/collaborators/outsider/permission');
+          return permission;
+        }
+        throw new Error(`unexpected gh ${args.join(' ')}`);
+      });
+      process.env['SANDBOX'] = 'qwen-code-sandbox';
+      runPrepare({ pr: 7, repo: 'o/r' });
+      expect(lastReport()).toMatchObject({
+        authorCanPush: false,
+        sandboxed: true,
+      });
+
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', paths.worktreePath],
+        {
+          cwd: clone,
+        },
+      );
+      execFileSync('git', ['branch', '-D', paths.branch], { cwd: clone });
+      rmSync(paths.statePath);
+      permission = 'write';
+      runPrepare({ pr: 7, repo: 'o/r' });
+      expect(lastReport()).toMatchObject({ authorCanPush: true });
+    } finally {
+      if (savedSandbox === undefined) delete process.env['SANDBOX'];
+      else process.env['SANDBOX'] = savedSandbox;
+    }
   });
 
   it('recreates a worktree deleted with rm -rf', () => {

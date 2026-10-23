@@ -51,16 +51,27 @@ export function runRerun(prNumber: number, runId: number): RerunOutcome {
       reason: `the PR head moved to ${pr.headRefOid.slice(0, 12)}; its checks are not the ones that failed`,
     };
   }
+  // Only a job of this repository's Actions can be re-run with `gh run
+  // rerun`: a commit status or another app may link any URL, and a run id
+  // read from it would re-run some unrelated run here.
+  const runUrl = `https://${state.host}/${state.owner}/${state.repo}/actions/runs/${runId}/`;
   const failed = checkEvents(pr).failed.filter(
-    ({ event }) => event.runId === runId,
+    ({ event, actions }) =>
+      actions &&
+      event.runId === runId &&
+      (event.url ?? '').toLowerCase().startsWith(runUrl.toLowerCase()),
   );
   if (failed.length === 0) {
     throw new Error(
-      `run ${runId} has no failed check on PR #${prNumber}'s head ${pr.headRefOid.slice(0, 12)}.`,
+      `run ${runId} is no failed GitHub Actions run of ${state.owner}/${state.repo} on PR #${prNumber}'s head ${pr.headRefOid.slice(0, 12)}.`,
     );
   }
   const checks = failed.map(({ event }) => event.check);
-  const rerunKeys = checks.map((check) => `${check}@${pr.headRefOid}`);
+  // Keyed by the check's identity, not its name: two workflows may each
+  // have a failed job of the same name, and each has its own re-run.
+  const rerunKeys = failed.map(
+    ({ identity }) => `${identity}@${pr.headRefOid}`,
+  );
   const already = new Set(state.rerunChecks ?? []);
   const repeated = checks.filter((_, index) => already.has(rerunKeys[index]));
   if (repeated.length > 0) {

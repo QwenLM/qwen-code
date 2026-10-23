@@ -188,6 +188,44 @@ describe('runSync (real git, bare remote)', () => {
     expect(worktreeHead()).toBe(again);
   });
 
+  it('follows the author rolling back a push the watch made, so the next push cannot restore it', () => {
+    // The watch pushed `fix` on top of the PR head.
+    const fix = commitIn(paths.worktreePath, 'fix.txt');
+    run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      lastKnownHeadSha: fix,
+      pushedShas: [fix],
+    });
+    // The author resets the branch back to before it.
+    run(repo, 'push', '-q', '--force', 'origin', `${featSha}:refs/heads/feat`);
+    expect(runSync(7)).toEqual({ synced: true, headSha: featSha, moved: true });
+    expect(worktreeHead()).toBe(featSha);
+    expect(known()).toBe(featSha);
+  });
+
+  it('with --discard returns the worktree to the PR head, whatever it holds', () => {
+    commitIn(paths.worktreePath, 'attempt.txt');
+    writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');
+    expect(runSync(7, true)).toEqual({
+      synced: true,
+      headSha: featSha,
+      moved: false,
+      dropped: 1,
+      discardedChanges: true,
+    });
+    expect(worktreeHead()).toBe(featSha);
+    expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
+  });
+
+  it('refuses a worktree with another branch checked out', () => {
+    run(repo, 'branch', 'mine', featSha);
+    run(paths.worktreePath, 'switch', '-q', 'mine');
+    forcePushFromElsewhere('rewritten.txt');
+    expect(() => runSync(7)).toThrow(/branch mine checked out/);
+    expect(run(repo, 'rev-parse', 'mine')).toBe(featSha);
+  });
+
   it('refuses to move or reset a worktree with uncommitted changes', () => {
     pushFromElsewhere('theirs.txt');
     writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');

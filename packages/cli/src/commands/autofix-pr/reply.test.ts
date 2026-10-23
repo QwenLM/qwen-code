@@ -15,7 +15,8 @@ const mocks = vi.hoisted(() => ({
   ghWithInput: vi.fn((_input: string, ..._args: string[]) => ''),
   fetchPrData: vi.fn(),
 }));
-vi.mock('../review/lib/gh.js', () => ({
+vi.mock('../review/lib/gh.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
   ghWithInput: mocks.ghWithInput,
   setGhHost: () => {},
   ensureAuthenticated: () => {},
@@ -253,7 +254,7 @@ describe('runReply', () => {
     expect(state().handledCommentIds).toEqual([]);
   });
 
-  it('refuses to mark an untrusted comment, an unknown failure or an absent conflict as handled', () => {
+  it('refuses to mark an untrusted comment, or an unknown failure of the head, as handled', () => {
     expect(() => reply({ handled: ['IC_2'] })).toThrow(/does not act on/);
     expect(() => reply({ summary: { body: 'x', handled: ['IC_9'] } })).toThrow(
       /not a new comment from a trusted author/,
@@ -261,17 +262,85 @@ describe('runReply', () => {
     expect(() => reply({ handledChecks: [`Test@${HEAD}@#4`] })).toThrow(
       /not a failure snapshot reports/,
     );
-    expect(() => reply({ handledConflict: true })).toThrow(/no merge conflict/);
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    expect(state().handledChecks).toBeUndefined();
   });
 
-  it('records a conflict left for a human against the head', () => {
+  it('after a push, ignores failures of the old head instead of refusing the plan', () => {
+    const pushed = 'b'.repeat(40);
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({ headRefOid: pushed, mergeable: 'UNKNOWN' }),
+      viewer: 'me',
+    }));
+    const outcome = reply({
+      replies: [{ replyTo: 101, body: 'Fixed in bbb.', handled: ['PRRC_101'] }],
+      handledChecks: [`Test@${HEAD}@#5`],
+      handledConflict: true,
+    });
+    expect(outcome).toMatchObject({ handledChecks: 0, ignoredChecks: 1 });
+    expect(posts()).toHaveLength(1);
+    // GitHub reports UNKNOWN until it has recomputed the merge: the
+    // conflict left for a human is recorded against the new head.
+    expect(state()).toMatchObject({
+      handledChecks: [],
+      handledConflictSha: pushed,
+    });
+  });
+
+  it('records a conflict left for a human unless the head merges cleanly', () => {
     mocks.fetchPrData.mockImplementation(() => ({
       pr: prData({ mergeable: 'CONFLICTING' }),
       viewer: 'me',
     }));
     reply({ handledConflict: true });
     expect(state().handledConflictSha).toBe(HEAD);
+
+    writeState(paths.statePath, { ...state(), handledConflictSha: null });
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({ mergeable: 'MERGEABLE' }),
+      viewer: 'me',
+    }));
+    reply({ handledConflict: true });
+    expect(state().handledConflictSha).toBeNull();
+  });
+
+  it('never posts a reply whose comments were partly answered already', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: ['PRRC_101'],
+    });
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            thread('T1', [
+              comment('PRRC_101', 'alice', 'COLLABORATOR'),
+              comment('PRRC_102', 'alice', 'COLLABORATOR'),
+            ]),
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+    const outcome = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101', 'PRRC_102'] },
+      ],
+    });
+    expect(outcome).toMatchObject({ posted: [], skipped: 1 });
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    expect(state().handledCommentIds).toEqual(['PRRC_101']);
+  });
+
+  it('with --no-post records the summary as given, so a later run does not post it', () => {
+    reply({ summary: { body: 'Pushed.' } }, false);
+    expect(state().summarizedSha).toBe(HEAD);
+    expect(reply({ summary: { body: 'Pushed.' } })).toMatchObject({
+      posted: [],
+      skipped: 1,
+    });
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
   it('with --no-post records what was handled and posts nothing', () => {
@@ -368,6 +437,20 @@ describe('parsePlan', () => {
     expect(() => parsePlan({ summary: { body: 'x'.repeat(65_536) } })).toThrow(
       /GitHub takes at most/,
     );
+    expect(() =>
+      parsePlan({
+        replies: [
+          { replyTo: 1, body: 'x', handled: ['a'] },
+          { replyTo: 1, body: 'y', handled: ['b'] },
+        ],
+      }),
+    ).toThrow(/thread 1 has more than one reply/);
+    expect(() =>
+      parsePlan({
+        replies: [{ replyTo: 1, body: 'x', handled: ['a'] }],
+        summary: { body: 'y', handled: ['a'] },
+      }),
+    ).toThrow(/handled more than once in the plan: a/);
     expect(parsePlan({})).toEqual({
       replies: [],
       summary: null,

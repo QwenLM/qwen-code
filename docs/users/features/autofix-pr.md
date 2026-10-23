@@ -19,7 +19,8 @@
 
 - `gh` is signed in, with push access to the PR branch: write access to a same-repository PR, or your own fork, or a fork that allows edits from maintainers.
 - You run it from a clone of the PR's repository with one git remote for it.
-- In the default [approval mode](./approval-mode.md), every helper call (the push included) and every command a fix runs asks first. That suits a watch you keep an eye on. To let it run unattended, choose a mode that lets commands run, such as [Auto Mode](./auto-mode.md), and keep in mind that the fix runs the repository's own build and test commands.
+- In the default [approval mode](./approval-mode.md), every shell command asks first: the helper calls (the push included), `gh pr view`, and every command a fix runs. That suits a watch you keep an eye on. To let it run unattended, choose a mode that lets commands run, such as [Auto Mode](./auto-mode.md), and keep in mind that the fix runs the repository's own build and test commands. The skill itself grants only reading its own files under `.qwen/tmp/`, writing its fix brief and reply plan there, and listing scheduled tasks.
+- A PR whose author cannot push to the repository runs someone else's code when a fix is verified. Such a PR is watched only from a [sandboxed](./sandbox.md) session; elsewhere only `--once` is offered, after a confirmation that `--yes` does not skip.
 
 When it starts, it asks once to confirm where it will push and that it will reply on the PR.
 

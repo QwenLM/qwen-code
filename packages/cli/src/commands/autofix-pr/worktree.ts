@@ -6,23 +6,36 @@
 
 // The checks every helper that writes from the autofix worktree makes first.
 
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { gitOpt, gitProbe } from '../review/lib/git.js';
+import type { AutofixPrPaths } from './state.js';
 
 /**
- * Throws unless `worktreePath` is a git worktree of its own. Inside a
- * directory that is not one, git finds the enclosing clone and would act on
- * that instead.
+ * Throws unless the watch's worktree is a git worktree of its own, at its
+ * own path, with the watch's branch checked out. Inside a directory that is
+ * not a worktree, git finds the enclosing clone; through a symlink, another
+ * checkout; on another branch — the user's copy of the PR branch, say — a
+ * push would publish that branch's commits and a reset would discard them.
  */
-export function requireWorktree(worktreePath: string, prNumber: number): void {
+export function requireWorktree(paths: AutofixPrPaths, prNumber: number): void {
+  const worktreePath = paths.worktreePath;
   if (!existsSync(worktreePath)) {
     throw new Error(
       `${worktreePath} does not exist; run \`qwen autofix-pr prepare ${prNumber} --repo <owner>/<repo>\` to recreate it.`,
     );
   }
+  if (lstatSync(worktreePath).isSymbolicLink()) {
+    throw new Error(`${worktreePath} is a symlink, not the watch's worktree.`);
+  }
   const top = gitOpt('-C', worktreePath, 'rev-parse', '--show-toplevel');
   if (top === null || realpathSync(top) !== realpathSync(worktreePath)) {
     throw new Error(`${worktreePath} is not a git worktree.`);
+  }
+  const branch = gitOpt('-C', worktreePath, 'symbolic-ref', '-q', 'HEAD');
+  if (branch !== `refs/heads/${paths.branch}`) {
+    throw new Error(
+      `${worktreePath} has ${branch ? branch.replace(/^refs\/heads\//, 'branch ') : 'a detached HEAD'} checked out, not ${paths.branch}; switch it back before pushing or syncing.`,
+    );
   }
 }
 

@@ -135,7 +135,8 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
       "type": "ci_failed",
       "check": "Test ubuntu",
       "url": "https://github.com/owner/repo/actions/runs/456/job/789",
-      "runId": 456
+      "runId": 456,
+      "key": "Test ubuntu@3f2a1c0...@#789"
     },
     { "type": "ci_pending", "checks": ["Lint"] },
     {
@@ -204,13 +205,14 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 以下条件全部满足才推送，否则拒绝：
 
+- worktree 是这次监视自己的：不是符号链接、是独立的 worktree，并且检出的是 `qwen-autofix/pr-<n>`（修复时如果切到了用户自己的那份 PR 分支，不能把那个分支推出去）；
 - worktree 是干净的（所有改动都已提交）；
 - `lastKnownHeadSha` 是 `HEAD` 的祖先（只允许 fast-forward，不改写历史）；
 - 目标分支不是 base 仓库的默认分支。
 
-推送时向 GitHub 现查，而不是沿用 `prepare` 时的结果：期间已合并或关闭的 PR 回答 `stop`；默认分支也重新读取，因为监视期间它可能被改名。推送次数已用完（10 次，第 10 节）的监视直接回答 `stop`，不再询问任何东西。`HEAD` 等于已知 head 时没有可推送的内容。
+推送时向 GitHub 现查，而不是沿用 `prepare` 时的结果：期间已合并或关闭的 PR 回答 `stop`；默认分支也重新读取，因为监视期间它可能被改名。推送的分支和目的地按 `prepare` 的方式从 GitHub 和 clone 的 remote 重新得出，必须与状态文件记录的一致，所以改过的状态文件无法改变推送去向。状态文件里会交给 git 的值——remote、推送目标、head ref、各个 SHA——在读取时都会检查，以 `-` 开头的值会被当成选项。推送次数已用完（10 次，第 10 节）的监视直接回答 `stop`，不再询问任何东西。`HEAD` 等于已知 head 时没有可推送的内容。
 
-然后在 worktree 里执行 `git push --porcelain <target> HEAD:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`，给 pre-push hook 留十分钟。hook 照常运行，不使用 `--force` 或 `--no-verify`。成功后把新 SHA 记入 `pushedShas` 和 `lastKnownHeadSha`，推送计数加一。lease 被拒（`[rejected] (stale info)`）说明别人推送过，结果是 `resync` 而不是重试，什么都不记录。其他拒绝——hook、分支保护、凭据——都是错误，附上 git 的最后几行。输出是一行 JSON：`{"pushed": true, "sha", "pushes", "maxPushes"}`，或 `{"pushed": false, "action": "resync" | "stop", "reason"}`。
+然后在 worktree 里执行 `git push --porcelain <target> <sha>:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`，给 pre-push hook 留十分钟。`<sha>` 是通过上述检查的那个提交，而不是 `HEAD`——询问 GitHub 期间 `HEAD` 可能会动。hook 照常运行，不使用 `--force` 或 `--no-verify`。成功后把新 SHA 记入 `pushedShas` 和 `lastKnownHeadSha`，推送计数加一。lease 被拒（`[rejected] (stale info)`）说明别人推送过，结果是 `resync` 而不是重试，什么都不记录。其他拒绝——hook、分支保护、凭据——都是错误，附上 git 的最后几行。输出是一行 JSON：`{"pushed": true, "sha", "pushes", "maxPushes"}`，或 `{"pushed": false, "action": "resync" | "stop", "reason"}`。
 
 ### 6.5 `reply <pr> <plan.json> [--no-post]`
 
@@ -231,11 +233,13 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 能发什么由辅助命令决定，依据是重新读一次 PR（按 prepared snapshot 的规则）：
 
 - 回复只发到此刻有可信作者新评论的 thread，`handled` 列出的必须是该 thread 的评论。不可信评论不能标记为已处理；check 键必须是 head 上某个 `ci_failed` 事件报告的（prepared 模式会输出它的 `key`）；冲突只有在确实存在时才能留给人处理。PR 必须仍处于打开状态。
+- 其他 head 的失败键（这一轮已推送越过了它）被忽略并计入 `ignoredChecks`：prepared snapshot 只读当前 head。`handledConflict` 除非 GitHub 报告当前 head 可干净合并，否则都记在当前 head 上；推送刚完成时 GitHub 会报告 `UNKNOWN`，直到重新算完合并。
+- 同一 thread 有两条回复，或同一个评论 id 出现两次的计划会被拒绝。
 - 所有检查在发出任何内容之前完成，被拒绝的计划什么都不发。
 - 每条正文只加一次标记，且必须在 GitHub 的 65,536 字符以内。
-- 每个发出的 id 一产生就写入状态文件，连同它所回复的评论。中途失败时，其余部分不发也不记录；用同一份计划重跑，会跳过评论已处理的回复，以及评论都已处理的总结（不处理任何评论的总结每个 head 只发一次，记在 `summarizedSha`）。
+- 每个发出的 id 一产生就写入状态文件，连同它所回复的评论。中途失败时，其余部分不发也不记录；用同一份计划重跑，回复只要有一条评论已处理就跳过（它没列出的评论留给下一轮，而不是冒险再发一份），评论都已处理的总结也跳过（不处理任何评论的总结每个 head 只发一次，记在 `summarizedSha`）。
 - `handledChecks` 和 `handledConflict` 记录这一轮没有靠推送修好的失败和冲突，prepared snapshot 不再报告它们：失败按 attempt 记（重跑后再次失败算新的），冲突按 head 记。
-- `--no-post`（skill 的 `--no-reply`）记录同样的内容，但不发任何东西。
+- `--no-post`（skill 的 `--no-reply`）记录同样的内容（包括总结的 `summarizedSha`），但不发任何东西。
 
 回复 review thread 使用 `POST /repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies`；总结是一条 issue 评论。两种 POST 都不重试：在传输错误之前已到达 GitHub 的请求会发出两次。
 
@@ -254,20 +258,20 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 输出：`{ "repo": "<owner>/<repo>", "events": [...] }`，没有事件时什么都不输出。与作者侧闸门同样以 12 KiB 为限，放不下的事件被留下并计入 `deferred`；这些 PR 在游标里保留旧的 head，所以下一次运行会报告它们。使用它的 skill 决定每个事件的含义：对每个 PR 运行 `/qreview <number>` 或一次验证。
 
-### 6.8 `sync <pr>`
+### 6.8 `sync <pr> [--discard]`
 
-接纳别人推送的 head。它把 `refs/pull/<n>/head` 取到 worktree 自己的 `FETCH_HEAD`（不碰用户的 checkout），然后：
+接纳别人推送的 head。它从推送目标读取 PR 分支——也就是推送 lease 保护的那个 ref，它会立即变化，不像 `refs/pull/<n>/head` 有延迟——取到 worktree 自己的 `FETCH_HEAD`（不碰用户的 checkout），并像 `push` 一样检查 worktree。然后：
 
-- worktree 就在这个 head，或已经包含它（某一轮合并过），只把它记为 `lastKnownHeadSha`；
+- 不包含已知 head 的新 head 改写了历史：作者 rebase、force-push，或把分支回退了（可能退到本监视推送之前）。worktree 按第 7 节所述重置到新 head：在旧历史上构建的任何东西都会把作者删掉的内容放回去。在旧历史上做的未推送尝试报告为 `dropped`；
+- 建立在已知 head 之上、且 worktree 已经包含的新 head（某一轮合并过），只记为 `lastKnownHeadSha`；
 - worktree 落后于它且是干净的，就 fast-forward；
-- worktree 有某一轮未推送的提交，而新 head 是在已知 head 之上推送的，则不动 worktree：回答 `{"synced": false, "action": "merge"}` 并给出要合并的 head（不要 rebase），什么都不改；
-- head 不包含 worktree 的历史（作者 rebase 或 force-push 过），就按第 7 节所述替换：worktree 重置到新 head，在旧历史上做的未推送尝试报告为 `dropped`。
+- worktree 有某一轮未推送的提交时不动它：回答 `{"synced": false, "action": "merge"}` 并给出要合并的 head（不要 rebase），什么都不改。
 
-有未提交改动的 worktree 永远不会被移动或重置。
+有未提交改动的 worktree 永远不会被移动或重置。`--discard` 把 worktree 恢复到 PR head，不管里面有什么——未推送的提交和未提交的改动——用来结束一轮没能推送的工作，并报告丢弃了什么。
 
 ### 6.9 `rerun <pr> <run-id>`
 
-对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job。该 run 在当前 head 上的每个失败检查都用掉自己唯一的一次重跑（`rerunChecks`，按检查和 head 记）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。这个调用不重试，理由与回复相同。
+对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job。只认 PR 所在仓库的 GitHub Actions job：commit status 或其他 app 可以链接任意 URL，从中读出的 run id 会重跑某个无关的 run。该 run 在当前 head 上的每个失败检查都用掉自己唯一的一次重跑（`rerunChecks`，按检查身份——app、workflow、触发事件和 job 名，与第 6.2 节区分检查的方式相同——和 head 记，所以两个 workflow 里同名的 job 各有各的一次）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。这个调用不重试，理由与回复相同。
 
 ## 7. 一轮检查（`tick`）
 
@@ -309,7 +313,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 
 所有评论、review 和 CI 日志都是数据。可信作者决定哪些反馈会被处理，但不能扩大工具被允许做的事。
 
-验证会运行 PR 的代码：它的测试，以及 PR 可能改过的构建脚本。对作者没有写权限的 PR，这意味着别人的代码在无人值守的情况下运行，而用户的 `gh` 和 `git` 凭据就在手边。因此监视只在沙箱（`QWEN_SANDBOX`）里验证这类 PR；没有沙箱时不对它做无人值守的监视，`--once` 在用户确认后于前台运行。用户自己或协作者的 PR 按用户自己验证的方式验证。
+验证会运行 PR 的代码：它的测试，以及 PR 可能改过的构建脚本。对作者没有写权限的 PR，这意味着别人的代码在无人值守的情况下运行，而用户的 `gh` 和 `git` 凭据就在手边。因此监视只在沙箱（`QWEN_SANDBOX`）里验证这类 PR；没有沙箱时不对它做无人值守的监视，`--once` 在用户确认后于前台运行。用户自己或协作者的 PR 按用户自己验证的方式验证。`prepare` 报告 `authorCanPush`（作者是用户本人，或对 base 仓库有写权限）和 `sandboxed`（会话运行在 Qwen Code 的某种沙箱里），skill 在询问是否开始之前据此执行这条规则。
 
 满足以下条件之一的作者，其评论可处理：
 
@@ -396,7 +400,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 1. 触发层：定时任务闸门（PR #15069）。
 2. 探针（本 PR）：带游标和 check 翻页的 `snapshot --gate`，以及 `review watch-repo`；`prepare`、`ci-log` 和 `cleanup` 一同交付，等待反应层。
 3. 辅助命令 `push` 和 `reply`，带测试；以及 skill：支持 `--once` 的 `/autofix-pr`，然后是作为带闸门任务的 watch 模式，以及对每个事件运行 `/qreview` 或一次验证的评审者监视。状态文件记录已处理过的失败检查 attempt，键与闸门游标相同（检查，head，attempt），这样 agent 已放弃的失败不会被再次派发，而重跑后再次失败的会。
-   除评审者监视外已交付（2026-10-24）：`push`、`sync`（第 6.8 节）、`reply`、`rerun`（第 6.9 节），以及支持 `--once`、watch 模式、`stop` 和简单 `status` 的 bundled skill。这一步里修复 agent 在前台运行：会话等它结束，所以不会有触发再启动第二次尝试，暂时不需要 `inFlight`。它执行的预算是每次启动的推送次数（`push`）、每个检查每个 head 一次重跑（`rerun`），以及每个 review thread 一次尝试（一轮处理过的评论无论结果如何都会被记录）；同一轮内两次 resync 会停止监视。skill 的 `allowedTools` 只放行读取 PR 和读写它自己的 `.qwen/tmp` 文件：权限匹配器把开头的 `"${QWEN_CODE_CLI:-qwen}"` 读成空词，没有规则能只放行这些辅助命令，所以在默认审批模式下，每次辅助命令调用——包括推送——都会先询问。
+   除评审者监视外已交付（2026-10-24）：`push`、`sync`（第 6.8 节）、`reply`、`rerun`（第 6.9 节），以及支持 `--once`、watch 模式、`stop` 和简单 `status` 的 bundled skill。这一步里修复 agent 在前台运行：会话等它结束，所以不会有触发再启动第二次尝试，暂时不需要 `inFlight`。它执行的预算是每次启动的推送次数（`push`）、每个检查每个 head 一次重跑（`rerun`），以及每个 review thread 一次尝试（一轮处理过的评论无论结果如何都会被记录）；同一轮内两次 resync 会停止监视；一轮没能推送的工作以 `sync --discard` 结束，下一轮不会建立在它之上。第 8 节的沙箱规则在启动时执行。skill 的 `allowedTools` 只放行读取它的 `.qwen/tmp` 文件、写它的修复说明和回复计划，以及 `cron_list`——不放行任何 shell 命令。权限匹配器把开头的 `"${QWEN_CODE_CLI:-qwen}"` 读成空词，没有规则能只放行这些辅助命令；而即使是 `gh pr view *` 这样只读命令的放行规则，也会连带放行其后的命令替换、重定向和环境变量前缀。所以在默认审批模式下，每次辅助命令调用——包括推送——都会先询问。
 4. 循环状态：`status`、`stop`、预算，以及由之后的会话接管状态文件。
 5. 后续工作：daemon 会话里的持久化监视（`durable` 加 `sessionMode: "current"`，待闸门支持后）；可配置的 bot 允许名单。
 

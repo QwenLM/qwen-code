@@ -52,6 +52,8 @@ export interface ReplyOutcome {
   skipped: number;
   handledCommentIds: number;
   handledChecks: number;
+  /** Keys of an earlier head, which the round pushed past: not recorded. */
+  ignoredChecks: number;
 }
 
 function stringList(value: unknown, what: string): string[] {
@@ -140,32 +142,56 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
   if (conflict !== undefined && typeof conflict !== 'boolean') {
     throw new TypeError('handledConflict must be a boolean');
   }
+  const handled = stringList(plan['handled'], 'handled');
+  // One reply per thread and one answer per comment: a plan that names
+  // either twice would post the same reply twice.
+  const threads = new Set<number>();
+  for (const reply of replies) {
+    if (threads.has(reply.replyTo)) {
+      throw new TypeError(`thread ${reply.replyTo} has more than one reply`);
+    }
+    threads.add(reply.replyTo);
+  }
+  const ids = [
+    ...replies.flatMap((reply) => reply.handled),
+    ...(summary?.handled ?? []),
+    ...handled,
+  ];
+  const twice = ids.filter((id, index) => ids.indexOf(id) !== index);
+  if (twice.length > 0) {
+    throw new TypeError(
+      `comment(s) handled more than once in the plan: ${[...new Set(twice)].join(', ')}`,
+    );
+  }
   return {
     replies,
     summary,
-    handled: stringList(plan['handled'], 'handled'),
+    handled,
     handledChecks: stringList(plan['handledChecks'], 'handledChecks'),
     handledConflict: conflict === true,
   };
 }
 
+/** The head SHA a check attempt key names (`<check>@<head>@<attempt>`). */
+function keyHead(key: string): string | null {
+  return /@([0-9a-f]{40,64})@[^@]*$/.exec(key)?.[1] ?? null;
+}
+
 /**
  * What the PR offers to handle right now, from a fresh prepared snapshot:
  * the trusted comments no round has handled, by thread for replies, and the
- * failed check attempts and conflict still reported.
+ * failed check attempts still reported.
  */
 function actionable(snapshot: Snapshot): {
   threads: Map<number, Set<string>>;
   comments: Set<string>;
   untrusted: Set<string>;
   checks: Set<string>;
-  conflict: boolean;
 } {
   const threads = new Map<number, Set<string>>();
   const comments = new Set<string>();
   const untrusted = new Set<string>();
   const checks = new Set<string>();
-  let conflict = false;
   for (const event of snapshot.events) {
     switch (event.type) {
       case 'review_thread': {
@@ -184,14 +210,11 @@ function actionable(snapshot: Snapshot): {
       case 'ci_failed':
         if (event.key) checks.add(event.key);
         break;
-      case 'conflict':
-        conflict = true;
-        break;
       default:
         break;
     }
   }
-  return { threads, comments, untrusted, checks, conflict };
+  return { threads, comments, untrusted, checks };
 }
 
 function postComment(path: string, body: string): { id: string; url: string } {
@@ -242,12 +265,14 @@ export function runReply(args: ReplyArgs): ReplyOutcome {
   const pending: typeof plan.replies = [];
   let skipped = 0;
   for (const reply of plan.replies) {
-    const fresh = reply.handled.filter((id) => !done.has(id));
-    if (fresh.length === 0) {
-      // Posted by an earlier run of this plan, which recorded the ids.
+    if (reply.handled.some((id) => done.has(id))) {
+      // Posted by an earlier run of this plan, which recorded its ids with
+      // it. A comment of the thread it did not name stays open for the
+      // next round rather than risk a second copy of this reply.
       skipped += 1;
       continue;
     }
+    const fresh = reply.handled;
     const thread = offer.threads.get(reply.replyTo);
     if (!thread) {
       throw new Error(
@@ -272,15 +297,23 @@ export function runReply(args: ReplyArgs): ReplyOutcome {
         : `${id} is not a new comment from a trusted author on PR #${args.pr}.`,
     );
   }
+  // A failure of an earlier head — the round pushed past it — is history:
+  // prepared snapshots read only the current head, so it is not recorded.
   const knownChecks = new Set(state.handledChecks ?? []);
-  for (const key of plan.handledChecks) {
-    if (knownChecks.has(key) || offer.checks.has(key)) continue;
-    throw new Error(
-      `${key} is not a failure snapshot reports on the PR head; pass the \`key\` of a ci_failed event.`,
-    );
-  }
-  if (plan.handledConflict && !offer.conflict) {
-    throw new Error(`PR #${args.pr} reports no merge conflict on its head.`);
+  const currentChecks: string[] = [];
+  let ignoredChecks = 0;
+  for (const key of new Set(plan.handledChecks)) {
+    if (keyHead(key) !== pr.headRefOid) {
+      ignoredChecks += 1;
+      continue;
+    }
+    if (knownChecks.has(key)) continue;
+    if (!offer.checks.has(key)) {
+      throw new Error(
+        `${key} is not a failure snapshot reports on the PR head; pass the \`key\` of a ci_failed event.`,
+      );
+    }
+    currentChecks.push(key);
   }
 
   const outcome: ReplyOutcome = {
@@ -288,6 +321,7 @@ export function runReply(args: ReplyArgs): ReplyOutcome {
     skipped,
     handledCommentIds: 0,
     handledChecks: 0,
+    ignoredChecks,
   };
   const record = (patch: Partial<AutofixPrState>) => {
     state = { ...state, ...patch };
@@ -335,31 +369,40 @@ export function runReply(args: ReplyArgs): ReplyOutcome {
     (summary.handled && summary.handled.length > 0
       ? summary.handled.some((id) => !handledBefore.has(id))
       : state.summarizedSha !== pr.headRefOid);
-  if (summary && args.post && summaryDue) {
-    const posted = postComment(
-      `${base}/issues/${args.pr}/comments`,
-      summary.body,
-    );
+  if (summary && summaryDue) {
+    // Its comments are recorded with it, so a retry after a later failure
+    // finds it posted. `--no-post` records the same, posting nothing.
+    const posted = args.post
+      ? postComment(`${base}/issues/${args.pr}/comments`, summary.body)
+      : null;
     record({
-      postedCommentIds: [...state.postedCommentIds, posted.id],
+      postedCommentIds: posted
+        ? [...state.postedCommentIds, posted.id]
+        : state.postedCommentIds,
+      handledCommentIds: [
+        ...state.handledCommentIds,
+        ...addHandled(summary.handled ?? []),
+      ],
       summarizedSha: pr.headRefOid,
     });
-    outcome.posted.push({ kind: 'summary', ...posted });
-  } else if (summary && !summaryDue) {
+    if (posted) outcome.posted.push({ kind: 'summary', ...posted });
+  } else if (summary) {
     outcome.skipped += 1;
   }
 
-  const freshChecks = [...new Set(plan.handledChecks)].filter(
-    (key) => !knownChecks.has(key),
-  );
-  outcome.handledChecks = freshChecks.length;
+  outcome.handledChecks = currentChecks.length;
   record({
     handledCommentIds: [
       ...state.handledCommentIds,
       ...addHandled(otherHandled),
     ],
-    handledChecks: [...(state.handledChecks ?? []), ...freshChecks],
-    ...(plan.handledConflict ? { handledConflictSha: pr.headRefOid } : {}),
+    handledChecks: [...(state.handledChecks ?? []), ...currentChecks],
+    // Right after a push GitHub reports `UNKNOWN` until it has recomputed
+    // the merge, so a conflict left for a human is recorded unless the
+    // head is known to merge cleanly.
+    ...(plan.handledConflict && pr.mergeable !== 'MERGEABLE'
+      ? { handledConflictSha: pr.headRefOid }
+      : {}),
   });
   return outcome;
 }

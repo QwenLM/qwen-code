@@ -5,13 +5,18 @@
  */
 
 // `qwen autofix-pr sync`: adopt a PR head someone else pushed, and record it
-// as the head the next push builds on. The worktree fast-forwards to a head
-// built on it. A worktree with unpushed commits of a round merges a head
-// pushed on top of the known one (never rebase). A head that rewrote the
-// history the worktree stands on (a rebase or force-push by the author)
-// replaces the worktree: what the tool pushed is part of that history now,
-// and an unpushed attempt made on the old history is dropped, since `push`
-// would refuse it anyway.
+// as the head the next push builds on. The head is read from the PR branch
+// where pushes go — the ref the push lease protects, which moves at once,
+// unlike `refs/pull/<n>/head`.
+//
+// A head built on the known one is adopted: the worktree fast-forwards to
+// it, or, holding unpushed commits of a round, must merge it first (never
+// rebase). A head that does not contain the known one rewrote the history
+// (the author rebased, force-pushed or rolled the branch back): the
+// worktree is replaced by it, since anything built on the old history would
+// put back what the author removed, and an unpushed attempt is dropped.
+// `--discard` returns the worktree to the PR head whatever it holds, to end
+// a round whose work was not pushed.
 
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -37,55 +42,60 @@ export interface SyncOutcome {
   /** When not synced: what the worktree must do first. */
   action?: 'merge';
   reason?: string;
-  /** Unpushed commits of an attempt dropped because the author rewrote the
-   * history they were made on. */
+  /** Unpushed commits dropped: the author rewrote the history they were
+   * made on, or `--discard` asked for it. */
   dropped?: number;
+  /** `--discard` threw away uncommitted changes as well. */
+  discardedChanges?: true;
 }
 
-export function runSync(prNumber: number): SyncOutcome {
+export function runSync(prNumber: number, discard = false): SyncOutcome {
   const paths = autofixPrPaths(repoRoot(), prNumber);
   const state = requireState(paths.statePath, prNumber);
   assertOwnedBySession(state);
   const worktree = paths.worktreePath;
-  requireWorktree(worktree, prNumber);
+  requireWorktree(paths, prNumber);
 
-  // FETCH_HEAD is per worktree, so this leaves the user's checkout alone. The
-  // PR ref lives on the base repository, fork PRs included.
+  // FETCH_HEAD is per worktree, so this leaves the user's checkout alone.
   git(
     '-C',
     worktree,
     'fetch',
     '--quiet',
-    state.remote,
-    `refs/pull/${prNumber}/head`,
+    state.pushTarget,
+    `refs/heads/${state.headRefName}`,
   );
   const prHead = git('-C', worktree, 'rev-parse', 'FETCH_HEAD^{commit}');
   const head = git('-C', worktree, 'rev-parse', 'HEAD');
-  const moved = prHead !== state.lastKnownHeadSha;
+  const known = state.lastKnownHeadSha;
+  const moved = prHead !== known;
+  // Commits of a round that are not on the PR: the worktree's own work.
+  const own = Number(
+    gitOpt('-C', worktree, 'rev-list', '--count', 'HEAD', '--not', known) ??
+      'NaN',
+  );
+  if (!Number.isInteger(own)) {
+    throw new Error(`git cannot count the unpushed commits in ${worktree}`);
+  }
 
   let dropped: number | undefined;
-  if (head !== prHead && !isAncestor(worktree, prHead, head)) {
-    // Commits of a round that are not on the PR: the worktree's own work.
-    const own = Number(
-      gitOpt(
-        '-C',
-        worktree,
-        'rev-list',
-        '--count',
-        'HEAD',
-        '--not',
-        state.lastKnownHeadSha,
-      ) ?? 'NaN',
-    );
-    if (!Number.isInteger(own)) {
-      throw new Error(`git cannot count the unpushed commits in ${worktree}`);
+  let discardedChanges = false;
+  if (discard) {
+    discardedChanges = hasUncommittedChanges(worktree);
+    git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
+    git('-C', worktree, 'clean', '-fdq');
+    if (own > 0) dropped = own;
+  } else if (!isAncestor(worktree, known, prHead)) {
+    // The author rewrote the history the watch knew.
+    if (hasUncommittedChanges(worktree)) {
+      throw new Error(
+        `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
+      );
     }
-    const fastForward = isAncestor(worktree, head, prHead);
-    if (
-      !fastForward &&
-      own > 0 &&
-      isAncestor(worktree, state.lastKnownHeadSha, prHead)
-    ) {
+    git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
+    if (own > 0) dropped = own;
+  } else if (head !== prHead && !isAncestor(worktree, prHead, head)) {
+    if (!isAncestor(worktree, head, prHead)) {
       return {
         synced: false,
         headSha: prHead,
@@ -101,33 +111,41 @@ export function runSync(prNumber: number): SyncOutcome {
         `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
       );
     }
-    if (fastForward) {
-      git('-C', worktree, 'merge', '--ff-only', '--quiet', prHead);
-    } else {
-      // The author rewrote the history the worktree stands on.
-      git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
-      if (own > 0) dropped = own;
-    }
+    git('-C', worktree, 'merge', '--ff-only', '--quiet', prHead);
   }
 
-  if (moved)
+  if (moved) {
     writeState(paths.statePath, { ...state, lastKnownHeadSha: prHead });
-  return dropped === undefined
-    ? { synced: true, headSha: prHead, moved }
-    : { synced: true, headSha: prHead, moved, dropped };
+  }
+  return {
+    synced: true,
+    headSha: prHead,
+    moved,
+    ...(dropped === undefined ? {} : { dropped }),
+    ...(discardedChanges ? { discardedChanges: true as const } : {}),
+  };
 }
 
 export const syncCommand: CommandModule = {
   command: 'sync <pr>',
   describe:
-    'Adopt a PR head pushed by someone else: fast-forward the worktree to it, or say what to merge first',
+    'Adopt a PR head pushed by someone else: fast-forward the worktree to it, say what to merge first, or follow a rewritten history',
   builder: (yargs) =>
-    yargs.positional('pr', {
-      type: 'number',
-      demandOption: true,
-      describe: 'PR number',
-    }),
+    yargs
+      .positional('pr', {
+        type: 'number',
+        demandOption: true,
+        describe: 'PR number',
+      })
+      .option('discard', {
+        type: 'boolean',
+        default: false,
+        describe:
+          "Return the worktree to the PR head, dropping a round's unpushed commits and uncommitted changes",
+      }),
   handler: (argv) => {
-    writeStdoutLine(JSON.stringify(runSync(Number(argv['pr']))));
+    writeStdoutLine(
+      JSON.stringify(runSync(Number(argv['pr']), Boolean(argv['discard']))),
+    );
   },
 };

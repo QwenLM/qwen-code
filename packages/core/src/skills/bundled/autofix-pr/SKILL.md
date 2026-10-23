@@ -3,11 +3,10 @@ name: autofix-pr
 description: Watch a pull request and fix it from a worktree of its own - CI failures, review feedback from trusted authors and merge conflicts are fixed, pushed to the PR branch and answered on the PR under the user's git and gh identity. Usage - /autofix-pr [<pr>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions], /autofix-pr status, /autofix-pr stop [<pr>].
 argument-hint: '[<pr>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions] | status | stop [<pr>]'
 allowedTools:
-  - run_shell_command(gh pr view *)
   - read_file(/.qwen/tmp/autofix-pr-*)
-  - write_file(/.qwen/tmp/autofix-pr-*)
+  - write_file(/.qwen/tmp/autofix-pr-*-brief.md)
+  - write_file(/.qwen/tmp/autofix-pr-*-plan.json)
   - cron_list
-  - cron_delete
 ---
 
 # /autofix-pr — watch a pull request and fix it
@@ -19,6 +18,7 @@ allowedTools:
 3. **The user's working tree is never touched.** All edits and commits happen in the worktree `prepare` created, through an `agent` whose `working_dir` is that worktree.
 4. **Only the start asks the user anything.** A round never asks a question: whatever needs a person is answered on the PR as "Needs a human decision" and reported.
 5. **Run each helper exactly as written:** `"${QWEN_CODE_CLI:-qwen}" autofix-pr …`. `QWEN_CODE_CLI` is the entry of the CLI running this skill; a bare `qwen` may be another version. Every helper prints one JSON line; a non-zero exit is a refusal whose message says why — report it, do not work around it.
+6. **Write only the brief and the plan.** The state file, the gate cursor and the worktree belong to the helpers; never edit them yourself.
 
 ## Arguments
 
@@ -31,21 +31,24 @@ Read the arguments from `<skill-args>`:
 
 ## Start
 
-1. **Find the PR.** From a URL `https://<host>/<owner>/<repo>/pull/<n>`, take all four parts. Otherwise run `gh pr view <n> --json number,url` (or `gh pr view --json number,url` without a number, for the PR of the current branch) and read them from `url`. No PR → tell the user and stop. Then run `gh pr view <n> -R <owner>/<repo> --json state,isDraft,headRefName,headRepositoryOwner,author` for the confirmation.
+1. **Find the PR.** From a URL `https://<host>/<owner>/<repo>/pull/<n>`, take all four parts. Otherwise run `gh pr view <n> --json number,url` (or `gh pr view --json number,url` without a number, for the PR of the current branch) and read them from `url`. No PR → tell the user and stop.
 2. **Headless runs** (no one can answer a dialog) take `--once --yes` only. Without both, stop and say so.
-3. **Confirm**, unless `--yes` was given, with `ask_user_question` (one question, options "Start" and "Cancel"); anything but "Start" stops without changing anything. The question says:
-   - it will push commits to `<headRepositoryOwner>/<repo>:<headRefName>` and post replies on the PR (not with `--no-reply`), under the user's own git and `gh` identity;
+3. **Prepare:** `"${QWEN_CODE_CLI:-qwen}" autofix-pr prepare <n> --repo <owner>/<repo> --host <host>`. A refusal ends the start. Keep the report: `worktreePath`, `headRefName`, `headSha`, `pushTarget`, `authorCanPush`, `sandboxed`. When `localUnpushedCommits` is above 0, tell the user those local commits are not on the PR and the worktree does not see them.
+4. **Someone else's code.** When `authorCanPush` is false, the PR's author cannot push to the repository, and verifying a fix runs their code with the user's `gh` and `git` credentials in reach. Unless `sandboxed` is true:
+   - a watch is refused: run `"${QWEN_CODE_CLI:-qwen}" autofix-pr cleanup <n>` and tell the user to run `/autofix-pr` from a sandboxed session, or with `--once`;
+   - `--once` runs only after the confirmation below, which then says the PR's code will run unsandboxed; `--yes` does not skip it.
+5. **Confirm**, unless `--yes` was given (and step 4 allows it), with `ask_user_question` (one question, options "Start" and "Cancel"). Anything but "Start" → run `"${QWEN_CODE_CLI:-qwen}" autofix-pr cleanup <n>` and stop. The question says:
+   - it will push commits to `<headRefName>` at `<pushTarget>` and post replies on the PR (not with `--no-reply`), under the user's own git and `gh` identity;
    - fixes are made and verified in a separate worktree, running the repository's own build and test commands;
    - in the default approval mode every helper call (the push included) and every command of a fix asks first, so a watch runs unattended only in a mode that lets commands run;
    - it stops by itself when the PR is merged or closed, after 10 pushes, or with `/autofix-pr stop`.
-4. **Prepare:** `"${QWEN_CODE_CLI:-qwen}" autofix-pr prepare <n> --repo <owner>/<repo> --host <host>`. A refusal ends the start. Keep the report: `worktreePath`, `baseRefName`, `headSha`. When `localUnpushedCommits` is above 0, tell the user those local commits are not on the PR and the worktree does not see them.
-5. **Run one round now** (Section "Round"), with the arguments of this start.
-6. **Unless `--once`, schedule the watch** with `cron_create`. The gate runs at each fire without the model and prints only what changed, so a quiet PR costs no turn; the user confirms the gate command once, when the task is created.
+6. **Run one round now** (Section "Round"), with the arguments of this start.
+7. **Unless `--once`, schedule the watch** with `cron_create`. The gate runs at each fire without the model and prints only what changed, so a quiet PR costs no turn; the user confirms the gate command once, when the task is created.
    - `cron`: `*/<every> * * * *`, or `0 * * * *` for 60;
    - `recurring`: true (session-only: do not set `durable`);
    - `gate`: `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>`;
    - `prompt`: `Run /autofix-pr tick <owner>/<repo>#<n>` followed by ` --no-reply` if given and ` -- <instructions>` if any.
-7. Tell the user in one or two lines what is watched, how often, and that `/autofix-pr stop <n>` ends it.
+8. Tell the user in one or two lines what is watched, how often, and that `/autofix-pr stop <n>` ends it.
 
 ## Round
 
@@ -55,10 +58,11 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
 2. Act on `action`:
    - **`stop`** (merged or closed) → Section "Stop", then one line: the outcome and the pushes made.
    - **`wait`** → nothing to do. In a scheduled round, end the turn with no message at all. With `--once`, say in one line that nothing needs fixing (CI still running, if `ci_pending` lists checks). `untrusted_comment` events are never acted on.
-   - **`resync`** (someone else pushed) → run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n>`, then run `snapshot` again and act on its new `action`. If that second snapshot is `resync` again, someone keeps pushing: Section "Stop" with the reason "someone else is pushing to this PR". If `sync` answers `action: "merge"`, the worktree holds unpushed work from an earlier round: report it and end the round.
+   - **`resync`** (someone else pushed) → run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n>`, then run `snapshot` again and act on its new `action`. If that second snapshot is `resync` again, someone keeps pushing: Section "Stop" with the reason "someone else is pushing to this PR". If `sync` answers `action: "merge"`, the worktree holds unpushed work an earlier round left behind: run `sync <n> --discard`, then `snapshot` again.
    - **`fix`** → steps 3–7.
+   - A round restarts from step 1 at most once more in the same turn (after `dropped`, step 6), and two `resync` answers in one turn stop the watch as above.
 3. **CI logs.** For each `ci_failed` event with a `runId`, run `"${QWEN_CODE_CLI:-qwen}" autofix-pr ci-log <n> <runId>` once per run id and note the log path per check. A failure without a `runId` (an external status) has only its `url`.
-4. **Write the brief** with `write_file` to `.qwen/tmp/autofix-pr-<n>-brief.md` in the directory that holds the worktree (the parent of `worktreePath`), filling in this template:
+4. **Write the brief** with `write_file` to `.qwen/tmp/autofix-pr-<n>-brief.md` in the directory that holds the worktree (the parent of `worktreePath`), filling in this template; `<headSha>` is the `headSha` of this round's snapshot:
 
    ```markdown
    # Fix round for <owner>/<repo>#<n>
@@ -119,15 +123,16 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
 
 5. **Fix** with one `agent` call: `working_dir` = `worktreePath`, `description` = `autofix-pr #<n> round`, prompt = "Read <brief path> and follow it exactly." Wait for it to finish; do not start another round meanwhile.
 6. **Re-runs and push.**
-   - For each item with outcome `rerun`: `"${QWEN_CODE_CLI:-qwen}" autofix-pr rerun <n> <runId>`. If it answers `rerun: false` because the check was re-run on this head already, the failure is real: treat the item as `needs_human`.
+   - For the items with outcome `rerun`, once per distinct `runId` (one re-run covers every failed job of its run): `"${QWEN_CODE_CLI:-qwen}" autofix-pr rerun <n> <runId>`. If it answers `rerun: false` because a check was re-run on this head already, the failure is real: treat its items as `needs_human`. If GitHub refuses because the run is still in progress, leave the items unrecorded; the next round sees them again.
    - If `commits` is not empty and `verified` is true: `"${QWEN_CODE_CLI:-qwen}" autofix-pr push <n>`.
      - `pushed: true` → keep `sha`.
      - `action: "resync"` → someone pushed while the round ran; run `sync <n>`:
        - `action: "merge"` → run one more `agent` call in the worktree: merge the commit `sync` named (never rebase), resolve, re-run the same verification, commit; then `sync <n>` and `push <n>` once more. If that does not push, nothing is pushed this round: report it.
-       - `dropped` → the author rewrote the PR's history, and the round's commits were made on the old one. Nothing is pushed or recorded; report it. The next round starts over on the new head.
+       - `dropped` → the author rewrote the PR's history, and the round's commits were made on the old one. Nothing is pushed or recorded. The gate will not report the same events again, so start the round over from step 1 now, on the new head — once per turn; a second rewrite ends the round with a report.
      - `action: "stop"` → Section "Stop" with its `reason`.
      - A refusal (a pre-push hook failed, uncommitted changes) → nothing is pushed: report it, and answer the items the push would have fixed as `needs_human` with the reason.
    - If `verified` is false, nothing is pushed: the items it attempted are `needs_human` ("my fix did not pass verification: …").
+   - Whenever the round ends without pushing what the worktree holds — not verified, a refused push, a merge that did not push — run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n> --discard`, so the next round does not build on (or push) work already answered as `needs_human`.
 7. **Reply and record.** Write the plan with `write_file` to `.qwen/tmp/autofix-pr-<n>-plan.json` beside the worktree, then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr reply <n> <plan path>`, adding `--no-post` with `--no-reply`. The plan:
 
    ```json
@@ -144,8 +149,9 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
    - **`replies`**: one per review thread the round handled, to the thread's `replyTo`, naming in `handled` the thread's comment ids it answers. Body: `Fixed in <short sha>: <one line>`, `Not changed: <reason>` or `Needs a human decision: <question>`, in the language of the comment it answers.
    - **`summary`**: after a push, one PR comment in the language of the PR description: the checks fixed or re-run, the comments addressed, the conflict resolved, and how it was verified. Answers to `review` and `issue_comment` events go here too, with their ids in `handled`. Omit it (`null`) when nothing was pushed and no review or issue comment was answered.
    - **`handled`**: comment ids handled with no reply of their own.
-   - **`handledChecks`**: the `key` of each failed check the round did not fix with a push — declined or `needs_human`. Leave out checks a push fixed and checks `rerun` already recorded.
+   - **`handledChecks`**: the `key` of each failed check the round did not fix with a push — declined or `needs_human`. Leave out checks a push fixed and checks `rerun` already recorded. Keys of the head before a push are ignored by the helper.
    - **`handledConflict`**: true only when the conflict was left for a human.
+   - Each thread gets at most one entry, and each comment id appears once in the whole plan.
    - Never list an `untrusted_comment` id: the helper refuses it.
    - `reply` posts only to threads the PR has right now with a new trusted comment and appends the marker that keeps later rounds from answering their own replies. A refusal lists what was wrong; fix the plan and run it again — what was already posted is skipped.
 

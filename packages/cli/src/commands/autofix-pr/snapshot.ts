@@ -349,24 +349,25 @@ type CiFailed = Extract<SnapshotEvent, { type: 'ci_failed' }>;
 function latestContexts(nodes: CheckContext[]): CheckContext[] {
   const latest = new Map<string, CheckContext>();
   for (const ctx of nodes) {
-    let key: string;
-    if (ctx.__typename === 'CheckRun') {
-      const suite = ctx.checkSuite;
-      const run = suite?.workflowRun;
-      key = [
-        'run',
-        suite?.app?.databaseId ?? '',
-        run?.workflow?.databaseId ?? '',
-        run?.event ?? '',
-        ctx.name,
-      ].join('\0');
-    } else {
-      key = `status\0${ctx.context}`;
-    }
+    const key = checkIdentity(ctx);
     const seen = latest.get(key);
     if (!seen || attemptOrder(ctx) > attemptOrder(seen)) latest.set(key, ctx);
   }
   return [...latest.values()];
+}
+
+/** What makes two runs attempts of one check (see `latestContexts`). */
+function checkIdentity(ctx: CheckContext): string {
+  if (ctx.__typename !== 'CheckRun') return `status:${ctx.context}`;
+  const suite = ctx.checkSuite;
+  const run = suite?.workflowRun;
+  return [
+    'run',
+    suite?.app?.databaseId ?? '',
+    run?.workflow?.databaseId ?? '',
+    run?.event ?? '',
+    ctx.name,
+  ].join(':');
 }
 
 function attemptOrder(ctx: CheckContext): number {
@@ -375,9 +376,19 @@ function attemptOrder(ctx: CheckContext): number {
     : Date.parse(ctx.createdAt);
 }
 
+export interface FailedCheck {
+  event: CiFailed;
+  /** The attempt: a check run's id (`#<databaseId>`) or a status's time. */
+  attempt: string;
+  /** The check across its attempts: app, workflow, trigger and name. */
+  identity: string;
+  /** A GitHub Actions job, the only kind `gh run rerun` can re-run. */
+  actions: boolean;
+}
+
 /** The failed checks of the head, each with the identity of its attempt. */
 export function checkEvents(pr: PrData): {
-  failed: Array<{ event: CiFailed; attempt: string }>;
+  failed: FailedCheck[];
   pending: string[];
   truncated: boolean;
 } {
@@ -387,7 +398,7 @@ export function checkEvents(pr: PrData): {
     return { failed: [], pending: [], truncated: false };
   }
   const { contexts } = commit.statusCheckRollup;
-  const failed: Array<{ event: CiFailed; attempt: string }> = [];
+  const failed: FailedCheck[] = [];
   const pending: string[] = [];
   for (const ctx of latestContexts(contexts.nodes)) {
     if (ctx.__typename === 'CheckRun') {
@@ -401,6 +412,8 @@ export function checkEvents(pr: PrData): {
             runId: runIdFrom(ctx.detailsUrl),
           },
           attempt: `#${ctx.databaseId}`,
+          identity: checkIdentity(ctx),
+          actions: Boolean(ctx.checkSuite?.workflowRun),
         });
       }
     } else if (PENDING_STATUSES.has(ctx.state)) {
@@ -414,6 +427,8 @@ export function checkEvents(pr: PrData): {
           runId: runIdFrom(ctx.targetUrl),
         },
         attempt: ctx.createdAt,
+        identity: checkIdentity(ctx),
+        actions: false,
       });
     }
   }

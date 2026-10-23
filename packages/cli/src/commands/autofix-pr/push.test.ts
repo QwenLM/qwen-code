@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  symlinkSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -19,8 +20,16 @@ import { dirname, join } from 'node:path';
 
 const ghMock = vi.hoisted(() => ({
   gh: vi.fn((..._args: string[]) => ''),
+  // The bare remote is a local path the real matcher cannot read: say which
+  // remote serves the head repository.
+  matched: vi.fn((): string[] => ['origin']),
 }));
-vi.mock('../review/lib/gh.js', () => ({
+vi.mock('../review/lib/remote-match.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../review/lib/remote-match.js')>()),
+  matchRemotes: () => ({ matched: ghMock.matched() }),
+}));
+vi.mock('../review/lib/gh.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
   gh: ghMock.gh,
   setGhHost: () => {},
   ensureAuthenticated: () => {},
@@ -43,7 +52,13 @@ describe('runPush (real git, bare remote)', () => {
   let savedCwd: string;
   let savedSession: string | undefined;
   let paths: ReturnType<typeof autofixPrPaths>;
-  let live: { state: string; headRefName: string; isCrossRepository: boolean };
+  let live: {
+    state: string;
+    headRefName: string;
+    isCrossRepository: boolean;
+    headRepository: { name: string } | null;
+    headRepositoryOwner: { login: string } | null;
+  };
   let defaultBranch: string;
 
   const run = (cwd: string, ...args: string[]) =>
@@ -107,8 +122,16 @@ describe('runPush (real git, bare remote)', () => {
     };
     writeState(paths.statePath, initial);
 
-    live = { state: 'OPEN', headRefName: 'feat', isCrossRepository: false };
+    live = {
+      state: 'OPEN',
+      headRefName: 'feat',
+      isCrossRepository: false,
+      headRepository: { name: 'r' },
+      headRepositoryOwner: { login: 'o' },
+    };
     defaultBranch = 'main';
+    ghMock.matched.mockReset();
+    ghMock.matched.mockImplementation(() => ['origin']);
     ghMock.gh.mockReset();
     ghMock.gh.mockImplementation((...args: string[]) =>
       args[0] === 'pr' ? JSON.stringify(live) : defaultBranch,
@@ -216,13 +239,74 @@ describe('runPush (real git, bare remote)', () => {
   });
 
   it('runs pre-push hooks and reports their refusal', () => {
-    const hook = join(repo, '.git', 'hooks', 'pre-push');
+    // Named in the repository's own config, so a global `core.hooksPath` on
+    // the machine running the test does not replace it.
+    const hooks = join(base, 'hooks');
+    mkdirSync(hooks);
+    run(repo, 'config', 'core.hooksPath', hooks);
+    const hook = join(hooks, 'pre-push');
     writeFileSync(hook, '#!/bin/sh\necho "hook says no" >&2\nexit 1\n');
     chmodSync(hook, 0o755);
     commitIn(paths.worktreePath, 'fix.txt');
     expect(() => runPush(7)).toThrow(/hook says no/);
     expect(remoteFeat()).toBe(featSha);
     expect(state().pushCount).toBeUndefined();
+  });
+
+  it('pushes the commit it checked, even if HEAD moves while GitHub is asked', () => {
+    const fix = commitIn(paths.worktreePath, 'fix.txt');
+    ghMock.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        // Meanwhile the worktree is moved to a commit off the PR history.
+        run(paths.worktreePath, 'reset', '-q', '--hard', 'main');
+        commitIn(paths.worktreePath, 'rewrite.txt');
+        return JSON.stringify(live);
+      }
+      return defaultBranch;
+    });
+    expect(runPush(7)).toMatchObject({ pushed: true, sha: fix });
+    expect(remoteFeat()).toBe(fix);
+  });
+
+  it('pushes only the branch and destination GitHub and the remotes name, not an edited state file', () => {
+    commitIn(paths.worktreePath, 'fix.txt');
+    writeState(paths.statePath, { ...state(), headRefName: 'main' });
+    expect(() => runPush(7)).toThrow(/head branch is feat, not the main/);
+    writeState(paths.statePath, {
+      ...state(),
+      headRefName: 'feat',
+      pushTarget: 'elsewhere',
+    });
+    expect(() => runPush(7)).toThrow(/now go to origin, not the elsewhere/);
+    expect(remoteFeat()).toBe(featSha);
+  });
+
+  it('refuses a state file whose values would reach git as options', () => {
+    const valid = state();
+    writeState(paths.statePath, {
+      ...valid,
+      remote: '--upload-pack=touch pwned',
+    });
+    expect(() => runPush(7)).toThrow(/invalid remote/);
+    writeState(paths.statePath, { ...valid, lastKnownHeadSha: '--all' });
+    expect(() => runPush(7)).toThrow(/invalid lastKnownHeadSha/);
+    writeState(paths.statePath, { ...valid, pushTarget: '-oProxy' });
+    expect(() => runPush(7)).toThrow(/invalid pushTarget/);
+  });
+
+  it('refuses a worktree on another branch, or a symlink in its place', () => {
+    run(repo, 'branch', 'mine', featSha);
+    run(paths.worktreePath, 'switch', '-q', 'mine');
+    commitIn(paths.worktreePath, 'user-work.txt');
+    expect(() => runPush(7)).toThrow(
+      /branch mine checked out, not qwen-autofix\/pr-7/,
+    );
+    expect(remoteFeat()).toBe(featSha);
+
+    run(repo, 'worktree', 'remove', '--force', paths.worktreePath);
+    symlinkSync(repo, paths.worktreePath);
+    expect(() => runPush(7)).toThrow(/is a symlink/);
+    expect(remoteFeat()).toBe(featSha);
   });
 
   it('refuses a watch owned by another session', () => {

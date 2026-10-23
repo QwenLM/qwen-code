@@ -220,7 +220,8 @@ wrote and prints events plus one action:
       "type": "ci_failed",
       "check": "Test ubuntu",
       "url": "https://github.com/owner/repo/actions/runs/456/job/789",
-      "runId": 456
+      "runId": 456,
+      "key": "Test ubuntu@3f2a1c0...@#789"
     },
     { "type": "ci_pending", "checks": ["Lint"] },
     {
@@ -364,6 +365,9 @@ while other jobs of the same run may still be running.
 
 Refuses unless all of these hold:
 
+- the worktree is the watch's own: not a symlink, a worktree of its own, with
+  `qwen-autofix/pr-<n>` checked out (a fix that switched it to the user's
+  copy of the PR branch must not publish that branch);
 - the worktree is clean (every change committed);
 - `lastKnownHeadSha` is an ancestor of `HEAD` (fast-forward only, no history
   rewrite);
@@ -371,19 +375,26 @@ Refuses unless all of these hold:
 
 It asks GitHub at push time, not at `prepare`: a PR that was merged or closed
 meanwhile answers `stop`, and the default branch is read again, since it can
-be renamed while a watch runs. A watch that has used its pushes (10, Section 10) answers `stop` without asking anything. A `HEAD` equal to the known head
-has nothing to push.
+be renamed while a watch runs. The branch and the destination come from
+GitHub and the clone's remotes, found the way `prepare` found them, and must
+equal the ones the state file recorded, so an edited state file cannot
+redirect a push. Every value of the state file that reaches git — the
+remote, the push target, the head ref, the SHAs — is checked when the file
+is read; one starting with `-` would be taken as an option. A watch that has
+used its pushes (10, Section 10) answers `stop` without asking anything. A
+`HEAD` equal to the known head has nothing to push.
 
 Then it runs
-`git push --porcelain <target> HEAD:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`
-from the worktree, with ten minutes for pre-push hooks. Hooks run, and there
-is no `--force` or `--no-verify`. On success it records the new SHA in
-`pushedShas` and `lastKnownHeadSha` and counts one push. A rejected lease
-(`[rejected] (stale info)`) means someone else pushed; the result is `resync`,
-not a retry, and nothing is recorded. Any other refusal — a hook, branch
-protection, credentials — is an error with git's last lines. The output is
-one JSON line: `{"pushed": true, "sha", "pushes", "maxPushes"}`, or
-`{"pushed": false, "action": "resync" | "stop", "reason"}`.
+`git push --porcelain <target> <sha>:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`
+from the worktree, with ten minutes for pre-push hooks. `<sha>` is the commit
+the checks above passed, not `HEAD`, which could move while GitHub is asked.
+Hooks run, and there is no `--force` or `--no-verify`. On success it records
+the new SHA in `pushedShas` and `lastKnownHeadSha` and counts one push. A
+rejected lease (`[rejected] (stale info)`) means someone else pushed; the
+result is `resync`, not a retry, and nothing is recorded. Any other refusal —
+a hook, branch protection, credentials — is an error with git's last lines.
+The output is one JSON line: `{"pushed": true, "sha", "pushes", "maxPushes"}`,
+or `{"pushed": false, "action": "resync" | "stop", "reason"}`.
 
 ### 6.5 `reply <pr> <plan.json> [--no-post]`
 
@@ -410,19 +421,28 @@ The helper decides what may be posted, against one fresh read of the PR
   comments cannot be marked handled; a check key must be one a `ci_failed`
   event reports on the head (prepared mode prints its `key`); a conflict can
   be left for a human only while there is one. The PR must be open.
+- A failure key of another head — the round pushed past it — is ignored and
+  counted in `ignoredChecks`: prepared snapshots read only the current head.
+  `handledConflict` is recorded against the head unless GitHub reports it as
+  mergeable; right after a push it reports `UNKNOWN` until it has recomputed
+  the merge.
+- A plan with two replies to one thread, or one comment id twice, is refused.
 - Every check runs before anything is posted, so a refused plan posts
   nothing.
 - Each body gets the marker once and must fit GitHub's 65,536 characters.
 - Each posted id is written to the state file the moment it exists, with the
   comments its reply handled. A run that fails part way leaves the rest
-  unposted and unrecorded; running the same plan again skips the replies
-  whose comments are already handled, and the summary when its comments are
-  (a summary that handles none is posted once per head, `summarizedSha`).
+  unposted and unrecorded; running the same plan again skips a reply when any
+  of its comments is already handled (a comment it did not name stays open
+  for the next round, rather than risk a second copy), and the summary when
+  its comments are (a summary that handles none is posted once per head,
+  `summarizedSha`).
 - `handledChecks` and `handledConflict` record failures and a conflict the
   round did not fix with a push, so prepared snapshots stop reporting them:
   a failure by its attempt (a re-run that fails again is new), a conflict by
   its head.
-- `--no-post` (the skill's `--no-reply`) records the same and posts nothing.
+- `--no-post` (the skill's `--no-reply`) records the same, the summary's
+  `summarizedSha` included, and posts nothing.
 
 Replies to review threads use
 `POST /repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies`; the summary is an
@@ -493,30 +513,40 @@ do not fit are left out and counted in `deferred`; their PRs keep their old
 head in the cursor, so the next run reports them. The skill that uses it decides what each event means:
 run `/qreview <number>`, or a verification pass, per PR.
 
-### 6.8 `sync <pr>`
+### 6.8 `sync <pr> [--discard]`
 
-Adopts a head someone else pushed. It fetches `refs/pull/<n>/head` into the
-worktree's own `FETCH_HEAD` (the user's checkout is untouched), then:
+Adopts a head someone else pushed. It fetches the PR branch from the push
+target — the ref the push lease protects, which moves at once, unlike
+`refs/pull/<n>/head` — into the worktree's own `FETCH_HEAD` (the user's
+checkout is untouched), and checks the worktree as `push` does. Then:
 
-- a worktree at that head, or one that already contains it (a round merged
-  it), only records it as `lastKnownHeadSha`;
+- a head that does not contain the known head rewrote the history: the
+  author rebased, force-pushed, or rolled the branch back, perhaps past a
+  push of the watch. The worktree is reset to it, as Section 7 describes:
+  anything built on the old history would put back what the author removed.
+  An unpushed attempt made on the old history is reported as `dropped`;
+- a head built on the known one that the worktree already contains (a round
+  merged it) is only recorded as `lastKnownHeadSha`;
 - a worktree behind it is fast-forwarded, when it is clean;
-- a worktree with unpushed commits of a round, while the new head was pushed
-  on top of the known one, is not touched: the answer is
+- a worktree with unpushed commits of a round is not touched: the answer is
   `{"synced": false, "action": "merge"}` with the head to merge (never
-  rebase), and nothing changes;
-- a head that does not contain the worktree's history (the author rebased or
-  force-pushed) replaces it, as Section 7 describes: the worktree is reset to
-  the new head, and an unpushed attempt made on the old history is reported
-  as `dropped`.
+  rebase), and nothing changes.
 
-A worktree with uncommitted changes is never moved or reset.
+A worktree with uncommitted changes is never moved or reset. `--discard`
+returns the worktree to the PR head whatever it holds — unpushed commits and
+uncommitted changes — to end a round whose work was not pushed, and reports
+what it dropped.
 
 ### 6.9 `rerun <pr> <run-id>`
 
 Re-runs the failed jobs of a run the fix agent judged an infrastructure
-failure, with `gh run rerun <run-id> --failed`. Each failed check of that run
-on the head spends its one re-run (`rerunChecks`, keyed by check and head);
+failure, with `gh run rerun <run-id> --failed`. Only a GitHub Actions job of
+the PR's repository counts: a commit status or another app may link any URL,
+and a run id read from it would re-run some unrelated run. Each failed check
+of that run on the head spends its one re-run (`rerunChecks`, keyed by the
+check's identity — app, workflow, trigger and job name, as Section 6.2 tells
+checks apart — and the head, so two workflows with a job of the same name
+each keep theirs);
 a run with a check that was re-run on this head already answers
 `{"rerun": false}`, and the failure is treated as real. The attempts it
 re-ran are recorded in `handledChecks`, so the prepared snapshot does not
@@ -592,7 +622,10 @@ code running unattended with the user's `gh` and `git` credentials in reach.
 The watch therefore verifies such a PR only in the sandbox (`QWEN_SANDBOX`);
 without one it does not watch it unattended, and `--once` runs in the
 foreground after the user confirms. A PR by the user or a collaborator is
-verified as the user would verify it.
+verified as the user would verify it. `prepare` reports `authorCanPush` (the
+author is the user, or has write access to the base repository) and
+`sandboxed` (the session runs in one of Qwen Code's sandboxes), and the skill
+applies the rule from them before it asks to start.
 
 A comment is actionable when its author is:
 
@@ -744,11 +777,16 @@ Delivery plan:
    enforces are the pushes per start (`push`), one re-run per check and head
    (`rerun`), and one attempt per review thread (every comment a round
    handled is recorded, whatever its outcome); two resyncs within one round
-   stop the watch. The skill's `allowedTools` grant reads of the PR and its
-   own `.qwen/tmp` files only: the permission matcher reads a leading
+   stop the watch, and a round whose work was not pushed ends with
+   `sync --discard`, so the next one does not build on it. The sandbox rule of
+   Section 8 is applied at the start. The skill's `allowedTools` grant
+   reading its `.qwen/tmp` files, writing its brief and plan, and
+   `cron_list` — no shell command. The permission matcher reads a leading
    `"${QWEN_CODE_CLI:-qwen}"` as an empty word, so no rule can name the
-   helpers alone, and in the default approval mode each helper call — the
-   push included — asks first.
+   helpers alone, and an allow rule for even a read-only command such as
+   `gh pr view *` also admits command substitution, redirections and
+   environment prefixes behind it. In the default approval mode each helper
+   call — the push included — therefore asks first.
 4. The loop state: `status`, `stop`, budgets, and a later session taking
    over the state file.
 5. Follow-ups: durable watching in daemon sessions (`durable` with

@@ -119,7 +119,7 @@ function onlyRemote(
  * entry, which git fetches from the first of and pushes to all of. Each
  * effective push URL is judged by the same matcher that chose the remote.
  */
-function pushTargetFor(
+export function pushTargetFor(
   remoteV: string,
   host: string,
   owner: string,
@@ -163,6 +163,28 @@ function remotePushesTo(
   );
 }
 
+/**
+ * Whether the PR's author could push to the base repository: the user, or
+ * someone with write access. Anyone else's code runs only sandboxed when a
+ * watch verifies it (design Section 8).
+ */
+function authorCanPush(slug: string, author: string, viewer: string): boolean {
+  if (!author) return false;
+  if (author === viewer) return true;
+  try {
+    const permission = gh(
+      'api',
+      `repos/${slug}/collaborators/${encodeURIComponent(author)}/permission`,
+      '--jq',
+      '.permission',
+    );
+    return permission === 'admin' || permission === 'write';
+  } catch {
+    // Not a collaborator (404), or an account GitHub will not describe.
+    return false;
+  }
+}
+
 function report(state: AutofixPrState, extra: Record<string, unknown>): void {
   writeStdoutLine(
     JSON.stringify({
@@ -174,6 +196,9 @@ function report(state: AutofixPrState, extra: Record<string, unknown>): void {
       pushTarget: state.pushTarget,
       viewer: state.viewer,
       prAuthor: state.prAuthor,
+      authorCanPush: state.authorCanPush ?? false,
+      // Set by every sandbox Qwen Code runs in (container, seatbelt, bwrap).
+      sandboxed: Boolean(process.env['SANDBOX']),
       ...extra,
     }),
   );
@@ -304,12 +329,22 @@ export function runPrepare(args: PrepareArgs): void {
     worktreePath: paths.worktreePath,
     viewer,
     prAuthor: pr.author?.login ?? '',
+    authorCanPush: authorCanPush(args.repo, pr.author?.login ?? '', viewer),
     lastKnownHeadSha: headSha,
     // A watch whose worktree was removed keeps its history, so it does not
-    // answer the same comments again.
+    // answer the same comments again, and keeps its budgets.
     pushedShas: existing?.pushedShas ?? [],
     handledCommentIds: existing?.handledCommentIds ?? [],
     postedCommentIds: existing?.postedCommentIds ?? [],
+    ...(existing
+      ? {
+          handledChecks: existing.handledChecks,
+          rerunChecks: existing.rerunChecks,
+          handledConflictSha: existing.handledConflictSha,
+          pushCount: existing.pushCount,
+          summarizedSha: existing.summarizedSha,
+        }
+      : {}),
   };
   writeState(paths.statePath, state);
 

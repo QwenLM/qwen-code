@@ -7,7 +7,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
-import { normalizeGhHostForUrl } from '../review/lib/gh.js';
+import {
+  HOSTNAME_RE,
+  isOwnerRepo,
+  normalizeGhHostForUrl,
+} from '../review/lib/gh.js';
 import { normalizeSegment } from '../review/lib/remote-match.js';
 
 export const REPLY_MARKER = '<!-- qwen-autofix-pr:v1 -->';
@@ -50,6 +54,8 @@ export interface AutofixPrState {
   pushCount?: number;
   /** Head SHA the last round summary was posted for. */
   summarizedSha?: string;
+  /** Whether the PR author could push to the base repository (`prepare`). */
+  authorCanPush?: boolean;
 }
 
 /** Pushes one watch may make before it stops (Section 10 of the design). */
@@ -167,12 +173,59 @@ export function sameRepository(
   );
 }
 
+const SHA_RE = /^[0-9a-f]{40,64}$/;
+
+/**
+ * Why a state file's values cannot be handed to git and gh as they are, or
+ * null. The helpers pass the remote, the push target, the head ref and the
+ * SHAs as arguments: a value starting with `-` would be read as an option
+ * (`--upload-pack=<command>` runs a command), so whatever wrote the file —
+ * by hand or through a tool — cannot widen what a helper does.
+ */
+export function stateDefect(state: AutofixPrState): string | null {
+  const word = (value: unknown) =>
+    typeof value === 'string' && value !== '' && !value.startsWith('-');
+  if (!word(state.remote)) return 'remote';
+  if (!word(state.pushTarget)) return 'pushTarget';
+  if (!word(state.headRefName) || /[\s\0]/.test(state.headRefName)) {
+    return 'headRefName';
+  }
+  if (!isOwnerRepo(`${state.owner}/${state.repo}`)) return 'owner/repo';
+  if (typeof state.host !== 'string' || !HOSTNAME_RE.test(state.host)) {
+    return 'host';
+  }
+  if (!Number.isInteger(state.prNumber) || state.prNumber < 1) {
+    return 'prNumber';
+  }
+  if (
+    typeof state.lastKnownHeadSha !== 'string' ||
+    !SHA_RE.test(state.lastKnownHeadSha)
+  ) {
+    return 'lastKnownHeadSha';
+  }
+  if (
+    !Array.isArray(state.pushedShas) ||
+    !state.pushedShas.every(
+      (sha) => typeof sha === 'string' && SHA_RE.test(sha),
+    )
+  ) {
+    return 'pushedShas';
+  }
+  return null;
+}
+
 export function readState(statePath: string): AutofixPrState | null {
   if (!existsSync(statePath)) return null;
   const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as AutofixPrState;
   if (parsed.version !== 1) {
     throw new Error(
       `unsupported autofix-pr state version in ${statePath}: ${String(parsed.version)}`,
+    );
+  }
+  const defect = stateDefect(parsed);
+  if (defect) {
+    throw new Error(
+      `${statePath} has an invalid ${defect}; run \`qwen autofix-pr cleanup ${String(parsed.prNumber)} --force\` and prepare the watch again.`,
     );
   }
   return parsed;

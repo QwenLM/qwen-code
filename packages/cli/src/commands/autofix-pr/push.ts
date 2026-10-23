@@ -15,6 +15,7 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from '../review/lib/gh.js';
 import { git } from '../review/lib/git.js';
 import { sanitizedGitEnv } from '../review/lib/worktree.js';
+import { pushTargetFor } from './prepare.js';
 import {
   MAX_PUSHES,
   assertOwnedBySession,
@@ -36,6 +37,8 @@ interface LivePr {
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   headRefName: string;
   isCrossRepository: boolean;
+  headRepository: { name: string } | null;
+  headRepositoryOwner: { login: string } | null;
 }
 
 export interface PushOutcome {
@@ -61,6 +64,7 @@ export function leaseRejected(porcelain: string): boolean {
 function pushRef(
   worktreePath: string,
   target: string,
+  sha: string,
   headRef: string,
   expected: string,
 ): { ok: boolean; stdout: string; stderr: string } {
@@ -73,7 +77,10 @@ function pushRef(
         'push',
         '--porcelain',
         target,
-        `HEAD:refs/heads/${headRef}`,
+        // The commit that was checked, not `HEAD`: the worktree may move
+        // while GitHub is asked, and the lease alone would let a commit
+        // that does not build on the known head through.
+        `${sha}:refs/heads/${headRef}`,
         `--force-with-lease=refs/heads/${headRef}:${expected}`,
       ],
       {
@@ -100,7 +107,7 @@ export function runPush(prNumber: number): PushOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertOwnedBySession(state);
   const worktree = paths.worktreePath;
-  requireWorktree(worktree, prNumber);
+  requireWorktree(paths, prNumber);
   if (hasUncommittedChanges(worktree)) {
     throw new Error(
       `${worktree} has uncommitted changes; commit them, or discard what should not be pushed, before pushing.`,
@@ -139,7 +146,7 @@ export function runPush(prNumber: number): PushOutcome {
       '-R',
       slug,
       '--json',
-      'state,headRefName,isCrossRepository',
+      'state,headRefName,isCrossRepository,headRepository,headRepositoryOwner',
     ),
   ) as LivePr;
   if (live.state !== 'OPEN') {
@@ -148,6 +155,29 @@ export function runPush(prNumber: number): PushOutcome {
       action: 'stop',
       reason: `PR #${prNumber} is ${live.state.toLowerCase()}`,
     };
+  }
+  // The branch and the destination come from GitHub and this clone's
+  // remotes, the way `prepare` found them, not from the state file alone:
+  // a state file edited since must not redirect the push.
+  if (!live.headRepository || !live.headRepositoryOwner) {
+    throw new Error(`PR #${prNumber}'s head repository no longer exists.`);
+  }
+  if (live.headRefName !== state.headRefName) {
+    throw new Error(
+      `PR #${prNumber}'s head branch is ${live.headRefName}, not the ${state.headRefName} this watch was prepared for.`,
+    );
+  }
+  const target = pushTargetFor(
+    git('remote', '-v'),
+    state.host,
+    live.headRepositoryOwner.login,
+    live.headRepository.name,
+  );
+  if (target !== state.pushTarget) {
+    throw new Error(
+      `pushes to PR #${prNumber}'s head repository now go to ${target}, not the ${state.pushTarget} this watch was prepared with; ` +
+        `run \`qwen autofix-pr cleanup ${prNumber}\` and prepare it again.`,
+    );
   }
   // Asked at push time, not trusted from `prepare`: the default branch can
   // be renamed while a watch runs.
@@ -161,14 +191,20 @@ export function runPush(prNumber: number): PushOutcome {
       '--jq',
       '.defaultBranchRef.name',
     );
-    if (live.headRefName === defaultBranch) {
+    if (state.headRefName === defaultBranch) {
       throw new Error(
         `PR #${prNumber}'s head is the default branch (${defaultBranch}); autofix never pushes there.`,
       );
     }
   }
 
-  const result = pushRef(worktree, state.pushTarget, state.headRefName, known);
+  const result = pushRef(
+    worktree,
+    state.pushTarget,
+    head,
+    state.headRefName,
+    known,
+  );
   if (!result.ok) {
     if (leaseRejected(result.stdout)) {
       return {

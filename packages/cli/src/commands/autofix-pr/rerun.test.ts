@@ -15,7 +15,8 @@ const mocks = vi.hoisted(() => ({
   ghWithInput: vi.fn((_input: string, ..._args: string[]) => ''),
   fetchPrData: vi.fn(),
 }));
-vi.mock('../review/lib/gh.js', () => ({
+vi.mock('../review/lib/gh.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
   ghWithInput: mocks.ghWithInput,
   setGhHost: () => {},
   ensureAuthenticated: () => {},
@@ -35,7 +36,12 @@ import {
 
 const HEAD = 'a'.repeat(40);
 
-function failedRun(databaseId: number, name: string, runId: number) {
+function failedRun(
+  databaseId: number,
+  name: string,
+  runId: number,
+  workflow = 1,
+) {
   return {
     __typename: 'CheckRun' as const,
     databaseId,
@@ -43,8 +49,17 @@ function failedRun(databaseId: number, name: string, runId: number) {
     status: 'COMPLETED',
     conclusion: 'FAILURE',
     detailsUrl: `https://github.com/o/r/actions/runs/${runId}/job/${databaseId}`,
+    checkSuite: {
+      app: { databaseId: 15368 },
+      workflowRun: {
+        event: 'pull_request',
+        workflow: { databaseId: workflow },
+      },
+    },
   };
 }
+
+let contexts: Array<Record<string, unknown>>;
 
 function prData(headRefOid = HEAD): PrData {
   return {
@@ -61,11 +76,7 @@ function prData(headRefOid = HEAD): PrData {
             statusCheckRollup: {
               contexts: {
                 pageInfo: { hasNextPage: false },
-                nodes: [
-                  failedRun(5, 'Test ubuntu', 50),
-                  failedRun(6, 'Test macos', 50),
-                  failedRun(7, 'Lint', 60),
-                ],
+                nodes: contexts as never,
               },
             },
           },
@@ -112,6 +123,11 @@ describe('runRerun', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, initial);
+    contexts = [
+      failedRun(5, 'Test ubuntu', 50),
+      failedRun(6, 'Test macos', 50),
+      failedRun(7, 'Lint', 60),
+    ];
     mocks.ghWithInput.mockReset();
     mocks.fetchPrData.mockReset();
     mocks.fetchPrData.mockImplementation(() => ({
@@ -147,7 +163,10 @@ describe('runRerun', () => {
       'o/r',
     );
     expect(state()).toMatchObject({
-      rerunChecks: [`Test ubuntu@${HEAD}`, `Test macos@${HEAD}`],
+      rerunChecks: [
+        `run:15368:1:pull_request:Test ubuntu@${HEAD}`,
+        `run:15368:1:pull_request:Test macos@${HEAD}`,
+      ],
       handledChecks: [`Test ubuntu@${HEAD}@#5`, `Test macos@${HEAD}@#6`],
     });
   });
@@ -163,6 +182,38 @@ describe('runRerun', () => {
     expect(runRerun(7, 60)).toMatchObject({ rerun: true, checks: ['Lint'] });
   });
 
+  it('gives each workflow its own re-run, even for jobs of the same name', () => {
+    contexts = [failedRun(5, 'Test', 50, 100), failedRun(6, 'Test', 60, 200)];
+    expect(runRerun(7, 50)).toMatchObject({ rerun: true, checks: ['Test'] });
+    expect(runRerun(7, 60)).toMatchObject({ rerun: true, checks: ['Test'] });
+    expect(mocks.ghWithInput).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-runs only GitHub Actions runs of this repository', () => {
+    contexts = [
+      // A commit status whose link happens to look like an Actions run.
+      {
+        __typename: 'StatusContext',
+        context: 'ci/external',
+        state: 'FAILURE',
+        createdAt: '2026-10-21T00:00:00Z',
+        targetUrl: 'https://github.com/o/r/actions/runs/70/job/1',
+      },
+      // A check run of another repository's Actions.
+      {
+        ...failedRun(8, 'Build', 80),
+        detailsUrl: 'https://github.com/elsewhere/r/actions/runs/80/job/8',
+      },
+    ];
+    expect(() => runRerun(7, 70)).toThrow(
+      /no failed GitHub Actions run of o\/r/,
+    );
+    expect(() => runRerun(7, 80)).toThrow(
+      /no failed GitHub Actions run of o\/r/,
+    );
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
   it('asks for a resync when the PR head moved, and re-runs nothing', () => {
     mocks.fetchPrData.mockImplementation(() => ({
       pr: prData('b'.repeat(40)),
@@ -173,7 +224,9 @@ describe('runRerun', () => {
   });
 
   it('refuses a run with no failed check on the head', () => {
-    expect(() => runRerun(7, 99)).toThrow(/run 99 has no failed check/);
+    expect(() => runRerun(7, 99)).toThrow(
+      /run 99 is no failed GitHub Actions run/,
+    );
     expect(() => runRerun(7, 0)).toThrow(/run id must be a positive integer/);
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
