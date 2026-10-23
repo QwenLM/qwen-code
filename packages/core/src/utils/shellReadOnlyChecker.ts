@@ -214,7 +214,9 @@ function evaluateGitRemoteArgs(args: string[]): boolean {
   const options = args.slice(0, end < 0 ? args.length : end);
   // shell-quote leaves bracket globs as plain text, and bash expands one such
   // as `[--][--]` to a real `--` when the cwd holds a file with that name,
-  // hiding the terminator from the slice above.
+  // hiding the terminator from the slice above. Any `[` is refused, since
+  // `[]-]` and `[[:punct:]]` match `-` as well. `*`, `?` and brace globs
+  // never get here: the argument guard in isShellCommandReadOnly refuses them.
   if (
     action === 'show' &&
     (!options.includes('-n') || args.some((arg) => arg.includes('[')))
