@@ -220,7 +220,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'auth_provider_install', 'workspace_memory',
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
- 'session_supported_commands', 'session_tasks', 'session_monitor_tool_correlation', 'session_stats',
+ 'session_supported_commands', 'session_tasks', 'scheduled_task_gate', 'session_monitor_tool_correlation', 'session_stats',
  'session_lsp', 'session_resources', 'session_status',
  'session_close', 'session_metadata', 'session_organization',
  'session_archive', 'mcp_guardrails',
@@ -593,6 +593,39 @@ operator diagnostic snapshot documented below.
 
 `daemon_update` advertises the process-global `GET /daemon/update`,
 `POST /daemon/update/prepare`, and `POST /daemon/update/restart` surface.
+
+`scheduled_task_gate` advertises the optional `gate` on `POST` and
+`PATCH /scheduled-tasks`, and `gate` and `gateStatus` on task views. A gate is
+a shell command the owning session runs at each fire, outside the model:
+exit 0 with output delivers the fire with that output attached, exit 0 with
+nothing on stdout skips it, and a non-zero exit is reported when the gate
+starts failing, not at every fire.
+`gateStatus.lastOutcome` is `quiet`, `delivered`, `failed` or `blocked`.
+
+- A gate needs a recurring task: `POST` with `recurring: false`, or a `PATCH`
+  that sets a gate on a one-shot or turns a gated task one-shot, answers 400
+  `gate_requires_recurring`; a task already in that state keeps its other
+  edits. A malformed gate (empty on `POST`, only a comment, over 2048
+  characters, a NUL character or an unpaired UTF-16 surrogate, a shell wrapper
+  such as `bash -c '…'`, or
+  any part backgrounded with `&`) answers 400 `invalid_gate`.
+  The `&` check is lexical and best-effort; where unsure it refuses (an `&` in
+  a comment, a heredoc body or `(( … ))`), and a gate that gets past it is
+  reported `failed` when it exits with nothing on stdout while a background
+  part still holds its stdout (outside the bwrap shell sandbox, whose PID
+  namespace ends that part with the command).
+  On `PATCH`, `gate: null` or `gate: ""` clears the gate and its `condition`.
+- A legacy task guarded by a `condition` refuses any `gate` key in a `PATCH`
+  with 409 `task_legacy_unsupported`, so a client sends `gate` only when it
+  changes it.
+- A gate written through these routes carries no confirmation from the
+  session. It runs unattended only where a `monitor` call of the same command
+  would run without asking: under a saved `Monitor(...)` or `Bash(...)` allow
+  rule, as a read-only command, or in an auto or yolo session. A deny rule
+  blocks it in every mode and plan mode blocks it; a blocked fire settles
+  `blocked`.
+- Clients must not send `gate` to a daemon without this tag: such a daemon
+  drops it on `POST` and answers a gate-only `PATCH` with 400 `empty_patch`.
 
 **Conditional tags.** These feature tags are advertised only when their deployment toggle, runtime wiring, or availability condition is active. Tag presence means the documented behavior is available; absence means either an older daemon predating the tag or a current daemon where that condition is false. Currently:
 

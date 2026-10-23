@@ -75,7 +75,7 @@ for (const width of [1280, 390]) {
         return route.fulfill({ json: workspace });
       if (path.endsWith('/transcript/query'))
         return route.fulfill({
-          json: { events: [], lastSequence: 10, hasMore: false },
+          json: { items: [], events: [], lastSequence: 10, hasMore: false },
         });
       if (path.endsWith('/events/stream'))
         return route.fulfill({ contentType: 'text/event-stream', body: '' });

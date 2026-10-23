@@ -406,8 +406,12 @@ class WorkspaceCsiNativeActivationGateTest {
                     .add("pending"), event -> {}));
             assertThat(authorityRows()).as(pointer).isEqualTo(before);
         }
-        for (String field : List.of("attempt", "tools", "runtime", "approval")) {
+        for (String field : List.of("attempt", "tools", "runtime", "approval", "agentWait", "commandWait", "commandLock")) {
             rejectedCommit(changedCheckpoint(state -> state.putObject(field), event -> {}));
+            assertThat(authorityRows()).as(field).isEqualTo(before);
+        }
+        for (String field : List.of("agentWait", "commandWait", "commandLock")) {
+            rejectedCommit(changedCheckpoint(state -> state.remove(field), event -> {}));
             assertThat(authorityRows()).as(field).isEqualTo(before);
         }
         rejectedCommit(changedCheckpoint(state -> ((ObjectNode) state.path("continuation"))

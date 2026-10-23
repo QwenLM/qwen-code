@@ -161,6 +161,9 @@ checks in the same checkout.
   must not commit durable state or release a newer owner's resources.
 - Server and Broker use the
   [shared schema baseline](src/main/resources/db/managed-schema/V1__managed_schema.sql).
+  Until the first formal Managed Agent release, edit this V1 baseline in place;
+  do not add V2+ migrations or increment the database schema version. Recreate
+  development catalogs after baseline changes rather than maintaining upgrades.
   Keep initialization and validation consistent across Server and Broker. Preserve
   refusal of legacy, partial, and foreign catalogs; do not revive archived
   migrations or use Flyway repair/history edits to bypass that refusal. Follow
