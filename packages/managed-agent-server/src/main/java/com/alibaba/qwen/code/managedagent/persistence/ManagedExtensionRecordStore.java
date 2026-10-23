@@ -1045,6 +1045,8 @@ public class ManagedExtensionRecordStore {
      */
     private static void requireDomainCommitted(JsonNode payload,
             String domain, boolean stageH) {
+        require(!HarnessPlacementStore.RELEASE_DOMAIN.equals(domain),
+                "Harness release receipts can only be written by the ownership release transaction.");
         try {
             ManagedExtensionRecords.closed(payload, PAYLOAD_FIELDS,
                     "event.payload");
