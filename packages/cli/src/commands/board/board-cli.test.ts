@@ -104,6 +104,34 @@ describe('board CLI', () => {
     );
   });
 
+  it.each([
+    ['CaseJson', 'casejson'],
+    ['CASEJSON', 'casejson'],
+    ['casejson', 'casejson'],
+    ['Board_42-A', 'board_42-a'],
+  ])(
+    'reports the canonical storage name for board %s',
+    async (name, canonical) => {
+      await parse(`board show --board ${name} --json`);
+      expect(JSON.parse(written(stdout)).board).toBe(canonical);
+      expect(core.listBoardTasks).toHaveBeenCalledWith(canonical);
+      expect(core.listAsks).toHaveBeenCalledWith(canonical);
+    },
+  );
+
+  it('normalizes the board without changing actor or suggested owner spelling', async () => {
+    core.createBoardTask.mockResolvedValue({ id: TASK_ID, subject: 'check' });
+    await parse(
+      'board task check --board MixedBoard --as MiXeDActor --owner OwNeR --json',
+    );
+    expect(core.createBoardTask).toHaveBeenCalledWith({
+      board: 'mixedboard',
+      createdBy: 'MiXeDActor',
+      subject: 'check',
+      owner: 'OwNeR',
+    });
+  });
+
   it('passes the declared actor when answering', async () => {
     core.answerAsk.mockResolvedValue({ id: ASK_ID, state: 'answered' });
     await parse(`board answer ${ASK_ID} yes --board demo --as web --json`);

@@ -43,6 +43,9 @@ Board names are matched case-insensitively, so `Orders` and `orders` are the
 same board on a case-folding filesystem (APFS, NTFS) and on a case-sensitive
 one (ext4) alike.
 
+The `board` field in `show --json` uses the lowercase storage name, even when
+`--board` uses mixed case. Actor labels retain their supplied spelling.
+
 ## Ask a question
 
 ```bash

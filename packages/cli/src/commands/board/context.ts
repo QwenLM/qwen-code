@@ -11,7 +11,7 @@ export function requireBoardName(value: unknown): string {
     throw new Error('Pass --board <name>.');
   }
   assertSafeName('board name', value);
-  return value;
+  return value.toLowerCase();
 }
 
 export function requireActorName(value: unknown): string {
