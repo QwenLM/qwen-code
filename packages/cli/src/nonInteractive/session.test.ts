@@ -543,6 +543,36 @@ describe('runNonInteractiveStreamJson', () => {
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
   });
 
+  it('processes direct-mode startup messages in arrival order', async () => {
+    // No `initialize` control request: the first frame is a user message, so
+    // the session takes the direct-mode path.
+    let releaseInit: () => void = () => {};
+    config = createConfig({
+      initialize: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseInit = resolve;
+          }),
+      ),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('First message');
+      yield createUserMessage('Second message');
+      // Both frames have already reached the read loop by the time the
+      // generator resumes here, so config initialization is still pending
+      // for both of them. No sleeps, no polling.
+      releaseInit();
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock.mock.calls.map((call) => call[2])).toEqual([
+      'First message',
+      'Second message',
+    ]);
+  });
+
   it('rejects continue_last_turn when the Gemini client is not initialized', async () => {
     const { continueResults } = installContinueDispatch();
     config = createConfig({
