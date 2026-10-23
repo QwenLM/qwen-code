@@ -345,6 +345,7 @@ class Session {
       getActiveTurnAbortSignal: () => this.activeTurnAbortController?.signal,
       settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
+      waitForInitialization: () => this.waitForInitialization(),
       onInterrupt: () => this.handleInterrupt(),
       onContinueLastTurn: () => this.requestContinueLastTurn(),
     });
@@ -416,7 +417,7 @@ class Session {
     try {
       // Dispatch the initialize request first
       // This registers SDK MCP servers in the control context
-      await this.dispatcher?.dispatch(request);
+      await this.dispatcher?.dispatch(request, true);
 
       // Get sendSdkMcpMessage callback from SdkMcpController
       // This callback is used by McpClientManager to send MCP messages

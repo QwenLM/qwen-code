@@ -5753,6 +5753,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     let providers: ReturnType<Config['getModelProvidersConfig']>;
     let protocols: ReturnType<Config['getProviderProtocolConfig']> = {};
     return {
+      isWorkflowModeSupported: vi.fn(() => false),
+      getWorkflowMode: vi.fn<Config['getWorkflowMode']>(() => ({
+        requested: false,
+        available: false,
+        effective: false,
+      })),
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
@@ -12680,6 +12686,51 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([false, true])(
+    'advertises Workflow mode independently of reasoning support (%s)',
+    async (available) => {
+      const sessionId = 'workflow-mode-options';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn(() => 'ordinary-model');
+      innerConfig.getContentGeneratorConfig.mockReturnValue(undefined);
+      innerConfig.isWorkflowModeSupported = vi.fn(() => true);
+      innerConfig.getWorkflowMode = vi.fn(() => ({
+        requested: true,
+        available,
+        effective: available,
+        ...(!available ? { reason: 'workflow_unavailable' } : {}),
+      }));
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const result = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as NewSessionResponse;
+        expect(
+          result.configOptions?.find((option) => option.id === 'workflow_mode'),
+        ).toMatchObject({
+          currentValue: 'on',
+          _meta: { 'qwen.workflowMode': { available, effective: available } },
+        });
+        expect(
+          result.configOptions?.find(
+            (option) => option.id === 'reasoning_effort',
+          ),
+        ).toBeUndefined();
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'workflow_mode',
+            value: 'true',
+          }),
+        ).rejects.toThrow('on or off');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it.each([
     ['gpt-5.4', 'none', ['none', 'low', 'medium', 'high', 'xhigh']],

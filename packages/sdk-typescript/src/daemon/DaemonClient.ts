@@ -6294,16 +6294,36 @@ export class DaemonClient {
     );
   }
 
-  async setSessionConfigOption(
+  setSessionConfigOption(
     sessionId: string,
     configId: 'reasoning_effort',
     value: ReasoningSelection,
+    clientOrOptions?: string | { clientId?: string; persist?: boolean },
+  ): Promise<DaemonSessionConfigOptionResult>;
+  setSessionConfigOption(
+    sessionId: string,
+    configId: 'workflow_mode',
+    value: 'on' | 'off',
+    clientOrOptions?: string | { clientId?: string },
+  ): Promise<DaemonSessionConfigOptionResult>;
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: 'reasoning_effort' | 'workflow_mode',
+    value: ReasoningSelection | 'on' | 'off',
     clientOrOptions?: string | { clientId?: string; persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
     const options =
       typeof clientOrOptions === 'string'
         ? { clientId: clientOrOptions }
         : clientOrOptions;
+    if (
+      configId === 'workflow_mode' &&
+      ((value !== 'on' && value !== 'off') || options?.persist !== undefined)
+    ) {
+      throw new Error(
+        'Workflow mode requires on/off and does not accept persist',
+      );
+    }
     return await this.jsonRequest<DaemonSessionConfigOptionResult>(
       `/session/${urlEncode(sessionId)}/config-option`,
       'POST /session/:id/config-option',
