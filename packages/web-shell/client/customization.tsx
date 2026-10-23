@@ -703,6 +703,7 @@ export type FooterRenderer = ComponentType<WebShellFooterRenderInfo>;
  * resolved UI language. Return phrases to override the built-in defaults, an
  * empty array to hide the phrase entirely, or `undefined`/`null` to fall back
  * to the built-in defaults for that language.
+ * `ui.accessibility.enableLoadingPhrases: false` hides even custom phrases.
  */
 export type LoadingPhrasesResolver = (
   language: string,
