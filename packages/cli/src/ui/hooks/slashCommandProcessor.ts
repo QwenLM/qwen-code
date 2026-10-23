@@ -1147,6 +1147,7 @@ export const useSlashCommandProcessor = (
                 raw: trimmed,
                 name: commandToExecute.name,
                 args,
+                historyItemId: invocationItemId,
               },
               overwriteConfirmed,
               abortSignal: abortController.signal,

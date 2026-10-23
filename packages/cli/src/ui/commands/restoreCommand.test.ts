@@ -126,6 +126,86 @@ describe('restoreCommand', () => {
     },
   );
 
+  it.each([
+    'owned',
+    'wrong-id',
+    'wrong-text',
+    'later-item',
+    'replaced-prefix',
+    'cancel',
+  ] as const)(
+    'accepts only its own newly published invocation during restore: %s',
+    async (change) => {
+      const original: HistoryItem = { id: 1, type: 'user', text: 'old' };
+      mockContext.ui.history = [original];
+      mockContext.invocation = {
+        raw: '/restore owned',
+        name: 'restore',
+        args: 'owned',
+        historyItemId: 2,
+      };
+      const controller = new AbortController();
+      mockContext.abortSignal = controller.signal;
+      await fs.writeFile(
+        path.join(checkpointsDir, 'owned.json'),
+        JSON.stringify({
+          promptId: 'old-prompt',
+          clientHistory: [{ role: 'user', parts: [{ text: 'old' }] }],
+          toolCall: { name: 'run_shell_command', args: { command: 'pwd' } },
+        }),
+      );
+      let release!: () => void;
+      mockRewind.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ filesChanged: [], filesFailed: [] });
+          }),
+      );
+      mockContext.ui.addItem = vi.fn((item) => {
+        mockContext.ui.history = [
+          ...mockContext.ui.history,
+          { ...item, id: 3 } as HistoryItem,
+        ];
+        return 3;
+      });
+      const pending = restoreCommand(mockConfig)!.action!(mockContext, 'owned');
+      try {
+        await vi.waitFor(() => expect(mockRewind).toHaveBeenCalledOnce());
+        mockContext.ui.history = [
+          change === 'replaced-prefix' ? { ...original } : original,
+          {
+            id: change === 'wrong-id' ? 4 : 2,
+            type: 'user',
+            text: change === 'wrong-text' ? 'successor' : '/restore owned',
+          },
+          ...(change === 'later-item'
+            ? [{ id: 5, type: 'info' as const, text: 'new activity' }]
+            : []),
+        ];
+        if (change === 'cancel') controller.abort();
+        release();
+        expect(await pending).toEqual(
+          change === 'owned'
+            ? {
+                type: 'tool',
+                toolName: 'run_shell_command',
+                toolArgs: { command: 'pwd' },
+              }
+            : undefined,
+        );
+        expect(mockSetHistory).toHaveBeenCalledTimes(
+          change === 'owned' ? 1 : 0,
+        );
+        expect(mockContext.ui.addItem).toHaveBeenCalledTimes(
+          change === 'owned' ? 1 : 0,
+        );
+      } finally {
+        release?.();
+        await pending;
+      }
+    },
+  );
+
   it.each(['loaded', 'notice-only', 'successor'] as const)(
     'guards deferred tool replay across the real Ink history publication: %s',
     async (change) => {

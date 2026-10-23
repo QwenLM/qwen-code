@@ -32,17 +32,26 @@ async function restoreAction(
   const isCurrent = () => {
     const history = ui.history;
     const loaded = loadedHistory;
+    // Ink can publish this command's queued user item while filesystem work awaits.
+    const invocation = history[expectedHistory.length];
+    const ownInvocationPublished =
+      context.invocation?.historyItemId !== undefined &&
+      invocation?.id === context.invocation.historyItemId &&
+      invocation.type === 'user' &&
+      invocation.text === context.invocation.raw;
+    const expectedLength =
+      expectedHistory.length + (ownInvocationPublished ? 1 : 0);
     return (
       !context.abortSignal?.aborted &&
       config?.getSessionId() === sessionId &&
       ui.isIdleRef.current &&
-      ((history.length === expectedHistory.length &&
-        history.every((item, index) => item === expectedHistory[index])) ||
+      ((history.length === expectedLength &&
+        expectedHistory.every((item, index) => item === history[index])) ||
         (loaded !== undefined &&
           history.length === loaded.length &&
           history.every((item, index) => item === loaded[index])) ||
         (restoreNoticeId !== undefined &&
-          history.length === expectedHistory.length + 1 &&
+          history.length === expectedLength + 1 &&
           history.at(-1)?.id === restoreNoticeId &&
           expectedHistory.every((item, index) => item === history[index])))
     );

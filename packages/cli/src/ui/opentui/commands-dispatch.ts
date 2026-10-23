@@ -746,6 +746,7 @@ export class OpenTuiSlashDispatcher {
               raw: trimmed,
               name: commandToExecute.name,
               args,
+              historyItemId: invocationItemId,
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,

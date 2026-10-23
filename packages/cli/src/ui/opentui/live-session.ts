@@ -1213,6 +1213,19 @@ export async function* livePromptEvents(
             });
       }
     }
+    // Client-initiated slash tools finish locally in Ink. Leave queued user
+    // input for its own turn rather than attaching it to tool responses.
+    if (initialTool) {
+      if (!abort.aborted && current()) {
+        for (const [index, call] of completed.entries()) {
+          dualOutput?.emitToolResult(call.request, {
+            ...call.response,
+            ...finalResponses[index],
+          });
+        }
+      }
+      return;
+    }
     // ink use-llm-stream parity (:5328): when every tool in the batch was
     // cancelled, the cancelled responses go to history only — no follow-up
     // model request. Checked before the steering drain so surviving steered

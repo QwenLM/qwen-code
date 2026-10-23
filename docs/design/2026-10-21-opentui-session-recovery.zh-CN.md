@@ -4,7 +4,7 @@
 
 ## 状态与源码边界
 
-**当前检查点（2026-10-23）：npm 分发 PR #14959 已合入 main `32b4234b`；#15283 仍为 Draft。** C 已通过保留原提交历史的正常 merge 整合该 main。其相对已合并 main 的已提交 55 文件补丁，与此前相对 stacked 分发基线的 C 补丁逐字节一致；这证明源码范围保留，不代表整合产物已验收。整合后的生产与测试文件通过全部七个完整受影响 CLI unit 文件：**801 案、零跳过**，包括真实联合 Ink `/restore` 接纳、文件系统等待期间取消后启动健康后继的保护，以及 OpenTUI dispatcher 完整的取消、错误和 session 对照。正常 fresh build、完整 typecheck 和 bundle 也已在 `b1d7d78d` 加冻结审查修复补丁上通过；本次状态文档更新不改变这些生产与测试文件。此类 unit seam 不代表真实终端或安装产品验收。精确 `044c1073` 的 Linux CI 失败来自新增专用 TUI 恢复测试缺少 no-AK 清单登记；原始失败继续保留，窄范围登记修复仍待当前 head CI 确认。
+**当前检查点（2026-10-23）：npm 分发 PR #14959 已合入 main `32b4234b`；#15283 仍为 Draft。** C 已通过保留原提交历史的正常 merge 整合该 main。本恢复批次进一步允许异步恢复期间精确匹配的命令自有 user-history 行，并让客户端发起的工具在本地完成，与 Ink 一致且不自动请求模型。正常 build、包含集成测试的完整 typecheck、bundle，以及八个完整受影响 CLI unit 文件均已通过（**902 案、零跳过**）。持久 H11e tool-only checkpoint 用例在同一 bundle 的 Node+Ink、Bun+Ink、严格 Bun+OpenTUI 三腿均通过：真实工具执行一次、自动模型请求为零、显式后续输入请求一次、checkpoint 不变、自然退出为 0。这些检查覆盖 shell pipes 和 tool-only 重放，不代表完整文件/history rewind、inner PTY 或安装平台验收。早期 fixture 错误与真实额外请求失败保留在调查证据中。已发布的 `0b798829` 通过专用 TUI CI；其继承的 Java reference-distribution 失败已由上游 #15305 修复。最新 main `56733c35` 的整合与最终组合安装验收仍待完成。
 
 完整本地修复已恢复到整合后的 main。剩余门禁包括正常提交检查与当前 head CI、实际 TUI 的 held-restore 取消与后继保护，以及最终 npm/standalone 安装产物和受支持平台/PTY 验收。历史源码 bundle 与终端通过保留各自产物和运行时身份。本 C 批次不改变 Bun/OpenTUI pin、默认 renderer 或记录 schema。
 
@@ -63,7 +63,7 @@ OpenTUI 已经能加载会话、持有结构化输入队列、运行模型/工�
 | Slash 资格         | `commands-dispatch.ts` 后续将 host invocation 标记为 `sentToModel`，但 `opentui-host.ts` 的更新未同步初始为 false 的 live row。                                         | 更新同一个已标识行，并对生成提交使用同一 prompt ID；回忆资格与模型 turn/rewind 资格仍分别处理。            |
 | Cancel/retry       | Composer 已恢复结构化输入并保护 pending successor；live-turn 有 tool-start guard，但缺少 Ink 完整无输出回滚。RetryInfo 保存 `skipDelay`，键盘没有 consumer。            | 只在现有 turn owner 补充下述操作真正需要的所有权和失败 attempt 信息。                                      |
 | Rewind             | `opentui-dialog-mount.tsx` 仍挂载占位组件；`session-rewind.tsx` 中已有完整 selector 没有生产调用。                                                                      | 挂载 selector，复用标准身份映射、文件 rewind、core 截断及 recording 分支操作。                             |
-| Checkpoint restore | 共享 `commands/restoreCommand.ts` 恢复文件/历史并返回工具重放；OpenTUI host 替换历史没有替换 live row，shell 也没有执行返回的 `schedule_tool`。                         | 将现有历史替换、scheduler continuation 恰好接通一次；与 rewind 分开验收。                                  |
+| Checkpoint restore | 共享 `commands/restoreCommand.ts` 恢复文件/历史并返回工具重放；OpenTUI host 替换历史没有替换 live row，shell 也没有执行返回的 `schedule_tool`。                         | 将现有历史替换、scheduler 工具重放恰好接通一次；区分本地结束与显式模型提交，与 rewind 分开验收。           |
 
 ## 共享状态与操作合同
 
@@ -124,7 +124,7 @@ Resume/branch 保留现有 core-before-UI 事务和失败回滚。复用共享 r
 
 折叠恢复行在同一个 live 数组保留原有 display 元数据；只有 transcript renderer 过滤隐藏行，selector 和 rewind boundary 仍读取它们。Rewind 与 `/history expand-now` 去掉 suppression 和 summary 行，并保留富记录内容。只有 expand 命令向现有 history-load seam 传显式 `expand` mode：OpenTUI 在当前 live 数组折叠仅改变显示的 event，保留后续 turn、行 ID、stream 状态及排队输入。普通 restore 仍执行替换/reset，Ink 原有完整 history loader 保持兼容。现有 context-files announcement latch 按 startup、恢复或回退后保留行重算，已有公告不会重复，回退移除公告后允许下一次公告。Compression 保留完整 kind/status，边界 ID 使用原始完整快照的下标。
 
-Checkpoint `/restore` 是另一种操作。记录携带 `promptId` 和 history 时，保留共享次序：恢复自有文件、拒绝部分恢复、替换 pending/history、恢复 API prompt ID，然后恰好执行一次返回的工具重放及 continuation。将 host 历史替换接到 live view，同时避免对已有显式 reset 的 resume/branch 再次 reset。缺失 checkpoint 文件、无效 `toolCall` 及旧版 `commitHash && !promptId` 格式按现有拒绝语义处理。只有合法 toolCall 的 checkpoint 仍受支持：恰好调度一次工具，不执行文件 rewind 或 UI/core history 替换。不能将可选 history 或 `promptId` 缺失一律变成新的拒绝条件。
+Checkpoint `/restore` 是另一种操作。记录携带 `promptId` 和 history 时，保留共享次序：恢复自有文件、拒绝部分恢复、替换 pending/history、恢复 API prompt ID，然后恰好执行一次返回的工具重放。将 host 历史替换接到 live view，同时避免对已有显式 reset 的 resume/branch 再次 reset。缺失 checkpoint 文件、无效 `toolCall` 及旧版 `commitHash && !promptId` 格式按现有拒绝语义处理。只有合法 toolCall 的 checkpoint 仍受支持：恰好调度一次工具，不执行文件 rewind 或 UI/core history 替换；工具在本地结束，不自动请求模型，显式后续输入可请求模型一次且不得重复执行该工具。不能将可选 history 或 `promptId` 缺失一律变成新的拒绝条件。
 
 Checkpoint 的迟到结果守卫核对现有 session、idle、取消信号和来源历史快照。Ink 经 React 发布 `loadHistory`，OpenTUI context 则复制 host 数组，因此守卫接受明确请求的标准行引用，以及尚未发布时未变化的旧快照和本操作自己的 notice。同会话的新历史或新 turn 不能重放旧工具。使用真实 history hook 的 deferred 测试覆盖发布时序与后继拒绝。
 
@@ -158,22 +158,22 @@ selector 消费父弹窗区域的真实高度，保留正常尺寸的七项上�
 
 Ignored Phase 3 计划将下列稳定案组展开成命名分支。当前源码/补丁组合上的 H01–H14 **完整产品案组仍为 NOT_RUN**；具名完整文件/组件结果和六案 H15 源码 bundle 通过不关闭这些案组。上文 H01a/H01b/H09a dry-run 继续只归属历史参考。基线例外与候选通过分别报告；跳过一个分支不能关闭其案组。
 
-| 案组                     | 必须验证的行为与反例                                                                                                                     |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| H01 — 记录与回忆         | 普通/重复输入、local slash、model-sent slash、shell、重启顺序、原始文本及不同的 rewind 资格。                                            |
-| H02 — 来源重放           | 图片、typed `@`、accepted/restored steering、重复文本、prompt ID、display/model 分离与 resume 后 known/unknown 来源。                    |
-| H03 — 无输出取消         | 真实请求取消、精确 owned row/core/log 回滚、结构化重提、纯 thought/info 与冷 journal characterization。                                  |
-| H04 — 内容取消与后继     | 保留 text/image/tool 内容；queued/accepted/restored 输入、pending paste/image、late callback、同 ID reset 与新会话后继隔离。             |
-| H05 — 重试延迟           | 真实 RetryInfo 倒计时、Ctrl+Y 一次、reset/cancel 失效、无额外请求/user event、busy/permission 门禁。                                     |
-| H06 — 终态重试           | 同一 prepared parts/prompt ID；普通、image/`@`、tool-result、steering、model override；重复按键/无失败正控。                             |
-| H07 — Resume             | 交互及启动 resume/continue、visible/core context、title/usage、异常/缺失数据、late callback、失败回滚。                                  |
-| H08 — Branch             | 独立 session/ancestry/title、原会话不变、fork 失败清理与提交前回滚。                                                                     |
-| H09 — 会话 rewind        | 真实命令/alias/double-Esc、折叠隐藏 turn 与重复文本身份、unknown 草稿、同步 stale/new-turn/notice 守卫及 cancel/busy/IDE/压缩/歧义门禁。 |
-| H10 — 文件 rewind        | 工具真实编辑文件、code-only 与 combined、snapshot、精确文件字节/模式、部分失败、无 client 时仅恢复文件、不错误截断会话。                 |
-| H11 — Checkpoint restore | 真实 checkpoint、精确替换 history/API ID、一次工具重放/continuation、合法 toolCall-only 支持与精确 missing/legacy/partial-failure 拒绝。 |
-| H12 — 删除               | 非活跃成功与重启 purge、活跃拒绝、部分 batch 和持久化失败对照。                                                                          |
-| H13 — Markdown           | 字面下划线回归、真实 emphasis/code/path/CJK/link/table 对照、streaming/settled frames、source 字节及 render-error 归属。                 |
-| H14 — 长 transcript      | 长 resume 与 picker preview、head/tail/window/scroll/resize/expanded code、稳定选择与有界渲染。                                          |
+| 案组                     | 必须验证的行为与反例                                                                                                                               |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H01 — 记录与回忆         | 普通/重复输入、local slash、model-sent slash、shell、重启顺序、原始文本及不同的 rewind 资格。                                                      |
+| H02 — 来源重放           | 图片、typed `@`、accepted/restored steering、重复文本、prompt ID、display/model 分离与 resume 后 known/unknown 来源。                              |
+| H03 — 无输出取消         | 真实请求取消、精确 owned row/core/log 回滚、结构化重提、纯 thought/info 与冷 journal characterization。                                            |
+| H04 — 内容取消与后继     | 保留 text/image/tool 内容；queued/accepted/restored 输入、pending paste/image、late callback、同 ID reset 与新会话后继隔离。                       |
+| H05 — 重试延迟           | 真实 RetryInfo 倒计时、Ctrl+Y 一次、reset/cancel 失效、无额外请求/user event、busy/permission 门禁。                                               |
+| H06 — 终态重试           | 同一 prepared parts/prompt ID；普通、image/`@`、tool-result、steering、model override；重复按键/无失败正控。                                       |
+| H07 — Resume             | 交互及启动 resume/continue、visible/core context、title/usage、异常/缺失数据、late callback、失败回滚。                                            |
+| H08 — Branch             | 独立 session/ancestry/title、原会话不变、fork 失败清理与提交前回滚。                                                                               |
+| H09 — 会话 rewind        | 真实命令/alias/double-Esc、折叠隐藏 turn 与重复文本身份、unknown 草稿、同步 stale/new-turn/notice 守卫及 cancel/busy/IDE/压缩/歧义门禁。           |
+| H10 — 文件 rewind        | 工具真实编辑文件、code-only 与 combined、snapshot、精确文件字节/模式、部分失败、无 client 时仅恢复文件、不错误截断会话。                           |
+| H11 — Checkpoint restore | 真实 checkpoint、精确替换 history/API ID、一次工具重放、toolCall-only 零自动模型请求及一次显式后续请求与精确 missing/legacy/partial-failure 拒绝。 |
+| H12 — 删除               | 非活跃成功与重启 purge、活跃拒绝、部分 batch 和持久化失败对照。                                                                                    |
+| H13 — Markdown           | 字面下划线回归、真实 emphasis/code/path/CJK/link/table 对照、streaming/settled frames、source 字节及 render-error 归属。                           |
+| H14 — 长 transcript      | 长 resume 与 picker preview、head/tail/window/scroll/resize/expanded code、稳定选择与有界渲染。                                                    |
 
 参考矩阵先解析实际 launcher/runtime 后运行 global `qwen`，再用同一本地 artifact 分别运行 Node 24.19 + Ink、Bun 1.3.14 + Ink、Bun 1.3.14 + strict OpenTUI。历史参考版本来自实际执行发现。早期六案 H15 检查点使用其绑定 WIP 源码 bundle 的 Node 22 + Ink、Bun 1.3.14 + Ink 和 strict Bun 1.3.14 + OpenTUI。当前具名六案、三腿范围已在上文说明；这些通过不证明其余 C/Ink 产品合同。Strict readiness 必须证明所选渲染器；仅证明没有 fallback 还不能证明所有操作合同。
 

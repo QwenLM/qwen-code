@@ -58,6 +58,8 @@ export interface CommandContext {
     name: string;
     /** The arguments string that follows the command name. */
     args: string;
+    /** The visible user history item owned by this invocation. */
+    historyItemId?: number;
   };
   // Core services and configuration
   services: {

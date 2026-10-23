@@ -1002,7 +1002,7 @@ describe('livePromptEvents', () => {
     expect(visionMocks.run).not.toHaveBeenCalled();
   });
 
-  it('runs a restored client tool before sending its single ToolResult continuation', async () => {
+  it('runs a restored client tool without starting a model continuation', async () => {
     const sendMessageStream = vi.fn(function* () {
       yield { type: 'finished', value: {} };
     });
@@ -1013,19 +1013,36 @@ describe('livePromptEvents', () => {
         toolCall: { name: 'test_tool', args: { owned: true } },
       }),
     );
-    expect(sendMessageStream).toHaveBeenCalledTimes(1);
-    const call = sendMessageStream.mock.calls[0] as unknown[];
-    expect(call[2]).toBe('restored-tool');
-    expect(call[3]).toEqual({ type: SendMessageType.ToolResult });
-    expect(call[0]).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          functionResponse: expect.objectContaining({ name: 'test_tool' }),
-        }),
-      ]),
+    expect(sendMessageStream).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'tool-start')).toHaveLength(
+      1,
     );
-    expect(events.filter((event) => event.type === 'tool-end')).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'tool-result')).toEqual([
+      expect.objectContaining({ display: 'done' }),
+    ]);
+    expect(events.filter((event) => event.type === 'tool-end')).toEqual([
+      expect.objectContaining({ success: true }),
+    ]);
     expect(events.some((event) => event.type === 'user')).toBe(false);
+  });
+
+  it('keeps cancelled client tools out of model history and queued input', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+    const drainSteering = vi.fn(() => steering('next user turn'));
+    const events = await drain(
+      livePromptEvents(config, [], undefined, {
+        toolCall: { name: 'test_tool', args: { __cancelled: true } },
+        drainSteering,
+      }),
+    );
+
+    expect(sendMessageStream).not.toHaveBeenCalled();
+    expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+    expect(drainSteering).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'tool-end')).toEqual([
+      expect.objectContaining({ success: false, summary: 'cancelled' }),
+    ]);
   });
 
   it('passes the per-turn modelOverride through send options', async () => {

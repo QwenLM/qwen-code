@@ -1106,10 +1106,13 @@ describe('useLlmStream', () => {
     ['owned-checkpoint', false],
     ['owned-checkpoint', true],
   ] as const)(
-    'admits real /restore %s through joined Ink preprocessing and processor context (cancelled=%s)',
+    'admits real /restore %s through real history publication and joined Ink processor context (cancelled=%s)',
     async (args, cancelled) => {
-      const { useRef, useState } = await import('react');
+      const { useRef, useState, useCallback } = await import('react');
       const { makeFakeConfig } = await import('@qwen-code/qwen-code-core');
+      const { useHistory } = await vi.importActual<
+        typeof import('./useHistoryManager.js')
+      >('./useHistoryManager.js');
       const { restoreCommand } = await import('../commands/restoreCommand.js');
       const { createMockCommandContext } = await import(
         '../../test-utils/mockCommandContext.js'
@@ -1183,7 +1186,6 @@ describe('useLlmStream', () => {
           );
         restoreRegistry = () => registry.mockRestore();
         const logMessage = vi.fn(() => heldLog);
-        const history: HistoryItem[] = [];
         const client = config.getLlmClient();
         const extensionStates = new Map();
         const loadHistory = vi.fn();
@@ -1197,6 +1199,16 @@ describe('useLlmStream', () => {
           Parameters<typeof useLlmStream>[20]
         >;
         const hook = renderHook(() => {
+          const { history, addItem: addRealHistoryItem } = useHistory();
+          const addHistoryItem = useCallback<
+            UseHistoryManagerReturn['addItem']
+          >(
+            (...parameters) => {
+              mockAddItem(...parameters);
+              return addRealHistoryItem(...parameters);
+            },
+            [addRealHistoryItem],
+          );
           const idle = useRef(true);
           const handler = useRef<Parameters<typeof useLlmStream>[7]>(
             async () => false,
@@ -1205,7 +1217,7 @@ describe('useLlmStream', () => {
           const llm = useLlmStream(
             client,
             history,
-            mockAddItem,
+            addHistoryItem,
             config,
             true,
             mockLoadedSettings,
@@ -1229,7 +1241,7 @@ describe('useLlmStream', () => {
             config,
             mockLoadedSettings,
             history,
-            mockAddItem,
+            addHistoryItem,
             vi.fn(),
             loadHistory,
             vi.fn(),
@@ -1247,7 +1259,7 @@ describe('useLlmStream', () => {
           handler.current = slash.handleSlashCommand;
           // The real AppContainer publication, derived from actual hook state.
           idle.current = llm.streamingState === StreamingState.Idle;
-          return { llm, slash };
+          return { llm, slash, history };
         });
         unmount = hook.unmount;
         await waitFor(() =>
@@ -1267,13 +1279,13 @@ describe('useLlmStream', () => {
           StreamingState.Responding,
         );
         expect(action).not.toHaveBeenCalled();
+        const enteredFs = vi.fn();
+        pendingToolPersistence.directory = directory;
+        pendingToolPersistence.wait = new Promise<void>((resolve) => {
+          releaseFs = resolve;
+        });
+        pendingToolPersistence.entered = enteredFs;
         if (cancelled) {
-          const enteredFs = vi.fn();
-          pendingToolPersistence.directory = directory;
-          pendingToolPersistence.wait = new Promise<void>((resolve) => {
-            releaseFs = resolve;
-          });
-          pendingToolPersistence.entered = enteredFs;
           const heldSuccessor = new Promise<void>((resolve) => {
             releaseSuccessor = resolve;
           });
@@ -1341,6 +1353,18 @@ describe('useLlmStream', () => {
         }
         await act(async () => {
           releaseLog();
+        });
+        await waitFor(() => expect(enteredFs).toHaveBeenCalledOnce());
+        await waitFor(() =>
+          expect(hook.result.current.history).toContainEqual(
+            expect.objectContaining({
+              type: 'user',
+              text: args ? `/restore ${args}` : '/restore',
+            }),
+          ),
+        );
+        await act(async () => {
+          releaseFs();
           await pending;
         });
         expect(action).toHaveBeenCalledOnce();

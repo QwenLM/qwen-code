@@ -6,10 +6,12 @@
 
 import { createHash } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -19,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import xtermHeadless from '@xterm/headless';
 import unicode11 from '@xterm/addon-unicode11';
 import { expect, it } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
@@ -197,6 +200,7 @@ async function setup(name: string) {
   const api = {
     scratch,
     workspace,
+    runtimeDir,
     evidence,
     server,
     sessions,
@@ -208,7 +212,10 @@ async function setup(name: string) {
     get session() {
       return sessions[sessions.length - 1];
     },
-    async start(resume?: string): Promise<void> {
+    async start(
+      resume?: string,
+      approvalMode: 'default' | 'yolo' = 'default',
+    ): Promise<void> {
       if (resume)
         expect(resume).toMatch(
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
@@ -245,7 +252,7 @@ async function setup(name: string) {
           '--model',
           'qwen-vl-baseline',
           '--approval-mode',
-          'default',
+          approvalMode,
           ...(resume ? ['--resume', resume] : []),
         ],
       });
@@ -617,3 +624,87 @@ it.each(['/rewind', '/rollback'])(
       expect(api.server.requests).toHaveLength(1);
     }),
 );
+
+it(`H11e tool-only restore completes locally and accepts one explicit followup (${runtime}+${renderer})`, () =>
+  scenario('restore-tool-only', async (api) => {
+    const settingsFile = join(api.scratch, 'home', 'settings.json');
+    const settings = JSON.parse(readFileSync(settingsFile, 'utf8'));
+    json(settingsFile, {
+      ...settings,
+      tools: { shell: { enableInteractiveShell: false } },
+    });
+    await api.start(undefined, 'yolo');
+    await sendAboutUntilRendered(api.session);
+    const checkpoint = join(
+      new Storage(
+        realpathSync(api.workspace),
+        api.runtimeDir,
+      ).getProjectTempCheckpointsDir(),
+      'owned-h11e-checkpoint.json',
+    );
+    const counter = join(api.workspace, 'h11e-executions.txt');
+    const value = {
+      toolCall: {
+        name: 'run_shell_command',
+        args: {
+          command:
+            "printf 'H11E_EXECUTION\n' >> h11e-executions.txt; printf 'H11E_TOOL_STDOUT\n'",
+        },
+      },
+    };
+    try {
+      mkdirSync(dirname(checkpoint), { recursive: true });
+      json(checkpoint, value);
+      json(join(api.evidence, 'checkpoint-seed.json'), { checkpoint, value });
+      expect(JSON.parse(readFileSync(checkpoint, 'utf8'))).toEqual(value);
+      expect(api.server.requests).toHaveLength(0);
+      expect(existsSync(counter)).toBe(false);
+      await api.send('/restore');
+      const listing = await api.visible(
+        'Available tool calls to restore:',
+        'restore-list',
+      );
+      expect(listing).toContain('owned-h11e-checkpoint');
+      expect(api.server.requests).toHaveLength(0);
+      expect(existsSync(counter)).toBe(false);
+      await api.send('/restore owned-h11e-checkpoint');
+      // Completion consumes the first Enter; submit after that render settles.
+      await api.session.idle(150, 750);
+      api.session.pressKey('\r');
+      await until(
+        () =>
+          existsSync(counter) &&
+          readFileSync(counter, 'utf8') === 'H11E_EXECUTION\n',
+        'owned checkpoint tool executes exactly once',
+      );
+      await api.visible('H11E_TOOL_STDOUT', 'restore-tool');
+      expect(api.server.requests).toHaveLength(0);
+      expect(readFileSync(counter, 'utf8')).toBe('H11E_EXECUTION\n');
+      const messages = await api.prompt('H11E_HEALTHY_FOLLOWUP');
+      expect(
+        messages.some(
+          (message) =>
+            message.role === 'user' &&
+            JSON.stringify(message.content).includes('H11E_HEALTHY_FOLLOWUP'),
+        ),
+      ).toBe(true);
+      expect(api.server.requests).toHaveLength(1);
+      expect(readFileSync(counter, 'utf8')).toBe('H11E_EXECUTION\n');
+      expect(JSON.parse(readFileSync(checkpoint, 'utf8'))).toEqual(value);
+      await api.quit();
+      expect(api.server.requests).toHaveLength(1);
+      expect(readFileSync(counter, 'utf8')).toBe('H11E_EXECUTION\n');
+    } finally {
+      json(join(api.evidence, 'checkpoint-final.json'), {
+        value: existsSync(checkpoint)
+          ? JSON.parse(readFileSync(checkpoint, 'utf8'))
+          : null,
+        executionCounter: existsSync(counter)
+          ? readFileSync(counter, 'utf8')
+          : null,
+        naturalExit: api.session.exitResult(),
+        scope:
+          'tool-only scheduler/shell pipes; not file rewind, history load or inner PTY',
+      });
+    }
+  }));
