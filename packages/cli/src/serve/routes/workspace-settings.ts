@@ -7,7 +7,11 @@
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import {
+  loadSettings,
+  SettingScope,
+  workspaceTightenOnlyWriteVerdict,
+} from '../../config/settings.js';
 import {
   redactMcpServersSetting,
   restoreRedactedMcpServersSetting,
@@ -24,6 +28,7 @@ import {
   validateSettingValue,
   WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
+  WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS,
 } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
@@ -159,6 +164,90 @@ function rejectWorkspaceRestrictedWrite(
     return true;
   }
   return false;
+}
+
+/**
+ * Refuse a workspace-scope write of a tighten-only setting that the merge
+ * strips anyway, the same trap `rejectWorkspaceRestrictedWrite` closes one
+ * list over. `general.enableAutoUpdate` is tighten-only — the key must stay
+ * out of `WORKSPACE_RESTRICTED_SETTING_KEYS` so a workspace `false` keeps
+ * working — but a workspace `true` under a user-scope `false` was accepted,
+ * persisted into the committable `.qwen/settings.json`, and answered 200 +
+ * `requiresRestart: false` while the merge dropped it at every load.
+ *
+ * The refusal is on the verdict, never on the key: a write is refused only
+ * when it would loosen an operator scope, when System scope sets the key, or
+ * when it would overwrite a strictly stricter value the workspace file
+ * already carries.
+ *
+ * When the bound workspace is the home directory the loader marks the
+ * workspace scope inactive and, when the write target really is this
+ * process's user settings file, the write lands there and is honored on the
+ * next load — the guard stays out of its way. With QWEN_HOME set the two
+ * files diverge: the home-bound workspace file is then what processes
+ * without QWEN_HOME read as their user settings, holding values this process
+ * never loads, so no verdict can be trusted — the guard refuses on the
+ * mismatch itself.
+ *
+ * Returns true when the request was answered and the caller must stop.
+ */
+function rejectWorkspaceTightenOnlyWrite(
+  res: Response,
+  scope: string,
+  key: string,
+  value: unknown,
+  workspace: string,
+): boolean {
+  if (scope !== 'workspace') return false;
+  if (!WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS.includes(key)) return false;
+  if (value === undefined || value === null) return false;
+  const loaded = loadSettings(workspace, {
+    skipLoadEnvironment: true,
+    workspaceTrusted: true,
+  });
+  if (!loaded.workspaceSettingsActive) {
+    // The short-circuit assumes the write target IS this process's user
+    // settings file. When QWEN_HOME redirects the user settings file
+    // elsewhere that premise breaks: the target is the file processes
+    // without QWEN_HOME read as their user settings — a file this process
+    // never loads, so the verdict cannot see the values a write would
+    // overwrite. Refuse on the mismatch itself.
+    if (
+      loaded.workspace.path !== undefined &&
+      loaded.workspace.path !== loaded.user.path
+    ) {
+      res.status(400).json({
+        error: `Setting "${key}" is not honored from workspace scope because the bound workspace is the home directory while this process's user settings file resolves elsewhere (QWEN_HOME); the write would overwrite the settings file processes without QWEN_HOME read; set it at user scope instead`,
+        code: 'workspace_tighten_only_setting',
+      });
+      return true;
+    }
+    return false;
+  }
+  const verdict = workspaceTightenOnlyWriteVerdict(
+    key,
+    value,
+    {
+      system: loaded.system.settings,
+      systemDefaults: loaded.systemDefaults.settings,
+      user: loaded.user.settings,
+    },
+    loaded.workspace.settings,
+  );
+  if (verdict === undefined || verdict.kept || verdict.reason === 'same') {
+    return false;
+  }
+  const reason =
+    verdict.reason === 'system-sets'
+      ? 'System scope settings also set it'
+      : verdict.reason === 'loosens-workspace-value'
+        ? `it would replace the workspace value ${JSON.stringify(verdict.workspaceValue)} with a looser one`
+        : `it would loosen the ${verdict.against} value`;
+  res.status(400).json({
+    error: `Setting "${key}" is not honored from workspace scope because ${reason}; a workspace may only make this setting stricter`,
+    code: 'workspace_tighten_only_setting',
+  });
+  return true;
 }
 
 /** Keys the daemon may serve to Web Shell clients; exported for tests. */
@@ -596,6 +685,10 @@ export function registerWorkspaceSettingsRoutes(
       }
 
       if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
+      if (
+        rejectWorkspaceTightenOnlyWrite(res, scope, key, value, boundWorkspace)
+      )
+        return;
 
       if (LIVE_MANAGED_SETTINGS.has(key)) {
         res.status(400).json({
@@ -878,6 +971,16 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       }
 
       if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
+      if (
+        rejectWorkspaceTightenOnlyWrite(
+          res,
+          scope,
+          key,
+          value,
+          runtime.workspaceCwd,
+        )
+      )
+        return;
       if (LIVE_MANAGED_SETTINGS.has(key)) {
         res.status(400).json({
           error: `Setting "${key}" must be changed through the Live setup API`,

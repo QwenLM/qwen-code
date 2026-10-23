@@ -575,7 +575,7 @@ function stripWorkspaceOverrides(
 
 type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
 
-type TightenOnlyVerdict =
+export type TightenOnlyVerdict =
   | { kept: true }
   | { kept: false; reason: 'system-sets' }
   | {
@@ -584,6 +584,20 @@ type TightenOnlyVerdict =
       against: 'User' | 'SystemDefaults' | 'default';
     }
   | { kept: false; reason: 'same' };
+
+/**
+ * Verdict for a workspace-scope write. Adds the one refusal the merge alone
+ * cannot see: a write that ranks below the workspace file's own value would
+ * destroy a tightening the merge was keeping in force, even when the written
+ * value itself ranks `same` against the operator scopes.
+ */
+export type WorkspaceTightenOnlyWriteVerdict =
+  | TightenOnlyVerdict
+  | {
+      kept: false;
+      reason: 'loosens-workspace-value';
+      workspaceValue: unknown;
+    };
 
 /**
  * Decide one tighten-only key for a workspace, or `undefined` when the
@@ -628,6 +642,60 @@ function tightenOnlyVerdict(
   if (rank > baseline) return { kept: true };
   if (rank === baseline) return { kept: false, reason: 'same' };
   return { kept: false, reason: 'looser', against };
+}
+
+/**
+ * Verdict for a workspace-scope write of `key` with `value`, or `undefined`
+ * when the key is not tighten-only. Write routes consult this so they can
+ * refuse a write the merge strips at every load: persisting it answers 200
+ * with the value never taking effect and leaves a dead committable entry in
+ * the repository.
+ *
+ * The requested value stands in for the workspace file — the merge judges the
+ * value a write would leave there, not the one currently on disk. `kept` and
+ * `same` writes stay acceptable: `same` merely repeats the value already in
+ * force and loses nothing.
+ *
+ * Pass the workspace file's current settings as `workspaceSettings` so the
+ * route also refuses a write that ranks below the file's own value. Without
+ * it, overwriting a committed tightening ranks `same` against the operator
+ * scopes, is dropped silently at load, and the tightening it replaced is
+ * gone.
+ */
+export function workspaceTightenOnlyWriteVerdict(
+  key: string,
+  value: unknown,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+  workspaceSettings?: Settings,
+): WorkspaceTightenOnlyWriteVerdict | undefined {
+  const entry = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+    (candidate) => `${candidate.section}.${candidate.key}` === key,
+  );
+  if (!entry) return undefined;
+  const workspaceCandidate = {
+    [entry.section]: { [entry.key]: value },
+  } as unknown as Settings;
+  const verdict = tightenOnlyVerdict(entry, workspaceCandidate, scopes);
+  if (
+    verdict === undefined ||
+    (verdict.kept === false && verdict.reason === 'system-sets')
+  ) {
+    return verdict;
+  }
+  const current = (
+    workspaceSettings?.[entry.section] as Record<string, unknown> | undefined
+  )?.[entry.key];
+  if (
+    current !== undefined &&
+    entry.strictness(value) < entry.strictness(current)
+  ) {
+    return {
+      kept: false,
+      reason: 'loosens-workspace-value',
+      workspaceValue: current,
+    };
+  }
+  return verdict;
 }
 
 /**

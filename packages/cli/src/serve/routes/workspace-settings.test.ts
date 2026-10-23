@@ -784,6 +784,229 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).toHaveBeenCalled();
   });
 
+  // R1-1: a workspace write of a tighten-only key survives into the repo
+  // file and answers 200 even when the merge drops the value (or drops it
+  // with a warning), leaving a dead entry that never takes effect. The route
+  // refuses exactly the writes the merge would not honor: a value that
+  // loosens an explicit user value, or any value when System scope sets it.
+  describe('tighten-only key writes at workspace scope', () => {
+    const mockScopes = (scopes: {
+      user?: Record<string, unknown>;
+      system?: Record<string, unknown>;
+      systemDefaults?: Record<string, unknown>;
+      workspace?: Record<string, unknown>;
+      workspaceSettingsActive?: boolean;
+      userPath?: string;
+      workspacePath?: string;
+    }) => {
+      vi.mocked(loadSettings).mockReturnValue({
+        merged: {},
+        user: { settings: scopes.user ?? {}, path: scopes.userPath },
+        system: { settings: scopes.system ?? {} },
+        systemDefaults: { settings: scopes.systemDefaults ?? {} },
+        workspace: {
+          settings: scopes.workspace ?? {},
+          path: scopes.workspacePath,
+        },
+        workspaceSettingsActive: scopes.workspaceSettingsActive ?? true,
+        forScope: vi.fn().mockReturnValue({ settings: {} }),
+      } as never);
+    };
+
+    it('rejects a workspace write that would loosen an explicit user value', async () => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+      mockScopes({ user: { general: { enableAutoUpdate: false } } });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: true,
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_tighten_only_setting',
+      });
+      expect(res.body.error).toContain('loosen the User value');
+      expect(persistSetting).not.toHaveBeenCalled();
+      expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+    });
+
+    it('rejects a workspace write when system scope sets the key', async () => {
+      // The merge drops any workspace value once an operator scope sets the
+      // key — even a tightening one — so the write must be refused too.
+      const { app, persistSetting } = makeApp();
+      mockScopes({ system: { general: { enableAutoUpdate: true } } });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: false,
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_tighten_only_setting',
+      });
+      expect(res.body.error).toContain('System scope settings also set it');
+      expect(persistSetting).not.toHaveBeenCalled();
+    });
+
+    it('accepts a workspace write that tightens (false)', async () => {
+      const { app, persistSetting } = makeApp();
+      mockScopes({ user: { general: { enableAutoUpdate: true } } });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: false,
+      });
+
+      expect(res.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        SettingScope.Workspace,
+        'general.enableAutoUpdate',
+        false,
+      );
+    });
+
+    it('accepts a workspace write that repeats the effective value', async () => {
+      const { app, persistSetting } = makeApp();
+      mockScopes({});
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalled();
+    });
+
+    it("rejects a workspace write that would destroy the file's own stricter value", async () => {
+      // R3-1: with the operator scopes silent, the merge keeps the
+      // workspace's committed `false` in force. Writing `true` over it ranks
+      // `same` against the operator scopes — but it erases the in-force
+      // tightening and silently reopens unattended updates.
+      const { app, persistSetting } = makeApp();
+      mockScopes({ workspace: { general: { enableAutoUpdate: false } } });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: true,
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_tighten_only_setting',
+      });
+      expect(res.body.error).toContain('false');
+      expect(persistSetting).not.toHaveBeenCalled();
+    });
+
+    it('accepts a workspace write that repeats the file value', async () => {
+      // A genuinely repeated value ranks equal, not lower.
+      const { app, persistSetting } = makeApp();
+      mockScopes({ workspace: { general: { enableAutoUpdate: false } } });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: false,
+      });
+
+      expect(res.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalled();
+    });
+
+    it('accepts a workspace write when the bound workspace is the home directory', async () => {
+      // R3-2: the loader marks the workspace scope inactive when the
+      // workspace IS the home directory; the write lands in the user file
+      // and is honored on the next load. Refusing it (with a false reason)
+      // would lock the operator out of re-enabling auto-update through the
+      // API.
+      const { app, persistSetting } = makeApp();
+      mockScopes({
+        user: { general: { enableAutoUpdate: false } },
+        workspaceSettingsActive: false,
+        userPath: '/home/operator/.qwen/settings.json',
+        workspacePath: '/home/operator/.qwen/settings.json',
+      });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalled();
+    });
+
+    it('rejects a workspace write when the home-bound workspace file is not the user settings file', async () => {
+      // R3-2 follow-up: when QWEN_HOME redirects the user settings file,
+      // the home-bound workspace file is what processes without QWEN_HOME
+      // read as their user settings. The inactive-workspace shortcut must
+      // not skip the guard here: the write would overwrite a file this
+      // process never loads, so the verdict cannot see the opt-out it
+      // destroys.
+      const { app, persistSetting } = makeApp();
+      mockScopes({
+        user: { general: { enableAutoUpdate: false } },
+        workspaceSettingsActive: false,
+        userPath: '/config/qwenhome/settings.json',
+        workspacePath: '/home/operator/.qwen/settings.json',
+      });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: true,
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_tighten_only_setting',
+      });
+      expect(res.body.error).toContain('QWEN_HOME');
+      expect(persistSetting).not.toHaveBeenCalled();
+    });
+
+    it('does not restrict the same key at user scope', async () => {
+      const { app, persistSetting } = makeApp();
+      mockScopes({ system: { general: { enableAutoUpdate: false } } });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'user',
+        key: 'general.enableAutoUpdate',
+        value: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalled();
+    });
+
+    it('rejects the loosening write on the workspace-qualified route too', async () => {
+      const { app, persistSetting } = makeQualifiedApp();
+      mockScopes({ user: { general: { enableAutoUpdate: false } } });
+
+      const res = await request(app).post('/workspaces/primary/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: true,
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_tighten_only_setting',
+      });
+      expect(persistSetting).not.toHaveBeenCalled();
+    });
+  });
+
   it('refuses workspace pluginConfigs without persisting operator options', async () => {
     const { app, persistSetting } = makeApp();
     const response = await request(app)
