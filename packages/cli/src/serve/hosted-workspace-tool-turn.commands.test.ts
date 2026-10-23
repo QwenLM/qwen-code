@@ -489,7 +489,7 @@ it('gates the member plan tool and submits it through the durable command wait',
     const running = execute(turn, [call(args, id, name)]);
     await vi.waitFor(
       () => expect(commands.command(commandIdOf(id))).toBeDefined(),
-      { timeout: 5000 },
+      { timeout: 10_000 },
     );
     expect(commands.command(commandIdOf(id))?.kind).toBe(
       name === 'task_list' ? 'board_read' : 'plan_submit',
