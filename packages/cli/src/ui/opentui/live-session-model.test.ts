@@ -21,6 +21,8 @@ import {
 } from './live-session-model.js';
 import type { GoalSnapshotLike } from './event-adapter.js';
 import { ICON } from '../constants.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
+import type { HistoryItem as CanonicalHistoryItem } from '../types.js';
 
 const assistant = (text: string): LiveHistoryItem => ({
   kind: 'assistant',
@@ -1102,5 +1104,47 @@ describe('foldLiveEvent assistant timestamps (#76)', () => {
     const items = foldLiveEvent([], { type: 'text', delta: 'live' });
     expect(stampOf(items)).toBeGreaterThanOrEqual(before);
     expect(stampOf(items)).toBeLessThanOrEqual(Date.now());
+  });
+});
+
+describe('replayed canonical source ownership', () => {
+  it('keeps text and image fanout owned by the original complete source', () => {
+    const source: CanonicalHistoryItem = {
+      id: 91,
+      type: 'gemini',
+      text: 'original',
+      timestamp: 123,
+      images: [{ mimeType: 'image/png', data: 'aW1hZ2U=' }],
+    };
+    const items = projectHistoryToStreamEvents([source], {}).reduce<
+      readonly LiveHistoryItem[]
+    >(foldLiveEvent, []);
+    expect(items.filter((item) => item.kind === 'assistant')).toHaveLength(1);
+    expect(items.filter((item) => item.kind === 'image')).toHaveLength(1);
+    expect(items.every((item) => item.canonicalHistoryItem === source)).toBe(
+      true,
+    );
+  });
+  it('replaces only the original source fanout without replacing its successor', () => {
+    const source: CanonicalHistoryItem = { id: 91, type: 'info', text: 'old' };
+    const next: CanonicalHistoryItem = {
+      id: 92,
+      type: 'info',
+      text: 'successor',
+    };
+    const items = projectHistoryToStreamEvents([source, next], {}).reduce<
+      readonly LiveHistoryItem[]
+    >(foldLiveEvent, []);
+    const updated: CanonicalHistoryItem = { ...source, text: 'new' };
+    const replaced = foldLiveEvent(items, {
+      type: 'canonical-history-replace',
+      item: updated,
+      events: projectHistoryToStreamEvents([updated], {}),
+    });
+    expect(replaced.map((item) => item.canonicalHistoryItem)).toEqual([
+      updated,
+      next,
+    ]);
+    expect(replaced[1]).toBe(items[1]);
   });
 });

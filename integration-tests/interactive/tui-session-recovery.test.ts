@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import {
   mkdirSync,
   mkdtempSync,
@@ -28,6 +29,11 @@ const renderer = pickE2eRenderer();
 const runtime = resolveE2eCliCommand(renderer);
 const json = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
+const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+const png = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
+  'base64',
+);
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 async function until(check: () => boolean | Promise<boolean>, reason: string) {
   const deadline = Date.now() + 15_000;
@@ -77,6 +83,21 @@ function text(message: Message) {
   expect(content.every((part) => part.type === 'text')).toBe(true);
   return content.map((part) => part.text).join('');
 }
+function identity(record: Journal) {
+  expect(record.sessionId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  );
+  expect(record.uuid).toBeTruthy();
+  expect(record.promptId).toBeTruthy();
+  expect(Object.hasOwn(record, 'parentUuid')).toBe(true);
+  return {
+    sessionId: record.sessionId,
+    uuid: record.uuid,
+    promptId: record.promptId,
+    parentUuid: record.parentUuid,
+  };
+}
+
 async function scenario(
   name: string,
   action: (api: Awaited<ReturnType<typeof setup>>) => Promise<void>,
@@ -388,3 +409,155 @@ for (const command of ['/quit', '/exit']) {
       expect(api.sessions).toHaveLength(1);
     }));
 }
+
+function assertImage(message: Message) {
+  expect(Array.isArray(message.content)).toBe(true);
+  const images = (message.content as Part[]).filter(
+    (part) => part.type === 'image_url',
+  );
+  expect(images).toHaveLength(1);
+  const match = /^data:([^;]+);base64,(.*)$/.exec(images[0].image_url!.url);
+  expect(match).not.toBeNull();
+  const bytes = Buffer.from(match![2], 'base64');
+  expect({ mime: match![1], length: bytes.length, hash: sha(bytes) }).toEqual(
+    renderer === 'opentui'
+      ? { mime: 'image/png', length: png.length, hash: sha(png) }
+      : {
+          mime: 'image/jpeg',
+          length: 268,
+          hash: '262e7d0be78165df4afc3c94a821e1ade5d151808908ffa8cc984c2029894246',
+        },
+  );
+}
+
+it(`H02a image caption survives cold resume (${runtime}+${renderer})`, () =>
+  scenario('image', async (api) => {
+    const caption = 'RECOVERY_IMAGE_CAPTION';
+    const followup = 'RECOVERY_IMAGE_FOLLOWUP';
+    const imagePath = join(api.workspace, 'owned image 甲.png');
+    writeFileSync(imagePath, png);
+    await api.start();
+    api.session.pressKey('\x1b[200~' + JSON.stringify(imagePath) + '\x1b[201~');
+    await api.visible('clipboard-', 'image-chip');
+    expect(api.server.requests).toHaveLength(0);
+    const first = (await api.prompt(caption)).filter((m) => m.role === 'user');
+    expect(first).toHaveLength(1);
+    expect(JSON.stringify(first[0])).toContain(caption);
+    assertImage(first[0]);
+    await until(
+      () =>
+        api.users().length === 1 &&
+        api.journals().some((r) => r.type === 'assistant'),
+      'user and assistant persisted',
+    );
+    const original = identity(api.users()[0]);
+    await api.quit();
+    await api.start(original.sessionId);
+    const cold = await api.visible(caption, 'cold-caption');
+    expect(cold).toContain('RECOVERY_image_0_DONE');
+    expect(cold).not.toContain(png.toString('base64'));
+    expect(api.server.requests).toHaveLength(1);
+    expect(api.users()).toHaveLength(1);
+    expect(identity(api.users()[0])).toEqual(original);
+    const messages = await api.prompt(followup);
+    const users = messages.filter((m) => m.role === 'user');
+    expect(users).toHaveLength(2);
+    expect(canonical(users[0])).toEqual(canonical(first[0]));
+    assertImage(users[0]);
+    expect(text(users[1])).toBe(followup);
+    expect(messages.filter((m) => m.role === 'assistant').map(text)).toEqual([
+      'RECOVERY_image_0_DONE',
+    ]);
+    expect(messages.some((m) => m.role === 'tool')).toBe(false);
+    await until(() => api.users().length === 2, 'followup persisted');
+    expect(identity(api.users()[0])).toEqual(original);
+    const next = identity(api.users()[1]);
+    expect(next.sessionId).toBe(original.sessionId);
+    expect(next.uuid).not.toBe(original.uuid);
+    expect(next.promptId).not.toBe(original.promptId);
+    await api.quit();
+    expect(api.logs()).toEqual([caption, followup]);
+    expect(api.sessions).toHaveLength(2);
+  }));
+
+it(`H02b typed file survives mutation and cold resume (${runtime}+${renderer})`, () =>
+  scenario('file', async (api) => {
+    const submitted = '@owned.txt RECOVERY_INSPECT_FILE';
+    const followup = 'RECOVERY_FILE_FOLLOWUP';
+    const old = 'RECOVERY_FILE_OLD_CANARY\n';
+    const changed = 'RECOVERY_FILE_NEW_CANARY\n';
+    const file = join(api.workspace, 'owned.txt');
+    writeFileSync(file, old);
+    await api.start();
+    const first = (await api.prompt(submitted)).filter(
+      (m) => m.role === 'user',
+    );
+    expect(first).toHaveLength(1);
+    expect(JSON.stringify(first[0])).toContain(old.trim());
+    expect(JSON.stringify(first[0])).not.toContain(changed.trim());
+    await until(
+      () =>
+        api.users().length === 1 &&
+        api.atRecords().length === 1 &&
+        api.journals().some((r) => r.type === 'assistant'),
+      'user, at-command and assistant persisted',
+    );
+    const original = identity(api.users()[0]);
+    const at = api.atRecords()[0];
+    expect(at.systemPayload?.userText).toBe(submitted);
+    expect(at.sessionId).toBe(original.sessionId);
+    expect(JSON.stringify(api.users()[0].message)).toContain(old.trim());
+    await api.visible(submitted, 'hot-typed-form');
+    await api.quit();
+    writeFileSync(file, changed);
+    expect(readFileSync(file, 'utf8')).toBe(changed);
+    await api.start(original.sessionId);
+    const cold = await api.visible(submitted, 'cold-typed-form');
+    expect(cold).toContain('RECOVERY_file_0_DONE');
+    expect(cold).not.toContain(changed.trim());
+    expect(api.server.requests).toHaveLength(1);
+    expect(api.users()).toHaveLength(1);
+    expect(api.atRecords()).toEqual([at]);
+    expect(identity(api.users()[0])).toEqual(original);
+    await api.session.idle(150, 750);
+    api.session.pressKey('\x1b[A');
+    await until(
+      async () =>
+        (await api.session.viewport())
+          .split('\n')
+          .filter((line) => /^\s*>/.test(line))
+          .at(-1)
+          ?.trim() === `> ${submitted}`,
+      'Up recalls the exact typed form into the composer',
+    );
+    api.frames['cold-Up'] = await api.session.viewport();
+    await api.session.idle(150, 750);
+    api.session.pressKey('\x01');
+    await api.session.idle(150, 750);
+    api.session.pressKey('\x0b');
+    await api.session.idle(150, 750);
+    expect(api.server.requests).toHaveLength(1);
+    const messages = await api.prompt(followup);
+    const users = messages.filter((m) => m.role === 'user');
+    expect(users).toHaveLength(2);
+    expect(canonical(users[0])).toEqual(canonical(first[0]));
+    expect(JSON.stringify(users[0])).toContain(old.trim());
+    expect(JSON.stringify(messages)).not.toContain(changed.trim());
+    expect(text(users[1])).toBe(followup);
+    expect(messages.filter((m) => m.role === 'assistant').map(text)).toEqual([
+      'RECOVERY_file_0_DONE',
+    ]);
+    await until(() => api.users().length === 2, 'followup persisted');
+    expect(identity(api.users()[0])).toEqual(original);
+    const next = identity(api.users()[1]);
+    expect(next.sessionId).toBe(original.sessionId);
+    expect(next.uuid).not.toBe(original.uuid);
+    expect(next.promptId).not.toBe(original.promptId);
+    expect(api.atRecords()).toEqual([at]);
+    expect(readFileSync(file, 'utf8')).toBe(changed);
+    await api.quit();
+    expect(api.logs()).toEqual([submitted, followup]);
+    expect(api.sessions).toHaveLength(2);
+    // Unknown humanInput provenance is covered by input-prompt.test.tsx's
+    // fresh/known/unknown seam; the HTTP protocol does not expose that field.
+  }));
