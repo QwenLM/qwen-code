@@ -26,7 +26,12 @@ import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
+import { WebFetchTool } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
+import {
+  ManagedAutomationGateTool,
+  type ManagedAutomationGateExecution,
+} from './managed-automation-gate-tool.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -239,6 +244,10 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
+  WebFetchTool.Name,
+  // The managed automation gate probe: the Harness's own execution, never
+  // a model's (docs/design/2026-10-22-managed-automation-gate.md).
+  ManagedAutomationGateTool.Name,
 ]);
 
 /** Live background Shells one Session may hold, by the H3 design contract. */
@@ -2336,40 +2345,53 @@ export class ManagedToolExecutor {
         return sessionIdContext.run(sessionId, () => {
           const invocation = fileInvocation ?? tool.build(params);
           invocationStarted = true;
+          const ledger = this.options.ledger;
+          const trackGroup = (pid: number) => {
+            if (!ledger) return;
+            // Before any settle step of this call can run, the group is
+            // durable for the host's sweeps: the pid leads the group.
+            shellPgid = pid;
+            try {
+              ledger.addGroup({
+                pgid: pid,
+                callId: entry.reference.callId,
+                startedAt: Date.now(),
+              });
+            } catch (error) {
+              this.ledgerIntegrityFailed = true;
+              // A group that could not get into the ledger must not
+              // outlive the failure: stop it first, then let the call
+              // fail loudly instead of settling an outcome nothing
+              // recorded.
+              signalProcessGroup(pid, 'SIGKILL');
+              void ledger.waitForGroupExit(pid, CLOSE_SWEEP_TIMEOUT_MS);
+              throw error;
+            }
+          };
           if (
             entry.toolName === ShellTool.Name &&
-            (this.options.ledger || entry.captureSink)
+            (ledger || entry.captureSink)
           ) {
-            const ledger = this.options.ledger;
             return (invocation as ShellToolInvocation).execute(
               entry.controller.signal,
               undefined,
               undefined,
-              (pid) => {
-                if (!ledger) return;
-                // Before any settle step of this call can run, the group is
-                // durable for the host's sweeps: the pid leads the group.
-                shellPgid = pid;
-                try {
-                  ledger.addGroup({
-                    pgid: pid,
-                    callId: entry.reference.callId,
-                    startedAt: Date.now(),
-                  });
-                } catch (error) {
-                  this.ledgerIntegrityFailed = true;
-                  // A group that could not get into the ledger must not
-                  // outlive the failure: stop it first, then let the call
-                  // fail loudly instead of settling an outcome nothing
-                  // recorded.
-                  signalProcessGroup(pid, 'SIGKILL');
-                  void ledger.waitForGroupExit(pid, CLOSE_SWEEP_TIMEOUT_MS);
-                  throw error;
-                }
-              },
+              trackGroup,
               undefined,
               undefined,
               entry.captureSink,
+            );
+          }
+          // A gate probe's command is a Shell's too: the same group
+          // tracking stops what it leaves behind.
+          if (entry.toolName === ManagedAutomationGateTool.Name && ledger) {
+            return (
+              invocation as unknown as ManagedAutomationGateExecution
+            ).execute(
+              entry.controller.signal,
+              undefined,
+              undefined,
+              trackGroup,
             );
           }
           return invocation.execute(entry.controller.signal);
@@ -2699,12 +2721,14 @@ export function createManagedToolSet(
         new ReadFileTool(config),
         new WriteFileTool(config),
         new EditTool(config),
+        new WebFetchTool(config, 'managed'),
         // The walk never leaves the Session, whatever the pattern spells.
         new GlobTool(config, {
           containmentRoot: directory,
           executionTimeoutMs: 5_000,
         }),
         new ShellTool(config),
+        new ManagedAutomationGateTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
   };
