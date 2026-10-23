@@ -31,6 +31,27 @@ describe('TUI product evidence', () => {
     }
   });
 
+  it('runs durable session recovery in every runtime leg', () => {
+    const product = steps.find((step) =>
+      step.name?.startsWith('Three-leg product acceptance'),
+    );
+    expect(product.run).toMatch(/for leg in node:ink bun:ink bun:opentui; do/);
+    const runtimeLoop = product.run.match(
+      /for leg[^\n]*; do([\s\S]*?)\n\s*done/,
+    );
+    expect(runtimeLoop).not.toBeNull();
+    const commands = runtimeLoop[1]
+      .split('\n')
+      .filter((line) => line.includes('npx vitest run'));
+    expect(commands).toHaveLength(1);
+    expect(commands[0].split(/\s+/)).toContain(
+      'interactive/tui-session-recovery.test.ts',
+    );
+    expect(
+      existsSync('integration-tests/interactive/tui-session-recovery.test.ts'),
+    ).toBe(true);
+  });
+
   it('keeps fresh evidence retrievable when the same head is rerun', () => {
     const upload = steps.find(
       (step) => step.name === 'Upload product acceptance evidence',

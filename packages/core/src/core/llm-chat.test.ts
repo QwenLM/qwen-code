@@ -5447,6 +5447,90 @@ describe('LlmChat', async () => {
     });
   });
 
+  describe('getHistoryReplacementRevision', () => {
+    it.each(['same array', 'new array retaining the same entries'] as const)(
+      'invalidates a captured revision when %s keeps the same raw tail and length',
+      (kind) => {
+        const history: Content[] = [userText('saved'), modelText('pending')];
+        chat.setHistory(history);
+        const tail = chat.peekLastHistoryEntry();
+        const length = chat.getHistoryLength();
+        const revision = chat.getHistoryReplacementRevision();
+
+        chat.setHistory(kind === 'same array' ? history : [...history]);
+
+        expect(chat.peekLastHistoryEntry()).toBe(tail);
+        expect(chat.getHistoryLength()).toBe(length);
+        expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+      },
+    );
+
+    it.each([
+      'setHistory',
+      'clearHistory',
+      'truncateHistory',
+      'stripThoughtsFromHistory',
+    ] as const)('advances for every %s, including a no-op repeat', (method) => {
+      const history: Content[] = [userText('saved'), modelText('pending')];
+      chat.setHistory(history);
+      const revision = chat.getHistoryReplacementRevision();
+      const mutate = () => {
+        switch (method) {
+          case 'setHistory':
+            chat.setHistory(history);
+            break;
+          case 'clearHistory':
+            chat.clearHistory();
+            break;
+          case 'truncateHistory':
+            chat.truncateHistory(chat.getHistoryLength());
+            break;
+          case 'stripThoughtsFromHistory':
+            chat.stripThoughtsFromHistory();
+            break;
+          default:
+            throw new Error(`Unexpected history operation: ${method}`);
+        }
+      };
+
+      mutate();
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+      mutate();
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 2);
+    });
+
+    it('advances only when stripping orphaned users actually removes an entry', () => {
+      const kept = modelText('kept');
+      const orphan = userText('not delivered');
+      chat.setHistory([userText('saved'), kept, orphan]);
+      const revision = chat.getHistoryReplacementRevision();
+
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([orphan]);
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+      expect(chat.peekLastHistoryEntry()).toBe(kept);
+      expect(chat.getHistoryLength()).toBe(2);
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([]);
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+    });
+
+    it('keeps the replacement revision on append while the raw tail and length change', () => {
+      const initial = userText('saved');
+      chat.setHistory([initial]);
+      const revision = chat.getHistoryReplacementRevision();
+      const tail = chat.peekLastHistoryEntry();
+      const length = chat.getHistoryLength();
+      const appended = modelText('append');
+
+      chat.addHistory(appended);
+
+      expect(chat.getHistoryReplacementRevision()).toBe(revision);
+      expect(chat.peekLastHistoryEntry()).toBe(appended);
+      expect(chat.peekLastHistoryEntry()).not.toBe(tail);
+      expect(chat.getHistoryLength()).toBe(length + 1);
+      expect(chat.getHistory()).toEqual([initial, appended]);
+    });
+  });
+
   describe('getHistoryLength', () => {
     it('returns 0 for an empty history', () => {
       expect(chat.getHistoryLength()).toBe(0);
