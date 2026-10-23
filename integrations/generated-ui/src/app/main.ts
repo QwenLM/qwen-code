@@ -19,6 +19,7 @@ const doc = globalThis.document;
 const title = doc.getElementById('title')!;
 const summary = doc.getElementById('summary')!;
 const status = doc.getElementById('status')!;
+const notice = doc.getElementById('notice')!;
 const stop = doc.getElementById('stop') as HTMLButtonElement;
 const frame = doc.getElementById('view') as HTMLIFrameElement;
 const surface = new ViewSurface(
@@ -57,11 +58,43 @@ const controller = new ViewController(
     title.textContent = document.title;
     summary.textContent = document.summary;
   },
-  (phase, message) => {
-    status.textContent = message;
+  (state) => {
+    const { phase } = state;
+    const messages = {
+      waiting: 'Waiting for the completed view…',
+      starting: 'Starting the interactive view…',
+      running: 'Updating the view…',
+      ready: 'Latest update applied',
+      dirty: 'Parameters changed. Use the view’s update action to apply them.',
+      stopped: 'Stopped. Reopen the card to start a new view.',
+      error: state.error ?? 'The view runtime failed. Use the summary.',
+    };
+    if (status.textContent !== messages[phase])
+      status.textContent = messages[phase];
     status.dataset['state'] = phase;
-    stop.disabled = phase === 'stopped' || phase === 'error';
-    if (phase === 'ready') frame.hidden = false;
+    const terminal = phase === 'stopped' || phase === 'error';
+    stop.disabled = terminal;
+    frame.hidden = !state.viewAvailable;
+    frame.setAttribute(
+      'aria-busy',
+      String(phase === 'starting' || phase === 'running'),
+    );
+    const notices: string[] = [];
+    if (!terminal) {
+      if (state.lastUpdate === 'superseded')
+        notices.push(
+          'An older update was skipped. Your newer inputs were kept.',
+        );
+      else if (state.lastUpdate === 'outdated')
+        notices.push('The displayed update may still use earlier parameters.');
+      if (state.rejectedEvents)
+        notices.push(
+          'Some interactions were not processed because the queue was full. Wait for the update, then repeat the intended action.',
+        );
+    }
+    const message = notices.join(' ');
+    if (notice.textContent !== message) notice.textContent = message;
+    notice.hidden = !message;
   },
 );
 

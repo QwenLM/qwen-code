@@ -13,6 +13,7 @@ import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   RELAUNCH_SUPERVISED_ENV,
+  NPM_RUNTIME_CONTEXT,
 } from '../utils/env-provenance.js';
 export { PRIVATE_RELAUNCH_ENV_PROVENANCE };
 
@@ -294,6 +295,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // Only a relaunch supervisor marks its child; a forged marker would make a
   // piped, one-shot run exit as if its supervisor had gone.
   RELAUNCH_SUPERVISED_ENV,
+  NPM_RUNTIME_CONTEXT,
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
@@ -339,6 +341,7 @@ const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
   PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
   PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
   RELAUNCH_SUPERVISED_ENV.toLowerCase(),
+  NPM_RUNTIME_CONTEXT.toLowerCase(),
   'sandbox',
   'sandbox_enforcement',
 ]);

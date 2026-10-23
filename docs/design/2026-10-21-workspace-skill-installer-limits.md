@@ -5,8 +5,9 @@
 
 ## Status
 
-Proposed on 2026-10-21. This document specifies a later implementation
-pull request. It does not change the installer.
+Implemented by this pull request, initially proposed on 2026-10-21.
+The baseline sections describe the previous limits; the solution below
+describes this implementation. Merge and cross-platform validation are pending.
 
 ## Problem
 
@@ -38,9 +39,9 @@ per-file cap and the 128-file cap have no finer written rationale.
 
 A second skill download path already allows much larger fetches. It is not
 this installer, and its decompressed budget is not safe to copy while this
-process still buffers every file. See Current state.
+process still buffers every file. See Baseline before this change.
 
-## Current state
+## Baseline before this change
 
 `packages/cli/src/serve/workspace-skill-management.ts` uses one budget for
 every source:
@@ -121,7 +122,8 @@ to a path that still buffers every file.
 - Raise the per-file and file-count ceilings to values that admit a skill
   with real assets and a real reference tree.
 - Keep zip-bomb, path, symlink, and staging rollback behavior.
-- Keep peak installer heap independent of the on-disk package size.
+- Avoid retaining the expanded package in the installer heap; retain only
+  streaming buffers and the separately bounded manifest read.
 - Tell Web Shell the new ZIP ceiling in both languages, and stop
   describing every size failure as a 6 MB ZIP.
 
@@ -138,10 +140,10 @@ to a path that still buffers every file.
 - No user setting, environment variable, or per-workspace override.
 - No change to `MAX_PATH_LENGTH` (512) or `MAX_PATH_DEPTH` (16). Depth
   already matches `MAX_SKILL_API_DIR_DEPTH`.
-- No change to skill-name rules, `SKILL.md` name matching, symlink
-  rejection, single-root stripping, staging rollback, or the GitHub
-  API-then-git fallback and its timeouts (60 s clone, 30 s
-  sparse-checkout).
+- Preserve skill-name rules, `SKILL.md` name matching, symlink rejection,
+  single-root stripping, staging rollback, and API-then-git fallback
+  behavior while adapting their implementation to disk staging. Git
+  timeouts remain 60 s for clone and 30 s for sparse-checkout.
 - No rewrite of `docs/design/web-shell/web-shell-skill-manager-page.md`.
   That page has no Chinese twin; editing one sentence would require a
   full translation. This document is the limit spec. The old sentence
@@ -240,7 +242,8 @@ failure, remove staging and restore the backup, as today. Keep calling
 `assertGenerationOpen` around the writes so a closed generation does not
 leave a skill directory.
 
-Peak JS heap does not grow with `MAX_PACKAGE_BYTES`:
+During staging, retained file bodies do not grow with `MAX_PACKAGE_BYTES`
+(the later manifest read is accounted for under Risks):
 
 | Source       | What stays in the heap                                                                                           |
 | ------------ | ---------------------------------------------------------------------------------------------------------------- |
@@ -303,6 +306,13 @@ The staging directory, rollback, and `SKILL.md` parse-from-disk already
 exist. The implementation writes there earlier and deletes the in-memory
 package array. No new type of temp directory and no new route.
 
+**Retry and cleanup isolation.** Before a Contents API failure falls back
+to git, empty the same staging directory and reset paths, file count, and
+byte count together. Artifact cleanup matches the complete suffix after
+the skill-specific prefix, so installing `foo` cannot sweep the staging
+or backup of `foo.backup-1` or `foo.installing-abc123`. Existing skill-name
+rules remain unchanged. This does not introduce cross-process install locks.
+
 **Keep one size error code.** `skill_package_too_large` (413) still covers
 the archive, one file, and the package total. Messages stay specific.
 File count gets its own code so Web Shell can translate it. See
@@ -315,20 +325,23 @@ Implementation scope.
 - The transport formula assumes compact JSON and a valid skill name. A
   client that pretty-prints, adds fields, or sends a name that
   JSON-escapes can still receive the generic parser 413. The official
-  client (`DaemonClient.jsonRequest` → `JSON.stringify` of
-  `{ name, scope, source }`) does not.
+  client uses compact `JSON.stringify` of `{ name, scope, source }`, but
+  does not enforce the name-length ceiling before submission. Overlong
+  names can therefore hit the parser before route validation.
 - `yauzl`'s `fromBuffer` requires the whole archive. That cost is capped
   by `MAX_ZIP_ARCHIVE_BYTES` and is acceptable. Do not add a temp-file ZIP
   reader in this change.
 - GitHub Contents API listings and the existing git fallback are
   unchanged. A 2000-file API walk can be slow or rate-limited. The new
-  file cap is a ceiling, not a promise that the API path finishes inside
-  the current git timeouts.
+  file cap is a ceiling, not a completion-time guarantee. Both the SDK
+  request and Web Shell action currently time out after 30 s. A slow
+  install may finish on the daemon after the client reports a timeout;
+  cancellation and timeout changes are follow-up work.
 - Web Shell and the CLI do not share a module for this constant. The two
   literals must be kept equal by review.
-- Allowed ZIP compression ratio is about 64 MiB / 7.5 MiB ≈ 8.5:1. A
-  higher ratio is rejected when uncompressed bytes hit `MAX_PACKAGE_BYTES`,
-  before the rest of the entry is written.
+- ZIP compression ratio is not limited separately. The archive and
+  expanded-byte ceilings apply independently, including to highly
+  compressible packages.
 
 ## Risks
 
@@ -342,13 +355,17 @@ package still resides in those buffers at the new ceiling.
 **ZIP heap that remains.** A ZIP install still holds the JSON text and the
 decoded archive until the handler finishes. Together those are at most
 the 10 MiB JSON body plus the 7,864,071-byte archive, plus one stream
-chunk. They are not bounded by 64 MiB. Do not describe the ZIP path as
-allocation-free.
+chunk. Manifest validation additionally reads the whole `SKILL.md`
+(up to 32 MiB) into a string, as do subsequent skill-loader reads.
+Streaming removes retained package bodies, not this manifest cost.
+Do not describe any source as allocation-free.
 
 **Disk.** Staging can hold up to 64 MiB, then the rename makes that the
 installed skill. Replacing an existing skill briefly keeps a backup of the
 old tree as well. The git fallback briefly keeps the temp checkout and the
-staging copy (up to about 128 MiB) until `finally` deletes the checkout.
+staging copy until `finally` deletes the checkout. The checkout itself
+is not bounded by the installer caps: git materializes it before the
+copy validates sizes. Do not treat 128 MiB as a disk-usage bound.
 A failed install must still delete staging. A partial entry that crossed
 the cap lives only inside that staging directory.
 

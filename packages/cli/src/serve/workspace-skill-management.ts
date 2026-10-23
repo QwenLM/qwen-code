@@ -544,6 +544,13 @@ async function downloadGitHubSkill(
     ) {
       throw error;
     }
+    for (const entry of await fs.readdir(staging)) {
+      assertGenerationOpen?.();
+      await fs.rm(path.join(staging, entry), { recursive: true, force: true });
+    }
+    state.count = 0;
+    state.totalBytes = 0;
+    state.paths.clear();
     await downloadGitHubDirectoryWithGit(
       plan.owner,
       plan.repo,
@@ -911,7 +918,11 @@ async function removeInstallArtifacts(
     await Promise.all(
       entries
         .filter((entry) =>
-          prefixes.some((prefix) => entry.name.startsWith(prefix)),
+          prefixes.some(
+            (prefix) =>
+              entry.name.startsWith(prefix) &&
+              /^[A-Za-z0-9-]+$/.test(entry.name.slice(prefix.length)),
+          ),
         )
         .map(async (entry) => {
           assertGenerationOpen?.();
