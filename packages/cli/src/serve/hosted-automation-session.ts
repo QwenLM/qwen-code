@@ -346,12 +346,17 @@ export class HostedAutomationSession {
    * again to settle its entry.
    */
   private readonly owedGateReleases = new Set<string>();
+  private gateReleaseDebtOverflowed = false;
 
   constructor(
     private readonly store: HostedAutomationStore,
     private readonly key: ManagedSessionKey,
     private readonly options: HostedAutomationSessionOptions = {},
   ) {}
+
+  get hasPendingGateReleases(): boolean {
+    return this.gateReleaseDebtOverflowed || this.owedGateReleases.size > 0;
+  }
 
   schedule(scheduleId: string): Schedule | undefined {
     const existing = this.store.authority.extensionRecord(
@@ -831,6 +836,8 @@ export class HostedAutomationSession {
           this.owedGateReleases.delete(owed);
           this.owedGateReleases.add(owed);
           if (this.owedGateReleases.size > OWED_GATE_RELEASES_LIMIT) {
+            // Forgetting a release key cannot prove its Runtime was released.
+            this.gateReleaseDebtOverflowed = true;
             this.owedGateReleases.delete(
               this.owedGateReleases.values().next().value!,
             );
