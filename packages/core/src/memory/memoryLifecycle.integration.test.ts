@@ -223,8 +223,11 @@ describe('managed auto-memory lifecycle integration', () => {
 
   afterEach(async () => {
     // Let a trailing queued extraction settle before the temp dir is
-    // removed; otherwise its late writes race the removal and fail after
-    // teardown.
+    // removed; otherwise its late writes race the removal. drain()
+    // snapshots inFlight once and a trailing queued extraction is only
+    // registered when the run ahead of it settles, so one pass can return
+    // before it starts; drain again to pick it up.
+    await mgr.drain();
     await mgr.drain();
     mgr.resetExtractStateForTests();
     if (originalMemoryBase === undefined) {
