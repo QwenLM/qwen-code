@@ -1556,6 +1556,33 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('7');
   });
 
+  it('never applies QWEN_SERVER_TOKEN from home settings.env without the full settings loader', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['QWEN_SERVE_RATE_LIMIT'];
+    const qwenHome = useTempQwenHome();
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        env: {
+          QWEN_SERVER_TOKEN: 'from-home-settings-env',
+          // Positive control: the home settings.env is merged and applied;
+          // only the token key is rejected. A home `.env` is an operator
+          // channel for the bearer, a home settings.json is not.
+          QWEN_SERVE_RATE_LIMIT: '7',
+        },
+      }),
+    );
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-home-settings-env-')),
+    );
+    process.chdir(tempWorkspace);
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('7');
+  });
+
   it('pre-resolves home env overrides in the same order as the full loader', () => {
     delete process.env['QWEN_HOME'];
     delete process.env['QWEN_RUNTIME_DIR'];
