@@ -2,7 +2,7 @@
 
 [English](2026-10-23-mod-compatibility-baseline.md) | [简体中文](2026-10-23-mod-compatibility-baseline.zh-CN.md)
 
-Status: proposed. This document describes the experimental Mod runtime as implemented on `main` at `3d65e23cf6` and three changes that move its Claude Code compatibility baseline from 2.1.296 to 2.1.308. Tracking issue: #13749.
+Status: proposed. This document describes the experimental Mod runtime as implemented on `main` at `3d65e23cf6` and three changes that move its Claude Code compatibility baseline from 2.1.296 to 2.1.308. Changes 1 and 2 are under review in #15273 and #15306. Tracking issue: #13749.
 
 ## Problem and current behavior
 
@@ -31,8 +31,8 @@ Non-goals: events or `$` methods beyond `session.version`; rendering, state, str
 The public API is the Claude Code authoring contract. Qwen Code implements a versioned subset of it:
 
 - Every documented behavior names the Claude Code release it follows. With the changes below, recognized event names come from one release, 2.1.308: its engine events, its `$` API events and its `classic.*` settings hook events, 144 names in total.
-- Deliberate differences stay documented in the user guide: one QuickJS environment per plugin, `tool.check` that only tightens a native decision, plugin settings that workspace settings cannot change, dependency failures that reject startup, and built-in command conflicts that rename the plugin's command.
-- Moving to a new release means extracting that release's plugin API declarations, comparing its events, `$` methods and changed semantics with the current pin, updating the event list and tests, and recording the release in the user guide.
+- Deliberate differences stay documented in the user guide: one QuickJS environment per plugin, `tool.check` that only tightens a native decision, a PermissionRequest hook that cannot approve a Mod's own ask, plugin settings that workspace settings cannot change, dependency failures that reject startup, and built-in command conflicts that rename the plugin's command.
+- Moving to a new release means extracting that release's plugin API declarations, comparing its events, `$` methods and changed semantics with the current pin, updating the event list and tests, and recording the release in the user guide. Claude Code writes those declarations beside every Mod it loads, as `.claude-plugin/types/claude-code/index.d.ts`; they take precedence over its CHANGELOG, which summarizes them.
 
 ## Proposed changes
 
@@ -48,7 +48,7 @@ A skipped guard does not protect anything, including its `.catch`. A plugin's `u
 
 ### 2. Align `tool.check` with 2.1.308
 
-The event gains two facts that the engine sets and hooks cannot change:
+The event gains two facts that the engine sets and hooks cannot change. Both are declared on `ToolCheckInput` in the 2.1.308 declarations:
 
 - `isReadOnly: true` when the tool reports the call as read-only: read, search and fetch tools, MCP tools whose server marks them read-only, and shell commands that pass the read-only check. A hook reads its absence as a possible write.
 - `approver`: `person` where a dialog can ask the user, `host` where a stream-json host answers permission requests, absent where nobody can answer.
@@ -61,6 +61,8 @@ A Mod's own ask, meaning an ask it made or reworded rather than Qwen Code's ask 
 - A session where nobody can answer denies it with the Mod's reason.
 
 As with a PreToolUse ask, a PermissionRequest hook can deny the call but cannot answer for the person. This is stricter than Claude Code, which lets such a hook allow it.
+
+The 2.1.308 declarations carry this as engine-set data. The engine names the plugin on an ask a hook answered, `ToolCheckResult.plugin`, and states who can answer, `ToolCheckInput.approver`. The 2.1.304 CHANGELOG instead described a `decider: "person"` field on the hook's answer. By 2.1.308 that field was gone: the engine's answer validation no longer accepts it, and every ask a hook makes is a person's ask. Qwen Code follows 2.1.308.
 
 The merge stays restrictive. A Mod still cannot turn a native ask or deny into allow.
 

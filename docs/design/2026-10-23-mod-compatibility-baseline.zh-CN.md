@@ -2,7 +2,7 @@
 
 [English](2026-10-23-mod-compatibility-baseline.md) | [简体中文](2026-10-23-mod-compatibility-baseline.zh-CN.md)
 
-状态：提案。本文描述 `main`（`3d65e23cf6`）上已实现的实验性 Mod 运行时，以及把 Claude Code 兼容基线从 2.1.296 移到 2.1.308 的三项改动。跟踪 issue：#13749。
+状态：提案。本文描述 `main`（`3d65e23cf6`）上已实现的实验性 Mod 运行时，以及把 Claude Code 兼容基线从 2.1.296 移到 2.1.308 的三项改动。改动 1 与 2 正在 #15273 和 #15306 中评审。跟踪 issue：#13749。
 
 ## 问题与当前行为
 
@@ -31,8 +31,8 @@ Qwen Code 运行 Claude Code Mod API 的一个子集。插件的 hooks 模块导
 公开 API 即 Claude Code 的编写契约。Qwen Code 实现其中一个带版本的子集：
 
 - 每项文档化的行为都注明所依据的 Claude Code 版本。完成下文的改动后，可识别的事件名取自同一个版本 2.1.308：它的引擎事件、`$` API 事件与 `classic.*` settings hook 事件，共 144 个名字。
-- 有意的差异继续写在用户指南中：每个插件一个 QuickJS 环境；`tool.check` 只能收紧原生决定；工作区设置不能修改插件设置；依赖失败时拒绝启动；与内置命令冲突时，插件的命令会被改名。
-- 迁移到新版本时：提取该版本的插件 API 声明，与当前基线对比事件、`$` 方法和变化的语义，更新事件列表和测试，并在用户指南中写明该版本。
+- 有意的差异继续写在用户指南中：每个插件一个 QuickJS 环境；`tool.check` 只能收紧原生决定；PermissionRequest hook 不能批准 Mod 自己的 ask；工作区设置不能修改插件设置；依赖失败时拒绝启动；与内置命令冲突时，插件的命令会被改名。
+- 迁移到新版本时：提取该版本的插件 API 声明，与当前基线对比事件、`$` 方法和变化的语义，更新事件列表和测试，并在用户指南中写明该版本。Claude Code 每加载一个 Mod，都会把这些声明写到 Mod 旁边的 `.claude-plugin/types/claude-code/index.d.ts`。它们的优先级高于 CHANGELOG，后者只是对声明的摘要。
 
 ## 改动方案
 
@@ -54,7 +54,7 @@ Qwen Code 运行 Claude Code Mod API 的一个子集。插件的 hooks 模块导
 
 ### 2. 让 `tool.check` 对齐 2.1.308
 
-事件新增两项由引擎设置、hook 不能修改的字段：
+事件新增两项由引擎设置、hook 不能修改的字段，两者都声明在 2.1.308 的 `ToolCheckInput` 上：
 
 - `isReadOnly: true`：工具报告该调用为只读时设置。包括读取、搜索和抓取类工具，服务端标记为只读的 MCP 工具，以及通过只读检查的 shell 命令。字段缺失时，hook 应把调用当作可能写入。
 - `approver`：能弹对话框问用户时为 `person`，由 stream-json 宿主回答权限请求时为 `host`，没人能回答时不设置。
@@ -67,6 +67,8 @@ Mod 自己的 ask 交给人来决定，与 PreToolUse hook 的 ask 现有行为�
 - 没人能回答的会话会用 Mod 的理由拒绝它。
 
 与 PreToolUse 的 ask 一样，PermissionRequest hook 可以拒绝该调用，但不能代替人批准。这比 Claude Code 更严格：Claude Code 允许这类 hook 批准。
+
+2.1.308 的声明把这些表达为由引擎设置的数据：引擎在 hook 答复的 ask 上标出插件名（`ToolCheckResult.plugin`），并说明谁能回答（`ToolCheckInput.approver`）。2.1.304 的 CHANGELOG 描述的则是 hook 答复上的 `decider: "person"` 字段。到 2.1.308 时这个字段已被移除：引擎对答复的校验不再接受它，hook 发出的每个 ask 都是要人回答的 ask。Qwen Code 以 2.1.308 为准。
 
 合并规则仍然只收紧：Mod 依旧不能把原生的 ask 或 deny 改成 allow。
 
