@@ -132,6 +132,7 @@ export interface LivePromptOptions {
    */
   submittedPrompt?: string;
   humanInput?: HumanPromptInput;
+  workflowModeEligible?: boolean;
   /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
@@ -772,6 +773,9 @@ export async function* livePromptEvents(
     const sendOptions = first
       ? {
           type: SendMessageType.UserQuery,
+          ...(options?.workflowModeEligible === true
+            ? { workflowModeEligible: true }
+            : {}),
           ...(options?.humanInput ? { humanInput: options.humanInput } : {}),
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
           ...(options?.submittedPrompt

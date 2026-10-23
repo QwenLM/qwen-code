@@ -951,6 +951,29 @@ describe('livePromptEvents', () => {
     );
   });
 
+  it('forwards fresh-mode eligibility once without inventing human provenance', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'mode-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    await drain(
+      livePromptEvents(config, 'ordinary recalled input', undefined, {
+        workflowModeEligible: true,
+      }),
+    );
+    expect((sendMessageStream.mock.calls[0] as unknown[])[3]).toMatchObject({
+      workflowModeEligible: true,
+    });
+    expect(
+      (sendMessageStream.mock.calls[0] as unknown[])[3],
+    ).not.toHaveProperty('humanInput');
+    expect(
+      (sendMessageStream.mock.calls[1] as unknown[])[3],
+    ).not.toHaveProperty('workflowModeEligible');
+  });
+
   it('forwards multimodal part lists unchanged', async () => {
     const sendMessageStream = vi.fn(function* () {});
     const config = createFakeConfig(sendMessageStream);

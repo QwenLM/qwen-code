@@ -311,6 +311,7 @@ export function useOpenTuiLiveTurn(
           modelOverride: turnOptions?.modelOverride,
           submittedPrompt: turnOptions?.submittedPrompt,
           humanInput: turnOptions?.humanInput,
+          workflowModeEligible: editablePrompt !== undefined,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           isCurrentTurn: () => seq === turnSeqRef.current,
           drainSteering: () => (seq === turnSeqRef.current ? drainQueue() : []),

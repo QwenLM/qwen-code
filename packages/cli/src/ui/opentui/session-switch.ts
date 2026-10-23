@@ -132,6 +132,7 @@ export async function handleResumeSession(
   }
 
   const oldSessionId = config.getSessionId();
+  const oldWorkflowMode = config.captureWorkflowModeState?.();
   let coreSwapped = false;
   let uiSwapped = false;
   let toolsInvalidated = false;
@@ -213,6 +214,7 @@ export async function handleResumeSession(
         resetBackgroundStateForSessionSwitch(config);
         getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(oldSessionId, undefined);
+        if (oldWorkflowMode) config.restoreWorkflowModeState(oldWorkflowMode);
         await config.loadPausedBackgroundAgents(oldSessionId).catch(() => {});
         // Re-hydrate the client against the restored session, mirroring the
         // other three rollback routes (useResumeCommand, useBranchCommand,
@@ -323,6 +325,7 @@ export async function handleBranchSession(
   }
 
   const oldSessionId = config.getSessionId();
+  const oldWorkflowMode = config.captureWorkflowModeState?.();
   const newSessionId = randomUUID();
   const sessionService = config.getSessionService();
 
@@ -427,6 +430,7 @@ export async function handleBranchSession(
       try {
         getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(oldSessionId, prevSessionData);
+        if (oldWorkflowMode) config.restoreWorkflowModeState(oldWorkflowMode);
         await config.getGeminiClient()?.initialize?.();
       } catch (rollbackErr) {
         config

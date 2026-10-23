@@ -177,6 +177,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       });
     });
     const options = live.turns[0].options as LivePromptOptions;
+    expect(options.workflowModeEligible).toBe(true);
     let held: OpenTuiSteeringSubmission[] = [];
     act(() => {
       result.current.submit('read @delayed.txt', [path]);

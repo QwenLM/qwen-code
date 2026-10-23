@@ -154,6 +154,7 @@ export function useResumeCommand(
       // the user is on, and rolling back against that stale id would land
       // on a session the UI never shows (#9844).
       const oldSessionId = config.getSessionId();
+      const oldWorkflowMode = config.captureWorkflowModeState?.();
       let coreSwapped = false;
       let uiSwapped = false;
       let toolsInvalidated = false;
@@ -296,6 +297,8 @@ export function useResumeCommand(
             }
             getInteractiveModSession(config)?.invalidateTools();
             config.startNewSession(oldSessionId, prevSessionData);
+            if (oldWorkflowMode)
+              config.restoreWorkflowModeState(oldWorkflowMode);
             // Re-hydrate the client against the restored session, mirroring
             // /branch's rollback: without it the client's chat stays on the
             // abandoned session's replayed history, and the abort below

@@ -2571,6 +2571,12 @@ export async function runNonInteractive(
           {
             type: sendType,
             modelOverride,
+            workflowModeEligible:
+              isFirstTurn &&
+              sendType === SendMessageType.UserQuery &&
+              !goalTurn &&
+              !options.continueInterrupted &&
+              !isSlashCommand(input),
             ...(isFirstTurn &&
               sendType === SendMessageType.UserQuery &&
               !goalTurn &&

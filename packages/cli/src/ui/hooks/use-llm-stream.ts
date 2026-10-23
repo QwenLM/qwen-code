@@ -4181,17 +4181,19 @@ export const useLlmStream = (
           }
 
           const workflowSessionId = config.getSessionId();
-          const humanInput =
+          const workflowModeEligible =
             submitType === SendMessageType.UserQuery &&
             !allowConcurrentBtwDuringResponse &&
             !isDetachedToolContinuation &&
             !(metadata?.shellMode ?? shellModeActive) &&
             !dispatchesSlashCommand &&
-            !(typeof query === 'string' && isBtwCommand(query))
-              ? metadata?.humanInput
-              : undefined;
+            !(typeof query === 'string' && isBtwCommand(query));
+          const humanInput = workflowModeEligible
+            ? metadata?.humanInput
+            : undefined;
           const sendOptions = {
             type: submitType,
+            ...(workflowModeEligible ? { workflowModeEligible: true } : {}),
             notificationDisplayText: metadata?.notificationDisplayText,
             todoWorkChainId: metadata?.todoWorkChainId,
             modelOverride: modelOverrideRef.current,
