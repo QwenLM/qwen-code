@@ -6,6 +6,16 @@ Web chat and web terminal clients should consume `qwen serve` through the
 daemon HTTP/SSE APIs and render a client-side transcript. Native local TUI,
 channel, and IDE integrations keep their existing default paths for now.
 
+## Interface terminology
+
+The Web Shell labels directory-backed entries **Workspaces / 工作区** and
+ordinary conversations **Sessions / 会话**. Their creation action is
+**New session / 新建会话**. This display terminology also applies to the
+workspace Memory scope; scheduled tasks keep their separate domain name.
+The existing **No-workspace sessions / 无工作区会话** group retains its name
+and placement while its naming and hierarchy are discussed separately.
+These labels do not change API fields, configuration keys, or runtime behavior.
+
 ## Shared UI Contract
 
 Use the TypeScript SDK daemon UI exports as the common boundary:

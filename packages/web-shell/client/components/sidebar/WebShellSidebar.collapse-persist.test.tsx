@@ -2061,7 +2061,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const preview = document.querySelector('[data-web-shell-home-popover]');
     expect(preview).not.toBeNull();
     expect(preview!.textContent).toContain('Qwen Code');
-    expect(preview!.textContent).toContain('New task');
+    expect(preview!.textContent).toContain('New session');
     expect(preview!.textContent).toContain('Release notes');
     expect(
       document.querySelectorAll('[data-web-shell-home-column]'),
@@ -2120,7 +2120,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       ).not.toBeNull();
       expect(
         document.querySelector('[data-web-shell-home-popover]')!.textContent,
-      ).toContain('New task');
+      ).toContain('New session');
       expect(
         container
           .querySelector('button[aria-current="page"]')

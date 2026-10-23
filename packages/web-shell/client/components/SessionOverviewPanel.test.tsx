@@ -2801,7 +2801,7 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(container!.textContent).toContain('Failed to create a new chat');
+    expect(container!.textContent).toContain('Failed to create a new session');
     expect(container!.textContent).not.toContain('Failed to delete session');
   });
 
@@ -2816,7 +2816,7 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(container!.textContent).toContain('Failed to create a new chat');
+    expect(container!.textContent).toContain('Failed to create a new session');
     expect(container!.textContent).not.toContain('Failed to archive session');
   });
 

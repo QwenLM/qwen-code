@@ -134,13 +134,13 @@ describe('Managed workspace navigation', () => {
     expect(provider.listSessions).not.toHaveBeenCalled();
     await act(async () =>
       group('b')
-        .querySelector<HTMLButtonElement>('button[title="New task"]')!
+        .querySelector<HTMLButtonElement>('button[title="New session"]')!
         .click(),
     );
     expect(selectWorkspace).toHaveBeenCalledWith('b');
     expect(
       group('unpaged').querySelector<HTMLButtonElement>(
-        'button[title="New task"]',
+        'button[title="New session"]',
       )!.disabled,
     ).toBe(true);
     await act(async () =>
@@ -340,8 +340,9 @@ describe('Managed workspace navigation', () => {
     );
     expect(group('a').textContent).toContain('Task one');
     expect(
-      group('a').querySelector<HTMLButtonElement>('button[title="New task"]')!
-        .disabled,
+      group('a').querySelector<HTMLButtonElement>(
+        'button[title="New session"]',
+      )!.disabled,
     ).toBe(true);
     await render({ revision: 1 });
     expect(container.querySelector('[role="alert"]')).toBeNull();

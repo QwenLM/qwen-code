@@ -159,7 +159,7 @@ describe('WorkspaceMenu', () => {
       'Copy path',
       'Open folder',
       'Open terminal',
-      'New task',
+      'New session',
     ]);
     await act(async () => {
       click(items[1]!);
@@ -227,7 +227,7 @@ describe('WorkspaceMenu', () => {
     );
     const items = await open();
     expect(onOpenChange).toHaveBeenLastCalledWith(true);
-    expect(labels(items)).toEqual(['Rename…', 'New worktree task']);
+    expect(labels(items)).toEqual(['Rename…', 'New worktree session']);
     await act(async () => {
       click(items[0]!);
     });
@@ -289,8 +289,8 @@ describe('WorkspaceMenu', () => {
       'Copy path',
       'Open folder',
       'Open terminal',
-      'New task',
-      'New worktree task',
+      'New session',
+      'New worktree session',
       'MCP',
       'Skills',
       'Extensions',

@@ -270,7 +270,7 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     });
     await flushSidebar();
     const newTask = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="New task"]',
+      'button[aria-label="New session"]',
     )!;
     expect(newTask.textContent).toContain('Managed');
     expect(
