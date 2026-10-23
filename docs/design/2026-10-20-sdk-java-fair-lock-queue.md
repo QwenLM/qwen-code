@@ -80,7 +80,7 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   resumes an existing tag by checking out that immutable commit, which may
   predate the helper. Both sites therefore fall back to the bare
   `flock --wait 5400 9` lock they replaced when the helper file is absent,
-  rather than dying before Maven and wedging the release permanently.
+  rather than dying before the cache write-back and wedging the release permanently.
 
 ### Hold scope: the write-back, not the suite
 
@@ -95,18 +95,44 @@ the bound.
 Both Maven runs already resolve from a job-local repository, so they touch no
 host-shared state. Only the cache write-back mutates `~/.m2`, so only the
 write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
-and runs before the acquisition; the Maven runs run unlocked; the write-back
-holds one acquisition, and its `mkdir` and bounded `find`/`cp` children
-drop fd 9 so a survivor
-cannot retain the lock. A hold now measures the copy instead of the suite, and
-the fast tier's 90-minute budget is again far above one hold.
+and runs before the acquisition; the `find -delete` that follows it breaks
+only the job-local links for the resolver's mutable tracking files
+(`*.lastUpdated`, `_remote.repositories`, `resolver-status.properties`,
+`maven-metadata-*.xml`), so an in-place write cannot reach the host inode. The
+Maven runs run unlocked; the write-back holds one acquisition, and its
+`mkdir` and bounded `find`/`cp` children drop fd 9 so a survivor cannot
+retain the lock. A hold now measures the copy instead of the suite, and the
+fast tier's 90-minute budget is again far above one hold.
 
-The test job follows the same rule. Its suite was the other long hold: on
-2026-10-22 the full-tier Java 21 leg of run 39754414693 ran for 89 minutes on
-the same host as run 39771949573's fast-tier job, which waited out its
-90-minute budget and failed five seconds after that leg ended. Its Maven runs
-now resolve from the job-local repository seeded from `~/.m2`, and only its
-write-back takes the lock.
+The test job follows the same rule. Its suite was previously inside the lock.
+The full-tier Java 21 leg of run 39754414693 is the record: its 89 minutes
+were ~81 minutes queueing for the lock and ~6 minutes holding it for its
+Maven runs, so treating the whole job as the hold pointed at the wrong phase.
+The fast-tier leg of run 39831684300 then ran ~21 minutes of Maven outside the
+lock — the hold this rule removes. Its Maven runs now resolve from the
+job-local repository seeded from `~/.m2`, and only its write-back takes the
+lock.
+
+Failing to reach the write-back is deliberately fatal, unlike a failed copy,
+which only warns: `lock not acquired within` is the infrastructure signature
+the rerun classifiers match, so a host whose lock is wedged must not report
+green while publishing nothing.
+
+A red or cancelled leg reaches no write-back at all, so it warms nothing;
+that is deliberate, so a failing leg spends no host-lock budget. The cost is
+that the next leg on that host re-resolves; that is accepted in exchange for
+not spending lock budget on a failed run.
+
+The lock predates this change: #10552 added it to serialize this suite against
+host contention, not to protect the cache. Running the suite unlocked is now
+the steady state on the pool — the MariaDB and both EventTransport lanes
+already do — and the protection against host CPU/RAM contention is the
+CI-conditional timing budgets #10552 landed with it
+(`DaemonSessionClientTest`'s `ASYNC_WAIT_SECONDS = CI ? 60 : 1`,
+`TIMEOUT_UPPER_BOUND_MILLIS = CI ? 5000 : 900`, and
+`STALLED_RESPONSE_REQUEST_TIMEOUT = CI ? 3000 : 150`). Re-serializing the
+suite would need a new design; this document deliberately does not add a
+second lock.
 
 ### Fast-tier priority
 
@@ -175,9 +201,9 @@ order this section exists to prevent.
 
 ### Why fairness over the alternatives
 
-- Shard the lock by suite: reduces queue frequency but each shard is still a
-  bare flock, and it rides on an untested assumption that concurrent suites
-  share the host safely on a pool that just OOMed a build.
+- Shard the lock by suite: the lock now guards only the bounded cache
+  write-back, so a per-suite shard would multiply write-back races against
+  the same host cache without shrinking a hold already capped at 300 s.
 - Cap registrations per host: needs pool topology changes outside the repo
   and leaves the same lost-place race per host.
 - Second host: at least three hosts starved simultaneously; host count is

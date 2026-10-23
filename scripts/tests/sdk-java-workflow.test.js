@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -172,20 +173,30 @@ describe('SDK Java self-hosted workflow guards', () => {
         'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
       );
       expect(lockAt, locked.name).toBeGreaterThan(-1);
-      expect(
-        locked.run.indexOf('cp -aln "${HOME}/.m2/repository"'),
-        locked.name,
-      ).toBeLessThan(lockAt);
+      const seedAt = locked.run.indexOf('cp -aln "${HOME}/.m2/repository"');
+      expect(seedAt, locked.name).toBeGreaterThan(-1);
+      expect(seedAt, locked.name).toBeLessThan(lockAt);
       const maven = locked.run.match(/^\s*mvn .+$/gm) ?? [];
       expect(maven.length, locked.name).toBeGreaterThan(0);
       for (const command of maven) {
-        expect(locked.run.indexOf(command), locked.name).toBeLessThan(lockAt);
+        expect(locked.run.lastIndexOf(command), locked.name).toBeLessThan(
+          lockAt,
+        );
       }
       expect(locked.run).toContain('mkdir -p "${HOME}/.m2/repository" 9>&-');
-      expect(locked.run).toMatch(
-        /timeout 300 find \..*-exec cp -ln --parents -t "\$\{HOME\}\/\.m2\/repository" \{\} \+ 9>&- \|\| write_back=\$\?/,
+      expect(locked.run).toContain(
+        'timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \\) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?',
       );
     }
+    // The write-back is copied between the two pooled jobs; pin it byte-equal
+    // so a fix to one copy cannot leave the other with a wider prune list or
+    // a missing -links 1 delta.
+    const writeBacks = lockedSteps.map((locked) => {
+      const at = locked.run.indexOf('mkdir -p "${HOME}/.m2/repository"');
+      expect(at, locked.name).toBeGreaterThan(-1);
+      return locked.run.slice(at).trimEnd();
+    });
+    expect(writeBacks[1]).toBe(writeBacks[0]);
     // The MariaDB lane keeps its two specific Maven runs above the lock.
     const integration = lockedSteps.find((lockedStep) =>
       lockedStep.run.includes('-Pmysql-integration'),
@@ -250,6 +261,53 @@ describe('SDK Java self-hosted workflow guards', () => {
   );
 
   it.skipIf(process.platform !== 'linux')(
+    'breaks the resolver tracking files out of the host-cache hardlinks',
+    () => {
+      const seedLine = 'cp -aln "${HOME}/.m2/repository"';
+      const sites = Object.values(parse(workflow).jobs)
+        .flatMap((candidate) => candidate.steps ?? [])
+        .filter((candidate) => candidate.run?.includes(seedLine));
+      // Every pool job that seeds the host cache shares this exposure.
+      expect(sites).toHaveLength(4);
+      for (const site of sites) {
+        const seedAt = site.run.indexOf(seedLine);
+        const mvnAt = site.run.slice(seedAt).search(/\n\s*mvn /);
+        expect(mvnAt, site.name).toBeGreaterThan(-1);
+        const seed = site.run.slice(seedAt, seedAt + mvnAt);
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-m2-metadata-'));
+        const home = join(dir, 'home');
+        const runnerTemp = join(dir, 'runner-temp');
+        const relative = join('g', 'a', '1.0', 'x.lastUpdated');
+        const hostFile = join(home, '.m2', 'repository', relative);
+        const jobFile = join(runnerTemp, 'm2-repo', relative);
+        mkdirSync(dirname(hostFile), { recursive: true });
+        mkdirSync(runnerTemp, { recursive: true });
+        writeFileSync(hostFile, 'host-before\n');
+        try {
+          const result = spawnSync('bash', ['-e', '-c', seed], {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: { ...process.env, HOME: home, RUNNER_TEMP: runnerTemp },
+          });
+          expect(result.error, site.name).toBeUndefined();
+          expect(result.status, site.name + result.stderr).toBe(0);
+          // Maven truncates and rewrites this tracking file in place; the
+          // job-local path must no longer be the host inode.
+          writeFileSync(jobFile, 'job-after\n');
+          expect(readFileSync(hostFile, 'utf8'), site.name).toBe(
+            'host-before\n',
+          );
+          expect(statSync(jobFile).ino, site.name).not.toBe(
+            statSync(hostFile).ino,
+          );
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
     'releases the host lock when a write-back child survives the step',
     () => {
       const jobs = parse(workflow).jobs;
@@ -299,6 +357,7 @@ describe('SDK Java self-hosted workflow guards', () => {
               env: {
                 ...process.env,
                 PATH: `${shims}:${process.env.PATH}`,
+                GITHUB_WORKSPACE: dir,
                 HOME: home,
                 RUNNER_TEMP: runnerTemp,
                 CHILD_PID_FILE: pidFile,
@@ -525,6 +584,11 @@ describe('SDK Java self-hosted workflow guards', () => {
       // The self-hosted suite resolves from a job-local repository; only the
       // cache write-back takes the host lock.
       expect(jobLocal?.length ?? 0).toBe(1);
+      expect(
+        parse(workflow).jobs.test.steps.find(
+          (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+        )?.env?.MAVEN_ARGS,
+      ).toContain('-Dmaven.repo.local=${{ runner.temp }}/m2-repo');
     } else if (name !== 'mysql-integration') {
       expect(jobLocal).toBeNull();
     }
@@ -1295,9 +1359,17 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + writeBackBound + 30 * 60);
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait, its Maven suite (the sdk-java and Managed Agent
-    // H2 suites, 925 s) and ~11 minutes of setup.
+    // H2 suites, 925 s), its own bounded write-back and ~11 minutes of setup.
+    const testWriteBackBound = Number(
+      parse(workflow)
+        .jobs.test.steps.find(
+          (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+        )
+        .run.match(/timeout (\d+) find \. /)?.[1],
+    );
+    expect(testWriteBackBound).toBe(300);
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      seconds + 925 + 11 * 60,
+      seconds + 925 + testWriteBackBound + 11 * 60,
     );
   });
 
