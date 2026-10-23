@@ -4002,6 +4002,8 @@ export function App({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
+  const [standaloneSessionsReloadToken, setStandaloneSessionsReloadToken] =
+    useState(0);
 
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const refreshWorkspaceBrand = workspace.refreshBrand;
@@ -11496,6 +11498,8 @@ export function App({
                   catalogWorkspaceCwd,
                   sessionId,
                 );
+              } else if (creationSessionContext?.kind === 'standalone') {
+                setStandaloneSessionsReloadToken((value) => value + 1);
               }
             },
             getCurrentSessionId: () => connectionRef.current.sessionId,
@@ -16330,6 +16334,7 @@ export function App({
             setStandaloneRecoveryResolution('archived');
             return;
           }
+          setStandaloneSessionsReloadToken((value) => value + 1);
           await loadSidebarSession(sessionId, undefined, {
             kind: 'standalone',
           });
@@ -16392,6 +16397,7 @@ export function App({
       return;
     }
     try {
+      setStandaloneSessionsReloadToken((value) => value + 1);
       await loadSidebarSession(sessionId, undefined, { kind: 'standalone' });
     } catch (error) {
       if (!isCurrent()) return;
@@ -21958,6 +21964,7 @@ export function App({
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
+                  standaloneSessionsReloadToken={standaloneSessionsReloadToken}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);

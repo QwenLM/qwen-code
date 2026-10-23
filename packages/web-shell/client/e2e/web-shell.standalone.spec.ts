@@ -3,6 +3,7 @@ import {
   createWebShellDaemonScenario,
   installMockDaemon,
   replayCompleteEvent,
+  turnCompleteEvent,
   type DaemonRequestRecord,
   type MockDaemonController,
   type WebShellDaemonScenario,
@@ -27,6 +28,71 @@ function standaloneCreates(
     (request) =>
       request.method === 'POST' && request.path === '/standalone/sessions',
   );
+}
+
+for (const entry of ['composer', 'sidebar'] as const) {
+  test(`lists a new standalone session before its first turn finishes from the ${entry} @smoke`, async ({
+    page,
+  }, testInfo) => {
+    const scenario = createWebShellDaemonScenario({
+      capabilities: { features: standaloneFeatures },
+    });
+    const daemon = await installScenario(page, scenario, testInfo);
+    await page.goto('/');
+    const group = page.getByTestId('standalone-active-group');
+    await expect(
+      group.getByText('No sessions.', { exact: true }),
+    ).toBeVisible();
+
+    if (entry === 'composer') {
+      await selectNoWorkspaceTarget(page);
+    } else {
+      await group.hover();
+      await group
+        .getByRole('button', { name: 'New task', exact: true })
+        .click();
+    }
+    expect(standaloneCreates(daemon)).toHaveLength(0);
+    await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(
+      0,
+    );
+
+    await fillComposer(page, 'Start a standalone conversation');
+    await page.locator('[data-web-shell-composer-submit]').click();
+    const create = await waitForRequest(
+      daemon,
+      (request) =>
+        request.method === 'POST' && request.path === '/standalone/sessions',
+    );
+    const sessionId = String(requestBody(create)['sessionId']);
+    await daemon.sse.waitForConnection(sessionId);
+    await daemon.sendEvent(replayCompleteEvent({ sessionId }));
+    await waitForRequest(
+      daemon,
+      (request) => request.path === `/session/${sessionId}/prompt`,
+    );
+    await expect(
+      page.getByRole('button', { name: 'esc to cancel' }),
+    ).toBeVisible();
+    await expect(
+      group.locator('[data-web-shell-session-title]', {
+        hasText: 'Standalone 1',
+      }),
+    ).toBeVisible();
+
+    scenario.standaloneSessions[0].displayName = 'Completed conversation';
+    await daemon.sendEvent(
+      turnCompleteEvent('prompt-e2e', { id: 1, sessionId }),
+    );
+    await expect(
+      group.locator('[data-web-shell-session-title]', {
+        hasText: 'Completed conversation',
+      }),
+    ).toBeVisible();
+    await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(
+      1,
+    );
+  });
 }
 
 test('the composer no-workspace target creates an exact standalone session @smoke', async ({
@@ -192,6 +258,22 @@ test('an uncertain standalone create stays recoverable and is never retried @smo
         request.method === 'POST' && request.path === '/standalone/sessions',
     ),
   ).toHaveLength(1);
+
+  const group = page.getByTestId('standalone-active-group');
+  await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(0);
+  const sessionId = String(
+    requestBody(standaloneCreates(daemon)[0])['sessionId'],
+  );
+  scenario.standaloneSessions.push(
+    standaloneSummary(sessionId, 'Recovered conversation'),
+  );
+  await page.getByRole('button', { name: 'Check status', exact: true }).click();
+  await expect(
+    group.locator('[data-web-shell-session-title]', {
+      hasText: 'Recovered conversation',
+    }),
+  ).toBeVisible();
+  expect(standaloneCreates(daemon)).toHaveLength(1);
 });
 
 test('standalone Recents keeps lifecycle actions on exact standalone routes @smoke', async ({
