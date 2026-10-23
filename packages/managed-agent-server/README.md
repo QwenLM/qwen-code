@@ -216,7 +216,7 @@ All settings below use the `qwen.managed-agent.artifacts` prefix:
 | `max-concurrent-reads`       | `4`     | Maximum simultaneous content responses per server process.                                                                                                                                                                                                                                                                                                                                                                            |
 | `read-timeout`               | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts.                                                                                                                                                                                                                                                                         |
 | `read-revalidation-interval` | `5s`    | How often an in-flight download re-runs the access check (workspace grant, read policy, session lifecycle); `PT0S` re-verifies every chunk. A revocation lands at the first chunk boundary after the window's end; chunks written inside the window still reach the client — up to 1 MiB for a Range request, and up to a full `read-timeout`'s worth of a streaming download. Once the re-check denies, no further chunk is written. |
-| `projection-interval`        | `1s`    | Cadence of the tool-result projection pass (backfill plus claim processing). Bound through a `@Scheduled` placeholder, so a suffix-less number binds as milliseconds — unlike the typed settings above.                                                                                                                                                                                                                               |
+| `projection-interval`        | `1s`    | Cadence of the tool-result projection pass (claim processing). Bound through a `@Scheduled` placeholder, so a suffix-less number binds as milliseconds — unlike the typed settings above.                                                                                                                                                                                                                                             |
 
 A product can replace `ManagedArtifactPolicy` for narrower publication or
 actor rules. Published previews persist in shared events. Policy changes do
@@ -224,17 +224,11 @@ not automatically reproject historical results; content requests use the
 current read policy at admission and once per revalidation window thereafter.
 Configure the policy before enabling projection.
 
-Two sibling knobs tune the same relaxation elsewhere:
 `qwen.managed-agent.events.read-grant-recheck-interval` (default `5s`) bounds
-how often a live event stream re-checks the Workspace read grant — `PT0S`
-restores the per-event check — and
-`qwen.managed-agent.tool-publication.journal-head-authorization` (default
-`false`) switches tool-publication authorization from the journal scan to the
-session journal head's activation columns; enable it only after every writer
-in the fleet runs the V36 schema's code (the rolling-window self-healing is
-covered in the
-[query-amplification design](../../docs/design/2026-10-02-managed-agent-query-amplification.md)
-§9).
+how often a live event stream re-checks the Workspace read grant; `PT0S`
+restores the per-event check. Tool-publication authorization always uses the
+session journal head's validated activation columns. Missing or inconsistent
+head proofs refuse publication.
 Original reads are capped at 1 MiB per Range request; full downloads use
 bounded segment buffers and stream with backpressure. Deployments must retain
 O2 roots and validate real OSS and slow-reader limits before enabling this
@@ -247,15 +241,15 @@ revalidation window: [English](../../docs/design/2026-10-02-managed-agent-query-
 
 ## Asynchronous tool publication verification
 
-Apply migration V68 and upgrade all servers before enabling
-`qwen.managed-agent.tool-publication.async-verification-enabled` (default
-`false`). Enable `journal-head-authorization` first; startup rejects async
-admission without it. `verification-concurrency` defaults to `2` and controls
-the dedicated verifier pool, independently of retention and GC.
+Enable `qwen.managed-agent.tool-publication.async-verification-enabled`
+(default `false`) to use asynchronous admission. `verification-concurrency`
+defaults to `2` and controls the dedicated verifier pool, independently of
+retention and GC.
 
-Updated clients send `X-Qwen-Tool-Publication-Async: 1` and poll the existing
-operation status after HTTP 202. They continue accepting direct receipts from
-old or disabled servers. Older clients remain synchronous. A mode is saved
+Clients that support asynchronous verification send
+`X-Qwen-Tool-Publication-Async: 1` and poll the operation status after HTTP 202.
+Synchronous responses remain supported when asynchronous verification is
+disabled or the request does not opt in. A mode is saved
 when each operation is created, so retries do not change it. `FAILED` carries
 only a safe `error: {status, code}` and must be handled as a terminal error,
 outside network retry handling. The adapter keeps awaiting verified success
@@ -329,9 +323,10 @@ can name the Harness's own environment file. The server then reads
 configuration, never into its process environment, and refuses to start when
 either direct value is also set. Write each credential as `KEY=value` on one
 line, with no whitespace around the `=` and only letters, digits and `._:/+=-`
-in the value. The server refuses, by file and line, any line it might read
-differently from systemd or a shell, such as a continuation, a carriage return
-from CRLF line endings, an unterminated quote or text after a closing quote.
+in the value, and start comments with `#`. The server refuses, by file and
+line, any line it might read differently from systemd or a shell, such as a
+continuation, a carriage return from CRLF line endings, a `;` comment, an
+unterminated quote or text after a closing quote.
 
 Create a Session:
 
@@ -590,7 +585,7 @@ and mount checks still apply. A failed recovery logs the tenant and Session and
 remains retryable without a permanent attempt limit. Backlog or unavailable
 execution/restore evidence can delay recovery beyond the lease and retry time.
 
-Schema V11 adds a revision-stamped wake hint and retry timestamp to the existing
+The shared V1 baseline includes a revision-stamped wake hint and retry timestamp in the
 Session head. Unknown or stale hints rebuild from committed journal events;
 compacted heads are excluded without marking their inputs consumed, while missing
 or corrupt proof is refused. Each proof invocation reads at most 32 transactions
@@ -599,7 +594,7 @@ clears the hint or triggers a load. At most 128 exact-prefix continuations or
 positive memos are retained. Live partials keep their slots; new long proofs wait
 for completed or ineligible holders to free capacity. A new revision or process
 restart begins proof at zero with the durable hint intact.
-Upgrade the Server and Broker together; rollback binaries must understand V11.
+Use matching Server and Broker builds that understand the current V1 baseline.
 This scan is locally verified on macOS/MySQL 8.4. Linux/Windows, real MQ-on and
 deployed provider acceptance remain unverified; see also [Hosted recovery scope](#hosted-recovery-scope).
 The [English design](../../docs/design/2026-10-18-hosted-wake-recovery.md) and
@@ -882,7 +877,7 @@ Workspace-bound WebShell Session summaries can include `modelContext` with the a
 
 To allow an existing Workspace Session to change its next Turn's model, publish an explicit `qwen.managed-agent.model-catalog` list of `{modelId, label}` entries in the server configuration. The default is empty. IDs must identify configured, cached-credential models in the Hosted CLI; the browser supplies neither provider settings nor credentials. The Harness must advertise `model-selection/1`. `POST /api/agent/web-shell/v1/session-models/query` returns the catalog and current selection; `POST /api/agent/web-shell/v1/session-models/change` takes `sessionId`, `modelId`, `expectedRevision` and `idempotencyKey` and synchronously returns the saved selection. The caller needs Workspace OPERATOR or OWNER and the Session must be idle, without pending approval, context/lifecycle work or recovery. Same-key retries return their original result before mutable catalog and role gates, provided the caller still has read access. They never reapply a change.
 
-Idle Workspace Sessions support manual context compression when the Harness advertises `context-compression/1`. Send `POST /v1/agents/sessions/{sessionId}/compress` with `Idempotency-Key` and `{ "expected_compaction_revision": 0 }`, using the Session's current `compaction_revision`; WebShell uses `/api/agent/web-shell/v1/sessions/compress` and camelCase fields. The public `context_compression` capability advertises deployment support; the WebShell `contextCompression` capability also reflects the current caller grant and execution facts. A Workspace OPERATOR or OWNER can admit the durable `context_compression` operation; the existing operation query returns `pending`, `running`, `recovery_blocked`, `completed` or `failed`, and a completed outcome is `compressed` or `noop`. Same-key retries resolve the original operation before mutable capability, revision and busy checks. Compression refuses active or queued Turns, approvals, unsettled Hooks and conflicting context work. It does not create a user Turn or change approval, Plan or Workspace context revisions. After compression, context usage stays unknown until the next main-model observation. Deploy the V16-compatible Server/Broker reader before the Harness writer and WebShell; stop new compression admission and settle accepted operations before rollback. Existing retained journals establish their compaction revision on first read; if that evidence is unavailable, the capability is false and the revision is omitted.
+Idle Workspace Sessions support manual context compression when the Harness advertises `context-compression/1`. Send `POST /v1/agents/sessions/{sessionId}/compress` with `Idempotency-Key` and `{ "expected_compaction_revision": 0 }`, using the Session's current `compaction_revision`; WebShell uses `/api/agent/web-shell/v1/sessions/compress` and camelCase fields. The public `context_compression` capability advertises deployment support; the WebShell `contextCompression` capability also reflects the current caller grant and execution facts. A Workspace OPERATOR or OWNER can admit the durable `context_compression` operation; the existing operation query returns `pending`, `running`, `recovery_blocked`, `completed` or `failed`, and a completed outcome is `compressed` or `noop`. Same-key retries resolve the original operation before mutable capability, revision and busy checks. Compression refuses active or queued Turns, approvals, unsettled Hooks and conflicting context work. It does not create a user Turn or change approval, Plan or Workspace context revisions. After compression, context usage stays unknown until the next main-model observation. Deploy matching Server/Broker, Harness and WebShell builds using the current V1 baseline; stop new compression admission and settle accepted operations before rollback. Existing retained journals establish their compaction revision on first read; if that evidence is unavailable, the capability is false and the revision is omitted.
 
 Schema V5 adds the current selection to the Session and copies it into each newly admitted Turn. Retries and recovery send that Turn's fixed model, never a later Session choice. No explicit selection preserves the original AgentDefinition/deployment behavior. Selection does not change the AgentDefinition identity, instructions, tools or approval policy. Each newly committed selection clears the latest context observation, including A→B→A without a Turn, until a new successful model request supplies usage. `modelSelection` in the summary describes the next-Turn setting; `modelContext` describes an actual successful request. An unavailable selected model fails closed rather than falling back to the deployment model.
 
@@ -1199,8 +1194,12 @@ standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
 
-Managed Server and Runtime Broker share the single versioned 32-table baseline in
+Managed Server and Runtime Broker share the single 32-table baseline in
 [`src/main/resources/db/managed-schema/V1__managed_schema.sql`](src/main/resources/db/managed-schema/V1__managed_schema.sql).
+Until the first formal Managed Agent release, schema changes update this V1 baseline
+in place. Do not add V2+ migrations or increment the database schema version before
+that release. Recreate development catalogs when the baseline changes; pre-release
+database upgrades are not maintained.
 The Server loads it through Flyway; Broker initialization reads the same resource.
 Both refuse a legacy, partial, foreign, or history-only catalog before schema writes.
 An already initialized complete baseline is structurally validated; a Broker-created
@@ -1351,7 +1350,7 @@ Marker v2 stores birth time as a canonical `Instant` string. Linux reads creatio
 
 Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
 
-The retired V1–V68 migration chain and marker v1 are historical formats. This application initializes a new database with the shared V1 baseline and marker v2; it refuses catalogs from that retired chain. Additive migrations within the current canonical chain follow their own rollout requirements, including the [V15 drained cutover](#hosted-recovery-scope). Preserve retired deployments and their data for historical access. Do not attach this binary to a retired catalog or bypass refusal with Flyway `repair`, `outOfOrder` or manual history edits.
+The first-release contract initializes fresh catalogs with one complete shared V1 baseline and marker v2. Server, Broker, Harness and WebShell must use matching builds. Earlier development catalogs and checkpoints are unsupported; keep any data that still needs historical access with its original deployment, and use a fresh database and state directory for this build. Do not bypass refusal with Flyway `repair`, `outOfOrder` or manual history edits. See the [first-release contract](../../docs/design/2026-10-23-managed-first-release-contract.md) ([简体中文](../../docs/design/2026-10-23-managed-first-release-contract.zh-CN.md)).
 
 Stop all processes and external jobs that can write the storage, account for
 old Runtime holders and verify the original root before registration. Initialize
@@ -1686,9 +1685,7 @@ each arm runs even when an earlier one failed.
 
 Ordinary LOCAL and SSH_LOCAL Managed Workspace Sessions may execute concurrently in the same directory, with one active Turn per Session. An UNKNOWN tool result on a READY binding retains its original Runtime Session and cannot be replayed, but does not exclude another ordinary Session. Existing LOST, DRAINING, OPERATOR_RECOVERY and attested RECOVERY_BLOCKED placement barriers remain in force. Physical registration, fencing, migration and maintenance still require every execution membership and unproven writer to drain. Shared files have no transactional isolation. Past execution overlap does not disable file undo. Undo requires other current memberships to release, then briefly excludes new acquisitions; existing file-level history checks still apply. Resident/private CSI and existing Agent/Workflow child-admission restrictions are unchanged. See the [concurrency design](../../docs/design/2026-10-21-managed-workspace-concurrency.md) ([简体中文](../../docs/design/2026-10-21-managed-workspace-concurrency.zh-CN.md)).
 
-V15 stores ordinary execution memberships per Runtime Session. Use the matching Server/Broker build and schema. There is no singleton-holder conversion or fallback execution authority; CSI reservation and physical-maintenance ownership keep their existing roles.
-
-Fresh installations initialize an empty catalog. An existing canonical V1–V14 catalog requires a drained cutover, not a mixed-version rolling upgrade: disable new Turn admission, then use the old build to finish or recover and release every ordinary LOCAL/SSH_LOCAL holder. Stop the old Server, Broker, Harness, Runtime workers and other storage writers, then verify that no `ma_storage_owner` row with `storage_kind IN ('LOCAL', 'SSH_LOCAL')` and `maintenance_id IS NULL` has a non-null `holder_key`. Only then apply V15 and start the matching build. An UNKNOWN holder with unconfirmed writer cleanup must remain on the old deployment until recovery and release succeed. Do not manually clear its ownership or start the new build against that catalog.
+The baseline stores ordinary execution memberships per Runtime Session. Use matching Server/Broker builds with a fresh catalog. CSI reservation and physical-maintenance ownership retain their existing roles. Development catalogs using singleton holders require their original deployment to finish or recover and release those holders; they cannot be reused by this build.
 
 The [SQL wake scan](#wake-recovery-after-harness-loss) has separate local
 macOS/MySQL 8.4 evidence; it does not yet have Linux/Windows, real-MQ or deployed
@@ -1755,7 +1752,7 @@ runner.
 
 See the [English design](../../docs/design/workspace-storage-migration.md) and [Chinese design](../../docs/design/workspace-storage-migration.zh-CN.md). Run only after every service is upgraded, admission/dispatch is disabled, accepted work is settled, Harness writers are stopped, and automatic restart is disabled. The source remains accessible on the same trusted Linux host. Export the original canonical absolute `QWEN_HOME` in the private maintenance and registration commands as well as the Broker/Harness environment, with no symlink components. `fileHistoryRoot` must equal the canonical `$QWEN_HOME/file-history` directory. Preserve that home and its independent history volume; do not move it with the Workspace.
 
-W1c adds Flyway V48–V50 after main's V47 channel-persistence migration, preserving all published migration bytes and applied history. Databases using earlier unpublished W1c migration numbers require fresh disposable fixtures; do not repair production Flyway history to reuse them.
+The current baseline includes the Workspace migration schema. Earlier development catalogs require fresh disposable fixtures; do not edit Flyway history to reuse them.
 
 The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
 
