@@ -25,7 +25,7 @@ import type {
   ManagedToolExecutionResult,
   ManagedToolInvocationStatus,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
-import { BrokerManagedRuntimeProvider } from '../../packages/cli/src/serve/broker-managed-runtime-provider.js';
+import { BrokerManagedRuntimeProvider } from './broker-tool-v2-provider.js';
 import { waitUntil } from './hosted-harness-process.js';
 import { mediaFixture, type MediaCase } from './provider-media-fixtures.js';
 import { PROVIDER_MEDIA_HARNESS_PREFIX } from './provider-media-process-cleanup.mjs';
@@ -370,7 +370,7 @@ try {
     await waitUntil(async () => {
       try {
         status = await client.status(reference);
-        return status.state === 'settled';
+        return status !== undefined && status.state === 'settled';
       } catch (cause) {
         if (name !== 'lost-execute') throw cause;
         return false;
