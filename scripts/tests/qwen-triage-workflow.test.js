@@ -5230,6 +5230,8 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('Never fall back to `origin` for the host');
     // Overwriting a published name leaves every older link on the old image.
     expect(flat).toContain('A published filename is spent');
+    // A contents PUT cannot create the branch the first upload needs.
+    expect(flat).toContain('git/refs');
     // The deliverables are the skill's, not the maintainer's list.
     expect(flat).toContain('do not ask the maintainer to restate them');
   });

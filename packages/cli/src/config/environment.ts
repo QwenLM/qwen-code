@@ -21,6 +21,7 @@ import {
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
+import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
 import { publishPendingCompileCache } from './compile-cache.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -641,6 +642,17 @@ function reportRejectedSettingsEnv(
   ) {
     writeStderrLineSafe(
       `qwen: ${source} cannot set QWEN_AGENT_EXECUTION_BACKEND; ignored. Export it in the launch environment instead.`,
+    );
+  }
+  // The publishing coordinates are excluded at every settings scope: the
+  // merged map carries a workspace entry indistinguishably from an operator
+  // one, and only the operator may choose where evidence is published. Say so
+  // instead of dropping the entry silently, and name the channel that works.
+  for (const [setting, key] of Object.entries(VERIFY_PR_COORDINATE_ENV)) {
+    const value = env[key];
+    if (typeof value !== 'string' || value.trim() === '') continue;
+    writeStderrLineSafe(
+      `qwen: ${source} cannot set ${key}; ignored. Set verifyPr.${setting} at user scope in settings.json, or export it in the launch environment.`,
     );
   }
 }

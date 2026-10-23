@@ -64,6 +64,11 @@ that never changes between rounds should be configured once.
 - A value written in a workspace settings file has no effect. That is the
   point, but it must be visible: the schema description and the skill both say
   it, so a maintainer does not debug a silently ignored key.
+- `settings.env` entries for either variable are ignored at every scope,
+  including User, with a line on stderr that names `verifyPr.*` and the launch
+  environment. The merged map cannot tell a workspace entry from an operator
+  one, so a scope-blind rule is the only auditable one; the dedicated setting
+  is the user-scope channel, and `~/.qwen/.env` still works.
 - The bridge runs from `loadSettings` where the environment is applied. Callers
   that skip environment loading are per-request config reads and do not need
   it.

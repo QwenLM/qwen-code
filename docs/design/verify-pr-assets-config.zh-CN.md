@@ -31,6 +31,7 @@ Status: implementing with this change.
 ## 约束与风险
 
 - 写在 workspace 设置里的值不会生效。这是设计目的，但必须可见：schema 描述与 skill 都写明，避免维护者去排查一个被静默忽略的键。
+- 通过 `settings.env` 设置这两个变量在任何作用域都不生效（含 User），并在 stderr 明确提示改用 `verifyPr.*` 或启动环境。合并后的 map 无法区分 workspace 条目与 operator 条目，所以只能采用"不区分作用域"这一条可审计的规则；用户级通道是专用设置，`~/.qwen/.env` 仍然可用。
 - 桥接位于 `loadSettings` 应用环境的位置。跳过环境加载的调用方都是按请求读取配置，不需要它。
 - 坐标不是同意：`--publish` 仍然门控每条评论，发布前 guard 与发布后回读均不变。
 

@@ -237,6 +237,38 @@ describe('operator container requirement across environment reload', () => {
     },
   );
 
+  it('warns when settings.env tries to set a publishing coordinate', () => {
+    // The exclusion is key-based, so it also drops an operator-scope entry.
+    // That is deliberate — the merged map cannot tell a workspace entry from
+    // an operator one — but it must not be silent, and it must name the
+    // channel that does work.
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const settingsFile = path.join(os.homedir(), '.qwen', 'settings.json');
+    fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+    fs.writeFileSync(
+      settingsFile,
+      JSON.stringify({
+        env: { QWEN_VERIFY_ASSETS_BRANCH: 'assets/wenshao' },
+      }),
+    );
+    const settings = testSettings(
+      JSON.parse(fs.readFileSync(settingsFile, 'utf8')),
+    );
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      loadEnvironment(settings, workspace);
+      expect(process.env['QWEN_VERIFY_ASSETS_BRANCH']).toBeUndefined();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'cannot set QWEN_VERIFY_ASSETS_BRANCH; ignored. Set verifyPr.assetsBranch at user scope in settings.json, or export it in the launch environment.',
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it.each(
     ['.env', '.qwen/.env', 'settings.env'].flatMap((source) =>
       ['', 'docker', 'podman'].map((value) => ({ source, value })),
