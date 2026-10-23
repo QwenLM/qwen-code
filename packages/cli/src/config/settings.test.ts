@@ -43,6 +43,7 @@ import {
   vi,
   beforeEach,
   afterEach,
+  afterAll,
   type Mocked,
   type Mock,
 } from 'vitest';
@@ -79,6 +80,7 @@ import { getModelProvidersOwnerScope } from './modelProvidersScope.js';
 import { needsMigration } from './migration/index.js';
 import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
+import { clearQwenHomePin } from '../test-utils/qwen-home-pin.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -96,23 +98,30 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
-// This file's settings resolution is built on the mocked `os.homedir`, so
-// the ambient `QWEN_HOME` must not redirect it: test-setup.ts pins the
-// variable to an empty directory to keep the suite off the operator's real
-// settings. Tests that exercise `QWEN_HOME` itself set it in-body.
-delete process.env['QWEN_HOME'];
+// This file's settings resolution is built on the mocked `os.homedir`, so the
+// ambient `QWEN_HOME` must not redirect it: test-setup.ts pins the variable to
+// a temp dir to keep the suite off the operator's real settings. This file
+// mocks the filesystem outright and keys its fixtures on the os.homedir()
+// mock, so it drops the pin before the module-load path constants below are
+// captured. Tests that exercise `QWEN_HOME` itself set it in-body.
+//
+// The pin is dropped for the duration of this file only. An un-restored delete
+// leaves `process.env` un-pinned for every later file in the worker — under
+// `--no-isolate` the module registry shares that side effect, so a neighbour
+// resolving `getUserSettingsPath()` against the real filesystem saved a merged
+// object over the operator's real `~/.qwen/settings.json` (#15267). Re-pinning
+// to the mocked home is not equivalent: the `~/.env` bootstrap branches on
+// `QWEN_HOME` being set (config/environment.ts), so it would silently change
+// what the `.env` tests below cover.
+const restoreQwenHomePin = clearQwenHomePin();
 
 // Resolve the (mocked) user-settings path once at module load. Tests mock
 // `os.homedir`, so the value is stable across the suite. Production callers
 // must keep going through `getUserSettingsPath()` to pick up `QWEN_HOME`
 // resolved from `~/.env` after module load.
-// The package test-setup pins QWEN_HOME to a per-worker temp dir so a
-// polluted real ~/.qwen cannot leak into the suite. This file mocks the
-// filesystem outright and keys its fixtures on the os.homedir() mock, so it
-// drops the pin before the module-load path constants below are captured.
-delete process.env['QWEN_HOME'];
-
 const USER_SETTINGS_PATH = getUserSettingsPath();
+
+afterAll(restoreQwenHomePin);
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
 const RESOLVED_MOCK_WORKSPACE_DIR = pathActual.resolve(MOCK_WORKSPACE_DIR);
