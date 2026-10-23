@@ -6,6 +6,7 @@
 
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
+import { getJsInterpreterCommand } from '../utils/runtime-info.js';
 import type {
   ProcessLaunch,
   ShellExecutionConfig,
@@ -110,14 +111,16 @@ export async function executeLandlock(
   const inputBridge = payload.inheritStdin
     ? resolveStdinBridge(policy.landlockPath)
     : undefined;
-  const node = realpathSync(process.execPath);
+  const interpreter = realpathSync(
+    getJsInterpreterCommand(import.meta.url).command,
+  );
   return executeSandboxRelay(
     policy,
     payload,
     [
       path.dirname(runner),
       path.dirname(relay),
-      path.dirname(node),
+      path.dirname(interpreter),
       ...(inputBridge ? [path.dirname(inputBridge)] : []),
     ],
     ({
@@ -146,7 +149,7 @@ export async function executeLandlock(
       if (filesystem === 'workspace-write') runnerArgs.push('--rw', workspace);
       runnerArgs.push('--', executable, ...args);
       return {
-        executable: node,
+        executable: interpreter,
         args: [
           relay,
           String(process.pid),
