@@ -13,7 +13,6 @@ import type {
 } from './managed-session-authority.js';
 import {
   createNextTurnReadyHarnessCheckpoint,
-  encodeHarnessCheckpointV1,
   HARNESS_MODEL_START_PHASES,
   HARNESS_TURN_COMPLETE_BOUNDARY,
 } from './managed-harness-checkpoint.js';
@@ -364,15 +363,13 @@ export class ManagedSessionRecordSink {
             turn,
             boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
             state: (identity, previous) =>
-              encodeHarnessCheckpointV1(
-                createNextTurnReadyHarnessCheckpoint({
-                  previous,
-                  ...identity,
-                  activationId: held.activationId,
-                  turnId,
-                  promptId: turnId,
-                }),
-              ),
+              createNextTurnReadyHarnessCheckpoint({
+                previous,
+                ...identity,
+                activationId: held.activationId,
+                turnId,
+                promptId: turnId,
+              }),
           },
           actor,
         );

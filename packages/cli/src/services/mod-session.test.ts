@@ -53,6 +53,7 @@ describe('Mod session ownership', () => {
     const config = {
       getSessionId: vi.fn(() => 'session-1'),
       getTargetDir: () => '/workspace',
+      getCliVersion: () => '1.2.3',
       getOutputFormat: () => OutputFormat.JSON,
       getExtensions: () => [extension],
       isInteractive: () => false,
@@ -569,6 +570,59 @@ describe('Mod session ownership', () => {
       });
     },
   );
+
+  it.each([
+    [undefined, undefined, 'skip'],
+    ['reject', undefined, 'reject'],
+    ['reject', 'skip', 'skip'],
+  ] as const)(
+    'selects the unsupported-event policy from operator settings (%s, %s)',
+    async (user, system, expected) => {
+      const { config, adapter } = setup();
+      const settings = {
+        merged: {
+          experimental: { mods: true },
+          pluginConfigs: { 'hello-mod': { unsupportedEvents: 'reject' } },
+        },
+        systemDefaults: { settings: {} },
+        user: {
+          settings: {
+            pluginConfigs: { 'hello-mod': { unsupportedEvents: user } },
+          },
+        },
+        system: {
+          settings: {
+            pluginConfigs: { 'hello-mod': { unsupportedEvents: system } },
+          },
+        },
+      } as unknown as LoadedSettings;
+      const session = ModSession.create(
+        config as unknown as Config,
+        settings,
+        adapter as unknown as JsonOutputAdapterInterface,
+      )!;
+      sessions.push(session);
+      await session.initialize(new AbortController().signal);
+      expect(mocks.create.mock.calls[0][0][0]).toMatchObject({
+        unsupportedEvents: expected,
+      });
+      expect(mocks.create.mock.calls[0][6]).toBe('1.2.3');
+    },
+  );
+
+  it('rejects an invalid unsupported-event policy before any worker starts', async () => {
+    const { config, adapter } = setup();
+    const session = new ModSession(
+      config as unknown as Config,
+      adapter as unknown as JsonOutputAdapterInterface,
+      [{ 'hello-mod': { unsupportedEvents: 'warn' } }],
+    );
+    sessions.push(session);
+    await expect(
+      session.initialize(new AbortController().signal),
+    ).rejects.toThrow('Mod hello-mod: Invalid Mod unsupportedEvents');
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
 
   it('rejects an invalid dialect on a later plugin before any worker starts without userConfig', async () => {
     const extensions = [

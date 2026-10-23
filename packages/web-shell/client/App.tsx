@@ -14,6 +14,10 @@ import {
   resolveModelManagement,
   type WebShellModelManagementOptions,
 } from './modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from './unavailableModels';
 import './styles/globals.css';
 import {
   useMessageNavigation,
@@ -474,6 +478,7 @@ import {
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
 import { McpManagerPage } from './components/mcp/McpManagerPage';
+import { ManagedMcpManagerPage } from './components/managed/ManagedMcpManagerPage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import {
   createAndAttachSessionForPrompt,
@@ -1364,6 +1369,10 @@ export interface WebShellProps {
   settings?: WebShellSettingsOptions;
   /** Model add/delete interactions across WebShell. Not a backend permission policy. */
   modelManagement?: WebShellModelManagementOptions;
+  /** Extra catalog models shown disabled in the composer picker. */
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  /** Host-owned hint for a disabled model. DOM/Solid hosts mount into the container. */
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
@@ -3446,6 +3455,8 @@ export function App({
   sidebar,
   settings: settingsPresentation,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   header,
   rightPanel,
   showToolCalls = false,
@@ -3939,8 +3950,7 @@ export function App({
     [workspace.client],
   );
   const managedCreationSkills = useMemo(() => {
-    if (managedAgentProvider?.kind !== 'java' || !skillsSourceCwd)
-      return undefined;
+    if (!managedAgentProvider || !skillsSourceCwd) return undefined;
     const sourceCwd = skillsSourceCwd;
     return {
       workspaceCwd: sourceCwd,
@@ -3968,7 +3978,7 @@ export function App({
         return snapshot.skills;
       },
     };
-  }, [managedAgentProvider?.kind, skillsSourceCwd, workspace.client]);
+  }, [managedAgentProvider, skillsSourceCwd, workspace.client]);
 
   // Multi-daemon (#13727): saved hosts stay connected read-only alongside
   // the provider that owns this App subtree; the picker and sidebar consume
@@ -21207,6 +21217,8 @@ export function App({
     onError: reportError,
     sessionWorkflowEnabled,
     modelManagement,
+    unavailableModels,
+    mountUnavailableModelTooltip,
     workflow: sessionWorkflowEnabled
       ? {
           todos: sessionWorkflowTodos,
@@ -22564,6 +22576,13 @@ export function App({
                         onClose={closePanel}
                         initialFocusRef={panelHeadingRef}
                       />
+                    ) : activePanel === 'mcp' && managedMode && managedAgentProvider ? (
+                      <ManagedMcpManagerPage
+                        provider={managedAgentProvider}
+                        sessionId={managedSessionId}
+                        workspaceId={managedWorkspaceId ?? undefined}
+                        onClose={closePanel}
+                      />
                     ) : activePanel === 'mcp' && mcpDialogMessage ? (
                       <McpManagerPage
                         message={mcpDialogMessage}
@@ -22606,7 +22625,12 @@ export function App({
                         initialTab={pluginInitialTab}
                         skillsWorkspaceCwd={skillsSourceCwd}
                         onSkillsWorkspaceChange={selectSkillsWorkspace}
-                        managedSkills={managedAgentProvider?.kind === 'java'}
+                        managedSkills={managedAgentProvider !== undefined}
+                        managedMcp={managedMode && managedAgentProvider ? {
+                          provider: managedAgentProvider,
+                          sessionId: managedSessionId,
+                          workspaceId: managedWorkspaceId ?? undefined,
+                        } : undefined}
                       />
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
@@ -23013,6 +23037,10 @@ export function App({
                       <SplitView
                         showResponseTokensPerSecond={showResponseTokensPerSecond}
                         modelManagement={modelManagement}
+                        unavailableModels={unavailableModels}
+                        mountUnavailableModelTooltip={
+                          mountUnavailableModelTooltip
+                        }
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
                         onAssistantTurnSettled={onAssistantTurnSettled}
@@ -23116,7 +23144,6 @@ export function App({
                           returnToChat();
                         }
                       }}
-                      workspaceCwd={lockedWorkspaceCwd}
                       managedAgentProvider={managedAgentProvider}
                       creationSkills={managedCreationSkills}
                       onManageSkills={() => {
@@ -24029,6 +24056,10 @@ export function App({
                           }
                           modelRefresh={modelRefresh}
                           availableModels={availableModels}
+                          unavailableModels={unavailableModels}
+                          mountUnavailableModelTooltip={
+                            mountUnavailableModelTooltip
+                          }
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
                           reasoning={displayedReasoning}

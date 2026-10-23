@@ -41,6 +41,7 @@ import {
 } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { Part, PartListUnion } from '@google/genai';
+import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import {
   foldLiveEvent,
   settleOpenTools,
@@ -101,6 +102,7 @@ export function imagePathsToParts(imagePaths: readonly string[]): {
 
 export interface UseOpenTuiLiveTurnOptions {
   config: Config;
+  dualOutput?: DualOutputBridge | null;
 }
 
 /**
@@ -186,7 +188,7 @@ export function foldBatch(
 export function useOpenTuiLiveTurn(
   options: UseOpenTuiLiveTurnOptions,
 ): OpenTuiLiveTurn {
-  const { config } = options;
+  const { config, dualOutput } = options;
   const [items, setItems] = useState<readonly LiveHistoryItem[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [waitingCalls, setWaitingCalls] = useState<readonly WaitingCallInfo[]>(
@@ -305,6 +307,7 @@ export function useOpenTuiLiveTurn(
       try {
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
+          dualOutput,
           modelOverride: turnOptions?.modelOverride,
           submittedPrompt: turnOptions?.submittedPrompt,
           humanInput: turnOptions?.humanInput,
@@ -439,6 +442,7 @@ export function useOpenTuiLiveTurn(
     },
     [
       config,
+      dualOutput,
       apply,
       drainQueue,
       restoreQueue,
@@ -579,8 +583,9 @@ export function useOpenTuiLiveTurn(
   const resetTranscript = useCallback(
     (events: readonly OpenTuiStreamEvent[]) => {
       const onReset = activeTurnRef.current?.onCancelSettled;
-      // Invalidate the in-flight generation first: its late events and
-      // settles are dead on arrival (P2-2).
+      // Commit the accepted partial before invalidating its generation; a late
+      // finally must not finalize the successor adapter.
+      dualOutput?.finalizeAssistantMessage();
       turnSeqRef.current += 1;
       activeTurnRef.current = null;
       const abort = abortRef.current;
@@ -605,7 +610,7 @@ export function useOpenTuiLiveTurn(
       setItems(foldBatch(events));
       onReset?.({ kind: 'reset' });
     },
-    [setBusy, syncQueue],
+    [dualOutput, setBusy, syncQueue],
   );
 
   const settleWaitingCall = useCallback((callId: string) => {
@@ -616,12 +621,13 @@ export function useOpenTuiLiveTurn(
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      dualOutput?.finalizeAssistantMessage();
       turnSeqRef.current += 1;
       activeTurnRef.current = null;
       queueRef.current = [];
       abortRef.current?.abort();
     };
-  }, []);
+  }, [dualOutput]);
 
   return {
     items,
