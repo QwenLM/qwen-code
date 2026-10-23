@@ -651,3 +651,257 @@ it(`H11e tool-only restore completes locally and accepts one explicit followup (
       });
     }
   }));
+
+it(
+  `H01 actual conversation rewind preserves the retained branch (${runtime}+${renderer})`,
+  () =>
+    scenario('rewind', async (api) => {
+      const a = 'RECOVERY_REWIND_PROMPT_A';
+      const b = 'RECOVERY_REWIND_PROMPT_B';
+      const c = 'RECOVERY_REWIND_PROMPT_C';
+      const answerA = 'RECOVERY_rewind_0_DONE';
+      const answerB = 'RECOVERY_rewind_1_DONE';
+      const recordText = (record: Journal) =>
+        (record.message as { parts?: Array<{ text?: string }> })?.parts
+          ?.map((part) => part.text ?? '')
+          .join('');
+      const frameWhere = async (
+        predicate: (frame: string) => boolean,
+        label: string,
+      ) => {
+        await until(async () => {
+          api.frames[label] = await api.session.viewport();
+          return predicate(api.frames[label]);
+        }, label);
+        await api.session.idle(150, 750);
+        api.frames[label] = await api.session.viewport();
+        return api.frames[label];
+      };
+      const composerValue = (frame: string): string | undefined => {
+        const lines = frame.split('\n');
+        const borders = lines.flatMap((line, index) =>
+          /^\s*─{20,}\s*$/.test(line) ? [index] : [],
+        );
+        if (borders.length < 2) return;
+        const [top, bottom] = borders.slice(-2);
+        const body = lines.slice(top + 1, bottom);
+        if (body.length !== 1) return;
+        const match = /^\s*\* (.*)$/.exec(body[0].trimEnd());
+        if (!match) return;
+        return match[1] === '  Type your message or @path/to/file'
+          ? ''
+          : match[1];
+      };
+      const draftIs = (value: string, label: string) =>
+        frameWhere((frame) => composerValue(frame) === value, label);
+      const selectB = async (label: string) => {
+        for (let step = 0; step < 4; step++) {
+          const frame = await frameWhere(
+            (value) =>
+              value.includes('Rewind Conversation') &&
+              /›\s*#\d+\s+/.test(value),
+            `${label}-${step}`,
+          );
+          const rows = frame.split('\n');
+          const target = rows.findIndex((line) =>
+            /#2\s+RECOVERY_REWIND_PROMPT_B(?:\s|[│┃]|$)/.test(line),
+          );
+          const selected = rows.findIndex((line) => /›\s*#\d+\s+/.test(line));
+          expect(target).toBeGreaterThanOrEqual(0);
+          expect(selected).toBeGreaterThanOrEqual(0);
+          if (target === selected) {
+            expect(rows[selected]).toMatch(/›\s*#2\s+RECOVERY_REWIND_PROMPT_B/);
+            return;
+          }
+          await api.session.idle(150, 750);
+          api.session.pressKey(target > selected ? '\x1b[B' : '\x1b[A');
+          await api.session.idle(150, 750);
+        }
+        throw new Error('Visible B selection did not converge');
+      };
+
+      try {
+        await api.start(undefined, 'yolo');
+        const first = await api.prompt(a);
+        expect(
+          first.filter((message) => message.role === 'user').map(text),
+        ).toEqual([a]);
+        const second = await api.prompt(b);
+        expect(
+          second.filter((message) => message.role === 'user').map(text),
+        ).toEqual([a, b]);
+        expect(
+          second.filter((message) => message.role === 'assistant').map(text),
+        ).toEqual([answerA]);
+        await until(
+          () =>
+            api.users().length === 2 &&
+            api
+              .journals()
+              .some(
+                (record) =>
+                  record.type === 'assistant' && recordText(record) === answerB,
+              ),
+          'two real prompts and B answer recorded',
+        );
+        const before = api.journals();
+        const [originalA, originalB] = before.filter(
+          (record) => record.type === 'user',
+        );
+        const aIdentity = identity(originalA);
+        const bIdentity = identity(originalB);
+        const originalAnswerA = before.find(
+          (record) =>
+            record.type === 'assistant' && recordText(record) === answerA,
+        )!;
+        const originalAnswerB = before.find(
+          (record) =>
+            record.type === 'assistant' && recordText(record) === answerB,
+        )!;
+        expect(originalAnswerA?.uuid).toBeTruthy();
+        expect(originalAnswerB?.uuid).toBeTruthy();
+        expect(bIdentity.sessionId).toBe(aIdentity.sessionId);
+        expect(bIdentity.promptId).not.toBe(aIdentity.promptId);
+        json(join(api.evidence, 'rewind-before-journal.json'), before);
+
+        await api.send('/rollback');
+        await selectB('alias-selected-B');
+        expect(api.server.requests).toHaveLength(2);
+        await api.session.idle(150, 750);
+        api.session.pressKey('\x1b');
+        await frameWhere(
+          (frame) => !frame.includes('Rewind Conversation'),
+          'alias-cancelled',
+        );
+        await draftIs('', 'empty-after-alias-cancel');
+        expect(api.server.requests).toHaveLength(2);
+        const afterAlias = api.journals();
+        expect(
+          afterAlias.filter((record) =>
+            before.some((original) => original.uuid === record.uuid),
+          ),
+        ).toEqual(before);
+        expect(
+          afterAlias.filter(
+            (record) => record.type === 'user' || record.type === 'assistant',
+          ),
+        ).toEqual(
+          before.filter(
+            (record) => record.type === 'user' || record.type === 'assistant',
+          ),
+        );
+        json(join(api.evidence, 'rewind-alias-journal.json'), afterAlias);
+
+        await api.send('/rewind');
+        await selectB('rewind-selected-B');
+        expect(api.server.requests).toHaveLength(2);
+        await api.session.idle(150, 750);
+        api.session.pressKey('\r');
+        const confirmation = await frameWhere(
+          (frame) =>
+            frame.includes('Restore conversation only') &&
+            frame.includes(b) &&
+            !frame.includes('Computing file changes...'),
+          'confirm-real-B',
+        );
+        expect(confirmation).toMatch(/›\s*Restore conversation only/);
+        expect(confirmation).not.toContain('Restore code and conversation');
+        await api.session.idle(150, 750);
+        api.session.pressKey('\r');
+        await api.visible(
+          'Conversation rewound. Edit your prompt and press Enter to continue.',
+          'rewind-committed',
+        );
+        const draft = await draftIs(b, 'exact-restored-B-draft');
+        expect(draft).not.toContain(answerB);
+        expect(draft).toContain(answerA);
+        expect(draft.split(b)).toHaveLength(2);
+        expect(api.server.requests).toHaveLength(2);
+        await until(
+          () =>
+            api
+              .journals()
+              .some(
+                (record) =>
+                  record.type === 'system' && record.subtype === 'rewind',
+              ),
+          'rewind recorded',
+        );
+
+        await api.session.idle(150, 750);
+        api.session.pressKey('\x01');
+        await api.session.idle(150, 750);
+        api.session.pressKey('\x0b');
+        await api.session.idle(150, 750);
+        await draftIs('', 'explicitly-cleared-B');
+        const next = await api.prompt(c);
+        const users = next.filter((message) => message.role === 'user');
+        expect(users.map(text)).toEqual([a, c]);
+        expect(canonical(users[0])).toEqual(
+          canonical(first.find((message) => message.role === 'user')!),
+        );
+        expect(
+          next.filter((message) => message.role === 'assistant').map(text),
+        ).toEqual([answerA]);
+        expect(next.filter((message) => message.role === 'tool')).toHaveLength(
+          0,
+        );
+        for (const discarded of [b, answerB, '/rewind', '/rollback'])
+          expect(JSON.stringify(next)).not.toContain(discarded);
+        await until(
+          () => api.users().some((record) => recordText(record) === c),
+          'explicit C recorded',
+        );
+        const after = api.journals();
+        expect(after.find((record) => record.uuid === originalA.uuid)).toEqual(
+          originalA,
+        );
+        expect(after.find((record) => record.uuid === originalB.uuid)).toEqual(
+          originalB,
+        );
+        const currentC = after.find(
+          (record) => record.type === 'user' && recordText(record) === c,
+        )!;
+        const cIdentity = identity(currentC);
+        expect(cIdentity.sessionId).toBe(aIdentity.sessionId);
+        expect(cIdentity.promptId).not.toBe(bIdentity.promptId);
+        const byUUID = new Map(after.map((record) => [record.uuid, record]));
+        const seen = new Set<string>();
+        const ancestors: Journal[] = [];
+        let current: Journal | undefined = currentC;
+        while (current) {
+          expect(seen.has(current.uuid)).toBe(false);
+          seen.add(current.uuid);
+          ancestors.push(current);
+          if (current.parentUuid === null) break;
+          expect(byUUID.has(current.parentUuid)).toBe(true);
+          current = byUUID.get(current.parentUuid);
+        }
+        expect(seen.has(originalA.uuid)).toBe(true);
+        expect(seen.has(originalAnswerA.uuid)).toBe(true);
+        expect(seen.has(originalB.uuid)).toBe(false);
+        expect(seen.has(originalAnswerB.uuid)).toBe(false);
+        expect(
+          ancestors.filter(
+            (record) => record.type === 'system' && record.subtype === 'rewind',
+          ),
+        ).toHaveLength(1);
+        json(join(api.evidence, 'rewind-facts.json'), {
+          aIdentity,
+          bIdentity,
+          cIdentity,
+          activeAncestorUUIDs: [...seen],
+          nextWire: next,
+        });
+        await api.quit();
+      } catch (error) {
+        json(join(api.evidence, 'rewind-primary-failure.json'), {
+          name: error instanceof Error ? error.name : typeof error,
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        });
+        throw error;
+      }
+    }),
+  120_000,
+);
