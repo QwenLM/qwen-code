@@ -13,10 +13,6 @@ CREATE TABLE ma_session (
     harness_boot_id VARBINARY(144),
     harness_event_epoch VARBINARY(256),
     harness_last_event_id BIGINT NOT NULL DEFAULT 0,
-    harness_instance_id VARBINARY(144),
-    harness_owner_boot_id VARBINARY(144),
-    harness_placement_epoch BIGINT NOT NULL DEFAULT 0,
-    harness_placement_state VARCHAR(16) NOT NULL DEFAULT 'UNASSIGNED',
     gmt_create BIGINT UNSIGNED NOT NULL,
     gmt_modified BIGINT UNSIGNED NOT NULL,
     version BIGINT NOT NULL DEFAULT 0,
@@ -70,6 +66,10 @@ CREATE TABLE ma_session (
     CONSTRAINT ck_ma_session_plan CHECK (plan_enabled = FALSE OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1)),
     public_child_agents_version INT NOT NULL DEFAULT 0,
     CONSTRAINT ck_ma_public_child_agents CHECK (public_child_agents_version >= 0 AND public_child_agents_version <= 1),
+    harness_instance_id VARBINARY(144),
+    harness_owner_boot_id VARBINARY(144),
+    harness_placement_epoch BIGINT NOT NULL DEFAULT 0,
+    harness_placement_state VARCHAR(16) NOT NULL DEFAULT 'UNASSIGNED',
     CONSTRAINT ck_ma_harness_placement CHECK ((harness_placement_state = 'UNASSIGNED' AND harness_instance_id IS NULL AND harness_owner_boot_id IS NULL AND harness_placement_epoch = 0) OR (harness_instance_id IS NOT NULL AND harness_owner_boot_id IS NOT NULL AND harness_placement_epoch > 0 AND (CASE harness_placement_state WHEN 'ACTIVE' THEN 6 WHEN 'QUIESCING' THEN 9 WHEN 'RELEASED' THEN 8 ELSE -1 END = CHAR_LENGTH(harness_placement_state))))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
