@@ -1826,7 +1826,9 @@ class HostedPublicWorkspaceIT {
                 "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
         if (shellLifecycleV2) {
-            environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "hosted-workspace-shell/1");
+            environment.remove("QWEN_HOSTED_LIFECYCLE_V2_PROFILES");
+        } else {
+            environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "");
         }
         environment.put("TMPDIR", temporary.toString());
         environment.put("TMP", temporary.toString());
@@ -1865,7 +1867,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
                 assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
             } else if (shell) {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor");
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor", "glob");
             } else {
                 assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
             }

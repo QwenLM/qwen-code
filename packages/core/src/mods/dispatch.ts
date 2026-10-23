@@ -5,7 +5,7 @@
  */
 
 import { isDeepStrictEqual } from 'node:util';
-import { MOD_TIMEOUT_MS, MOD_MAX_BYTES } from './types.js';
+import { MOD_TIMEOUT_MS, MOD_MAX_BYTES, MOD_MAX_DEPTH } from './types.js';
 import {
   validateToolInput,
   validToolResult,
@@ -40,6 +40,30 @@ export interface ModOrigin {
 export const engineOrigin: ModOrigin = { plugin: 'engine', tier: 'core' };
 export const record = (value: unknown): value is ModInput =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
+
+// Counts nesting without walking a value, so one too deep for V8 or QuickJS
+// to traverse is refused before anything traverses it.
+export function jsonDepth(json: string): number {
+  let depth = 0;
+  let deepest = 0;
+  let quoted = false;
+  for (let i = 0; i < json.length; i++) {
+    const code = json.charCodeAt(i);
+    if (quoted) {
+      if (code === 0x5c) i++;
+      else if (code === 0x22) quoted = false;
+    } else if (code === 0x22) quoted = true;
+    else if (code === 0x7b || code === 0x5b)
+      deepest = Math.max(deepest, ++depth);
+    else if (code === 0x7d || code === 0x5d) depth--;
+  }
+  return deepest;
+}
+
+export function assertModDepth(json: string, label: string): void {
+  if (jsonDepth(json) > MOD_MAX_DEPTH)
+    throw new Error(`${label} nests deeper than ${MOD_MAX_DEPTH} levels.`);
+}
 
 export function validateInput(
   event: ModEvent,
