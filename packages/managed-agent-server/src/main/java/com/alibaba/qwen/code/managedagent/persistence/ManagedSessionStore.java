@@ -26,12 +26,14 @@ import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DeadlockLoserDataAccessException;
@@ -622,7 +624,7 @@ public class ManagedSessionStore {
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
                     STORAGE_VERSION,
                     request.writerId(),
@@ -637,7 +639,7 @@ public class ManagedSessionStore {
         }
         try {
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
                             .harnessDrainKey(tenantId),
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
@@ -1016,13 +1018,29 @@ public class ManagedSessionStore {
         var hostedReferences = new HashMap<String, JsonNode>();
         java.util.function.Function<String, StoredResource> reader = resourceId -> resourceCache.computeIfAbsent(resourceId,
                 id -> storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, id));
-        java.util.function.Function<String, StoredResource> closureReader = resourceId -> {
-            if (!declaredResources.contains(resourceId)) {
-                throw invalid("Hosted nested reference is absent from the transaction census.");
+        ManagedHostedRecoveryRecords.HistoricalResources closureReader = new ManagedHostedRecoveryRecords.HistoricalResources() {
+            @Override
+            public StoredResource apply(String resourceId) {
+                if (!declaredResources.contains(resourceId)) {
+                    throw invalid("Hosted nested reference is absent from the transaction census.");
+                }
+                return reader.apply(resourceId);
             }
-            return reader.apply(resourceId);
+
+            @Override
+            public void checkpointHistory(JsonNode ref) {
+                validateCheckpointHistory(ref, tenantId, request.workspaceId(), sessionId,
+                        head.journalRevision(), declaredResources, reader);
+            }
         };
         for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
+            if (ManagedCheckpointHistory.KIND.equals(resource.kind())) {
+                ObjectNode ref = CSI_JSON.valueToTree(resource);
+                ref.remove("bytesBase64");
+                closureReader.checkpointHistory(ref);
+            } else if ("managed-checkpoint".equals(resource.kind())) {
+                validatePagedCheckpoint(closureReader.apply(resource.resourceId()), tenantId, request.workspaceId(), sessionId, closureReader);
+            }
             if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {
                 ManagedHostedRecoveryRecords.validateResource(closureReader.apply(resource.resourceId()), tenantId,
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
@@ -1158,22 +1176,7 @@ public class ManagedSessionStore {
                 validated.recordDigest(), now.getTime());
         ActivationChange activation = activationChange(
                 applied.lastActivation());
-        // A payload wider than the columns blanks them instead of
-        // failing the commit: authorization then reads the journal
-        // directly, exactly as before the columns existed.
-        boolean fits = activation == null
-                || (activation.id() == null || activation.id().length()
-                        <= ManagedSessionStoreModels.MAX_ACTIVATION_ID_CHARS)
-                        && (activation.phase() == null
-                                || activation.phase().length()
-                                        <= ManagedSessionStoreModels.MAX_ACTIVATION_PHASE_CHARS);
-        // activation_head_revision stamps which journal revision the
-        // columns reflect, so a head written by a binary that does not
-        // maintain the columns is detected (stamp lags journal_revision)
-        // and rescanned instead of trusted. A commit that keeps the
-        // existing columns advances their stamp only when they were
-        // current at the previous revision — re-stamping a skewed set
-        // would certify it as fresh.
+        // Never certify a skewed activation projection as current.
         Long activationHeadRevision = head.activationHeadRevision();
         if (activation != null || (activationHeadRevision != null
                 && activationHeadRevision == head.journalRevision())) {
@@ -1201,13 +1204,13 @@ public class ManagedSessionStore {
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(),
                 activation == null ? head.activationId()
-                        : fits ? activation.id() : null,
+                        : activation.id(),
                 activation == null ? head.activationPhase()
-                        : fits ? activation.phase() : null,
+                        : activation.phase(),
                 activation == null ? head.activationEventEpoch()
-                        : fits ? activation.epoch() : null,
+                        : Long.valueOf(activation.epoch()),
                 activation == null ? head.activationExpiresAt()
-                        : fits ? activation.expiresAt() : null,
+                        : activation.expiresAt(),
                 activationHeadRevision, Math.max(head.storageVersion(), promotes ? 2 : 1), now.getTime(), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
@@ -2247,6 +2250,114 @@ public class ManagedSessionStore {
         return request;
     }
 
+    private void validatePagedCheckpoint(StoredResource stored, String tenant, String workspace, String session,
+            ManagedHostedRecoveryRecords.HistoricalResources resources) {
+        JsonNode body = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
+        if (body == null || !ManagedCheckpointHistory.paged(body)) {
+            return;
+        }
+        if (!ManagedCheckpointHistory.PROFILE.equals(body.path("storageProfile").asText())) {
+            throw invalid("Unsupported checkpoint storage profile.");
+        }
+        JsonNode history = body.path("history");
+        ManagedExtensionRecords.closed(history, Set.of("ref", "toolCount", "bindingCount"), "checkpoint history");
+        resources.checkpointHistory(history.path("ref"));
+        StoredResource page = resources.apply(history.path("ref").path("resourceId").asText());
+        JsonNode saved = ManagedCheckpointHistory.page(page.bytes());
+        if (!saved.path("sessionKey").equals(body.path("identity").path("sessionKey"))
+                || !saved.path("turnId").equals(body.path("identity").path("turnId"))
+                || !saved.path("promptId").equals(body.path("identity").path("promptId"))
+                || !saved.path("toolCount").equals(history.path("toolCount"))
+                || !saved.path("bindingCount").equals(history.path("bindingCount"))) {
+            throw invalid("Checkpoint history identity or coverage conflicts.");
+        }
+    }
+
+    private void validateCheckpointHistory(JsonNode ref, String tenant, String workspace, String session,
+            long previousRevision, Set<String> declared, java.util.function.Function<String, StoredResource> resources) {
+        try {
+            ManagedCheckpointHistory.pageRef(ref);
+            StoredResource stored = resources.apply(ref.path("resourceId").asText());
+            requireCheckpointResource(ref, stored);
+            JsonNode page = ManagedCheckpointHistory.page(stored.bytes());
+            JsonNode key = page.path("sessionKey");
+            if (!tenant.equals(key.path("tenantId").asText()) || !workspace.equals(key.path("workspaceId").asText())
+                    || !session.equals(key.path("sessionId").asText())) {
+                throw invalid("Checkpoint history belongs to another Session.");
+            }
+            Long origin = priorCheckpointResourceRevision(tenant, workspace, session, stored.resourceId(), previousRevision);
+            long ceiling = origin == null ? previousRevision : origin;
+            for (JsonNode nested : checkpointReferences(page)) {
+                StoredResource dependency = resources.apply(nested.path("resourceId").asText());
+                requireCheckpointResource(nested, dependency);
+                Long owned = priorCheckpointResourceRevision(tenant, workspace, session, dependency.resourceId(), ceiling);
+                if (owned == null && (origin != null || !declared.contains(dependency.resourceId()))) {
+                    throw invalid("Checkpoint history dependency has no committed owner.");
+                }
+            }
+            long tools = page.path("toolCount").longValue() - page.path("items").size();
+            long bindings = page.path("bindingCount").longValue() - page.path("bindings").size();
+            JsonNode previous = page.path("previous");
+            if (tools < 0 || bindings < 0) {
+                throw invalid("Checkpoint history count conflicts.");
+            }
+            if (previous.isNull()) {
+                if (tools != 0 || bindings != 0) {
+                    throw invalid("Checkpoint history predecessor is missing.");
+                }
+            } else {
+                JsonNode predecessor = ManagedCheckpointHistory.page(resources.apply(previous.path("resourceId").asText()).bytes());
+                if (!predecessor.path("sessionKey").equals(key)
+                        || !predecessor.path("turnId").equals(page.path("turnId"))
+                        || !predecessor.path("promptId").equals(page.path("promptId"))
+                        || predecessor.path("toolCount").longValue() != tools
+                        || predecessor.path("bindingCount").longValue() != bindings) {
+                    throw invalid("Checkpoint history predecessor conflicts.");
+                }
+            }
+        } catch (IllegalArgumentException | com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException error) {
+            throw invalid("Invalid checkpoint history page.");
+        }
+    }
+
+    private static void requireCheckpointResource(JsonNode ref, StoredResource stored) {
+        ManagedExtensionRecords.durableRef(ref, "checkpoint history dependency");
+        if (!stored.kind().equals(ref.path("kind").asText())
+                || stored.schemaVersion() != ref.path("schemaVersion").intValue()
+                || stored.byteLength() != ref.path("byteLength").longValue()
+                || !stored.digest().equals(ref.path("digest").asText())
+                || stored.bytes() == null || stored.bytes().length != stored.byteLength()
+                || !ToolPublicationContract.sha256(stored.bytes()).equals(stored.digest())) {
+            throw invalid("Checkpoint history resource metadata conflicts.");
+        }
+    }
+
+    private static List<JsonNode> checkpointReferences(JsonNode value) {
+        List<JsonNode> result = new ArrayList<>();
+        if (value.isObject() && value.has("resourceId")) {
+            result.add(value);
+        } else if (value.isContainerNode()) {
+            for (JsonNode child : value) {
+                result.addAll(checkpointReferences(child));
+            }
+        }
+        return result;
+    }
+
+    private Long priorCheckpointResourceRevision(String tenant, String workspace, String session,
+            String resourceId, long maximum) {
+        String scope = sessionScopeKey(tenant, session);
+        List<Long> origins = jdbc.query("SELECT x.owner_revision FROM ma_resource_ref x JOIN ma_session_journal_tx t"
+                        + " ON t.tenant_id = x.tenant_id AND t.workspace_id = x.workspace_id AND t.session_id = x.session_id"
+                        + " AND t.journal_revision = x.owner_revision WHERE x.resource_key = ? AND x.session_scope_key = ?"
+                        + " AND x.tenant_id = ? AND x.workspace_id = ? AND x.session_id = ? AND x.resource_id = ?"
+                        + " AND x.owner_kind = 'JOURNAL' AND x.owner_key = ? AND x.owner_revision = x.journal_revision"
+                        + " AND x.owner_revision <= ? ORDER BY x.owner_revision LIMIT 1",
+                (row, index) -> row.getLong(1), resourceKey(scope, resourceId), scope, tenant, workspace, session,
+                resourceId, scope, maximum);
+        return origins.isEmpty() ? null : origins.getFirst();
+    }
+
     private void commitResources(String scopeKey, String tenantId,
             String sessionId, CommitTransactionRequest request,
             long revision, Timestamp now,
@@ -2539,8 +2650,7 @@ public class ManagedSessionStore {
     /**
      * Converts the last activation.changed payload of a committed transaction, so the head row can
      * answer authorization reads without rescanning the journal. The payload was already parsed by
-     * the extension record pass of this commit. Text fields read with the same leniency as the
-     * authorization scans, so the two never disagree.
+     * the extension record pass of this commit.
      */
     private static ActivationChange activationChange(JsonNode payload) {
         if (payload == null) {

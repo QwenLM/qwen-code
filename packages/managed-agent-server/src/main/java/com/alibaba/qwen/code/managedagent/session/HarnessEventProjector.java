@@ -40,6 +40,22 @@ public class HarnessEventProjector {
                         "The Hosted Harness Turn reached its configured model round limit.";
                 case "hosted_turn_deadline_exceeded" ->
                         "The Hosted Harness Turn exceeded its deadline.";
+                case "model_payment_required" ->
+                        "Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.";
+                case "model_authentication_failed" ->
+                        "Model API authentication failed (HTTP 401). Check the configured provider credentials.";
+                case "model_access_denied" ->
+                        "Model API access denied (HTTP 403). Check the provider account and model permissions.";
+                case "model_request_timeout" ->
+                        "The model API request timed out. Try again later.";
+                case "model_rate_limited" ->
+                        "Model API rate limit exceeded (HTTP 429). Wait and try again later.";
+                case "model_request_rejected" ->
+                        "The model API rejected the request. Check the model configuration and input.";
+                case "model_service_unavailable" ->
+                        "The model API service is unavailable. Try again later.";
+                case "model_request_failed" ->
+                        "Model API request failed. Check the server logs for this session before retrying.";
                 default -> "The Hosted Harness Turn failed.";
             };
             return new ProjectedEvent("turn.failed", Map.of(

@@ -348,7 +348,7 @@ class ManagedSessionGuardConvoyIT {
      */
     @Test
     void heldTenantGuardsBoundPublicationLaneEntries() throws Exception {
-        var journal = PublicationJournalFixture.create(source, false);
+        var journal = PublicationJournalFixture.create(source);
         var jdbc = journal.jdbc;
         var manager = journal.manager;
         String tenant = "tenant-1";
@@ -484,7 +484,7 @@ class ManagedSessionGuardConvoyIT {
 
     @Test
     void heldSessionRowsBoundRetentionReads() throws Exception {
-        var journal = PublicationJournalFixture.create(source, false);
+        var journal = PublicationJournalFixture.create(source);
         var retention = new ToolPublicationRetentionStore(journal.jdbc, journal.manager);
         try (var lease = retention.read("tenant-1", "session-1")) {
             lease.check();
