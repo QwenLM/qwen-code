@@ -171,8 +171,8 @@ case "${step}" in
     }
     npm run prepare:package
     # Last check before the publish step: the tarball the registry will serve
-    # must carry the exec bit on every vendored ripgrep (#12668). The gate rides
-    # the workflow-pinned checkout, not the selected release ref, which may
+    # must carry the exec bit on every spawned vendored binary (#12668). The gate
+    # rides the workflow-pinned checkout, not the selected release ref, which may
     # predate it; `dist` still resolves against the release ref's package.
     node .release-workflow/scripts/check-release-tarball-exec-bits.mjs dist
     ;;
