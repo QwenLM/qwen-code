@@ -31,6 +31,10 @@ daemon 接纳 `/review` 提示词时，立即绑定 PR。
 
 - **只认显式命令。** 共享语法只读命令位置上的 `/review <N|#N|PR URL>`。
   assistant 散文与工具输出不能创建绑定。
+- **来源。** 只有本地用户键入的提示词会绑定。渠道转发的轮次按原始渠道标记跳过，
+  外部发送者不能把 PR 绑定写进本地会话。
+- **输入上限。** 语法最多扫描 16 KiB。惰性 URL 分支呈二次方回溯，而 live 钩子
+  在每个被接纳提示词的同步前缀上执行匹配；该上限同时覆盖回填扫描。
 - **仓库身份。** GitHub 号经 gh 页与 workspace 仓库 key 解析。fork 父仓库只有
   在确认后才接受。remote URL 是兜底。
 - **Aone。** Aone 号经 `mr view` 解析。代码绝不拼 `<origin>/pull/<N>` 链接。
@@ -56,9 +60,11 @@ daemon 接纳 `/review` 提示词时，立即绑定 PR。
 ## 验证
 
 - 回填测试覆盖：无 transcript 的实时绑定、归档与 URL 形态、仅扫描目标会话、
-  catalog 标记、文件目标拒绝、untrusted 闸门、满额淘汰、归档/删除生命周期竞争。
-- 提示路由测试覆盖：首个文本块的传递、后续文本块与 untrusted workspace 的
-  拒绝。
+  catalog 标记、文件目标拒绝、untrusted 闸门、超长提示词上限、满额淘汰（含
+  create 保护与目标已绑定时的重复审查）、conflict 分支、trusted wrapper 的
+  仅目标会话/非 review 场景、归档/删除/位置解析失败的生命周期竞争。
+- 提示路由测试覆盖：首个文本块的传递、后续文本块、untrusted workspace、渠道
+  提示词、binder 拒绝/挂起、coordinator 交接。
 - `packages/cli` 的 typecheck、ESLint、Prettier 通过。
 
 ## 验收标准

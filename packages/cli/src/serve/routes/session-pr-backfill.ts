@@ -162,21 +162,22 @@ interface BackfillCandidate {
 const REVIEW_COMMAND_PATTERN =
   /^\s*\/review(?:[ \t]+#?(\d{1,9})(?![\w./-])|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
 
-// Only the prompt the user typed counts: assistant prose, tool calls, and
-// tool results (read_file echoes of fixtures/docs) quote `/review <N>`
-// without requesting one, and the parts after the first carry @-imported
-// file content whose line-leading examples would forge bindings. The TUI
-// expands bundled skills BEFORE recording: the user record's first part is
-// the skill body with the typed command appended at its END, so the typed
-// `/review <N>` survives only in the `slash_command` system record's
-// `rawCommand` — read that when present, falling back to the user record's
-// first text part (the daemon-provided prompt path carries no payload).
+/**
+ * Longest prompt the grammar scans. The lazy URL alternative in
+ * `REVIEW_COMMAND_PATTERN` backtracks quadratically past this size, and the
+ * live hook runs the match on the synchronous prefix of every admitted
+ * prompt. 16 KiB matches `MID_TURN_MESSAGE_MAX_LENGTH` and leaves room above
+ * the 2048-char `SESSION_PR_URL_MAX_LENGTH` for flags.
+ */
+const REVIEW_COMMAND_MAX_LENGTH = 16 * 1024;
+
 // The URL form names the repo it reviewed; it is repo-gated once gh's page
 // key is known (see backfillWorkspaceSessionPrs) rather than here.
 function parseReviewCommand(prompt: string): {
   mention?: { number: number; bare: boolean };
   urlForm?: { number: number; url: string };
 } {
+  if (prompt.length > REVIEW_COMMAND_MAX_LENGTH) return {};
   const match = REVIEW_COMMAND_PATTERN.exec(prompt);
   if (!match) return {};
   const bareNumber = match[1];
@@ -208,6 +209,15 @@ function liveReviewTargets(prompt: string): {
   };
 }
 
+// Only the prompt the user typed counts: assistant prose, tool calls, and
+// tool results (read_file echoes of fixtures/docs) quote `/review <N>`
+// without requesting one, and the parts after the first carry @-imported
+// file content whose line-leading examples would forge bindings. The TUI
+// expands bundled skills BEFORE recording: the user record's first part is
+// the skill body with the typed command appended at its END, so the typed
+// `/review <N>` survives only in the `slash_command` system record's
+// `rawCommand` — read that when present, falling back to the user record's
+// first text part (the daemon-provided prompt path carries no payload).
 function collectReviewedPrNumbers(raw: string): {
   mentions: ReadonlyArray<{ number: number; bare: boolean }>;
   reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
@@ -367,16 +377,18 @@ export async function backfillWorkspaceSessionPrs(
       } catch {
         worktree = null;
       }
-      let transcriptRaw: string;
-      try {
-        transcriptRaw = await fs.readFile(
-          path.join(dir, `${sessionId}.jsonl`),
-          'utf8',
-        );
-      } catch {
-        transcriptRaw = '';
-      }
       const liveCandidate = live?.sessionId === sessionId;
+      let transcriptRaw = '';
+      if (!liveCandidate) {
+        try {
+          transcriptRaw = await fs.readFile(
+            path.join(dir, `${sessionId}.jsonl`),
+            'utf8',
+          );
+        } catch {
+          transcriptRaw = '';
+        }
+      }
       const reviewed =
         liveCandidate && live
           ? liveReviewTargets(live.rawCommand)
@@ -767,7 +779,6 @@ export async function backfillWorkspaceSessionPrs(
       // that moved mid-scan is re-bound by a later sweep from its new
       // transcript, and writing here would leave a stray sidecar.
       let commitPrPath = prPath;
-      let commitTranscriptPath = transcriptPath;
       if (liveCandidate) {
         let location: SessionArchiveState | 'conflict' | undefined = undefined;
         try {
@@ -784,28 +795,16 @@ export async function backfillWorkspaceSessionPrs(
             candidate.sessionId,
             location,
           );
-          commitTranscriptPath = path.join(
-            path.dirname(commitPrPath),
-            `${candidate.sessionId}.jsonl`,
-          );
         } else {
           if (location === 'conflict') return;
           // No transcript in either state. A session the bridge still owns is
           // a brand-new turn whose transcript has not been written yet; one
           // the bridge no longer knows was deleted and must not be
-          // resurrected. A partial bridge without the lookup keeps the
-          // pre-lane path.
-          const getSummary = (
-            runtime.bridge as {
-              getSessionSummary?: (sessionId: string) => unknown;
-            }
-          ).getSessionSummary;
-          if (typeof getSummary === 'function') {
-            try {
-              getSummary.call(runtime.bridge, candidate.sessionId);
-            } catch {
-              return;
-            }
+          // resurrected. Any throw means liveness cannot be proven; skip.
+          try {
+            runtime.bridge.getSessionSummary(candidate.sessionId);
+          } catch {
+            return;
           }
         }
       }
@@ -818,7 +817,7 @@ export async function backfillWorkspaceSessionPrs(
         // A live `/review` bind is exempt only after the re-check above
         // proved the session still exists (a bridge-owned new turn); a
         // deleted one returned already.
-        if (!liveCandidate && !existsSync(commitTranscriptPath)) {
+        if (!liveCandidate && !existsSync(transcriptPath)) {
           return null;
         }
         // Repair legacy fabricated URLs first (Aone only), so the repaired
@@ -926,8 +925,12 @@ export async function backfillWorkspaceSessionPrs(
           plan = plan.filter((_, index) => !evicted.has(index));
         }
         const planSet = new Set(plan);
-        result.alreadyBound += plan.filter((number) =>
-          freshNumbers.has(number),
+        // Occupants are not requests: a live bind must not report nine
+        // older reviews as "already bound". Only numbers this run planned
+        // for count, matching the sweep (where every plan number is one).
+        const requestedNumbers = new Set(numbers);
+        result.alreadyBound += plan.filter(
+          (number) => requestedNumbers.has(number) && freshNumbers.has(number),
         ).length;
         // A re-offered occupant this run ranks higher than its persisted
         // provenance (a `/review`-bound number the session now exists for
@@ -1103,10 +1106,10 @@ export async function bindSessionPrsFromReviewPrompt(
   sessionId: string,
   promptText: string,
   options: SessionPrBackfillOptions = {},
-): Promise<void> {
-  if (!runtime.trusted) return;
-  if (parseReviewCommand(promptText).mention === undefined) return;
-  await backfillWorkspaceSessionPrs(runtime, undefined, undefined, {
+): Promise<SessionPrBackfillWorkspaceResult | undefined> {
+  if (!runtime.trusted) return undefined;
+  if (parseReviewCommand(promptText).mention === undefined) return undefined;
+  return backfillWorkspaceSessionPrs(runtime, undefined, undefined, {
     ...options,
     liveReview: { sessionId, rawCommand: promptText },
   });

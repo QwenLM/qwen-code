@@ -20,7 +20,7 @@ import {
   readSessionPrs,
   upsertSessionPr,
   writeSessionPrs,
-  type SessionService,
+  SessionService,
 } from '@qwen-code/qwen-code-core';
 import { SessionArchivingError } from '../acp-session-bridge.js';
 import {
@@ -2595,6 +2595,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     });
 
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(runtime.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
     expect(
       await readSessionPrs(
         sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
@@ -2788,8 +2789,241 @@ describe('backfillWorkspaceSessionPrs', () => {
     );
 
     expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(runtime.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
     expect(await readSessionPrs(activePrPath)).toBeNull();
     expect(await readSessionPrs(archivedPrPath)).toBeNull();
+  });
+
+  it('keeps create bindings when a live review evicts at the cap', async () => {
+    // The cap may displace weaker review bindings, never a created PR. Put
+    // the create first (oldest) so a filter/rank regression evicts it first.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await fsp.mkdir(path.dirname(prPath), { recursive: true });
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          {
+            number: 100,
+            url: 'https://github.com/o/r/pull/100',
+            createdAt: '2026-07-01T00:00:00.000Z',
+            source: 'create',
+          },
+          ...Array.from({ length: SESSION_PR_LIST_LIMIT - 1 }, (_, index) => ({
+            number: index + 1,
+            url: `https://github.com/o/r/pull/${index + 1}`,
+            createdAt: '2026-08-01T00:00:00.000Z',
+            source: 'review' as const,
+          })),
+        ],
+      }),
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(11, 'fix/11')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(
+      runtime,
+      undefined,
+      undefined,
+      {
+        liveReview: { sessionId: SESSION_A, rawCommand: '/review 11' },
+      },
+    );
+
+    expect(result).toMatchObject({ bound: 1, overLimit: 1 });
+    expect(
+      (await readSessionPrs(prPath))?.map((entry) => entry.number),
+    ).toEqual([100, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
+  });
+
+  it('does not evict when the live review is already bound at the cap', async () => {
+    // A repeat review is a no-op even at the cap: no occupant moves, and the
+    // request itself is the only "already bound" count.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await seedPrSidecar(
+      SESSION_A,
+      Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, index) => index + 1),
+      'active',
+      'review',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(5, 'fix/5')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(
+      runtime,
+      undefined,
+      undefined,
+      {
+        liveReview: { sessionId: SESSION_A, rawCommand: '/review 5' },
+      },
+    );
+
+    expect(result).toMatchObject({
+      bound: 0,
+      written: 0,
+      overLimit: 0,
+      alreadyBound: 1,
+    });
+    const prs = await readSessionPrs(prPath);
+    expect(prs?.map((entry) => entry.number)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+    expect(
+      prs?.every((entry) => entry.createdAt === '2026-08-01T00:00:00.000Z'),
+    ).toBe(true);
+    expect(runtime.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the commit-time session location cannot be resolved', async () => {
+    // A live bind must not assume active when the location lookup fails.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const getLocation = vi.spyOn(
+      SessionService.prototype,
+      'getSessionLocation',
+    );
+    getLocation
+      .mockResolvedValueOnce('active')
+      .mockResolvedValueOnce('active')
+      .mockRejectedValueOnce(new Error('location unavailable'));
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    try {
+      const result = await backfillWorkspaceSessionPrs(
+        runtime,
+        undefined,
+        undefined,
+        {
+          liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+        },
+      );
+
+      expect(result).toMatchObject({ bound: 0, written: 0 });
+      expect(await readSessionPrs(prPath)).toBeNull();
+    } finally {
+      getLocation.mockRestore();
+    }
+  });
+
+  it(
+    'does not scan an oversized review prompt',
+    { timeout: 10_000 },
+    async () => {
+      // The grammar backtracks quadratically; the live hook must bound the
+      // input before it reaches the regex. The elapsed assertion is what
+      // makes removing the bound fail rather than merely run slowly.
+      const prompt = '/review ' + 'http://a'.repeat(25_000);
+      const started = Date.now();
+      await bindSessionPrsFromReviewPrompt(runtime, SESSION_A, prompt);
+      expect(Date.now() - started).toBeLessThan(1_000);
+
+      expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+      expect(
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        ),
+      ).toBeNull();
+    },
+  );
+
+  it('binds only the named session through the trusted wrapper', async () => {
+    // The wrapper must inject liveReview (target-only) and forward the lane.
+    await seedSession(SESSION_B);
+    await seedReviewedNumbers(SESSION_B, 66, 66);
+    const coordinator = new SessionArchiveCoordinator();
+    const laneSpy = vi.spyOn(coordinator, 'runSharedMany');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(66, 'fix/66'), pr(77, 'fix/77')],
+    });
+
+    await bindSessionPrsFromReviewPrompt(runtime, SESSION_A, '/review 77', {
+      archiveCoordinator: coordinator,
+    });
+
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toMatchObject([{ number: 77, source: 'review' }]);
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      ),
+    ).toBeNull();
+    expect(laneSpy).toHaveBeenCalledWith([SESSION_A], expect.any(Function));
+  });
+
+  it('does not run the pipeline for a non-review prompt with a worktree sidecar', async () => {
+    // Without the wrapper's parse gate this would sweep and bind pr-123.
+    await seedWorktreeSidecar(SESSION_C, 'pr-123', 'worktree-pr-123');
+
+    await bindSessionPrsFromReviewPrompt(runtime, SESSION_C, 'hello there');
+
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_C, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('fails closed when the session location is conflicted at commit time', async () => {
+    // A conflict must not fall through to the bridge probe and write into a
+    // directory the resolver refused to disambiguate.
+    const activePrPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const archivedPrPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'archived',
+    );
+    const getLocation = vi.spyOn(
+      SessionService.prototype,
+      'getSessionLocation',
+    );
+    getLocation
+      .mockResolvedValueOnce('active')
+      .mockResolvedValueOnce('active')
+      .mockResolvedValueOnce('conflict');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    try {
+      const result = await backfillWorkspaceSessionPrs(
+        runtime,
+        undefined,
+        undefined,
+        {
+          liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+        },
+      );
+
+      expect(result).toMatchObject({ bound: 0, written: 0 });
+      expect(await readSessionPrs(activePrPath)).toBeNull();
+      expect(await readSessionPrs(archivedPrPath)).toBeNull();
+    } finally {
+      getLocation.mockRestore();
+    }
   });
 
   it('ignores /review mentions outside user text records', async () => {

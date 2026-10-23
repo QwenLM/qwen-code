@@ -35,6 +35,13 @@ Bind the PR when the daemon admits a `/review` prompt.
 
 - **Explicit command only.** The shared grammar reads `/review <N|#N|PR URL>`
   at command position. Assistant prose and tool output cannot create a binding.
+- **Source.** Only the local user's typed prompt binds. A channel-relayed turn
+  is skipped on its raw channel marker, so an external sender cannot write a
+  PR binding into the local session.
+- **Bounded input.** The grammar scans at most 16 KiB. The lazy URL
+  alternative backtracks quadratically, and the live hook runs the match on
+  the synchronous prefix of every admitted prompt; the bound covers the sweep
+  too.
 - **Repository identity.** GitHub numbers resolve through the gh page and the
   workspace repository key. A fork parent is accepted only after confirmation.
   The remote URL is the fallback.
@@ -68,10 +75,13 @@ Bind the PR when the daemon admits a `/review` prompt.
 
 - The backfill tests cover a live binding without a transcript, the archive
   and URL forms, single-session scope, the catalog mark, file-target
-  rejection, the untrusted gate, cap eviction, and the archive/delete
-  lifecycle races.
-- The prompt-route tests cover the hand-off of the first text block and the
-  rejection of a later block and of an untrusted workspace.
+  rejection, the untrusted gate, the oversized-prompt bound, cap eviction
+  (including create protection and a repeat review at the cap), the conflict
+  branch, the trusted-wrapper target-only and non-review cases, and the
+  archive/delete/location-failure lifecycle races.
+- The prompt-route tests cover the hand-off of the first text block, the
+  rejection of a later block, the untrusted workspace, channel-relayed
+  prompts, binder rejection/hang, and the coordinator hand-off.
 - `packages/cli` typecheck, ESLint, and Prettier pass.
 
 ## Acceptance criteria
