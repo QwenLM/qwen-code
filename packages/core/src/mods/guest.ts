@@ -4,11 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MOD_MAX_DEPTH } from './types.js';
+
 // Executed only inside QuickJS. The factory's handles stay private to the host.
 export const MOD_GUEST_FACTORY = String.raw`
 ((bridge, status) => {
   const parse = JSON.parse.bind(JSON);
   const stringify = JSON.stringify.bind(JSON);
+  const Depths = Map;
+  // Stops before nesting deep enough to exhaust the host's native stack.
+  const encode = value => {
+    const depths = new Depths();
+    return stringify(value, function (key, item) {
+      if (item !== null && typeof item === 'object') {
+        const depth = (depths.get(this) ?? 0) + 1;
+        if (depth > ${MOD_MAX_DEPTH}) throw new Error('Mod value nests deeper than ${MOD_MAX_DEPTH} levels.');
+        depths.set(item, depth);
+      }
+      return item;
+    });
+  };
   const keys = Object.keys;
   const freeze = Object.freeze;
   const hasOwn = Object.hasOwn;
@@ -79,7 +94,7 @@ export const MOD_GUEST_FACTORY = String.raw`
       hook.caught = handler;
     }});
   };
-  const call = (id, frames, kind, value) => bridge(id, kind, stringify({ value, frames })).then(json => {
+  const call = (id, frames, kind, value) => bridge(id, kind, encode({ value, frames })).then(json => {
     const envelope = parse(json);
     return frozen(envelope.voidValue ? {value: undefined} : envelope.value);
   });
@@ -146,14 +161,14 @@ export const MOD_GUEST_FACTORY = String.raw`
         if (hook.matcher !== undefined && !matches(hook.matcher, input)) return invoke(index + 1, input, frames);
         const nested = [...frames, hook.id];
         const next = nextFor(run, async e => {
-          status(run.id, 'validate', stringify(e));
+          status(run.id, 'validate', encode(e));
           const result = await invoke(index + 1, frozen(e), nested);
           if (!result) throw new Error('Mod hook returned no result');
           return result;
         });
         return hook.handler(api(run.id, nested), frozen(input), next);
       };
-      return stringify(await invoke(0, run.input, []));
+      return encode(await invoke(0, run.input, []));
     },
     recover: async json => {
       const recovery = parse(json);
@@ -173,7 +188,7 @@ export const MOD_GUEST_FACTORY = String.raw`
         });
         try {
           const answer = await hook.caught(api(run.id, [hook.id]), input, next);
-          if (answer !== undefined || used) return stringify(answer);
+          if (answer !== undefined || used) return encode(answer);
         } catch (caught) {
           if (used) throw caught;
           error = caught;
