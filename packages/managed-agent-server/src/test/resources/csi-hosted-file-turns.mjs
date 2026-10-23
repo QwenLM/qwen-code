@@ -225,7 +225,10 @@ export async function runHostedFileTurn({
             prompt,
             new AbortController(),
           ),
-          /recovery|receipt|complete-output/i,
+          (error) => {
+            if (!interrupted) throw error;
+            return /recovery|receipt|complete-output/i.test(String(error));
+          },
         );
       } finally {
         session.sink.write = write;
