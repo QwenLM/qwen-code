@@ -174,7 +174,7 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
     void persistsPlanIndependentlyAndFreezesItWithTheTurnPolicy(String profile) throws Exception {
         when(harness.supportsPlanMode()).thenReturn(true);
         session = customSession(profile, "default");
@@ -326,8 +326,8 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2",
-            "hosted-workspace-files/3", "hosted-workspace-shell/3"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1",
+            "hosted-workspace-files/3"})
     void changesStoredDefinitionSessionsWithoutChangingTheirInitialIdentityOrCreationOptions(String profile) throws Exception {
         session = customSession(profile, "default");
         var initial = store.requireSession(tenant, session);
@@ -362,7 +362,7 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/3", "hosted-workspace-shell/3"})
+    @ValueSource(strings = {"hosted-workspace-files/3"})
     void snapshotsTheApprovalSelectionOnTurnsOfTheNewProfileVersions(String profile) throws Exception {
         session = customSession(profile, "default");
         var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "hello"));
@@ -374,8 +374,8 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"hosted-workspace-files/1,true", "hosted-workspace-shell/2,true",
-            "hosted-workspace-files/3,false", "hosted-workspace-shell/3,false"})
+    @CsvSource({"hosted-workspace-files/1,true", "hosted-workspace-shell/1,true",
+            "hosted-workspace-files/3,false"})
     void keepsPlanModeOnlyOnTheProfilesThatDeclareIt(String profile, boolean planMode) throws Exception {
         session = customSession(profile, "default");
         var stored = store.requireSession(tenant, session);
@@ -643,8 +643,7 @@ class ManagedApprovalChangeTest {
     private ManagedAgentStore store() {
         var properties = new ManagedAgentProperties();
         properties.setDefinitionToolProfiles(List.of("hosted-workspace-files/1", "hosted-workspace-shell/1",
-                "hosted-workspace-shell/2", "hosted-workspace-files/2", "hosted-workspace-files/3",
-                "hosted-workspace-shell/3", "hosted-workspace-read/1"));
+                "hosted-workspace-files/2", "hosted-workspace-files/3", "hosted-workspace-read/1"));
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode("default");

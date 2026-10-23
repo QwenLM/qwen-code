@@ -56,7 +56,7 @@ import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
   HOSTED_WORKSPACE_FILE_TOOLS,
-  HOSTED_WORKSPACE_SHELL_TOOLS_V3,
+  HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_INPUT_PREVIEW_TOOLS,
   HOSTED_MEMBER_PLAN_TOOL,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
@@ -1543,7 +1543,7 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
-it('offers glob under the search profiles and the read Workspace profile', async () => {
+it('offers glob under the unified Shell, file-search and read profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
     (
@@ -1566,17 +1566,17 @@ it('offers glob under the search profiles and the read Workspace profile', async
   const shellTools = [...file, 'run_shell_command', 'monitor'];
   await expect(advertised()).resolves.toEqual(file);
   await expect(advertised('hosted-workspace-files/1')).resolves.toEqual(file);
-  await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual(
-    shellTools,
-  );
+  await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual([
+    ...shellTools,
+    'glob',
+  ]);
   await expect(advertised('hosted-workspace-files/2')).resolves.toEqual([
     ...file,
     'glob',
   ]);
-  await expect(advertised('hosted-workspace-shell/2', true)).resolves.toEqual([
-    ...shellTools,
-    'glob',
-  ]);
+  await expect(
+    advertised('hosted-workspace-team-lead/1', true),
+  ).resolves.toEqual(shellTools);
   // #13753 I3: the read profile declares its two read tools, whatever
   // lane the Session has.
   await expect(advertised('hosted-workspace-read/1')).resolves.toEqual([
@@ -1667,96 +1667,105 @@ it.each([
 // #13905 (item 41): the approval wiring keys on the Session's own profile,
 // not the call's name — a read-profile glob asks nothing under `default`,
 // while an MCP-declared glob on files/1 still asks.
-it('pre-approves glob only where the profile declares it', async () => {
-  const globCall = {
-    ...calls[0],
-    callId: 'call-glob',
-    name: 'glob',
-    args: { pattern: '**/*.ts' },
-  };
-  const globParts: Part[] = [
-    {
-      functionCall: {
-        id: globCall.callId,
-        name: globCall.name,
-        args: globCall.args,
-      },
-    },
-  ];
-  const read = new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    commit,
-    messageFitsInline,
-    undefined,
-    undefined,
-    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
-    { profile: 'hosted-workspace-read/1' },
-  );
-  const responses = await read.execute(
-    [globCall],
-    globParts,
-    'model',
-    new AbortController().signal,
-  );
-  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
-  expect(actionIds()).toEqual([]);
-  expect(
-    broker.execute.mock.calls.map(
-      (args: unknown[]) => JSON.parse(args[1] as string).toolName,
-    ),
-  ).toEqual(['glob']);
-  await read.consumeResults();
-  await read.finish();
-
-  const mcp = {
-    broker,
-    ensureReady: async () => undefined,
-    refresh: async () => undefined,
-    tools: () => [{ name: 'glob', parametersJsonSchema: { type: 'object' } }],
-    toolInput: () => ({ toolName: 'managed_mcp_call', input: {} }),
-  };
-  turn = new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    commit,
-    messageFitsInline,
-    undefined,
-    undefined,
-    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
-    {
-      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
-    },
-  );
-  const mcpGlobCall = { ...globCall, callId: 'call-glob-mcp' };
-  const running = turn.execute(
-    [mcpGlobCall],
-    [
+it.each([
+  ['hosted-workspace-read/1', 'default'],
+  ['hosted-workspace-shell/1', 'default'],
+  ['hosted-workspace-shell/1', 'auto-edit'],
+] as const)(
+  'pre-approves native glob on %s in %s mode',
+  async (profile, mode) => {
+    const globCall = {
+      ...calls[0],
+      callId: 'call-glob',
+      name: 'glob',
+      args: { pattern: '**/*.ts' },
+    };
+    const globParts: Part[] = [
       {
         functionCall: {
-          id: mcpGlobCall.callId,
-          name: mcpGlobCall.name,
-          args: mcpGlobCall.args,
+          id: globCall.callId,
+          name: globCall.name,
+          args: globCall.args,
         },
       },
-    ],
-    'model',
-    new AbortController().signal,
-  );
-  // The files/1 Session must ask before dispatching even this name.
-  const requestId = await requested();
-  expect(actionIds()).toEqual([requestId]);
-  expect(broker.execute).toHaveBeenCalledOnce();
-  await resolveHostedAction(session, waiters, requestId, answer('allow'));
-  await running;
-  expect(broker.execute).toHaveBeenCalledTimes(2);
-  await turn.consumeResults();
-  await turn.finish();
-});
+    ];
+    const native = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      profile === 'hosted-workspace-shell/1'
+        ? { resources: session.resources, assertWritable: async () => {} }
+        : undefined,
+      undefined,
+      { settings: { mode, timeoutMs: 60_000 }, waiters },
+      { profile },
+    );
+    const responses = await native.execute(
+      [globCall],
+      globParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
+    expect(actionIds()).toEqual([]);
+    expect(
+      broker.execute.mock.calls.map(
+        (args: unknown[]) => JSON.parse(args[1] as string).toolName,
+      ),
+    ).toEqual(['glob']);
+    await native.consumeResults();
+    await native.finish();
+
+    const mcp = {
+      broker,
+      ensureReady: async () => undefined,
+      refresh: async () => undefined,
+      tools: () => [{ name: 'glob', parametersJsonSchema: { type: 'object' } }],
+      toolInput: () => ({ toolName: 'managed_mcp_call', input: {} }),
+    };
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+      {
+        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
+    );
+    const mcpGlobCall = { ...globCall, callId: 'call-glob-mcp' };
+    const running = turn.execute(
+      [mcpGlobCall],
+      [
+        {
+          functionCall: {
+            id: mcpGlobCall.callId,
+            name: mcpGlobCall.name,
+            args: mcpGlobCall.args,
+          },
+        },
+      ],
+      'model',
+      new AbortController().signal,
+    );
+    // The files/1 Session must ask before dispatching even this name.
+    const requestId = await requested();
+    expect(actionIds()).toEqual([requestId]);
+    expect(broker.execute).toHaveBeenCalledOnce();
+    await resolveHostedAction(session, waiters, requestId, answer('allow'));
+    await running;
+    expect(broker.execute).toHaveBeenCalledTimes(2);
+    await turn.consumeResults();
+    await turn.finish();
+  },
+);
 
 function createSearchTurn() {
   return new HostedWorkspaceToolTurn(
@@ -1773,7 +1782,7 @@ function createSearchTurn() {
   );
 }
 
-it('refuses a glob call a /1 profile never advertised', async () => {
+it('refuses a glob call the files/1 profile never advertised', async () => {
   const call = {
     ...calls[0],
     name: 'glob',
@@ -1810,57 +1819,54 @@ function createV3Turn(profile = 'hosted-workspace-files/3') {
   );
 }
 
-it.each([
-  ['hosted-workspace-files/3', false],
-  ['hosted-workspace-shell/3', true],
-])('declares todo_write on %s', async (profile, shell) => {
-  turn = new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    commit,
-    messageFitsInline,
-    shell
-      ? { resources: session.resources, assertWritable: async () => {} }
-      : undefined,
-    undefined,
-    undefined,
-    { profile },
-  );
-  const declarations = await turn.declarations(new AbortController().signal);
-  const names = declarations.map((tool) => tool.name);
-  expect(names).toContain('todo_write');
-  expect(names).toContain('glob');
-  // The fetch half is held for a recorded maintainer decision.
-  expect(names).not.toContain('web_fetch');
-  if (!shell) expect(names).not.toContain('run_shell_command');
-});
+it.each([['hosted-workspace-files/3', false]])(
+  'declares todo_write on %s',
+  async (profile, shell) => {
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      shell
+        ? { resources: session.resources, assertWritable: async () => {} }
+        : undefined,
+      undefined,
+      undefined,
+      { profile },
+    );
+    const declarations = await turn.declarations(new AbortController().signal);
+    const names = declarations.map((tool) => tool.name);
+    expect(names).toContain('todo_write');
+    expect(names).toContain('glob');
+    // The fetch half is held for a recorded maintainer decision.
+    expect(names).not.toContain('web_fetch');
+    if (!shell) expect(names).not.toContain('run_shell_command');
+  },
+);
 
-it.each([
-  'hosted-workspace-files/1',
-  'hosted-workspace-files/2',
-  'hosted-workspace-shell/2',
-])('never offers todo_write on %s', async (profile) => {
-  turn = new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    commit,
-    messageFitsInline,
-    profile === 'hosted-workspace-shell/2'
-      ? { resources: session.resources, assertWritable: async () => {} }
-      : undefined,
-    undefined,
-    undefined,
-    { profile },
-  );
-  const names = (await turn.declarations(new AbortController().signal)).map(
-    (tool) => tool.name,
-  );
-  expect(names).not.toContain('todo_write');
-});
+it.each(['hosted-workspace-files/1', 'hosted-workspace-files/2'])(
+  'never offers todo_write on %s',
+  async (profile) => {
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile },
+    );
+    const names = (await turn.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    );
+    expect(names).not.toContain('todo_write');
+  },
+);
 
 it('refuses todo_write on a /2 profile before the Broker', async () => {
   turn = createSearchTurn();
@@ -4811,7 +4817,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
     'team_plan_approval',
   ]);
   const declared = [
-    ...HOSTED_WORKSPACE_SHELL_TOOLS_V3.map((tool) => tool.name),
+    ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
     HOSTED_AGENT_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_PARENT_TOOL.name,

@@ -6,9 +6,8 @@ public final class WorkspaceToolProfiles {
     public static final String FILES = "hosted-workspace-files/1";
     public static final String MCP = "hosted-workspace-mcp/1";
     public static final String SHELL = "hosted-workspace-shell/1";
-    /** #15076: the `/3` profiles add `todo_write`; enabling one is a rollout decision. */
+    /** #15076: `files/3` adds `todo_write`; enabling it is a rollout decision. */
     public static final String FILES_V3 = "hosted-workspace-files/3";
-    public static final String SHELL_V3 = "hosted-workspace-shell/3";
     public static final String INTERNAL_TEAM_LEAD = "hosted-workspace-team-lead/1";
     /**
      * The profile of a child bound to a snapshot child Workspace (#13753 I3):
@@ -20,16 +19,7 @@ public final class WorkspaceToolProfiles {
     }
 
     public static boolean isPublicShell(String profile) {
-        return SHELL.equals(profile) || "hosted-workspace-shell/2".equals(profile)
-                || SHELL_V3.equals(profile);
-    }
-
-    /**
-     * #15076: {@link #isPublicShell} also admits `/3`, but Plan mode stays unavailable there, so the
-     * Plan gates name their profiles instead of reusing the shell predicate.
-     */
-    public static boolean isPlanModeProfile(String profile) {
-        return FILES.equals(profile) || SHELL.equals(profile) || "hosted-workspace-shell/2".equals(profile);
+        return SHELL.equals(profile);
     }
 
     public static boolean isShellOrMcp(String profile) {

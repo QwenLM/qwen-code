@@ -42,15 +42,20 @@ never offered would become callable on its next load.
 
 ## Proposed change
 
-Add `todo_write` through two new profiles:
+Add `todo_write` through one new profile:
 
 - `hosted-workspace-files/3` — `read_file`, `write_file`, `edit`, `glob`,
   `todo_write`
-- `hosted-workspace-shell/3` — the same five plus `run_shell_command` and
-  `monitor`
 
-`/3` borrows its tool array from the `/2` declarations and appends one new
-declaration, so the existing declarations stay byte-identical.
+`files/3` borrows its tool array from the `files/2` declarations and appends
+one new declaration, so the existing declarations stay byte-identical.
+
+There is no `hosted-workspace-shell/3`. `#15330`, merged before this change
+landed, unified Shell under `hosted-workspace-shell/1`, removed `/2`, and made
+`AgentDefinitionCompiler` refuse every other `hosted-workspace-shell/…`
+identifier even when the deployment allow-lists it. A second Shell profile is
+therefore unreachable, so the Shell half is dropped rather than carried as
+dead code.
 
 `hosted-workspace-team-lead/1` and `hosted-workspace-read/1` do not gain the
 tool. A team lead is a Session the control plane creates internally, and the
@@ -128,16 +133,15 @@ read profile belongs to a snapshot child that must not write.
   turn. This needs the Harness to pass a stable hosted Session id to the
   Worker, and a decision on where that list is stored across Runtime
   instances.
-- **Java profile predicates for `/3`.** Delivered with this change, because a
-  TypeScript-only `/3` would leave the control plane disagreeing with the
-  Harness. `isPublicShell` covers `/3` (so child-agent suppression, byte
-  capture, shell approval and the `workspaceShellEnabled` kill switch all
-  apply), `supportsApprovalSelection` admits `files/3` as well as the shell
-  profiles, the `ma_turn` insert and the turn-snapshot reader name both `/3`
-  profiles, and `isPlanModeProfile` keeps Plan mode off there so `/3` matches
-  the Harness refusal rather than advertising a toggle it rejects.
-  `lifecycleProtocol` still returns 0 for `/3`, which is what it already
-  returns for `/2`; neither version issues Workspace lifecycle calls.
+- **Java profile predicates for `files/3`.** Delivered with this change,
+  because a TypeScript-only profile would leave the control plane disagreeing
+  with the Harness. `supportsApprovalSelection` admits `files/3`, and the
+  `ma_turn` insert and the turn-snapshot reader name it. `isPublicShell` stays
+  `/1`-only per `#15330`, and the Plan gates keep their existing
+  `FILES || isPublicShell` form, which already excludes `files/3`, so Plan mode
+  stays unavailable there without a new predicate. `lifecycleProtocol` returns
+  0 for `files/3`, as it does for `files/2`; neither version issues Workspace
+  lifecycle calls.
 - **Projecting the task list to Web Shell or another client** as a durable
   Session record.
 - **Enabling `/3` in the production connector.** Which deployment pins `/3`
@@ -168,8 +172,8 @@ admits a payload for any tool name the Worker knows, and
 ## Acceptance criteria
 
 1. A `hosted-workspace-files/3` Session declares `todo_write` next to the four
-   file tools; a `hosted-workspace-shell/3` Session declares it next to the
-   shell tools. Neither declares `web_fetch`.
+   file tools, and does not declare `web_fetch`. No Shell profile declares
+   `todo_write`.
 2. A `/1` or `/2` Session still refuses `todo_write` with the existing
    `Hosted Workspace profile refused a tool call.` error and spends no Runtime
    work.

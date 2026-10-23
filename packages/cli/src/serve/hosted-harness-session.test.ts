@@ -1475,9 +1475,7 @@ describe('Hosted Harness no-tool session', () => {
       { toolProfile: 'hosted-workspace-files/1', custom: false },
       { toolProfile: 'hosted-workspace-files/1', custom: true },
       { toolProfile: 'hosted-workspace-shell/1', custom: true },
-      { toolProfile: 'hosted-workspace-shell/2', custom: true },
       { toolProfile: 'hosted-workspace-files/3', custom: true },
-      { toolProfile: 'hosted-workspace-shell/3', custom: true },
     ].flatMap((profile) =>
       [undefined, { mode: 'yolo', revision: 1 }].map((approvalSelection) => ({
         ...profile,
@@ -15978,6 +15976,21 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  it('rejects the removed Shell profile on creation and load', async () => {
+    const server = await app(true);
+    for (const route of ['/session', `/session/${SESSION_ID}/load`]) {
+      const response = await headers(supertest(server).post(route)).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/2',
+      });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('hosted_tool_profile_unavailable');
+    }
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
   it('requires the saved explicit Shell profile and advertises it only with a Broker', async () => {
     const body = {
       sessionId: SESSION_ID,
@@ -16035,6 +16048,7 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'run_shell_command',
       'monitor',
+      'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
       'agent',
@@ -16100,6 +16114,7 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'run_shell_command',
       'monitor',
+      'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
       'agent',
@@ -16567,7 +16582,7 @@ describe('Hosted Harness no-tool session', () => {
           'read_file',
           'write_file',
           'edit',
-          ...(profile.includes('shell') ? ['run_shell_command'] : []),
+          ...(profile.includes('shell') ? ['run_shell_command', 'glob'] : []),
         ]);
       };
       const created = await headers(supertest(server).post('/session'))
@@ -23153,8 +23168,6 @@ describe('Hosted Harness tool approvals', () => {
     ['hosted-workspace-files/2', false],
     ['hosted-workspace-files/3', true],
     ['hosted-workspace-shell/1', true],
-    ['hosted-workspace-shell/2', true],
-    ['hosted-workspace-shell/3', true],
     ['hosted-workspace-read/1', false],
   ] as const)(
     'queries live policy only for eligible profile %s',

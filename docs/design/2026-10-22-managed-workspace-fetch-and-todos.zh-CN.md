@@ -39,14 +39,17 @@ profile 名称随 Session 定义持久化，加载时改用其他 profile 会以
 
 ## 变更方案
 
-通过两个新 profile 加入 `todo_write`：
+通过一个新 profile 加入 `todo_write`：
 
 - `hosted-workspace-files/3` —— `read_file`、`write_file`、`edit`、`glob`、
   `todo_write`
-- `hosted-workspace-shell/3` —— 同上五个，再加 `run_shell_command` 与
-  `monitor`
 
-`/3` 复用 `/2` 的声明数组并追加一个新声明，因此既有声明保持逐字节一致。
+`files/3` 复用 `files/2` 的声明数组并追加一个新声明，因此既有声明保持逐字节一致。
+
+不存在 `hosted-workspace-shell/3`。先于本改动合并的 `#15330` 把 Shell 统一到
+`hosted-workspace-shell/1`、移除了 `/2`，并让 `AgentDefinitionCompiler` 拒绝
+其他 `hosted-workspace-shell/…` 标识——即使部署侧仍允许列表包含它。第二个
+Shell profile 因此不可达，所以这一半直接移除，而不是留作死代码。
 
 `hosted-workspace-team-lead/1` 与 `hosted-workspace-read/1` 不获得该工具。
 team lead 是控制面内部创建的会话，read profile 属于不得写入的快照子会话。
@@ -100,13 +103,13 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
   决定）。有了它才能重新提出抓取部分；它今天不是配置开关。
 - **任务清单的稳定会话身份**，让计划跨轮存活。需要 Harness 向 Worker 传递稳定的
   Hosted Session id，并决定跨 Runtime 实例时清单存在哪里。
-- **`/3` 的 Java profile 判定。** 已随本次改动交付：只改 TypeScript 会让控制面
-  与 Harness 判断不一致。`isPublicShell` 覆盖 `/3`（因此子代理抑制、字节采集、
-  shell 审批与 `workspaceShellEnabled` 杀开关都适用），`supportsApprovalSelection`
-  接纳 `files/3` 与 shell 两版，`ma_turn` 插入与轮次快照读取都点名两个 `/3`
-  profile，`isPlanModeProfile` 则在 `/3` 上保持 Plan mode 关闭，使 `/3` 与
-  Harness 的拒绝一致，而不是对外宣称一个它拒绝的开关。`lifecycleProtocol` 对
-  `/3` 仍返回 0，与它对 `/2` 的返回值相同；两个版本都不发起 Workspace 生命周期调用。
+- **`files/3` 的 Java profile 判定。** 已随本次改动交付：只改 TypeScript 会让
+  控制面与 Harness 判断不一致。`supportsApprovalSelection` 接纳 `files/3`，
+  `ma_turn` 插入与轮次快照读取都点名它。按 `#15330`，`isPublicShell` 保持只认
+  `/1`，Plan 判定沿用既有的 `FILES || isPublicShell` 形式——它本就把 `files/3`
+  排除在外，因此 Plan mode 在 `files/3` 上仍不可用，不需要新判定。
+  `lifecycleProtocol` 对 `files/3` 返回 0，与它对 `files/2` 的返回值相同；
+  两者都不发起 Workspace 生命周期调用。
 - **把任务清单作为持久 Session 记录投影到 Web Shell 或其他客户端。**
 - **在生产 connector 中启用 `/3`。** 哪个部署固定 `/3` 属于上线决策，与 `/2`
   相同。它要求先升级所有 Worker 并排空旧实例，正如 `/2` 的 ledger 条目所记录：
@@ -132,9 +135,8 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
 
 ## 验收标准
 
-1. `hosted-workspace-files/3` 会话在四个文件工具旁声明 `todo_write`；
-   `hosted-workspace-shell/3` 会话在 shell 工具旁声明它。两者都不声明
-   `web_fetch`。
+1. `hosted-workspace-files/3` 会话在四个文件工具旁声明 `todo_write`，且不声明
+   `web_fetch`；任何 Shell profile 都不声明 `todo_write`。
 2. `/1` 或 `/2` 会话仍以既有的 `Hosted Workspace profile refused a tool call.`
    错误拒绝 `todo_write`，且不消耗 Runtime 工作。
 3. 畸形的 `todo_write` 参数得到模型可纠正的拒绝，作为工具结果提交，不获取、

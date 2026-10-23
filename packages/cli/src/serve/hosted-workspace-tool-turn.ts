@@ -35,9 +35,7 @@ import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
-  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
-  HOSTED_WORKSPACE_SHELL_PROFILE_V3,
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
@@ -239,7 +237,6 @@ export {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
-  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
@@ -666,17 +663,8 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
-export const HOSTED_WORKSPACE_FILE_TOOLS_V2: FunctionDeclaration[] = [
-  ...HOSTED_WORKSPACE_FILE_TOOLS,
-  HOSTED_GLOB_TOOL,
-];
-export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
-  ...HOSTED_WORKSPACE_SHELL_TOOLS,
-  HOSTED_GLOB_TOOL,
-];
-
-// #15076: `todo_write`, declared only on the `/3` profiles. The Worker keeps
-// the list, which writes no Workspace file. The `web_fetch` half is held: a
+// #15076: `todo_write`, declared only on `files/3`. The Worker keeps the
+// list, which writes no Workspace file. The `web_fetch` half is held: a
 // maintainer ruling on the issue defers it, and a files-profile Session has no
 // shell, so a fetch there would open a new outbound path rather than reuse one.
 const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
@@ -721,15 +709,6 @@ const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
-
-export const HOSTED_WORKSPACE_FILE_TOOLS_V3: FunctionDeclaration[] = [
-  ...HOSTED_WORKSPACE_FILE_TOOLS_V2,
-  HOSTED_TODO_WRITE_TOOL,
-];
-export const HOSTED_WORKSPACE_SHELL_TOOLS_V3: FunctionDeclaration[] = [
-  ...HOSTED_WORKSPACE_SHELL_TOOLS_V2,
-  HOSTED_TODO_WRITE_TOOL,
-];
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
 // call it does not declare. A missing read_file stops the module loading:
@@ -1956,11 +1935,9 @@ export class HostedWorkspaceToolTurn {
         this.mcp ||
         this.memberPlanMode ||
         this.childDepth !== 0 ||
-        ![
-          'hosted-workspace-files/1',
-          'hosted-workspace-shell/1',
-          'hosted-workspace-shell/2',
-        ].includes(this.profile ?? ''))
+        !['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
+          this.profile ?? '',
+        ))
     )
       throw new Error('Public Plan mode is unavailable for this Session.');
     this.publication =
@@ -1999,10 +1976,7 @@ export class HostedWorkspaceToolTurn {
    * the turn refuses the name there.
    */
   private declaresTodoTool(): boolean {
-    return (
-      this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
-      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
-    );
+    return this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3;
   }
 
   /**
@@ -2060,18 +2034,13 @@ export class HostedWorkspaceToolTurn {
     // profile keeps the exact array it has always declared.
     const todoTool = this.declaresTodoTool();
     this.advertised = [
-      ...(this.publication || this.shell
-        ? search
-          ? todoTool
-            ? HOSTED_WORKSPACE_SHELL_TOOLS_V3
-            : HOSTED_WORKSPACE_SHELL_TOOLS_V2
-          : HOSTED_WORKSPACE_SHELL_TOOLS
-        : search
-          ? todoTool
-            ? HOSTED_WORKSPACE_FILE_TOOLS_V3
-            : HOSTED_WORKSPACE_FILE_TOOLS_V2
-          : HOSTED_WORKSPACE_FILE_TOOLS
-      )
+      ...[
+        ...(this.publication || this.shell
+          ? HOSTED_WORKSPACE_SHELL_TOOLS
+          : HOSTED_WORKSPACE_FILE_TOOLS),
+        ...(search ? [HOSTED_GLOB_TOOL] : []),
+        ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
+      ]
         .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
         .map((tool) => {
           if (this.foregroundOnly && tool.name === 'run_shell_command') {
