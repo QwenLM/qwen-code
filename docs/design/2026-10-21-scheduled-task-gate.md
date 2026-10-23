@@ -490,6 +490,13 @@ Rejected:
   there can join the next line to the allowed command. That is how it
   treats `Monitor` and shell commands today, not something the gate adds;
   the read-only check that applies without a rule is not fooled by it.
+- A delivered gate output is one-shot data: the probe's cursor has moved
+  past it. The session still treats the fire like any other, so where it
+  drops or replaces a fire the output goes with it: a `per_run` task with
+  model or group routing drops a fire whose fresh session cannot be created
+  (it never runs in the task session against its routing), and behind the
+  experimental todo stop guard a deferred fire is replaced by the same
+  task's next one. The run record still says the gate delivered.
 - An older binary reading a gated task file: fail-closed through the fuse,
   with a confusing but safe message, from v0.19.9 on; v0.19.8 and older fire
   it unconditionally (see the downgrade fuse above).
