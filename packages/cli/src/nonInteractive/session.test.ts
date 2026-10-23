@@ -573,6 +573,31 @@ describe('runNonInteractiveStreamJson', () => {
     ]);
   });
 
+  it('reports one error result when direct-mode config initialization fails', async () => {
+    // The first user message is enqueued before config initialization is
+    // awaited, so a rejected initialize() reaches the queued message and
+    // surfaces as a terminal result frame instead of leaving an SDK consumer
+    // waiting on a frame that is never written.
+    config = createConfig({
+      initialize: vi.fn().mockRejectedValue(new Error('bad credentials')),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('Only message');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: true,
+        errorMessage: 'bad credentials',
+      }),
+    );
+  });
+
   it('rejects continue_last_turn when the Gemini client is not initialized', async () => {
     const { continueResults } = installContinueDispatch();
     config = createConfig({
