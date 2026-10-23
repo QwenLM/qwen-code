@@ -5752,7 +5752,8 @@ export class Config {
       `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
       `${estimatedTokens.toLocaleString()} tokens, more than ${bound}. ` +
       `Of those, there are ${breakdown}. Consider trimming context files or ` +
-      `pruning stale memories, or moving details into on-demand files.`
+      (catalogTokens > 0 ? 'pruning stale memories, or ' : '') +
+      `moving details into on-demand files.`
     );
   }
 

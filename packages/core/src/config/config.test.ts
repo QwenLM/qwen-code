@@ -8630,6 +8630,53 @@ describe('Server Config (config.ts)', () => {
     expect(warning).not.toContain('auto-memory catalog');
   });
 
+  it.each([
+    ['context files only', {}],
+    ['bare mode', { bareMode: true }],
+    ['safe mode', { safeMode: true }],
+  ])(
+    'does not suggest pruning memories for %s without a catalog',
+    (_, mode) => {
+      const config = makeConfig({
+        userMemory: 'a'.repeat(4_000),
+        ...smallWindow(),
+        ...mode,
+      });
+
+      const warning = config
+        .getWarnings()
+        .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+
+      expect(config.getAutoMemoryContext()).toBe('');
+      expect(warning).toContain(
+        'Consider trimming context files or moving details into on-demand files.',
+      );
+      expect(warning).not.toContain('pruning stale memories');
+    },
+  );
+
+  it('does not suggest pruning memories when structured recall omits the catalog', () => {
+    const config = makeConfig({
+      userMemory: 'a'.repeat(4_000),
+      ...smallWindow(),
+    });
+    Object.assign(config, {
+      memoryRecallMode: 'structured',
+      autoMemoryPrompt: 'b'.repeat(400),
+      autoMemoryContext: 'c'.repeat(20_000),
+    });
+
+    const warning = config
+      .getWarnings()
+      .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+
+    expect(config.getAutoMemoryContext()).toBe('');
+    expect(warning).toContain('uses about 1,100 tokens');
+    expect(warning).toContain('100 tokens of auto-memory policy');
+    expect(warning).not.toContain('auto-memory catalog');
+    expect(warning).not.toContain('pruning stale memories');
+  });
+
   // #14976: the memory catalog drove the breach while the advice pointed at
   // QWEN.md, so the warning now names each contributor.
   it('names the context-file, auto-memory policy, and catalog split in the warning', () => {
