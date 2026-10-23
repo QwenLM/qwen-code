@@ -12,6 +12,8 @@ Issue：https://github.com/QwenLM/qwen-code/issues/15247
 
 在 Spring 服务中，本增量只完成 worker 的分配、身份认证和恢复，尚无工具调用方。未绑定 Workspace 的 Session 没有 Hosted 工具 profile，Hosted Harness 不向模型声明任何工具；但每个被接纳的 Turn 仍会预热该 Session 的 Runtime。因此每个这样的 Session 都会占用一个收不到任何工具调用的远程 worker，直到 provider 自身的 TTL 结束它。远程工具执行依赖下文的 Workspace 扩展；不要为了工具调用在生产环境启用 `external-scratch`。
 
+`RuntimeBrokerService` 的 Runtime Session 活性属于进程内状态，与持久化的 Session 身份分开。Broker 重建后，`warm()` 可以接管原 worker binding 并验证身份，但不会恢复进程内 Session。创建新执行前，调用方必须重新 `acquire()` 该 Session，否则 `requireSession()` 返回 `runtime_session_not_found`。只有完整 Session 身份（Harness/Runtime Session ID、turn kind、scope、binding ID 和 generation）一致且已有记录为 `READY` 时，重新获取才会复用仓库记录而不调用 `transport.acquire`；这不允许复活已释放或失败的 Session。重放已终结执行的回执属于独立的持久化查询，不能证明 Session 活性。
+
 ## Scratch HTTP 协议
 
 Broker 在配置的 provider URL 下相对请求 `provision` 和 `observe`，使用 POST、provider Bearer 凭据、JSON 请求及响应头、`Cache-Control: no-store`。不跟随重定向，请求和响应各限制 64 KiB；成功必须返回 HTTP 200 和 `protocolVersion: 1`。网络错误、超时、408、429、5xx 可重试，但不证明资源消失，也不允许替换原 worker。错误消息不透出 provider 响应体。远程服务应使用 HTTPS，仅允许受信控制面访问。
@@ -51,6 +53,8 @@ Preflight 仅验证配置，不证明网络连通、worker 身份或 Hosted 工�
 Aone SDK、分配、入口地址、挂载和进程监管留在独立适配服务。通用实现不要求 Kubernetes 或 SSH。
 
 ## 验证矩阵与现有证据
+
+调用方源码检查只能确认更窄的边界：Spring 的 `HarnessCoordinator.warmRuntime` 经 `EmbeddedRuntimeBroker.warm` 仅预热 binding。`RuntimeBrokerHttpServer` 将显式 acquire/create 请求转交 `RuntimeBrokerService`，不会插入重新 acquire。现有 Hosted Workspace 调用方在 `HostedWorkspaceToolTurn` 和 `hosted-runtime-recovery.ts` 中通过 `HostedWorkspaceBroker.acquire` 显式获取 Session，执行使用 prepare/start 路径。这些源码路径不能证明所有调用方均已自动适配重启，也不能证明没有 Spring 工具调用方的 `external-scratch` 已完成此适配。`ExternalRuntimeWorkerFaultGateTest` 在 warm 接管后显式重新 acquire，并在 Broker 实例间共享内存仓库；它覆盖的是这一 Broker/worker 序列，不是 Spring/Hosted 重启 E2E，也不是持久化数据库重启。远程工具调用方的重启适配仍属于尚未实现的 Workspace 扩展集成工作。
 
 | 层级                 | 所需证据                                                          | 能证明什么                             |
 | -------------------- | ----------------------------------------------------------------- | -------------------------------------- |
