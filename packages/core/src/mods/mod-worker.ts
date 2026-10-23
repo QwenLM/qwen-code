@@ -10,6 +10,7 @@ import {
   newQuickJSWASMModuleFromVariant,
   type QuickJSHandle,
 } from 'quickjs-emscripten-core';
+import { CLAUDE_CODE_EVENTS_VERSION } from './claude-events.js';
 import { MOD_GUEST_FACTORY } from './guest.js';
 import { compileModModules } from './module-loader.js';
 import { modToolInputView } from './tool-dialect.js';
@@ -24,6 +25,8 @@ import {
   type ModWorkerRequest,
 } from './types.js';
 import {
+  MOD_EVENTS,
+  MOD_METHODS,
   ModBudget,
   ModTimeoutError,
   engineOrigin,
@@ -74,6 +77,7 @@ let operations = 0;
 let pumping = false;
 let builtinTool: string | undefined;
 let surface: 'terminal' | null = null;
+let version = 'unknown';
 const send = (reply: ModReply, root = rootId) =>
   port.postMessage({ ...reply, root, phase });
 const abandoned = () =>
@@ -537,7 +541,11 @@ async function hostCall(
       updateActivity();
     }
   }
-  if (method !== 'command.register' && method !== 'ui.log')
+  if (
+    method !== 'command.register' &&
+    method !== 'session.version' &&
+    method !== 'ui.log'
+  )
     throw new Error('Mod API not supported: ' + method);
   validateInput(method, value, {});
   const plugin = realms[call.plugin].plugin;
@@ -563,6 +571,17 @@ async function hostCall(
           commands.set(spec.name, { ...spec, plugin: plugin.id });
           return { value: { command: spec.name } };
         }
+        if (method === 'session.version')
+          return {
+            value: {
+              version,
+              qwen: {
+                claudeCode: CLAUDE_CODE_EVENTS_VERSION,
+                events: MOD_EVENTS,
+                methods: MOD_METHODS,
+              },
+            },
+          };
         logChars += String(e['text']).length + 1;
         if (logChars > 100_000) throw new Error('Mod log budget exceeded.');
         send({
@@ -712,6 +731,7 @@ port.on('message', async (request: ModWorkerRequest) => {
     if (request.type === 'load') {
       if (realms.length) throw new Error('Mods already loaded.');
       surface = request.surface;
+      version = request.version;
       for (const plugin of request.plugins) {
         assertLive();
         const realm = new Realm(plugin, realms.length);
@@ -721,6 +741,29 @@ port.on('message', async (request: ModWorkerRequest) => {
         } catch (error) {
           throw new Error('Mod ' + plugin.name + ': ' + String(error));
         }
+        const skipped = [
+          ...new Set(
+            realm.patterns.filter(
+              (pattern) => !MOD_EVENTS.some((e) => patternMatches(pattern, e)),
+            ),
+          ),
+        ].sort();
+        if (skipped.length && plugin.unsupportedEvents === 'reject')
+          throw new Error(
+            'Mod ' +
+              plugin.name +
+              ': Mod events not supported: ' +
+              skipped.join(', '),
+          );
+        if (skipped.length)
+          send({
+            type: 'log',
+            plugin: plugin.name,
+            to: 'transcript',
+            text:
+              'Hooks for unsupported events will not run: ' +
+              skipped.join(', '),
+          });
       }
       starting = true;
       await dispatch(

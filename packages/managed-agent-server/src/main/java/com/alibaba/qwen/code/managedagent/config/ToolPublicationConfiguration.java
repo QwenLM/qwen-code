@@ -42,7 +42,7 @@ public class ToolPublicationConfiguration {
             throw new IllegalStateException("Tool publication entry concurrency is required");
         }
         return new ToolPublicationStore(jdbc, manager, sessions, executions,
-                bindings, capacity, settings.isJournalHeadAuthorization());
+                bindings, capacity);
     }
 
     @Bean
@@ -51,9 +51,6 @@ public class ToolPublicationConfiguration {
             ManagedSessionStore sessions, ToolPublicationObjectStore objects,
             ManagedAgentProperties properties) {
         var settings = properties.getToolPublication();
-        if (settings.isAsyncVerificationEnabled() && !settings.isJournalHeadAuthorization()) {
-            throw new IllegalStateException("Async verification requires journal-head authorization");
-        }
         if (settings.getOperationTimeout() == null || settings.getClaimTimeout() == null
                 || settings.getMaxVerificationTimeout() == null) {
             throw new IllegalStateException("Tool publication operation and verification deadlines are required");
