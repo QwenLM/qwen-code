@@ -590,6 +590,36 @@ describe('SettingsMessage user-scope editing', () => {
     expect(onOutputLanguageChange).toHaveBeenCalledWith('');
   });
 
+  it('restores the saved output language when the commit is rejected', async () => {
+    // A busy session or a failed command does not change the saved value, so
+    // the row must not keep showing an unsaved draft.
+    const onOutputLanguageChange = vi.fn(async () => false);
+    const container = renderPanel(
+      makeState([outputLanguageSetting('English')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    expect(input?.value).toBe('English');
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'French');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('French');
+    expect(input?.value).toBe('English');
+  });
+
   it('still persists to workspace scope on the default (Workspace) tab', async () => {
     const setValue = vi.fn(
       (scope: 'workspace' | 'user', key: string, value: unknown) =>

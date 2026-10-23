@@ -86,8 +86,12 @@ interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
   presentation?: WebShellSettingsOptions;
   onLanguageChange: (language: WebShellLanguage, scope: Scope) => void;
-  /** Applies a model output language through `/language output`. */
-  onOutputLanguageChange: (language: string) => void;
+  /**
+   * Applies a model output language through `/language output`. Resolves to
+   * whether the value was applied, so a rejected commit can restore the saved
+   * value instead of leaving an unsaved draft on screen.
+   */
+  onOutputLanguageChange: (language: string) => Promise<boolean> | boolean;
   onSubDialog: (settingKey: string, scope: Scope) => void;
   onThemeChange: (theme: WebShellTheme) => void;
   chatWidthMode: ChatWidthMode;
@@ -367,7 +371,7 @@ function SettingInput({
   type: 'number' | 'text';
   value: unknown;
   disabled: boolean;
-  onCommit: (value: unknown) => void;
+  onCommit: (value: unknown) => unknown;
   onInvalid: () => void;
   placeholder?: string;
   className?: string;
@@ -376,6 +380,21 @@ function SettingInput({
   const [draft, setDraft] = useState(currentValue);
 
   useEffect(() => setDraft(currentValue), [currentValue]);
+
+  // A commit may be rejected (busy session, failed command). The saved value
+  // does not change in that case, so the draft has to be restored explicitly.
+  const applyCommitResult = (result: unknown) => {
+    if (result && typeof (result as Promise<unknown>).then === 'function') {
+      void (result as Promise<unknown>).then(
+        (applied) => {
+          if (applied === false) setDraft(currentValue);
+        },
+        () => setDraft(currentValue),
+      );
+      return;
+    }
+    if (result === false) setDraft(currentValue);
+  };
 
   const commit = () => {
     if (type === 'number') {
@@ -386,10 +405,10 @@ function SettingInput({
         onInvalid();
         return;
       }
-      if (parsed !== value) onCommit(parsed);
+      if (parsed !== value) applyCommitResult(onCommit(parsed));
       return;
     }
-    if (draft !== currentValue) onCommit(draft);
+    if (draft !== currentValue) applyCommitResult(onCommit(draft));
   };
 
   return (

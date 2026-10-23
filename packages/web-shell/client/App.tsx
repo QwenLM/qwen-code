@@ -14017,8 +14017,8 @@ export function App({
   );
 
   const handleSettingsOutputLanguageChange = useCallback(
-    (language: string) => {
-      if (sessionWriteBlocked) return;
+    async (language: string): Promise<boolean> => {
+      if (sessionWriteBlocked) return false;
       const owner = { current: sessionOwnerGuard.capture() };
       if (
         streamingStateRef.current !== 'idle' ||
@@ -14026,26 +14026,31 @@ export function App({
         isGoalGateBlocked()
       ) {
         blockCommand();
-        return;
+        return false;
       }
       // Only the language command rewrites output-language.md and refreshes
       // running sessions; a plain settings write would leave both stale.
       const command = `/language output ${language.trim() || 'auto'}`;
-      sendPrompt(command, undefined, undefined, { ownerRef: owner })
-        .then(() => {
-          if (!owner.current.isCurrent()) return;
-          return reloadWorkspaceSettings().catch((error: unknown) => {
-            if (!owner.current.isCurrent()) return;
-            reportError(
-              error,
-              'Failed to refresh settings after /language output',
-            );
-          });
-        })
-        .catch((error: unknown) => {
-          if (!owner.current.isCurrent()) return;
+      try {
+        await sendPrompt(command, undefined, undefined, { ownerRef: owner });
+      } catch (error) {
+        if (owner.current.isCurrent()) {
           reportError(error, 'Failed to sync /language output command');
-        });
+        }
+        return false;
+      }
+      if (!owner.current.isCurrent()) return true;
+      try {
+        await reloadWorkspaceSettings();
+      } catch (error) {
+        if (owner.current.isCurrent()) {
+          reportError(
+            error,
+            'Failed to refresh settings after /language output',
+          );
+        }
+      }
+      return true;
     },
     [
       blockCommand,
