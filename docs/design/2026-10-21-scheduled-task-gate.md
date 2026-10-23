@@ -155,13 +155,14 @@ by that command, not instructions; each `<` in it is written `&lt;`.
 ```
 
 A gate failure delivers a notice instead of the prompt, once per failure
-streak:
+streak, and again when the streak changes kind (a blocked gate that runs once
+its rule is added and then fails, or the reverse):
 
 ```text
 Scheduled task ab12cd34 (every 2 minutes): its gate command failed, so the
 task prompt did not run. `qwen autofix-pr snapshot --gate 15057` exited with
-code 1 after 0.4 s. Further consecutive failures are counted silently until
-the gate succeeds again (see cron_list). stderr, last 20 lines, each `<`
+code 1 after 0.4 s. Further failures are counted silently until the gate
+succeeds again or is blocked (see cron_list). stderr, last 20 lines, each `<`
 written `&lt;`:
 <gate-stderr>
 …
@@ -372,7 +373,9 @@ the command is proposed and checked again where it runs.
   dropped, and every `<` written `&lt;`, as the text says, so no tag can
   open or close the block however it is spelled or hidden (attributes,
   joiners or bidi marks in the name, a tag spelled in tag characters).
-  Defanging tag names alone kept missing forms. It is then wrapped in the
+  Defanging tag names alone kept missing forms. Look-alike brackets (a
+  fullwidth `＜`) are not tags and stay as text inside the block, which the
+  prompt marks as data. It is then wrapped in the
   text of Section 4.2, and
   delivered on the existing cron path, which cannot answer a pending
   permission prompt and skips the `UserPromptSubmit` hook. One fix rides
@@ -452,14 +455,14 @@ Rejected:
 
 ## 7. Limits
 
-| Limit                    | Value                                            |
-| ------------------------ | ------------------------------------------------ |
-| Gate timeout             | 60 s; a timeout is a failure                     |
-| Delivered output         | first 16 KiB of stdout; truncation is noted      |
-| Failure notice           | last 20 lines of stderr, 2 KiB                   |
-| Concurrency              | one gate run per task; an overlapping slot skips |
-| Failure reporting        | once per streak; counted in `gateStatus`         |
-| Catch-up for quiet fires | none; the next slot runs the probe again         |
+| Limit                    | Value                                             |
+| ------------------------ | ------------------------------------------------- |
+| Gate timeout             | 60 s; a timeout is a failure                      |
+| Delivered output         | first 16 KiB of stdout; truncation is noted       |
+| Failure notice           | last 20 lines of stderr, 2 KiB                    |
+| Concurrency              | one gate run per task; an overlapping slot skips  |
+| Failure reporting        | once per streak and kind; counted in `gateStatus` |
+| Catch-up for quiet fires | none; the next slot runs the probe again          |
 
 ## 8. Risks
 
@@ -534,7 +537,8 @@ Web Shell-created gated task across a daemon restart.
   session.
 - A gate that prints output wakes the session exactly once per fire, with the
   output after the prompt and marked as data.
-- A failing gate is reported once per streak and never runs the task prompt.
+- A failing gate is reported once per streak and kind (blocked, failed) and
+  never runs the task prompt.
 - A gate proposed by the model is confirmed like a `Monitor` command; a gate
   that may not run unattended is blocked with the rule to add, never run.
 - A durable gated task survives a restart of the CLI or the daemon with its

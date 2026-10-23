@@ -184,6 +184,35 @@ describe('CronScheduler gate', () => {
     expect(fired[0]!.prompt).toContain('`Monitor(./probe.sh)`');
   });
 
+  it('reports again when a blocked streak turns into failures, and back', async () => {
+    const job = createGated();
+    const blocked: CronGateResult = {
+      kind: 'blocked',
+      reason: 'it has not been approved to run unattended in this session',
+      rule: 'Monitor(./probe.sh)',
+    };
+    scheduler.tick(at(10, 30, 59));
+    await script.release(blocked);
+    expect(fired).toHaveLength(1);
+    // The rule is added, the gate runs and fails: the blocked notice promised
+    // silence only until then.
+    scheduler.tick(at(10, 31, 59));
+    await script.release(failed);
+    expect(fired).toHaveLength(2);
+    expect(fired[1]!.prompt).toContain('its gate command failed');
+    scheduler.tick(at(10, 32, 59));
+    await script.release(failed);
+    expect(fired).toHaveLength(2);
+    scheduler.tick(at(10, 33, 59));
+    await script.release(blocked);
+    expect(fired).toHaveLength(3);
+    expect(fired[2]!.prompt).toContain('was not run because');
+    expect(job.gateStatus).toMatchObject({
+      lastOutcome: 'blocked',
+      consecutiveFailures: 4,
+    });
+  });
+
   it('blocks every gated fire when the scheduler has no runner', async () => {
     const bare = new CronScheduler();
     const bareFired: CronJob[] = [];

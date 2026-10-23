@@ -8,7 +8,7 @@
  * @fileoverview The gate of a scheduled task: a shell command the scheduler
  * runs at fire time, outside the model, to decide whether the fire reaches a
  * session. Silence skips the fire, output delivers it with the output
- * attached, and a failure is reported once per streak.
+ * attached, and a failure is reported once per streak and kind.
  * See docs/design/2026-10-21-scheduled-task-gate.md.
  */
 
@@ -370,8 +370,10 @@ const TAG_CHARACTERS = /[\u{E0000}-\u{E007F}]/gu;
  * Strips ANSI and control characters line by line, like a `Monitor` line,
  * and writes every `<` as `&lt;`, so a probe's output cannot close the
  * `<gate-output>` block it is wrapped in or open any other tag, however
- * the tag is spelled or hidden. The block is otherwise unescaped: the
- * model reads `&lt;` as `<` in data.
+ * the tag's name is spelled or hidden. Look-alike brackets (a fullwidth
+ * `＜`) are not tags and stay as text inside the block, which the prompt
+ * marks as data. The block is otherwise unescaped: the model reads `&lt;`
+ * as `<` in data.
  */
 function sanitizeGateText(text: string): string {
   // Line by line: an escape sequence left open on one line (an OSC title
@@ -435,7 +437,7 @@ export function buildGateFailureNotice(
   return (
     `Scheduled task ${job.id} (${humanReadableCron(job.cronExpr)}): its gate command failed, so the task prompt did not run. ` +
     `\`${job.gate}\` ${result.detail} after ${seconds(result.durationMs)}. ` +
-    `Further consecutive failures are counted silently until the gate succeeds again (see ${ToolNames.CRON_LIST}).\n` +
+    `Further failures are counted silently until the gate succeeds again or is blocked (see ${ToolNames.CRON_LIST}).\n` +
     stderrBlock +
     'Tell the user, and suggest a fix if the cause is clear (for example expired `gh` authentication). Do not run the task prompt.'
   );

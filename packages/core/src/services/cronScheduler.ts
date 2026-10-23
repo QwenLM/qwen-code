@@ -1560,12 +1560,16 @@ export class CronScheduler {
     };
     debugLogger.debug(`gate for ${job.id}: ${outcome} (streak ${streak})`);
 
+    // A notice opens a streak, and again when the streak changes kind: the
+    // blocked notice promises silence only until the gate runs, so a gate
+    // that runs once its rule is added and then fails is reported.
+    const reportable = streak === 1 || previous?.lastOutcome !== outcome;
     let text: string | null = null;
     if (result.kind === 'output') {
       text = buildGatedFirePrompt(job, result, at);
-    } else if (result.kind === 'failed' && streak === 1) {
+    } else if (result.kind === 'failed' && reportable) {
       text = buildGateFailureNotice(job, result);
-    } else if (result.kind === 'blocked' && streak === 1) {
+    } else if (result.kind === 'blocked' && reportable) {
       text = buildGateBlockedNotice(job, result);
     }
     // The run record is written before the consumer sees the fire, so an ACP
