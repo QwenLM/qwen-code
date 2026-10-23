@@ -4,7 +4,7 @@
 //
 // classify_pr carries the routing logic TWICE — the `runs-on` expression
 // (which selects the classify job's own runner) and the `pick_runner` shell
-// step (which publishes `ubuntu_runner` for every downstream Linux job). If
+// step (which publishes `ubuntu_runner` for downstream Linux jobs). If
 // they drift, classify and the Test job land on different pools. These tests
 // evaluate BOTH against the same event matrix — including the negative
 // associations that must stay hosted — and assert they agree.
@@ -118,7 +118,14 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
 
 // Executes the real pick_runner shell with the same inputs and returns the
 // selected runner exactly as CI would publish it.
-function runPickRunner({ ecsDisabled, sameRepo, assoc, eventName, dispatch }) {
+function runPickRunner({
+  ecsDisabled,
+  sameRepo,
+  assoc,
+  eventName,
+  dispatch,
+  fleet,
+}) {
   const tmp = mkdtempSync(join(tmpdir(), 'pick-runner-'));
   const outputFile = join(tmp, 'github_output');
   const result = spawnSync('bash', ['-c', pickRunner.run], {
@@ -127,6 +134,7 @@ function runPickRunner({ ecsDisabled, sameRepo, assoc, eventName, dispatch }) {
       AUTHOR_ASSOCIATION: assoc,
       ECS_DISABLED: ecsDisabled ? 'true' : '',
       EVENT_NAME: eventName,
+      LINUX_RUNNER_FLEET: fleet ?? '',
       DISPATCH_LINUX_RUNNER: dispatch ?? '',
       GITHUB_OUTPUT: outputFile,
     },
@@ -263,6 +271,73 @@ describe('ci.yml classify_pr runner routing', () => {
       /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
     );
     assert.match(classifyRunsOn, /github\.event_name == 'merge_group'/);
+  });
+});
+
+describe('ci.yml web_shell_e2e_smoke runner routing', () => {
+  const expression = String(ciDoc.jobs.web_shell_e2e_smoke['runs-on'])
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '');
+  const selectSmokeRunner = new Function(
+    'needs',
+    'fromJSON',
+    'contains',
+    `return (${expression});`,
+  );
+
+  it('uses ARM64 for self-hosted runs while preserving every hosted fallback', () => {
+    for (const ecsDisabled of [false, true]) {
+      for (const fleet of ['', 'x64', 'arm64', 'hosted']) {
+        for (const sameRepo of [false, true]) {
+          for (const assoc of ASSOCIATIONS) {
+            for (const dispatch of [
+              undefined,
+              'self-hosted',
+              'self-hosted-arm64',
+              'hosted',
+            ]) {
+              const runner = runPickRunner({
+                ecsDisabled,
+                fleet,
+                sameRepo,
+                assoc,
+                dispatch,
+                eventName: dispatch ? 'workflow_dispatch' : 'pull_request',
+              });
+              assert.deepEqual(
+                selectSmokeRunner(
+                  { classify_pr: { outputs: { ubuntu_runner: runner } } },
+                  JSON.parse,
+                  (labels, label) => labels.includes(label),
+                ),
+                JSON.parse(runner).includes('self-hosted')
+                  ? ['self-hosted', 'linux', 'arm64']
+                  : JSON.parse(HOSTED),
+                JSON.stringify({
+                  ecsDisabled,
+                  fleet,
+                  sameRepo,
+                  assoc,
+                  dispatch,
+                  runner,
+                }),
+              );
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('stays hosted when the classifier output is missing', () => {
+    assert.deepEqual(
+      selectSmokeRunner(
+        { classify_pr: { outputs: {} } },
+        JSON.parse,
+        (labels, label) => labels.includes(label),
+      ),
+      JSON.parse(HOSTED),
+    );
   });
 });
 

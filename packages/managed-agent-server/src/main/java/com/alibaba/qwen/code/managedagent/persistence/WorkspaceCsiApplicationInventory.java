@@ -195,7 +195,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "goal:VARCHAR,cron:VARCHAR,timezone:VARCHAR,session_mode:VARCHAR,overlap:VARCHAR,catch_up:VARCHAR,"
                     + "catch_up_limit:BIGINT,enabled:BOOLEAN,state:VARCHAR,blocked_reason:VARCHAR,armed_at:BIGINT,"
                     + "watermark_slot:BIGINT,lease_owner:VARBINARY,lease_until:BIGINT,fence:BIGINT,gmt_create:BIGINT,"
-                    + "gmt_modified:BIGINT"),
+                    + "gmt_modified:BIGINT,gate:VARCHAR,gate_last_outcome:VARCHAR,gate_last_at:BIGINT,"
+                    + "gate_quiet_since_delivery:INT,gate_failures:INT,gate_last_error:VARCHAR"),
             declaration("ma_schedule_occurrence", "tenant_id,schedule_id,occurrence_key",
                     "tenant_id:VARBINARY,schedule_id:VARBINARY,occurrence_key:VARBINARY,run_id:VARBINARY,"
                     + "session_id:VARBINARY,slot:BIGINT,trigger_kind:VARCHAR,outcome:VARCHAR,reason:VARCHAR,"
@@ -216,7 +217,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "retirement_generation:BIGINT,retired_at:BIGINT,recovery_protected:BOOLEAN,"
                     + "resource_gc_completed:BOOLEAN,runtime_request_key:CHAR,csi_guard:BOOLEAN,"
                     + "model_id:VARBINARY,model_revision:BIGINT,selected_approval_mode:VARCHAR,approval_revision:BIGINT,"
-                    + "plan_enabled:BOOLEAN,public_child_agents_version:INT"),
+                    + "plan_enabled:BOOLEAN,public_child_agents_version:INT,harness_instance_id:VARBINARY,harness_owner_boot_id:VARBINARY,"
+                    + "harness_placement_epoch:BIGINT,harness_placement_state:VARCHAR"),
             declaration("ma_session_head", "tenant_key,harness_key",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,storage_version:INT,state:VARCHAR,"
                     + "writer_generation:BIGINT,writer_id:VARBINARY,writer_lease_until:BIGINT,lease_token_hash:CHAR,"
@@ -2974,6 +2976,9 @@ final class WorkspaceCsiApplicationInventory {
                             && row.cell("selected_approval_mode").isNull() && Objects.equals(0L, row.number("approval_revision"))
                             && Boolean.FALSE.equals(row.bool("plan_enabled"))
                             && Objects.equals(0L, row.number("public_child_agents_version"))
+                            && row.cell("harness_instance_id").isNull() && row.cell("harness_owner_boot_id").isNull()
+                            && Objects.equals(0L, row.number("harness_placement_epoch"))
+                            && "UNASSIGNED".equals(row.text("harness_placement_state"))
                             && original.request().requestKey().equals(row.text("runtime_request_key"))
                             && workspace.equals(row.text("workspace_id")) && storage.equals(row.text("workspace_storage_id"))
                             && original.request().getScope().getWorkspaceGeneration().equals(String.valueOf(row.number("workspace_generation")))

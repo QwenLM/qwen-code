@@ -29,7 +29,6 @@ import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
-  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
@@ -209,6 +208,7 @@ import {
 } from './hosted-hook-session.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { waitForTurn } from './hosted-turn-wait.js';
+import { rewriteGitHubBlobUrl } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
 import {
   HOSTED_SKILL_APPROVAL_REFUSAL,
@@ -231,7 +231,6 @@ export {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
-  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
@@ -604,8 +603,28 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+const HOSTED_WEB_FETCH_TOOL: FunctionDeclaration = {
+  name: 'web_fetch',
+  description:
+    'Fetch a public HTTPS web page from the Session Runtime. Returns bounded text and HTTP metadata; HTML is converted to Markdown. Use prompt to describe what to extract and answer using the returned content. Private networks, authenticated URLs and binary downloads are unavailable. Cross-host redirects require a new call. Outbound requests require approval in default and auto-edit modes.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      url: { type: 'string', description: 'The public HTTPS URL to fetch.' },
+      prompt: {
+        type: 'string',
+        description: 'Information to extract from the page.',
+      },
+      format: { type: 'string', enum: ['auto', 'markdown', 'html', 'text'] },
+    },
+    required: ['url', 'prompt'],
+    additionalProperties: false,
+  },
+};
+
 export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_FILE_TOOLS,
+  HOSTED_WEB_FETCH_TOOL,
   {
     name: 'run_shell_command',
     description:
@@ -658,14 +677,6 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
-export const HOSTED_WORKSPACE_FILE_TOOLS_V2: FunctionDeclaration[] = [
-  ...HOSTED_WORKSPACE_FILE_TOOLS,
-  HOSTED_GLOB_TOOL,
-];
-export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
-  ...HOSTED_WORKSPACE_SHELL_TOOLS,
-  HOSTED_GLOB_TOOL,
-];
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
 // call it does not declare. A missing read_file stops the module loading:
@@ -692,6 +703,7 @@ export const HOSTED_WORKSPACE_READ_TOOLS: FunctionDeclaration[] = [
 // no preview. Both degrade silently into the card's "Tool arguments are
 // unavailable for this approval." fallback, so a test enumerates the set.
 export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
+  'web_fetch',
   'read_file',
   'write_file',
   'edit',
@@ -1891,11 +1903,9 @@ export class HostedWorkspaceToolTurn {
         this.mcp ||
         this.memberPlanMode ||
         this.childDepth !== 0 ||
-        ![
-          'hosted-workspace-files/1',
-          'hosted-workspace-shell/1',
-          'hosted-workspace-shell/2',
-        ].includes(this.profile ?? ''))
+        !['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
+          this.profile ?? '',
+        ))
     )
       throw new Error('Public Plan mode is unavailable for this Session.');
     this.publication =
@@ -1980,14 +1990,12 @@ export class HostedWorkspaceToolTurn {
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
     this.advertised = [
-      ...(this.publication || this.shell
-        ? search
-          ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
-          : HOSTED_WORKSPACE_SHELL_TOOLS
-        : search
-          ? HOSTED_WORKSPACE_FILE_TOOLS_V2
-          : HOSTED_WORKSPACE_FILE_TOOLS
-      )
+      ...[
+        ...(this.publication || this.shell
+          ? HOSTED_WORKSPACE_SHELL_TOOLS
+          : [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_WEB_FETCH_TOOL]),
+        ...(search ? [HOSTED_GLOB_TOOL] : []),
+      ]
         .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
         .map((tool) => {
           if (this.foregroundOnly && tool.name === 'run_shell_command') {
@@ -2413,13 +2421,19 @@ export class HostedWorkspaceToolTurn {
           items.every(
             (item) =>
               item.state === 'settled' &&
-              ['read_file', 'write_file', 'edit', 'glob'].includes(
+              ['read_file', 'write_file', 'edit', 'glob', 'web_fetch'].includes(
                 item.toolName,
               ),
           ) &&
           (saved ||
             items.every((item) =>
-              ['read_file', 'glob'].includes(item.toolName),
+              [
+                'read_file',
+                'glob',
+                ...(isHostedWorkspaceReadProfile(this.profile)
+                  ? []
+                  : ['web_fetch']),
+              ].includes(item.toolName),
             )) &&
           (await canSettleHostedFileHistory(this.session, {
             pendingUndo: null,
@@ -3370,7 +3384,7 @@ export class HostedWorkspaceToolTurn {
             singlePlanExit ||
             (this.publicChildren &&
               ['agent', 'run_shell_command'].includes(request.call.name)) ||
-            ['read_file', 'write_file', 'edit', 'glob'].includes(
+            ['read_file', 'write_file', 'edit', 'glob', 'web_fetch'].includes(
               request.call.name,
             )
           ) ||
@@ -3699,6 +3713,37 @@ export class HostedWorkspaceToolTurn {
             : this.publication
               ? { ...args }
               : { ...args, is_background: false };
+        } else if (call.name === 'web_fetch') {
+          input = { ...call.args };
+          const args = call.args;
+          try {
+            const url =
+              typeof args['url'] === 'string'
+                ? new URL(args['url'])
+                : undefined;
+            if (
+              !url ||
+              url.protocol !== 'https:' ||
+              url.username ||
+              url.password ||
+              typeof args['url'] !== 'string' ||
+              !/^https:\/\//i.test(args['url']) ||
+              typeof args['prompt'] !== 'string' ||
+              !args['prompt'].trim() ||
+              (args['format'] !== undefined &&
+                !['auto', 'markdown', 'html', 'text'].includes(
+                  args['format'] as string,
+                )) ||
+              Object.keys(args).some(
+                (key) => !['url', 'prompt', 'format'].includes(key),
+              )
+            )
+              throw new Error('Invalid web_fetch arguments.');
+            input['url'] = rewriteGitHubBlobUrl(url.toString());
+          } catch {
+            validationError =
+              'Hosted web_fetch requires a public HTTPS URL without credentials, a nonempty prompt, and optional format auto, markdown, html or text. Correct the arguments and retry.';
+          }
         } else if (call.name === 'glob') {
           input = { ...call.args };
           const globError =
