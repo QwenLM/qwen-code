@@ -337,6 +337,15 @@ test('replaces clicked details when hovering another entry @smoke', async ({
 test('keeps footer Archive clickable when canceling a rename @smoke', async ({
   page,
 }) => {
+  const renameRequests: string[] = [];
+  page.on('request', (request) => {
+    if (
+      request.method() === 'PATCH' &&
+      new URL(request.url()).pathname.endsWith('/session/idle-session/metadata')
+    ) {
+      renameRequests.push(request.url());
+    }
+  });
   const panel = page.locator('[data-web-shell-session-panel]');
   const row = panel.getByRole('row').filter({
     has: page.getByRole('checkbox', {
@@ -365,6 +374,8 @@ test('keeps footer Archive clickable when canceling a rename @smoke', async ({
     const confirmation = page.getByRole('alertdialog');
     await expect(confirmation).toBeVisible();
     await confirmation.getByRole('button', { name: /^cancel$/i }).click();
+    await expect(confirmation).toHaveCount(0);
+    expect(renameRequests).toEqual([]);
   }
 });
 
