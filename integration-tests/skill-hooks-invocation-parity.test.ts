@@ -13,7 +13,11 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { fakeServerHostOptions, TestRig } from './test-helper.js';
+import {
+  CI_DEFAULT_WAIT_MS,
+  fakeServerHostOptions,
+  TestRig,
+} from './test-helper.js';
 import { fakeToolCall, startFakeOpenAIServer } from './fake-openai-server.js';
 import type { FakeOpenAIServer } from './fake-openai-server.js';
 import {
@@ -39,7 +43,7 @@ import { existsSync } from 'node:fs';
 // moves both ceilings. retry: 0 because the suite retries twice by default,
 // and a stall that exhausts the ready budget cannot recover on a retry —
 // three attempts would burn 18 minutes of the docker leg's 60-minute job.
-const CI_WAIT_MS = 60_000;
+const CI_WAIT_MS = CI_DEFAULT_WAIT_MS;
 const SLACK_MS = 60_000;
 const MODEL_CASE_TIMEOUT =
   MAX_READY_PROMPT_BUDGET_MS + 3 * CI_WAIT_MS + SLACK_MS;
@@ -113,8 +117,9 @@ describe('skill hooks fire on both invocation paths', () => {
     // The docker leg's container boot has stalled past 30s before the prompt
     // renders (#13552, #14191); use the measured self-hosted budget instead of
     // the old fixed 30s. A child that dies during startup fails fast with its
-    // exit code instead of polling the dead pty for the whole budget; only a
-    // live-but-slow boot pays it.
+    // exit code, and cleanup() stops the abandoned waitForText poll within one
+    // tick instead of leaving it to scan the dead pty for the whole budget;
+    // only a live-but-slow boot pays that budget.
     let startupUndecided = true;
     const ready = await Promise.race([
       rig.waitForText('Type your message', readyPromptBudgetMs(process.env)),

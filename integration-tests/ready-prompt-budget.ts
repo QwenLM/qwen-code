@@ -26,10 +26,18 @@
  * plain object instead of real time (scripts/tests/ready-prompt-budget.test.ts).
  */
 
+const TIERS = {
+  default: 30_000,
+  selfHosted: 90_000,
+  selfHostedDocker: 180_000,
+} as const;
+
 /** The widest branch, so a suite ceiling can be derived instead of copied. */
-export const MAX_READY_PROMPT_BUDGET_MS = 180_000;
+export const MAX_READY_PROMPT_BUDGET_MS = Math.max(...Object.values(TIERS));
 
 export function readyPromptBudgetMs(env: NodeJS.ProcessEnv): number {
-  if (env['RUNNER_ENVIRONMENT'] !== 'self-hosted') return 30_000;
-  return env['QWEN_SANDBOX'] === 'docker' ? MAX_READY_PROMPT_BUDGET_MS : 90_000;
+  if (env['RUNNER_ENVIRONMENT'] !== 'self-hosted') return TIERS.default;
+  return env['QWEN_SANDBOX'] === 'docker'
+    ? TIERS.selfHostedDocker
+    : TIERS.selfHosted;
 }

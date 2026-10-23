@@ -27,10 +27,14 @@ describe('readyPromptBudgetMs', () => {
         QWEN_SANDBOX: 'docker',
       }),
     ];
-    // The parity suite sizes its per-case timeouts from this value, so a
-    // docker-tier raise must move the constant or fail here rather than
-    // leave those ceilings behind.
+    // MAX derives from every TIER, so this cross-check reddens when a new
+    // tier is added without being sampled here. The parity suite sizes its
+    // per-case timeouts from MAX, so a raise moves those ceilings too.
     expect(Math.max(...branches)).toBe(MAX_READY_PROMPT_BUDGET_MS);
+    // "Any budget here must stay under the suite's testTimeout"
+    // (ready-prompt-budget.ts): interactive-session.test.ts sets no per-case
+    // timeout and inherits integration-tests/vitest.config.ts's 300s default.
+    expect(MAX_READY_PROMPT_BUDGET_MS).toBeLessThan(300_000);
   });
 
   it('widens the ready-prompt budget on shared self-hosted runners (#13552)', () => {

@@ -9,10 +9,14 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 // The parity suite runs in the PR-gated no-AK lane, but neither property here
-// is observable there: ci.yml never exports RUNNER_ENVIRONMENT, so the budget
-// call resolves to the same 30s the deleted literal did, and a healthy boot
-// never exercises the dead-child race. These byte-shape pins give each revert
-// a ~0ms witness through test:scripts, which runs on every PR.
+// is observable there on a green run: the ubuntu-latest fallback resolves the
+// budget to the same 30s the deleted literal was, while on the ecs-qwen
+// routing the runner injects RUNNER_ENVIRONMENT=self-hosted and
+// QWEN_SANDBOX=false selects the 90s tier. Neither value is asserted on the
+// lane, a healthy boot renders the prompt in seconds and never exercises the
+// dead-child race, and only a non-deterministic boot stall would surface a
+// revert to 30_000. These byte-shape pins give each revert a ~0ms witness
+// through test:scripts, which runs on every PR.
 const source = readFileSync(
   join(
     resolve(import.meta.dirname, '../..'),
@@ -34,15 +38,27 @@ describe('skill-hooks invocation-parity startup source pins (#15226)', () => {
 
   it('races the ready-prompt wait against child exit, keeping the tail', () => {
     // Reverting the race returns a dead-child boot to a full-budget poll of a
-    // dead pty and discards the exit code; dropping the tail loses the
+    // dead pty and discards the exit code; dropping the throw's tail loses the
     // host-side boot log that made #15226 diagnosable from the job log. The
-    // latch keeps the race's abandoned arm from rejecting on teardown.
+    // latch keeps the race's abandoned arm from rejecting on teardown. The
+    // same `Output:\n${output}` substring also appears in the untouched
+    // expect below, so the tail must be pinned as part of the throw.
     expect(source).toContain('Promise.race([');
     expect(source).toContain('if (!startupUndecided) return false;');
     expect(source).toContain(
       'CLI exited during startup (code ${exitCode}, signal ${signal})',
     );
     expect(source).toContain('Output:\\n${output}');
+    expect(source).toMatch(
+      /CLI exited during startup[\s\S]{0,120}?Output:\\n\$\{output\}/,
+    );
+  });
+
+  it('derives the CI wait from the harness default', () => {
+    // The ceilings multiply this value, and the harness derives every
+    // makeWaitFor budget from the same default. Re-spelling 60_000 here lets
+    // a harness change move the real waits without moving the ceilings.
+    expect(source).toMatch(/CI_WAIT_MS\s*=\s*CI_DEFAULT_WAIT_MS/);
   });
 
   it('derives both case ceilings from the budget and bounds retries', () => {

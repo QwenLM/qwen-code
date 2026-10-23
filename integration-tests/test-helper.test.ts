@@ -133,6 +133,26 @@ describe('TestRig', () => {
       .toBe(false);
   });
 
+  it('stops a pending readiness poll when the rig is cleaned up', async () => {
+    const rig = new TestRig();
+    await rig.setup('cleanup stops readiness poll');
+
+    const settled = rig.waitForText('never-rendered', 60_000);
+    await rig.cleanup();
+
+    // Without the stop flag the abandoned poll keeps scanning until its 60s
+    // budget expires; the race bounds the failure so a regression reddens
+    // this case instead of stalling the lane.
+    await expect(
+      Promise.race([
+        settled,
+        new Promise<'still polling'>((resolve) =>
+          setTimeout(() => resolve('still polling'), 5_000).unref(),
+        ),
+      ]),
+    ).resolves.toBe(false);
+  });
+
   it.each([
     [
       'telemetry events',
