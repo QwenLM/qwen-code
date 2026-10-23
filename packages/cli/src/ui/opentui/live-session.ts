@@ -855,6 +855,9 @@ export async function* livePromptEvents(
             /* ignore */
           }
         }
+        if (ev.type === 'retry' || ev.type === 'model_fallback') {
+          pending.length = 0;
+        }
         if ((ev as { type?: string }).type === 'tool_call_request') {
           pending.push((ev as { value: ToolCallRequestInfo }).value);
         }

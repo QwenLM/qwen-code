@@ -17,12 +17,16 @@ import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   ApprovalMode,
+  CoreToolScheduler,
+  LlmEventType,
   MockTool,
   getUnsupportedImageFormatWarning,
   SendMessageType,
 } from '@qwen-code/qwen-code-core';
 import type {
   Config,
+  ServerLlmStreamEvent,
+  ToolCallRequestInfo,
   SendMessageOptions,
   ToolCallConfirmationDetails,
   VisionBridgeModelSelection,
@@ -394,6 +398,69 @@ async function drain<T>(gen: AsyncGenerator<T>): Promise<T[]> {
 }
 
 describe('livePromptEvents', () => {
+  it.each([
+    { type: LlmEventType.Retry },
+    {
+      type: LlmEventType.ModelFallback,
+      fromModel: 'primary-model',
+      toModel: 'fallback-model',
+      fallbackIndex: 1,
+    },
+  ] satisfies ServerLlmStreamEvent[])(
+    'executes only fresh tools after $type discards a failed attempt',
+    async (boundary) => {
+      const oldRequest: ToolCallRequestInfo = {
+        callId: 'discarded-attempt-tool',
+        name: 'test_tool',
+        args: { attempt: 'discarded' },
+        isClientInitiated: false,
+        prompt_id: 'same-prompt',
+      };
+      const freshRequest: ToolCallRequestInfo = {
+        ...oldRequest,
+        callId: 'fresh-attempt-tool',
+        args: { attempt: 'fresh' },
+      };
+      let sends = 0;
+      const sendMessageStream = vi.fn(
+        function* (): Generator<ServerLlmStreamEvent> {
+          sends += 1;
+          if (sends === 1) {
+            yield { type: LlmEventType.ToolCallRequest, value: oldRequest };
+            yield boundary;
+            yield { type: LlmEventType.ToolCallRequest, value: freshRequest };
+          }
+        },
+      );
+      const schedule = vi.spyOn(CoreToolScheduler.prototype, 'schedule');
+      try {
+        await drain(livePromptEvents(createFakeConfig(sendMessageStream), 'q'));
+
+        expect(schedule).toHaveBeenCalledExactlyOnceWith(
+          [freshRequest],
+          expect.any(AbortSignal),
+        );
+        expect(sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(sendMessageStream.mock.calls[1]).toEqual([
+          [
+            {
+              functionResponse: {
+                name: freshRequest.name,
+                id: freshRequest.callId,
+                response: { ok: true },
+              },
+            },
+          ],
+          expect.any(AbortSignal),
+          expect.any(String),
+          { type: SendMessageType.ToolResult },
+        ]);
+      } finally {
+        schedule.mockRestore();
+      }
+    },
+  );
+
   it('explicit Retry reuses prepared parts without rereading mentions or rebridging media', async () => {
     const sendMessageStream = vi.fn(function* () {
       yield { type: 'finished', value: {} };
