@@ -508,6 +508,17 @@ printf '%s\\n' '${liveAttempt}'
     expect(downloadStep.env.RUN_ATTEMPT).toBe(
       '${{ github.event.workflow_run.run_attempt }}',
     );
+    // Producer and consumers are three separate spellings: a renamed step id
+    // or a retyped binding resolves the expression to '', which every reader
+    // sees as "the list was short".
+    const jobsCompleteRef = '${{ steps.download.outputs.jobs_complete }}';
+    expect(steps.find((step) => step.id === 'download')).toBeTruthy();
+    expect(steps.find((step) => step.id === 'summary').env.JOBS_COMPLETE).toBe(
+      jobsCompleteRef,
+    );
+    expect(steps.find((step) => step.id === 'plan').env.JOBS_COMPLETE).toBe(
+      jobsCompleteRef,
+    );
     // Counted over the whole workflow: both projections read the file this one
     // fetch wrote, so the payload must be fetched exactly once.
     expect(
@@ -674,6 +685,12 @@ printf '%s\\n' '{"jobs":[]}'
     expect(noReceipt.stdout).toContain(
       '::warning::Could not read the whole job list of run',
     );
+
+    // gh can also exit 0 with fewer jobs than it declares; the pipeline status
+    // cannot see that, so the receipt is the only guard that does.
+    const shortButClean = runPages([{ body: page([9001]) }]);
+    expect(shortButClean.jobs).toEqual([]);
+    expect(shortButClean.complete).toBe('false');
 
     // Positive control: every page arrives, and the merged list — including
     // the failure that only page 2 carries — is promoted as a whole.
@@ -1088,6 +1105,26 @@ printf '%s\\n' '{"jobs":[]}'
       expect(firstPlan).toContain('The job list could not be read in full');
       expect(firstPlan.split('could not be read in full')).toHaveLength(2);
 
+      // A certified list must not gain the caveat: the plan path's negative
+      // control, mirroring the comment path's.
+      const completeOut = join(tmp, 'output-plan-complete');
+      const completePlan = spawnSync(
+        'bash',
+        ['-eo', 'pipefail', '-c', plan.run],
+        {
+          env: {
+            ...planEnv,
+            JOBS_COMPLETE: 'true',
+            GITHUB_OUTPUT: completeOut,
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(completePlan.status, completePlan.stderr).toBe(0);
+      expect(readFileSync(completeOut, 'utf8')).not.toContain(
+        'could not be read in full',
+      );
+
       // Re-plan against an issue whose body already carries the sentence: a
       // recurrence must not stack a second copy.
       const note =
@@ -1111,6 +1148,23 @@ exit 0
       expect(
         readFileSync(replanOut, 'utf8').split('could not be read in full'),
       ).toHaveLength(2);
+
+      // A certified replan clears the stale sentence an earlier degraded run
+      // left in the body: append-only would keep the claim above the rebuilt
+      // failure block forever.
+      const clearedOut = join(tmp, 'output-replan-cleared');
+      const cleared = spawnSync('bash', ['-eo', 'pipefail', '-c', plan.run], {
+        env: {
+          ...planEnv,
+          JOBS_COMPLETE: 'true',
+          GITHUB_OUTPUT: clearedOut,
+        },
+        encoding: 'utf8',
+      });
+      expect(cleared.status, cleared.stderr).toBe(0);
+      expect(readFileSync(clearedOut, 'utf8')).not.toContain(
+        'could not be read in full',
+      );
 
       writeFileSync(join(tmp, 'gh'), '#!/bin/sh\nexit 1\n');
       const planned = spawnSync('bash', ['-eo', 'pipefail', '-c', plan.run], {

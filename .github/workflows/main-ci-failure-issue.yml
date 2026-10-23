@@ -378,10 +378,11 @@ jobs:
           fi
 
           body="$(jq -r '.body' "${plan}")"
-          # Same signal as the PR comment. Guarded on the sentence so a
-          # recurrence replanned through --existing does not stack a copy.
+          # Machine-owned: strip the sentence, then re-add it only for a short
+          # list so a certified run clears a stale copy.
           incomplete_jobs_note='The job list could not be read in full, so this issue may name fewer failing jobs than the run had.'
-          if [[ "${JOBS_COMPLETE}" != 'true' && "${body}" != *"${incomplete_jobs_note}"* ]]; then
+          body=${body//$'\n\n'"${incomplete_jobs_note}"/}
+          if [[ "${JOBS_COMPLETE}" != 'true' ]]; then
             body="${body}"$'\n\n'"${incomplete_jobs_note}"
           fi
 
