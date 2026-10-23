@@ -1,14 +1,7 @@
 /** @jsxImportSource @opentui/react */
 /** Native textarea/input regression; clipboard and command catalog are injected. */
 import assert from 'node:assert/strict';
-import {
-  mkdtemp,
-  mkdir,
-  writeFile,
-  readFile,
-  readdir,
-  rm,
-} from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +10,6 @@ import { mock } from 'bun:test';
 import { act } from 'react';
 import { TextareaRenderable, type Renderable } from '@opentui/core';
 import { testRender } from '@opentui/react/test-utils';
-import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import type { InputPromptProps } from '../src/ui/opentui/input-prompt.js';
 
 const scratch = await mkdtemp(join(tmpdir(), 'qwen-native-input-'));
@@ -102,37 +94,16 @@ try {
   );
   assert(editor, 'The native textarea must be mounted');
   await input(() => ui.mockInput.pasteBracketedText(JSON.stringify(a)));
-  const firstImageStarted = Date.now();
-  let firstImageFrame = ui.captureCharFrame();
-  for (
-    let pass = 0;
-    pass < 20 &&
-    !/📎 clipboard-/.test(firstImageFrame) &&
-    Date.now() - firstImageStarted < 1_000;
-    pass++
+  // A single act around the wait defers the async attachment update we need.
+  const attachmentDeadline = Date.now() + 5_000;
+  while (
+    !/📎 clipboard-/.test(ui.captureCharFrame()) &&
+    Date.now() < attachmentDeadline
   ) {
-    await act(async () => {
-      await new Promise<void>((done) => setTimeout(done, 0));
-    });
-    await act(async () => {
-      await ui.renderOnce();
-    });
-    firstImageFrame = ui.captureCharFrame();
+    await new Promise((done) => setTimeout(done, 10));
+    await idle();
   }
-  if (!/📎 clipboard-/.test(firstImageFrame)) {
-    const copiedFiles = await readdir(
-      join(Storage.getGlobalTempDir(), 'clipboard'),
-    ).catch((error: unknown) => [String(error)]);
-    throw new Error(
-      `First image attachment did not render: ${JSON.stringify({
-        elapsedMs: Date.now() - firstImageStarted,
-        frame: firstImageFrame,
-        scheduler: ui.renderer.getSchedulerState(),
-        copiedFiles,
-        notices,
-      })}`,
-    );
-  }
+  assert.match(ui.captureCharFrame(), /📎 clipboard-/);
   await key('RETURN');
   assert.equal(
     submissions.length,

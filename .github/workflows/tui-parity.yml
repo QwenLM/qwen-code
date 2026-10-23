@@ -21,7 +21,8 @@ jobs:
     # stay hosted because these jobs build the PR's code. Kill-switch:
     # MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 30
+    # Cold setup/build plus three serial product legs can exceed 30 minutes.
+    timeout-minutes: 45
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
