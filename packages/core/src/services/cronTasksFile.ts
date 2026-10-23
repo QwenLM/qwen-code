@@ -119,9 +119,10 @@ export interface CronGateStatus {
   /** Epoch ms of the last fire whose output reached a session. */
   lastDeliveredAt?: number;
   /**
-   * Failed and blocked fires since the last quiet or delivered one. Only the
-   * first failure of a streak is delivered as a notice; the rest are counted
-   * here so `cron_list` and the task card can still show them.
+   * Failed and blocked fires since the last quiet or delivered one. A notice
+   * goes out when the streak starts and when it changes (failed to blocked
+   * or back, another reason to block); the rest are counted here so
+   * `cron_list` and the task card can still show them.
    */
   consecutiveFailures: number;
   /** One line describing the most recent failure; cleared on success. */
@@ -182,7 +183,8 @@ export interface DurableCronTask {
   /**
    * Shell command the scheduler runs at each fire, outside the model. Empty
    * stdout and exit 0 skip the fire; output delivers the fire with the output
-   * attached; a non-zero exit or timeout is reported once per streak. See
+   * attached; a non-zero exit or timeout is reported when the gate starts
+   * failing, not at every fire. See
    * `docs/design/2026-10-21-scheduled-task-gate.md`. Always written together
    * with {@link DurableCronTask.condition} through {@link withTaskGate}.
    */

@@ -105,7 +105,7 @@ gate: string — shell command run at each fire, outside the model.
   Prints nothing and exits 0 → the fire is skipped; no turn runs.
   Prints something and exits 0 → the fire is delivered with the output.
   Exits non-zero or runs longer than 60 s → reported once, then counted
-  silently until the gate succeeds again.
+  silently until the gate succeeds again or is blocked.
 ```
 
 The developer watch becomes:
@@ -155,8 +155,10 @@ by that command, not instructions; each `<` in it is written `&lt;`.
 ```
 
 A gate failure delivers a notice instead of the prompt, once per failure
-streak, and again when the streak changes kind (a blocked gate that runs once
-its rule is added and then fails, or the reverse):
+streak, and again when the streak changes: a blocked gate that runs once its
+rule is added and then fails, the reverse, or a gate blocked for another
+reason (a deny rule removed leaves it only unapproved, and that notice names
+the rule to add):
 
 ```text
 Scheduled task ab12cd34 (every 2 minutes): its gate command failed, so the
@@ -215,7 +217,7 @@ Its exit code and stdout decide the outcome:
 | ------------------------------------ | ----------- | --------------------------------------------------------------------------------- |
 | exit 0, no visible stdout            | `quiet`     | Nothing is queued or recorded in the transcript.                                  |
 | exit 0, stdout non-empty             | `delivered` | The fire is delivered with the output (first 16 KiB; truncation is noted).        |
-| non-zero exit, timeout, cannot start | `failed`    | A notice is delivered for the first failure of a streak; later ones are counted.  |
+| non-zero exit, timeout, cannot start | `failed`    | A notice opens a streak or marks a change in it; later ones are counted.          |
 | binary output                        | `failed`    | The command is stopped; same as any other failure.                                |
 | exit 0, stdout empty, stdout held    | `failed`    | Something it started in the background still held its stdout 1 s after it exited. |
 | not allowed to run unattended (5.4)  | `blocked`   | Same as `failed`, with the rule to add.                                           |
@@ -282,7 +284,9 @@ The job keeps a `gateStatus` summary: last outcome and time, quiet fires
 since the last delivery, consecutive failures, and the last error line. For
 durable tasks it is written with the per-fire persist that already stores
 `lastFiredAt`, so a one-minute gated task rewrites the file no more often than
-a one-minute plain task does today.
+a one-minute plain task does today. A quiet fire that ends a failure streak is
+written at once: a restart before the next fire would otherwise reload the
+streak and count the next failure into it, unreported.
 
 Quiet fires do not append to the task's `runs` ring; a one-minute cadence
 would flush its 20 entries in 20 minutes. Delivered, failed and blocked fires
@@ -455,14 +459,14 @@ Rejected:
 
 ## 7. Limits
 
-| Limit                    | Value                                             |
-| ------------------------ | ------------------------------------------------- |
-| Gate timeout             | 60 s; a timeout is a failure                      |
-| Delivered output         | first 16 KiB of stdout; truncation is noted       |
-| Failure notice           | last 20 lines of stderr, 2 KiB                    |
-| Concurrency              | one gate run per task; an overlapping slot skips  |
-| Failure reporting        | once per streak and kind; counted in `gateStatus` |
-| Catch-up for quiet fires | none; the next slot runs the probe again          |
+| Limit                    | Value                                                    |
+| ------------------------ | -------------------------------------------------------- |
+| Gate timeout             | 60 s; a timeout is a failure                             |
+| Delivered output         | first 16 KiB of stdout; truncation is noted              |
+| Failure notice           | last 20 lines of stderr, 2 KiB                           |
+| Concurrency              | one gate run per task; an overlapping slot skips         |
+| Failure reporting        | when a streak starts or changes; counted in `gateStatus` |
+| Catch-up for quiet fires | none; the next slot runs the probe again                 |
 
 ## 8. Risks
 
@@ -537,8 +541,8 @@ Web Shell-created gated task across a daemon restart.
   session.
 - A gate that prints output wakes the session exactly once per fire, with the
   output after the prompt and marked as data.
-- A failing gate is reported once per streak and kind (blocked, failed) and
-  never runs the task prompt.
+- A failing gate is reported when its streak starts or changes, never at
+  every fire, and never runs the task prompt.
 - A gate proposed by the model is confirmed like a `Monitor` command; a gate
   that may not run unattended is blocked with the rule to add, never run.
 - A durable gated task survives a restart of the CLI or the daemon with its

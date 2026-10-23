@@ -1878,7 +1878,7 @@ const EN: Messages = {
   'scheduledTasks.gatePlaceholder':
     'e.g. ./check-pr.sh 15057 — a command that prints only what changed',
   'scheduledTasks.gate.hint':
-    'Runs from the project directory before each scheduled fire, outside the model. Exit 0 with output wakes the session with that output attached as data; exit 0 with nothing on stdout skips the fire with no turn; a non-zero exit reports only its stderr, once per streak. It runs unattended only where the session would run the same command without asking — a saved Monitor(…) or Bash(…) rule, a read-only command, or an auto or yolo session; otherwise every fire is blocked.',
+    'Runs from the project directory before each scheduled fire, outside the model. Exit 0 with output wakes the session with that output attached as data; exit 0 with nothing on stdout skips the fire with no turn; a non-zero exit reports only its stderr, and only when the gate starts failing. It runs unattended only where the session would run the same command without asking — a saved Monitor(…) or Bash(…) rule, a read-only command, or an auto or yolo session; otherwise every fire is blocked.',
   'scheduledTasks.gate.cardPrefix': 'Gate:',
   'scheduledTasks.gate.notRunYet': 'gate not run yet',
   'scheduledTasks.gate.neverDelivered': 'never',
@@ -6272,7 +6272,7 @@ const ZH: Messages = {
   'scheduledTasks.gatePlaceholder':
     '例如：./check-pr.sh 15057 —— 一条只打印变化的命令',
   'scheduledTasks.gate.hint':
-    '每次定时触发前在模型之外、从项目目录运行。退出码 0 且有输出时唤醒会话，并把输出作为数据附上；退出码 0 且 stdout 为空则跳过本次触发、不产生回合；非零退出只报告其 stderr，每个连段一次。只有在会话本身不经询问就会运行这条命令时(已保存的 Monitor(…) 或 Bash(…) 规则、只读命令，或 auto/yolo 模式)才会无人值守运行，否则每次触发都会被阻止。',
+    '每次定时触发前在模型之外、从项目目录运行。退出码 0 且有输出时唤醒会话，并把输出作为数据附上；退出码 0 且 stdout 为空则跳过本次触发、不产生回合；非零退出只报告其 stderr，且只在闸门开始失败时报告。只有在会话本身不经询问就会运行这条命令时(已保存的 Monitor(…) 或 Bash(…) 规则、只读命令，或 auto/yolo 模式)才会无人值守运行，否则每次触发都会被阻止。',
   'scheduledTasks.gate.cardPrefix': '闸门：',
   'scheduledTasks.gate.notRunYet': '闸门尚未运行',
   'scheduledTasks.gate.neverDelivered': '从未',

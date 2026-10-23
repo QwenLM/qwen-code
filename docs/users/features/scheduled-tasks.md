@@ -84,7 +84,7 @@ Qwen Code pins the fire time to a specific minute and hour using a cron expressi
 
 ## Wake the session only when something changed
 
-A recurring task can carry a **gate**: a shell command that runs at each fire time, outside the model. If it prints nothing and exits 0, the fire is skipped — no turn runs and nothing is added to the conversation. If it prints output, the task's prompt runs with that output attached and marked as data produced by the command. A command that fails, prints binary data or runs longer than 60 seconds is reported once, then counted silently until it succeeds again; `CronList` shows the count.
+A recurring task can carry a **gate**: a shell command that runs at each fire time, outside the model. If it prints nothing and exits 0, the fire is skipped — no turn runs and nothing is added to the conversation. If it prints output, the task's prompt runs with that output attached and marked as data produced by the command. A command that fails, prints binary data or runs longer than 60 seconds is reported once, then counted silently until it succeeds again or is blocked; `CronList` shows the count.
 
 Use a gate for watches that are usually quiet, with a command that keeps its own cursor and prints only what changed:
 

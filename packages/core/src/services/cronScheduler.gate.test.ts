@@ -213,6 +213,29 @@ describe('CronScheduler gate', () => {
     });
   });
 
+  it('reports a gate blocked for another reason, so the rule to add reaches the session', async () => {
+    // A deny rule is removed: the gate is now only unapproved, and that
+    // notice is the one that names the rule.
+    createGated();
+    scheduler.tick(at(10, 30, 59));
+    await script.release({
+      kind: 'blocked',
+      reason: 'a permission rule denies it',
+    });
+    const unapproved: CronGateResult = {
+      kind: 'blocked',
+      reason: 'it has not been approved to run unattended in this session',
+      rule: 'Monitor(./probe.sh)',
+    };
+    scheduler.tick(at(10, 31, 59));
+    await script.release(unapproved);
+    expect(fired).toHaveLength(2);
+    expect(fired[1]!.prompt).toContain('`Monitor(./probe.sh)`');
+    scheduler.tick(at(10, 32, 59));
+    await script.release(unapproved);
+    expect(fired).toHaveLength(2);
+  });
+
   it('blocks every gated fire when the scheduler has no runner', async () => {
     const bare = new CronScheduler();
     const bareFired: CronJob[] = [];
@@ -567,6 +590,33 @@ describe('CronScheduler gate', () => {
       expect(approved('swapped')).toBe(false);
       scheduler.approveGate('swapped', './other.sh');
       expect(approved('swapped')).toBe(true);
+    });
+
+    it('stores a quiet fire that ends a failure streak at once, so a restart cannot revive the streak', async () => {
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'p',
+        true,
+        './probe.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      scheduler.tick(at(10, 30, 59));
+      await script.release(failed);
+      scheduler.tick(at(10, 31, 59));
+      await script.release(quiet);
+      // Before the next slot's tick persist: the file already has the
+      // streak ended, so a scheduler that reloads it reports its next
+      // failure.
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      const [task] = await readCronTasks(tmpDir);
+      expect(task?.gateStatus).toMatchObject({
+        lastOutcome: 'quiet',
+        consecutiveFailures: 0,
+      });
+      expect(task?.runs).toEqual([expect.objectContaining({ gate: 'failed' })]);
     });
 
     it('keeps a late result of the replaced command off the new gate', async () => {

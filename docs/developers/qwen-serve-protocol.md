@@ -598,7 +598,8 @@ operator diagnostic snapshot documented below.
 `PATCH /scheduled-tasks`, and `gate` and `gateStatus` on task views. A gate is
 a shell command the owning session runs at each fire, outside the model:
 exit 0 with output delivers the fire with that output attached, exit 0 with
-nothing on stdout skips it, and a non-zero exit is reported once per streak.
+nothing on stdout skips it, and a non-zero exit is reported when the gate
+starts failing, not at every fire.
 `gateStatus.lastOutcome` is `quiet`, `delivered`, `failed` or `blocked`.
 
 - A gate needs a recurring task: `POST` with `recurring: false`, or a `PATCH`

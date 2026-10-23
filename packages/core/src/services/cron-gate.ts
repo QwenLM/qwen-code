@@ -8,7 +8,8 @@
  * @fileoverview The gate of a scheduled task: a shell command the scheduler
  * runs at fire time, outside the model, to decide whether the fire reaches a
  * session. Silence skips the fire, output delivers it with the output
- * attached, and a failure is reported once per streak and kind.
+ * attached, and a failure is reported when its streak starts or changes,
+ * not at every fire.
  * See docs/design/2026-10-21-scheduled-task-gate.md.
  */
 
@@ -425,7 +426,8 @@ export function buildGatedFirePrompt(
   );
 }
 
-/** Delivered instead of the prompt for the first failure of a streak. */
+/** Delivered instead of the prompt for a failure that opens a streak or
+ * follows a blocked fire. */
 export function buildGateFailureNotice(
   job: GateJob,
   result: Extract<CronGateResult, { kind: 'failed' }>,
@@ -453,7 +455,7 @@ export function buildGateBlockedNotice(
     : '';
   return (
     `Scheduled task ${job.id} (${humanReadableCron(job.cronExpr)}): its gate command \`${job.gate}\` was not run because ${result.reason}, so the task prompt did not run.${remedy} ` +
-    `This is reported once; further blocked fires are counted silently until the gate runs again (see ${ToolNames.CRON_LIST}). ` +
+    `This is reported once; further fires blocked for the same reason are counted silently until the gate runs again (see ${ToolNames.CRON_LIST}). ` +
     'Tell the user. Do not run the task prompt.'
   );
 }

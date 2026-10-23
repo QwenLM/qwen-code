@@ -1560,10 +1560,14 @@ export class CronScheduler {
     };
     debugLogger.debug(`gate for ${job.id}: ${outcome} (streak ${streak})`);
 
-    // A notice opens a streak, and again when the streak changes kind: the
-    // blocked notice promises silence only until the gate runs, so a gate
-    // that runs once its rule is added and then fails is reported.
-    const reportable = streak === 1 || previous?.lastOutcome !== outcome;
+    // A notice opens a streak, and again whenever it changes: from blocked to
+    // failed or back, or to another reason the gate is blocked for. The
+    // blocked notice promises silence only until the gate runs, and only a
+    // gate blocked as not approved is told the rule to add.
+    const reportable =
+      streak === 1 ||
+      previous?.lastOutcome !== outcome ||
+      (result.kind === 'blocked' && previous?.lastError !== result.reason);
     let text: string | null = null;
     if (result.kind === 'output') {
       text = buildGatedFirePrompt(job, result, at);
@@ -1575,8 +1579,14 @@ export class CronScheduler {
     // The run record is written before the consumer sees the fire, so an ACP
     // per-run dispatch that annotates it (annotateRunSession awaits
     // pendingPersist) finds the entry. Only a fire that reaches a session is
-    // booked: a counted failure every slot would flush the 20-entry ring.
-    if (job.durable && outcome !== 'quiet') {
+    // booked: a counted failure every slot would flush the 20-entry ring. A
+    // quiet fire that ends a failure streak is stored at once too: a restart
+    // before the next tick persist would reload the streak and count the
+    // next failure into it, unreported.
+    if (
+      job.durable &&
+      (outcome !== 'quiet' || (previous?.consecutiveFailures ?? 0) > 0)
+    ) {
       this.persistGateOutcome(
         job,
         text !== null ? (outcome as CronGateRunOutcome) : undefined,
@@ -1590,8 +1600,8 @@ export class CronScheduler {
   }
 
   /** Stores the gate status summary and, for a fire that reached a session,
-   * books it in the task's run ring. Quiet fires come through neither path;
-   * their summary rides along with the next tick persist. */
+   * books it in the task's run ring. Other quiet fires come through neither
+   * path; their summary rides along with the next tick persist. */
   private persistGateOutcome(
     job: CronJob,
     run: CronGateRunOutcome | undefined,

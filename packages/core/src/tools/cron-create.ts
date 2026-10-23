@@ -301,7 +301,7 @@ class CronCreateInvocation extends BaseToolInvocation<
         ? `Auto-expires after ${formatDays(maxAgeDays)}. Use CronDelete to cancel sooner.`
         : 'Never auto-expires. Use CronDelete to cancel.';
       const gateNote = gate
-        ? ` Gate: \`${gate}\` runs at each fire; the prompt is delivered only when it prints output, a silent run costs no turn, and a failing run is reported once per streak.`
+        ? ` Gate: \`${gate}\` runs at each fire; the prompt is delivered only when it prints output, a silent run costs no turn, and a failing run is reported once, not at every fire.`
         : '';
       const llmContent =
         (recurring
@@ -361,7 +361,7 @@ export class CronCreateTool extends BaseDeclarativeTool<
         'Use sessionMode: "current" only when the user explicitly wants future runs to continue in this conversation. ' +
         'Current-session mode requires durable: true and an active daemon-backed prompt.\n\n' +
         '## Gate (optional)\n\n' +
-        'Pass gate: a shell command run at each fire, outside the model, from the project directory. It decides whether the fire reaches you: nothing on stdout and exit 0 = the fire is skipped (no turn, nothing recorded); output = the fire is delivered with the output appended after the prompt, marked as data; a non-zero exit or a timeout = reported once, then counted until the command succeeds again. ' +
+        'Pass gate: a shell command run at each fire, outside the model, from the project directory. It decides whether the fire reaches you: nothing on stdout and exit 0 = the fire is skipped (no turn, nothing recorded); output = the fire is delivered with the output appended after the prompt, marked as data; a non-zero exit or a timeout = reported once, then counted until the command succeeds again or is blocked. ' +
         'Use it for watches that are usually quiet ("every 2 minutes, check this PR"): the command keeps its own cursor and prints only what changed, and the prompt says what to do with the output. The command is confirmed like a Monitor command when the task is created and then runs unattended. Write the prompt as instructions, not as a slash command. A gate needs a recurring task (a one-shot whose gate is quiet would be consumed with nothing delivered).\n\n' +
         '## Runtime behavior\n\n' +
         'Jobs only fire while the REPL is idle (not mid-query). The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\n' +
@@ -402,7 +402,7 @@ export class CronCreateTool extends BaseDeclarativeTool<
           },
           gate: {
             type: 'string',
-            description: `Shell command run at each fire, outside the model. Prints nothing and exits 0 = the fire is skipped and no turn runs. Prints output = the fire is delivered with the output. Exits non-zero or runs longer than ${CRON_GATE_TIMEOUT_MS / 1000} s = reported once per streak.`,
+            description: `Shell command run at each fire, outside the model. Prints nothing and exits 0 = the fire is skipped and no turn runs. Prints output = the fire is delivered with the output. Exits non-zero or runs longer than ${CRON_GATE_TIMEOUT_MS / 1000} s = reported once, not at every fire.`,
           },
         },
         required: ['cron', 'prompt'],
