@@ -50,7 +50,6 @@ async function installRecovery(page: Page, running = false) {
   };
   if (running) {
     summary.activeTurn!.status = 'running';
-    summary.capabilities!.durableOperations = true;
     summary.recovery = undefined;
   }
   const operation = {
@@ -138,7 +137,7 @@ async function installRecovery(page: Page, running = false) {
       });
     if (path.endsWith('/transcript/query'))
       return route.fulfill({
-        json: { events, lastSequence: 6, hasMore: false },
+        json: { items: [], events, lastSequence: 6, hasMore: false },
       });
     if (path.endsWith('/events/stream'))
       return route.fulfill({ contentType: 'text/event-stream', body: '' });

@@ -1450,8 +1450,9 @@ class HostedMcpRestartFaultGatesIT {
                 loaded = json.readTree(response.body());
                 break;
             }
-            // The killed Harness still holds the writer lease; wait for it
-            // to lapse instead of treating the conflict as a failed load.
+            // killHarness() has already expired the dead writer's lease, so
+            // the first load is expected to succeed. Retry only a writer
+            // conflict that outlived the expiry, until that lease lapses.
             assertThat(response.statusCode()).as("load: %s",
                     response.body()).isEqualTo(409);
             JsonNode refusal = json.readTree(response.body());

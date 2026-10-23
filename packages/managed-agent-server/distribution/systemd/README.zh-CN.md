@@ -29,7 +29,7 @@ install -m 0600 -o qwen-managed-agent -g qwen-managed-agent \
 
 控制面以 `qwen-managed-agent` 身份读取 `application.yml` 和 `harness.env`，因此这两个文件由服务账号拥有、权限 `0600`。含 secret 的文件对 group 或 others 可读时，预检会在 `config` 和 `credentials` 行给出警告；WARN 不会让 `--check` 失败，请执行它给出的 `chmod 600`。`root` 拥有的 `0600` `harness.env` 服务读不到，`credentials` 行会将其报告为 FAIL。`systemd` 以 root 读取环境文件，因此 `server.env` 保持 `0640 root:qwen-managed-agent` 即可。
 
-Harness token 和 capability digest 只保存在 `harness.env` 中：`server.env` 通过 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` 指向它；若该文件与 `QWEN_MANAGED_AGENT_HARNESS_TOKEN` 或 `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` 同时设置，控制面会拒绝启动。`harness.env` 中的每项凭据都应在一行内写成 `KEY=value`，使用 LF 换行，`=` 两侧不留空白，值只用字母、数字和 `._:/+=-`。其余写法（例如续行或闭引号之后的文字）都会被控制面拒绝，因为 systemd 或 shell 会以不同方式读取它们。若 `qwen serve` 因 4170 被占用而报告了其他端口，请在启动控制面前把 `server.env` 中的 `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` 改为实际端口。Session Store 无需单独配置：控制面从自己的监听推导其 URL（不随 Harness 端口变化），并从 `QWEN_MANAGED_AGENT_WORKSPACE_CWD`（即上文创建的目录）推导其 workspace ID。
+Harness token 和 capability digest 只保存在 `harness.env` 中：`server.env` 通过 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` 指向它；若该文件与 `QWEN_MANAGED_AGENT_HARNESS_TOKEN` 或 `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` 同时设置，控制面会拒绝启动。`harness.env` 中的每项凭据都应在一行内写成 `KEY=value`，使用 LF 换行，`=` 两侧不留空白，值只用字母、数字和 `._:/+=-`，注释以 `#` 开头。其余写法（例如续行、`;` 注释或闭引号之后的文字）都会被控制面拒绝，因为 systemd 或 shell 会以不同方式读取它们。若 `qwen serve` 因 4170 被占用而报告了其他端口，请在启动控制面前把 `server.env` 中的 `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` 改为实际端口。Session Store 无需单独配置：控制面从自己的监听推导其 URL（不随 Harness 端口变化），并从 `QWEN_MANAGED_AGENT_WORKSPACE_CWD`（即上文创建的目录）推导其 workspace ID。
 
 也可以运行 `../bin/qwen-managed-agent-bootstrap --directory /etc/qwen-managed-agent` 生成这三个文件，随后调整属主与权限。
 
