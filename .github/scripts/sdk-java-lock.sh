@@ -38,12 +38,10 @@ sdk_java_lock_acquire() {
   if [[ ${class} == 'fast' ]]; then
     rank=0
   fi
-  # 1200 s sits well inside the 5400 s write-back budget, the shorter of
-  # the two acquisition budgets, and leaves 4200 s of it — enough for four
-  # 925 s holds (8400 s at the test lane's 9600 s). At or above a
-  # budget promotion would rename a ticket in the same iteration whose
-  # timeout arm deletes it; sdk-java-workflow.test.js pins the default below
-  # both budgets.
+  # 1200 s sits well inside both acquisition budgets (the write-back's
+  # 5400 s is the shorter). At or above a budget promotion would rename a
+  # ticket in the same iteration whose timeout arm deletes it;
+  # sdk-java-workflow.test.js pins the default below both budgets.
   local promote_after="${SDK_JAVA_LOCK_PROMOTE_AFTER:-1200}"
   local lock="${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
   local queue="${lock}.queue"

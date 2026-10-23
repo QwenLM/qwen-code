@@ -141,10 +141,10 @@ describe('SDK Java self-hosted workflow guards', () => {
     // The ticketed queue makes the wake order deterministic and the fast
     // class puts this tier's ticket ahead of waiting full-tier tickets, so
     // the pin is the sourced helper, its budget, and the tier argument. The
-    // longest live hold measures 925 s, so the 9600 s budget covers about
-    // ten chained holds and lowers the failure probability; no constant
-    // budget bounds the queue (#14566, #15031). Run 39754359013 burned the
-    // old 5400 s behind the MariaDB lane's verify hold.
+    // 9600 s budget is headroom for about ten chained test-lane holds, sized
+    // from the hold length rather than an observed chain; no constant budget
+    // bounds the queue (#14566, #15031). Run 39754359013 burned the old
+    // 5400 s behind the MariaDB lane's verify hold, a shape #15128 removed.
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
@@ -154,6 +154,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     // fallback keeps acquisition independent of the checkout's ref.
     expect(block).toContain('flock --wait 9600 9');
     expect(block).toContain('::error::sdk-java host lock not acquired within');
+    expect(block).toContain(
+      '::error::sdk-java host lock not acquired within 160 minutes',
+    );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
@@ -1231,6 +1234,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(step.run).toContain(
       '::error::sdk-java host lock not acquired within',
     );
+    expect(step.run).toContain(
+      '::error::sdk-java host lock not acquired within 90 minutes',
+    );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
     // The fast tier owns the same lock: it overtakes this job only while
     // this ticket still waits, then waits out its hold. This write-back
@@ -1281,9 +1287,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + writeBackBound + 30 * 60);
     // The sibling test job shares the same per-host lock but carries a longer
     // budget, because a waiting test leg can queue behind several holds. Its
-    // ceiling must cover that full wait plus its own measured hold (the
-    // sdk-java suite plus the managed-agent H2 suite, 925 s) and ~11 minutes
-    // of setup.
+    // ceiling must cover that full wait plus its own hold (the sdk-java suite
+    // plus the managed-agent H2 suite) and ~11 minutes of setup; the design
+    // doc's Goals sizes the hold.
     const testBudget = Number(
       parsed.jobs.test.steps
         .map(

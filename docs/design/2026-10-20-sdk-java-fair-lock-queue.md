@@ -29,9 +29,12 @@ hold at a time — no constant budget bounds the queue.
   automatically at the step boundary; the pinned infrastructure-signature
   error text (`lock not acquired within`) stays so the rerun classifier in
   `qwen-autofix.yml` is untouched.
-- Goal: raise the test-lane wait budget to 9600 s. The longest live hold
-  measures 925 s, so that covers about ten chained holds and lowers the
-  failure probability — no constant budget bounds the queue (qwen-code#15243).
+- Goal: raise the test-lane wait budget to 9600 s. With the MariaDB lane's
+  suite off the lock, this workflow's longest hold is the test lane's own
+  suite — 925 s in the ceiling arithmetic since #14801 — so 9600 s covers
+  about ten chained holds and stays above the 8685 s hold measured before
+  #15128. That ten is headroom chosen from the hold length, not an observed
+  chain; no constant budget bounds the queue (qwen-code#15243).
 - Non-goal: reducing total occupancy. Sharding the lock by suite, capping
   registrations per host, or adding hosts are orthogonal and can follow;
   fairness makes their remaining work measurable instead of urgent.
@@ -161,15 +164,16 @@ ticket's class.
 Priority does not bound a single hold. The same 2026-10-21 job then waited
 its last 52 minutes as head behind one hold and timed out. Before the
 MariaDB lane's suite moved off the lock, its holds of 7426 s and 8685 s were
-measured here. A chain of holds can outlast a budget too: on 2026-10-22 run
-39754359013's Java 11 and Java 21 lanes each burned the full 5400 s while
-the MariaDB lane still held the lock for its verify (qwen-code#15243). At
-this commit the longest live hold is a 925 s test-lane hold, so the test
-lane's 9600 s acquisition budget covers about ten chained holds and lowers
-the failure probability; no constant budget bounds the queue (#14566,
-#15031). Its ceiling rises to 200 minutes (9600 s wait + one 925 s hold +
-~11 minutes of setup). The MariaDB write-back keeps 5400 s and its
-310-minute ceiling:
+measured here, and a chain of holds could outlast a budget too: on
+2026-10-22 run 39754359013's Java 11 and Java 21 lanes each burned the full
+5400 s while the MariaDB lane still held the lock for its verify
+(qwen-code#15243) — pre-#15128 history, like those longer holds. At this
+commit the longest hold this workflow takes is the test lane's own 925 s
+suite, so its 9600 s acquisition budget is headroom for about ten chained
+holds, sized from that hold and not from an observed chain; no constant
+budget bounds the queue (#14566, #15031). Its ceiling rises to 200 minutes
+(9600 s wait + one 925 s hold + ~11 minutes of setup). The MariaDB
+write-back keeps 5400 s and its 310-minute ceiling:
 its own hold is the short copy, and its wait sits after the ~3-hour verify,
 so a larger budget would not fit a legal job ceiling. Naming the holder (a
 long ticketed hold, or a process that never took a ticket) is the diagnostic

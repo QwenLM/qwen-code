@@ -38,15 +38,15 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    # One per-host lock wait plus the locked Maven work it guards. A
-    # hold measures 925 s (the sdk-java suite plus the managed-agent H2
-    # suite), but a waiter can queue behind several sibling holds: the
-    # 2026-10-22 full-tier run burned the old 5400-second budget behind the
-    # MariaDB lane's verify hold (qwen-code#15243). The longest live hold
-    # now measures 925 s, so the 9600-second wait covers about ten chained
-    # holds and lowers the failure probability; no constant budget bounds
-    # the queue itself (#14566, #15031). The ticketed queue in
-    # .github/scripts/sdk-java-lock.sh serves the fast
+    # One per-host lock wait plus the locked Maven work it guards. The test
+    # lane runs its whole suite under the lock, so a waiter can queue behind
+    # several sibling holds. The 2026-10-22 run 39754359013 burned the then
+    # 5400-second budget behind the MariaDB lane's verify hold — the shape
+    # #15128 removed (qwen-code#15243) — and the 9600-second wait is headroom
+    # for about ten chained test-lane holds, sized from the hold length
+    # rather than an observed chain (the design doc's Goals restates this);
+    # no constant budget bounds the queue itself (#14566, #15031). The
+    # ticketed queue in .github/scripts/sdk-java-lock.sh serves the fast
     # class first: a fast-tier leg waits for the running hold, at most one
     # parked full-tier head and older fast-class tickets, overtaking only
     # full-tier tickets younger than SDK_JAVA_LOCK_PROMOTE_AFTER (under a
