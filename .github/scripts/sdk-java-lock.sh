@@ -22,11 +22,16 @@
 # single hold longer than that window every waiting normal ticket crosses the
 # threshold together and the queue is plain sequence order.
 #
-# Source this file and call `sdk_java_lock_acquire <wait-seconds> [fast|full]`
-# (an empty tier means normal); it returns non-zero on timeout with the pinned
-# `lock not acquired within` error.
+# Source this file and call
+# `sdk_java_lock_acquire <wait-seconds> [fast|full] [best-effort]` (an empty
+# tier means normal); it returns non-zero on timeout. Without `best-effort` the
+# timeout prints the pinned `lock not acquired within` error for a step that
+# fails; with it the timeout is a warning, so a caller that only skips optional
+# work can stay green without leaving the infrastructure signature on a
+# succeeding job.
 sdk_java_lock_acquire() {
   local wait_seconds="${1:?wait seconds required}"
+  local best_effort="${3:-}"
   # Callers pass the workflow tier (`fast`, `full`, or empty); everything but
   # `fast` is the normal class. Resolve it once so the rank, the periodic wait
   # line, and the timeout line all report the class the ticket actually has.
@@ -168,7 +173,11 @@ sdk_java_lock_acquire() {
       # stays literal, so say so instead of printing `*`.
       head=$(printf '%s\n' "${queue}/"* | grep -v '/\.seq$' | sort | sed -n '1p')
       [[ -e ${head} ]] || head='(no other ticket queued)'
-      echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq} (${class}); head of queue is ${head##*/}"
+      if [[ ${best_effort} == 'best-effort' ]]; then
+        echo "::warning::sdk-java host lock wait exhausted as queue ticket ${seq} (${class}); head of queue is ${head##*/}"
+      else
+        echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq} (${class}); head of queue is ${head##*/}"
+      fi
       echo "holder of ${lock} at timeout:"
       sdk_java_lock_holder_hint "${lock}"
       return 1

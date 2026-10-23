@@ -26,12 +26,15 @@ hold at a time — no constant budget bounds the queue.
 - Goal: make the wait deterministic. A waiter's worst-case wait is the work
   ahead of it in line, not how often it has re-entered the queue.
 - Goal: preserve the current semantics elsewhere. The lock still releases
-  automatically at the step boundary; the pinned infrastructure-signature
-  error text (`lock not acquired within`) stays so the rerun classifier in
-  `qwen-autofix.yml` is untouched.
+  automatically at the step boundary; a step that fails on the lock keeps the
+  pinned infrastructure-signature error text (`lock not acquired within`) so
+  the rerun classifier in `qwen-autofix.yml` is untouched.
 - Non-goal: reducing total occupancy. Sharding the lock by suite, capping
   registrations per host, or adding hosts are orthogonal and can follow;
-  fairness makes their remaining work measurable instead of urgent.
+  fairness makes their remaining work measurable instead of urgent. The
+  hold-scope change below does run sdk-java suites concurrently on one host;
+  that host-resource contention is an accepted residual (see Hold scope), not
+  a claim that concurrent suites are free.
 - Non-goal: changing the 5400 s budget or the 150/310-minute job ceilings.
 
 ## Design
@@ -109,10 +112,22 @@ the Java 11/17 legs across the sdk-java suite. On 2026-10-22 run
 runs all three Maven commands unlocked, and takes the lock only for its
 write-back, so no hold spans a suite anywhere in this workflow.
 
+This is strictly more suite concurrency than the sharded-lock alternative
+rejected below, on a pool whose only recorded evidence is that it OOMed a
+build. No per-host memory headroom measurement is available for concurrent
+sdk-java suites, so host-resource contention is an accepted residual of this
+change, owned by the SDK Java CI maintainers: if a Java leg flakes while
+sibling suites run on the same host, re-scope the lock for that lane rather
+than attributing the flake to the suite.
+
 The write-back acquisition is also best-effort at both sites: a lock that
 cannot be acquired within its budget warns and skips the copy instead of
-failing a step whose suite already passed. The `lock not acquired within`
-substring, the 5400 s budget, and the fd 9 closures are unchanged.
+failing a step whose suite already passed. On that path the helper emits a
+distinct `sdk-java host lock wait exhausted` warning instead of the pinned
+`lock not acquired within` error, so a succeeding step cannot leave the
+infrastructure signature on a job where a later genuine failure would be
+misclassified; the fatal callers outside this workflow keep the substring.
+The 5400 s budget and the fd 9 closures are unchanged.
 
 ### Fast-tier priority
 
@@ -184,8 +199,10 @@ order this section exists to prevent.
 ### Why fairness over the alternatives
 
 - Shard the lock by suite: reduces queue frequency but each shard is still a
-  bare flock, and it rides on an untested assumption that concurrent suites
-  share the host safely on a pool that just OOMed a build.
+  bare flock. The earlier rejection rested on an untested assumption that
+  concurrent suites share the host safely; the hold-scope change now runs the
+  suites unlocked, so the remaining concern is the host-contention residual
+  recorded under Hold scope, not a reason to keep suite-spanning holds.
 - Cap registrations per host: needs pool topology changes outside the repo
   and leaves the same lost-place race per host.
 - Second host: at least three hosts starved simultaneously; host count is
@@ -240,8 +257,10 @@ order this section exists to prevent.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
-- The error text still contains the substring `lock not acquired within`,
-  so `qwen-autofix.yml`'s `INFRA_FAILURE_SIGNATURES` keeps matching.
+- Fatal lock callers still contain the substring `lock not acquired within`
+  so `qwen-autofix.yml`'s `INFRA_FAILURE_SIGNATURES` keeps matching; the
+  best-effort write-back path emits `sdk-java host lock wait exhausted`
+  instead, so a succeeding step cannot carry the infrastructure signature.
 
 ## Open questions
 

@@ -600,6 +600,56 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   );
 
   it(
+    'returns on a best-effort timeout so the caller guard keeps the step green',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-best-effort-'));
+      const held = join(home, 'held');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, join(home, 'order')));
+      const child = spawn(
+        'bash',
+        [
+          '--noprofile',
+          '--norc',
+          '-eo',
+          'pipefail',
+          '-c',
+          [
+            `source "${script}"`,
+            'sdk_java_lock_acquire 5 fast best-effort || echo GUARD_FIRED',
+            'echo SURVIVED',
+          ].join('\n'),
+        ],
+        {
+          env: { ...baseEnv, HOME: home, PATH: `${stub}:${process.env.PATH}` },
+        },
+      );
+      const state = { out: '' };
+      child.stdout.on('data', (d) => (state.out += d));
+      child.stderr.on('data', (d) => (state.out += d));
+      const code = await new Promise((resolve) => child.on('close', resolve));
+      // Both markers are the contract: GUARD_FIRED proves the function
+      // returned instead of exiting the sourcing shell, SURVIVED proves the
+      // step continued to its guard.
+      expect(code).toBe(0);
+      expect(state.out).toContain('GUARD_FIRED');
+      expect(state.out).toContain('SURVIVED');
+      expect(state.out).toContain(
+        '::warning::sdk-java host lock wait exhausted',
+      );
+      // The fatal substring must not reach a succeeding step: a later
+      // genuine failure in the same job would be classified as infra.
+      expect(state.out).not.toContain(
+        '::error::sdk-java host lock not acquired within',
+      );
+      expect(readdirSync(queueDir(home)).filter((f) => f !== '.seq')).toEqual(
+        [],
+      );
+    },
+  );
+
+  it(
     'names the blocking head ticket when it times out behind one',
     { timeout: 30000 },
     async () => {
