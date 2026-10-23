@@ -1937,6 +1937,7 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        id: 'install'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
@@ -2000,9 +2001,11 @@ jobs:
       # Unlike macOS, whose E2E legs run this file in full, no other Windows
       # lane runs the Hosted cases, so this one runs all of them and fails if
       # any is skipped. It runs after the unit tests so that a Hosted failure
-      # cannot hide their results.
+      # cannot hide their results, but only after a successful install: without
+      # node_modules and dist the suite cannot even collect and the red is then
+      # attributed to a test file that never ran.
       - name: 'Hosted process suite'
-        if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ !cancelled() && steps.install.outcome == 'success' && needs.classify_pr.outputs.skip_ci != 'true' }}"
         timeout-minutes: 10
         run: |-
           npm run test:integration:hosted:sandbox:none -- --reporter=default --reporter=json --outputFile.json=hosted-process-suite.json
