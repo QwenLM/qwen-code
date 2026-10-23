@@ -1198,6 +1198,15 @@ public class ManagedExtensionRecordStore {
                 }
             }
         }
+        if (domain.equals("automation_run")) {
+            // The gate probe output a claim recorded, closed over the Session's
+            // resources like every other reference a body names.
+            JsonNode gateOutputRef = record.get("gateOutputRef");
+            if (gateOutputRef != null && !gateOutputRef.isNull()) {
+                requireReference(resources.apply(gateOutputRef.get("resourceId").textValue()),
+                        gateOutputRef);
+            }
+        }
         if (domain.equals("schedule")) {
             JsonNode ref = record.get("promptRef");
             requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
