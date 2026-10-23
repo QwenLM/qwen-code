@@ -349,7 +349,7 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
-     * Collects the parsed records in the same pass; the legacy cache still uses the last activation
+     * Collects the parsed records in the same pass; the head projection uses the last activation
      * payload.
      */
     record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation, List<JsonNode> records) {}
@@ -484,6 +484,16 @@ public class ManagedExtensionRecordStore {
                                 + ":<n> id.");
             }
             if ("activation.changed".equals(kind)) {
+                require(payload.path("activationId").isTextual()
+                        && !payload.path("activationId").textValue().isEmpty()
+                        && payload.path("activationId").textValue().length()
+                                <= ManagedSessionStoreModels.MAX_ACTIVATION_ID_CHARS,
+                        "Activation id must fit the journal head.");
+                require(payload.path("phase").isTextual()
+                        && !payload.path("phase").textValue().isEmpty()
+                        && payload.path("phase").textValue().length()
+                                <= ManagedSessionStoreModels.MAX_ACTIVATION_PHASE_CHARS,
+                        "Activation phase must fit the journal head.");
                 lastActivation = payload;
             }
             if ("tool.receipt".equals(kind)) {
@@ -935,14 +945,37 @@ public class ManagedExtensionRecordStore {
      * committed record names it (the attach, or a verdict that names a minted child), else null.
      * The record body is the only place that fact lives; no other kind has a child Session.
      */
-    public String childSessionId(String tenantId, String sessionId,
-            TaskRow task) {
-        if (!CHILD_SESSION_TASK_KINDS.contains(task.kind())) {
+    public record ChildTaskDetails(String sessionId, Boolean stopRequested, String approvalMode) { }
+
+    public Long activeChildCount(String tenantId, String sessionId) {
+        if (sessions == null || sessions.requireSession(tenantId, sessionId).publicChildAgentsVersion() != 1) {
             return null;
         }
-        JsonNode named = readBody(readResource(tenantId, sessionId,
-                task.resourceId())).get("childSessionId");
-        return named == null || named.isNull() ? null : named.textValue();
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE"
+                        + " record_kind = 'DOMAIN' AND session_scope_key = ? AND tenant_id = ?"
+                        + " AND session_id = ? AND task_kind = 'child_agent'"
+                        + " AND task_state NOT IN ('completed', 'failed', 'cancelled')",
+                Long.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId);
+    }
+
+    public String childSessionId(String tenantId, String sessionId, TaskRow task) {
+        return childTaskDetails(tenantId, sessionId, task).sessionId();
+    }
+
+    public ChildTaskDetails childTaskDetails(String tenantId, String sessionId, TaskRow task) {
+        if (!CHILD_SESSION_TASK_KINDS.contains(task.kind())) {
+            return new ChildTaskDetails(null, null, null);
+        }
+        JsonNode record = readBody(readResource(tenantId, sessionId, task.resourceId()));
+        JsonNode named = record.get("childSessionId");
+        String childId = named == null || named.isNull() ? null : named.textValue();
+        boolean publicParent = sessions != null
+                && sessions.requireSession(tenantId, sessionId).publicChildAgentsVersion() == 1;
+        var child = !publicParent || childId == null ? null : sessions.requireSession(tenantId, childId);
+        boolean publicChild = child != null && child.publicChildAgentsVersion() == 1;
+        return new ChildTaskDetails(childId,
+                publicParent && "child_agent".equals(task.kind()) ? record.path("stopRequested").booleanValue() : null,
+                publicChild ? child.approvalMode() : null);
     }
 
     /**

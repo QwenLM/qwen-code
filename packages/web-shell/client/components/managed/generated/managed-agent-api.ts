@@ -93,7 +93,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission with public Session creation: the server-selected profile for the built-in qwen-code agent, and the profile selected by a stored definition's single allowlisted hosted_profile tools entry for a definition-pinned Session. Newly bound qwen-code Sessions, including empty creation, persist hosted-workspace-shell/1 with mandatory default/auto-edit approval when the Shell deployment opt-in is enabled; otherwise they persist hosted-workspace-files/1 with the configured file approval mode. The switch does not override a stored AgentDefinition's compiled profile or approval mode. Public callers cannot select the built-in profile. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grant it needs survives the cancellation), and the Session's own liveness keeps OPERATOR access even when its Workspace's background-exit observation closes some other bound Session; cancel is always allowed for its own running Turn even outside the Workspace files opt-in. A definition-pinned Session keeps its pinned revision's tool profile, model and instructions for its whole life, and a replay of the create command reuses the original pin; a WebShell Session inherits its Workspace's default Workspace selection when the request omits one. Shell Sessions additionally require the Shell opt-in and valid persisted approval for fresh Turns; disabling only Shell admission preserves original-key replay and accepted approvals and cancellation while Workspace files remain enabled and persisted approval remains valid. The public Shell tool list does not include the child agent tool. Invalid approval or files-off can refuse attachment. Public Shell close, archive, unarchive and delete stay unavailable, including protocol-0. Fresh Shell sending also requires foregroundShell=true; workspaceTurns alone is not sufficient Shell Turn admission. Manual rename uses the independent rename capability. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission with public Session creation: the server-selected profile for the built-in qwen-code agent, and the profile selected by a stored definition's single allowlisted hosted_profile tools entry for a definition-pinned Session. Newly bound qwen-code Sessions, including empty creation, persist hosted-workspace-shell/1 with mandatory default/auto-edit approval when the Shell deployment opt-in is enabled; otherwise they persist hosted-workspace-files/1 with the configured file approval mode. The switch does not override a stored AgentDefinition's compiled profile or approval mode. Public callers cannot select the built-in profile. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grant it needs survives the cancellation), and the Session's own liveness keeps OPERATOR access even when its Workspace's background-exit observation closes some other bound Session; cancel is always allowed for its own running Turn even outside the Workspace files opt-in. A definition-pinned Session keeps its pinned revision's tool profile, model and instructions for its whole life, and a replay of the create command reuses the original pin; a WebShell Session inherits its Workspace's default Workspace selection when the request omits one. Shell Sessions additionally require the Shell opt-in and valid persisted approval for fresh Turns; disabling only Shell admission preserves original-key replay and accepted approvals and cancellation while Workspace files remain enabled and persisted approval remains valid. Qualified new public Shell Sessions expose agent by default under the public-child deployment switch and runtime/Harness admission; existing Sessions retain their original tool scope. Invalid approval or files-off can refuse attachment. Public Shell close, archive, unarchive and delete stay unavailable, including protocol-0. Fresh Shell sending also requires foregroundShell=true; workspaceTurns alone is not sufficient Shell Turn admission. Manual rename uses the independent rename capability. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -110,6 +110,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Admits the command durably and returns its operation identity, admission stage and delivery state. Replaying the same idempotency key returns the original command operation. Existing Session and actor authorization checks apply. */
         post: operations["webShellSubmitTurn"];
         delete?: never;
         options?: never;
@@ -126,6 +127,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Admits the command durably and returns its operation identity, admission stage and delivery state. Replaying the same idempotency key returns the original command operation. Existing Session and actor authorization checks apply. */
         post: operations["webShellCancelTurn"];
         delete?: never;
         options?: never;
@@ -909,7 +911,7 @@ export interface components {
             /** @default 20 */
             limit?: number | null;
             /**
-             * @description Filter before pagination. Omission preserves all readable, undeleted Sessions. Cursors are bound to this filter; legacy cursors are valid only for all.
+             * @description Filter before pagination. Omission preserves all readable, undeleted Sessions. Cursors are bound to the normalized archive state and title query.
              * @default all
              * @enum {string}
              */
@@ -942,8 +944,8 @@ export interface components {
             requestId?: string | null;
             idempotencyKey: string;
             agentId: string;
-            /** @description Planned; phase one rejects non-blank values. */
-            environmentId?: string | null;
+            /** @description Optional host-catalog model for a bound built-in qwen-code Session. Requires modelSelectionSupported. Persisted atomically before the first Turn and included in creation idempotency; omission preserves the default model and old digest. */
+            modelId?: string;
             /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
             /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
@@ -969,12 +971,6 @@ export interface components {
             /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
-            /**
-             * @description D7-3. java_durable asks for the java_durable admission view: the 202 then names the command's operation (operationId, admissionStage, deliveryState), so a lost response resolves through that operation. Only a deployment whose Sessions advertise durableOperations admits it; elsewhere it answers 400 unsupported_feature before anything is read or written. Absent or harness_confirmed keeps today's response. harness_confirmed is the pinned reference design's qwen_confirmed. The request digest leaves this field out, so a retry under the same idempotencyKey replays the same command in either view.
-             * @default harness_confirmed
-             * @enum {string}
-             */
-            admissionProfile?: "harness_confirmed" | "java_durable";
         };
         WebShellCancelRequest: {
             /** @description Trace correlation only. */
@@ -983,28 +979,29 @@ export interface components {
             /** Format: uuid */
             sessionId: string;
             turnId: string;
-            /**
-             * @description D7-3. java_durable asks for the java_durable admission view: the 202 then names the command's operation (operationId, admissionStage, deliveryState), so a lost response resolves through that operation. Only a deployment whose Sessions advertise durableOperations admits it; elsewhere it answers 400 unsupported_feature before anything is read or written. Absent or harness_confirmed keeps today's response. harness_confirmed is the pinned reference design's qwen_confirmed. The request digest leaves this field out, so a retry under the same idempotencyKey replays the same command in either view.
-             * @default harness_confirmed
-             * @enum {string}
-             */
-            admissionProfile?: "harness_confirmed" | "java_durable";
         };
         /** @description Arbitrary caller metadata, as a JSON object (or null). Accepted and ignored in Phase 1: nothing from it is persisted. On WebShellCreateRequest the Session title travels in that request's own `title` field; WebShellSubmitRequest has no title surface. Any keys are valid. */
         WebShellMetadata: {
             [key: string]: unknown;
         } | null;
-        /** @description accepted means Java durable delivery responsibility, not model execution. The three operation fields come together, and only on a Turn input or cancel admission that asked for admissionProfile java_durable on a deployment advertising durableOperations (D7-3): operationId names the command's original submit_input or cancel operation, readable through the operation query, and admissionStage and deliveryState are that operation's latest durable values. A fresh input reads java_durable and pending; a cancel of a Turn that already ended reads its settled values. A retry under the same key answers the same operation with replayed true. Missing fields keep the legacy harness_confirmed response semantics, also for Session creation and for a replayed command recorded before v1.58. */
+        /** @description Command admission. Session creation and internal commands may omit operation fields. */
         WebShellAdmission: {
             /** Format: uuid */
             sessionId: string;
             turnId?: string | null;
             status: string;
             replayed: boolean;
+            /** @description Durable operation identifier for turn submission or cancellation. */
             operationId?: string;
-            /** @enum {string} */
+            /**
+             * @description Persisted admission stage of the operation.
+             * @enum {string}
+             */
             admissionStage?: "java_durable" | "harness_confirmed";
-            /** @enum {string} */
+            /**
+             * @description Current delivery state of the operation.
+             * @enum {string}
+             */
             deliveryState?: "pending" | "leased" | "confirmed" | "blocked";
         };
         WebShellTurn: {
@@ -1073,11 +1070,6 @@ export interface components {
              * @default false
              */
             cwdChange?: boolean;
-            /**
-             * @description D7-3. Present only on a deployment that enables the java_durable admission profile, where it is true while the Session is readable: a Turn input or cancel may then ask for admissionProfile java_durable. Omitted elsewhere, where asking for it answers 400 unsupported_feature.
-             * @default false
-             */
-            durableOperations?: boolean;
             /** @default false */
             actions: boolean;
             /**
@@ -1125,6 +1117,11 @@ export interface components {
              * @default false
              */
             contextCompression?: boolean;
+            /**
+             * @description Public child orchestration support for this persisted Session; launch and caller authorization are checked separately.
+             * @default false
+             */
+            childAgents?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -1264,7 +1261,7 @@ export interface components {
                  * @default false
                  */
                 workspaceContext: boolean;
-                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Turn at creation: Read/Write/Edit under hosted-workspace-files/1, or file tools plus mandatory-approval foreground Shell under hosted-workspace-shell/1 when the Shell opt-in is enabled. The public Shell tool list does not include the child agent tool. Callers holding the OPERATOR role may submit later Turns or rename under the same opt-in while the registry row stays ACTIVE and still backs the Session's binding and the actor recorded by the Workspace create command keeps OPERATOR or above, and may cancel a running Turn (its delivery re-checks no grants). Shell fresh sending also requires foregroundShell=true. Public Shell close, archive, unarchive and delete stay unavailable, including protocol-0, while close of other profiles follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close. */
+                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Turn at creation: Read/Write/Edit under hosted-workspace-files/1, or file tools plus mandatory-approval foreground Shell under hosted-workspace-shell/1 when the Shell opt-in is enabled. Qualified new public Shell Sessions expose agent by default under the public-child deployment switch and runtime/Harness admission; existing Sessions retain their original tool scope. Callers holding the OPERATOR role may submit later Turns or rename under the same opt-in while the registry row stays ACTIVE and still backs the Session's binding and the actor recorded by the Workspace create command keeps OPERATOR or above, and may cancel a running Turn (its delivery re-checks no grants). Shell fresh sending also requires foregroundShell=true. Public Shell close, archive, unarchive and delete stay unavailable, including protocol-0, while close of other profiles follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close. */
                 workspaceBinding: boolean;
                 /** @description Supports creating empty Workspaces under the operator-controlled root. Missing or false means unsupported; current actor and server admission checks still apply. */
                 workspaceCreation?: boolean;
@@ -1441,6 +1438,11 @@ export interface components {
             cursor?: string;
             /** @default 20 */
             limit?: number;
+            /**
+             * @description Include pending permission Actions of this public root Session and its direct children; each Action retains its actual owning sessionId.
+             * @default false
+             */
+            includeChildren?: boolean;
         };
         WebShellActionGetRequest: {
             /** Format: uuid */
@@ -1525,11 +1527,20 @@ export interface components {
             /** @description The newest Artifacts that hold durable task output, at most 100, oldest first. Entries must not rotate out until older Artifacts can be enumerated and attributed to the task: an evicted Artifact stays readable by id through the Session artifact routes but is no longer discoverable from the task. */
             artifactRefs: string[];
             actionCapabilities: components["schemas"]["TaskActionCapability"][];
+            /** @description A durable stop request has been recorded. This does not prove that the task has terminated. */
+            stopRequested?: boolean;
+            /**
+             * @description The actual immutable approval mode of this public child Session.
+             * @enum {string}
+             */
+            approvalMode?: "default" | "auto-edit" | "yolo";
         } & (unknown & unknown & unknown & unknown & unknown);
         WebShellTaskPage: {
             data: components["schemas"]["WebShellTask"][];
             hasMore: boolean;
             nextCursor?: string | null;
+            /** @description The total number of nonterminal child Agent tasks in this Session, independent of pagination. */
+            activeChildCount?: number;
         } & unknown;
         /** @description One task event: a logical state change, a bounded output chunk, or an Artifact reference. High-volume output goes to Artifacts or bounded chunks in this paged stream, never one Session event per raw line. The closed schema validates the server's own version; clients ignore unknown optional fields and unknown types and checkpoint their cursors. Strict response validation against an older minor version is not supported. Event identity, position, payload and accepted schema/projection versions are immutable across restart, projection rebuild and archival. */
         WebShellTaskEvent: {
@@ -1684,6 +1695,8 @@ export interface components {
             planModeSupported?: boolean;
             /** @description Optional deployment capability; missing means false. */
             inputAttachments?: boolean;
+            /** @description Optional capability for modelId on Workspace creation. Missing means false. */
+            modelSelectionSupported?: boolean;
             /** @description Optional deployment capability; missing means false. Requires a compatible Harness and durable Session Store. */
             skillsSupported?: boolean;
         };
@@ -1928,7 +1941,7 @@ export interface components {
         };
         WebShellRenameResult: {
             sessionId: string;
-            /** @description Current persisted title from the confirmed mutation or completed replay. Existing legacy titles can exceed the fresh-title input bound. */
+            /** @description Current persisted title from the confirmed mutation or completed replay. */
             title: string;
             replayed: boolean;
         };
@@ -2075,6 +2088,26 @@ export interface components {
             cursor?: string | null;
             /** @default 100 */
             limit?: number | null;
+        };
+        /** @description Durable Turn input or cancellation admission. The operation identifies the saved command and remains stable across idempotent retries. */
+        WebShellTurnAdmission: {
+            /** Format: uuid */
+            sessionId: string;
+            turnId: string;
+            status: string;
+            replayed: boolean;
+            /** @description Durable operation identifier for turn submission or cancellation. */
+            operationId: string;
+            /**
+             * @description Persisted admission stage of the operation.
+             * @enum {string}
+             */
+            admissionStage: "java_durable" | "harness_confirmed";
+            /**
+             * @description Current delivery state of the operation.
+             * @enum {string}
+             */
+            deliveryState: "pending" | "leased" | "confirmed" | "blocked";
         };
     };
     responses: {
@@ -2372,7 +2405,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebShellAdmission"];
+                    "application/json": components["schemas"]["WebShellTurnAdmission"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2403,7 +2436,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebShellAdmission"];
+                    "application/json": components["schemas"]["WebShellTurnAdmission"];
                 };
             };
             400: components["responses"]["BadRequest"];

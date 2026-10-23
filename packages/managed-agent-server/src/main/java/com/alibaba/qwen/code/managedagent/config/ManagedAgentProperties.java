@@ -55,8 +55,6 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private final Automation automation = new Automation();
     private final Channels channels = new Channels();
     private final EventTransport eventTransport = new EventTransport();
-    private final JavaDurableAdmission javaDurableAdmission =
-            new JavaDurableAdmission();
     private String agentRevision = "1";
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
@@ -72,6 +70,13 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public Harness getHarness() {
         return harness;
+    }
+
+    public boolean admitsPublicChildAgents() {
+        return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
+                && runtimeBroker.isDurableLocalProcess()
+                && LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                && "session".equals(runtimeBroker.getBoundSessionIsolationClass());
     }
 
     public Auth getAuth() {
@@ -92,10 +97,6 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public EventTransport getEventTransport() {
         return eventTransport;
-    }
-
-    public JavaDurableAdmission getJavaDurableAdmission() {
-        return javaDurableAdmission;
     }
 
     public SessionStore getSessionStore() {
@@ -601,6 +602,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean enabled;
         private boolean workspaceFilesEnabled;
         private boolean workspaceShellEnabled;
+        private boolean workspaceChildAgentsEnabled = true;
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";
         private String capabilityDigest = "";
@@ -651,6 +653,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         public void setWorkspaceFilesEnabled(boolean workspaceFilesEnabled) {
             this.workspaceFilesEnabled = workspaceFilesEnabled;
         }
+
+        public boolean isWorkspaceChildAgentsEnabled() { return workspaceChildAgentsEnabled; }
+
+        public void setWorkspaceChildAgentsEnabled(boolean value) { workspaceChildAgentsEnabled = value; }
 
         public boolean isWorkspaceShellEnabled() {
             return workspaceShellEnabled;
@@ -900,17 +906,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private int verificationConcurrency = 2;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(24);
-        // Off by default: the head's activation columns are only trustworthy
-        // once no pre-V36 binary can still commit. Enable after the fleet
-        // fully runs the schema's version.
-        private boolean journalHeadAuthorization;
-
-        public boolean isJournalHeadAuthorization() { return journalHeadAuthorization; }
         public boolean isAsyncVerificationEnabled() { return asyncVerificationEnabled; }
         public void setAsyncVerificationEnabled(boolean value) { asyncVerificationEnabled = value; }
         public int getVerificationConcurrency() { return verificationConcurrency; }
         public void setVerificationConcurrency(int value) { verificationConcurrency = value; }
-        public void setJournalHeadAuthorization(boolean value) { journalHeadAuthorization = value; }
         public boolean isGcEnabled() { return gcEnabled; }
         public void setGcEnabled(boolean value) { gcEnabled = value; }
         public Duration getDeletionGrace() { return deletionGrace; }
@@ -1661,26 +1660,6 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setClaimLease(Duration claimLease) {
             this.claimLease = claimLease;
-        }
-    }
-
-    /**
-     * D7-3 of #14122: the opt-in java_durable admission profile. Default off;
-     * a flag-off deployment creates no profile bean (see
-     * JavaDurableAdmissionConfiguration), so every admission answers as
-     * before. On, a Turn input or cancel admission that asks for
-     * java_durable is answered with its durable operation, and
-     * harness_confirmed stays the default for every other admission.
-     */
-    public static class JavaDurableAdmission {
-        private boolean enabled;
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
         }
     }
 

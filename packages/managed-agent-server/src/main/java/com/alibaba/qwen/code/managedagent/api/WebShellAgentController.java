@@ -32,6 +32,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskCancelRequ
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEvent;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEventQueryRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskGetRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskPage;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscriptRequest;
@@ -86,7 +87,7 @@ public class WebShellAgentController {
     }
 
     @PostMapping("/tasks/query")
-    public WebShellPage<WebShellTask> tasks(TenantContext tenant,
+    public WebShellTaskPage tasks(TenantContext tenant,
             @Valid @RequestBody WebShellTaskQueryRequest request) {
         return tasks.queryWebShellTasks(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(), request.cursor(),
@@ -214,16 +215,14 @@ public class WebShellAgentController {
             selection = WorkspaceSelection.parse(request.workspace(), true);
             tenant.requireActorId();
         }
-        if (request.environmentId() != null
-                && !request.environmentId().isBlank()) {
-            throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
-                    "unsupported_feature",
-                    "Standalone Phase 1 has no environment templates.");
-        }
         if (selection == null && (request.approvalMode() != null || request.planMode() != null)) {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
                     "unsupported_approval_mode",
                     "Approval mode selection requires a bound Workspace.");
+        }
+        if (selection == null && request.modelId() != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
+                    "Model selection requires a bound Workspace.");
         }
         if (selection == null && request.skills() != null && !request.skills().isEmpty()) {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
@@ -240,7 +239,7 @@ public class WebShellAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills()));
+                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId()));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -261,7 +260,7 @@ public class WebShellAgentController {
         WebShellAdmission admission = webShell(service.submitTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
-                request.input(), request.admissionProfile()));
+                request.input()));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -274,7 +273,7 @@ public class WebShellAgentController {
         WebShellAdmission admission = webShell(service.cancelTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
-                request.turnId(), request.admissionProfile()));
+                request.turnId()));
         return ResponseEntity.accepted().body(admission);
     }
 
