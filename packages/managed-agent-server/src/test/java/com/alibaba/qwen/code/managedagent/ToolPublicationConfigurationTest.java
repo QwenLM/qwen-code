@@ -1,12 +1,12 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.config.AliyunToolPublicationStorageAutoConfiguration;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -29,10 +29,9 @@ class ToolPublicationConfigurationTest {
     }
 
     @Test
-    void asyncAdmissionRequiresJournalHeadAuthorizationAndASeparateBoundedPool() {
+    void asyncAdmissionRequiresASeparateBoundedPool() {
         var properties = new ManagedAgentProperties();
         properties.getToolPublication().setAsyncVerificationEnabled(true);
-        assertThatThrownBy(() -> data(properties)).hasMessageContaining("requires journal-head authorization");
         properties.getToolPublication().setVerificationConcurrency(0);
         assertThatThrownBy(() -> new ToolPublicationConfiguration().toolPublicationVerifier(
                 mock(ToolPublicationDataStore.class), properties)).hasMessageContaining("Invalid verification concurrency");
@@ -96,34 +95,6 @@ class ToolPublicationConfigurationTest {
         settings.setOssEndpoint("http://oss-cn-hangzhou.aliyuncs.com");
         assertThatThrownBy(() -> AliyunToolPublicationStorageAutoConfiguration.buildOss(properties, credentials))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("regional HTTPS");
-    }
-
-    @Test
-    void theJournalHeadAuthorizationFlagReachesTheStore() {
-        var configuration = new ToolPublicationConfiguration();
-        var properties = new ManagedAgentProperties();
-        var settings = properties.getToolPublication();
-        settings.setServiceBaseUrl("https://test.invalid");
-        settings.setExecutionBytes(1024L * 1024 * 1024);
-        settings.setSessionBytes(1024L * 1024 * 1024);
-        settings.setTenantBytes(1024L * 1024 * 1024);
-        settings.setActiveCaptures(4L);
-        settings.setEntryConcurrency(4);
-        assertThat(storeOf(configuration, properties).journalHeadAuthorization())
-                .isFalse();
-        settings.setJournalHeadAuthorization(true);
-        assertThat(storeOf(configuration, properties).journalHeadAuthorization())
-                .isTrue();
-    }
-
-    private ToolPublicationStore storeOf(ToolPublicationConfiguration configuration,
-            ManagedAgentProperties properties) {
-        return configuration.toolPublicationStore(mock(JdbcTemplate.class),
-                mock(PlatformTransactionManager.class),
-                mock(ManagedSessionStore.class),
-                mock(com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class),
-                mock(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class),
-                properties);
     }
 
     private ToolPublicationDataStore data(ManagedAgentProperties properties) {

@@ -381,6 +381,26 @@ it.each(['/work/project', '/work/secondary'])(
   },
 );
 
+it('threads unavailable models to its chat pane', () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  transcript.blocks = [{ kind: 'user' }];
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const unavailableModels = [{ id: 'qwen-max', tooltip: 'Need Pro' }];
+  const mountUnavailableModelTooltip = () => undefined;
+  act(() => {
+    renderSideTask({ unavailableModels, mountUnavailableModelTooltip });
+  });
+  expect(latestChatPaneProps.current?.unavailableModels).toEqual(
+    unavailableModels,
+  );
+  expect(latestChatPaneProps.current?.mountUnavailableModelTooltip).toBe(
+    mountUnavailableModelTooltip,
+  );
+});
+
 it('threads model management policy to its chat pane', () => {
   connection.sessionId = 'side-session-1';
   connection.status = 'connected';

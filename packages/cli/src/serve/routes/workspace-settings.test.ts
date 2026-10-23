@@ -290,6 +290,39 @@ function makeQualifiedApp(
   };
 }
 
+describe('terminal-only Mods settings', () => {
+  it.each([
+    { route: '/workspace/settings', scope: 'user', qualified: false },
+    {
+      route: '/workspaces/primary/settings',
+      scope: 'workspace',
+      qualified: true,
+    },
+  ])(
+    'keeps terminal-only Mods out of $route',
+    async ({ route, scope, qualified }) => {
+      const { app, persistSetting } = qualified
+        ? makeQualifiedApp()
+        : makeApp();
+
+      const read = await request(app).get(route);
+      expect(read.status).toBe(200);
+      expect(
+        read.body.settings.map((setting: { key: string }) => setting.key),
+      ).not.toContain('experimental.mods');
+
+      const write = await request(app).post(route).send({
+        scope,
+        key: 'experimental.mods',
+        value: true,
+      });
+      expect(write.status).toBe(400);
+      expect(write.body).toMatchObject({ code: 'disallowed_key' });
+      expect(persistSetting).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('POST /workspace/settings', () => {
   it('updates live sessions when Session Workflow changes', async () => {
     // Seeded as the post-write state: the route reads back the effective value.
@@ -1343,6 +1376,84 @@ describe('web-shell settings alias drift', () => {
     expect(publishWorkspaceEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'settings_changed' }),
     );
+  });
+});
+
+describe('Web Shell loading phrase settings', () => {
+  it('serves the effective value and user/workspace overrides', async () => {
+    const { app } = makeApp({
+      userSettings: { ui: { accessibility: { enableLoadingPhrases: true } } },
+      workspaceSettings: {
+        ui: { accessibility: { enableLoadingPhrases: false } },
+      },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'ui.accessibility.enableLoadingPhrases',
+        type: 'boolean',
+        default: true,
+        values: { effective: false, user: true, workspace: false },
+      }),
+    );
+  });
+
+  it.each(['user', 'workspace'] as const)(
+    'accepts a %s override',
+    async (scope) => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+      const response = await request(app).post('/workspace/settings').send({
+        scope,
+        key: 'ui.accessibility.enableLoadingPhrases',
+        value: false,
+      });
+      expect(response.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+        'ui.accessibility.enableLoadingPhrases',
+        false,
+      );
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'ui.accessibility.enableLoadingPhrases',
+        false,
+        scope,
+        undefined,
+      );
+    },
+  );
+
+  it('reads only the selected runtime on the qualified route', async () => {
+    const { app } = makeQualifiedApp();
+    vi.mocked(loadSettings).mockImplementation(
+      (cwd) =>
+        ({
+          merged: {
+            ui: {
+              accessibility: {
+                enableLoadingPhrases: cwd !== '/selected-workspace',
+              },
+            },
+          },
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+    const response = await request(app).get('/workspaces/secondary/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'ui.accessibility.enableLoadingPhrases',
+        values: { effective: false },
+      }),
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/selected-workspace', {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: false,
+      workspaceTrusted: true,
+    });
   });
 });
 

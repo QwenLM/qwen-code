@@ -12,7 +12,12 @@ import { pathToFileURL } from 'node:url';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
-import { record, validateResult } from './dispatch.js';
+import {
+  ModBudget,
+  assertModDepth,
+  record,
+  validateResult,
+} from './dispatch.js';
 import type {
   ModToolCallInput,
   ModToolNext,
@@ -27,6 +32,7 @@ import {
   type ModLog,
   type ModReply,
   type ModRequest,
+  type ModWorkerReply,
   type ModSource,
   type ModOptions,
   type ModPlugin,
@@ -57,6 +63,14 @@ export class ModRuntime {
   private commands: Array<ModCommand & { plugin: string }> = [];
   private tools = false;
   private sequence = 0;
+  private root?: {
+    id: number;
+    native?: number;
+    idle?: number;
+    revision: number;
+    phase: number;
+    refresh: () => void;
+  };
   private tool?: {
     next: ModToolNext;
     controller: AbortController;
@@ -84,14 +98,26 @@ export class ModRuntime {
     });
     this.worker.stdout?.resume();
     this.worker.stderr?.resume();
-    this.worker.on('message', (reply: ModReply) => {
+    this.worker.on('message', (reply: ModWorkerReply) => {
+      const root = this.root;
+      if (!root || reply.root !== root.id) return;
       if (reply.type === 'host-call') this.executeHost(reply);
       else if (reply.type === 'host-cancel') {
         for (const id of reply.ids)
           this.tool?.operations.get(id)?.controller.abort();
       } else if (reply.type === 'check-result')
         this.tool?.checks.get(reply.id)?.(reply);
-      else if (reply.type === 'log') {
+      else if (reply.type === 'activity') {
+        if (
+          reply.phase !== root.phase ||
+          reply.revision <= root.revision ||
+          (reply.operation !== undefined && reply.operation !== root.native)
+        )
+          return;
+        root.revision = reply.revision;
+        root.idle = this.tool?.checks.size ? undefined : reply.operation;
+        root.refresh();
+      } else if (reply.type === 'log') {
         if (this.failure) return;
         try {
           this.log({ text: reply.text, to: reply.to }, reply.plugin);
@@ -129,6 +155,7 @@ export class ModRuntime {
     signal: AbortSignal,
     resolveTool?: ModToolResolver,
     surface: 'terminal' | null = null,
+    version = 'unknown',
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -144,7 +171,7 @@ export class ModRuntime {
     );
     try {
       const result = await runtime.request(
-        { type: 'load', plugins, cwd, surface },
+        { type: 'load', plugins, cwd, surface, version },
         signal,
         60_000,
       );
@@ -215,10 +242,6 @@ export class ModRuntime {
     next: ModToolNext,
     signal: AbortSignal,
   ): Promise<ModToolResult> {
-    if (this.surface === 'terminal')
-      throw new Error(
-        'Mod tool middleware is not supported in terminal sessions.',
-      );
     if (this.tool || this.pending)
       throw new Error('A Mod dispatch is already running.');
     const owner: NonNullable<ModRuntime['tool']> = {
@@ -248,8 +271,10 @@ export class ModRuntime {
 
   private executeHost(reply: Extract<ModReply, { type: 'host-call' }>): void {
     const owner = this.tool;
+    const root = this.root;
     if (
       !owner ||
+      !root ||
       owner.operations.size >= 32 ||
       owner.operations.has(reply.id)
     ) {
@@ -264,6 +289,11 @@ export class ModRuntime {
     const task = owner.tail
       .then(async () => {
         signal.throwIfAborted();
+        root.native = reply.id;
+        root.phase++;
+        root.idle = undefined;
+        root.refresh();
+        this.post({ type: 'native', id: reply.id }, root.id);
         const result = await owner.next(
           reply.input,
           signal,
@@ -292,32 +322,50 @@ export class ModRuntime {
                       }
                     }
                   });
+                  root.idle = undefined;
+                  root.phase++;
+                  root.refresh();
                   active.addEventListener('abort', abort, { once: true });
-                  this.post({
-                    type: 'tool-check',
-                    id,
-                    operation: reply.id,
-                    input,
-                    verdict,
-                  });
+                  this.post(
+                    {
+                      type: 'tool-check',
+                      id,
+                      operation: reply.id,
+                      input,
+                      verdict,
+                    },
+                    root.id,
+                  );
                 },
               );
             } finally {
               active.removeEventListener('abort', abort);
               owner.checks.delete(id);
+              root.refresh();
             }
           },
         );
+        root.native = undefined;
+        root.phase++;
+        root.idle = undefined;
+        root.refresh();
         signal.throwIfAborted();
-        this.post({ type: 'host-result', id: reply.id, result });
+        this.post({ type: 'host-result', id: reply.id, result }, root.id);
       })
       .catch((error: unknown) => {
+        root.native = undefined;
+        root.phase++;
+        root.idle = undefined;
+        root.refresh();
         if (!this.failure)
-          this.post({
-            type: 'host-result',
-            id: reply.id,
-            error: String(error).slice(0, 4000),
-          });
+          this.post(
+            {
+              type: 'host-result',
+              id: reply.id,
+              error: String(error).slice(0, 4000),
+            },
+            root.id,
+          );
       })
       .finally(() => {
         owner.operations.delete(reply.id);
@@ -326,10 +374,13 @@ export class ModRuntime {
     owner.tail = task;
   }
 
-  private post(request: ModRequest): void {
-    if (Buffer.byteLength(JSON.stringify(request)) > MOD_MAX_BYTES + 8192)
+  private post(request: ModRequest, root: number): void {
+    if (this.root?.id !== root) return;
+    const json = JSON.stringify(request);
+    if (Buffer.byteLength(json) > MOD_MAX_BYTES + 8192)
       throw new Error('Mod host message is too large.');
-    this.worker.postMessage(request);
+    assertModDepth(json, 'Mod host message');
+    this.worker.postMessage({ ...request, root, phase: this.root.phase });
   }
 
   async runCommand(
@@ -399,24 +450,59 @@ export class ModRuntime {
     signal.throwIfAborted();
     if (this.failure) throw this.failure;
     if (this.pending) throw new Error('A Mod dispatch is already running.');
+    const json = JSON.stringify(request);
     if (
-      Buffer.byteLength(JSON.stringify(request)) >
+      Buffer.byteLength(json) >
       (request.type === 'load' ? 32 : 1) * MOD_MAX_BYTES + 8192
     )
       throw new Error('Mod request is too large.');
+    assertModDepth(json, 'Mod request');
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const cleanup = new AbortController();
+    let cancelTimer: ReturnType<typeof setTimeout> | undefined;
     let aborted = false;
+    const budget = new ModBudget(timeoutMs + 250);
+    const stop = () => {
+      this.fail(
+        new Error(
+          aborted ? 'Mod dispatch cancelled.' : 'Mod dispatch timed out.',
+        ),
+      );
+      void this.worker.terminate();
+    };
+    const root: NonNullable<ModRuntime['root']> = {
+      id: ++this.sequence,
+      revision: 0,
+      phase: 0,
+      refresh: () => {
+        if (aborted || this.root !== root) return;
+        const lending =
+          request.type === 'tool' &&
+          root.native !== undefined &&
+          root.idle === root.native &&
+          !this.tool?.checks.size &&
+          !budget.expired;
+        if (lending !== budget.lending) {
+          if (lending) budget.pause();
+          else budget.resume();
+        }
+        if (timer) clearTimeout(timer);
+        if (!budget.lending) timer = setTimeout(stop, budget.remainingMs);
+      },
+    };
+    this.root = root;
     const onAbort = () => {
       aborted = true;
       Atomics.store(this.cancelled, 0, 1);
       this.tool?.controller.abort();
+      if (timer) clearTimeout(timer);
+      cancelTimer = setTimeout(stop, 250);
     };
     Atomics.store(this.cancelled, 0, 0);
     try {
       return await new Promise<unknown>((resolve, reject) => {
         this.pending = (reply) => {
-          if (aborted) reject(new Error('Mod dispatch cancelled.'));
+          if (this.failure) reject(this.failure);
+          else if (aborted) reject(new Error('Mod dispatch cancelled.'));
           else if (reply.type === 'error') reject(new Error(reply.message));
           else if (reply.type === 'result') {
             try {
@@ -429,30 +515,17 @@ export class ModRuntime {
           }
         };
         signal.addEventListener('abort', onAbort, { once: true });
-        timer = setTimeout(() => {
-          this.fail(
-            new Error(
-              aborted ? 'Mod dispatch cancelled.' : 'Mod dispatch timed out.',
-            ),
-          );
-          void this.worker.terminate();
-        }, timeoutMs + 250);
-        signal.addEventListener(
-          'abort',
-          () => {
-            if (timer) clearTimeout(timer);
-            timer = setTimeout(() => {
-              this.fail(new Error('Mod dispatch cancelled.'));
-              void this.worker.terminate();
-            }, 250);
-          },
-          { once: true, signal: cleanup.signal },
-        );
-        this.worker.postMessage(request);
+        root.refresh();
+        this.worker.postMessage({
+          ...request,
+          root: root.id,
+          phase: root.phase,
+        });
       });
     } finally {
-      cleanup.abort();
+      this.root = undefined;
       if (timer) clearTimeout(timer);
+      if (cancelTimer) clearTimeout(cancelTimer);
       signal.removeEventListener('abort', onAbort);
       this.pending = undefined;
     }

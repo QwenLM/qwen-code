@@ -93,6 +93,7 @@ import {
   type ServeSessionLspStatus,
   type ServeSessionResourcesStatus,
   type ServeSessionSavedWorkflowStatus,
+  type ServeSessionTaskRuntimeStatus,
   type ServeSessionTasksStatus,
   type ServeSessionWorkflowTaskStatus,
   type ServeWorkspaceMcpResourcesStatus,
@@ -764,6 +765,8 @@ interface SessionEntry {
   closing: boolean;
   /** Tail of cwd changes that direct shell commands must not overtake. */
   cwdChangeQueue: Promise<void>;
+  /** Odd during a physical cd; advances again on settlement. */
+  cwdChangeEpoch: number;
   /**
    * Tail of the per-session prompt queue. Each new prompt chains off the
    * resolved (or rejected) state of this promise so prompts run one at a
@@ -1046,6 +1049,9 @@ interface SessionEntry {
    * had an ACP load/resume response, so attaches return `state: {}`.
    */
   restoreState?: BridgeSessionState;
+  generatedUi?: BridgeSession['generatedUi'];
+  generatedUiReceiptKnown?: true;
+  generatedUiRefreshGeneration?: number;
   /** Response-mode `session/load` can return a partial replay prefix. */
   restoreReplayPartial?: true;
   restoreReplayError?: string;
@@ -1587,15 +1593,29 @@ function extractNestedErrorDetail(error: unknown): string | undefined {
   return undefined;
 }
 
+function getJsonRpcErrorDataField(err: unknown, field: string): unknown {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const data = (err as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return undefined;
+  return (data as Record<string, unknown>)[field];
+}
+
 function extractJsonRpcErrorField(
   err: unknown,
   field: string,
 ): string | undefined {
-  if (typeof err !== 'object' || err === null) return undefined;
-  const data = (err as { data?: unknown }).data;
-  if (typeof data !== 'object' || data === null) return undefined;
-  const value = (data as Record<string, unknown>)[field];
+  const value = getJsonRpcErrorDataField(err, field);
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function extractJsonRpcErrorNumber(
+  err: unknown,
+  field: string,
+): number | undefined {
+  const value = getJsonRpcErrorDataField(err, field);
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 export function extractErrorCode(err: unknown): string | undefined {
@@ -1739,6 +1759,9 @@ function broadcastTurnError(
       ? (extractJsonRpcErrorField(err, 'code') ?? extractErrorCode(err))
       : extractErrorCode(err);
   const loopType = extractJsonRpcErrorField(err, 'loopType');
+  const loopReason = extractJsonRpcErrorField(err, 'loopReason');
+  const toolCallCount = extractJsonRpcErrorNumber(err, 'toolCallCount');
+  const toolCallLimit = extractJsonRpcErrorNumber(err, 'toolCallLimit');
   if (errorKind) {
     writeServeDebugLine(
       `turn_error classified session=${JSON.stringify(sessionId)} ` +
@@ -1772,6 +1795,9 @@ function broadcastTurnError(
         ...(code ? { code } : {}),
         ...(errorKind ? { errorKind } : {}),
         ...(loopType ? { loopType } : {}),
+        ...(loopReason ? { loopReason } : {}),
+        ...(toolCallCount !== undefined ? { toolCallCount } : {}),
+        ...(toolCallLimit !== undefined ? { toolCallLimit } : {}),
         ...(promptId ? { promptId } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
@@ -1808,11 +1834,14 @@ function truncateTurnText(text: string): {
   text: string;
   truncated: boolean;
 } {
-  const truncated = text.length > TURN_RESULT_TEXT_MAX_CHARS;
-  return {
-    text: truncated ? text.slice(0, TURN_RESULT_TEXT_MAX_CHARS) : text,
-    truncated,
-  };
+  if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
+    return { text, truncated: false };
+  }
+  const end =
+    (text.codePointAt(TURN_RESULT_TEXT_MAX_CHARS - 1) ?? 0) > 0xffff
+      ? TURN_RESULT_TEXT_MAX_CHARS - 1
+      : TURN_RESULT_TEXT_MAX_CHARS;
+  return { text: text.slice(0, end), truncated: true };
 }
 
 function rememberTerminalTurnStatus(
@@ -4618,7 +4647,7 @@ export function createSessionControlPlane(
   /**
    * Barrier check for the writers other than `sendPrompt`: a rewind restores
    * files under the session cwd, a fork agent runs tools there, a shell
-   * command executes in `effectiveCwd`, a branch mutates the session's
+   * command executes in `effectiveCwd`, a branch or message deletion mutates
    * persisted history, a cwd change moves the session inside the checkout, a
    * workflow action runs through the session's tool registry in that cwd, and
    * a goal control starts a turn that never passes `sendPrompt`. Each is
@@ -4956,6 +4985,7 @@ export function createSessionControlPlane(
           })
           .catch(() => undefined);
       },
+      opts.onWorkflowAncestorTrust,
     );
     const connection = harness.createConnection(client, channel);
     // Add to `aliveChannels` + register the `channel.exited` handler
@@ -5910,6 +5940,8 @@ export function createSessionControlPlane(
         }
       }
 
+      await refreshGeneratedUiStatus(entry);
+
       // Bd1zc: re-check that the entry is still live before returning.
       // The model/approval-mode calls yield and race against
       // `channel.exited` — if the child crashed during the model
@@ -5934,6 +5966,7 @@ export function createSessionControlPlane(
         attached: false,
         clientId,
         createdAt: entry.createdAt,
+        ...(entry.generatedUi ? { generatedUi: entry.generatedUi } : {}),
         ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
         ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
         ...(entry.sourceType
@@ -7441,6 +7474,7 @@ export function createSessionControlPlane(
       recordingDegraded: false,
       closing: false,
       cwdChangeQueue: Promise.resolve(),
+      cwdChangeEpoch: 0,
       promptQueue: Promise.resolve(),
       rewindTail: Promise.resolve(),
       pendingPromptCount: 0,
@@ -7733,6 +7767,82 @@ export function createSessionControlPlane(
     };
   }
 
+  const parseGeneratedUiStatus = (
+    value: unknown,
+  ): BridgeSession['generatedUi'] => {
+    if (
+      !value ||
+      typeof value !== 'object' ||
+      Array.isArray(value) ||
+      !('version' in value) ||
+      value.version !== 1 ||
+      !('enabled' in value) ||
+      typeof value.enabled !== 'boolean'
+    )
+      return undefined;
+    const status: NonNullable<BridgeSession['generatedUi']> = {
+      version: 1,
+      enabled: value.enabled,
+    };
+    const reason = 'reason' in value ? value.reason : undefined;
+    if (
+      reason === 'setting-disabled' ||
+      reason === 'unsupported-runtime' ||
+      reason === 'workspace-untrusted' ||
+      reason === 'provider-conflict' ||
+      reason === 'assets-missing' ||
+      reason === 'policy-disabled'
+    )
+      status.reason = reason;
+    return status;
+  };
+
+  const setGeneratedUiStatus = (
+    entry: SessionEntry,
+    status: BridgeSession['generatedUi'],
+  ): void => {
+    entry.generatedUi = status;
+    if (!entry.restoreState) return;
+    const { generatedUi: _previous, ...meta } = entry.restoreState._meta ?? {};
+    entry.restoreState = {
+      ...entry.restoreState,
+      _meta: { ...meta, ...(status ? { generatedUi: status } : {}) },
+    };
+  };
+
+  const refreshGeneratedUiStatus = async (
+    entry: SessionEntry,
+  ): Promise<void> => {
+    if (!entry.generatedUiReceiptKnown) return;
+    const generation = (entry.generatedUiRefreshGeneration ?? 0) + 1;
+    entry.generatedUiRefreshGeneration = generation;
+    setGeneratedUiStatus(entry, undefined);
+    try {
+      const response = await requestSessionStatus<ServeSessionContextStatus>(
+        entry.sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionContext,
+        {},
+        Math.min(initTimeoutMs, 5_000),
+      );
+      if (
+        byId.get(entry.sessionId) !== entry ||
+        entry.generatedUiRefreshGeneration !== generation ||
+        response?.v !== STATUS_SCHEMA_VERSION ||
+        response.sessionId !== entry.sessionId
+      )
+        return;
+      const meta = response.state?.['_meta'];
+      const status = parseGeneratedUiStatus(
+        meta && typeof meta === 'object' && 'generatedUi' in meta
+          ? meta.generatedUi
+          : undefined,
+      );
+      setGeneratedUiStatus(entry, status);
+    } catch {
+      // Missing status support cannot revive the last enabled receipt.
+    }
+  };
+
   // A5: seed the snapshot caches from the agent's session-create response
   // (`newSession` / `loadSession` / `resumeSession` all return `models` +
   // `modes`). Without this the caches stay unset until the first change, so a
@@ -7747,6 +7857,7 @@ export function createSessionControlPlane(
   const seedSnapshotCaches = (
     entry: SessionEntry,
     resp: {
+      _meta?: Record<string, unknown> | null;
       models?: { currentModelId?: unknown } | null;
       modes?: {
         currentModeId?: unknown;
@@ -7754,6 +7865,11 @@ export function createSessionControlPlane(
       } | null;
     },
   ): void => {
+    const generatedUi = parseGeneratedUiStatus(resp._meta?.['generatedUi']);
+    if (generatedUi) {
+      entry.generatedUiReceiptKnown = true;
+      entry.generatedUi = generatedUi;
+    }
     const model = resp.models?.currentModelId;
     if (typeof model === 'string' && model.length > 0) {
       entry.currentModelId = model;
@@ -8495,6 +8611,7 @@ export function createSessionControlPlane(
       }
       const sourcePersisted = await applyRestoreSourceIfMissing(existing, req);
       try {
+        await refreshGeneratedUiStatus(existing);
         assertAttachableSessionEntry(req.sessionId, existing);
       } catch (error) {
         if (previousApprovalMode !== undefined) {
@@ -8516,6 +8633,7 @@ export function createSessionControlPlane(
         attached: true,
         clientId,
         createdAt: existing.createdAt,
+        ...(existing.generatedUi ? { generatedUi: existing.generatedUi } : {}),
         ...(existing.sourceType ? { sourceType: existing.sourceType } : {}),
         ...(existing.sourceId !== undefined
           ? { sourceId: existing.sourceId }
@@ -8689,6 +8807,7 @@ export function createSessionControlPlane(
       }
       const sourcePersisted = await applyRestoreSourceIfMissing(entry, req);
       try {
+        await refreshGeneratedUiStatus(entry);
         assertAttachableSessionEntry(restored.sessionId, entry);
       } catch (error) {
         if (previousApprovalMode !== undefined) {
@@ -8701,11 +8820,14 @@ export function createSessionControlPlane(
         await rollbackAttachRegistration(entry, clientId);
         throw error;
       }
+      const { generatedUi: _previousGeneratedUi, ...restoredState } = restored;
       return {
-        ...restored,
+        ...restoredState,
+        state: entry.restoreState ?? {},
         attached: true,
         clientId,
         createdAt: entry.createdAt,
+        ...(entry.generatedUi ? { generatedUi: entry.generatedUi } : {}),
         // Unlike the owner-side restore responses, the waiter has no
         // `restorePromptAdmitted` term; a prompt the owner parked while the
         // restore was in flight must still read as active here so the
@@ -9261,6 +9383,7 @@ export function createSessionControlPlane(
           req,
         );
         try {
+          await refreshGeneratedUiStatus(racedEntry);
           assertAttachableSessionEntry(req.sessionId, racedEntry);
         } catch (error) {
           if (previousApprovalMode !== undefined) {
@@ -9295,6 +9418,9 @@ export function createSessionControlPlane(
           attached: true,
           clientId,
           createdAt: racedEntry.createdAt,
+          ...(racedEntry.generatedUi
+            ? { generatedUi: racedEntry.generatedUi }
+            : {}),
           ...(racedEntry.sourceType
             ? { sourceType: racedEntry.sourceType }
             : {}),
@@ -9446,6 +9572,7 @@ export function createSessionControlPlane(
         ? await persistSessionSource(entry, daemonOwnedStandaloneRestore)
         : undefined;
       try {
+        await refreshGeneratedUiStatus(entry);
         assertAttachableSessionEntry(req.sessionId, entry);
       } catch (error) {
         if (previousApprovalMode !== undefined) {
@@ -9480,10 +9607,11 @@ export function createSessionControlPlane(
         attached: false,
         clientId,
         createdAt: entry.createdAt,
+        ...(entry.generatedUi ? { generatedUi: entry.generatedUi } : {}),
         ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
         ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
         ...(sourcePersisted !== undefined ? { sourcePersisted } : {}),
-        state: publicState,
+        state: entry.restoreState ?? {},
         ...(deferArtifactWorkspace || artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
@@ -10769,6 +10897,7 @@ export function createSessionControlPlane(
             );
           }
           try {
+            await refreshGeneratedUiStatus(existing);
             assertAttachableSessionEntry(existing.sessionId, existing);
           } catch (error) {
             if (previousApprovalMode !== undefined) {
@@ -10790,6 +10919,9 @@ export function createSessionControlPlane(
             attached: true,
             clientId,
             createdAt: existing.createdAt,
+            ...(existing.generatedUi
+              ? { generatedUi: existing.generatedUi }
+              : {}),
             ...(existing.sourceType ? { sourceType: existing.sourceType } : {}),
             ...(existing.sourceId !== undefined
               ? { sourceId: existing.sourceId }
@@ -12656,6 +12788,7 @@ export function createSessionControlPlane(
       const cdPromise = entry.promptQueue.then(async () => {
         const ci = assertLivePromptEntry(sessionId, entry);
         harness.reserveRuntimeOperation(ci.harness.executionEngine);
+        entry.cwdChangeEpoch += 1;
         try {
           if (entry.promptActive || entry.backgroundTurn) {
             throw new CdWhilePromptActiveError(sessionId);
@@ -12717,10 +12850,14 @@ export function createSessionControlPlane(
           }
           return extResult;
         } finally {
-          await harness.releaseRuntimeOperationReservation(
-            'session cwd change',
-            ci.harness.executionEngine,
-          );
+          try {
+            await harness.releaseRuntimeOperationReservation(
+              'session cwd change',
+              ci.harness.executionEngine,
+            );
+          } finally {
+            entry.cwdChangeEpoch += 1;
+          }
         }
       });
 
@@ -13365,6 +13502,23 @@ export function createSessionControlPlane(
       return warnings.length > 0 ? { ...result, warnings } : result;
     },
 
+    async removeSessionArtifactForWorkspaceOwner(sessionId, artifactId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        entry.managedConversationBinding?.released !== true
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
+      await entry.prepareArtifactWorkspace?.();
+      const result = await entry.artifacts.remove(artifactId, {
+        workspaceOwner: true,
+      });
+      publishArtifactChanges(entry, result.changes, undefined);
+      return result;
+    },
+
     async removeSessionArtifact(sessionId, artifactId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -13908,6 +14062,14 @@ export function createSessionControlPlane(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionTasks,
         { includeWorkflows: opts?.includeWorkflows === true },
+      );
+    },
+
+    async getSessionTaskRuntime(sessionId, taskId) {
+      return requestSessionStatus<ServeSessionTaskRuntimeStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionTaskRuntime,
+        { taskId },
       );
     },
 
@@ -15772,6 +15934,120 @@ export function createSessionControlPlane(
       } finally {
         signal?.removeEventListener('abort', onSignalAbort);
       }
+    },
+
+    async getMessageGroups(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      await entry.rewindTail;
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionMessageGroups,
+      );
+    },
+
+    async deleteMessageGroups(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry || isClosingOrAuthorizingClose(entry))
+        throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.harness.isDying)
+        throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      assertSessionResetNotPending(sessionId);
+      if (
+        entry.pendingPromptCount > 0 ||
+        entry.promptActive ||
+        entry.backgroundTurn
+      ) {
+        throw new SessionBusyError(
+          sessionId,
+          'Cannot delete messages while a prompt is running',
+        );
+      }
+      const result = entry.promptQueue.then(async () => {
+        if (entry.closing) throw new SessionNotFoundError(sessionId);
+        let response: { deletedGroupIds: string[]; deletedPromptIds: string[] };
+        let contextError: unknown;
+        try {
+          response = (await Promise.race([
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionMessagesDelete,
+              { sessionId, ...req },
+            ),
+            getTransportClosedReject(entry),
+          ])) as typeof response;
+        } catch (error) {
+          const data = (
+            error as {
+              data?: {
+                errorKind?: string;
+                deletedGroupIds?: string[];
+                deletedPromptIds?: string[];
+              };
+            }
+          ).data;
+          if (data?.errorKind !== 'message_deletion_context_unavailable')
+            throw error;
+          contextError = error;
+          response = {
+            deletedGroupIds: data.deletedGroupIds ?? [],
+            deletedPromptIds: data.deletedPromptIds ?? [],
+          };
+        }
+        entry.terminalTurnStatuses.clear();
+        entry.enrichedTerminalPromptIds.clear();
+        entry.rewindGeneration += 1;
+        entry.turnErrorEvent = undefined;
+        // Clear both reconnect replay and compacted content before publishing
+        // invalidation. Reloading clients fetch the authoritative transcript.
+        entry.events.resetReplay();
+        const replayStartEventId = entry.events.lastEventId;
+        try {
+          const replay = (await Promise.race([
+            entry.connection.extMethod('qwen/session/loadUpdates', {
+              sessionId,
+            }),
+            getTransportClosedReject(entry),
+          ])) as {
+            updates?: SessionUpdate[];
+            partial?: boolean;
+            replayError?: string;
+          };
+          if (entry.events.lastEventId !== replayStartEventId)
+            throw new Error(
+              'Session changed while rebuilding deleted-message replay',
+            );
+          await info.client.seedSessionUpdates(entry, replay.updates ?? [], {
+            ingestArtifacts: false,
+          });
+          entry.restoreReplayPartial =
+            replay.partial === true ? true : undefined;
+          entry.restoreReplayError = replay.replayError;
+        } catch (error) {
+          entry.restoreReplayPartial = true;
+          entry.restoreReplayError = extractErrorMessage(error);
+        }
+        entry.restoreHistoryHasMore = undefined;
+        entry.restoreHistoryAnchorRecordId = undefined;
+        entry.events.publish({
+          type: 'session_messages_deleted',
+          data: { sessionId, ...response },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+        if (contextError) throw contextError;
+        return response;
+      });
+      const settled = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      entry.promptQueue = settled;
+      entry.rewindTail = settled;
+      return result;
     },
 
     async getRewindSnapshots(sessionId) {

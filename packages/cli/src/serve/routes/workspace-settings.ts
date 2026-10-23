@@ -45,6 +45,7 @@ import {
 } from '../../utils/acpModelUtils.js';
 
 const TUI_ONLY_SETTINGS = new Set([
+  'experimental.mods',
   'general.vimMode',
   'general.terminalBell',
   'general.notificationMode',
@@ -59,7 +60,6 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.arrowKeysScrollTranscript',
   'ui.showScrollbar',
   'ui.hideBanner',
-  'ui.accessibility.enableLoadingPhrases',
   'ui.enableWelcomeBack',
 ]);
 

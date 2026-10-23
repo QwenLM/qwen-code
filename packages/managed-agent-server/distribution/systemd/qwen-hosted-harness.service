@@ -1,0 +1,35 @@
+[Unit]
+Description=Qwen Hosted Harness
+Documentation=file:/opt/qwen-managed-agent/docs/deployment.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qwen-managed-agent
+Group=qwen-managed-agent
+WorkingDirectory=/srv/qwen-workspace
+EnvironmentFile=/etc/qwen-managed-agent/harness.env
+# For the Workspace tool path, set QWEN_HOSTED_HARNESS_BROKER_ARGS in
+# harness.env; these options have no environment fallback in the CLI, and
+# systemd expands them into argv, so the broker token is visible in the
+# process list. Keep this path to single-tenant hosts.
+ExecStart=/usr/local/bin/qwen serve --profile hosted-harness --hostname 127.0.0.1 --port 4170 --no-web $QWEN_HOSTED_HARNESS_BROKER_ARGS
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60s
+# The Harness owns its tool processes: terminate them with it.
+KillMode=mixed
+KillSignal=SIGTERM
+# The CLI writes its own state under the service home directory.
+StateDirectory=qwen-managed-agent
+StateDirectoryMode=0750
+# Adjust ReadWritePaths when the Workspace lives elsewhere.
+ReadWritePaths=/srv/qwen-workspace
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

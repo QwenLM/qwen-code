@@ -1,16 +1,16 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.SessionResourceCollectionCollector;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationCollector;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionObserver;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationVerifier;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationRetentionObserver;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.SessionResourceCollectionCollector;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationCollector;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import org.apache.commons.lang3.StringUtils;
@@ -42,7 +42,7 @@ public class ToolPublicationConfiguration {
             throw new IllegalStateException("Tool publication entry concurrency is required");
         }
         return new ToolPublicationStore(jdbc, manager, sessions, executions,
-                bindings, capacity, settings.isJournalHeadAuthorization());
+                bindings, capacity);
     }
 
     @Bean
@@ -51,9 +51,6 @@ public class ToolPublicationConfiguration {
             ManagedSessionStore sessions, ToolPublicationObjectStore objects,
             ManagedAgentProperties properties) {
         var settings = properties.getToolPublication();
-        if (settings.isAsyncVerificationEnabled() && !settings.isJournalHeadAuthorization()) {
-            throw new IllegalStateException("Async verification requires journal-head authorization");
-        }
         if (settings.getOperationTimeout() == null || settings.getClaimTimeout() == null
                 || settings.getMaxVerificationTimeout() == null) {
             throw new IllegalStateException("Tool publication operation and verification deadlines are required");

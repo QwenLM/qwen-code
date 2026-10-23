@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.provisioning.ManagedContextProtocol;
+
 import java.util.Objects;
 
 /** Immutable Runtime placement request including its isolation key. */

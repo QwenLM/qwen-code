@@ -70,6 +70,7 @@ export const TOP_LEVEL_COMMANDS = [
     'serve',
     'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
   ],
+  ['daemon <command>', 'Inspect and control local qwen serve daemons'],
   ['sessions <command>', 'Manage Qwen Code sessions'],
   ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;

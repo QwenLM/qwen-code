@@ -13,16 +13,20 @@ import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-sess
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import type { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
-import type {
-  ManagedSessionJournalStore,
-  ManagedSessionResourceStore,
+import {
+  ManagedSessionCommitRejectedError,
+  type ManagedSessionJournalStore,
+  type ManagedSessionResourceStore,
 } from './managed-session-storage.js';
 import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
   ManagedSessionSubject,
 } from './managed-session-records.js';
-import { ManagedSessionRecordError } from './managed-session-records.js';
+import {
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionRecordError,
+} from './managed-session-records.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
@@ -31,25 +35,84 @@ const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
  * Keeps the installed activation's horizon ahead of a reader while the worker
  * is alive. The install stamps a fixed expiry, so without renewal a session
  * that outlives its lease reads as abandoned behind a live writer lock.
- * Renewal failures are retried on the next tick: a durable write failure
- * already fences new appends, so the timer only logs.
+ * Renewal failures are retried on the next tick; a durable write failure
+ * already fences new appends. A renewal that is still in flight owns the next
+ * attempt: queueing another one behind a stalled Store call would grow the
+ * backlog for the whole outage.
+ *
+ * A stopped writer cannot renew again, and a persistent non-recoverable
+ * failure repeats the same rejection every interval for the rest of the
+ * process's life, so both end the loop. Two refusals are recoverable and keep
+ * retrying instead: an unsettled append (the store may settle it later) and a
+ * rejected commit (the store rolled the attempt back and the authority does
+ * not latch a write failure behind it). Both clear the count, so the cap
+ * measures consecutive refusals; three of them span one full lease
+ * (`leaseDurationMs / 3` per attempt), past which the activation cannot be
+ * kept ahead of a reader anyway.
  */
+const MAX_RENEWAL_FAILURES = 3;
+
 function startActivationRenewal(
   authority: LocalManagedSessionAuthority,
   leaseDurationMs: number,
 ): { stop: () => void } {
   const intervalMs = Math.max(Math.floor(leaseDurationMs / 3), 1);
+  let inFlight = false;
+  let failures = 0;
+  let stopped = false;
   const timer = setInterval(() => {
-    authority.renewActivation({ leaseDurationMs }).catch((error: unknown) => {
-      debugLogger.debug(
-        'Managed Session activation renewal failed',
-        describeRenewalError(error),
-      );
-    });
+    if (inFlight || stopped) return;
+    inFlight = true;
+    authority
+      .renewActivation({ leaseDurationMs })
+      .then(() => {
+        if (!stopped) failures = 0;
+      })
+      .catch((error: unknown) => {
+        if (stopped) return;
+        if (
+          error instanceof ManagedSessionAppendUnsettledError ||
+          error instanceof ManagedSessionCommitRejectedError
+        ) {
+          // Both are recoverable: the store may still settle the append, and a
+          // rollbackable commit rejection leaves the writer writable (the
+          // authority rethrows it before latching a write failure). A later
+          // tick can renew once the store recovers, so neither may count
+          // toward the permanent stop. Clearing the count keeps the cap
+          // measuring consecutive refusals rather than a process lifetime.
+          failures = 0;
+          debugLogger.debug(
+            'Managed Session activation renewal deferred',
+            describeRenewalError(error),
+          );
+          return;
+        }
+        debugLogger.debug(
+          'Managed Session activation renewal failed',
+          describeRenewalError(error),
+        );
+        failures += 1;
+        if (authority.writesStopped || failures >= MAX_RENEWAL_FAILURES) {
+          debugLogger.warn(
+            'Managed Session activation renewal stopped',
+            authority.writesStopped
+              ? 'the writer stopped accepting appends'
+              : `${failures} consecutive failures`,
+          );
+          stopped = true;
+          clearInterval(timer);
+        }
+      })
+      .finally(() => {
+        inFlight = false;
+      });
   }, intervalMs);
   timer.unref();
   return {
-    stop: () => clearInterval(timer),
+    stop: () => {
+      stopped = true;
+      clearInterval(timer);
+    },
   };
 }
 

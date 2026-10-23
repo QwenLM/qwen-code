@@ -414,7 +414,9 @@ Allow 保留原 Action、prepare key、request digest 和 Runtime binding，产�
 
 集成回归证明：模型请求准备失败时，普通 prompt 路由和 wake driver 均保留已准入、未结算的输入；渠道中断结算仅在终态与 file-history 退役之后确认原清理 owner。首次释放失败时保留清理 fence，随后 passive resident attachment 释放相同 binding/generation，只新增一次确认，不重复终态。独立 Spring/H2 probe 通过有界撤回与 replay floor 的组合：snapshot 重建期间 reader 保持可用，覆盖范围追平后旧 cursor 再次过期。这项 probe 不属于 MySQL 或进程接管验收。
 
-机器可读报告、manifest 和保留的失败诊断位于 `.qwen/investigations/g3-step3-implementation/`，当前汇总报告为 `packaged-verification.md`。这五种打包门禁不证明上述整个矩阵。自[可替换 Harness 设计 D11](2026-10-02-hosted-replaceable-harness.zh-CN.md#d11--残留门禁step-3-进-ci模型轮支路q2-的-binding-半边) 起，它们是 `hosted-failover-e2e` 任务的 CI 步骤，该任务独立于 Hosted MySQL 的 verify 运行（见 D11）；同一任务里还有一条模型轮支路，把无工具 Session 的 B1 与 B2 的主要观察项做成打包门禁，但不覆盖它们的 attempt 与 stream 身份、实时 SSE 视图以及准入次数。部分 prepare 崩溃、响应丢失、损坏/外部 ref、快照超限与清理崩溃，仅有定向测试或故障探针覆盖，或仍属于更广的打包验收工作。两侧 owner 重启、真实 provider 和真实混版本集群仍独立处理。Q2 的 binding 半边有 D11 的冻结控制面支路覆盖醒来的旧 Spring 的过期 claim，并有 store 测试钉住 bind 守卫；两个存活控制面仍属后续阶段。
+机器可读报告、manifest 和保留的失败诊断位于 `.qwen/investigations/g3-step3-implementation/`，当前汇总报告为 `packaged-verification.md`。这五种打包门禁不证明上述整个矩阵。自[可替换 Harness 设计 D11](2026-10-02-hosted-replaceable-harness.zh-CN.md#d11--残留门禁step-3-进-ci模型轮支路q2-的-binding-半边) 起，它们是 `hosted-failover-e2e` 任务的 CI 步骤，该任务独立于 Hosted MySQL 的 verify 运行（见 D11）；同一任务里还有一条模型轮支路，把无工具 Session 的 B1 与 B2 的主要观察项做成打包门禁，但不覆盖它们的 attempt 与 stream 身份、实时 SSE 视图以及准入次数。
+
+#14481 的第 2 步在同一任务里新增五条打包故障支路。三条在持久 A5 屏障之后崩溃替代 Harness：一条在 Allow 决策落库后（A5 的决策行），一条在批准执行到达 `PREPARED`、Runtime Broker 的 `:start` 被扣住时（A5a 的部分 prepare），还有一条在批准结果已提交、post-tool 模型轮被扣住时（A5 的 result commit 屏障）。三者都会启动第三代 Harness，要求它以原 Action、prepare key、digest、Runtime 身份、一次已结算执行、一次文件效果和一个终态收尾；result-commit 支路还要求重发复用同一个已保存请求，并撤回已发布的片段。另两条在提交后丢弃控制面的回复：决策回复丢失后，同一 `Idempotency-Key` 重试必须落到同一条记录，只产生一个 `ACTION_RESPONSE` operation（A4 的决策半边）；Turn 准入回复丢失后，重试只产生一行 Turn（C4）。load 回复丢失、清理失败后再崩溃（C3）、终态已提交但未送达、checkpoint 可付但终态缺失（C1/C2）仍无打包支路，继续由定向或集成证据覆盖。损坏/外部 ref 与快照超限同样保持定向测试。两侧 owner 重启、真实 provider 和真实混版本集群仍独立处理。Q2 的 binding 半边有 D11 的冻结控制面支路覆盖醒来的旧 Spring 的过期 claim，并有 store 测试钉住 bind 守卫；两个存活控制面仍属后续阶段。
 
 ## 10. 实现范围
 

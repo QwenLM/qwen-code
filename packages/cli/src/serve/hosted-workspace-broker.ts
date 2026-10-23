@@ -31,6 +31,14 @@ import type {
   ManagedMcpControl,
   ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
+import {
+  parseHostedMcpServers,
+  type HostedMcpServerPin,
+} from './hosted-mcp-definitions.js';
+
+export interface HostedPublishedMcpServer extends HostedMcpServerPin {
+  readonly transport: 'stdio' | 'streamable-http' | 'sse';
+}
 
 import type {
   ManagedHookControl,
@@ -106,6 +114,15 @@ export function isTerminalUnknownRejection(
     cause.code === 'runtime_broker_execution_unknown' &&
     cause.details?.['terminal'] === true
   );
+}
+
+/** A recovery read asked the original Runtime once and still could not prove
+ * whether the command committed. The caller reports the execution as unknown
+ * and re-checks later; it must never dispatch the command again. */
+export class HostedWorkspaceBrokerExecutionUnresolved extends Error {
+  constructor() {
+    super('Runtime execution outcome remains unknown after reconciliation.');
+  }
 }
 
 export class HostedWorkspaceBroker {
@@ -192,6 +209,35 @@ export class HostedWorkspaceBroker {
   async warm(): Promise<void> {
     const response = await this.harnessRequest('/runtimes:warm', {});
     if (response['runtime'] !== undefined) this.readRuntime(response);
+  }
+
+  async mcpDefinitions(
+    originalOwner = false,
+  ): Promise<readonly HostedPublishedMcpServer[]> {
+    const response = await this.harnessRequest(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/mcp-definitions`,
+      originalOwner ? { runtimeSessionId: this.runtimeSessionId } : {},
+    );
+    const servers = response['servers'];
+    if (!Array.isArray(servers) || servers.length > 128)
+      throw new Error('Invalid published MCP definitions.');
+    const identities = new Set<string>();
+    return servers.map((value: unknown) => {
+      const server = object(value);
+      const { transport, ...pin } = server;
+      const [parsed] = parseHostedMcpServers([pin]);
+      const identity = `${parsed.serverId}\0${parsed.serverRevision}`;
+      if (
+        !['stdio', 'streamable-http', 'sse'].includes(String(transport)) ||
+        identities.has(identity)
+      )
+        throw new Error('Invalid published MCP definition.');
+      identities.add(identity);
+      return {
+        ...parsed,
+        transport: transport as HostedPublishedMcpServer['transport'],
+      };
+    });
   }
 
   async authorizeLifecycle(): Promise<void> {
@@ -464,12 +510,14 @@ export class HostedWorkspaceBroker {
     signal: AbortSignal,
     observationMs = 120_000,
     waitForUnknown = false,
+    reconcileUnknownOnce = false,
   ): Promise<
     ManagedToolResultPayload & { capture?: ToolResultCapture | null }
   > {
     const path = `/executions/${encodeURIComponent(id)}`;
     let response: Record<string, unknown> | undefined;
     let cancellationSent = false;
+    let reconciledUnknown = false;
     if (!signal.aborted) {
       try {
         response = await this.request(`${path}:start`, { payloadJson });
@@ -500,20 +548,39 @@ export class HostedWorkspaceBroker {
           cause instanceof TypeError ||
           (cause instanceof DOMException && cause.name === 'TimeoutError');
         if (cancelling && transportFailed) cancellationSent = false;
-        if (
-          !waitForUnknown ||
-          !(
-            (cause instanceof HostedWorkspaceBrokerRejection &&
-              cause.status === 409 &&
-              cause.code === 'runtime_broker_execution_unknown' &&
-              !isTerminalUnknownRejection(cause)) ||
-            transportFailed
-          )
-        )
+        const stillUnknown =
+          cause instanceof HostedWorkspaceBrokerRejection &&
+          cause.status === 409 &&
+          cause.code === 'runtime_broker_execution_unknown' &&
+          !isTerminalUnknownRejection(cause);
+        if (reconcileUnknownOnce && stillUnknown && !reconciledUnknown) {
+          // The durable record is UNKNOWN: ask the original Runtime once for
+          // the evidence that decides the command. A settled answer is the
+          // observation; anything else is an outcome the takeover reports as
+          // unknown, so it never waits on the gap or dispatches the command
+          // again.
+          reconciledUnknown = true;
+          try {
+            response = await this.request(`${path}?reconcile=true`);
+          } catch (asked) {
+            if (
+              asked instanceof HostedWorkspaceBrokerRejection &&
+              asked.status === 409 &&
+              asked.code === 'runtime_broker_execution_unknown' &&
+              !isTerminalUnknownRejection(asked)
+            )
+              throw new HostedWorkspaceBrokerExecutionUnresolved();
+            throw asked;
+          }
+          if (object(response['status'])['state'] !== 'settled')
+            throw new HostedWorkspaceBrokerExecutionUnresolved();
+        } else if (waitForUnknown && (stillUnknown || transportFailed)) {
+          response = undefined;
+          await delay(250);
+          continue;
+        } else {
           throw cause;
-        response = undefined;
-        await delay(250);
-        continue;
+        }
       }
       if (response['executionCallId'] !== id)
         throw new Error('Runtime execution identity changed.');
@@ -645,8 +712,16 @@ export class HostedWorkspaceBroker {
    * terminally abandoned record reaches the caller as the distinct
    * `abandoned` state rather than folding into that sentinel. A settled
    * record also names its result's execution status.
+   *
+   * `reconcile` is the recovery read: it asks the original Runtime once about
+   * an UNKNOWN record instead of answering a state nobody refreshes. A
+   * settled answer becomes observable; anything the Runtime still cannot
+   * prove keeps the record's UNKNOWN.
    */
-  async status(id: string): Promise<
+  async status(
+    id: string,
+    options: { reconcile?: boolean } = {},
+  ): Promise<
     | {
         state: HostedBrokerExecutionState;
         executionStatus?: string;
@@ -654,8 +729,11 @@ export class HostedWorkspaceBroker {
     | undefined
   > {
     let response: Record<string, unknown>;
+    const path = `/executions/${encodeURIComponent(id)}`;
     try {
-      response = await this.request(`/executions/${encodeURIComponent(id)}`);
+      response = await this.request(
+        options.reconcile === true ? `${path}?reconcile=true` : path,
+      );
     } catch (cause) {
       if (cause instanceof HostedWorkspaceBrokerRejection) {
         if (

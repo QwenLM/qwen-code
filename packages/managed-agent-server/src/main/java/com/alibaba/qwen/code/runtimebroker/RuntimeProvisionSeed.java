@@ -83,7 +83,7 @@ public final class RuntimeProvisionSeed {
         return token;
     }
 
-    boolean matches(RuntimeLease lease) {
+    public boolean matches(RuntimeLease lease) {
         return lease != null && leaseId.equals(lease.getLeaseId())
                 && epoch == lease.getEpoch()
                 && token.equals(lease.getToken())
