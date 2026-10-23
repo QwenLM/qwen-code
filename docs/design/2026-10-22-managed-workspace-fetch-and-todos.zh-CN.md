@@ -89,6 +89,10 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
 8. **plan 模式不变。** `todo_write` 会写入，因此不加入公开 plan 模式的读取集合。
    `/3` 会话目前也无法进入公开 plan 模式：构造函数只接受 `files/1`、`shell/1`
    与 `shell/2`，所以本变更没有加入构建无法到达的 plan 分支。
+9. **团队看板仍是团队级面板。** hosted profile 已声明 `task_list`、
+   `task_create` 与 `task_update`，它们属于团队作用域并由 lead 读取，不是单会话
+   计划面，因此不满足本需求。固定到 `/3` 的团队成员会同时获得两者；看板优先，
+   `todo_write` 是该成员当前轮自己的临时计划，lead 不会读到。
 
 ### 本设计不覆盖的后续工作
 
@@ -102,7 +106,11 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
   因此启用 `/3` 需要改 Java 判定，而不只是改配置。
 - **把任务清单作为持久 Session 记录投影到 Web Shell 或其他客户端。**
 - **在生产 connector 中启用 `/3`。** 哪个部署固定 `/3` 属于上线决策，与 `/2`
-  相同。
+  相同。它要求先升级所有 Worker 并排空旧实例，正如 `/2` 的 ledger 条目所记录：
+  `managed-runtime-tools/1` 与 `preapproved-workspace-tools/1` 两个输入、以及由
+  它们派生的 `capabilityDigest`，都不区分「准入 `todo_write` 的 Worker」与
+  「不准入的 Worker」。未排空的旧 Worker 会在获取与派发之后以
+  `409 managed_runtime_identity_conflict` 回应，而不是派发前可由模型纠正的拒绝。
 
 ## 涉及文件
 

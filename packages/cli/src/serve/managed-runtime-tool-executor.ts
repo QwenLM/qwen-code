@@ -21,6 +21,7 @@ import {
   type ManagedWorkspaceContextFile,
 } from './managed-runtime-provider-protocol.js';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
@@ -2470,6 +2471,13 @@ export class ManagedToolExecutor {
         }
         result = relativizeGlobResult(result, root);
       }
+      // #15076: core turns a `todo_write` filesystem failure into a
+      // success-shaped result whose text embeds the absolute runtime path,
+      // which sits outside the Workspace the glob rewrite anchors on. Scrub
+      // the runtime root itself before the result is durably committed.
+      if (entry.toolName === TodoWriteTool.Name) {
+        result = relativizeRuntimeResult(result);
+      }
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2485,11 +2493,14 @@ export class ManagedToolExecutor {
         responseParts: [],
         error: {
           // A refused or failed glob reaches the model and the durable record
-          // the same way its results do, so it is rewritten the same way.
+          // the same way its results do, so it is rewritten the same way. A
+          // `todo_write` that throws carries the same runtime-root text.
           message:
             entry.toolName === GlobTool.Name && tools.directory !== undefined
               ? relativizeGlobText(message, tools.directory)
-              : message,
+              : entry.toolName === TodoWriteTool.Name
+                ? relativizeRuntimeText(message)
+                : message,
         },
       };
     }
@@ -2796,7 +2807,35 @@ function sameInvocation(
  * context becomes Workspace-relative, and the root itself becomes ".".
  */
 export function relativizeGlobText(text: string, directory: string): string {
-  const root = path.resolve(directory);
+  return relativizeRootedText(text, path.resolve(directory));
+}
+
+/**
+ * #15076: strip the Worker's runtime root, which sits outside the Workspace.
+ * Core reports a `todo_write` filesystem failure inside a success-shaped
+ * result, so the Workspace-rooted glob rewrite cannot reach that path.
+ */
+export function relativizeRuntimeText(text: string): string {
+  return relativizeRootedText(text, path.resolve(Storage.getRuntimeBaseDir()));
+}
+
+/** The runtime root rides both of `todo_write`'s model-facing channels. */
+function relativizeRuntimeResult(result: ToolResult): ToolResult {
+  const next: ToolResult = { ...result };
+  if (typeof next.llmContent === 'string') {
+    next.llmContent = relativizeRuntimeText(next.llmContent);
+  }
+  if (typeof next.error?.message === 'string') {
+    next.error = {
+      ...next.error,
+      message: relativizeRuntimeText(next.error.message),
+    };
+  }
+  return next;
+}
+
+/** Strip an absolute root from model-facing text, at path-token boundaries. */
+function relativizeRootedText(text: string, root: string): string {
   // A Session installed at the filesystem root is its own boundary: every
   // absolute path legitimately starts with it, so there is nothing to strip
   // and a one-character prefix would only eat separators (the echoed pattern

@@ -1543,7 +1543,7 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
-it('offers glob only under the /2 and the read Workspace profiles', async () => {
+it('offers glob under the search profiles and the read Workspace profile', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
     (
@@ -1912,6 +1912,25 @@ it.each([
   {
     todos: [{ id: 'a'.repeat(501), content: 'a', status: 'pending' }],
   },
+  // The declared and enforced bounds: each trips on its own, so removing a
+  // bound turns exactly one case red.
+  {
+    todos: [{ id: 'a', content: 'x'.repeat(1001), status: 'pending' }],
+  },
+  {
+    todos: Array.from({ length: 65 }, (_, index) => ({
+      id: `t${index}`,
+      content: 'a',
+      status: 'pending',
+    })),
+  },
+  {
+    todos: Array.from({ length: 40 }, (_, index) => ({
+      id: `t${index}`,
+      content: 'x'.repeat(500),
+      status: 'pending',
+    })),
+  },
 ])(
   'persists a correctable todo_write argument error without dispatch: %j',
   async (args) => {
@@ -1929,9 +1948,51 @@ it.each([
     expect(error).toContain('retry');
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
     await expect(turn.finish()).resolves.toBeUndefined();
   },
 );
+
+it('dispatches an admitted todo_write with its argument payload', async () => {
+  turn = createV3Turn();
+  const args = { todos: [{ id: 'a', content: 'audit', status: 'pending' }] };
+  const call = { ...calls[0], name: 'todo_write', args };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
+  expect(broker.acquire).toHaveBeenCalled();
+  expect(
+    broker.execute.mock.calls.map((entry: unknown[]) =>
+      JSON.parse(entry[1] as string),
+    ),
+  ).toEqual([{ toolName: 'todo_write', input: args }]);
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+it('declares the preservation rule for omitted dependencies', async () => {
+  turn = createV3Turn();
+  const todo = (await turn.declarations(new AbortController().signal)).find(
+    (tool) => tool.name === 'todo_write',
+  );
+  const schema = todo?.parametersJsonSchema as
+    | {
+        properties?: {
+          todos?: {
+            items?: { properties?: Record<string, { description?: string }> };
+          };
+        };
+      }
+    | undefined;
+  const description =
+    schema?.properties?.todos?.items?.properties?.['blockedBy']?.description;
+  expect(description).toContain('preserved');
+  expect(description).toContain('[]');
+});
 
 it('pre-approves todo_write under default and auto-edit, and yolo never asks', () => {
   expect(

@@ -112,6 +112,12 @@ read profile belongs to a snapshot child that must not write.
    public plan-mode read set. `/3` Sessions also cannot enter public plan mode
    today: the constructor admits only `files/1`, `shell/1` and `shell/2`, so
    this change adds no plan-mode branch that the build cannot reach.
+9. **The team board stays the team surface.** The hosted profiles already
+   declare `task_list`, `task_create` and `task_update`, which are scoped to a
+   team and read by its lead. They are not a single-session plan surface, so
+   they do not satisfy this request. A team member pinned to `/3` is offered
+   both; the board takes precedence, and `todo_write` is that member's own
+   scratch plan for the current turn, which its lead never reads.
 
 ### Follow-ups this design does not cover
 
@@ -130,7 +136,13 @@ read profile belongs to a snapshot child that must not write.
 - **Projecting the task list to Web Shell or another client** as a durable
   Session record.
 - **Enabling `/3` in the production connector.** Which deployment pins `/3`
-  is a rollout decision, as it was for `/2`.
+  is a rollout decision, as it was for `/2`. It requires every Worker upgraded
+  and old incarnations drained first, as the `/2` ledger entry records: the
+  `managed-runtime-tools/1` and `preapproved-workspace-tools/1` inputs, and
+  the `capabilityDigest` derived from them, do not distinguish a Worker that
+  admits `todo_write` from one that does not. An un-drained Worker answers the
+  call with `409 managed_runtime_identity_conflict` after acquisition and
+  dispatch, not with a pre-dispatch refusal the model can correct.
 
 ## Files affected
 

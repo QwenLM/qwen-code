@@ -2477,6 +2477,27 @@ describe('todo_write in the Worker', () => {
     expect(refused.error?.message).toContain('cycle');
     await exec.close();
   });
+
+  it('scrubs the runtime root from a failed write reported as success', async () => {
+    // A file where the todos directory belongs makes the write fail. Core then
+    // reports the failure inside a success-shaped result whose text names the
+    // absolute runtime path, outside the tenant Workspace.
+    await writeFile(path.join(runtimeDir, 'todos'), 'not a directory');
+    const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
+    const todos = { todos: [{ id: 'a', content: 'a', status: 'pending' }] };
+    const result = await exec.execute(
+      reference('todo-failed-write', todos),
+      'todo_write',
+      todos,
+    );
+    const text = (result.responseParts as Array<{ text?: string }>)
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(result.executionStatus).toBe('success');
+    expect(text).toContain('Failed to modify todos');
+    expect(text).not.toContain(runtimeDir);
+    await exec.close();
+  });
 });
 
 // The route-level fixtures cannot express these geometries (a Session root is

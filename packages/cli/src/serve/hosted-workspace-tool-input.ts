@@ -14,16 +14,37 @@ const TODO_STATUSES = new Set(['pending', 'in_progress', 'completed']);
 
 const TODO_ID_MAX_LENGTH = 500;
 
+/**
+ * The most items one call may carry, and the longest single `content`.
+ * Both are declared on the tool as well, so the model sees the same limits
+ * the admission check enforces.
+ */
+export const HOSTED_TODO_MAX_ITEMS = 64;
+export const HOSTED_TODO_CONTENT_MAX_CHARS = 1000;
+/** The most dependencies one item may name. */
+export const HOSTED_TODO_MAX_DEPENDENCIES = 32;
+/**
+ * The serialized-size ceiling for the whole list. Core echoes the stored list
+ * back in its success result, plus roughly 373 bytes of reminder prose, and a
+ * result over the 64 KiB inline limit is replaced with a generic "output
+ * omitted" — after the write already landed. The stored list can also carry
+ * `blockedBy` edges preserved from the previous list, which was itself
+ * admitted under this ceiling, so the echo is bounded by twice this value plus
+ * the reminder, which keeps it under 64 KiB. The field limits above are for the
+ * model's benefit; this total is what makes the echo provably fit.
+ */
+export const HOSTED_TODO_MAX_SERIALIZED_BYTES = 16 * 1024;
+
 export interface HostedToolInputCheck {
   input: Record<string, unknown>;
   error?: string;
 }
 
 /**
- * Checks a `todo_write` call. Every item's shape is checked here; the
- * list-level rules — duplicate ids, duplicate `blockedBy` references and a
- * dependency cycle — stay with the tool, which reports them with its own
- * message.
+ * Checks a `todo_write` call. Every item's shape and the list's size are
+ * checked here; the list-level rules — duplicate ids, duplicate `blockedBy`
+ * references and a dependency cycle — stay with the tool, which reports them
+ * with its own message.
  */
 export function checkHostedTodoWriteInput(
   args: Record<string, unknown>,
@@ -41,6 +62,11 @@ export function checkHostedTodoWriteInput(
       input,
       error:
         'Hosted todo_write requires a todos array. Correct the arguments and retry.',
+    };
+  if (todos.length > HOSTED_TODO_MAX_ITEMS)
+    return {
+      input,
+      error: `Hosted todo_write accepts at most ${HOSTED_TODO_MAX_ITEMS} todos per call (received ${todos.length}). Send a shorter list and retry.`,
     };
   for (const [index, todo] of todos.entries()) {
     if (!todo || typeof todo !== 'object' || Array.isArray(todo))
@@ -69,6 +95,14 @@ export function checkHostedTodoWriteInput(
     const content = item['content'];
     if (typeof content !== 'string' || content.trim() === '')
       return { input, error: todoItemError(index, 'a nonempty content') };
+    if (content.length > HOSTED_TODO_CONTENT_MAX_CHARS)
+      return {
+        input,
+        error: todoItemError(
+          index,
+          `content of at most ${HOSTED_TODO_CONTENT_MAX_CHARS} characters (received ${content.length})`,
+        ),
+      };
     if (!TODO_STATUSES.has(item['status'] as string))
       return {
         input,
@@ -89,7 +123,24 @@ export function checkHostedTodoWriteInput(
           `blockedBy as an array of ids, each at most ${TODO_ID_MAX_LENGTH} characters`,
         ),
       };
+    if (
+      Array.isArray(blockedBy) &&
+      blockedBy.length > HOSTED_TODO_MAX_DEPENDENCIES
+    )
+      return {
+        input,
+        error: todoItemError(
+          index,
+          `blockedBy of at most ${HOSTED_TODO_MAX_DEPENDENCIES} ids (received ${blockedBy.length})`,
+        ),
+      };
   }
+  const serializedBytes = Buffer.byteLength(JSON.stringify(todos), 'utf8');
+  if (serializedBytes > HOSTED_TODO_MAX_SERIALIZED_BYTES)
+    return {
+      input,
+      error: `Hosted todo_write accepts a list of at most ${HOSTED_TODO_MAX_SERIALIZED_BYTES} serialized bytes (received ${serializedBytes}). Shorten the list and retry.`,
+    };
   return { input };
 }
 

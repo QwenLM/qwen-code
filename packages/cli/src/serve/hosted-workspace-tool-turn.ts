@@ -25,7 +25,12 @@ import {
   checkHostedGlobPattern,
   HOSTED_GLOB_TOO_COMPLEX,
 } from './hosted-glob-pattern.js';
-import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
+import {
+  checkHostedTodoWriteInput,
+  HOSTED_TODO_CONTENT_MAX_CHARS,
+  HOSTED_TODO_MAX_DEPENDENCIES,
+  HOSTED_TODO_MAX_ITEMS,
+} from './hosted-workspace-tool-input.js';
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
@@ -673,18 +678,23 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
 const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
   name: 'todo_write',
   description:
-    'Create or replace the task list for complex or multi-step work in this turn. Send the whole list each time: the call replaces the stored list.',
+    'Create or replace the task list for complex or multi-step work in this turn. Send the whole list each time: the call replaces the stored list, and while the plan has unfinished items an omitted `blockedBy` is preserved for an id that already exists.',
   parametersJsonSchema: {
     type: 'object',
     properties: {
       todos: {
         type: 'array',
         description: 'The complete updated task list.',
+        maxItems: HOSTED_TODO_MAX_ITEMS,
         items: {
           type: 'object',
           properties: {
             id: { type: 'string', minLength: 1, maxLength: 500 },
-            content: { type: 'string', minLength: 1 },
+            content: {
+              type: 'string',
+              minLength: 1,
+              maxLength: HOSTED_TODO_CONTENT_MAX_CHARS,
+            },
             status: {
               type: 'string',
               enum: ['pending', 'in_progress', 'completed'],
@@ -693,7 +703,9 @@ const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
               type: 'array',
               items: { type: 'string', maxLength: 500 },
               uniqueItems: true,
-              description: 'Task IDs that must finish before this item.',
+              maxItems: HOSTED_TODO_MAX_DEPENDENCIES,
+              description:
+                'Task IDs that must finish before this item. While the plan has unfinished items, omitted dependencies are preserved for existing ids; send [] to remove them.',
             },
           },
           required: ['id', 'content', 'status'],
@@ -3268,7 +3280,7 @@ export class HostedWorkspaceToolTurn {
             singlePlanExit ||
             (this.publicChildren &&
               ['agent', 'run_shell_command'].includes(request.call.name)) ||
-            ['read_file', 'write_file', 'edit', 'glob'].includes(
+            ['read_file', 'write_file', 'edit', 'glob', 'todo_write'].includes(
               request.call.name,
             )
           ) ||
