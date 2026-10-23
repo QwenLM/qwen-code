@@ -371,6 +371,8 @@ describe('gate fire text', () => {
     expect(tail.endsWith('😀')).toBe(true);
     // The same under a caller's tighter budget.
     expect(/[\uD800-\uDFFF]/u.test(gateStderrTail(stderr, 1001))).toBe(false);
+    // A short tail whose start the runner's rolling buffer cut in a pair.
+    expect(gateStderrTail('\ude00 rate limited')).toBe(' rate limited');
   });
 
   it('keeps the prompt first and wraps the output as data', () => {
