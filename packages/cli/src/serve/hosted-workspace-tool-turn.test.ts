@@ -5098,12 +5098,18 @@ it.each(
   [false, true].flatMap((publication) =>
     [1, 2].flatMap((version) =>
       ['command', 'description'].flatMap((field) =>
-        ['\ud800', '\udc00', '😀\ud800', '\udc00\ud800'].flatMap((value) =>
+        [
+          ['high', '\ud800'],
+          ['low', '\udc00'],
+          ['emoji+high', '😀\ud800'],
+          ['low+high', '\udc00\ud800'],
+        ].flatMap(([valueLabel, value]) =>
           [false, true].map((invalidLast) => ({
             publication,
             version,
             field,
             value,
+            valueLabel,
             invalidLast,
           })),
         ),
@@ -5111,7 +5117,7 @@ it.each(
     ),
   ),
 )(
-  'durably refuses malformed Shell Unicode before Hooks and acquisition ($publication/$version/$field/$value/last:$invalidLast)',
+  'durably refuses malformed Shell Unicode before Hooks and acquisition ($publication/$version/$field/$valueLabel/last:$invalidLast)',
   async ({ publication, version, field, value, invalidLast }) => {
     const owner = {
       owner: vi.fn(),
