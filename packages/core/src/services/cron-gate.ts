@@ -400,10 +400,13 @@ function sanitizeGateText(text: string): string {
 function stderrTail(stderr: string): string {
   const lines = sanitizeGateText(stderr).split('\n');
   const tail = lines.slice(-CRON_GATE_STDERR_LINES).join('\n');
-  if (tail.length <= CRON_GATE_STDERR_CAP_BYTES) return tail;
-  const cut = tail.slice(-CRON_GATE_STDERR_CAP_BYTES);
-  // Not the low half of a pair whose high half was cut off: the notice is a
-  // model prompt, and an unpaired surrogate breaks its serialization.
+  const cut =
+    tail.length > CRON_GATE_STDERR_CAP_BYTES
+      ? tail.slice(-CRON_GATE_STDERR_CAP_BYTES)
+      : tail;
+  // Not the low half of a pair whose high half was cut off, here or by the
+  // runner's rolling stderr buffer: the notice is a model prompt, and an
+  // unpaired surrogate breaks its serialization.
   return /^[\uDC00-\uDFFF]/.test(cut) ? cut.slice(1) : cut;
 }
 

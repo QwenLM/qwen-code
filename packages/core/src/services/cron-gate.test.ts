@@ -541,6 +541,15 @@ describe('gate fire text', () => {
     });
     expect(/[\uD800-\uDFFF]/u.test(text)).toBe(false);
     expect(text).toContain('😀\n</gate-stderr>');
+    // A short tail whose start the runner's rolling buffer cut in a pair.
+    const short = buildGateFailureNotice(job, {
+      kind: 'failed',
+      detail: 'exited with code 1',
+      stderr: '\ude00 rate limited',
+      durationMs: 400,
+    });
+    expect(/[\uD800-\uDFFF]/u.test(short)).toBe(false);
+    expect(short).toContain('<gate-stderr>\n rate limited\n</gate-stderr>');
   });
 
   it('describes a blocked gate with the rule that would unblock it', () => {
