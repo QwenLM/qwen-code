@@ -145,9 +145,13 @@ export function gateCommandError(gate: unknown): string | null {
   // and joined into one line can differ from what the shell runs (adjacent
   // quotes, a trailing `\`, an open quote, a command after the script), so
   // a gate must be a command the normalization leaves as it is. A gate
-  // already runs in a shell; the wrapper adds nothing.
-  if (normalizeMonitorCommand(gate).safetyCommand !== gate.trim()) {
-    return 'must be the command itself, not wrapped in a shell such as `bash -c`';
+  // already runs in a shell; the wrapper adds nothing. The error names what
+  // the rules would check, as the normalization also misreads a few plain
+  // commands (`bash /opt/probe.sh -c x` reads as `x`).
+  const checked = normalizeMonitorCommand(gate).safetyCommand;
+  if (checked !== gate.trim()) {
+    const shown = checked.length > 80 ? `${checked.slice(0, 79)}…` : checked;
+    return `must be the command itself, not wrapped in a shell such as \`bash -c\`: the permission rules would check ${JSON.stringify(shown)} instead of what runs`;
   }
   return null;
 }

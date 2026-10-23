@@ -641,9 +641,17 @@ describe('gateCommandError', () => {
       'not wrapped in a shell',
     ],
     [
-      'a plain wrapper',
+      'a plain wrapper, naming the command the rules would check',
       "bash -c './probe.sh --gate'",
-      'not wrapped in a shell',
+      'not wrapped in a shell such as `bash -c`: the permission rules would check "./probe.sh --gate" instead',
+    ],
+    // The normalization takes a `/`-word for a flag and the `-c` after it
+    // for a wrapper's: the rules would check `config.yml`. Refused, and the
+    // error shows what they would read.
+    [
+      'a script by absolute path given a -c argument',
+      'bash /opt/probe.sh -c config.yml',
+      'the permission rules would check "config.yml" instead',
     ],
     [
       'an env-prefixed wrapper',

@@ -308,10 +308,11 @@ the command is proposed and checked again where it runs.
   refuses: an `&` in a comment, a heredoc body, `(( … ))` or an escape inside
   a double-quoted wrapper script (`bash -c "echo \\&"`) is refused too (put
   such a command in a script). It does not follow every spelling: a script
-  handed to `eval`, piped into a shell, passed as `bash -c -- …` or put
-  together from several quoted pieces (`bash -c './probe.sh '\&`,
-  `bash -c $'./probe.sh &'`), or an `&` after a quote it misreads (inside
-  `"$(…)"` or `$'…'`), gets past it. The runner backs it up: a gate that
+  handed to `eval` or piped into a shell, a wrapper's script behind a prefix
+  passed as `bash -c -- …` or put together from several quoted pieces
+  (`nohup bash -c './probe.sh '\&`, `nohup bash -c $'./probe.sh &'`), or an
+  `&` after a quote it misreads (inside `"$(…)"` or `$'…'`), gets past it; a
+  wrapper without a prefix is refused anyway (below). The runner backs it up: a gate that
   exits 0 with nothing on stdout while something it started in the
   background still holds its stdout open is `failed`, not `quiet` (the
   outcome table above). Whenever its stdout is held, delivered or not, the
@@ -326,9 +327,8 @@ the command is proposed and checked again where it runs.
   settles `quiet` and the lexical check is the only guard there. A gate of only comments
   is refused for the same reason: a shell runs it as nothing; `true` and `:`
   stay accepted as explicit no-ops. That check is best-effort too: a
-  comment-only script behind a wrapper prefix (`nohup bash -c '# x'`) or
-  after `bash -c --` is not caught, and only leaves a task that never
-  fires.
+  comment-only script behind a wrapper prefix (`nohup bash -c '# x'`) is not
+  caught, and only leaves a task that never fires.
   "Always allow" therefore saves a `Monitor(...)` rule, not a `cron_create`
   rule. The classifier input for auto mode includes the gate. A bare
   `cron_create` allow rule saved before this change does not cover a gate.
@@ -347,7 +347,11 @@ the command is proposed and checked again where it runs.
   no rebuilding keeps up with (adjacent quotes ending the script early, a
   separator glued to it, a trailing `\`, an open quote, a command after
   it). A gate already runs in a shell, so the wrapper adds nothing; the
-  check is that the normalization leaves the gate exactly as written.
+  check is that the normalization leaves the gate exactly as written. The
+  normalization also misreads a few plain commands as wrappers (a `/`-word
+  is taken for a flag, so `bash /opt/probe.sh -c x` reads as `x`); those are
+  refused the same way, and the error names the command the rules would
+  check.
 - **Written by the user (Web Shell form, a hand-edited tasks file).** Trusted
   like the permission rules themselves: the file lives under the Qwen home
   next to the settings that hold those rules, and a process that can write it
@@ -469,6 +473,14 @@ Rejected:
 - Gate output is attacker-influenced text (comment bodies, PR titles) placed
   in the turn. The wrapper marks it as data; step 2's probes label third-party
   fields explicitly; the fire cannot approve a pending permission.
+- The permission check is the shared `PermissionManager`, and a gate gets
+  exactly the decision the same text gets as a shell command. It does not
+  read inside `$( … )` or backticks (an allow rule for the outer command
+  covers what runs in them, a deny rule for that command does not catch it),
+  and its splitter does not model comments or backtick bodies, so a quote
+  there can join the next line to the allowed command. That is the shell
+  tool's behaviour today, not something the gate adds; the read-only check
+  that applies without a rule is not fooled by it.
 - An older binary reading a gated task file: fail-closed through the fuse,
   with a confusing but safe message, from v0.19.9 on; v0.19.8 and older fire
   it unconditionally (see the downgrade fuse above).
