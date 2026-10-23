@@ -56,6 +56,16 @@ it.each(
       ),
     )
     .concat(
+      ['allow', 'deny', 'cancelled', 'expired'].map((decision) => ({
+        decision,
+        promptId: randomUUID(),
+        round: 1,
+        planMode: false,
+        publicTool: 'web_fetch',
+        profile: 'hosted-workspace-files/1',
+      })),
+    )
+    .concat(
       ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
         ['hosted-workspace-files/1', 'hosted-workspace-shell/1'].map(
           (profile) => ({
@@ -71,14 +81,16 @@ it.each(
     )
     .concat(
       ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
-        ['write_file', 'agent', 'run_shell_command'].map((publicTool) => ({
-          decision,
-          promptId: randomUUID(),
-          round: 1,
-          planMode: false,
-          profile: 'hosted-workspace-shell/1',
-          publicTool,
-        })),
+        ['write_file', 'web_fetch', 'agent', 'run_shell_command'].map(
+          (publicTool) => ({
+            decision,
+            promptId: randomUUID(),
+            round: 1,
+            planMode: false,
+            profile: 'hosted-workspace-shell/1',
+            publicTool,
+          }),
+        ),
       ),
     ),
 )(
@@ -262,7 +274,9 @@ it.each(
               }
             : publicTool === 'run_shell_command'
               ? { command: 'printf once' }
-              : { file_path: 'original.txt', content: 'one original batch' },
+              : publicTool === 'web_fetch'
+                ? { url: 'https://example.com/docs', prompt: 'Summarize' }
+                : { file_path: 'original.txt', content: 'one original batch' },
         isClientInitiated: false,
         prompt_id: promptId,
       };
