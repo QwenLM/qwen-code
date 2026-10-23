@@ -1245,3 +1245,66 @@ it('owns the :process ledger key behind a plain execution id', async () => {
     'Runtime execution identity changed.',
   );
 });
+
+it('reserves a replayable execution afresh, or reads the terminal one back', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  let settled = false;
+  const broker = await fixture((path, body) => {
+    expect(path).toBe('/internal/runtime-broker/v1/executions:prepare');
+    requests.push(body);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'gate-execution',
+        status: settled
+          ? {
+              state: 'settled',
+              result: {
+                executionStatus: 'success',
+                responseParts: [{ text: '{"kind":"quiet","durationMs":3}' }],
+              },
+            }
+          : { state: 'prepared' },
+      },
+    };
+  });
+  await expect(
+    broker.prepareReplayable('run:gate', 'sha256:digest'),
+  ).resolves.toEqual({ executionCallId: 'gate-execution' });
+  // Every part of the reservation is derived, so a retry sends the same.
+  expect(requests[0]).toMatchObject({
+    idempotencyKey: 'turn:run:gate',
+    turnId: 'turn',
+    toolCallId: 'run:gate',
+    requestDigest: 'sha256:digest',
+    reference: {
+      sessionId: 'turn',
+      promptId: 'turn',
+      callId: 'run:gate',
+      argsDigest: 'sha256:digest',
+    },
+  });
+  settled = true;
+  await expect(
+    broker.prepareReplayable('run:gate', 'sha256:digest'),
+  ).resolves.toEqual({
+    executionCallId: 'gate-execution',
+    settled: {
+      executionStatus: 'success',
+      responseParts: [{ text: '{"kind":"quiet","durationMs":3}' }],
+    },
+  });
+});
+
+it('refuses a replayable reservation the Broker answers mid-flight', async () => {
+  const broker = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'gate-execution',
+      status: { state: 'executing' },
+    },
+  }));
+  await expect(
+    broker.prepareReplayable('run:gate', 'sha256:digest'),
+  ).rejects.toThrow(/neither fresh nor settled/);
+});
