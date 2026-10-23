@@ -870,6 +870,64 @@ describe('ManagedSessionsPage', () => {
     );
   });
 
+  it('retains attachment support while refreshing and applies an explicit revocation', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+        },
+      }),
+    );
+    await render('s1');
+    const composer = container.querySelector('form');
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+    let resolveSummary!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementation(
+      () => new Promise((resolve) => (resolveSummary = resolve)),
+    );
+    await act(async () => {
+      [...container.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Refresh')!
+        .click();
+      await flush();
+    });
+    expect(container.querySelector('form')).toBe(composer);
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+    await act(async () => {
+      resolveSummary(summary('s1'));
+      await flush();
+    });
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(false);
+  });
+
+  it.each(['session', 'provider'] as const)(
+    'does not carry attachment support into a different %s while loading',
+    async (change) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: {
+            canSend: true,
+            canCancel: false,
+            inputAttachments: true,
+          },
+        }),
+      );
+      await render('s1');
+      expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+      mocks.client.getSession.mockImplementation(() => new Promise(() => {}));
+      await render(
+        change === 'session' ? 's2' : 's1',
+        'en',
+        change === 'provider'
+          ? { ...provider, storageKey: 'other-provider' }
+          : provider,
+      );
+      expect(mocks.editorProps?.attachmentsEnabled).toBe(false);
+    },
+  );
+
   it('shows the actual model and context in the fixed composer and retains them after refresh', async () => {
     const observation = {
       modelId: 'actual-old-revision',
