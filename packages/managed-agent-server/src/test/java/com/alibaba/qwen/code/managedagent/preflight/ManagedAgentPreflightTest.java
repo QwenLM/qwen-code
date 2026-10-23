@@ -580,19 +580,46 @@ class ManagedAgentPreflightTest {
         assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in " + file
                 + " at http://127.0.0.1:4200, unless a proxy forwards"
                 + " http://127.0.0.1:4182 there", moved.fix());
+        // The URL the fix names passes once written to the file.
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlCheck("http://127.0.0.1:4200", broker).status());
         broker.setPort(4182);
+        // A non-loopback bind sits behind a TLS-terminating proxy, which the
+        // Harness reaches over https; the fix never names plain http there.
         broker.setHost("192.0.2.7");
-        assertEquals(ManagedAgentPreflight.Status.WARN,
-                urlRow(properties).status());
-        // A wildcard bind serves this machine's addresses, not any address.
+        broker.setAllowNonLoopback(true);
+        ManagedAgentPreflight.Check proxied =
+                urlCheck("https://198.51.100.5:8443", broker);
+        assertEquals(ManagedAgentPreflight.Status.WARN, proxied.status());
+        assertEquals("check that a proxy forwards https://198.51.100.5:8443"
+                + " to 192.0.2.7:4182", proxied.fix());
+        ManagedAgentPreflight.Check plain =
+                urlCheck("http://192.0.2.7:4182", broker);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, plain.status());
+        assertEquals("the Hosted Harness refuses http://192.0.2.7:4182,"
+                + " because it uses plain http outside the loopback interface",
+                plain.detail());
+        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at the https"
+                + " URL of the TLS-terminating proxy in front of"
+                + " 192.0.2.7:4182", plain.fix());
+        // A wildcard bind serves this machine's addresses, not any address,
+        // and the Harness dials it over loopback.
         broker.setHost("0.0.0.0");
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 urlRow(properties).status());
-        assertEquals(ManagedAgentPreflight.Status.WARN, urlCheck(
-                "http://192.0.2.7:4182", broker).status());
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                urlCheck("http://127.0.0.2:4183", broker).status());
+        ManagedAgentPreflight.Check outside =
+                urlCheck("http://192.0.2.7:4182", broker);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, outside.status());
+        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
+                + " http://127.0.0.1:4182", outside.fix());
+        broker.setAllowNonLoopback(false);
         broker.setHost("127.0.0.1");
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 urlCheck("http://localhost:4182", broker).status());
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlCheck("http://127.0.0.1:4182/", broker).status());
         // A specific bind serves its own address, not every loopback one.
         assertEquals(ManagedAgentPreflight.Status.WARN,
                 urlCheck("http://127.0.0.2:4182", broker).status());
@@ -607,10 +634,65 @@ class ManagedAgentPreflightTest {
                 urlCheck("https://127.0.0.1:8443", broker).status());
         assertEquals(ManagedAgentPreflight.Status.WARN,
                 urlCheck("http://127.0.0.1", broker).status());
+        // The Harness accepts only an http or https origin.
         assertEquals(ManagedAgentPreflight.Status.FAIL,
                 urlCheck("127.0.0.1:4182", broker).status());
+        ManagedAgentPreflight.Check ftp = urlCheck("ftp://127.0.0.1:4182", broker);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, ftp.status());
+        assertEquals("the Hosted Harness refuses ftp://127.0.0.1:4182, which is"
+                + " not an http or https origin", ftp.detail());
         assertEquals(ManagedAgentPreflight.Status.FAIL,
-                urlCheck("ftp://127.0.0.1:4182", broker).status());
+                urlCheck("http://127.0.0.1:4182/broker", broker).status());
+        // A host name the URI parser takes only as a registry authority is
+        // still read as a host.
+        assertEquals("the Hosted Harness refuses http://qwen_broker:4182,"
+                + " because it uses plain http outside the loopback interface",
+                urlCheck("http://qwen_broker:4182", broker).detail());
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                urlCheck("https://qwen_broker:port", broker).status());
+        // IPv6 loopback is one socket family; the IPv4 URL does not reach it.
+        broker.setHost("::1");
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlCheck("http://[::1]:4182", broker).status());
+        ManagedAgentPreflight.Check family =
+                urlCheck("http://127.0.0.1:4182", broker);
+        assertEquals(ManagedAgentPreflight.Status.WARN, family.status());
+        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
+                + " http://[::1]:4182, unless a proxy forwards"
+                + " http://127.0.0.1:4182 there", family.fix());
+    }
+
+    @Test
+    void refusesANonLoopbackBrokerListenerWithoutTheOptIn() {
+        ManagedAgentProperties.RuntimeBroker broker =
+                new ManagedAgentProperties().getRuntimeBroker();
+        broker.setHost("127.0.0.1");
+        assertNull(ManagedAgentPreflight.brokerListenCheck(broker));
+        broker.setHost("::1");
+        assertNull(ManagedAgentPreflight.brokerListenCheck(broker));
+        broker.setHost("0.0.0.0");
+        ManagedAgentPreflight.Check wildcard =
+                ManagedAgentPreflight.brokerListenCheck(broker);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, wildcard.status());
+        assertEquals("the Broker refuses to listen on 0.0.0.0 without"
+                + " runtime-broker.allow-non-loopback", wildcard.detail());
+        assertEquals("bind 127.0.0.1, or set"
+                + " QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true"
+                + " behind a TLS-terminating proxy", wildcard.fix());
+        broker.setHost("192.0.2.7");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.brokerListenCheck(broker).status());
+        broker.setAllowNonLoopback(true);
+        assertNull(ManagedAgentPreflight.brokerListenCheck(broker));
+        broker.setHost("0.0.0.0");
+        assertNull(ManagedAgentPreflight.brokerListenCheck(broker));
+        // The Broker rows carry it.
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setHost("0.0.0.0");
+        assertTrue(ManagedAgentPreflight.brokerChecks(properties).stream()
+                .anyMatch(check -> check.status() == ManagedAgentPreflight.Status.FAIL
+                        && check.detail().equals(wildcard.detail())));
     }
 
     private static ManagedAgentPreflight.Check urlCheck(String url,

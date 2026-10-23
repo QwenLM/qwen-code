@@ -1079,7 +1079,8 @@ export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 
 Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
-`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
+`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `QWEN_MANAGED_RUNTIME_BROKER_`,
+`SPRING_` or `OSS_`. Every other
 variable of the server process still reaches the worker and its tools. Keep
 unrelated secrets out of the service environment. A worker that uses the
 artifact tool's `oss` publisher therefore needs its credentials under the

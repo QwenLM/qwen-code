@@ -377,7 +377,9 @@ test('bootstrap writes private files without printing secrets', async () => {
         0o600,
       );
     }
-    assert.ok(!output.includes(token));
+    for (const secret of [token, digest, brokerToken]) {
+      assert.ok(!output.includes(secret));
+    }
     assert.throws(
       () =>
         execFileSync(process.execPath, [script, '--directory', directory], {

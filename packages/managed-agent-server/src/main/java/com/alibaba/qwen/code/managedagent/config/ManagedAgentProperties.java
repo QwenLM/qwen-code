@@ -46,6 +46,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private static final String CREDENTIAL_PUNCTUATION = "._:/+=-";
     private static final Pattern PLAIN_CREDENTIAL =
             Pattern.compile("[A-Za-z0-9" + CREDENTIAL_PUNCTUATION + "]*");
+    // A URL may also bracket an IPv6 literal; both readers take `[` and `]`
+    // literally in a value.
+    private static final String BROKER_URL_KEY = "QWEN_MANAGED_RUNTIME_BROKER_URL";
+    private static final Pattern PLAIN_URL =
+            Pattern.compile("[A-Za-z0-9\\[\\]" + CREDENTIAL_PUNCTUATION + "]*");
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
@@ -205,6 +210,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // Optional: a text-only deployment has no Broker to share a token with.
         String brokerToken = values.get("QWEN_MANAGED_RUNTIME_BROKER_TOKEN");
         boolean sharesBrokerToken = StringUtils.isNotBlank(brokerToken);
+        // The Harness takes the URL and token together or not at all.
+        if (sharesBrokerToken != StringUtils.isNotBlank(values.get(BROKER_URL_KEY))) {
+            throw new IllegalStateException("Set QWEN_MANAGED_RUNTIME_BROKER_URL and"
+                    + " QWEN_MANAGED_RUNTIME_BROKER_TOKEN together in harness.credentials-file, or neither");
+        }
         if (sharesBrokerToken && StringUtils.isNotBlank(runtimeBroker.getToken())) {
             throw new IllegalStateException("Configure the Runtime Broker token either in"
                     + " harness.credentials-file or directly, not both");
@@ -214,7 +224,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         if (sharesBrokerToken) {
             runtimeBroker.setToken(brokerToken);
         }
-        harnessBrokerUrl = values.getOrDefault("QWEN_MANAGED_RUNTIME_BROKER_URL", "");
+        harnessBrokerUrl = values.getOrDefault(BROKER_URL_KEY, "");
         harnessCredentialsApplied = true;
     }
 
@@ -260,6 +270,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
             }
             String key = line.substring(0, separator).strip();
             String value = line.substring(separator + 1);
+            // systemd ignores `export KEY=value`, which a shell assigns, and a
+            // shell runs `NAME KEY=value` as a command.
+            if (key.chars().anyMatch(Character::isWhitespace)) {
+                throw unsupportedCredentialLine(file, index, "a key that is not a bare variable name");
+            }
             boolean strict = STRICT_HARNESS_KEYS.contains(key);
             // A shell runs `KEY = value` or `KEY= value` as a command instead.
             if (strict && (key.length() != separator || !value.equals(value.stripLeading()))) {
@@ -282,9 +297,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
             }
             // Both readers take these characters literally anywhere in a
             // value; a shell gives others, such as `;`, `&` or `~`, meaning.
-            if (strict && !PLAIN_CREDENTIAL.matcher(value).matches()) {
-                throw unsupportedCredentialLine(file, index,
-                        "a character other than letters, digits and `" + CREDENTIAL_PUNCTUATION + "` in " + key);
+            boolean url = BROKER_URL_KEY.equals(key);
+            if (strict && !(url ? PLAIN_URL : PLAIN_CREDENTIAL).matcher(value).matches()) {
+                throw unsupportedCredentialLine(file, index, "a character other than letters, digits"
+                        + (url ? ", `[`, `]`" : "") + " and `" + CREDENTIAL_PUNCTUATION + "` in " + key);
             }
             values.put(key, value);
         }

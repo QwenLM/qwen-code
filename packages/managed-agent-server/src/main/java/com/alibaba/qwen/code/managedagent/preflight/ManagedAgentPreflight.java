@@ -21,6 +21,7 @@ import org.springframework.core.io.Resource;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
@@ -610,6 +611,10 @@ public final class ManagedAgentPreflight {
             checks.add(new Check("broker", Status.FAIL, "token is empty",
                     fix));
         }
+        Check listen = brokerListenCheck(broker);
+        if (listen != null) {
+            checks.add(listen);
+        }
         if (readsFile && properties.harnessCredentialsApplied()) {
             checks.add(harnessBrokerUrlCheck(
                     properties.harnessBrokerUrl(), broker, file));
@@ -655,9 +660,11 @@ public final class ManagedAgentPreflight {
     }
 
     // The Harness takes its Broker URL from its own environment file, which
-    // nothing else reconciles with the address the Broker binds. Only a URL
-    // that names the Broker's own plain-HTTP listener can be checked; one
-    // that names another address may reach it through a proxy.
+    // nothing else reconciles with the address the Broker binds. The URL is
+    // first held to the rules the Harness applies when it starts
+    // (managed-runtime-broker-url.ts); then only a URL that names the
+    // Broker's own plain-HTTP listener can be checked, and one that names
+    // another address may reach it through a proxy.
     static Check harnessBrokerUrlCheck(String url,
             ManagedAgentProperties.RuntimeBroker broker, String file) {
         String address = broker.getHost() + ":" + broker.getPort();
@@ -668,8 +675,11 @@ public final class ManagedAgentPreflight {
                             + " QWEN_MANAGED_RUNTIME_BROKER_TOKEN in " + file
                             + ", unless the Harness command line sets them");
         }
+        String direct = directBrokerUrl(broker);
         String fix = "point QWEN_MANAGED_RUNTIME_BROKER_URL in " + file
-                + " at http://" + address;
+                + " at " + (direct != null ? direct
+                        : "the https URL of the TLS-terminating proxy in front"
+                                + " of " + address);
         URI uri;
         try {
             uri = new URI(url);
@@ -679,15 +689,40 @@ public final class ManagedAgentPreflight {
         }
         String scheme = uri.getScheme() == null ? ""
                 : uri.getScheme().toLowerCase(Locale.ROOT);
-        if (uri.getHost() == null
-                || !"http".equals(scheme) && !"https".equals(scheme)) {
+        String host = uri.getHost();
+        int port = uri.getPort();
+        // An authority that is not a valid server name, such as one with an
+        // underscore, leaves both unset; the Harness still accepts it.
+        String authority = uri.getRawAuthority();
+        if (host == null && authority != null && authority.indexOf('@') < 0) {
+            int colon = authority.lastIndexOf(':');
+            String digits = colon < 0 ? "" : authority.substring(colon + 1);
+            host = colon < 0 ? authority : authority.substring(0, colon);
+            port = digits.matches("[0-9]{1,5}") ? Integer.parseInt(digits) : -1;
+            if ((colon >= 0 && port < 0) || host.isEmpty()) {
+                host = null;
+            }
+        }
+        // The file's character set already keeps out user information, a
+        // query and a fragment.
+        String path = uri.getRawPath();
+        if (host == null
+                || (!"http".equals(scheme) && !"https".equals(scheme))
+                || (path != null && !path.isEmpty() && !"/".equals(path))) {
             return new Check("broker-url", Status.FAIL,
-                    "the Hosted Harness Broker URL is not an http or https URL",
+                    "the Hosted Harness refuses " + url
+                            + ", which is not an http or https origin", fix);
+        }
+        if ("http".equals(scheme) && !isLoopbackHost(host)) {
+            return new Check("broker-url", Status.FAIL,
+                    "the Hosted Harness refuses " + url + ", because it uses"
+                            + " plain http outside the loopback interface",
                     fix);
         }
-        int port = uri.getPort() >= 0 ? uri.getPort()
-                : "https".equals(scheme) ? 443 : 80;
-        if (port == broker.getPort() && served(uri.getHost(), broker.getHost())) {
+        if (port < 0) {
+            port = "https".equals(scheme) ? 443 : 80;
+        }
+        if (port == broker.getPort() && served(host, broker.getHost())) {
             // The URL names the Broker's own socket, which speaks plain HTTP.
             return "https".equals(scheme)
                     ? new Check("broker-url", Status.FAIL, "the Hosted Harness"
@@ -698,7 +733,66 @@ public final class ManagedAgentPreflight {
         return new Check("broker-url", Status.WARN, "the Hosted Harness dials "
                 + url + ", not the Broker's listener at " + address
                 + "; a proxy may forward it, which preflight cannot verify",
-                fix + ", unless a proxy forwards " + url + " there");
+                direct != null
+                        ? fix + ", unless a proxy forwards " + url + " there"
+                        : "check that a proxy forwards " + url + " to "
+                                + address);
+    }
+
+    // The URL that reaches the Broker's listener directly, which the Harness
+    // accepts only on the loopback interface; null for a non-loopback bind,
+    // which the Harness reaches through a TLS-terminating proxy.
+    private static String directBrokerUrl(
+            ManagedAgentProperties.RuntimeBroker broker) {
+        InetAddress bind = new InetSocketAddress(broker.getHost(), 0)
+                .getAddress();
+        if (bind == null
+                || (!bind.isAnyLocalAddress() && !bind.isLoopbackAddress())) {
+            return null;
+        }
+        String host = broker.getHost();
+        if (bind.isAnyLocalAddress()) {
+            host = bind instanceof Inet6Address ? "[::1]" : "127.0.0.1";
+        } else if (host.indexOf(':') >= 0 && !host.startsWith("[")) {
+            host = "[" + host + "]";
+        }
+        return "http://" + host + ":" + broker.getPort();
+    }
+
+    // The hosts the Harness counts as loopback (loopback-binds.ts).
+    private static boolean isLoopbackHost(String host) {
+        String name = host.toLowerCase(Locale.ROOT);
+        if (name.equals("localhost") || name.equals("::1")
+                || name.equals("[::1]")) {
+            return true;
+        }
+        String[] octets = name.split("\\.", -1);
+        if (octets.length != 4 || !octets[0].equals("127")) {
+            return false;
+        }
+        for (String octet : octets) {
+            if (!octet.matches("[0-9]{1,3}") || Integer.parseInt(octet) > 255) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The Broker refuses a non-loopback listen address unless told it sits
+    // behind a TLS-terminating layer (RuntimeBrokerHttpServer).
+    static Check brokerListenCheck(ManagedAgentProperties.RuntimeBroker broker) {
+        InetAddress bind = new InetSocketAddress(broker.getHost(), 0)
+                .getAddress();
+        if (broker.isAllowNonLoopback()
+                || (bind != null && bind.isLoopbackAddress())) {
+            return null;
+        }
+        return new Check("broker", Status.FAIL, "the Broker refuses to listen"
+                + " on " + broker.getHost() + " without"
+                + " runtime-broker.allow-non-loopback",
+                "bind 127.0.0.1, or set"
+                        + " QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true"
+                        + " behind a TLS-terminating proxy");
     }
 
     // Whether the Broker's socket accepts connections to this host: a

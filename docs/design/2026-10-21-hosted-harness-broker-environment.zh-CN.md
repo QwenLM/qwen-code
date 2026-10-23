@@ -48,9 +48,9 @@ token 在读取后就离开了 Harness 自身的环境，因此 Harness 启动�
 
 ### 共享 Broker token
 
-Harness 凭据文件增加两个可选键。当设置了 `harness.credentials-file` 且文件中有 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 时，控制面从中取 `runtime-broker.token`。与另外两个键一样，文件设置了该键、同时又直接设置了 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` 时，启动失败。文件中没有该键时仍由直接配置决定，因此纯文本部署不受影响。Harness 还会从该文件读取 `QWEN_MANAGED_RUNTIME_BROKER_URL`，因此这两行都遵循与另外两个键相同的规则：`=` 两侧不留空白，值只用字母、数字和 `._:/+=-`。绑定是原子的：发生冲突时什么都不会被绑定。
+Harness 凭据文件增加两个可选键。当设置了 `harness.credentials-file` 且文件中有 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 时，控制面从中取 `runtime-broker.token`。与另外两个键一样，文件设置了该键、同时又直接设置了 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` 时，启动失败。文件中没有该键时仍由直接配置决定，因此纯文本部署不受影响。Harness 还会从该文件读取 `QWEN_MANAGED_RUNTIME_BROKER_URL`，因此这两行都遵循与另外两个键相同的规则：`=` 两侧不留空白，值只用字母、数字和 `._:/+=-`；URL 还可以用 `[` 和 `]` 括住 IPv6 字面量，两种读取方都按字面读取它们。Harness 要求 URL 和 token 同时提供，因此只有其中一项的文件会导致启动失败。任何一行的键名中含有空白时都会导致启动失败：systemd 会忽略 shell 能够赋值的 `export KEY=value`，两种读取方读到的内容会不一致。绑定是原子的：发生冲突时什么都不会被绑定。
 
-文件中的 Broker URL 是 Broker 绑定地址的第二份副本，而 Broker 的绑定地址由控制面单独配置。因此，在 Broker 已开启且启动时读取了该文件的情况下，预检增加一行 `broker-url`：只有当 URL 直接指向 Broker 自己的监听时，这一行才通过：协议为 `http`，端口为 `runtime-broker.port`，主机解析出的地址由该绑定提供，即 `runtime-broker.host` 本身，通配地址绑定时则为本机的任一地址。用 `https` 指向同一个监听时报 FAIL，因为嵌入式 Broker 提供的是明文 HTTP。其他 URL 报 WARN：它可能是转发到 Broker 的代理或 TLS 前端，预检无法确认，因此不会让 `--check` 失败。文件中没有 Broker URL 时同样报 WARN。
+文件中的 Broker URL 是 Broker 绑定地址的第二份副本，而 Broker 的绑定地址由控制面单独配置。因此，在 Broker 已开启且启动时读取了该文件的情况下，预检增加一行 `broker-url`。这一行先套用 Harness 启动时的规则（`managed-runtime-broker-url.ts`）：URL 必须是 `http` 或 `https` 的 origin，并且只有回环主机才允许明文 `http`；不满足时报 FAIL，因为 Harness 会拒绝启动。之后，只有当 URL 直接指向 Broker 自己的监听时，这一行才通过：协议为 `http`，端口为 `runtime-broker.port`，主机解析出的地址由该绑定提供，即 `runtime-broker.host` 本身，通配地址绑定时则为本机的任一地址。用 `https` 指向同一个监听时报 FAIL，因为嵌入式 Broker 提供的是明文 HTTP。其他 URL 报 WARN：它可能是转发到 Broker 的代理或 TLS 前端，预检无法确认，因此不会让 `--check` 失败。文件中没有 Broker URL 时同样报 WARN。Broker 绑定在回环或通配地址时，修复建议给出直连的回环 URL；否则指向 TLS 终止代理，因为 Harness 拒绝对非回环地址使用明文 `http`。Broker 绑定在回环以外的地址、却没有设置 `runtime-broker.allow-non-loopback` 时，`broker` 行同样报 FAIL，因为 Broker 本身会在启动时拒绝这种配置。
 
 ### 模板与文档
 
@@ -74,7 +74,8 @@ Harness 凭据文件增加两个可选键。当设置了 `harness.credentials-fi
 - Java 单元测试：
   - 可选的 Broker token 键能从文件解析出来；与直接配置冲突时失败且不绑定任何值；键缺失时保留直接配置的值；
   - Broker URL 和 token 所在行同样受凭据规则约束；
-  - 直连的 `http` URL 时 `broker-url` 行通过，用 `https` 指向明文监听时失败；Broker 端口或主机变更、换成另一个回环地址、通配地址绑定下的非本机地址、以及其他端口上的 TLS 前端都报警告；
+  - 直连的 `http` URL 时 `broker-url` 行通过；用 `https` 指向明文监听、URL 带路径、协议不是 `http(s)`、对非回环主机使用明文 `http` 时失败；Broker 端口或主机变更、换成另一个回环地址、IPv6 回环绑定配 IPv4 URL、以及其他端口上的 TLS 前端都报警告；非回环绑定时修复建议不会给出明文 `http`，且建议中的 URL 能够通过；
+  - 凭据文件能绑定带方括号的 IPv6 URL，并拒绝只有 URL 或只有 token 的文件以及 `export` 行；
   - broker 行只在启动读取了该文件时，才在修复建议中提到它；
   - Runtime worker 不继承该 token。
 - 模板测试：`server.env` 不含 Broker token，`harness.env` 含两个变量，模板中两者均为注释状态，unit 加载 `harness.env` 且 `ExecStart` 不含 Broker 参数。

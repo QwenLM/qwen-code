@@ -117,7 +117,7 @@ export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/opt/qwen-code/dist/cli.js'
 export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 ```
 
-Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令行，也不经上面这些控制面变量：在 `harness.env`（或启动 Harness 的环境）中设置 `QWEN_MANAGED_RUNTIME_BROKER_URL='http://127.0.0.1:4182'`，并把 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 设为 Broker token。`qwen serve` 读取后会把这两个变量从自己的环境中删除，因此 Harness 启动的进程都不会继承该 token；控制面也会把 `QWEN_MANAGED_RUNTIME_BROKER_` 开头的变量挡在 Runtime worker 之外。使用 bootstrap 生成的文件时，`harness.env` 已包含这两项，控制面也从该文件读取 Broker token，因此不要设置 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`；两份都设置时拒绝启动。文件中的 URL 以 `http` 直接指向 Broker 自己的监听时，预检的 `broker-url` 行通过；以 `https` 指向这个监听时报 FAIL，因为明文 HTTP 的 Broker 无法接受；指向其他地址或端口时报 WARN，因为只有代理才可能转发过去。
+Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令行，也不经上面这些控制面变量：在 `harness.env`（或启动 Harness 的环境）中设置 `QWEN_MANAGED_RUNTIME_BROKER_URL='http://127.0.0.1:4182'`，并把 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 设为 Broker token。`qwen serve` 读取后会把这两个变量从自己的环境中删除，因此 Harness 启动的进程都不会继承该 token；控制面也会把 `QWEN_MANAGED_RUNTIME_BROKER_` 开头的变量挡在 Runtime worker 之外。使用 bootstrap 生成的文件时，`harness.env` 已包含这两项，控制面也从该文件读取 Broker token，因此不要设置 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`；两份都设置时拒绝启动。Harness 的这两行要么同时设置，要么都不设置，并且每行都写成普通的 `KEY=value`：只有其中一行的文件，以及 systemd 会忽略的 `export KEY=value` 这类写法，都会拒绝启动。文件中的 URL 以 `http` 直接指向 Broker 自己的监听时，预检的 `broker-url` 行通过。以下两种情况报 FAIL：Harness 会拒绝这个 URL（URL 必须是 `http` 或 `https` 的 origin，且只有在回环接口上才可以用明文 `http`）；或者以 `https` 指向这个监听，而明文 HTTP 的 Broker 无法接受。URL 指向其他地址或端口时报 WARN，因为只有代理才可能转发过去；Broker 绑定在回环以外的地址时（需要 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true`），总是通过这种方式访问。
 
 在准入文件、Shell 或 child Git 工作前，必须完成 `docs/server-reference.md` 中 “Verified physical Workspace recovery” 所述的原生 storage 注册与 mount identity 校验。未注册或有歧义的 mount 必须保持不可用。Public Shell 执行仍默认关闭。Shell lifecycle v2 默认声明；显式生命周期列表替换默认值，空列表禁用它。MCP 生命周期仍须显式加入。能力声明不等于部署资格验收。
 
@@ -127,7 +127,7 @@ Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令�
 2. 停止新的入口准入，按照部署既有 drain 流程等待已准入工作完成结算。
 3. 备份 MySQL、`QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`、完整 Runtime credential key ring 和精确旧版分发产物。分发产物升级期间不要轮换 credential key。
 4. 停止 Java 服务与 Hosted Harness，保留 Workspace 和 durable Runtime state。随包的控制面 unit 使用 `KillMode=process`，`systemctl stop` 不会终止 Runtime worker；启动新版本前先用 `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server` 回收。
-5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。工具路径的主机需先把 `harness.env` 中的 `QWEN_HOSTED_HARNESS_BROKER_ARGS` 行换成 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`：已经没有组件读取那一行，不替换的话 Harness 启动时没有 Broker。
+5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。工具路径的主机需先把 `harness.env` 中的 `QWEN_HOSTED_HARNESS_BROKER_ARGS` 行换成 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`：已经没有组件读取那一行，不替换的话 Harness 启动时没有 Broker。如果 `server.env` 启用了 Harness 并把 `harness.env` 指定为凭据文件（bootstrap 生成的文件就是这样），还要从 `server.env` 中删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`：此后控制面从 `harness.env` 读取 token，两份都保留会拒绝启动。
 6. 使用相同数据库和 durable 配置启动新版 `bin/qwen-managed-agent-server`，由 Flyway 向前迁移 schema。
 7. 要求 actuator 健康检查通过，读取一个既有 Session 与历史，再完成一个新的无工具 Turn，之后才能恢复入口流量。任何可选工具 capability 都必须在重新验收后才能开启。
 

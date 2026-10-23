@@ -929,6 +929,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'deployment.',
       );
     }
+    if (argv['managed-runtime-broker-token'] !== undefined) {
+      // Same exposure for the Broker credential the Harness holds.
+      writeStderrLine(
+        'qwen serve: --managed-runtime-broker-token is visible in the ' +
+          'process command line; prefer the ' +
+          'QWEN_MANAGED_RUNTIME_BROKER_TOKEN env var.',
+      );
+    }
     let channelSelection: ServeChannelSelection | undefined;
     try {
       channelSelection = normalizeServeChannelSelection(argv.channel);
