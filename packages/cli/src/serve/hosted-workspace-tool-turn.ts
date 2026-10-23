@@ -29,7 +29,6 @@ import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
-  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
@@ -231,7 +230,6 @@ export {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
-  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
@@ -658,14 +656,6 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
-export const HOSTED_WORKSPACE_FILE_TOOLS_V2: FunctionDeclaration[] = [
-  ...HOSTED_WORKSPACE_FILE_TOOLS,
-  HOSTED_GLOB_TOOL,
-];
-export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
-  ...HOSTED_WORKSPACE_SHELL_TOOLS,
-  HOSTED_GLOB_TOOL,
-];
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
 // call it does not declare. A missing read_file stops the module loading:
@@ -1891,11 +1881,9 @@ export class HostedWorkspaceToolTurn {
         this.mcp ||
         this.memberPlanMode ||
         this.childDepth !== 0 ||
-        ![
-          'hosted-workspace-files/1',
-          'hosted-workspace-shell/1',
-          'hosted-workspace-shell/2',
-        ].includes(this.profile ?? ''))
+        !['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
+          this.profile ?? '',
+        ))
     )
       throw new Error('Public Plan mode is unavailable for this Session.');
     this.publication =
@@ -1980,14 +1968,12 @@ export class HostedWorkspaceToolTurn {
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
     this.advertised = [
-      ...(this.publication || this.shell
-        ? search
-          ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
-          : HOSTED_WORKSPACE_SHELL_TOOLS
-        : search
-          ? HOSTED_WORKSPACE_FILE_TOOLS_V2
-          : HOSTED_WORKSPACE_FILE_TOOLS
-      )
+      ...[
+        ...(this.publication || this.shell
+          ? HOSTED_WORKSPACE_SHELL_TOOLS
+          : HOSTED_WORKSPACE_FILE_TOOLS),
+        ...(search ? [HOSTED_GLOB_TOOL] : []),
+      ]
         .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
         .map((tool) => {
           if (this.foregroundOnly && tool.name === 'run_shell_command') {
