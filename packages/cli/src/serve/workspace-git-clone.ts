@@ -57,6 +57,10 @@ export interface GitCloneRequest {
    * cloner owns filesystem shape and existence checks.
    */
   validateTarget?: (absoluteTarget: string) => TargetRejection | undefined;
+  /** Reserves the canonical target for the job's lifetime. */
+  reserveTarget?: (canonicalTarget: string) => void;
+  /** Releases the reservation after the job and its cleanup settle. */
+  releaseTarget?: (canonicalTarget: string) => void;
 }
 
 export interface TargetRejection {
@@ -111,6 +115,8 @@ interface ClonerOptions {
   maxRetained?: number;
   now?: () => number;
   createJobId?: () => string;
+  /** Test seam for the success-path canonical path resolution. */
+  resolveCwd?: (target: string) => Promise<string>;
 }
 
 function requestError(
@@ -433,6 +439,7 @@ export function createWorkspaceGitCloner(
   const maxRetained = options.maxRetained ?? DEFAULT_MAX_RETAINED;
   const now = options.now ?? Date.now;
   const createJobId = options.createJobId ?? (() => randomUUID());
+  const resolveCwd = options.resolveCwd ?? ((target) => realpath(target));
   const jobs = new Map<string, CloneJob>();
   let sealed = false;
 
@@ -528,6 +535,10 @@ export function createWorkspaceGitCloner(
       status: 'running',
       startedAt: now(),
     };
+    // Reserve the canonical target before the job becomes visible, so an
+    // overlapping clone or registration cannot start under it while a
+    // failure/cancel cleanup could still delete the outer directory.
+    request.reserveTarget?.(claimed);
     jobs.set(jobId, { snapshot, controller, settled: Promise.resolve() });
     const job = jobs.get(jobId)!;
 
@@ -550,9 +561,12 @@ export function createWorkspaceGitCloner(
           },
         });
         if (controller.signal.aborted) throw abortError();
-        job.snapshot.status = 'succeeded';
+        // Resolve the result before publishing the terminal state: a reader
+        // must never observe `succeeded` without the `cwd` it registers.
+        const cwd = await resolveCwd(claimed).catch(() => claimed);
+        job.snapshot.cwd = cwd;
         job.snapshot.percent = 100;
-        job.snapshot.cwd = await realpath(claimed).catch(() => claimed);
+        job.snapshot.status = 'succeeded';
         delete job.snapshot.message;
       } catch (error) {
         const nextError = timedOut
@@ -577,6 +591,7 @@ export function createWorkspaceGitCloner(
         if (job.snapshot.status === 'running') {
           job.snapshot.status = 'cancelled';
         }
+        request.releaseTarget?.(claimed);
       }
     })();
 

@@ -357,4 +357,96 @@ describe('createWorkspaceGitCloner', () => {
       }),
     ).rejects.toMatchObject({ code: 'daemon_shutting_down' });
   });
+
+  it('publishes a success snapshot only after cwd is resolved', async () => {
+    const root = await tempRoot();
+    const target = join(root, 'repo');
+    let resolveCwd!: (value: string) => void;
+    const cwd = new Promise<string>((resolve) => {
+      resolveCwd = resolve;
+    });
+    let runnerDone!: () => void;
+    const done = new Promise<void>((resolve) => {
+      runnerDone = resolve;
+    });
+    const cloner = createWorkspaceGitCloner({
+      runner: {
+        async run({ target: cloneTarget }) {
+          await writeFile(join(cloneTarget, 'README.md'), 'x');
+          runnerDone();
+        },
+      },
+      resolveCwd: () => cwd,
+    });
+    const { jobId } = await cloner.start({
+      url: 'https://example.com/org/repo.git',
+      target,
+    });
+    await done;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The terminal state must not be observable before its result path.
+    expect(cloner.get(jobId)?.status).toBe('running');
+    expect(cloner.get(jobId)?.cwd).toBeUndefined();
+
+    resolveCwd('/canonical/repo');
+    const job = await waitForJob(cloner, jobId);
+    expect(job.status).toBe('succeeded');
+    expect(job.cwd).toBe('/canonical/repo');
+  });
+
+  it('reserves the target for the job lifetime and releases it on success', async () => {
+    const root = await tempRoot();
+    const reserved: string[] = [];
+    const released: string[] = [];
+    const cloner = createWorkspaceGitCloner({ runner: writingRunner() });
+    const { jobId } = await cloner.start({
+      url: 'https://example.com/org/repo.git',
+      target: join(root, 'repo'),
+      reserveTarget: (value) => reserved.push(value),
+      releaseTarget: (value) => released.push(value),
+    });
+
+    expect(reserved).toHaveLength(1);
+    const job = await waitForJob(cloner, jobId);
+    expect(job.status).toBe('succeeded');
+    expect(released).toEqual(reserved);
+  });
+
+  it('does not reserve a target rejected by the route validator', async () => {
+    const root = await tempRoot();
+    const reserved: string[] = [];
+    const cloner = createWorkspaceGitCloner({ runner: writingRunner() });
+
+    await expect(
+      cloner.start({
+        url: 'https://example.com/org/repo.git',
+        target: join(root, 'repo'),
+        validateTarget: () => ({
+          status: 409,
+          code: 'target_nested',
+          message: 'nested',
+        }),
+        reserveTarget: (value) => reserved.push(value),
+      }),
+    ).rejects.toMatchObject({ code: 'target_nested' });
+    expect(reserved).toHaveLength(0);
+  });
+
+  it('releases the reservation when a clone is cancelled', async () => {
+    const root = await tempRoot();
+    const reserved: string[] = [];
+    const released: string[] = [];
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner() });
+    const { jobId } = await cloner.start({
+      url: 'https://example.com/org/repo.git',
+      target: join(root, 'repo'),
+      reserveTarget: (value) => reserved.push(value),
+      releaseTarget: (value) => released.push(value),
+    });
+
+    const job = await cloner.cancel(jobId);
+    expect(job?.status).toBe('cancelled');
+    expect(released).toEqual(reserved);
+  });
 });

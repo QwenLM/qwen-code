@@ -309,6 +309,11 @@ export function registerWorkspaceManagementRoutes(
   // infrastructure: the capacity projection skips them just like it skips
   // the published internal runtime.
   const internalAdditionsInFlight = new Set<string>();
+  // Canonical targets of running clone jobs, held until the job and its
+  // failure/cancel cleanup settle. A clone's cleanup removes its directory
+  // recursively, so an overlapping clone or registration must not start
+  // underneath an active target.
+  const activeCloneTargets = new Set<string>();
   let sealed = false;
   let activeOperations = 0;
   let pendingScratchCreations = 0;
@@ -409,6 +414,14 @@ export function registerWorkspaceManagementRoutes(
       );
     });
 
+  const conflictsWithActiveClone = (canonical: string): boolean =>
+    [...activeCloneTargets].some(
+      (target) =>
+        canonical === target ||
+        isWithinRoot(canonical, target) ||
+        isWithinRoot(target, canonical),
+    );
+
   const assertOwnedRuntimeAdmission = (
     canonical: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
@@ -420,11 +433,15 @@ export function registerWorkspaceManagementRoutes(
     if (workspaceRegistry.getManagedByWorkspaceCwd(canonical)) {
       throw new Error('Workspace is already registered');
     }
+    if (activeCloneTargets.has(canonical)) {
+      throw new Error('Workspace path is being cloned');
+    }
     const nestingConflict = [
       ...workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
       ...[...inFlight].flatMap(([cwd, operation]) =>
         operation === 'addition' ? [cwd] : [],
       ),
+      ...activeCloneTargets,
     ].some((cwd) => {
       if (cwd === canonical) return false;
       if (isWithinRoot(cwd, canonical)) return true;
@@ -1071,6 +1088,13 @@ export function registerWorkspaceManagementRoutes(
         message: 'Workspace path nests with an existing workspace',
       };
     }
+    if (conflictsWithActiveClone(candidate)) {
+      return {
+        status: 409,
+        code: 'target_nested',
+        message: 'Workspace path overlaps an active clone',
+      };
+    }
     for (const cwd of inFlight.keys()) {
       if (
         cwd !== candidate &&
@@ -1120,6 +1144,8 @@ export function registerWorkspaceManagementRoutes(
         url: body['url'],
         target: body['target'],
         validateTarget: validateGitCloneTarget,
+        reserveTarget: (target) => activeCloneTargets.add(target),
+        releaseTarget: (target) => activeCloneTargets.delete(target),
       });
       res.status(202).json({ kind: 'git-workspace-clone', jobId });
     } catch (error) {
@@ -1414,6 +1440,7 @@ export function registerWorkspaceManagementRoutes(
         }
         const nested =
           conflictsWithRegisteredWorkspace(canonical) ||
+          conflictsWithActiveClone(canonical) ||
           [...inFlight].some(
             ([cwd, operation]) =>
               cwd !== canonical &&
@@ -1552,6 +1579,7 @@ export function registerWorkspaceManagementRoutes(
       // /project/sub) can't both pass while neither is in the registry yet.
       const nested =
         conflictsWithRegisteredWorkspace(canonical) ||
+        conflictsWithActiveClone(canonical) ||
         [...inFlight].some(
           ([cwd, operation]) =>
             cwd !== canonical &&

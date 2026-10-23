@@ -40,6 +40,10 @@ import {
 } from '../workspace-registration-store.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { prepareManagedScratchRoot } from '../managed-scratch-workspace.js';
+import {
+  createWorkspaceGitCloner,
+  type GitCloneProcess,
+} from '../workspace-git-clone.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
@@ -3680,6 +3684,82 @@ describe('remote daemon proxy routes', () => {
       await vi.waitFor(() => expect(captured?.aborted).toBe(true));
     } finally {
       await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+describe('git clone target reservations', () => {
+  const blockingRunner: GitCloneProcess = {
+    run({ signal }) {
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            const error = new Error('cancelled');
+            error.name = 'GitCloneCancelledError';
+            reject(error);
+          },
+          { once: true },
+        );
+      });
+    },
+  };
+
+  it('rejects overlapping clones and registrations until the outer job settles', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-reserve-'));
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+      });
+      const outer = join(root, 'outer');
+
+      const started = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target: outer,
+      });
+      expect(started.status).toBe(202);
+
+      const nested = await request(app)
+        .post('/workspaces')
+        .send({
+          kind: 'git',
+          url: 'https://example.com/org/repo.git',
+          target: join(outer, 'child'),
+        });
+      expect(nested.status).toBe(409);
+      expect(nested.body.code).toBe('target_nested');
+
+      const child = join(outer, 'child');
+      await mkdir(child);
+      const registration = await request(app).post('/workspaces').send({
+        cwd: child,
+        persist: false,
+      });
+      expect(registration.status).toBe(409);
+      expect(registration.body.code).toBe('workspace_nested');
+
+      const cancelled = await request(app).delete(
+        `/workspace-git-clone-jobs/${started.body.jobId}`,
+      );
+      expect(cancelled.status).toBe(200);
+      expect(cancelled.body.status).toBe('cancelled');
+
+      // The reservation is released with the job.
+      const again = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target: outer,
+      });
+      expect(again.status).toBe(202);
+      await cloner.cancel(again.body.jobId);
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
