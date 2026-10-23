@@ -241,9 +241,9 @@ export function useWorkspaceSessionLiveState(
       consumeRefreshRequest(state);
       state.lastReconcileAt = Date.now();
       const [stagedCatalog, groups] = await stageCatalogBundle(state);
-      if (disposed) return;
+      if (disposed || !availableRef.current) return;
       const liveB = await readLiveState(state.workspaceCwd);
-      if (disposed) return;
+      if (disposed || !availableRef.current) return;
       catalogStore.applyLiveState(
         state.workspaceCwd,
         liveB.sessions,
@@ -355,7 +355,7 @@ export function useWorkspaceSessionLiveState(
         finish();
         return;
       }
-      if (disposed) {
+      if (disposed || !availableRef.current) {
         finish();
         return;
       }
@@ -464,14 +464,22 @@ export function useWorkspaceSessionLiveState(
   }, [catalogStore, client, controller, enabled, targets]);
 
   useEffect(() => {
-    if (!enabled || !available || targets.length === 0) return;
+    if (!enabled || targets.length === 0) return;
+    if (!available) {
+      // Paused polling cannot advance the failure streak, so expire locally.
+      const timeout = window.setTimeout(() => {
+        for (const cwd of targets)
+          catalogStore.markWorkspaceLiveStateUnavailable(cwd);
+      }, SESSION_LIVE_STATE_STALE_AFTER_FAILURES * SESSION_LIVE_STATE_ERROR_RETRY_MS);
+      return () => window.clearTimeout(timeout);
+    }
     pollAllRef.current?.();
     const interval = window.setInterval(
       () => pollAllRef.current?.(),
       pollIntervalMs,
     );
     return () => window.clearInterval(interval);
-  }, [available, client, enabled, pollIntervalMs, targets]);
+  }, [available, catalogStore, client, enabled, pollIntervalMs, targets]);
 
   return groupCatalogs;
 }

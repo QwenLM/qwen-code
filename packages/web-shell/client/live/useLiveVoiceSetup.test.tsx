@@ -113,6 +113,54 @@ describe('useLiveVoiceSetup', () => {
     }
   });
 
+  it('retains an in-flight mutation across an outage without racing a recovery read', async () => {
+    const { server, availability } = offlineDaemon();
+    const oldStatus = { ...status(true), shortcut: 'OLD' };
+    const newStatus = { ...status(true), shortcut: 'NEW' };
+    mocks.client.liveSetupStatus.mockResolvedValue(oldStatus);
+    let finish!: (next: DaemonLiveSetupStatus) => void;
+    mocks.client.updateLiveSetup.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    let setup!: UseLiveVoiceSetupResult;
+    function Harness() {
+      setup = useLiveVoiceSetup(true);
+      return null;
+    }
+    try {
+      await act(async () =>
+        root.render(
+          <DaemonAvailabilityContext.Provider value={availability}>
+            <Harness />
+          </DaemonAvailabilityContext.Provider>,
+        ),
+      );
+      let mutation!: Promise<void>;
+      act(() => {
+        mutation = setup.update({ enabled: true });
+      });
+      await act(async () => availability.check(true));
+      server.healthy = true;
+      await act(async () => availability.check(true));
+      expect(mocks.client.liveSetupStatus).toHaveBeenCalledOnce();
+      expect(setup.mutating).toBe(true);
+      await act(async () => {
+        finish(newStatus);
+        await mutation;
+      });
+      expect(setup.status).toEqual(newStatus);
+      expect(setup.mutating).toBe(false);
+      expect(mocks.client.updateLiveSetup).toHaveBeenCalledOnce();
+    } finally {
+      act(() => root.unmount());
+      availability.dispose();
+    }
+  });
+
   it('loads on opening, polls only during installation, and stops when closed', async () => {
     vi.useFakeTimers();
     mocks.client.liveSetupStatus.mockResolvedValue(status(false));

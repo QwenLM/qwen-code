@@ -13,7 +13,6 @@ import {
 } from 'react';
 import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../daemon/availability.js';
-import { useI18n } from '../i18n';
 import {
   bearerSubprotocol,
   describeMicError,
@@ -112,9 +111,6 @@ export function useVoiceCapture({
   const [audioLevel, setAudioLevel] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string>();
   const availability = useDaemonAvailabilityController();
-  const { t } = useI18n();
-  const translateRef = useRef(t);
-  translateRef.current = t;
 
   const resourcesRef = useRef<CaptureResources>({});
   const mountedRef = useRef(true);
@@ -193,7 +189,7 @@ export function useVoiceCapture({
     (error: unknown, snapshot: CaptureSnapshot) => {
       if (!snapshotIsCurrent(snapshot)) return;
       const message = isDaemonUnavailableError(error)
-        ? translateRef.current('daemon.connection.unavailable')
+        ? 'Cannot reach the service.'
         : error instanceof Error
           ? error.message
           : String(error);
@@ -551,7 +547,7 @@ export function useVoiceCapture({
     const unsubscribe = availability?.subscribe(() => {
       const snapshot = snapshotRef.current;
       if (snapshot && availability.getSnapshot() !== 'available') {
-        fail(translateRef.current('daemon.connection.unavailable'), snapshot);
+        fail('Cannot reach the service.', snapshot);
       }
     });
     return () => {

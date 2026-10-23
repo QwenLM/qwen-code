@@ -419,7 +419,8 @@ export function WorkspaceSection({
     sessionsStale,
   ]);
   const sessions = sessionsResult.sessions;
-  const loadError = Boolean(sessionsResult.error);
+  const loadError =
+    Boolean(sessionsResult.error) || (!available && !sessionsPage);
 
   useEffect(() => {
     if (!sessionsResult.error) {

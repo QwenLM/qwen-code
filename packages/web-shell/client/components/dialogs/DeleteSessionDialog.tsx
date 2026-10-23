@@ -10,6 +10,7 @@ import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
 
 interface DeleteSessionDialogProps {
   /**
@@ -37,6 +38,7 @@ export function DeleteSessionDialog({
   workspaceCwd,
 }: DeleteSessionDialogProps) {
   const { t } = useI18n();
+  const availability = useDaemonAvailability();
   const connection = useConnection();
   const {
     sessions,
@@ -49,6 +51,14 @@ export function DeleteSessionDialog({
     maxAgeMs: 1_000,
   });
   const currentSessionId = connection.sessionId;
+  const sessionErrorMessage =
+    availability !== 'available'
+      ? t(
+          availability === 'auth-required'
+            ? 'daemon.connection.authRequired'
+            : 'daemon.connection.unavailable',
+        )
+      : sessionsError?.message;
   const [deleting, setDeleting] = useState(false);
   // `selectedIdx` is the keyboard/hover cursor (roving highlight, -1 = none —
   // see ResumeDialog for the rationale); `selectedIds` is the multi-select set
@@ -272,7 +282,8 @@ export function DeleteSessionDialog({
           placeholder=""
         />
         <span className={dp('picker-search-hint')}>
-          {message ||
+          {sessionErrorMessage ||
+            message ||
             (deleting
               ? t('delete.deleting')
               : loading
@@ -297,13 +308,13 @@ export function DeleteSessionDialog({
         )}
         ref={listRef}
       >
-        {loading && (
+        {loading && !sessionErrorMessage && (
           <div className={dp('picker-empty')}>{t('common.loading')}</div>
         )}
-        {!loading && sessionsError && (
-          <div className={dp('picker-empty')}>{sessionsError.message}</div>
+        {sessionErrorMessage && (
+          <div className={dp('picker-empty')}>{sessionErrorMessage}</div>
         )}
-        {!loading && !sessionsError && filtered.length === 0 && (
+        {!loading && !sessionErrorMessage && filtered.length === 0 && (
           <div className={dp('picker-empty')}>
             {filterQuery
               ? t('delete.noMatch', { query: filterQuery })

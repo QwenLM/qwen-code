@@ -56,6 +56,7 @@ export function useLiveVoiceSetup(
   const [mutationError, setMutationError] = useState<Error>();
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
+  const pollGenerationRef = useRef(0);
   const contextRef = useRef({ client: workspace.client, supported });
   const requestRef = useRef<
     { generation: number; promise: Promise<void> } | undefined
@@ -77,8 +78,8 @@ export function useLiveVoiceSetup(
         availabilityController.getSnapshot() !== 'available')
     )
       return;
-    const generation = generationRef.current;
-    if (mutationRef.current === generation) return;
+    if (mutationRef.current !== undefined) return;
+    const generation = pollGenerationRef.current;
     if (requestRef.current?.generation === generation) {
       return await requestRef.current.promise;
     }
@@ -86,12 +87,12 @@ export function useLiveVoiceSetup(
       setLoading(true);
       try {
         const next = await workspace.client.liveSetupStatus();
-        if (mountedRef.current && generationRef.current === generation) {
+        if (mountedRef.current && pollGenerationRef.current === generation) {
           setStatus(next);
           setRefreshError(undefined);
         }
       } catch (cause) {
-        if (mountedRef.current && generationRef.current === generation) {
+        if (mountedRef.current && pollGenerationRef.current === generation) {
           setRefreshError(
             isDaemonUnavailableError(cause)
               ? new Error(translateRef.current('daemon.connection.unavailable'))
@@ -101,7 +102,7 @@ export function useLiveVoiceSetup(
           );
         }
       } finally {
-        if (mountedRef.current && generationRef.current === generation) {
+        if (mountedRef.current && pollGenerationRef.current === generation) {
           setLoading(false);
         }
         if (requestRef.current?.generation === generation) {
@@ -120,6 +121,8 @@ export function useLiveVoiceSetup(
     ) {
       contextRef.current = { client: workspace.client, supported };
       generationRef.current += 1;
+      pollGenerationRef.current += 1;
+      requestRef.current = undefined;
       mutationRef.current = undefined;
     }
     setStatus(undefined);
@@ -131,7 +134,7 @@ export function useLiveVoiceSetup(
 
   useEffect(() => {
     if (availability !== 'available') {
-      generationRef.current += 1;
+      pollGenerationRef.current += 1;
       requestRef.current = undefined;
       setLoading(false);
       return;
@@ -186,6 +189,8 @@ export function useLiveVoiceSetup(
       const generation = generationRef.current;
       if (mutationRef.current === generation) return;
       generationRef.current += 1;
+      pollGenerationRef.current += 1;
+      requestRef.current = undefined;
       const mutationGeneration = generationRef.current;
       mutationRef.current = mutationGeneration;
       setLoading(false);

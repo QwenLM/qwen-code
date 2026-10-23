@@ -94,12 +94,11 @@ it('posts a retry to the run route of the session workspace', async () => {
     expect.objectContaining({
       method: 'POST',
       body: '{}',
-      headers: new Headers({
-        'content-type': 'application/json',
-        Authorization: 'Bearer secret',
-      }),
     }),
   );
+  const headers = new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers);
+  expect(headers.get('content-type')).toBe('application/json');
+  expect(headers.get('Authorization')).toBe('Bearer secret');
 });
 
 it('surfaces a refused retry as an error with the server message', async () => {

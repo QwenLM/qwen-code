@@ -698,6 +698,7 @@ describe('LocalFilesBridge reconnection', () => {
     availabilityMock.available = false;
     const h = harness();
     await flush();
+    expect(lastPhase(h)).toBe('connecting');
     expect(h.sockets).toHaveLength(0);
     h.bridge.stop();
     await h.running;

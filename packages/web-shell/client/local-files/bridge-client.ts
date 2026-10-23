@@ -400,6 +400,10 @@ export class LocalFilesBridge {
 
   private async connect(): Promise<void> {
     if (this.stopped) return;
+    const attempt = this.reconnectAttempts + 1;
+    if (this.state.phase === 'idle' || this.state.phase === 'stopped') {
+      this.setState({ phase: 'connecting', attempt });
+    }
     try {
       if (this.availability) {
         do {
@@ -413,8 +417,9 @@ export class LocalFilesBridge {
       return;
     }
     if (this.stopped) return;
-    const attempt = this.reconnectAttempts + 1;
-    this.setState({ phase: 'connecting', attempt });
+    if (this.state.phase !== 'connecting') {
+      this.setState({ phase: 'connecting', attempt });
+    }
     this.registerAttempts = 0;
     let socket: WebSocketLike;
     try {

@@ -87,6 +87,8 @@ import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
+import { DaemonAvailabilityContext } from './daemon/availability-context.js';
+import { offlineDaemon } from './daemon/availability.test-fixtures.js';
 import { WebShellNavigationBoundary } from './navigation';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
@@ -11834,6 +11836,7 @@ function renderApp(
   notificationTarget?: EventTarget,
   standalone = false,
   urlNavigation = false,
+  availability?: ReturnType<typeof offlineDaemon>['availability'],
 ): {
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
@@ -11844,7 +11847,7 @@ function renderApp(
   const root = createRoot(container);
   const doRender = (nextProps: React.ComponentProps<typeof App> = props) => {
     act(() => {
-      root.render(
+      const content = (
         <StandaloneContext.Provider value={standalone}>
           <TurnNotificationNavigationContext.Provider
             value={notificationTarget}
@@ -11865,7 +11868,16 @@ function renderApp(
               <App sidebar={{ enabled: true }} header={{}} {...nextProps} />
             )}
           </TurnNotificationNavigationContext.Provider>
-        </StandaloneContext.Provider>,
+        </StandaloneContext.Provider>
+      );
+      root.render(
+        availability ? (
+          <DaemonAvailabilityContext.Provider value={availability}>
+            {content}
+          </DaemonAvailabilityContext.Provider>
+        ) : (
+          content
+        ),
       );
     });
   };
@@ -33127,6 +33139,34 @@ describe('App session callbacks', () => {
     );
   });
 
+  it.each([true, false])(
+    'calls the local slash handler while offline, without daemon dispatch (handled=%s)',
+    async (handled) => {
+      const { availability } = offlineDaemon();
+      try {
+        await availability.check(true);
+        const onSlashCommand = vi.fn(() => handled);
+        const { container } = renderApp(
+          { onSlashCommand },
+          undefined,
+          false,
+          false,
+          availability,
+        );
+        await flush();
+        testState.prompt = '/deploy production';
+        await clickSubmit(container);
+        expect(onSlashCommand).toHaveBeenCalledOnce();
+        testState.prompt = 'Ordinary offline draft';
+        await clickSubmit(container);
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(onSlashCommand).toHaveBeenCalledOnce();
+      } finally {
+        availability.dispose();
+      }
+    },
+  );
+
   it('lets the host handle a slash command instead of forwarding it', async () => {
     const onSlashCommand = vi.fn(() => true);
     const { container } = renderApp({ onSlashCommand });
@@ -48846,6 +48886,51 @@ describe('approval mode allowlist', () => {
 });
 
 describe('Managed home integration', () => {
+  it('keeps the offline banner when Managed home hides an open floating artifact', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const { availability } = offlineDaemon();
+    try {
+      const { container } = renderApp(
+        { managedAgentProvider: managedProvider(), language: 'en' },
+        undefined,
+        false,
+        false,
+        availability,
+      );
+      await flush();
+      await act(async () =>
+        testState.latestChatEditorProps?.onAttachmentPreview?.({
+          name: 'kept.txt',
+          text: 'Keep open',
+        }),
+      );
+      await flush();
+      expect(document.body.textContent).toContain('kept.txt');
+      await act(async () => availability.check(true));
+      await chooseBackend(container, 'Managed');
+      const managedHome = container.querySelector(
+        '[data-testid="managed-home"]',
+      );
+      expect(managedHome).not.toBeNull();
+      expect(managedHome?.getAttribute('aria-hidden')).not.toBe('true');
+      expect(
+        container.querySelector('[data-testid="daemon-connection-banner"]'),
+      ).not.toBeNull();
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    } finally {
+      availability.dispose();
+    }
+  });
+
   it.each([
     ['primary', '/workspace'],
     ['other', '/other-project'],

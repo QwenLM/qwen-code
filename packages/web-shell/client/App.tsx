@@ -3993,6 +3993,8 @@ export function App({
     [workspace.baseUrl],
   );
   const daemonAvailable = useDaemonAvailability() === 'available';
+  const daemonAvailableRef = useRef(daemonAvailable);
+  daemonAvailableRef.current = daemonAvailable;
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -17614,6 +17616,7 @@ export function App({
         pushToast('info', t('settings.models.addDisabled'));
         return true;
       }
+      if (!daemonAvailableRef.current) return false;
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
         return false;
@@ -19042,7 +19045,6 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: ComposerSubmitMetadata,
     ) => {
-      if (!daemonAvailable) return false;
       const accepted = handleSubmitRef.current(
         text,
         images,
@@ -19055,7 +19057,7 @@ export function App({
       }
       return accepted;
     },
-    [resumeChatBottomFollow, daemonAvailable],
+    [resumeChatBottomFollow],
   );
 
   const handleAskUserConfirm = useCallback(
@@ -22310,7 +22312,8 @@ export function App({
                 </div>
               )}
               {!artifactPanelFullscreen &&
-                !(artifactPanelOpen && useFloatingArtifactPanel) && (
+                (managedMode ||
+                  !(artifactPanelOpen && useFloatingArtifactPanel)) && (
                   <DaemonConnectionBanner />
                 )}
               <div

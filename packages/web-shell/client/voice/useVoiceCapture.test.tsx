@@ -208,7 +208,7 @@ describe('useVoiceCapture', () => {
     await act(async () => result.start());
     expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
     expect(MockWebSocket.latest).toBeUndefined();
-    expect(capture!.errorMessage).toBe('无法连接服务。');
+    expect(capture!.errorMessage).toBe('Cannot reach the service.');
     availabilityMock.available = true;
     await act(async () => capture!.start());
     const ws = MockWebSocket.latest;
@@ -219,7 +219,7 @@ describe('useVoiceCapture', () => {
     });
     expect(track.stop).toHaveBeenCalled();
     expect(capture!.status).toBe('error');
-    expect(capture!.errorMessage).toBe('无法连接服务。');
+    expect(capture!.errorMessage).toBe('Cannot reach the service.');
     await act(async () => {
       availabilityMock.available = true;
       availabilityMock.listener?.();
