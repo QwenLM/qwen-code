@@ -13,6 +13,8 @@ import {
 } from 'react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import {
+  ArrowDownIcon,
+  ArrowUpIcon,
   BlocksIcon,
   CopyIcon,
   EllipsisVerticalIcon,
@@ -56,6 +58,8 @@ export interface WorkspaceMenuActions {
   openTerminal?: () => void;
   newSession?: () => void;
   newWorktreeSession?: () => void;
+  moveUp?: () => void;
+  moveDown?: () => void;
   openManagement?: (target: WorkspaceManagementTarget) => void;
   reload?: () => void;
   remove?: () => void;
@@ -166,6 +170,22 @@ export function WorkspaceMenu({
       <DropdownMenuItem key="worktree" onSelect={actions.newWorktreeSession}>
         <GitForkIcon />
         {t('sidebar.newWorktreeTask')}
+      </DropdownMenuItem>,
+    );
+  }
+  if (actions.moveUp) {
+    primary.push(
+      <DropdownMenuItem key="move-up" onSelect={actions.moveUp}>
+        <ArrowUpIcon />
+        {t('sidebar.moveWorkspaceUp')}
+      </DropdownMenuItem>,
+    );
+  }
+  if (actions.moveDown) {
+    primary.push(
+      <DropdownMenuItem key="move-down" onSelect={actions.moveDown}>
+        <ArrowDownIcon />
+        {t('sidebar.moveWorkspaceDown')}
       </DropdownMenuItem>,
     );
   }
