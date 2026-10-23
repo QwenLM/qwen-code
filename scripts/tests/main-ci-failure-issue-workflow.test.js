@@ -168,9 +168,8 @@ cat "\${RUNNER_TEMP}/pulls.json"
               // and the fork cases below keep passing it to document that.
               HEAD_REPO: 'QwenLM/qwen-code',
               HEAD_SHA: 'tested-head',
-              // Before the merged fixtures' 16:15:57Z merge, so the default
-              // path is the run that was already in flight at merge time.
-              RUN_STARTED_AT: '2026-10-17T16:00:00Z',
+              // A fresh approval run, which is what the guard keeps filing.
+              RUN_ATTEMPT: '1',
               ...overrides,
             },
           },
@@ -218,11 +217,11 @@ cat "\${RUNNER_TEMP}/pulls.json"
       ]);
       expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
     });
-    it('passes the attempt start to the destination guard', () => {
-      // Without this wiring the guard reads an empty timestamp and every
-      // post-merge rerun files exactly as before.
-      expect(destination.env.RUN_STARTED_AT).toBe(
-        '${{ github.event.workflow_run.run_started_at }}',
+    it('passes the attempt to the destination guard', () => {
+      // Without this wiring the guard reads an empty attempt and every
+      // rerun files exactly as before.
+      expect(destination.env.RUN_ATTEMPT).toBe(
+        '${{ github.event.workflow_run.run_attempt }}',
       );
     });
     it('also files an issue when the failed PR already merged', () => {
@@ -230,27 +229,41 @@ cat "\${RUNNER_TEMP}/pulls.json"
         'pr_number=14472\nfile_issue=true\n',
       );
     });
-    it('does not file for a rerun that starts after the PR merged', () => {
-      // Run 39768204855's attempt 2 started 96 minutes after its PR merged
-      // and re-ran the PR's pre-merge workflow; the lock timeout it hit could
-      // not describe main, and filing it created #15239. The post-merge push
-      // run owns that signal.
+    it('does not file for a rerun of a merged PR workflow', () => {
+      // Run 39768204855's attempt 2 re-ran the PR's pre-merge workflow; the
+      // lock timeout it hit could not describe main, and filing it created
+      // #15239. Main's own push and nightly runs carry that signal.
       const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
-        RUN_STARTED_AT: '2026-10-17T16:30:00Z',
+        RUN_ATTEMPT: '2',
       });
       expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
       expect(resolved.stdout).toContain(
-        'after the PR merged at 2026-10-17T16:15:57Z',
+        "Attempt 2 of the PR's pre-merge workflow",
       );
     });
-    it('falls back to filing when the run start is unreadable', () => {
+    it('files a fresh dispatch on a merged PR branch', () => {
+      // A maintainer's manual run is attempt 1 even when it starts long
+      // after the merge; only reruns are stale. The old clock proxy would
+      // have suppressed this.
+      expect(
+        resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
+          EVENT_NAME: 'workflow_dispatch',
+          HEAD_BRANCH: 'ci/java',
+          RUN_STARTED_AT: '2026-10-18T09:00:00Z',
+        }).output,
+      ).toBe('pr_number=14472\nfile_issue=true\n');
+    });
+    it('falls back to filing when the attempt is unreadable', () => {
       // The guard must not turn a missing payload field into silence: before
-      // this change every merged-PR failure filed, and an unreadable
-      // timestamp keeps that direction.
+      // this change every merged-PR failure filed, and an unreadable attempt
+      // keeps that direction — and says so.
       const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
-        RUN_STARTED_AT: '',
+        RUN_ATTEMPT: '',
       });
       expect(resolved.output).toBe('pr_number=14472\nfile_issue=true\n');
+      expect(resolved.stdout).toContain(
+        'No run_attempt in the workflow_run payload',
+      );
     });
     it('does not report a superseded head, wherever the same-named branch lives', () => {
       // The exact head SHA qualifies the PR: a branch whose head is another
@@ -647,7 +660,8 @@ printf '%s\\n' '{"jobs":[]}'
     // auto-rerun this annotation class for months (qwen-autofix.md#af-076);
     // this lane now does the same for main runs — once, because the rerun's
     // own completion re-enters this workflow at attempt 2 and files then if
-    // the break persists.
+    // the break persists (a merged PR's rerun is suppressed as a stale
+    // pre-merge head).
     const infraStep = jobs.analyze.steps.find((step) => step.id === 'infra');
     const rerunJob = jobs.rerun_infra;
     const infraScript = oneLine(infraStep.run);
@@ -716,9 +730,9 @@ printf '%s\\n' '{"jobs":[]}'
     });
 
     it('fails closed: later attempts, empty failure lists, and unreadable annotations all file', () => {
-      // The attempt guard is what stops a rerun loop: a persistent break
-      // re-fails at attempt 2 and files then. Negate it and the pin below
-      // goes red.
+      // The attempt guard is what stops a rerun loop: on main a persistent
+      // break re-fails at attempt 2 and files then. Negate it and the pin
+      // below goes red.
       expect(infraScript).toContain('if [[ "${RUN_ATTEMPT}" == \'1\' ]]; then');
       // Without the count guard an empty failure set is vacuously "all
       // infrastructure" and a run whose job list could not be fetched would
@@ -876,6 +890,31 @@ printf '%s\\n' '{"jobs":[]}'
       // A rerun that could not be dispatched must not swallow the report:
       // the issue is then the only record of a red main.
       expect(condition).toContain("needs.rerun_infra.result != 'success'");
+    });
+
+    it('suppresses the issue and the rerun for a merged PR rerun', () => {
+      // The comments above the infra path promise a persistent break files
+      // at attempt 2; that holds for main only. A merged PR's rerun keeps
+      // the comment, but neither re-runs nor opens an issue.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'true',
+            file_issue: 'false',
+            comment_body: 'body',
+            pr_number: '14472',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(rerunJob.if), needs)).toBe(false);
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
     });
 
     it.each([
@@ -1061,13 +1100,17 @@ printf '%s\\n' '{"jobs":[]}'
       'issues/comments/456',
       'https://github.com/QwenLM/qwen-code/issues/14500',
       0,
+      false,
     ],
-    ['contributor', 'POST', 'issues/14472/comments', '', 0],
-    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 1],
-    ['github-actions[bot]', null, null, '', 3],
+    ['contributor', 'POST', 'issues/14472/comments', '', 0, false],
+    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 1, false],
+    // A suppressed rerun finds the comment an earlier attempt linked to a
+    // still-open issue; the whole-body PATCH must not drop that link.
+    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 0, true],
+    ['github-actions[bot]', null, null, '', 3, false],
   ])(
-    'upserts a %s comment via %s with %s and issue=%s after %s lookup errors',
-    (login, method, endpoint, issueUrl, failures) => {
+    'upserts a %s comment via %s with %s and issue=%s after %s lookup errors (existing tracking: %s)',
+    (login, method, endpoint, issueUrl, failures, existingTracking) => {
       const tmp = mkdtempSync(join(tmpdir(), 'java-ci-comment-'));
       try {
         const step = jobs.report_pr.steps[0];
@@ -1080,10 +1123,17 @@ printf '%s\\n' '{"jobs":[]}'
               'https://github.com/QwenLM/qwen-code/actions/runs/39045740099',
           },
         });
+        const existingBody = existingTracking
+          ? `${comment}\n[Tracking issue](https://github.com/QwenLM/qwen-code/issues/15240)\n`
+          : comment;
         writeFileSync(
           join(tmp, 'comments.json'),
           JSON.stringify(
-            [123, 456].map((id) => ({ id, user: { login }, body: comment })),
+            [123, 456].map((id) => ({
+              id,
+              user: { login },
+              body: existingBody,
+            })),
           ),
         );
         writeFileSync(
@@ -1124,11 +1174,16 @@ fi
             `${method}\nrepos/QwenLM/qwen-code/${endpoint}\n`,
           );
         else expect(existsSync(published)).toBe(false);
-        expect(
-          readFileSync(join(tmp, 'pr-comment.md'), 'utf8').includes(
-            '[Tracking issue]',
-          ),
-        ).toBe(Boolean(issueUrl));
+        const publishedBody = readFileSync(join(tmp, 'pr-comment.md'), 'utf8');
+        if (existingTracking) {
+          expect(publishedBody).toContain(
+            '[Tracking issue](https://github.com/QwenLM/qwen-code/issues/15240)',
+          );
+        } else {
+          expect(publishedBody.includes('[Tracking issue]')).toBe(
+            Boolean(issueUrl),
+          );
+        }
         expect(JSON.stringify(jobs.report_pr)).not.toContain(
           'actions/checkout',
         );
