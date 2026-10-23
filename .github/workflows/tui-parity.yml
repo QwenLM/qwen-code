@@ -28,13 +28,14 @@ jobs:
   changes:
     name: 'Check TUI impact'
     runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
     permissions:
-      pull-requests: read
+      pull-requests: 'read'
     outputs:
       required: '${{ steps.changes.outputs.result }}'
     steps:
       - uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
-        id: changes
+        id: 'changes'
         with:
           script: |-
             if (context.eventName !== 'pull_request') return true;
@@ -52,7 +53,7 @@ jobs:
 
   parity:
     name: 'TUI parity snapshots (ink vs opentui)'
-    needs: changes
+    needs: 'changes'
     if: "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}"
     # Same-repo PRs, write-access authors and dispatches run on the ECS pool
     # (#13245: both jobs sat 26+ minutes in the hosted queue); other fork PRs
@@ -154,7 +155,7 @@ jobs:
 
   noflicker:
     name: 'OpenTUI no-flicker gate'
-    needs: changes
+    needs: 'changes'
     if: "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}"
     # With secrets.QWEN_API_KEY it drives a
     # real model conversation; without it (fork PRs never receive secrets)
