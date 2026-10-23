@@ -985,6 +985,12 @@ describe('startOpenTuiUI fallback contract', () => {
           promptId: 'test-session-id########4',
           sentToModel: undefined,
           historyId: mocks.state.appProps?.startupHistory?.[0]?.id,
+          canonicalHistoryItem: {
+            id: mocks.state.appProps?.startupHistory?.[0]?.id,
+            type: 'user',
+            text: 'restored history',
+            promptId: 'test-session-id########4',
+          },
         },
         { type: 'done' },
         { type: 'info', text: `[Mod fixture] ${warning}` },

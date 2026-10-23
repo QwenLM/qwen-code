@@ -47,6 +47,9 @@ import {
   type OpenTuiSteeringSubmission,
   type WaitingCallInfo,
 } from './live-session.js';
+import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
+import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
@@ -328,6 +331,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             return {
               nativeAttemptsObserved: a.__modOutput !== undefined,
               request: {
+                ...c,
                 callId: c.callId,
                 name: c.name ?? 'test_tool',
                 args: c.args ?? {},
@@ -414,8 +418,12 @@ function createFakeConfig(
   isInitialized: () => boolean = () => true,
   recorder?: {
     recordMidTurnUserMessage: (...args: unknown[]) => void;
+    recordToolResult?: ChatRecordingService['recordToolResult'];
   },
 ) {
+  const chatRecorder = recorder
+    ? { recordToolResult: vi.fn(), ...recorder }
+    : undefined;
   // One stable client object: tests spy on its addHistory through
   // getGeminiClient() (R5-4/R6-5).
   const client = {
@@ -440,7 +448,7 @@ function createFakeConfig(
     // Pinning a bridge model is what turns `shouldRunVisionBridge` on; every
     // other test leaves it undefined and the prompt rides through untouched.
     getDefaultVisionBridgeModel: () => bridgeModel,
-    getChatRecordingService: () => recorder,
+    getChatRecordingService: () => chatRecorder,
     getDebugLogger: () => ({
       debug: () => {},
       warn: () => {},
@@ -451,6 +459,7 @@ function createFakeConfig(
 
 /** One tool batch on call 1, plain finish on the continuation call. */
 function oneToolBatchStream(request: {
+  goalContext?: ToolCallRequestInfo['goalContext'];
   callId: string;
   name: string;
   args?: unknown;
@@ -544,6 +553,101 @@ describe('livePromptEvents', () => {
 
     expect(nextLivePromptId(config)).toBe('session-1########3');
   });
+
+  it('records a native model result once using the same finalized response sent to the model', async () => {
+    const request = { callId: 'native-recorded', name: 'read_file', args: {} };
+    const stream = oneToolBatchStream(request);
+    const recordToolResult = vi.fn();
+    const config = createFakeConfig(stream, undefined, () => true, {
+      recordMidTurnUserMessage: vi.fn(),
+      recordToolResult,
+    } as Parameters<typeof createFakeConfig>[3]);
+    await drain(livePromptEvents(config, 'read', new AbortController().signal));
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(recordToolResult).toHaveBeenCalledOnce();
+    const [parts, metadata] = recordToolResult.mock.calls[0];
+    expect(parts).toEqual(stream.mock.calls[1][0]);
+    expect(metadata.callId).toBe(request.callId);
+    expect(metadata.status).toBe('success');
+    expect(parts).toEqual([
+      {
+        functionResponse: {
+          id: request.callId,
+          name: request.name,
+          response: { ok: true },
+        },
+      },
+    ]);
+  });
+
+  it.each(['turn', 'session'] as const)(
+    'does not record an old model result after the %s changes while rendering completion',
+    async (scope) => {
+      const stream = oneToolBatchStream({
+        callId: 'old-owner-result',
+        name: 'read_file',
+        args: {},
+      });
+      const recordToolResult = vi.fn();
+      const config = createFakeConfig(stream, undefined, () => true, {
+        recordMidTurnUserMessage: vi.fn(),
+        recordToolResult,
+      } as Parameters<typeof createFakeConfig>[3]);
+      let current = true;
+      let sessionId = 'session-1';
+      Object.assign(config, { getSessionId: () => sessionId });
+      let invalidated = false;
+      for await (const event of livePromptEvents(config, 'read', undefined, {
+        isCurrentTurn: () => current,
+      })) {
+        if (event.type === 'tool-end' && event.id === 'old-owner-result') {
+          invalidated = true;
+          if (scope === 'turn') current = false;
+          else sessionId = 'session-2';
+        }
+      }
+      expect(invalidated).toBe(true);
+      expect(recordToolResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['read_file', 'get_goal'])(
+    'retains real Goal provenance options for native %s result',
+    async (name) => {
+      const permit = {
+        goalId: 'goal-native',
+        revision: 2,
+        turnId: 'turn-native',
+      };
+      const request = {
+        callId: 'goal-call',
+        name,
+        args: {},
+        goalContext: permit,
+      };
+      const stream = oneToolBatchStream(request);
+      const recordToolResult = vi.fn();
+      const config = createFakeConfig(stream, undefined, () => true, {
+        recordMidTurnUserMessage: vi.fn(),
+        recordToolResult,
+      });
+      await drain(livePromptEvents(config, 'go', new AbortController().signal));
+      expect(recordToolResult).toHaveBeenCalledOnce();
+      const [parts, metadata, options] = recordToolResult.mock.calls[0];
+      expect(parts).toEqual(stream.mock.calls[1][0]);
+      expect(metadata).toMatchObject({
+        callId: request.callId,
+        status: 'success',
+      });
+      expect(options).toEqual(goalToolResultProvenance(request, parts));
+      expect(options).toEqual(
+        name === 'get_goal'
+          ? { goalContext: permit, provenance: 'goal_runtime' }
+          : { goalContext: permit },
+      );
+      expect(options.goalContext).not.toBe(permit);
+    },
+  );
 
   it('records and restores only the finalized synthetic read response under a small batch budget', async () => {
     const output = 'RAW-MOD-RESULT:'.repeat(2000);
@@ -1113,13 +1217,18 @@ describe('livePromptEvents', () => {
     const sendMessageStream = vi.fn(function* () {
       yield { type: 'finished', value: {} };
     });
-    const config = createFakeConfig(sendMessageStream);
+    const recordToolResult = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, () => true, {
+      recordMidTurnUserMessage: vi.fn(),
+      recordToolResult,
+    });
     const events = await drain(
       livePromptEvents(config, [], undefined, {
         promptId: 'restored-tool',
         toolCall: { name: 'test_tool', args: { owned: true } },
       }),
     );
+    expect(recordToolResult).not.toHaveBeenCalled();
     expect(sendMessageStream).not.toHaveBeenCalled();
     expect(events.filter((event) => event.type === 'tool-start')).toHaveLength(
       1,
@@ -1135,7 +1244,11 @@ describe('livePromptEvents', () => {
 
   it('keeps cancelled client tools out of model history and queued input', async () => {
     const sendMessageStream = vi.fn(function* () {});
-    const config = createFakeConfig(sendMessageStream);
+    const recordToolResult = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, () => true, {
+      recordMidTurnUserMessage: vi.fn(),
+      recordToolResult,
+    });
     const drainSteering = vi.fn(() => steering('next user turn'));
     const events = await drain(
       livePromptEvents(config, [], undefined, {
@@ -1144,6 +1257,7 @@ describe('livePromptEvents', () => {
       }),
     );
 
+    expect(recordToolResult).not.toHaveBeenCalled();
     expect(sendMessageStream).not.toHaveBeenCalled();
     expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
     expect(drainSteering).not.toHaveBeenCalled();

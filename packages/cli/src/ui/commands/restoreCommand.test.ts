@@ -9,7 +9,7 @@
 import { useLayoutEffect, useRef } from 'react';
 import { renderHook, act } from '@testing-library/react';
 import { useHistory } from '../hooks/useHistoryManager.js';
-import type { HistoryItem } from '../types.js';
+import type { ConfirmationRequest, HistoryItem } from '../types.js';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -29,6 +29,11 @@ import {
   getApiHistoryPromptId,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import { PermissionManager } from '@qwen-code/qwen-code-core/permissions/permission-manager.js';
+import { ToolRegistry } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
+import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
+import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { computeApiTruncationIndex } from '../utils/historyMapping.js';
 import { writeToolCheckpoint } from '../opentui/tool-checkpoint.js';
 
@@ -59,6 +64,7 @@ describe('restoreCommand', () => {
     mockConfig = {
       getSessionId: vi.fn().mockReturnValue('original'),
       getFileCheckpointingEnabled: vi.fn().mockReturnValue(true),
+      getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
       getFileHistoryService: vi.fn().mockReturnValue({ rewind: mockRewind }),
       storage: {
         getProjectTempCheckpointsDir: vi.fn().mockReturnValue(checkpointsDir),
@@ -81,6 +87,148 @@ describe('restoreCommand', () => {
     vi.restoreAllMocks();
     await fs.rm(testRootDir, { recursive: true, force: true });
   });
+
+  it.each([
+    'yes',
+    'no',
+    'abort',
+    'current loss',
+    'deny',
+    'missing',
+    'cache disabled',
+  ] as const)(
+    'uses actual read permissions before replay: %s',
+    async (mode) => {
+      const file = path.join(testRootDir, 'owned.txt');
+      if (mode !== 'missing') await fs.writeFile(file, 'A');
+      const config = makeFakeConfig({
+        targetDir: testRootDir,
+        cwd: testRootDir,
+        trustedFolder: true,
+        interactive: true,
+        approvalMode: ApprovalMode.DEFAULT,
+        fileCheckpointingEnabled: true,
+        fileReadCacheDisabled: mode === 'cache disabled',
+        disableAllHooks: true,
+        usageStatisticsEnabled: false,
+        permissions: mode === 'deny' ? { deny: ['Read'] } : { ask: ['Read'] },
+      });
+      expect(config.isInteractive()).toBe(true);
+      const pm = new PermissionManager(config);
+      pm.initialize();
+      vi.spyOn(config, 'getPermissionManager').mockReturnValue(pm);
+      const registry = new ToolRegistry(config);
+      const read = new ReadFileTool(config);
+      const edit = new EditTool(config);
+      registry.registerTool(read);
+      registry.registerTool(edit);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      const readInvocations: Array<ReturnType<ReadFileTool['build']>> = [];
+      const buildRead = read.build.bind(read);
+      const readExecute = vi
+        .spyOn(read, 'build')
+        .mockImplementation((params) => {
+          const invocation = buildRead(params);
+          vi.spyOn(invocation, 'execute');
+          readInvocations.push(invocation);
+          return invocation;
+        });
+      expect(await pm.evaluate({ toolName: 'read_file' })).toBe(
+        mode === 'deny' ? 'deny' : 'ask',
+      );
+      const chat = new LlmChat(config);
+      const client = new LlmClient(config);
+      vi.spyOn(client, 'getChat').mockReturnValue(chat);
+      vi.spyOn(config, 'getLlmClient').mockReturnValue(client);
+      vi.spyOn(config.storage, 'getProjectTempCheckpointsDir').mockReturnValue(
+        checkpointsDir,
+      );
+      mockContext.services.config = config;
+      const controller = new AbortController();
+      mockContext.abortSignal = controller.signal;
+      const requests: ConfirmationRequest[] = [];
+      mockContext.ui.addConfirmUpdateExtensionRequest = (request) =>
+        requests.push(request);
+      await fs.writeFile(
+        path.join(checkpointsDir, 'permission.json'),
+        JSON.stringify({
+          clientHistory: [],
+          toolCall: {
+            name: 'edit',
+            args: { file_path: file, old_string: 'A', new_string: 'B' },
+          },
+        }),
+      );
+      const pending = restoreCommand(config)!.action!(
+        mockContext,
+        'permission',
+      );
+      try {
+        if (['yes', 'no', 'abort', 'current loss'].includes(mode)) {
+          await vi.waitFor(() => expect(requests).toHaveLength(1));
+          expect(requests[0].signal).toBeDefined();
+          expect(requests[0].isCurrent?.()).toBe(true);
+          // Real PM ask must actually park the scheduler, not auto-allow a workspace read.
+          expect(await fs.readFile(file, 'utf8')).toBe('A');
+          if (mode === 'abort') controller.abort();
+          if (mode === 'current loss') mockContext.ui.isIdleRef.current = false;
+          requests[0].onConfirm(mode !== 'no');
+        }
+        const result = await pending;
+        if (mode === 'yes' || mode === 'missing' || mode === 'cache disabled') {
+          expect(result?.type).toBe('tool');
+          if (mode === 'yes') {
+            const checks = config.getFileReadCache().check(await fs.stat(file));
+            expect(checks.state).toBe('fresh');
+            if (checks.state !== 'fresh')
+              throw new Error('Real Read did not seed the cache.');
+            expect(checks.entry.lastReadWasFull).toBe(true);
+            expect(checks.entry.lastReadAt).toBeGreaterThan(0);
+            expect(readInvocations).toHaveLength(1);
+            expect(readInvocations[0].execute).toHaveBeenCalledTimes(1);
+            const readResult = await vi.mocked(readInvocations[0].execute).mock
+              .results[0].value;
+            expect(readResult.error).toBeUndefined();
+            const edited = await edit
+              .build({ file_path: file, old_string: 'A', new_string: 'B' })
+              .execute(new AbortController().signal);
+            expect(edited.error).toBeUndefined();
+            expect(await fs.readFile(file, 'utf8')).toBe('B');
+            const other = path.join(testRootDir, 'unread.txt');
+            await fs.writeFile(other, 'SECRET');
+            const denied = await edit
+              .build({
+                file_path: other,
+                old_string: 'SECRET',
+                new_string: 'CHANGED',
+              })
+              .execute(new AbortController().signal);
+            expect(denied.error?.message).toMatch(
+              /has not been read in this session/,
+            );
+            expect(await fs.readFile(other, 'utf8')).toBe('SECRET');
+          }
+        } else {
+          expect(result?.type).not.toBe('tool');
+          expect(await fs.readFile(file, 'utf8')).toBe('A');
+        }
+        if (mode === 'deny')
+          expect(
+            readInvocations.every(
+              (call) => vi.mocked(call.execute).mock.calls.length === 0,
+            ),
+          ).toBe(true);
+        if (mode === 'deny' || mode === 'missing' || mode === 'cache disabled')
+          expect(requests).toHaveLength(0);
+        if (mode === 'missing' || mode === 'cache disabled')
+          expect(readExecute).not.toHaveBeenCalled();
+      } finally {
+        controller.abort();
+        await pending.catch(() => undefined);
+        await config.shutdown({ strictResourceCleanup: true });
+      }
+    },
+  );
 
   it.each(['', 'missing'])(
     'does not return an old checkpoint listing or lookup after a session change: %s',

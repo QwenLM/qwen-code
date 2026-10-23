@@ -322,7 +322,14 @@ vi.mock('./dialogs-confirm.js', () => ({
   },
   OpenTuiActionConfirmation: (props: Record<string, unknown>) => {
     mocks.state.actionConfirmProps = props;
-    return 'action-confirm';
+    return (
+      <>
+        <span>action-confirm</span>
+        <span>
+          {typeof props['prompt'] === 'string' ? props['prompt'] : null}
+        </span>
+      </>
+    );
   },
   OpenTuiMcpApprovalDialog: (props: Record<string, unknown>) => {
     mocks.state.mcpApprovalProps = props;
@@ -2246,6 +2253,125 @@ describe('OpenTuiApp shell wiring', () => {
       );
     });
     await expect(actionPending).resolves.toBe(true);
+  });
+
+  it.each(['abort', 'current loss'] as const)(
+    'removes only owned A on %s and rejects stale callbacks',
+    async (mode) => {
+      const view = renderApp();
+      await settle();
+      const host = mocks.state.host as OpenTuiAppHost;
+      const controller = new AbortController();
+      let current = true;
+      const a = vi.fn();
+      const b = vi.fn();
+      await act(async () => {
+        host.addConfirmUpdateExtensionRequest({
+          prompt: 'owned A',
+          signal: controller.signal,
+          isCurrent: () => current,
+          onConfirm: a,
+        });
+        host.addConfirmUpdateExtensionRequest({
+          prompt: 'owned B',
+          onConfirm: b,
+        });
+      });
+      expect(screen.getByText('owned A')).toBeTruthy();
+      const lateA = mocks.state.actionConfirmProps!['onResolve'] as (
+        value: boolean,
+      ) => void;
+      if (mode === 'abort') {
+        await act(async () => controller.abort());
+      } else {
+        current = false;
+        view.rerender(
+          <OpenTuiApp
+            config={CONFIG}
+            settings={SETTINGS}
+            logger={null}
+            commands={[]}
+            getSessionStats={getSessionStats}
+          />,
+        );
+        await settle();
+      }
+      expect(a.mock.calls).toEqual([[false]]);
+      expect(screen.queryByText('owned A')).toBeNull();
+      expect(screen.getByText('owned B')).toBeTruthy();
+      await act(async () => {
+        lateA(true);
+        lateA(false);
+      });
+      expect(a.mock.calls).toEqual([[false]]);
+      expect(b).not.toHaveBeenCalled();
+      expect(screen.getByText('owned B')).toBeTruthy();
+      await act(async () =>
+        (
+          mocks.state.actionConfirmProps!['onResolve'] as (
+            value: boolean,
+          ) => void
+        )(true),
+      );
+      expect(b.mock.calls).toEqual([[true]]);
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    },
+  );
+
+  it('denies an owned late yes even before current loss has rendered', async () => {
+    renderApp();
+    await settle();
+    let current = true;
+    const onConfirm = vi.fn();
+    await act(async () =>
+      (mocks.state.host as OpenTuiAppHost).addConfirmUpdateExtensionRequest({
+        prompt: 'owned',
+        isCurrent: () => current,
+        onConfirm,
+      }),
+    );
+    const late = mocks.state.actionConfirmProps!['onResolve'] as (
+      value: boolean,
+    ) => void;
+    current = false;
+    await act(async () => late(true));
+    expect(onConfirm.mock.calls).toEqual([[false]]);
+    expect(screen.queryByText('owned')).toBeNull();
+  });
+
+  it('does not render pre-aborted consent and denies owned consent once on unmount', async () => {
+    const view = renderApp();
+    await settle();
+    const host = mocks.state.host as OpenTuiAppHost;
+    const dead = new AbortController();
+    dead.abort();
+    const live = new AbortController();
+    const a = vi.fn();
+    const b = vi.fn();
+    await act(async () => {
+      host.addConfirmUpdateExtensionRequest({
+        prompt: 'dead',
+        signal: dead.signal,
+        onConfirm: a,
+      });
+      host.addConfirmUpdateExtensionRequest({
+        prompt: 'live',
+        signal: live.signal,
+        onConfirm: b,
+      });
+    });
+    expect(a.mock.calls).toEqual([[false]]);
+    expect(screen.queryByText('dead')).toBeNull();
+    expect(screen.getByText('live')).toBeTruthy();
+    const late = mocks.state.actionConfirmProps!['onResolve'] as (
+      value: boolean,
+    ) => void;
+    view.unmount();
+    await act(async () => {
+      live.abort();
+      late(true);
+    });
+    expect(b.mock.calls).toEqual([[false]]);
   });
 
   it('gives a waiting tool call priority over the composer and settles it', async () => {

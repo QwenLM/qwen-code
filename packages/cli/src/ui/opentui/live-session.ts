@@ -34,6 +34,7 @@ import { writeToolCheckpoint } from './tool-checkpoint.js';
 import { allocateCanonicalHistoryId } from './live-session-model.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import { buildPermissionSuggestions } from '../../nonInteractive/permission-suggestions.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
@@ -1299,10 +1300,10 @@ export async function* livePromptEvents(
       if (resp) {
         const final = finalResponses[index];
         responseParts.push(...final.responseParts);
-        if (usesMods)
-          config
-            .getChatRecordingService()
-            ?.recordToolResult(final.responseParts, {
+        if (!initialTool && current() && config.getSessionId() === sessionId)
+          config.getChatRecordingService()?.recordToolResult(
+            final.responseParts,
+            {
               callId: call.request.callId,
               status: call.status,
               resultDisplay: resp.resultDisplay,
@@ -1311,7 +1312,9 @@ export async function* livePromptEvents(
               executionStatus: resp.executionStatus,
               persistedOutputFiles: final.persistedOutputFiles,
               artifacts: final.artifacts,
-            });
+            },
+            goalToolResultProvenance(call.request, final.responseParts),
+          );
       }
     }
     // Client-initiated slash tools finish locally in Ink. Leave queued user

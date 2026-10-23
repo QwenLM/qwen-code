@@ -1011,6 +1011,8 @@ export interface ShellConfirmationRequest {
 }
 
 export interface ConfirmationRequest {
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
   prompt: ReactNode;
   onConfirm: (confirm: boolean) => void;
 }

@@ -148,10 +148,30 @@ describe('opentui resume mapping', () => {
       conversation: { messages: sampleMessages() },
     });
 
+    const toolGroup = {
+      id: expect.any(Number),
+      type: 'tool_group',
+      tools: [
+        {
+          callId: CALL_ID,
+          name: 'read_file',
+          args: {},
+          description: '',
+          confirmationDetails: undefined,
+          resultDisplay: '# README\nhello',
+          status: 'Success',
+        },
+      ],
+    };
     expect(events).toEqual([
       {
         type: 'user',
         text: '读一下 README',
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'user',
+          text: '读一下 README',
+        },
         historyId: expect.any(Number),
         promptId: undefined,
         sentToModel: undefined,
@@ -159,20 +179,35 @@ describe('opentui resume mapping', () => {
       {
         type: 'thinking',
         delta: '我先看看文件。',
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'gemini_thought',
+          text: '我先看看文件。',
+        },
         historyId: expect.any(Number),
       },
-      { type: 'thinking-end', historyId: expect.any(Number) },
+      {
+        type: 'thinking-end',
+        historyId: expect.any(Number),
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'gemini_thought',
+          text: '我先看看文件。',
+        },
+      },
       {
         type: 'tool-start',
         historyId: expect.any(Number),
         id: CALL_ID,
         tool: 'read_file',
         title: 'read_file',
+        canonicalHistoryItem: toolGroup,
       },
       {
         type: 'tool-result',
         id: CALL_ID,
         display: '# README\nhello',
+        canonicalHistoryItem: toolGroup,
         historyId: expect.any(Number),
       },
       {
@@ -180,12 +215,19 @@ describe('opentui resume mapping', () => {
         id: CALL_ID,
         success: true,
         summary: 'ok',
+        canonicalHistoryItem: toolGroup,
         historyId: expect.any(Number),
       },
       { type: 'done' },
       {
         type: 'text',
         delta: 'README 内容已读取。',
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'gemini',
+          text: 'README 内容已读取。',
+          timestamp: Date.parse('2026-10-21T00:00:00Z'),
+        },
         historyId: expect.any(Number),
         timestamp: Date.parse('2026-10-21T00:00:00Z'),
       },
@@ -232,6 +274,26 @@ describe('opentui resume mapping', () => {
       id: 'c1',
       display: '',
       diff: { fileDiff, fileName: 'a.txt' },
+      canonicalHistoryItem: {
+        id: expect.any(Number),
+        type: 'tool_group',
+        tools: [
+          {
+            callId: 'c1',
+            name: 'edit',
+            args: {},
+            description: '',
+            confirmationDetails: undefined,
+            status: 'Success',
+            resultDisplay: {
+              fileDiff,
+              fileName: 'a.txt',
+              originalContent: 'old',
+              newContent: 'new',
+            },
+          },
+        ],
+      },
     });
   });
 
@@ -271,6 +333,21 @@ describe('opentui resume mapping', () => {
       id: 'c1',
       display: '',
       todos,
+      canonicalHistoryItem: {
+        id: expect.any(Number),
+        type: 'tool_group',
+        tools: [
+          {
+            callId: 'c1',
+            name: 'todo_write',
+            args: {},
+            description: '',
+            confirmationDetails: undefined,
+            resultDisplay: { type: 'todo_list', todos },
+            status: 'Success',
+          },
+        ],
+      },
     });
   });
 
@@ -298,6 +375,11 @@ describe('opentui resume mapping', () => {
     expect(thought.done).toBe(true);
     // Replay must leave the composer ready, not "streaming".
     expect(events[events.length - 1]).toEqual({ type: 'done' });
+    for (const event of events) {
+      if ('canonicalHistoryItem' in event && event.canonicalHistoryItem) {
+        expect(event.canonicalHistoryItem.id).toBe(event.historyId);
+      }
+    }
   });
 
   it('marks errored tool results as failed', () => {
@@ -328,6 +410,21 @@ describe('opentui resume mapping', () => {
       id: 'c1',
       success: false,
       summary: 'error',
+      canonicalHistoryItem: {
+        id: expect.any(Number),
+        type: 'tool_group',
+        tools: [
+          {
+            callId: 'c1',
+            name: 'run_shell',
+            args: {},
+            description: '',
+            confirmationDetails: undefined,
+            resultDisplay: undefined,
+            status: 'Error',
+          },
+        ],
+      },
     });
   });
 
@@ -352,6 +449,11 @@ describe('opentui resume mapping', () => {
       {
         type: 'user',
         text: '/compact',
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'user',
+          text: '/compact',
+        },
         historyId: expect.any(Number),
         promptId: undefined,
         sentToModel: undefined,
@@ -384,6 +486,11 @@ describe('opentui resume mapping', () => {
     expect(events?.[0]).toEqual({
       type: 'user',
       text: '读一下 README',
+      canonicalHistoryItem: {
+        id: expect.any(Number),
+        type: 'user',
+        text: '读一下 README',
+      },
       historyId: expect.any(Number),
       promptId: undefined,
       sentToModel: undefined,

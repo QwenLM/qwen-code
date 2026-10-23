@@ -6,6 +6,16 @@
 
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import {
+  InteractiveModToolScheduler,
+  type InteractiveCompletedToolCall,
+} from '../../services/interactive-mod-tool-scheduler.js';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import {
+  ToolConfirmationOutcome,
+  type ToolCallConfirmationDetails,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   type CommandContext,
   type SlashCommand,
@@ -211,6 +221,123 @@ async function restoreAction(
       });
       await config?.getLlmClient()?.setHistory(toolCallData.clientHistory);
       if (!isCurrent()) return;
+    }
+
+    const editable = [
+      ToolNames.EDIT,
+      'replace',
+      ToolNames.WRITE_FILE,
+      ToolNames.NOTEBOOK_EDIT,
+    ].includes(toolCall.name);
+    const target =
+      toolCall.args?.[
+        toolCall.name === ToolNames.NOTEBOOK_EDIT
+          ? 'notebook_path'
+          : 'file_path'
+      ];
+    if (
+      config &&
+      editable &&
+      typeof target === 'string' &&
+      target &&
+      !config.getFileReadCacheDisabled()
+    ) {
+      let exists = true;
+      try {
+        await fs.stat(target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        exists = false;
+      }
+      if (!isCurrent()) return;
+      if (exists) {
+        const controller = new AbortController();
+        const signal = context.abortSignal
+          ? AbortSignal.any([controller.signal, context.abortSignal])
+          : controller.signal;
+        let waiting: ToolCallConfirmationDetails | undefined;
+        let approval: AbortController | undefined;
+        try {
+          const read = await new Promise<InteractiveCompletedToolCall>(
+            (resolve, reject) => {
+              const callId = randomUUID();
+              const scheduler = new InteractiveModToolScheduler({
+                config,
+                getPreferredEditor: () => undefined,
+                onEditorClose: () => {},
+                onAllToolCallsComplete: async (calls) => {
+                  if (calls[0]) resolve(calls[0]);
+                  else reject(new Error('Restore read did not complete.'));
+                },
+                onToolCallsUpdate: (calls) => {
+                  const call = calls.find(
+                    (call) => call.request.callId === callId,
+                  );
+                  if (call?.status !== 'awaiting_approval') {
+                    waiting = undefined;
+                    approval?.abort();
+                    approval = undefined;
+                    return;
+                  }
+                  const details = call.confirmationDetails;
+                  if (waiting === details) return;
+                  waiting = details;
+                  approval?.abort();
+                  approval = new AbortController();
+                  if (details.type !== 'info' || !isCurrent()) {
+                    void details
+                      .onConfirm(ToolConfirmationOutcome.Cancel)
+                      .catch(reject);
+                    return;
+                  }
+                  let answered = false;
+                  ui.addConfirmUpdateExtensionRequest({
+                    prompt: `${details.title}\n\n${details.prompt}`,
+                    signal: AbortSignal.any([signal, approval.signal]),
+                    isCurrent,
+                    onConfirm: (confirmed) => {
+                      if (answered || waiting !== details) return;
+                      answered = true;
+                      void details
+                        .onConfirm(
+                          confirmed && isCurrent()
+                            ? ToolConfirmationOutcome.ProceedOnce
+                            : ToolConfirmationOutcome.Cancel,
+                        )
+                        .catch(reject);
+                    },
+                  });
+                },
+              });
+              void scheduler
+                .schedule(
+                  {
+                    callId,
+                    name: ToolNames.READ_FILE,
+                    args: { file_path: target },
+                    prompt_id: toolCallData.promptId ?? randomUUID(),
+                    isClientInitiated: true,
+                    executionOrigin: { kind: 'client' },
+                  },
+                  signal,
+                )
+                .catch(reject);
+            },
+          );
+          if (!isCurrent()) return;
+          if (read.status !== 'success' || read.response.error) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: `Could not read the restored file: ${read.response.error?.message ?? read.status}`,
+            };
+          }
+        } finally {
+          waiting = undefined;
+          approval?.abort();
+          controller.abort();
+        }
+      }
     }
 
     return {
