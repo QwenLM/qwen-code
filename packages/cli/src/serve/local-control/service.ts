@@ -334,13 +334,16 @@ export class LocalControlService {
     ) {
       this.#grantedExplicitCandidate = selected;
     } else if (
+      // While the grant stands, any process that can reach the trusted
+      // primary listener can re-post the named address — by construction the
+      // operator's most exposed one. Only an address the caller NAMED is the
+      // operator's later choice and revokes that admission; an address-less
+      // enable auto-picks, and that fallback must not supersede the
+      // daemon-start grant (#14140).
+      options.address !== undefined &&
       this.#grantedExplicitCandidate !== undefined &&
       this.#grantedExplicitCandidate.address !== selected.address
     ) {
-      // While the grant stands, any process that can reach the trusted
-      // primary listener can re-post the named address — by construction the
-      // operator's most exposed one. A successful enable on another address
-      // is the operator's later choice and revokes that standing admission.
       this.#grantedExplicitCandidate = undefined;
     }
     // Warn only now that the enable actually produced a live listener —

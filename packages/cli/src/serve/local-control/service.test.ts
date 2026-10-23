@@ -716,6 +716,54 @@ describe('LocalControlService', () => {
     }
   });
 
+  it('keeps the standing grant when an address-less enable auto-picks another address', async () => {
+    // An empty HTTP enable body names no address: the service's automatic
+    // selection is a fallback, not the operator's later choice, so it must
+    // not supersede the daemon-start grant (#14140).
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+
+    try {
+      await service.enable({
+        address: '127.0.0.1',
+        allowExplicitAddress: true,
+      });
+      expect(service.grantedExplicitCandidate).toEqual({
+        interfaceName: 'en0',
+        address: '127.0.0.1',
+      });
+      await service.disable();
+
+      vi.mocked(selectLanAddress).mockReturnValue({
+        interfaceName: 'en0',
+        address: '0.0.0.0',
+      });
+      vi.mocked(listLanCandidates).mockReturnValue([
+        { interfaceName: 'en0', address: '0.0.0.0' },
+      ]);
+      await service.enable();
+
+      expect(service.grantedExplicitCandidate).toEqual({
+        interfaceName: 'en0',
+        address: '127.0.0.1',
+      });
+    } finally {
+      // 0.0.0.0 binds INADDR_ANY for real; the listener must not outlive a
+      // failing assertion on a shared runner.
+      await service.disable();
+    }
+  });
+
   it('keeps the standing grant when a re-enable posts the granted address', async () => {
     // The Web Shell card's disable→enable round trip re-posts the grant
     // through the HTTP path (no flag): superseding must fire only on a

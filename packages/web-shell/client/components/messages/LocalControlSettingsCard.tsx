@@ -100,6 +100,15 @@ function reconcileRetained(
   if (next.explicitCandidate) {
     return { candidate: next.explicitCandidate, granted: true };
   }
+  // The grant outlives the host holding the address, so a card mounted after
+  // a VPN drop still offers it instead of auto-filling a candidate the
+  // operator explicitly avoided.
+  if (next.grantedAddress) {
+    return {
+      candidate: { interfaceName: '', address: next.grantedAddress },
+      granted: true,
+    };
+  }
   // A non-empty candidate list that no longer contains a retained automatic
   // pick proves it stale (same adapter, new DHCP address) — drop it so the
   // picker recovers. A granted pick is never in that list, and an empty or

@@ -251,6 +251,48 @@ describe('LocalControlSettingsCard', () => {
     expect(enableBodies[0]).toMatchObject({ address: '10.8.0.2' });
   });
 
+  it('offers the CLI-granted pick on a cold mount after the host lost the address (#14140)', async () => {
+    // Nothing was retained in this card yet: the active branch needs a live
+    // listener and the explicitCandidate branch needs the liveness probe. A
+    // mount that only reports `grantedAddress` must still offer the grant, or
+    // the single automatic candidate auto-fills and one click binds the
+    // network the operator explicitly avoided.
+    const enableBodies: Array<Record<string, unknown>> = [];
+    vi.mocked(fetch).mockImplementation(async (_input, init) => {
+      if ((init?.method ?? 'GET') === 'GET') {
+        return localControlResponse({
+          active: false,
+          interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      enableBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
+      return localControlResponse({
+        active: true,
+        address: '10.8.0.2',
+        interfaceName: 'en0',
+        interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+        grantedAddress: '10.8.0.2',
+      });
+    });
+
+    const container = mount();
+    await flush();
+
+    expect(container.querySelector('[aria-label="Local network"]')).not.toBe(
+      null,
+    );
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+
+    expect(enableBodies).toHaveLength(1);
+    expect(enableBodies[0]).toMatchObject({ address: '10.8.0.2' });
+  });
+
   it('drops the retained pick when the daemon refuses it and recovers from the fresh candidate list', async () => {
     // Stale-DHCP recovery must survive retention: an empty candidate list
     // proves nothing (the pick may live on a filtered tunnel interface), so
