@@ -1152,6 +1152,9 @@ describe('JavaManagedAgentClient', () => {
         turnId: 'p1',
         status: 'accepted',
         replayed: false,
+        operationId: 'cancel-1',
+        admissionStage: 'java_durable',
+        deliveryState: 'pending',
       }),
     );
     const client = new JavaManagedAgentClient({
