@@ -2648,7 +2648,12 @@ export class LlmChat {
       )
     ) {
       // A suppressed request cannot account for catalogs that are visible
-      // again. Invalidate every route before adoption.
+      // again. Invalidate every route before adoption. The opposite flip
+      // (visible -> suppressed) deliberately keeps the authoritative count:
+      // it over-states by the retained snapshots the next request strips, but
+      // that is the conservative direction for the output clamp and is
+      // replaced by the next usage report, whereas discarding the anchor falls
+      // back to a walk that under-counts by the full system/tool overhead.
       this.lastPromptTokenCount = 0;
       this.lastPromptTokenCountIsEstimated = false;
       this.lastOutputTokenCount = 0;
@@ -2832,8 +2837,12 @@ export class LlmChat {
   ): Content[] {
     const catalog = this.config.getAutoMemoryContext?.() ?? '';
     const snapshot = getAutoMemorySnapshot(this.history, catalog);
-    const history =
-      snapshot && retainMemorySnapshot ? [...this.history] : this.history;
+    // A request-only recovery catalog replaces, rather than follows, stale snapshots.
+    const history = !snapshot
+      ? this.history
+      : retainMemorySnapshot
+        ? [...this.history]
+        : withoutAutoMemorySnapshots(this.history);
     if (snapshot && retainMemorySnapshot) {
       appendAutoMemorySnapshot(history, snapshot);
     }
@@ -3510,9 +3519,7 @@ export class LlmChat {
                 parts: [],
               });
           const unaccountedSnapshots =
-            catalog &&
-            this.lastPromptTokenCountIsEstimated &&
-            this.lastPromptTokenCount > 0
+            catalog && this.lastPromptTokenCount > 0
               ? this.history.flatMap((entry) =>
                   (entry.parts ?? []).filter((part) =>
                     this.unaccountedMemorySnapshots.has(part),
@@ -5926,9 +5933,13 @@ export class LlmChat {
    */
   getHistoryTailShallow(count: number, curated: boolean = false): Content[] {
     if (count <= 0) return [];
+    const visibleHistory =
+      curated && !this.config.getAutoMemoryContext?.()
+        ? withoutAutoMemorySnapshots(this.history)
+        : this.history;
     const history = curated
-      ? extractCuratedHistory(this.history)
-      : this.history;
+      ? extractCuratedHistory(visibleHistory)
+      : visibleHistory;
     return history.slice(-count).map(copyContentContainer);
   }
 
@@ -7318,11 +7329,7 @@ export class LlmChat {
 
     // Charge newly retained catalogs only when the turn survives rollback.
     // A provider usage report already covers them and clears this ownership.
-    if (
-      this.config.getAutoMemoryContext?.() &&
-      this.lastPromptTokenCountIsEstimated &&
-      this.lastPromptTokenCount > 0
-    ) {
+    if (this.config.getAutoMemoryContext?.() && this.lastPromptTokenCount > 0) {
       const snapshots = this.history.flatMap((entry) =>
         (entry.parts ?? []).filter((part) =>
           this.unaccountedMemorySnapshots.has(part),

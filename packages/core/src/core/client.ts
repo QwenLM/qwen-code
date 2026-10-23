@@ -170,6 +170,7 @@ import {
 
 // Utilities
 import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
   formatDateForContext,
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
@@ -4722,7 +4723,15 @@ export class LlmClient {
       // Replay Parts carry snapshot metadata needed by history deduplication.
       let requestToSend = Array.isArray(request) ? [...request] : [request];
       if (ideContextText) {
-        requestToSend = prependToFirstTextPart(requestToSend, ideContextText);
+        const firstText = requestToSend.find(
+          (part) => typeof part === 'string' || 'text' in part,
+        );
+        // A marked catalog snapshot must keep its exact text for deduplication.
+        requestToSend =
+          typeof firstText === 'object' &&
+          firstText.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true
+            ? [{ text: ideContextText }, ...requestToSend]
+            : prependToFirstTextPart(requestToSend, ideContextText);
       }
       if (
         messageType === SendMessageType.UserQuery ||

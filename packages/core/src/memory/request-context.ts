@@ -10,6 +10,23 @@ import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../core/environmentContext.js';
 
 export { AUTO_MEMORY_SNAPSHOT_METADATA } from '../core/environmentContext.js';
 
+/**
+ * The newest marked catalog snapshot in `contents`, scanning back to the last
+ * entry that carries one. Shared by the live request path and transcript
+ * replay so both dedupe against the exact same part.
+ */
+export function findLatestAutoMemorySnapshot(
+  contents: Content[],
+): Part | undefined {
+  for (let i = contents.length - 1; i >= 0; i--) {
+    const latest = contents[i].parts?.findLast(
+      (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
+    );
+    if (latest) return latest;
+  }
+  return undefined;
+}
+
 export function getAutoMemorySnapshot(
   contents: Content[],
   catalog: string,
@@ -18,15 +35,7 @@ export function getAutoMemorySnapshot(
   const text =
     'Current memory catalog (full snapshot; supersedes all earlier memory catalogs):\n' +
     catalog;
-  for (let i = contents.length - 1; i >= 0; i--) {
-    const latest = contents[i].parts?.findLast(
-      (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
-    );
-    if (latest) {
-      if (latest.text === text) return undefined;
-      break;
-    }
-  }
+  if (findLatestAutoMemorySnapshot(contents)?.text === text) return undefined;
   return { text, partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true } };
 }
 

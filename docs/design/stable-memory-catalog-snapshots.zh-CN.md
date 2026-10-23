@@ -51,7 +51,11 @@ recap 和标题旁路请求先从原始浅拷贝历史中移除带标记的目�
 
 保留快照从被抑制变为可见时，之前的用量可能不包含它们，例如通过 `/cd` 从结构化记忆
 切换到旧版工作区。采用任一路由计数前，清除当前及保留路由用量，本次转换改用已有的
-完整历史估算。恢复计数采用当前目录可见性：启用旧版记忆时保存的会话已计入可见快照，
+完整历史估算。反向翻转（可见变为被抑制）则刻意保留权威计数：此时计数会比下一个请求
+实际发送的内容多出被剥离的快照，偏差方向是更小的输出预算和更早的压缩，而不是溢出，
+下一次 usage 报告会替换该计数；若改为丢弃计数，则会退回到遗漏整套系统提示词与工具
+开销的历史遍历。估算开销余量与响应溢出恢复因此只作为少计方向的安全网。恢复计数采用
+当前目录可见性：启用旧版记忆时保存的会话已计入可见快照，
 因此恢复的权威计数继续可用。较少见的“保存时被抑制、恢复时启用”情况依靠估算开销余量
 和响应溢出恢复，而不是丢弃所有恢复计数。显式的当前投影计数仍可使用；
 普通历史写回不会使计数失效。这种有限回退会失去原先的权威前缀基准，仍沿用估算开销
@@ -86,7 +90,13 @@ advisor 和非缓存 follow-up 输入，以及响应溢出后仅含快照的重�
 在 `packages/core` 中运行：
 
 ```sh
-npx vitest run src/memory/request-context.test.ts src/memory/prompt.test.ts src/core/llm-chat.test.ts src/permissions/classifier-transcript.test.ts src/services/session-transcript-reader.test.ts src/managed-runtime/managed-session-record-sink.test.ts src/core/loggingContentGenerator/context-usage-snapshot.test.ts
+npx vitest run src/memory/request-context.test.ts src/memory/prompt.test.ts src/core/llm-chat.test.ts src/core/client.test.ts src/permissions/classifier-transcript.test.ts src/services/session-transcript-reader.test.ts src/managed-runtime/managed-session-record-sink.test.ts src/core/loggingContentGenerator/context-usage-snapshot.test.ts src/services/sessionRecap.test.ts src/services/sessionTitle.test.ts
+```
+
+然后在 `packages/cli` 中运行：
+
+```sh
+npx vitest run src/ui/commands/summaryCommand.test.ts src/ui/commands/contextCommand.test.ts
 ```
 
 构建、类型检查、格式检查以及独立的真实运行时请求/回放验证由外部协调。实现交接不代表

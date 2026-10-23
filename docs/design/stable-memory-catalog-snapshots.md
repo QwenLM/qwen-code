@@ -70,7 +70,14 @@ against the latest retained snapshot again.
 When retained snapshots become visible after suppression, prior usage may exclude
 them (for example, `/cd` from structured memory to a legacy workspace). Before
 adopting counts for any route, discard current and retained route usage and use
-the existing full-history estimate for this transition. Resume counts adopt the
+the existing full-history estimate for this transition. The opposite flip,
+visible to suppressed, deliberately keeps the authoritative count: it then
+over-states by the retained snapshots the next request strips, which errs toward
+a smaller output grant and an earlier compaction rather than an overflow, and the
+next usage report replaces it. Discarding the count there instead would fall back
+to a history walk that omits the whole system and tool overhead. The estimate's
+overhead pad and reactive overflow recovery therefore remain the safety net for
+the under-count direction only. Resume counts adopt the
 current catalog visibility: a session saved with legacy memory enabled already
 counted its visible snapshots, so the resumed authoritative count stays usable.
 The rarer save-while-suppressed resume relies on the overhead pad and reactive
@@ -119,7 +126,13 @@ Tests must use the active project path
 Run from `packages/core`:
 
 ```sh
-npx vitest run src/memory/request-context.test.ts src/memory/prompt.test.ts src/core/llm-chat.test.ts src/permissions/classifier-transcript.test.ts src/services/session-transcript-reader.test.ts src/managed-runtime/managed-session-record-sink.test.ts src/core/loggingContentGenerator/context-usage-snapshot.test.ts
+npx vitest run src/memory/request-context.test.ts src/memory/prompt.test.ts src/core/llm-chat.test.ts src/core/client.test.ts src/permissions/classifier-transcript.test.ts src/services/session-transcript-reader.test.ts src/managed-runtime/managed-session-record-sink.test.ts src/core/loggingContentGenerator/context-usage-snapshot.test.ts src/services/sessionRecap.test.ts src/services/sessionTitle.test.ts
+```
+
+Then run from `packages/cli`:
+
+```sh
+npx vitest run src/ui/commands/summaryCommand.test.ts src/ui/commands/contextCommand.test.ts
 ```
 
 Build, typecheck, formatting, and independent real-runtime request/replay validation

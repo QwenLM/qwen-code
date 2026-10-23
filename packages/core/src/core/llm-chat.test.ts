@@ -3030,6 +3030,33 @@ describe('LlmChat', async () => {
       expect(recordMemoryCatalogSnapshot).toHaveBeenCalledOnce();
     });
 
+    it('sends only the current catalog in a recovery request after a catalog change', () => {
+      let catalog = 'STALE_CATALOG';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const recovery = userText('continue the truncated answer');
+      const target = newChat({
+        history: [
+          content('user', getAutoMemorySnapshot([], catalog)!),
+          modelText('partial'),
+          recovery,
+        ],
+      });
+      catalog = 'FRESH_CATALOG';
+      const request = (
+        target as unknown as {
+          getRequestHistoryForRoute: (
+            current: Content,
+            modalities: { image: boolean },
+            retain: boolean,
+          ) => Content[];
+        }
+      ).getRequestHistoryForRoute(recovery, { image: true }, false);
+      const sent = JSON.stringify(request);
+      expect(sent).not.toContain('STALE_CATALOG');
+      expect(sent.split('FRESH_CATALOG')).toHaveLength(2);
+      expect(JSON.stringify(target.getHistory())).toContain('STALE_CATALOG');
+    });
+
     it('keeps transient recovery snapshots request-only until a durable request', async () => {
       mockConfig.getAutoMemoryContext = () => 'current catalog';
       const recordMemoryCatalogSnapshot = vi.fn();
@@ -4275,7 +4302,8 @@ describe('LlmChat', async () => {
       const { generatePromptSuggestion } = await import(
         '../followup/suggestionGenerator.js'
       );
-      let catalog = 'AUXILIARY_CATALOG_SENTINEL';
+      const CATALOG_SENTINEL = 'AUXILIARY_CATALOG_SENTINEL';
+      let catalog: string = CATALOG_SENTINEL;
       mockConfig.getAutoMemoryContext = () => catalog;
       const snapshot = getAutoMemorySnapshot([], catalog)!;
       chat.setHistory([
@@ -4286,8 +4314,10 @@ describe('LlmChat', async () => {
       ]);
       const raw = chat.getHistory();
       const last = chat.peekLastHistoryEntry();
-      expect(JSON.stringify(chat.getHistory(true))).toContain(catalog);
-      expect(JSON.stringify(chat.getHistoryTail(40, true))).toContain(catalog);
+      expect(JSON.stringify(chat.getHistory(true))).toContain(CATALOG_SENTINEL);
+      expect(JSON.stringify(chat.getHistoryTail(40, true))).toContain(
+        CATALOG_SENTINEL,
+      );
       catalog = '';
 
       mockConfig.getFastModel = () => undefined;
@@ -4320,7 +4350,7 @@ describe('LlmChat', async () => {
         expect.stringContaining('inspect the package'),
       );
       expect(JSON.stringify(advisor.mock.calls[0][0])).not.toContain(
-        'AUXILIARY_CATALOG_SENTINEL',
+        CATALOG_SENTINEL,
       );
 
       const generateText = vi.fn().mockResolvedValue({ text: 'run the tests' });
@@ -4334,8 +4364,15 @@ describe('LlmChat', async () => {
       expect(generateText).toHaveBeenCalledOnce();
       const outbound = JSON.stringify(generateText.mock.calls[0][0].contents);
       expect(outbound).toContain('check the tests');
-      expect(outbound).not.toContain('AUXILIARY_CATALOG_SENTINEL');
+      expect(outbound).not.toContain(CATALOG_SENTINEL);
 
+      // The side queries strip marked snapshots unconditionally, so witness
+      // them with the catalog ACTIVE: under suppression their strip and the
+      // curated readers' conditional filter produce the same payload.
+      catalog = CATALOG_SENTINEL;
+      expect(JSON.stringify(chat.getHistoryShallow())).toContain(
+        CATALOG_SENTINEL,
+      );
       const { generateSessionRecap } = await import(
         '../services/sessionRecap.js'
       );
@@ -4360,7 +4397,7 @@ describe('LlmChat', async () => {
       ).not.toContain('memory catalog');
       expect(
         JSON.stringify(generateText.mock.calls[0][0].contents),
-      ).not.toContain('AUXILIARY_CATALOG_SENTINEL');
+      ).not.toContain(CATALOG_SENTINEL);
       const generateJson = vi
         .fn()
         .mockResolvedValue({ title: 'Package checks' });
@@ -4378,7 +4415,7 @@ describe('LlmChat', async () => {
       ).not.toContain('memory catalog');
       expect(
         JSON.stringify(generateJson.mock.calls[0][0].contents),
-      ).not.toContain('AUXILIARY_CATALOG_SENTINEL');
+      ).not.toContain(CATALOG_SENTINEL);
       expect(chat.getHistory()).toEqual(raw);
       expect(chat.getHistoryTail(40)).toEqual(raw);
       expect(chat.getHistoryLength()).toBe(raw.length);
@@ -5447,6 +5484,25 @@ describe('LlmChat', async () => {
       },
     );
 
+    it('charges a changed snapshot after an authoritative count when usage is missing', async () => {
+      let catalog = 'catalog A';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      mockStream(
+        textStream('seeded', { promptTokenCount: 5000, totalTokenCount: 5010 }),
+      );
+      await sendDrain('seed', 'catalog-authoritative-seed');
+      expect(chat.getLastPromptTokenCount()).toBe(5000);
+      catalog = 'catalog B';
+      mockStream(textStream('no usage'));
+      await sendDrain('next', 'catalog-authoritative-missing-usage');
+      expect(chat.getLastPromptTokenCount()).toBe(
+        5000 +
+          estimateContentTokens([
+            content('user', getAutoMemorySnapshot([], 'catalog B')!),
+          ]),
+      );
+    });
+
     it.each(['same catalog', 'changed catalog', 'suppressed catalog'])(
       'budgets a pending replay snapshot once with %s',
       async (mode) => {
@@ -5492,6 +5548,29 @@ describe('LlmChat', async () => {
         );
       },
     );
+
+    it('charges a replay-carried unchanged snapshot once', async () => {
+      mockConfig.getAutoMemoryContext = () => 'replay catalog';
+      const retained = getAutoMemorySnapshot([], 'replay catalog')!;
+      // A distinct part object with the same text: dedup compares text, so
+      // only the replayed copy is newly owned.
+      const replayed = { ...retained };
+      const target = newChat({
+        history: [content('user', retained), modelText('ack')],
+      });
+      target.setLastPromptTokenCount(5000, true);
+      mockStream(textStream('replayed again'));
+      // Dedup returns undefined here (the catalog text already matches), so
+      // the marking loop is the only thing that owns the replayed part.
+      await sendDrain(
+        [{ text: 'retry' }, replayed],
+        'catalog-replay-carried',
+        target,
+      );
+      expect(target.getLastPromptTokenCount()).toBe(
+        5000 + estimateContentTokens([content('user', replayed)]),
+      );
+    });
 
     it.each([
       { language: 'latin', retry: 'strip' },
@@ -6513,6 +6592,30 @@ describe('LlmChat', async () => {
       expect(tail).toEqual([recentContent]);
       expect(tail[0]).not.toBe(recentContent);
       expect(tail[0]!.parts).not.toBe(recentContent.parts);
+    });
+
+    it('omits marked snapshots from curated tails only while the catalog is suppressed', () => {
+      let catalog = '';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      chat.addHistory(
+        content(
+          'user',
+          { text: 'question' },
+          getAutoMemorySnapshot([], 'TAIL_CATALOG')!,
+        ),
+      );
+      chat.addHistory(modelText('answer'));
+
+      expect(JSON.stringify(chat.getHistoryTailShallow(2, true))).not.toContain(
+        'TAIL_CATALOG',
+      );
+      expect(JSON.stringify(chat.getHistoryTailShallow(2))).toContain(
+        'TAIL_CATALOG',
+      );
+      catalog = 'TAIL_CATALOG';
+      expect(JSON.stringify(chat.getHistoryTailShallow(2, true))).toContain(
+        'TAIL_CATALOG',
+      );
     });
   });
 
@@ -12306,6 +12409,57 @@ describe('LlmChat', async () => {
       ).toBe(1);
     }
 
+    it('keeps an output-recovery control prompt from owning a durable snapshot', async () => {
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 131_072,
+      });
+      mockCompress(noop(71_349));
+      let catalog = 'catalog A';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const recordMemoryCatalogSnapshot = vi.fn();
+      const target = newChat({
+        recorder: {
+          recordAssistantTurn: vi.fn(),
+          recordMemoryCatalogSnapshot,
+        },
+      });
+      const streams = [
+        streamOf(
+          textChunk('partial essay…', 'MAX_TOKENS', {
+            promptTokenCount: 71_349,
+            totalTokenCount: 121_071,
+          }),
+        ),
+        streamOf(modelChunk([{ text: 'still truncated' }], 'MAX_TOKENS')),
+        streamOf(modelChunk([{ text: ' …and done.' }], 'STOP')),
+      ];
+      let served = 0;
+      streamMock().mockImplementation(async () => {
+        const stream = streams[served]!;
+        served += 1;
+        // The escalated request is assembled before this point and reuses the
+        // durable request's contents; a mid-turn memory write (the model's own
+        // manage-memory tool refreshing the catalog) is the reachable producer
+        // of a catalog change by the time the recovery request is built.
+        if (served === 2) catalog = 'catalog B';
+        return stream;
+      });
+
+      await drain(await sendPro('answer', 'recovery-snapshot-owner', target));
+
+      // Initial send, escalation, recovery: the recovery request really ran.
+      expectStreamCalls(3);
+      // Only the durable request may journal a snapshot: a recovery control
+      // prompt is popped right after, so a snapshot journalled for it would
+      // resurrect on resume a prefix the live session never kept.
+      expect(recordMemoryCatalogSnapshot).toHaveBeenCalledOnce();
+      expect(recordMemoryCatalogSnapshot.mock.calls[0]![0].text).toContain(
+        'catalog A',
+      );
+      expect(JSON.stringify(target.getHistory())).not.toContain('catalog B');
+    });
+
     it('escalates an empty MAX_TOKENS response instead of retrying it as an empty stream', async () => {
       vi.useFakeTimers();
       const requestedMaxOutputTokens: Array<number | undefined> = [];
@@ -14090,9 +14244,14 @@ describe('LlmChat', async () => {
       expect(chat.getLastPromptTokenCount()).toBe(0);
       chat.seedResumeTokenCounts(654, 67);
       expect(chat.getLastPromptTokenCount()).toBe(654);
+      // The earlier route switch already zeroed both mirrors; clear them so
+      // only the flip's own writes can satisfy these assertions.
+      vi.mocked(promptMirror()).mockClear();
+      vi.mocked(cachedMirror()).mockClear();
       catalog = 'catalog';
       expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(chat.getLastOutputTokenCount()).toBe(0);
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
       expect(promptMirror()).toHaveBeenCalledWith(0);
       expect(cachedMirror()).toHaveBeenCalledWith(0);
       switchRoute('gemini-pro@test0001');

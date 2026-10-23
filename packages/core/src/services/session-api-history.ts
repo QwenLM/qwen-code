@@ -17,6 +17,7 @@ import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 import {
   appendAutoMemorySnapshot,
   AUTO_MEMORY_SNAPSHOT_METADATA,
+  findLatestAutoMemorySnapshot,
 } from '../memory/request-context.js';
 import { markCompressedHistory } from '../core/environmentContext.js';
 import {
@@ -314,15 +315,10 @@ export class SessionApiHistoryAccumulator {
           snapshot?.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true &&
           typeof snapshot.text === 'string'
         ) {
-          for (let i = this.history.length - 1; i >= 0; i--) {
-            const latest = this.history[i].parts?.findLast(
-              (part) =>
-                part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
-            );
-            if (latest) {
-              if (latest.text === snapshot.text) return;
-              break;
-            }
+          if (
+            findLatestAutoMemorySnapshot(this.history)?.text === snapshot.text
+          ) {
+            return;
           }
           const length = this.history.length;
           appendAutoMemorySnapshot(this.history, { ...snapshot });
