@@ -89,6 +89,28 @@ describe('Codex source preview', () => {
       '/synthetic/beta',
     ]);
   });
+  it.each([
+    {
+      content:
+        '# Shared\n## Alpha\n### Task\ncwd: /alpha\nAlpha fact\n## Beta\nBeta fact',
+      project: '/alpha',
+      sibling: 'Beta fact',
+    },
+    {
+      content:
+        '# Knowledge\n## Notes\n### /beta\nBeta fact\n## Other\nOther fact',
+      project: '/beta',
+      sibling: 'Other fact',
+    },
+  ])(
+    'does not absorb a later sibling section when a project hint is nested',
+    ({ content, project, sibling }) => {
+      const preview = previewSource(source(content));
+      expect(preview.sections).toHaveLength(1);
+      expect(preview.sections[0].sourceProject).toBe(project);
+      expect(preview.sections[0].content).not.toContain(sibling);
+    },
+  );
   it('splits a memory file at its shallowest heading depth', () => {
     const preview = previewSource(
       source('## Alpha\nAlpha-only fact.\n## Beta\nBeta-only fact.'),
@@ -235,6 +257,106 @@ describe('Codex source preview', () => {
           ],
         }),
       ).toThrow('Only memory Markdown');
+    },
+  );
+  it('rejects more than 256 source files', () => {
+    expect(() =>
+      validateSource({
+        version: 1,
+        source: 'codex',
+        files: [
+          { path: 'MEMORY.md', content: '# Topic\nFact.' },
+          ...Array.from({ length: 256 }, (_, i) => ({
+            path: `rollout_summaries/${i}.md`,
+            content: '# Detail\nFact.',
+          })),
+        ],
+      }),
+    ).toThrow('Invalid version 1 Codex source set.');
+  });
+  it('rejects a single file above 512 KiB', () => {
+    expect(() =>
+      validateSource(source(`# Topic\n${'x'.repeat(512 * 1024)}`)),
+    ).toThrow('Source exceeds limits');
+  });
+  it('rejects aggregate source above 8 MiB', () => {
+    expect(() =>
+      validateSource({
+        version: 1,
+        source: 'codex',
+        files: Array.from({ length: 17 }, (_, i) => ({
+          path: i === 0 ? 'MEMORY.md' : `rollout_summaries/${i}.md`,
+          content: 'x'.repeat(512 * 1024),
+        })),
+      }),
+    ).toThrow('Source exceeds limits');
+  });
+  it('requires a root memory file', () => {
+    expect(() =>
+      validateSource({
+        version: 1,
+        source: 'codex',
+        files: [
+          { path: 'rollout_summaries/one.md', content: '# Detail\nFact.' },
+        ],
+      }),
+    ).toThrow('Select the Codex memories folder');
+  });
+  it('rejects NUL content', () => {
+    expect(() => validateSource(source('# Topic\n\0Fact.'))).toThrow(
+      'Invalid Codex Markdown resource',
+    );
+  });
+  it('includes the source path in section identities', () => {
+    const preview = previewSource({
+      version: 1,
+      source: 'codex',
+      files: [
+        { path: 'MEMORY.md', content: '# Topic\nSame fact.' },
+        { path: 'memory_summary.md', content: '# Topic\nSame fact.' },
+      ],
+    });
+    expect(preview.sections.map((section) => section.path)).toEqual([
+      'MEMORY.md',
+      'memory_summary.md',
+    ]);
+    expect(new Set(preview.sections.map((section) => section.id)).size).toBe(2);
+  });
+  it('keeps sections above 64 KiB visible but unselectable', () => {
+    const over = previewSource(source(`# Big\n${'x'.repeat(64 * 1024)}`));
+    expect(over.sections).toHaveLength(1);
+    expect(over.sections[0].selectable).toBe(false);
+    expect(over.warnings[0]).toContain('exceeds 65536 bytes');
+
+    const exact = previewSource(source(`# Big\n${'x'.repeat(64 * 1024 - 6)}`));
+    expect(exact.sections[0].selectable).toBe(true);
+  });
+  it('excludes unselectable sections from the aggregate estimate', () => {
+    const huge = `# Big\n${'x'.repeat(70_000)}`;
+    const withHuge = previewSource(source(`${huge}\n# Small\nSmall fact.`));
+    const withoutHuge = previewSource(source('# Small\nSmall fact.'));
+    expect(
+      withHuge.sections.find((section) => !section.selectable),
+    ).toBeDefined();
+    expect(withHuge.estimate).toEqual(withoutHuge.estimate);
+  });
+  it.each([
+    ['rollout_summaries/One.md', 'rollout_summaries/one.md'],
+    ['rollout_summaries/one.md', 'rollout_summaries/One.md'],
+  ])(
+    'rejects case-insensitive duplicate paths (%s then %s)',
+    (first, second) => {
+      expect(() =>
+        validateSource({
+          version: 1,
+          source: 'codex',
+          files: [
+            { path: 'MEMORY.md', content: '# Topic\nFact.' },
+            { path: first, content: '# One\nFact.' },
+            { path: second, content: '# Two\nFact.' },
+          ],
+        }),
+      ).toThrow('duplicate paths');
     },
   );
   it('warns missing references and excludes unrelated supporting files', () => {

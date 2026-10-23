@@ -282,8 +282,14 @@ export function previewSource(input: unknown): ImportPreview {
       });
     for (let i = 0; i < boundaries.length; i++) {
       const boundary = boundaries[i];
+      const nextBoundary = boundaries[i + 1]?.offset ?? Infinity;
+      const nextPeer =
+        headings.find(
+          (heading) =>
+            heading.offset > boundary.offset && heading.depth <= boundary.depth,
+        )?.offset ?? Infinity;
       const own = file.content
-        .slice(boundary.offset, boundaries[i + 1]?.offset)
+        .slice(boundary.offset, Math.min(nextBoundary, nextPeer))
         .trim();
       if (
         !own ||
