@@ -235,8 +235,8 @@ describe.skipIf(process.platform === 'win32')(
       async () => {
         // awk stops at the first file it cannot open (mawk, gawk and busybox
         // awk all do), and a process that exits between the glob and the read
-        // leaves exactly that. The command's processes are the newest and are
-        // listed last, so on a busy machine every one of them was missed.
+        // leaves exactly that; no file after it is read. With processes
+        // exiting all through the walk, the command's were among those.
         const churn = spawn(
           '/bin/sh',
           ['-c', 'while :; do sleep 1 & sleep 0.002; done'],
@@ -254,10 +254,12 @@ describe.skipIf(process.platform === 'win32')(
           );
           expect(r.timedOut).toBe(true);
           const pids = readFileSync(pidFile, 'utf8')
-            .trim()
             .split('\n')
+            .filter(Boolean)
             .map(Number);
-          expect(pids).toHaveLength(4);
+          // A loaded machine may reach the deadline before all four start; one
+          // that never started cannot leak, and every one that did is checked.
+          expect(pids.length).toBeGreaterThan(0);
           // Every one checked, so a miss kills the rest too (see `gone`).
           const missed: number[] = [];
           for (const pid of pids) if (!(await gone(pid))) missed.push(pid);
