@@ -667,7 +667,7 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
 // list, which writes no Workspace file. The `web_fetch` half is held: a
 // maintainer ruling on the issue defers it, and a files-profile Session has no
 // shell, so a fetch there would open a new outbound path rather than reuse one.
-const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
+export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
   name: 'todo_write',
   description:
     'Create or replace the task list for complex or multi-step work in this turn. Send the whole list each time: the call replaces the stored list, and while the plan has unfinished items an omitted `blockedBy` is preserved for an id that already exists.',

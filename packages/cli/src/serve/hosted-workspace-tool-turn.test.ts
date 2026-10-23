@@ -58,6 +58,7 @@ import {
   HOSTED_WORKSPACE_FILE_TOOLS,
   HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_INPUT_PREVIEW_TOOLS,
+  HOSTED_TODO_WRITE_TOOL,
   HOSTED_MEMBER_PLAN_TOOL,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
@@ -4798,8 +4799,8 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
   // set is pinned here and each name must still be a declared native tool —
   // the child launch declares through HOSTED_AGENT_TOOL, a session message
   // through its two send_message declarations and the team board through
-  // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is declared only by the
-  // `/3` profiles, so the declaration list is the `/3` shell set.
+  // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is appended only for
+  // `files/3` (which is not a shell profile), so it joins the set on its own.
   expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
     'read_file',
     'write_file',
@@ -4818,6 +4819,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
   ]);
   const declared = [
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
+    HOSTED_TODO_WRITE_TOOL.name,
     HOSTED_AGENT_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_PARENT_TOOL.name,

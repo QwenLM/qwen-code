@@ -152,6 +152,22 @@ class ManagedApprovalChangeTest {
     }
 
     @Test
+    void liveApprovalReadsReturnTheSelectionForTheFilesV3Profile() throws Exception {
+        session = customSession("hosted-workspace-files/3", "default");
+        var privateStore = new ManagedSessionStore(jdbc);
+        String token = "live-approval-v3-writer-token-0123456789";
+        var grant = transaction().execute(status -> privateStore.acquireWriter(tenant, session, token,
+                new AcquireWriterRequest("ws", "writer", 60_000L)));
+        var request = new AuthorizeLifecycleRequest("ws", "writer", grant.writerGeneration());
+        var initial = transaction().execute(status -> privateStore.approvalSelection(tenant, session, token, request));
+        assertThat(initial).containsEntry("mode", "default").containsEntry("revision", 0L);
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        change("actor", "durable-live-v3", "yolo", 0);
+        var selected = transaction().execute(status -> privateStore.approvalSelection(tenant, session, token, request));
+        assertThat(selected).containsEntry("mode", "yolo").containsEntry("revision", 1L);
+    }
+
+    @Test
     void liveChangesStillRefuseCancellationAndRecovery() {
         when(harness.supportsLiveApprovalSelection()).thenReturn(true);
         var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "hello"));
