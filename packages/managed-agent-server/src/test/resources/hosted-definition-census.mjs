@@ -26,6 +26,11 @@ const { LocalManagedSessionAuthority } = await import(
     `${process.cwd()}/packages/core/dist/src/managed-runtime/managed-session-authority.js`,
   ).href
 );
+const { LocalJsonlManagedSessionJournalStore } = await import(
+  pathToFileURL(
+    `${process.cwd()}/packages/core/dist/src/managed-runtime/local-jsonl-managed-session-journal-store.js`,
+  ).href
+);
 const { SessionWriterLease } = await import(
   pathToFileURL(
     `${process.cwd()}/packages/core/dist/src/services/session-writer-lease.js`,
@@ -77,7 +82,10 @@ for (const fixture of fixtures) {
   });
   try {
     await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',

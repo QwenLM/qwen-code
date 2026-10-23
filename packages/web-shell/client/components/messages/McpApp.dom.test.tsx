@@ -4,6 +4,8 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   McpAppHostContext,
+  McpAppGeneratedUiContext,
+  type McpAppGeneratedUi,
   McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
@@ -1111,5 +1113,82 @@ describe('McpApp server tool bridge', () => {
     expect(signal.aborted).toBe(true);
     expect(appBridgeMocks.lastCapabilities).toEqual({ sandbox: {} });
     expect(appBridgeMocks.last?.oncalltool).toBeUndefined();
+  });
+});
+
+describe('built-in Generated UI admission', () => {
+  const display = appDisplay({
+    serverName: 'generated-ui',
+    resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+    requiredFeature: 'generated-ui',
+    fallbackText: 'Saved calculation summary',
+  });
+
+  it.each([
+    undefined,
+    { sessionId: 'other', status: { version: 1, enabled: true } },
+    { sessionId: 'owner', status: { version: 1, enabled: false } },
+    { sessionId: 'owner', status: { version: 2, enabled: true } },
+    { sessionId: 'owner', status: { version: 1, enabled: 'true' } },
+  ])(
+    'does not create an App bridge or iframe without an enabled owner: %j',
+    (value) => {
+      const { container, rerender } = renderApp(display);
+      rerender(
+        <McpAppGeneratedUiContext.Provider
+          value={value as McpAppGeneratedUi | undefined}
+        >
+          <McpAppSessionContext.Provider value="owner">
+            <McpApp display={display} />
+          </McpAppSessionContext.Provider>
+        </McpAppGeneratedUiContext.Provider>,
+      );
+      expect(container.textContent).toContain('Saved calculation summary');
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(appBridgeMocks.constructed).toBe(0);
+    },
+  );
+
+  it('mounts only with its owner and tears down before falling back on detach', async () => {
+    const { container, rerender } = renderApp(display);
+    const render = (sessionId: string) => (
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value={sessionId}>
+          <McpApp display={display} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>
+    );
+    rerender(render('owner'));
+    expect(container.querySelector('iframe')).not.toBeNull();
+    expect(appBridgeMocks.constructed).toBe(1);
+    rerender(render('other'));
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(appBridgeMocks.constructed).toBe(1);
+    await vi.waitFor(() => expect(appBridgeMocks.close).toHaveBeenCalledOnce());
+  });
+
+  it.each([
+    { requiredFeature: undefined },
+    { resourceUri: 'ui://unrelated/app' },
+  ] as Partial<McpAppDisplay>[])(
+    'restricts either built-in identity independently: %j',
+    (override) => {
+      const { container } = renderApp({ ...display, ...override });
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(appBridgeMocks.constructed).toBe(0);
+    },
+  );
+
+  it('retains manually installed legacy Generated UI behavior', () => {
+    const { container } = renderApp(
+      appDisplay({
+        serverName: 'generated-ui',
+        resourceUri: 'ui://generated-ui/view-v1.html',
+      }),
+    );
+    expect(container.querySelector('iframe')).not.toBeNull();
+    expect(appBridgeMocks.constructed).toBe(1);
   });
 });

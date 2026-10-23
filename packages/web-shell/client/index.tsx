@@ -23,6 +23,7 @@ export {
   JavaManagedAgentClient,
   JavaManagedAgentHttpError,
   type JavaAgentCommandAdmission,
+  type JavaAgentTurnAdmission,
   type JavaAgentEnvironment,
   type JavaAgentEvent,
   type JavaAgentSession,
@@ -369,6 +370,12 @@ export type {
 } from './settings';
 
 export type { WebShellModelManagementOptions } from './modelManagement';
+export type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipHandle,
+  WebShellUnavailableModelTooltipInfo,
+  WebShellUnavailableModelTooltipMount,
+} from './unavailableModels';
 export type {
   WebShellMessageNavigationRequest,
   WebShellMessageNavigationResult,

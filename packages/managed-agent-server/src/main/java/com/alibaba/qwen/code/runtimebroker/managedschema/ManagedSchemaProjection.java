@@ -97,7 +97,8 @@ public enum ManagedSchemaProjection {
     RUNTIME_SESSION(
             "scope_key, runtime_session_id, tenant_id, workspace_id, workspace_generation, "
                     + "canonical_cwd, capability_digest, isolation_class, harness_session_id, turn_kind, "
-                    + "binding_id, runtime_generation, session_state, record_version, last_active_at"),
+                    + "binding_id, runtime_generation, session_state, record_version, last_active_at, "
+                    + "execution_storage_key, execution_exclusive"),
     RUNTIME_SLOT(
             "request_key, tenant_id, workspace_id, workspace_generation, canonical_cwd, "
                     + "capability_digest, isolation_class, isolation_key, provisioner_kind, storage_id, "
@@ -122,14 +123,13 @@ public enum ManagedSchemaProjection {
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, recovery_protected, "
                     + "resource_gc_completed, runtime_request_key, csi_guard, model_id, model_revision, "
-                    + "selected_approval_mode, approval_revision, plan_enabled"),
+                    + "selected_approval_mode, approval_revision, plan_enabled, public_child_agents_version"),
     SESSION_HEAD(
             "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
                     + "committed_sequence, last_commit_digest, activation_epoch, "
                     + "latest_checkpoint_resource_id, compacted_through_revision, recovery_status, "
-                    + "recovery_detail_code, gmt_create, gmt_modified, o3_backfill_revision, "
-                    + "o3_backfill_through, o3_backfill_error, o3_backfill_pending, activation_id, "
+                    + "recovery_detail_code, gmt_create, gmt_modified, activation_id, "
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, wake_pending, "

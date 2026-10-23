@@ -32,4 +32,27 @@ class HostedOperatorRecoveryProbeRaceTest {
         assertThatThrownBy(() -> HostedOperatorRecoveryProbe.statRunning(alive, unreadable))
                 .isInstanceOf(IOException.class);
     }
+
+    @Test
+    void readsTheStateAfterTheLastParenthesisOfTheCommand() throws Exception {
+        ProcessHandle alive = mock(ProcessHandle.class);
+        when(alive.isAlive()).thenReturn(true);
+        Path stat = temporary.resolve("stat");
+        // Recorded kernel lines; HostedProcessLiveness relies on the same judgment.
+        Files.writeString(stat, "677557 (sleep) Z 677555 677555 677554 0 -1 4227084 98 0 0 0 0 0 0 0 20 0 1 0"
+                + " 45649481 0 0 18446744073709551615 0 0 0 0 0 0 0 6 0 1 0 0 17 5 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+        assertThat(HostedOperatorRecoveryProbe.statRunning(alive, stat)).as("zombie").isFalse();
+        Files.writeString(stat, "677555 (sleep) S 677554 677555 677554 0 -1 4194304 224 0 0 0 0 0 0 0 20 0 1 0"
+                + " 45649481 5709824 500 18446744073709551615 94686404997120 94686405017225 140721862394752 0 0 0"
+                + " 0 0 0 1 0 0 17 3 0 0 0 0 0 94686405032752 94686405034112 94687052972032 140721862399910"
+                + " 140721862399918 140721862399918 140721862402025 0\n");
+        assertThat(HostedOperatorRecoveryProbe.statRunning(alive, stat)).as("sleeper").isTrue();
+        Files.writeString(stat, "677557 (we)ird(name) Z 677555 677555 677554 0 -1 4227084 98 0 0 0 0 0 0 0 20 0 1"
+                + " 0 45649481 0 0 18446744073709551615 0 0 0 0 0 0 0 6 0 1 0 0 17 5 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+        assertThat(HostedOperatorRecoveryProbe.statRunning(alive, stat)).as("zombie with ')' in comm").isFalse();
+        Files.writeString(stat, "677555 (x) Z (y) S 677554 677555 677554 0 -1 4194304 224 0 0 0 0 0 0 0 20 0 1 0"
+                + " 45649481 5709824 500 18446744073709551615 0 0 0 0 0 0 0 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+        assertThat(HostedOperatorRecoveryProbe.statRunning(alive, stat)).as("sleeper whose comm spells ') Z ('")
+                .isTrue();
+    }
 }
