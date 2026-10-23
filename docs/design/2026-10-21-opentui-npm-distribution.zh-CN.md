@@ -218,3 +218,15 @@ PTY 资产。本批保留该实现并加入 92d4b193 已回收主进程 guard；
 
 执行前不标记 PASS。平台内容检查不替代对应平台 native 测试，本交付不关闭总体
 运行时迁移或 Ink 一致性总议题。
+
+## 永久 npm 安装回归
+
+一个专用安装测试套件共享当前候选的一次全新 `prepare:package`、真实 Node26.4/npm pack，以及普通 optional 依赖解析的自有目录 `install --ignore-scripts`。它核对同一 tarball 全部发布文件的内容和权限、160 MiB 解包上限，以及独立安装的私有 Bun 和 native 库；不以 checkout bundle、全局 Bun、preload 插桩或模拟包管理器结果替代。
+
+八个顺序用例覆盖 strict 安装版 native/parser 启动、一次闭合模型请求和自然退出；禁用 relaunch、缺失自有 Bun、继承 FFI 参数各自的普通 fallback 与 strict 拒绝；以及原 Node 下的真实 npm registry 子进程。身份观察器对 synthetic loopback registry 委托执行未修改的真实 npm。启动与退出记录必须关联同一个原 Node/无 Bun 进程，所需查询真实退出零后，才检查前台 Bun/native 与正常 UI。它不证明 registry 认证或实际更新安装。
+
+专用配置只选择本套件，单 worker、无重试、未处理错误致命，每案 120 秒。共享 setup 上限为 1560 秒：prepare 600、pack 300、install 600，加有界核验；清理保留首个失败。现有 TUI workflow 增加独立的 60 分钟安装 job，原 45 分钟源码 parity job 不变。默认 integration collection 排除 installed 目录，避免普通测试隐式安装软件包。
+
+必需 CI 首先使用 hosted Ubuntu Linux x64 GNU 与 Node26.4；Darwin arm64 作为单独本机结果。Linux 进程身份和 native 映射使用 `/proc`，Darwin 使用 `ps` 与 `lsof`，不能互借宿主观察结果。其他支持的 POSIX 宿主执行前仍为 NOT_RUN。Windows 和 musl 不是 strict npm OpenTUI 成功目标。必需工具链、资产、观察权限或网络缺失是 setup 失败，不能 skip 判绿。证据按唯一 run/attempt 目录保存实际 checkout、归档、安装、原始 PTY/HTTP、自然退出与自有进程清理。
+
+这些用例仍属于运行时后续 PR #15387。历史 ignored 手工结果仅校准合同，不代表新永久套件或 Linux adapter 已通过。Standalone 正式发布升级/回滚、global/npx/symlink/只读布局、其他目标平台与真实 registry 认证仍是独立义务。

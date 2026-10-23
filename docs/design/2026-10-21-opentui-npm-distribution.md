@@ -270,3 +270,15 @@ temporary HOME, QWEN_HOME, npm prefix/cache, and shell configuration paths.
 No result is marked passed before execution. Platform content checks do not
 substitute for native platform tests, and this delivery does not close the
 overall runtime-migration or Ink parity umbrella.
+
+## Permanent installed npm regression
+
+One dedicated installed suite shares a fresh current `prepare:package`, an actual Node26.4/npm pack, and one owned `install --ignore-scripts` with ordinary optional dependencies. It verifies the same tarball's complete published bytes and modes, the 160 MiB unpacked limit, and the separately installed private Bun and native library. It never substitutes the checkout bundle, global Bun, preload instrumentation or a simulated package-manager result.
+
+Eight sequential cases cover strict installed native/parser startup with one closed model request and natural quit; disabled relaunch, missing owned Bun and inherited FFI flag, each in ordinary fallback and strict refusal mode; and real npm registry-child execution under the original Node. The identity observer delegates to unchanged real npm against a synthetic loopback registry. Its start and exit records must identify the same original Node/no-Bun process, with the required queries actually exiting zero before the foreground Bun/native and normal UI are checked. This does not prove registry authentication or update installation.
+
+The dedicated configuration selects only this suite, one worker, no retry, fatal unhandled errors and 120 seconds per case. Its shared setup budget is 1560 seconds: prepare 600, pack 300, install 600 and bounded verification; cleanup retains the first failure. The independent installed job in the existing TUI workflow has a 60-minute limit and leaves the existing 45-minute source parity job unchanged. Default integration collection excludes the installed directory so generic tests do not silently install packages.
+
+Required CI initially uses hosted Ubuntu Linux x64 GNU and Node26.4; Darwin arm64 is a separate local result. Linux process identity and native mappings use `/proc`, while Darwin uses `ps` and `lsof`; neither platform inherits the other's observed result. Other supported POSIX hosts remain NOT_RUN until actual execution. Windows and musl are not strict npm OpenTUI success targets. Missing required toolchains, assets, observation permissions or network fail setup; they are not skipped passes. Evidence records the actual checkout, archive, installation, raw PTY/HTTP, natural exits and owned process cleanup under a unique run/attempt directory.
+
+These cases remain part of runtime follow-up PR #15387. Historical ignored manual results calibrate the contract, but do not mark the new permanent suite or Linux adapter passed. Standalone release upgrades/rollback, global/npx/symlink/read-only layouts, other target platforms and real registry authentication remain separate obligations.
