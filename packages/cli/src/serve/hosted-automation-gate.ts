@@ -247,6 +247,17 @@ export function createHostedAutomationGateRunner(
       }
     } catch (cause) {
       if (cause instanceof HostedAutomationGateHeld) throw cause;
+      // A Workspace refusal may also come back on a prepare that joined an
+      // acquisition still being provisioned: that acquisition's row may
+      // exist, so it is released like a refused acquire's.
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 409 &&
+        (cause.code === 'workspace_busy' ||
+          cause.code === 'workspace_unavailable')
+      ) {
+        mayHold = true;
+      }
       const message = cause instanceof Error ? cause.message : String(cause);
       // Once the start left, the command may have run: only a settled
       // answer could say; everything else is unknown, never a second start.
@@ -312,11 +323,12 @@ async function settle(
     const message = result.error?.message ?? result.executionStatus;
     return {
       kind: 'failed',
-      // `not_started` never ran; an error may have come from a run.
+      // `not_started` never ran; an error may have come from a run, or
+      // from a worker that refused the call before running it.
       detail:
         result.executionStatus === 'not_started'
           ? `could not start: ${message}`
-          : `the Runtime reported an error running it: ${message}`,
+          : `the Runtime reported an error: ${message}`,
       stderr: '',
       durationMs: 0,
     };

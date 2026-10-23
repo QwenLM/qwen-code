@@ -624,8 +624,26 @@ describe('createHostedAutomationGateRunner', () => {
     );
     await expect(probe()).resolves.toMatchObject({
       kind: 'failed',
-      detail: 'the Runtime reported an error running it: worker crashed',
+      detail: 'the Runtime reported an error: worker crashed',
     });
+  });
+
+  it('releases the row a Workspace refusal on a joined prepare may leave', async () => {
+    // A prepare that joined an acquisition still being provisioned carries
+    // the Workspace's refusal; the acquisition's row may already exist.
+    const { calls, probe } = await rig((path) =>
+      path === RELEASE
+        ? rejection(404, 'runtime_session_not_found')
+        : rejection(409, 'workspace_unavailable'),
+    );
+    await expect(probe()).resolves.toMatchObject({
+      kind: 'failed',
+      detail: expect.stringContaining('workspace_unavailable'),
+    });
+    expect(calls.map((call) => call.path)).toEqual([
+      '/executions:prepare',
+      RELEASE,
+    ]);
   });
 
   it('answers failed for a Workspace that cannot admit the probe, with the reason', async () => {

@@ -252,7 +252,9 @@ the route wires the real one:
    answers them (a bounded set), so a later attempt that still cannot read
    one back answers `unknown`, never "could not start", however often the
    fire is driven again. A refused acquisition is released too, since the
-   Broker records the Session's row before the Workspace refuses it. A
+   Broker may have recorded the Session's row before the Workspace refuses it
+   (also when the refusal comes back on a prepare that joined an
+   acquisition still being provisioned). A
    receipt of an execution that ended in error reads as such, not as
    "could not start". A Workspace that refuses the
    acquisition (`409 workspace_busy` or `workspace_unavailable`, which can
