@@ -142,6 +142,7 @@ jobs:
           echo "file_issue=${file_issue}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Download failed job logs'
+        id: 'download'
         if: "${{ steps.live.outputs.superseded != 'true' }}"
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
@@ -163,11 +164,30 @@ jobs:
           # naming no job. `gh api` writes a non-2xx body to stdout before
           # exiting non-zero, and that body carries no `.jobs`, so a parked
           # error normalizes to an empty list, which the comment renderer handles.
+          # The merged document is staged and promoted only once it accounts
+          # for every job the pages report: page 1 can arrive and page 2 still
+          # fail, and jq happily merges what it got. A partial list reads like
+          # a complete one to every consumer here — including the infra
+          # classifier, which would rerun a regression parked on the missing
+          # page instead of filing it. `total_count` is the receipt, and a
+          # response carrying none cannot be certified either: no receipt is a
+          # missing receipt, not a licence to publish.
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
-          if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
-            --paginate | jq -s '{jobs: [ .[].jobs[]? ]}' > "${jobs_json}"; then
-            echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}"
+          jobs_tmp="${jobs_json}.tmp"
+          jobs_complete=false
+          if gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
+            --paginate \
+            | jq -s '{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total != null and ($doc.jobs | length) == $total then $doc else error("incomplete job list: merged \($doc.jobs | length) of \($total)") end' \
+              > "${jobs_tmp}"; then
+            mv "${jobs_tmp}" "${jobs_json}"
+            jobs_complete=true
+          else
+            rm -f "${jobs_tmp}"
+            printf '{"jobs":[]}\n' > "${jobs_json}"
+            echo "::warning::Could not read the whole job list of run ${WORKFLOW_RUN_ID}; reporting without it"
           fi
+          # Both bodies read this list; the flag lets them say when it is short.
+          echo "jobs_complete=${jobs_complete}" >> "${GITHUB_OUTPUT}"
 
           mapfile -t job_ids < <(
             jq -r '.jobs[] | select(.conclusion == "failure") | .id' \
@@ -264,6 +284,7 @@ jobs:
           WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
           INFRA_ONLY: '${{ steps.infra.outputs.infra_only }}'
+          JOBS_COMPLETE: '${{ steps.download.outputs.jobs_complete }}'
         run: |-
           helper='.github/scripts/ci/main-failure-signature.mjs'
           shopt -s nullglob
@@ -279,6 +300,9 @@ jobs:
             cat "${RUNNER_TEMP}/pr-comment.md"
             if [[ "${INFRA_ONLY}" == 'true' ]]; then
               echo 'GitHub runner infrastructure failed; this result does not identify a Java test regression.'
+            fi
+            if [[ "${JOBS_COMPLETE}" != 'true' ]]; then
+              echo 'The job list could not be read in full, so this report may name fewer failing jobs than the run had.'
             fi
             echo "${delim}"
           } >> "${GITHUB_OUTPUT}"

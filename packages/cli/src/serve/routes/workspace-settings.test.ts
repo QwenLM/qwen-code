@@ -1379,6 +1379,84 @@ describe('web-shell settings alias drift', () => {
   });
 });
 
+describe('Web Shell loading phrase settings', () => {
+  it('serves the effective value and user/workspace overrides', async () => {
+    const { app } = makeApp({
+      userSettings: { ui: { accessibility: { enableLoadingPhrases: true } } },
+      workspaceSettings: {
+        ui: { accessibility: { enableLoadingPhrases: false } },
+      },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'ui.accessibility.enableLoadingPhrases',
+        type: 'boolean',
+        default: true,
+        values: { effective: false, user: true, workspace: false },
+      }),
+    );
+  });
+
+  it.each(['user', 'workspace'] as const)(
+    'accepts a %s override',
+    async (scope) => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+      const response = await request(app).post('/workspace/settings').send({
+        scope,
+        key: 'ui.accessibility.enableLoadingPhrases',
+        value: false,
+      });
+      expect(response.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+        'ui.accessibility.enableLoadingPhrases',
+        false,
+      );
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'ui.accessibility.enableLoadingPhrases',
+        false,
+        scope,
+        undefined,
+      );
+    },
+  );
+
+  it('reads only the selected runtime on the qualified route', async () => {
+    const { app } = makeQualifiedApp();
+    vi.mocked(loadSettings).mockImplementation(
+      (cwd) =>
+        ({
+          merged: {
+            ui: {
+              accessibility: {
+                enableLoadingPhrases: cwd !== '/selected-workspace',
+              },
+            },
+          },
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+    const response = await request(app).get('/workspaces/secondary/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'ui.accessibility.enableLoadingPhrases',
+        values: { effective: false },
+      }),
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/selected-workspace', {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: false,
+      workspaceTrusted: true,
+    });
+  });
+});
+
 describe('Web Shell approval mode allowlist settings', () => {
   it('serves the effective list and its settings scopes', async () => {
     const { app } = makeApp({
