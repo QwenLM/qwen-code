@@ -4,7 +4,11 @@
 
 ## 状态与源码边界
 
-**当前检查点：#15283 仍为 Draft，基于已提交的 `3301fee0` 加 shell 生命周期、本地键盘取消及重试文案工作变更。** 精确已提交 head 的 Linux CI 通过 no-flicker、20 个组件 validator 和三腿每腿 42 个产品用例；这些重叠执行不与历史本地总数相加。当前工作修复通过三个受影响的完整 CLI unit 文件（482 案、零跳过）；未改变的受影响 workflow 元测试文件通过 41 案。此前工作产物通过正常 build/type/bundle、Node22 + Ink 与 strict Bun + OpenTUI 的 held-shell Retry 接纳门禁，以及 Ink 英文倒计时精确文案。随后真实 OS 取消合同在 Node22 + Ink 上通过，在 strict OpenTUI 上失败：Ctrl+C 后已观察的 shell 仍存活，直到 fixture 清理时释放才结束。新增实际捕获 signal 的回归也在本地按键接线修复前失败。因此该整合迭代要求重新执行正常 build/type/bundle，并在精确同一新产物上验证真实终端取消、后继及自然退出合同。原产品失败和 fixture 未完成观察继续分别记录，不算本修复的通过结果。既有源码 bundle 与安装结果保留原产物归属；不改 runtime pin、依赖、默认 renderer 或记录 schema。
+**当前检查点（2026-10-23）：npm 分发 PR #14959 已合入 main `32b4234b`；#15283 仍为 Draft。** C 已通过保留原提交历史的正常 merge 整合该 main。其相对已合并 main 的已提交 55 文件补丁，与此前相对 stacked 分发基线的 C 补丁逐字节一致；这证明源码范围保留，不代表整合产物已验收。整合后的生产与测试文件通过全部七个完整受影响 CLI unit 文件：**801 案、零跳过**，包括真实联合 Ink `/restore` 接纳、文件系统等待期间取消后启动健康后继的保护，以及 OpenTUI dispatcher 完整的取消、错误和 session 对照。正常 fresh build、完整 typecheck 和 bundle 也已在 `b1d7d78d` 加冻结审查修复补丁上通过；本次状态文档更新不改变这些生产与测试文件。此类 unit seam 不代表真实终端或安装产品验收。精确 `044c1073` 的 Linux CI 失败来自新增专用 TUI 恢复测试缺少 no-AK 清单登记；原始失败继续保留，窄范围登记修复仍待当前 head CI 确认。
+
+完整本地修复已恢复到整合后的 main。剩余门禁包括正常提交检查与当前 head CI、实际 TUI 的 held-restore 取消与后继保护，以及最终 npm/standalone 安装产物和受支持平台/PTY 验收。历史源码 bundle 与终端通过保留各自产物和运行时身份。本 C 批次不改变 Bun/OpenTUI pin、默认 renderer 或记录 schema。
+
+**历史 shell 修复检查点（提交 `044c1073` 前）：#15283 当时仍为 Draft，基于已提交的 `3301fee0` 加 shell 生命周期、本地键盘取消及重试文案工作变更。** 精确已提交 head 的 Linux CI 通过 no-flicker、20 个组件 validator 和三腿每腿 42 个产品用例；这些重叠执行不与历史本地总数相加。当前工作修复通过三个受影响的完整 CLI unit 文件（482 案、零跳过）；未改变的受影响 workflow 元测试文件通过 41 案。此前工作产物通过正常 build/type/bundle、Node22 + Ink 与 strict Bun + OpenTUI 的 held-shell Retry 接纳门禁，以及 Ink 英文倒计时精确文案。随后真实 OS 取消合同在 Node22 + Ink 上通过，在 strict OpenTUI 上失败：Ctrl+C 后已观察的 shell 仍存活，直到 fixture 清理时释放才结束。新增实际捕获 signal 的回归也在本地按键接线修复前失败。因此该整合迭代要求重新执行正常 build/type/bundle，并在精确同一新产物上验证真实终端取消、后继及自然退出合同。原产品失败和 fixture 未完成观察继续分别记录，不算本修复的通过结果。既有源码 bundle 与安装结果保留原产物归属；不改 runtime pin、依赖、默认 renderer 或记录 schema。
 
 **上一交付检查点（保留）：基于 `4d57a2d218` 加三处生产修复的会话恢复 Draft 批次。** 修后源码通过三个完整 unit 文件的 736 案及 fresh build/type/bundle 验证。最终采用 readiness helper 的持久测试结果为 **18 案通过、零跳过、24 次完成 HTTP 和 30 次自然 exit0**。六案覆盖具名 H02a/H02b 冷恢复、H01b rewind/rollback selector 与冷召回，以及 Node24 + Ink、Bun1.3.14 + Ink、strict Bun1.3.14 + OpenTUI 的 H15 quit/exit summary。这些属于源码 bundle 结果，不是完整 H01–H15 或安装产品验收。本批次及父 PR #14959 仍未合并；最终安装产物与平台门禁仍未关闭。不改生产运行时、依赖、默认 renderer 或记录 schema。
 
@@ -12,7 +16,7 @@
 
 本状态检查点已通过 Node 22 + Ink、Bun 1.3.14 + Ink 和 strict Bun 1.3.14 + OpenTUI 三腿各自的 `/quit` 与 `/exit`，共六案源码 bundle H15。每案恰好一个真实模型 HTTP 请求，在 teardown 前展示告别标题、交互统计和墙钟时长且无输入框，并自然退出 0。六案源码 bundle 汇总 SHA 为 `1cde10ab1e7593eb86282014b5c870ed8313e177aab5658cfd915f1bb3b65dfc`。六案通过不关闭其他退出别名、持久日志冷召回、H01–H14、安装产物或平台门禁。精确收据汇总见下文。
 
-PR #15067（交互/输出）和 #14046 已合并。本地 C 整合包含选定的已接受 main 基线，但 npm 分发 PR #14959 已进入 Ready 待审，仍未合并，head 为 `cf0bb9d6db84594020951c88d9970ff46d357856`；本地依赖整合及其验收不能被描述成已合并。早期父批次失败保留其历史归属，不能在对应修复已被接受后继续误列为当前阻断。
+PR #15067（交互/输出）、#14046 和 npm 分发 PR #14959 均已合并。#14959 的早期 stacked 基线为 `cf0bb9d6db84594020951c88d9970ff46d357856`，当前 C 已整合其合并后的 main。早期本地依赖验证仍归属此前基线，不是新的整合候选验收。早期父批次失败保留其历史归属，不能在对应修复已被接受后继续误列为当前阻断。
 
 Phase 4 固定历史参考（`~/.local/bin/qwen` 0.22.0 及其私有 Node 22.23.2）已一次通过 H01a、H01b、H09a：7 个真实 PTY、7 个模型请求、7 次 `/quit` exit 0。该参考不是操作者当前默认 global 命令，也不代表当前 C 或 Ink 验收。原失败与 blocked 版本保留于 ignored 证据；最终汇总为 `.qwen/investigations/session-recovery-global-outer-v6/historical-baseline-summary.json`。
 
@@ -30,7 +34,7 @@ OpenTUI 已经能加载会话、持有结构化输入队列、运行模型/工�
 
 一个完整交付将贯通输入记录与回忆、resume/branch 投影、取消恢复、失败 attempt 重试与跳过重试延迟、真实 rewind、checkpoint `/restore` 及已删会话日志清理，同时保留 Markdown 和长 transcript 的既有验收范围。这些操作共享会话与 turn owner；按按键或对话框拆成多个 PR 会留下跨版本的不完整事务。
 
-最初预计整体约 **3,000–4,550 行变更**，包括生产代码、定向测试和双语设计。当前完整批次为 **7,156 行变更**，最终 formatter/提交统计仍待确认。共享会话事务与大量回归保持整批，不删测试或拆成零碎 PR 凑行数。较窄的事务核心本身更小，但不能在 `/restore`、Markdown 或长 transcript 案组被遗漏时宣称完成。若已验证的 Markdown 缺陷需要修改库或重构渲染器，应保留失败证据并重新裁定该依赖范围。
+最初预计整体约 **3,000–4,550 行变更**，包括生产代码、定向测试和双语设计。当前完整批次为 **8,240 行变更**、56 个文件（净增 6,830 行），包含完整恢复事务、审查修复和回归覆盖。共享会话事务与大量回归保持整批，不删测试或拆成零碎 PR 凑行数。较窄的事务核心本身更小，但不能在 `/restore`、Markdown 或长 transcript 案组被遗漏时宣称完成。若已验证的 Markdown 缺陷需要修改库或重构渲染器，应保留失败证据并重新裁定该依赖范围。
 
 ### 包含
 

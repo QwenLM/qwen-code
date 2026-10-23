@@ -225,7 +225,8 @@ vi.mock('./useLogger.js', () => ({
 
 const mockStartNewPrompt = vi.fn();
 const mockAddUsage = vi.fn();
-vi.mock('../contexts/SessionContext.js', () => ({
+vi.mock('../contexts/SessionContext.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../contexts/SessionContext.js')>()),
   useSessionStats: vi.fn(() => ({
     startNewPrompt: mockStartNewPrompt,
     addUsage: mockAddUsage,
@@ -239,6 +240,8 @@ vi.mock('../contexts/SessionContext.js', () => ({
 vi.mock('./slashCommandProcessor.js', () => ({
   handleSlashCommand: vi.fn().mockReturnValue(false),
 }));
+
+vi.mock('./useKeypress.js', () => ({ useKeypress: vi.fn() }));
 
 // --- END MOCKS ---
 
@@ -1097,6 +1100,303 @@ describe('useLlmStream', () => {
       'onWorkflowIntentApplied',
     );
   });
+
+  it.each([
+    ['', false],
+    ['owned-checkpoint', false],
+    ['owned-checkpoint', true],
+  ] as const)(
+    'admits real /restore %s through joined Ink preprocessing and processor context (cancelled=%s)',
+    async (args, cancelled) => {
+      const { useRef, useState } = await import('react');
+      const { makeFakeConfig } = await import('@qwen-code/qwen-code-core');
+      const { restoreCommand } = await import('../commands/restoreCommand.js');
+      const { createMockCommandContext } = await import(
+        '../../test-utils/mockCommandContext.js'
+      );
+      const { CommandService } = await import(
+        '../../services/CommandService.js'
+      );
+      const { useSlashCommandProcessor } = await vi.importActual<
+        typeof import('./slashCommandProcessor.js')
+      >('./slashCommandProcessor.js');
+      const directory = await fs.mkdtemp(
+        path.join(tmpdir(), 'restore-joined-'),
+      );
+      let releaseLog!: () => void;
+      const heldLog = new Promise<void>((resolve) => {
+        releaseLog = resolve;
+      });
+      let pending: Promise<void> | undefined;
+      let primaryFailure: unknown;
+      let successor: Promise<void> | undefined;
+      let releaseFs = () => {};
+      let releaseSuccessor = () => {};
+      let unmount: (() => void) | undefined;
+      const createService = CommandService.create.bind(CommandService);
+      let restoreRegistry: (() => void) | undefined;
+      try {
+        await fs.writeFile(
+          path.join(directory, 'owned-checkpoint.json'),
+          JSON.stringify({
+            toolCall: { name: 'run_shell_command', args: 'ls' },
+          }),
+        );
+        const config = Object.assign(
+          makeFakeConfig({ targetDir: directory }),
+          mockConfig,
+        );
+        vi.spyOn(config, 'getFileCheckpointingEnabled').mockReturnValue(true);
+        vi.spyOn(
+          config.storage,
+          'getProjectTempCheckpointsDir',
+        ).mockReturnValue(directory);
+        const command = restoreCommand(config)!;
+        const directContext = createMockCommandContext({
+          services: { config },
+        });
+        const direct = await command.action!(directContext, args);
+        expect(direct).toEqual(
+          args
+            ? {
+                type: 'tool',
+                toolName: 'run_shell_command',
+                toolArgs: 'ls',
+              }
+            : {
+                type: 'message',
+                messageType: 'info',
+                content: 'Available tool calls to restore:\n\nowned-checkpoint',
+              },
+        );
+        const actualAction = command.action!;
+        const action = vi.fn(actualAction);
+        // Keep the real registry clone/parser/context; isolate unrelated loaders.
+        const registry = vi
+          .spyOn(CommandService, 'create')
+          .mockImplementation((_loaders, signal, disabled) =>
+            createService(
+              [{ loadCommands: async () => [{ ...command, action }] }],
+              signal,
+              disabled,
+            ),
+          );
+        restoreRegistry = () => registry.mockRestore();
+        const logMessage = vi.fn(() => heldLog);
+        const history: HistoryItem[] = [];
+        const client = config.getLlmClient();
+        const extensionStates = new Map();
+        const loadHistory = vi.fn();
+        const actions = {
+          clearPendingState: vi.fn(),
+          setDebugMessage: vi.fn(),
+          dispatchExtensionStateUpdate: vi.fn(),
+          addConfirmUpdateExtensionRequest: vi.fn(),
+        } as unknown as Parameters<typeof useSlashCommandProcessor>[12];
+        const logger = { logMessage } as unknown as NonNullable<
+          Parameters<typeof useLlmStream>[20]
+        >;
+        const hook = renderHook(() => {
+          const idle = useRef(true);
+          const handler = useRef<Parameters<typeof useLlmStream>[7]>(
+            async () => false,
+          );
+          const [processing, setProcessing] = useState(false);
+          const llm = useLlmStream(
+            client,
+            history,
+            mockAddItem,
+            config,
+            true,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            (...parameters) => handler.current(...parameters),
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            async () => {},
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+            undefined,
+            logger,
+          );
+          const slash = useSlashCommandProcessor(
+            config,
+            mockLoadedSettings,
+            history,
+            mockAddItem,
+            vi.fn(),
+            loadHistory,
+            vi.fn(),
+            async () => false,
+            processing,
+            setProcessing,
+            idle,
+            vi.fn(),
+            actions,
+            extensionStates,
+            true,
+            null,
+            vi.fn(),
+          );
+          handler.current = slash.handleSlashCommand;
+          // The real AppContainer publication, derived from actual hook state.
+          idle.current = llm.streamingState === StreamingState.Idle;
+          return { llm, slash };
+        });
+        unmount = hook.unmount;
+        await waitFor(() =>
+          expect(
+            hook.result.current.slash.slashCommands.some(
+              (entry) => entry.name === 'restore',
+            ),
+          ).toBe(true),
+        );
+        await act(async () => {
+          pending = hook.result.current.llm.submitQuery(
+            args ? `/restore ${args}` : '/restore',
+          );
+        });
+        await waitFor(() => expect(logMessage).toHaveBeenCalledOnce());
+        expect(hook.result.current.llm.streamingState).toBe(
+          StreamingState.Responding,
+        );
+        expect(action).not.toHaveBeenCalled();
+        if (cancelled) {
+          const enteredFs = vi.fn();
+          pendingToolPersistence.directory = directory;
+          pendingToolPersistence.wait = new Promise<void>((resolve) => {
+            releaseFs = resolve;
+          });
+          pendingToolPersistence.entered = enteredFs;
+          const heldSuccessor = new Promise<void>((resolve) => {
+            releaseSuccessor = resolve;
+          });
+          mockSendMessageStream.mockReturnValue(
+            (async function* () {
+              yield {
+                type: ServerLlmEventType.Content,
+                value: 'healthy successor',
+              };
+              await heldSuccessor;
+              yield {
+                type: ServerLlmEventType.Finished,
+                value: { reason: FinishReason.STOP, usageMetadata: undefined },
+              };
+            })(),
+          );
+          await act(async () => {
+            releaseLog();
+          });
+          await waitFor(() => expect(enteredFs).toHaveBeenCalledOnce());
+          expect(action).toHaveBeenCalledOnce();
+          const oldCommandSignal = action.mock.calls[0][0].abortSignal!;
+          expect(oldCommandSignal.aborted).toBe(false);
+          act(() => hook.result.current.llm.cancelOngoingRequest());
+          await waitFor(() =>
+            expect(hook.result.current.llm.streamingState).toBe(
+              StreamingState.Idle,
+            ),
+          );
+          await act(async () => {
+            successor = hook.result.current.llm.submitQuery(
+              'healthy restore successor',
+            );
+          });
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          const successorSignal = mockSendMessageStream.mock
+            .calls[0][1] as AbortSignal;
+          expect(successorSignal.aborted).toBe(false);
+          expect(hook.result.current.llm.streamingState).toBe(
+            StreamingState.Responding,
+          );
+          const itemsBeforeOldFs = mockAddItem.mock.calls.slice();
+          // Only LLM ownership was cancelled; the command signal stays healthy.
+          expect(oldCommandSignal.aborted).toBe(false);
+          await act(async () => {
+            releaseFs();
+            await pending;
+          });
+          expect(await action.mock.results[0].value).toBeUndefined();
+          expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+          expect(loadHistory).not.toHaveBeenCalled();
+          expect(mockAddItem.mock.calls).toEqual(itemsBeforeOldFs);
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+          expect(successorSignal.aborted).toBe(false);
+          expect(hook.result.current.llm.streamingState).toBe(
+            StreamingState.Responding,
+          );
+          await act(async () => {
+            releaseSuccessor();
+            await successor;
+          });
+          return;
+        }
+        await act(async () => {
+          releaseLog();
+          await pending;
+        });
+        expect(action).toHaveBeenCalledOnce();
+        const actionContext = action.mock.calls[0][0];
+        expect(actionContext.abortSignal?.aborted).toBe(false);
+        expect(config.getSessionId()).toBe('test-session-id');
+        // Baseline must fail on the actual action outcome, not a mock return.
+        expect(await action.mock.results[0].value).toEqual(direct);
+        if (args) expect(mockScheduleToolCalls).toHaveBeenCalledOnce();
+        else {
+          expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(mockAddItem).toHaveBeenCalledWith(
+            expect.objectContaining({
+              text: 'Available tool calls to restore:\n\nowned-checkpoint',
+            }),
+            expect.any(Number),
+          );
+        }
+      } catch (error) {
+        primaryFailure = error;
+        throw error;
+      } finally {
+        releaseLog();
+        releaseFs();
+        releaseSuccessor();
+        try {
+          await act(async () => {
+            const settled = await Promise.allSettled(
+              [pending, successor].filter(Boolean),
+            );
+            const rejected = settled.filter(
+              (item) => item.status === 'rejected',
+            );
+            if (rejected.length > 0)
+              throw new AggregateError(
+                [
+                  ...(primaryFailure === undefined ? [] : [primaryFailure]),
+                  ...rejected.map(
+                    (item) => (item as PromiseRejectedResult).reason,
+                  ),
+                ],
+                'Restore joined request or cleanup failed',
+              );
+          });
+        } finally {
+          pendingToolPersistence.directory = '';
+          pendingToolPersistence.wait = undefined;
+          pendingToolPersistence.entered = undefined;
+          unmount?.();
+          restoreRegistry?.();
+          await fs.rm(directory, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it.each(['/rewind', '/model fake-model payload', '/slow-custom'])(
     'keeps admitted %s preprocessing busy until its deferred recall write completes',
@@ -14330,6 +14630,7 @@ describe('useLlmStream', () => {
           undefined,
           undefined,
           'test-session-id########5',
+          expect.any(Function),
         );
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
         expect(mockSendMessageStream).not.toHaveBeenCalled(); // No LLM call made
@@ -14362,6 +14663,7 @@ describe('useLlmStream', () => {
           undefined,
           undefined,
           'test-session-id########5',
+          expect.any(Function),
         );
 
         expect(localMockSendMessageStream).not.toHaveBeenCalledWith(
@@ -14405,6 +14707,7 @@ describe('useLlmStream', () => {
           undefined,
           undefined,
           'test-session-id########5',
+          expect.any(Function),
         );
         expect(localMockSendMessageStream).toHaveBeenCalledWith(
           '',
@@ -15563,6 +15866,7 @@ describe('useLlmStream', () => {
               undefined,
               undefined,
               undefined,
+              expect.any(Function),
             ),
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -15650,6 +15954,7 @@ describe('useLlmStream', () => {
               undefined,
               undefined,
               undefined,
+              expect.any(Function),
             ),
           );
 
@@ -19512,6 +19817,7 @@ describe('useLlmStream', () => {
           undefined,
           undefined,
           'test-session-id########5',
+          expect.any(Function),
         );
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {

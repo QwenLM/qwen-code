@@ -180,6 +180,7 @@ export type OpenTuiDispatchOutcome =
   | { kind: 'open_dialog'; request: OpenTuiDialogRequest };
 
 interface RunOptions {
+  recordRecall?: boolean;
   oneTimeShellAllowlist?: Set<string>;
   overwriteConfirmed?: boolean;
   existingInvocationItemId?: number;
@@ -473,13 +474,7 @@ export class OpenTuiSlashDispatcher {
       return false;
     }
     this.services.onInputProcessed?.();
-    if (this.services.logger && normalizeQuitSubmission(trimmed) !== '/quit') {
-      const sessionId = this.services.config?.getSessionId();
-      await this.services.logger.logMessage(MessageSenderType.USER, trimmed);
-      if (sessionId !== this.services.config?.getSessionId())
-        return { kind: 'handled' };
-    }
-    return this.run(trimmed, {});
+    return this.run(trimmed, { recordRecall: true });
   }
 
   private addMessage(message: Message): void {
@@ -510,6 +505,33 @@ export class OpenTuiSlashDispatcher {
     const abortController = new AbortController();
     const activeCommand = { controller: abortController, canCancel: true };
     this.activeCommand = activeCommand;
+    const releaseOwnership = () => {
+      if (this.activeCommand === activeCommand) {
+        this.activeCommand = null;
+        this.host.setIsProcessing(false);
+      }
+    };
+    if (
+      options.recordRecall &&
+      this.services.logger &&
+      normalizeQuitSubmission(trimmed) !== '/quit'
+    ) {
+      const sessionId = this.services.config?.getSessionId();
+      try {
+        await this.services.logger.logMessage(MessageSenderType.USER, trimmed);
+      } catch (error) {
+        releaseOwnership();
+        throw error;
+      }
+      if (
+        abortController.signal.aborted ||
+        this.activeCommand !== activeCommand ||
+        sessionId !== this.services.config?.getSessionId()
+      ) {
+        releaseOwnership();
+        return { kind: 'handled' };
+      }
+    }
 
     const userMessageTimestamp = Date.now();
     let invocationItemId = options.existingInvocationItemId;
@@ -1086,10 +1108,7 @@ export class OpenTuiSlashDispatcher {
         });
         logSlashCommand(this.services.config, event);
       }
-      if (this.activeCommand === activeCommand) {
-        this.activeCommand = null;
-        this.host.setIsProcessing(false);
-      }
+      releaseOwnership();
     }
   }
 }

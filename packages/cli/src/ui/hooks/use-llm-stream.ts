@@ -584,6 +584,7 @@ export const useLlmStream = (
     overwriteConfirmed?: boolean,
     existingInvocationItemId?: number,
     invocationPromptId?: string,
+    isCurrentSubmission?: () => boolean,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -1658,6 +1659,7 @@ export const useLlmStream = (
       humanInput?: HumanPromptInput,
       pasteExpansions?: ReadonlyMap<string, string>,
       hasUnknownInput?: boolean,
+      isCurrentSubmission?: () => boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -1737,6 +1739,7 @@ export const useLlmStream = (
               undefined,
               undefined,
               submitType === SendMessageType.UserQuery ? prompt_id : undefined,
+              isCurrentSubmission,
             )
           : false;
 
@@ -3998,6 +4001,16 @@ export const useLlmStream = (
                     metadata?.humanInput,
                     metadata?.pasteExpansions,
                     metadata?.hasUnknownInput,
+                    () =>
+                      streamingState === StreamingState.Idle &&
+                      workflowConfigRef.current === config &&
+                      !abortSignal.aborted &&
+                      foregroundAbortController !== undefined &&
+                      abortControllerRef.current ===
+                        foregroundAbortController &&
+                      submissionGeneration ===
+                        submissionLeaseGenerationRef.current &&
+                      activeModelStreamsRef.current === 0,
                   );
         } catch (error) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);

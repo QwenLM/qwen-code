@@ -286,6 +286,60 @@ describe('useSlashCommandProcessor', () => {
     return result;
   };
 
+  it.each([
+    ['direct builtin restore', 'restore', CommandKind.BUILT_IN, false, false],
+    ['owned builtin restore', 'restore', CommandKind.BUILT_IN, true, true],
+    ['same-name file command', 'restore', CommandKind.FILE, true, false],
+    ['unrelated builtin', 'other', CommandKind.BUILT_IN, true, false],
+  ] as const)(
+    'scopes the restore submission idle exception: %s',
+    async (_label, name, kind, suppliesOwner, expectedIdle) => {
+      const observedIdle = vi.fn();
+      const isCurrentSubmission = vi.fn(() => true);
+      const command = createTestCommand(
+        {
+          name,
+          action: (context) => {
+            observedIdle(context.ui.isIdleRef.current);
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'scope observed',
+            };
+          },
+        },
+        kind,
+      );
+      const result = setupProcessorHook(
+        kind === CommandKind.BUILT_IN ? [command] : [],
+        kind === CommandKind.FILE ? [command] : [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      await act(async () => {
+        if (suppliesOwner) {
+          await result.current.handleSlashCommand(
+            `/${name}`,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            isCurrentSubmission,
+          );
+        } else {
+          await result.current.handleSlashCommand(`/${name}`);
+        }
+      });
+      expect(observedIdle).toHaveBeenCalledExactlyOnceWith(expectedIdle);
+      if (expectedIdle) expect(isCurrentSubmission).toHaveBeenCalled();
+      else expect(isCurrentSubmission).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['rewind', 'rollback'])(
     'marks only the real registry-cloned builtin /%s as slash-origin rewind',
     async (invocation) => {

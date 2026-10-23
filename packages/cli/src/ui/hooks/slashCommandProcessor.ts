@@ -896,6 +896,7 @@ export const useSlashCommandProcessor = (
       existingInvocationItemId?: number,
       // Identity shared by the invocation item and submitted prompt.
       invocationPromptId?: string,
+      isCurrentSubmission?: () => boolean,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -1128,6 +1129,19 @@ export const useSlashCommandProcessor = (
                   return commandContext.ui.history;
                 },
                 addItem: addItemWithRecording,
+                isIdleRef:
+                  commandToExecute.kind === CommandKind.BUILT_IN &&
+                  commandToExecute.name === 'restore' &&
+                  isCurrentSubmission
+                    ? {
+                        get current() {
+                          return (
+                            activeCommandRef.current === activeCommand &&
+                            isCurrentSubmission()
+                          );
+                        },
+                      }
+                    : commandContext.ui.isIdleRef,
               },
               invocation: {
                 raw: trimmed,
@@ -1499,6 +1513,7 @@ export const useSlashCommandProcessor = (
                     undefined,
                     invocationItemId,
                     invocationPromptId,
+                    isCurrentSubmission,
                   );
                 }
                 case 'confirm_action': {
@@ -1532,6 +1547,7 @@ export const useSlashCommandProcessor = (
                     true,
                     invocationItemId,
                     invocationPromptId,
+                    isCurrentSubmission,
                   );
                 }
                 case 'stream_messages': {

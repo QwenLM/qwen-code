@@ -1397,6 +1397,227 @@ describe('cancellation, telemetry and recording', () => {
     logSlashCommandSpy.mockClear();
   });
 
+  it.each([false, true])(
+    'owns cancellation while durable recall is pending (cancel=%s)',
+    async (cancel) => {
+      const { Logger } = await import(
+        '@qwen-code/qwen-code-core/core/logger.js'
+      );
+      const { Storage } = await import(
+        '@qwen-code/qwen-code-core/config/storage.js'
+      );
+      const owned = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'slash-cancel-recall-'),
+      );
+      let finishLogging = () => {};
+      const logging = new Promise<void>((resolve) => {
+        finishLogging = resolve;
+      });
+      let enterLogger = () => {};
+      const loggerEntered = new Promise<void>((resolve) => {
+        enterLogger = resolve;
+      });
+      try {
+        const storage = new Storage(
+          path.join(owned, 'project'),
+          path.join(owned, 'runtime'),
+        );
+        const logger = new Logger('deferred-command', storage);
+        await logger.initialize();
+        const logMessage = logger.logMessage.bind(logger);
+        const log = vi
+          .spyOn(logger, 'logMessage')
+          .mockImplementationOnce(async (...args) => {
+            enterLogger();
+            await logging;
+            return logMessage(...args);
+          });
+        const heldAction = vi.fn(() => ({
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: 'held command completed',
+        }));
+        const nextAction = vi.fn(() => ({
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: 'next command completed',
+        }));
+        const config = makeFakeConfig();
+        const sessionId = config.getSessionId();
+        const host = createFakeHost();
+        const gateway = new OpenTuiSlashGateway();
+        gateway.attach(
+          new OpenTuiSlashDispatcher(host, { ...services, config, logger }, [
+            stub({ name: 'held', action: heldAction }),
+            stub({ name: 'next', action: nextAction }),
+          ]),
+        );
+        const pending = gateway.dispatch('/held');
+        try {
+          await loggerEntered;
+          expect(gateway.isBusy()).toBe(true);
+          expect(heldAction).not.toHaveBeenCalled();
+          if (cancel) gateway.cancel();
+          finishLogging();
+          const settlement = await pending;
+          const firstBusy = gateway.isBusy();
+          const firstCalls = heldAction.mock.calls.length;
+          const firstProducedInfo = host.items.some(
+            (item) => item.text === 'held command completed',
+          );
+          const successor = await gateway.dispatch('/next');
+          expect(successor).toEqual({
+            kind: 'dispatched',
+            outcome: { kind: 'handled' },
+          });
+          expect(nextAction).toHaveBeenCalledOnce();
+          expect(host.items.at(-1)).toMatchObject({
+            text: 'next command completed',
+          });
+          expect(gateway.isBusy()).toBe(false);
+          expect(config.getSessionId()).toBe(sessionId);
+          expect(log).toHaveBeenCalledTimes(2);
+          expect(settlement).toEqual({
+            kind: 'dispatched',
+            outcome: { kind: 'handled' },
+          });
+          expect(firstBusy).toBe(false);
+          expect(firstCalls).toBe(cancel ? 0 : 1);
+          expect(firstProducedInfo).toBe(!cancel);
+        } finally {
+          finishLogging();
+          try {
+            await pending;
+          } finally {
+            log.mockRestore();
+          }
+        }
+      } finally {
+        finishLogging();
+        fs.rmSync(owned, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['logger rejection', 'session change'] as const)(
+    'releases recall ownership after %s without running the old action',
+    async (change) => {
+      const { Logger } = await import(
+        '@qwen-code/qwen-code-core/core/logger.js'
+      );
+      const { Storage } = await import(
+        '@qwen-code/qwen-code-core/config/storage.js'
+      );
+      const owned = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'slash-recall-owner-'),
+      );
+      let finishLogging = () => {};
+      const logging = new Promise<void>((resolve) => {
+        finishLogging = resolve;
+      });
+      let enterLogger = () => {};
+      const loggerEntered = new Promise<void>((resolve) => {
+        enterLogger = resolve;
+      });
+      try {
+        const storage = new Storage(
+          path.join(owned, 'project'),
+          path.join(owned, 'runtime'),
+        );
+        const logger = new Logger('recall-owner', storage);
+        await logger.initialize();
+        const failure = new Error('owned recall write failed');
+        const logMessage = logger.logMessage.bind(logger);
+        const log = vi
+          .spyOn(logger, 'logMessage')
+          .mockImplementationOnce(async (...args) => {
+            enterLogger();
+            await logging;
+            if (change === 'logger rejection') throw failure;
+            return logMessage(...args);
+          });
+        const oldAction = vi.fn(() => ({
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: 'old command completed',
+        }));
+        const nextAction = vi.fn(() => ({
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: 'successor completed',
+        }));
+        const config = makeFakeConfig();
+        let sessionId = config.getSessionId();
+        const session = vi
+          .spyOn(config, 'getSessionId')
+          .mockImplementation(() => sessionId);
+        const host = createFakeHost();
+        const gateway = new OpenTuiSlashGateway();
+        gateway.attach(
+          new OpenTuiSlashDispatcher(host, { ...services, config, logger }, [
+            stub({ name: 'old', action: oldAction }),
+            stub({ name: 'next', action: nextAction }),
+          ]),
+        );
+        const settlement = gateway.dispatch('/old').then(
+          (outcome) => ({ outcome, error: undefined }),
+          (error: unknown) => ({ outcome: undefined, error }),
+        );
+        try {
+          await loggerEntered;
+          expect(gateway.isBusy()).toBe(true);
+          expect(oldAction).not.toHaveBeenCalled();
+          if (change === 'session change') sessionId = 'successor-session';
+          finishLogging();
+          const result = await settlement;
+          const firstBusy = gateway.isBusy();
+          const firstProcessing = host.processingFlags.at(-1);
+          const firstItems = [...host.items];
+          const firstTelemetryCalls = logSlashCommandSpy.mock.calls.length;
+          const successor = await gateway.dispatch('/next');
+          expect(successor).toEqual({
+            kind: 'dispatched',
+            outcome: { kind: 'handled' },
+          });
+          expect(nextAction).toHaveBeenCalledOnce();
+          expect(host.items.at(-1)).toMatchObject({
+            text: 'successor completed',
+          });
+          expect(gateway.isBusy()).toBe(false);
+          expect(host.processingFlags.at(-1)).toBe(false);
+          expect(log).toHaveBeenCalledTimes(2);
+          expect(oldAction).not.toHaveBeenCalled();
+          expect(firstBusy).toBe(false);
+          expect(firstProcessing).not.toBe(true);
+          expect(firstItems).toEqual([]);
+          expect(firstTelemetryCalls).toBe(0);
+          if (change === 'logger rejection') {
+            expect(result.error).toBe(failure);
+            expect(result.outcome).toBeUndefined();
+          } else {
+            expect(result.error).toBeUndefined();
+            expect(result.outcome).toEqual({
+              kind: 'dispatched',
+              outcome: { kind: 'handled' },
+            });
+            expect(config.getSessionId()).toBe('successor-session');
+          }
+        } finally {
+          finishLogging();
+          try {
+            await settlement;
+          } finally {
+            log.mockRestore();
+            session.mockRestore();
+          }
+        }
+      } finally {
+        finishLogging();
+        fs.rmSync(owned, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each(['/clear', '/reset', '/new'])(
     '%s retains input ownership through Mod shutdown and chat reset',
     async (input) => {
