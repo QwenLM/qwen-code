@@ -11,6 +11,7 @@ import nodeOs from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { describeTree as describeTreeUnder } from '../test-utils/describe-tree.js';
+import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ExtensionStore } from '@qwen-code/qwen-code-core/extension/extension-store.js';
 import {
@@ -36,6 +37,30 @@ vi.mock(
   },
 );
 
+// The system settings overrides are only honored for a root-owned file,
+// which a non-root test host cannot arrange for its temp fixtures; the
+// fixtures stand in for administrator-created system files.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const { trustedSystemSettingsLstat } = await import(
+    '../test-utils/trusted-system-settings.js'
+  );
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+  };
+});
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const { trustedSystemSettingsLstat } = await import(
+    '../test-utils/trusted-system-settings.js'
+  );
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+  };
+});
+
 describe('evaluateManagedCompatibility', () => {
   let root: string;
   let workspace: string;
@@ -53,6 +78,7 @@ describe('evaluateManagedCompatibility', () => {
     root = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-compat-')),
     );
+    trustedSystemSettingsDirs.add(root);
     workspace = path.join(root, 'workspace');
     qwenHome = path.join(root, 'qwen-home');
     fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
@@ -85,6 +111,7 @@ describe('evaluateManagedCompatibility', () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    trustedSystemSettingsDirs.delete(root);
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -615,7 +642,9 @@ describe('evaluateManagedCompatibility', () => {
         QWEN_CODE_SYSTEM_DEFAULTS_PATH: '',
       },
     };
-    // Unset, the defaults sit beside the system settings file.
+    // Unset, the defaults sit beside the system settings file, whose
+    // override is only honored while the file exists.
+    writeJson(systemSettings(), {});
     writeJson(systemDefaults(), { mcpServers: { demo: { command: 'demo' } } });
 
     await expect(evaluate()).resolves.toEqual({
