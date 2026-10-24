@@ -395,6 +395,69 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'skips the acquisition when the cache directory cannot hold the lock file',
+    () => {
+      const step = parse(workflow).jobs.test.steps.find(
+        (s) => s.name === 'Run Java SDK tests (self-hosted)',
+      );
+      const start = step.run.indexOf('lock_status=0');
+      expect(start).toBeGreaterThan(-1);
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-unwritable-'));
+      const workspace = join(dir, 'workspace');
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const called = join(dir, 'helper-called');
+      const cache = join(home, '.cache', 'qwen-code-ci');
+      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+      mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+      mkdirSync(cache, { recursive: true });
+      // `mkdir -p` succeeds on an existing directory, so the probe must
+      // also open the lock file the helper opens. Root ignores the mode.
+      chmodSync(cache, 0o555);
+      writeFileSync(
+        join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+        'sdk_java_lock_acquire() { : >"${HELPER_CALLED_FILE}"; return 1; }\n',
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-eo',
+            'pipefail',
+            '-c',
+            `mvn_status=0\n${step.run.slice(start)}`,
+          ],
+          {
+            encoding: 'utf8',
+            timeout: 10_000,
+            env: {
+              ...process.env,
+              GITHUB_WORKSPACE: workspace,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              TIER: 'fast',
+              HELPER_CALLED_FILE: called,
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back skipped; the test result above is unaffected',
+        );
+        // An unwritable cache makes every helper flock fail immediately, so
+        // a called helper would spin until its budget instead of skipping.
+        expect(existsSync(called)).toBe(false);
+      } finally {
+        chmodSync(cache, 0o755);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform !== 'linux')(
     'publishes the job-local repository when the Maven suite fails',
     () => {
