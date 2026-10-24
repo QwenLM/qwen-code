@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  afterAll,
+  vi,
+} from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   mkdirSync,
@@ -63,8 +71,19 @@ describe('runSync (real git, bare remote)', () => {
   let savedSession: string | undefined;
   let paths: ReturnType<typeof autofixPrPaths>;
 
+  // The runner may have no git identity of its own: a commit the test
+  // makes in a repository it configures none for (a submodule's checkout)
+  // takes this one, while a repository's own config still wins over it.
+  const gitHome = mkdtempSync(join(tmpdir(), 'autofix-git-'));
+  const gitConfig = join(gitHome, 'config');
+  writeFileSync(gitConfig, '[user]\n\tname = t\n\temail = t@example.com\n');
+  afterAll(() => rmSync(gitHome, { recursive: true, force: true }));
   const run = (cwd: string, ...args: string[]) =>
-    execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: gitConfig },
+    }).trim();
   const commitIn = (cwd: string, file: string) => {
     writeFileSync(join(cwd, file), file);
     run(cwd, 'add', file);
