@@ -8,7 +8,7 @@
   "main": "index.js",
   "scripts": {
     "link": "node scripts/link-public-docs.mjs",
-    "clean": "rm -rf .next",
+    "clean": "node -e \"require('node:fs').rmSync('.next',{recursive:true,force:true})\"",
     "dev": "npm run clean && next --turbopack",
     "test": "vitest run --config vitest.config.js"
   },
