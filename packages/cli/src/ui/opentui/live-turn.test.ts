@@ -353,8 +353,12 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       const rewindRecording = vi.fn();
       const config = {
         getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
-        getChatRecordingService: () => ({ rewindRecording }),
+        getChatRecordingService: () => ({
+          rewindRecording,
+          getRewindTurnIndex: (id: string) => (id === 'original-id' ? 0 : -1),
+        }),
         getFileHistoryService: () => ({
+          getSnapshots: () => [],
           rewind: async () => {
             await new Promise<void>((resolve) => {
               release = resolve;

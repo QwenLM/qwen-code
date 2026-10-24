@@ -94,6 +94,50 @@ class ManagedSchemaCatalogTest {
     }
 
     @Test
+    void acceptsMySqlByteLengthAliasWithoutAcceptingConstraintDrift() throws Exception {
+        for (String mode : new String[] {"selected_approval_mode", "approval_mode"}) {
+            String body = "\n    CONSTRAINT ck_probe CHECK (permission_rules_json IS NULL OR ("
+                    + mode + " IS NOT NULL AND approval_revision >= 1"
+                    + " AND OCTET_LENGTH(permission_rules_json) <= 8192))\n";
+            String stored = "`permission_rules_json` is null or (`" + mode + "` is not null"
+                    + " and `approval_revision` >= 1 and length(`permission_rules_json`) <= 8192)";
+            try (var data = fixture(true); var update = data.prepareStatement(
+                    "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
+                update.setString(1, stored);
+                update.executeUpdate();
+                ManagedSchemaCatalog.validateChecks(data, "ma_operation", body);
+                for (String changed : new String[] {
+                        stored.replace("length(", "char_length("),
+                        stored.replace("8192", "8193"),
+                        stored.replace("<=", "<"),
+                        stored.replace(">= 1", ">= 0"),
+                        stored.replace(" is null or", " is not null or")}) {
+                    update.setString(1, changed);
+                    update.executeUpdate();
+                    assertThrows(SQLException.class,
+                            () -> ManagedSchemaCatalog.validateChecks(data, "ma_operation", body),
+                            changed);
+                }
+            }
+        }
+    }
+
+    @Test
+    void doesNotNormalizeByteLengthNamesInsideStringLiterals() throws Exception {
+        String body = "\n    CONSTRAINT ck_probe CHECK (state = 'octet_length')\n";
+        try (var data = fixture(true); var update = data.prepareStatement(
+                "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
+            update.setString(1, "state = 'octet_length'");
+            update.executeUpdate();
+            ManagedSchemaCatalog.validateChecks(data, "ma_operation", body);
+            update.setString(1, "state = 'length'");
+            update.executeUpdate();
+            assertThrows(SQLException.class,
+                    () -> ManagedSchemaCatalog.validateChecks(data, "ma_operation", body));
+        }
+    }
+
+    @Test
     void acceptsNumericGeneratedBooleansWithoutAcceptingExpressionDrift() throws Exception {
         String body = "\n    csi_guard BOOLEAN GENERATED ALWAYS AS (COALESCE("
                 + "tool_profile = 'csi-files-retirement/1' OR runtime_request_key IS NOT NULL, FALSE))\n";

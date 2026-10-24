@@ -78,6 +78,7 @@ import {
   isApiHistoryDirectoryContext,
 } from '../utils/api-history-metadata.js';
 import { getStartupContextLength } from '../core/environmentContext.js';
+import { getRecordRewindId } from './session-api-history.js';
 import { computeInitialTurnFromHistory } from './session-turn-state.js';
 import {
   deleteTranscriptMessageGroups,
@@ -1133,6 +1134,7 @@ export interface BranchCheckpointCursor {
 export interface ChatRecordingRestoreState {
   lastCompletedUuid: string;
   turnParentUuids: Array<string | null>;
+  turnPromptIds?: Array<string | undefined>;
   customTitle?: string;
   titleSource?: TitleSource;
   parentSessionId?: string;
@@ -1190,6 +1192,7 @@ export class ChatRecordingService {
    * record).
    */
   private turnParentUuids: Array<string | null> = [];
+  private turnPromptIds: Array<string | undefined> = [];
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
@@ -1508,6 +1511,9 @@ export class ChatRecordingService {
     this.resetExternalRecordIndex();
     this.activeBranchBaseUuid = state.lastCompletedUuid;
     this.turnParentUuids = [...state.turnParentUuids];
+    this.turnPromptIds = state.turnPromptIds
+      ? [...state.turnPromptIds]
+      : Array.from(state.turnParentUuids, () => undefined);
     this.currentCustomTitle = state.customTitle;
     this.currentTitleSource = state.titleSource;
     this.currentParentSessionId = state.parentSessionId;
@@ -2508,8 +2514,6 @@ export class ChatRecordingService {
     daemonPromptId?: string,
   ): void {
     try {
-      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
-      this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         executionContext: this.getExecutionContext(),
@@ -2519,6 +2523,11 @@ export class ChatRecordingService {
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
         ...(promptId ? { promptId } : {}),
       };
+      // Advance rewind associations only after the record is built, so a
+      // rejected message cannot skew the projection.
+      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
+      this.turnParentUuids.push(record.parentUuid ?? null);
+      this.turnPromptIds.push(getRecordRewindId(record));
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
@@ -2527,6 +2536,11 @@ export class ChatRecordingService {
 
   getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
     return this.userDisplayTextsForTitle;
+  }
+
+  /** User turns in the active transcript: the boundaries `/rewind` uses. */
+  getUserTurnCount(): number {
+    return this.turnParentUuids.length;
   }
 
   recordGoalRuntimeMessage(
@@ -3320,6 +3334,7 @@ export class ChatRecordingService {
     };
     const projectTurns = (records: readonly ChatRecord[]) => {
       this.turnParentUuids = [];
+      this.turnPromptIds = [];
       this.userDisplayTextsForTitle.length = 0;
       for (const record of records) {
         if (
@@ -3333,8 +3348,10 @@ export class ChatRecordingService {
             'agent_mention',
             'agent_message',
           ].includes(record.subtype ?? '')
-        )
+        ) {
           this.turnParentUuids.push(record.parentUuid ?? null);
+          this.turnPromptIds.push(getRecordRewindId(record));
+        }
         if (record.type === 'user' && record.subtype === undefined)
           this.trackUserDisplayTextForTitle(
             (record.systemPayload as UserPromptRecordPayload | undefined)
@@ -3557,6 +3574,11 @@ export class ChatRecordingService {
     }
   }
 
+  getRewindTurnIndex(promptId: string): number {
+    const index = this.turnPromptIds.indexOf(promptId);
+    return index === this.turnPromptIds.lastIndexOf(promptId) ? index : -1;
+  }
+
   private isDeletedTelemetry(record: ChatRecord): boolean {
     const { promptId, callId } = telemetryRecordIdentity(record);
     return (
@@ -3574,10 +3596,12 @@ export class ChatRecordingService {
    * This makes all messages after that point sit on a dead branch in the
    * UUID tree, so `reconstructHistory()` will skip them on resume.
    *
-   * @param targetTurnIndex 0-based index of the user turn to rewind to.
-   *   For example, 0 means rewind to the very first user message (keeping
-   *   nothing before it), 1 means keep the first user turn, etc.
+   * @param targetTurnIndex 0-based recorder turn index to rewind to, resolved
+   *   independently of visible UI turns and retained file checkpoint positions.
+   *   For example, 0 keeps no preceding recorded user turns, 1 keeps one, etc.
    * @param payload Additional metadata to persist with the rewind record.
+   * @param survivingFileHistorySnapshots Complete identified checkpoint batch
+   *   surviving the rewind, including the target turn's checkpoint when present.
    */
   rewindRecording(
     targetTurnIndex: number,
@@ -3604,6 +3628,7 @@ export class ChatRecordingService {
       );
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
+      this.turnPromptIds = this.turnPromptIds.slice(0, targetTurnIndex);
       // The previous attribution snapshot now sits on the abandoned
       // branch — clear the dedup key so the next snapshot lands on the
       // active branch and `/resume` can find it. Without this, a
@@ -3659,6 +3684,7 @@ export class ChatRecordingService {
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.resetExternalRecordIndex();
     this.turnParentUuids = [];
+    this.turnPromptIds = [];
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
@@ -3678,6 +3704,7 @@ export class ChatRecordingService {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.
         this.turnParentUuids.push(record.parentUuid ?? null);
+        this.turnPromptIds.push(getRecordRewindId(record));
       }
     }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.

@@ -86,6 +86,7 @@ import {
   type OpenTuiComposerHandle,
 } from './input-submission.js';
 import { rewindSession } from '../utils/session-rewind.js';
+import { isRewindableUserTurn } from '../utils/historyMapping.js';
 import { expandCollapsedHistory } from '../utils/resumeHistoryUtils.js';
 import { projectItemToStreamEvent } from './item-projection.js';
 import {
@@ -1482,9 +1483,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 onApprovalModeChanged={adoptApprovalMode}
                 availableTerminalHeight={dialogRegionHeight}
                 statusLineState={statusLineState}
-                rewindTurns={props.historyItems?.flatMap((item) =>
-                  item.kind === 'user' ? [item] : [],
-                )}
+                rewindTurns={rewindBoundaryHistory(
+                  props.historyItems ?? [],
+                ).flatMap((boundary) => {
+                  const item = props.historyItems?.[boundary.id];
+                  return item?.kind === 'user' && isRewindableUserTurn(boundary)
+                    ? [item]
+                    : [];
+                })}
                 onRewind={(turn, option) => rewind(turn.id, option)}
               />
             </box>
