@@ -320,7 +320,7 @@ describe('standalone runtime cache wiring', () => {
       'const cacheDir = process.env.QWEN_STANDALONE_RUNTIME_CACHE;',
     );
     expect(script).toMatch(
-      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir\s*[,}]/,
+      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir,\s*fetchImpl: setup\.fetch,?\s*\}\)/,
     );
     expect(script.indexOf('sweepRuntimeCache(cacheDir, used)')).toBeGreaterThan(
       script.lastIndexOf('await fetchArchive('),

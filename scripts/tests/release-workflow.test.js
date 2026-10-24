@@ -3146,34 +3146,23 @@ exit 0`,
     // spawnSync treats timeout 0 as "no timeout", so a spent setup budget
     // must fail the next phase at 1 ms rather than disarm its cap.
     expect(
-      source.match(/Math\.max\(1, setupDeadline - Date\.now\(\)\)/g),
+      source.match(/Math\.max\(1, deadline - Date\.now\(\)\)/g),
+    ).toHaveLength(1);
+    // Both entry points must take their setup I/O from the one factory, and
+    // that factory must close both wrappers over the shared deadline.
+    expect(
+      source.match(/^ {2}const setup = makeSetupBudget\(\);$/gm),
     ).toHaveLength(2);
-    // Every setup phase must spend the shared budget instead of inheriting
-    // run()'s 300 s default, so check each call inside the two setup slices.
-    // A later phase added without the budget fails here; the counts above
-    // pin the other two bindings but cannot see an omission.
-    const callFragments = (slice) => {
-      const fragments = [];
-      const pattern = /\b(?:run|fetch)\s*\(/g;
-      let match;
-      while ((match = pattern.exec(slice))) {
-        let depth = 0;
-        let end = match.index;
-        for (; end < slice.length; end++) {
-          if (slice[end] === '(') depth++;
-          else if (slice[end] === ')' && --depth === 0) {
-            end++;
-            break;
-          }
-        }
-        fragments.push(slice.slice(match.index, end));
-      }
-      return fragments;
-    };
+    expect(source).toMatch(
+      /run: \(bin, args\) =>\s*run\(bin, args, \{ timeout: remaining\(\) \}\),/,
+    );
+    expect(source).toMatch(
+      /fetch: \(url, init\) =>\s*fetch\(url, \{ \.\.\.init, signal: AbortSignal\.timeout\(remaining\(\)\) \}\),/,
+    );
     const setupSlices = [];
     let from = 0;
     while (true) {
-      const start = source.indexOf('const setupDeadline', from);
+      const start = source.indexOf('const setup = makeSetupBudget();', from);
       if (start < 0) break;
       const end = source.indexOf('const result = spawnSync(', start);
       expect(end, 'setup must be followed by its spawn').toBeGreaterThan(start);
@@ -3182,16 +3171,20 @@ exit 0`,
     }
     expect(setupSlices).toHaveLength(2);
     for (const slice of setupSlices) {
+      // A phase that reaches past the budget factory inherits run()'s 300 s
+      // default or escapes the deadline entirely. Naming the escape hatches
+      // avoids enumerating call spellings: budgeted calls are setup.run() /
+      // setup.fetch(), which the leading-dot exclusion leaves alone.
       expect(
-        callFragments(slice).filter(
-          (call) => !call.includes('remainingSetupMs()'),
-        ),
-        'every setup call must spend the shared setup budget',
-      ).toEqual([]);
+        slice,
+        'every setup phase must go through the budget wrapper',
+      ).not.toMatch(/(?<![\w.])(?:spawnSync|run|fetch)\s*\(/);
     }
     // The slice's fetch must be the implementation the archive fetch uses,
     // not a helper left behind after the wiring was removed.
-    expect(setupSlices[0]).toContain('fetchImpl: fetchSetup');
+    expect(setupSlices[0]).toMatch(
+      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir,\s*fetchImpl: setup\.fetch,?\s*\}\)/,
+    );
     const workerMs = Number(worker[1].replaceAll('_', ''));
     const setupMs = Number(setup[1].replaceAll('_', ''));
     const spawnMs = 2 * workerMs + setupMs;

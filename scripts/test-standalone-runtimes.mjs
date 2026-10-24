@@ -53,6 +53,21 @@ const run = (bin, args, options = {}) => {
   return result.stdout.trim();
 };
 
+// A setup phase shares one deadline across its downloads, extractions and
+// probes: each call spends what remains instead of inheriting run()'s 300 s
+// default, and fetchVerifiedArchive's per-attempt 300 s signal is replaced by
+// the same budget. Wrapped here rather than by lowering run()'s default, which
+// also serves the worker/updater fixtures.
+const makeSetupBudget = () => {
+  const deadline = Date.now() + SETUP_TIMEOUT_MS;
+  const remaining = () => Math.max(1, deadline - Date.now());
+  return {
+    run: (bin, args) => run(bin, args, { timeout: remaining() }),
+    fetch: (url, init) =>
+      fetch(url, { ...init, signal: AbortSignal.timeout(remaining()) }),
+  };
+};
+
 async function worker(root, node, bun, expectedHost) {
   const host = process.versions.bun ? 'bun' : 'node';
   assert.equal(host, expectedHost);
@@ -967,21 +982,16 @@ async function ci() {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-tools-'),
   );
-  const setupDeadline = Date.now() + SETUP_TIMEOUT_MS;
-  const remainingSetupMs = () => Math.max(1, setupDeadline - Date.now());
+  const setup = makeSetupBudget();
   // Persistent runners point this at a host-wide directory, so each archive
   // is downloaded once per host instead of on every run.
   const cacheDir = process.env.QWEN_STANDALONE_RUNTIME_CACHE;
   const used = [];
-  // fetchVerifiedArchive bounds each attempt at 300 s; spend what the shared
-  // setup deadline has left instead, retries included.
-  const fetchSetup = (url, init) =>
-    fetch(url, { ...init, signal: AbortSignal.timeout(remainingSetupMs()) });
   const fetchArchive = (url, filename, pin) => {
     used.push(filename);
     return fetchVerifiedArchive(url, filename, pin, {
       cacheDir,
-      fetchImpl: fetchSetup,
+      fetchImpl: setup.fetch,
     });
   };
   try {
@@ -1012,9 +1022,7 @@ async function ci() {
       });
       const archive = path.join(root, 'node.tgz');
       fs.writeFileSync(archive, bytes);
-      run('tar', ['-xzf', archive, '-C', root], {
-        timeout: remainingSetupMs(),
-      });
+      setup.run('tar', ['-xzf', archive, '-C', root]);
       node = path.join(root, filename.slice(0, -7), 'bin/node');
     }
     if (!bun) {
@@ -1033,9 +1041,7 @@ async function ci() {
       fs.mkdirSync(dir);
       const archive = path.join(root, 'bun.tgz');
       fs.writeFileSync(archive, bytes);
-      run('tar', ['-xzf', archive, '-C', dir], {
-        timeout: remainingSetupMs(),
-      });
+      setup.run('tar', ['-xzf', archive, '-C', dir]);
       bun = path.join(dir, 'package/bin/bun');
     }
     // Only now: sweeping after the first archive would remove the second one
@@ -1064,24 +1070,17 @@ if (process.argv[2] === '--ci') {
     'win32',
     'This POSIX tar fixture does not cover Windows updates',
   );
-  const setupDeadline = Date.now() + SETUP_TIMEOUT_MS;
-  const remainingSetupMs = () => Math.max(1, setupDeadline - Date.now());
-  const node = run(
-    process.env.PINNED_NODE || process.execPath,
-    ['-p', 'process.execPath'],
-    { timeout: remainingSetupMs() },
-  );
-  const bun = run(process.env.PINNED_BUN || 'bun', ['-p', 'process.execPath'], {
-    timeout: remainingSetupMs(),
-  });
-  assert.equal(
-    run(node, ['--version'], { timeout: remainingSetupMs() }),
-    `v${NODE_VERSION}`,
-  );
-  assert.equal(
-    run(bun, ['--version'], { timeout: remainingSetupMs() }),
-    BUN_VERSION,
-  );
+  const setup = makeSetupBudget();
+  const node = setup.run(process.env.PINNED_NODE || process.execPath, [
+    '-p',
+    'process.execPath',
+  ]);
+  const bun = setup.run(process.env.PINNED_BUN || 'bun', [
+    '-p',
+    'process.execPath',
+  ]);
+  assert.equal(setup.run(node, ['--version']), `v${NODE_VERSION}`);
+  assert.equal(setup.run(bun, ['--version']), BUN_VERSION);
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-test-'),
   );
@@ -1091,25 +1090,21 @@ if (process.argv[2] === '--ci') {
       config,
       '[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=localhost\n[ext]\nsubjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\n',
     );
-    run(
-      'openssl',
-      [
-        'req',
-        '-x509',
-        '-newkey',
-        'rsa:2048',
-        '-nodes',
-        '-days',
-        '1',
-        '-config',
-        config,
-        '-keyout',
-        path.join(root, 'key.pem'),
-        '-out',
-        path.join(root, 'cert.pem'),
-      ],
-      { timeout: remainingSetupMs() },
-    );
+    setup.run('openssl', [
+      'req',
+      '-x509',
+      '-newkey',
+      'rsa:2048',
+      '-nodes',
+      '-days',
+      '1',
+      '-config',
+      config,
+      '-keyout',
+      path.join(root, 'key.pem'),
+      '-out',
+      path.join(root, 'cert.pem'),
+    ]);
     const env = {
       ...process.env,
       NODE_EXTRA_CA_CERTS: path.join(root, 'cert.pem'),
