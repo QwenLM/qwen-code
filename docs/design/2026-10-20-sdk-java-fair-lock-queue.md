@@ -95,11 +95,13 @@ the bound.
 Both Maven runs already resolve from a job-local repository, so they touch no
 host-shared state. Only the cache write-back mutates `~/.m2`, so only the
 write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
-and runs before the acquisition; the Maven runs run unlocked; the write-back
-holds one acquisition, and its `mkdir` and bounded `find`/`cp` children
-drop fd 9 so a survivor
-cannot retain the lock. A hold now measures the copy instead of the suite, and
-the fast tier's 90-minute budget is again far above one hold.
+and runs before the acquisition; it then drops the two in-house fixed-release
+coordinates from the job-local copy, so the unlocked `mvn install` writes
+fresh inodes instead of rewriting the host cache through a hardlink. The
+Maven runs run unlocked; the write-back holds one acquisition, and its `mkdir`
+and bounded `find`/`cp` children drop fd 9 so a survivor cannot retain the
+lock. A hold now measures the copy instead of the suite, and the fast tier's
+90-minute budget is again far above one hold.
 
 The test job follows the same rule. Its suite was the other long hold: on
 2026-10-22 the full-tier Java 21 leg of run 39754414693 ran for 89 minutes on
@@ -118,9 +120,13 @@ the mechanism's real bound.
 A write-back that cannot acquire the lock within 5400 s warns and skips the
 copy instead of failing the step. The Maven gate result above is already
 final at that point, and the call sites rewrite the helper's timeout text
-before it
-reaches the log, so nothing on that tolerated path carries a rerun-classifier
-signature onto a succeeding step.
+case-insensitively before it reaches the log, so nothing on that tolerated
+path carries a rerun-classifier signature onto a succeeding step. The same
+policy covers a host fault the helper cannot recover from: a missing `flock`
+or an unusable cache or queue directory warns and skips before the helper
+spins out its budget. In the bare-lock fallback, only `flock`'s timeout
+status is tolerated; any other status is an unknown setup failure and stays
+fatal.
 
 The 5400 s wait budget is unchanged. It bounds the queue, not the hold, and
 both lock sites (and the MariaDB lane) size their job ceilings against it;
@@ -244,10 +250,13 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
-  `sdk_java_lock_acquire 5400` budget at each acquisition site, both jobs'
-  Maven runs above their acquisition, their write-back children's fd 9
-  close, and the `.size-baseline` entry is re-measured to the workflow's
-  size after the last edit.
+  `sdk_java_lock_acquire 5400` budget at each acquisition site, the identical
+  prelude and write-back tail at both sites, both jobs' Maven runs above their
+  acquisition, their write-back children's fd 9 close, and the two in-house
+  coordinates' absence from every seeded job-local repository. The fault arms
+  cover a missing `flock`, a broken `mkdir`, a stray queue file, a timed-out
+  `flock`, and an unexpected `flock` status. The `.size-baseline` entry is
+  re-measured to the workflow's size after the last edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -256,17 +265,19 @@ order this section exists to prevent.
 - Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
   the test job passes its tier and the MariaDB site defaults to normal. Both
   sites run their Maven suites from a job-local repository before the
-  acquisition.
+  acquisition. Every job that seeds a job-local repository drops the two
+  in-house fixed-release coordinates from the copy before running Maven.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
 - The helper's timeout line still contains the substring
   `lock not acquired within`, so `qwen-autofix.yml`'s
   `INFRA_FAILURE_SIGNATURES` keeps matching a failed acquisition elsewhere.
-  Both call sites downgrade a failed acquisition to a warning, skip the
-  write-back, and rewrite the helper's timeout text on the way to the log,
-  so an acquisition this workflow now tolerates leaves no classifier
-  signature on a succeeding step.
+  Both call sites downgrade a failed acquisition or a setup fault to a
+  warning, skip the write-back, and rewrite the helper's timeout text
+  case-insensitively on the way to the log, so an acquisition this workflow
+  now tolerates leaves no classifier signature on a succeeding step. Only an
+  unexpected bare-`flock` status remains fatal.
 
 ## Open questions
 

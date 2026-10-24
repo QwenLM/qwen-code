@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -209,20 +210,42 @@ describe('SDK Java self-hosted workflow guards', () => {
   });
 
   it('keeps the cache write-back byte-identical across both lock sites', () => {
-    // The test job's write-back was cloned from mysql-integration's, and the
-    // wildcard pin above would not notice one copy losing -links 1 or its
-    // -prune excludes. That is the #13506 drift class: a later fix applied
-    // to only one copy republishes the whole seeded tree, or publishes the
-    // in-house fixed coordinates into the host cache the next seed reads.
-    const slices = ['test', 'mysql-integration'].map((name) => {
-      const run = parse(workflow).jobs[name].steps.find((candidate) =>
-        candidate.run?.includes('sdk-java-tests.lock'),
-      ).run;
+    // The test job's write-back prelude and tail were cloned from
+    // mysql-integration's, and the wildcard pin above would not notice one
+    // copy losing an errexit probe, -links 1 or its -prune excludes. That is
+    // the #13506 drift class: a later fix applied to only one copy
+    // republishes the whole seeded tree, publishes the in-house fixed
+    // coordinates into the host cache the next seed reads, or reintroduces
+    // the fatal setup path this PR warns past.
+    const runs = ['test', 'mysql-integration'].map(
+      (name) =>
+        parse(workflow).jobs[name].steps.find((candidate) =>
+          candidate.run?.includes('sdk-java-tests.lock'),
+        ).run,
+    );
+    const preludes = runs.map((run) => {
+      const start = run.indexOf('lock_setup_fault() {');
+      const end = run.indexOf('\nfi\n', start);
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      return run.slice(start, end + '\nfi\n'.length);
+    });
+    // The test job alone passes its tier; the prelude must otherwise stay
+    // byte-identical. The comment block between the prelude and the
+    // write-back differs by site, so the tail is pinned from its first
+    // command instead.
+    expect(
+      preludes[1].replace(
+        'sdk_java_lock_acquire 5400 >&7',
+        'sdk_java_lock_acquire 5400 "${TIER}" >&7',
+      ),
+    ).toBe(preludes[0]);
+    const tails = runs.map((run) => {
       const start = run.indexOf('mkdir -p "${HOME}/.m2/repository" 9>&-');
-      expect(start, name).toBeGreaterThan(-1);
+      expect(start).toBeGreaterThan(-1);
       return run.slice(start);
     });
-    expect(slices[1]).toBe(slices[0]);
+    expect(tails[1]).toBe(tails[0]);
   });
 
   it.skipIf(process.platform !== 'linux')(
@@ -269,6 +292,101 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(result.status, suite + result.stderr).toBe(0);
       } finally {
         rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'drops seeded in-house coordinates so Maven writes fresh inodes',
+    () => {
+      const jobs = parse(workflow).jobs;
+      for (const name of [
+        'test',
+        'mysql-integration',
+        'event-transport-broker',
+        'event-transport-multi-node',
+      ]) {
+        const seedRun = jobs[name].steps.find((candidate) =>
+          candidate.run?.includes('cp -aln "${HOME}/.m2/repository"'),
+        )?.run;
+        expect(seedRun, name).toBeDefined();
+        const start = seedRun.indexOf('cp -aln "${HOME}/.m2/repository"');
+        const end = seedRun.indexOf('\nmvn --batch-mode', start);
+        expect(start, name).toBeGreaterThan(-1);
+        expect(end, name).toBeGreaterThan(start);
+        const seed = seedRun.slice(start, end);
+        expect(seed, name).toContain(
+          'rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk"',
+        );
+        expect(seed, name).toContain(
+          '${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server',
+        );
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-'));
+        const home = join(dir, 'home');
+        const runnerTemp = join(dir, 'runner-temp');
+        mkdirSync(runnerTemp, { recursive: true });
+        const hostRepo = join(home, '.m2', 'repository');
+        const hostJars = [
+          ['com', 'alibaba', 'qwencode-sdk', '0.1.0-alpha', 'sdk.jar'],
+          [
+            'com',
+            'alibaba',
+            'qwen-managed-agent-server',
+            '0.1.0-alpha',
+            'server.jar',
+          ],
+          ['org', 'example', 'third-party', '1.0', 'third-party.jar'],
+        ].map((parts) => join(hostRepo, ...parts));
+        for (const jar of hostJars) {
+          mkdirSync(dirname(jar), { recursive: true });
+          writeFileSync(jar, 'host');
+        }
+        try {
+          const result = spawnSync('bash', ['-e', '-c', seed], {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+            },
+          });
+          expect(result.error, name).toBeUndefined();
+          expect(result.status, name + result.stderr).toBe(0);
+          for (const coordinate of [
+            'qwencode-sdk',
+            'qwen-managed-agent-server',
+          ]) {
+            expect(
+              existsSync(
+                join(runnerTemp, 'm2-repo', 'com', 'alibaba', coordinate),
+              ),
+              `${name}/${coordinate}`,
+            ).toBe(false);
+          }
+          expect(
+            existsSync(
+              join(
+                runnerTemp,
+                'm2-repo',
+                'org',
+                'example',
+                'third-party',
+                '1.0',
+                'third-party.jar',
+              ),
+            ),
+            name,
+          ).toBe(true);
+          for (const jar of hostJars.slice(0, 2)) {
+            expect(readFileSync(jar, 'utf8'), name).toBe('host');
+            // The job-local copy held the only extra link; dropping it must
+            // leave the host file exactly as seeded.
+            expect(statSync(jar).nlink, name).toBe(1);
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
       }
     },
   );
@@ -372,17 +490,40 @@ describe('SDK Java self-hosted workflow guards', () => {
         ).env.INFRA_FAILURE_SIGNATURES,
         'i',
       );
+      const helperSource = readFileSync(
+        '.github/scripts/sdk-java-lock.sh',
+        'utf8',
+      );
+      // Derive the stub's timeout line from the real helper: a wording or
+      // casing drift in the helper must not leave this arm passing against
+      // a hand-copied line the call site's sed rewrite no longer matches.
+      const timeoutLine = helperSource
+        .split('\n')
+        .find((line) =>
+          line.includes('::error::sdk-java host lock not acquired within'),
+        );
+      expect(timeoutLine).toBeDefined();
       const jobs = parse(workflow).jobs;
       for (const name of ['test', 'mysql-integration']) {
         const run = jobs[name].steps.find((candidate) =>
           candidate.run?.includes('sdk-java-tests.lock'),
         ).run;
-        const start = run.indexOf(
-          'if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then',
-        );
+        const start = run.indexOf('lock_setup_fault() {');
         expect(start, name).toBeGreaterThan(-1);
         const acquisitionAndWriteBack = run.slice(start);
-        for (const arm of ['helper', 'fallback', 'setup-fault']) {
+        for (const arm of [
+          'helper',
+          'helper-capitalised',
+          'helper-no-flock',
+          'fallback',
+          'fallback-no-flock',
+          'setup-fault',
+          'queue-fault',
+          'fallback-setup-fault',
+          'fallback-fault',
+        ]) {
+          const noFlock =
+            arm === 'helper-no-flock' || arm === 'fallback-no-flock';
           const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-skip-'));
           const workspace = join(dir, 'workspace');
           const home = join(dir, 'home');
@@ -396,42 +537,95 @@ describe('SDK Java self-hosted workflow guards', () => {
           // if the skip falls through into the write-back, it lands in the
           // host cache and the assertion below catches it.
           writeFileSync(join(runnerTemp, 'm2-repo', 'delta.marker'), 'x');
-          if (arm === 'helper') {
-            // The slot the slice sources is this stub, whose line is the
-            // helper's own timeout annotation with the classifier signature.
+          if (arm === 'helper' || arm === 'helper-capitalised') {
+            // The slot the slice sources is this stub, built from the real
+            // helper's own timeout annotation. The capitalised arm pins the
+            // sed rewrite's case-insensitivity against the classifiers,
+            // which are all case-insensitive.
+            const stubLine =
+              arm === 'helper-capitalised'
+                ? timeoutLine.replace(
+                    /lock not acquired within/i,
+                    'Lock not acquired within',
+                  )
+                : timeoutLine;
             writeFileSync(
               join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
               'sdk_java_lock_acquire() {\n' +
-                '  echo "::error::sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued)"\n' +
+                '  local wait_seconds=5400 seq=1 class=fast head="(no other ticket queued)"\n' +
+                `  ${stubLine.trim()}\n` +
                 '  return 1\n' +
                 '}\n',
             );
-          } else if (arm === 'setup-fault') {
-            // The real helper with a shim that breaks its setup: the call
-            // site must surface the fault instead of spinning out the wait
-            // and exiting green.
+          } else if (arm === 'helper-no-flock') {
+            // The real helper without flock on PATH: the probe must skip in
+            // seconds instead of spinning out the whole wait budget.
             writeFileSync(
               join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
-              readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8'),
+              helperSource,
             );
+          } else if (arm === 'setup-fault' || arm === 'queue-fault') {
+            // The real helper with a broken setup: a mkdir fault and a stray
+            // file at the queue path are the two shapes the parent-directory
+            // probe could not see.
+            writeFileSync(
+              join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+              helperSource,
+            );
+            if (arm === 'setup-fault') {
+              writeFileSync(join(shims, 'mkdir'), '#!/bin/sh\nexit 1\n', {
+                mode: 0o755,
+              });
+            } else {
+              mkdirSync(join(home, '.cache', 'qwen-code-ci'), {
+                recursive: true,
+              });
+              writeFileSync(
+                join(
+                  home,
+                  '.cache',
+                  'qwen-code-ci',
+                  'sdk-java-tests.lock.queue',
+                ),
+                'stray',
+              );
+            }
+          } else if (arm === 'fallback-setup-fault') {
+            // The fallback's own cache probe: without it a read-only HOME
+            // would redden the step after the gate already passed.
             writeFileSync(join(shims, 'mkdir'), '#!/bin/sh\nexit 1\n', {
               mode: 0o755,
             });
-          } else {
+          } else if (arm === 'fallback-fault') {
+            writeFileSync(join(shims, 'flock'), '#!/bin/sh\nexit 127\n', {
+              mode: 0o755,
+            });
+          } else if (arm === 'fallback') {
             writeFileSync(join(shims, 'flock'), '#!/bin/sh\nexit 1\n', {
               mode: 0o755,
             });
           }
+          if (noFlock) {
+            // Keep mkdir and sed available so the queue and rewrite paths
+            // still run; flock is the only missing command this arm tests.
+            for (const command of ['mkdir', 'sed']) {
+              writeFileSync(
+                join(shims, command),
+                `#!/bin/sh\nexec /bin/${command} "$@"\n`,
+                { mode: 0o755 },
+              );
+            }
+          }
           try {
             const result = spawnSync(
-              'bash',
+              '/bin/bash',
               ['-e', '-c', acquisitionAndWriteBack],
               {
                 encoding: 'utf8',
                 timeout: 5000,
                 env: {
                   ...process.env,
-                  PATH: `${shims}:${process.env.PATH}`,
+                  PATH: noFlock ? shims : `${shims}:${process.env.PATH}`,
                   HOME: home,
                   RUNNER_TEMP: runnerTemp,
                   GITHUB_WORKSPACE: workspace,
@@ -440,18 +634,20 @@ describe('SDK Java self-hosted workflow guards', () => {
               },
             );
             expect(result.error, `${name}/${arm}`).toBeUndefined();
-            if (arm === 'setup-fault') {
+            // A genuine timeout and a known host fault warn and skip; an
+            // unexpected flock status is not a fault this call site knows,
+            // so it stays fatal.
+            if (arm === 'fallback-fault') {
               expect(result.status, `${name}/${arm}${result.stderr}`).toBe(1);
               expect(result.stdout, `${name}/${arm}`).toContain(
                 'Maven cache write-back setup failed',
               );
-              expect(result.stdout, `${name}/${arm}`).not.toMatch(signatures);
-              continue;
+            } else {
+              expect(result.status, `${name}/${arm}${result.stderr}`).toBe(0);
+              expect(result.stdout, `${name}/${arm}`).toContain(
+                '::warning::Maven cache write-back skipped',
+              );
             }
-            expect(result.status, `${name}/${arm}${result.stderr}`).toBe(0);
-            expect(result.stdout, `${name}/${arm}`).toContain(
-              '::warning::Maven cache write-back skipped',
-            );
             // Neither the call-site warning nor the helper's timeout line
             // (rewritten at the call site) may carry a rerun-classifier
             // signature onto this now-green step.
