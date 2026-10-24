@@ -2242,6 +2242,146 @@ describe('SubagentManager', () => {
       });
     });
 
+    describe('custom provider-prefixed model selectors (#13561)', () => {
+      const providerManager = () =>
+        new SubagentManager(
+          makeFakeConfig({
+            modelProvidersConfig: {
+              'huawei-maas': [
+                {
+                  id: 'deepseek-v4.1-flash',
+                  name: 'DeepSeek-V4.1-Flash',
+                  envKey: 'MAAS_API_KEY',
+                  baseUrl: 'https://maas.example.com/v2',
+                },
+              ],
+            },
+            providerProtocolConfig: { 'huawei-maas': 'openai' },
+          }),
+        );
+
+      it('routes a modelProviders-prefixed selector and exposes only the bare model ID', async () => {
+        const mgr = providerManager();
+        const definition = {
+          ...validConfig,
+          model: 'huawei-maas:deepseek-v4.1-flash',
+        };
+
+        expect(mgr.resolveSubagentModelRoute(definition)).toEqual({
+          modelId: 'deepseek-v4.1-flash',
+          authType: AuthType.USE_OPENAI,
+        });
+        // convertToRuntimeConfig gets no context on the teammate path; the
+        // manager's own config must still resolve the provider prefix.
+        expect(
+          (await mgr.convertToRuntimeConfig(definition)).modelConfig.model,
+        ).toBe('deepseek-v4.1-flash');
+      });
+
+      it('routes a provider entry declaring wireApi responses onto the responses protocol', () => {
+        const mgr = new SubagentManager(
+          makeFakeConfig({
+            modelProvidersConfig: {
+              'huawei-maas': [
+                { id: 'deepseek-v4.1-reasoner', wireApi: 'responses' },
+              ],
+            },
+            providerProtocolConfig: { 'huawei-maas': 'openai' },
+          }),
+        );
+
+        expect(
+          mgr.resolveSubagentModelRoute({
+            ...validConfig,
+            model: 'huawei-maas:deepseek-v4.1-reasoner',
+          }),
+        ).toEqual({
+          modelId: 'deepseek-v4.1-reasoner',
+          authType: AuthType.USE_OPENAI_RESPONSES,
+        });
+      });
+
+      it('keeps a selector that is itself a configured model ID whole', async () => {
+        const mgr = new SubagentManager(
+          makeFakeConfig({
+            modelProvidersConfig: {
+              'huawei-maas': [{ id: 'deepseek-v4.1-flash' }],
+              'other-openai': [{ id: 'huawei-maas:deepseek-v4.1-flash' }],
+            },
+            providerProtocolConfig: {
+              'huawei-maas': 'openai',
+              'other-openai': 'openai',
+            },
+          }),
+        );
+
+        // Model IDs may legitimately contain colons, so the literal ID wins
+        // over reading a provider prefix out of the selector.
+        expect(
+          (
+            await mgr.convertToRuntimeConfig({
+              ...validConfig,
+              model: 'huawei-maas:deepseek-v4.1-flash',
+            })
+          ).modelConfig.model,
+        ).toBe('huawei-maas:deepseek-v4.1-flash');
+      });
+
+      it('keeps a provider-prefixed selector whole when the provider does not declare the model', async () => {
+        const mgr = providerManager();
+
+        expect(
+          (
+            await mgr.convertToRuntimeConfig({
+              ...validConfig,
+              model: 'huawei-maas:undeclared-model',
+            })
+          ).modelConfig.model,
+        ).toBe('huawei-maas:undeclared-model');
+      });
+
+      it('keeps selectors whose prefix is not a configured provider untouched', async () => {
+        const mgr = providerManager();
+
+        expect(
+          (
+            await mgr.convertToRuntimeConfig({
+              ...validConfig,
+              model: 'unknown-vendor:some-model',
+            })
+          ).modelConfig.model,
+        ).toBe('unknown-vendor:some-model');
+      });
+
+      it('routes a modelProviders-prefixed fastModel selected via "fast"', async () => {
+        const config = makeFakeConfig({
+          modelProvidersConfig: {
+            'huawei-maas': [
+              {
+                id: 'deepseek-v4.1-flash',
+                envKey: 'MAAS_API_KEY',
+                baseUrl: 'https://maas.example.com/v2',
+              },
+            ],
+          },
+          providerProtocolConfig: { 'huawei-maas': 'openai' },
+        });
+        vi.spyOn(config, 'getFastModel').mockReturnValue(
+          'huawei-maas:deepseek-v4.1-flash',
+        );
+        const mgr = new SubagentManager(config);
+
+        expect(
+          (
+            await mgr.convertToRuntimeConfig(
+              { ...validConfig, model: 'fast' },
+              config,
+            )
+          ).modelConfig.model,
+        ).toBe('deepseek-v4.1-flash');
+      });
+    });
+
     describe('mergeConfigurations', () => {
       it('should merge basic properties', () => {
         const merged = manager.mergeConfigurations(validConfig, {

@@ -66,6 +66,7 @@ import {
   resolveModelId,
   type ResolvedModelId,
 } from '../utils/modelId.js';
+import { resolveModelProtocol } from '../models/modelRegistry.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
 import {
@@ -1541,12 +1542,71 @@ export class SubagentManager {
   private resolveModelOverride(
     model: string | undefined,
     runtimeContext?: Config,
+    fastExpanded = false,
   ): ResolvedModelId | undefined {
+    const providerRoute = this.resolveCustomProviderRoute(
+      model,
+      runtimeContext ?? this.config,
+    );
+    if (providerRoute) {
+      return providerRoute;
+    }
     // Omit currentModel so `inherit` resolves to undefined; subagents treat
     // "inherit / no override" as a signal to skip building a dedicated
     // ContentGenerator entirely.
     const context = runtimeContext ? buildModelIdContext(runtimeContext) : {};
+    if (!fastExpanded && model?.trim().split('\0', 1)[0] === 'fast') {
+      const fastModel = context.fastModel;
+      // resolveModelId expands `fast` internally, but only splits known
+      // AuthType prefixes, so a modelProviders-prefixed fastModel would stay
+      // glued to the provider id; route it through the override resolution
+      // instead. A fastModel of literally `fast` falls through, where the
+      // fast branch returns undefined for the self-reference.
+      if (fastModel && fastModel.trim().split('\0', 1)[0] !== 'fast') {
+        return this.resolveModelOverride(fastModel, runtimeContext, true);
+      }
+    }
     return resolveModelId(model, { ...context, currentModel: undefined });
+  }
+
+  /**
+   * `<providerId>:<modelId>` where the prefix is a `modelProviders` key rather
+   * than a built-in auth type. `resolveModelId` only splits known AuthType
+   * prefixes, so a custom provider prefix would stay glued to the model ID and
+   * reach the wire verbatim (#13561). A selector that is itself a configured
+   * model ID stays whole (IDs may contain colons), and the provider must
+   * declare the bare ID — anything else keeps the bare-ID treatment.
+   */
+  private resolveCustomProviderRoute(
+    model: string | undefined,
+    runtimeContext: Config,
+  ): ResolvedModelId | undefined {
+    const trimmed = model?.trim().split('\0', 1)[0];
+    const colonIndex = trimmed?.indexOf(':') ?? -1;
+    if (!trimmed || colonIndex <= 0) {
+      return undefined;
+    }
+    const providerId = trimmed.slice(0, colonIndex).trim();
+    const providerModels =
+      runtimeContext.getModelProvidersConfig?.()?.[providerId];
+    if (!Array.isArray(providerModels)) {
+      return undefined;
+    }
+    const configured = runtimeContext.getAllConfiguredModels?.() ?? [];
+    if (configured.some((available) => available.id === trimmed)) {
+      return undefined;
+    }
+    const modelId = trimmed.slice(colonIndex + 1).trim();
+    const entry = providerModels.find((candidate) => candidate?.id === modelId);
+    if (!entry) {
+      return undefined;
+    }
+    const authType = resolveModelProtocol(
+      providerId,
+      entry,
+      runtimeContext.getProviderProtocolConfig?.(),
+    );
+    return authType ? { authType, modelId } : undefined;
   }
 
   /**
