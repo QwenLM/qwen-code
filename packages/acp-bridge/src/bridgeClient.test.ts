@@ -1356,6 +1356,149 @@ describe('BridgeClient — mode promotion fallback', () => {
   );
 });
 
+describe('BridgeClient — turn progress notifications (#12020)', () => {
+  const makeClient = (entry: unknown) =>
+    new BridgeClient(
+      (() => entry) as never,
+      vi.fn(),
+      { request: vi.fn(), cancelForPrompt: vi.fn() },
+      0,
+      Infinity,
+    );
+
+  it('translates a retry notification into a retry_scheduled frame', async () => {
+    const publish = vi.fn();
+    const entry = { sessionId: 'sess:retry', events: { publish } };
+    const client = makeClient(entry);
+
+    await client.extNotification('qwen/notify/session/retry', {
+      v: 1,
+      sessionId: entry.sessionId,
+      attempt: 2,
+      maxRetries: 10,
+      delayMs: 60000,
+      message: '429 Too Many Requests',
+      isContinuation: true,
+    });
+
+    const frame = publish.mock.calls.find(
+      ([event]) => event.type === 'retry_scheduled',
+    )?.[0];
+    expect(frame).toMatchObject({
+      data: {
+        sessionId: 'sess:retry',
+        attempt: 2,
+        maxRetries: 10,
+        delayMs: 60000,
+        message: '429 Too Many Requests',
+        isContinuation: true,
+      },
+    });
+  });
+
+  it('omits the optional retry fields when the child did not send them', async () => {
+    const publish = vi.fn();
+    const entry = { sessionId: 'sess:retry', events: { publish } };
+    const client = makeClient(entry);
+
+    await client.extNotification('qwen/notify/session/retry', {
+      v: 1,
+      sessionId: entry.sessionId,
+      attempt: 1,
+      maxRetries: 3,
+      delayMs: 1000,
+    });
+
+    const frame = publish.mock.calls.find(
+      ([event]) => event.type === 'retry_scheduled',
+    )?.[0];
+    expect(frame).toMatchObject({
+      data: {
+        sessionId: 'sess:retry',
+        attempt: 1,
+        maxRetries: 3,
+        delayMs: 1000,
+      },
+    });
+    expect(frame.data).not.toHaveProperty('message');
+    expect(frame.data).not.toHaveProperty('isContinuation');
+  });
+
+  it('drops a retry notification with a malformed payload', async () => {
+    const publish = vi.fn();
+    const entry = { sessionId: 'sess:retry', events: { publish } };
+    const client = makeClient(entry);
+
+    await client.extNotification('qwen/notify/session/retry', {
+      v: 1,
+      sessionId: entry.sessionId,
+      attempt: '2',
+      maxRetries: 10,
+      delayMs: 60000,
+    });
+
+    expect(
+      publish.mock.calls.find(([event]) => event.type === 'retry_scheduled'),
+    ).toBeUndefined();
+  });
+
+  it('translates a model-fallback notification into a model_fallback frame', async () => {
+    const publish = vi.fn();
+    const entry = { sessionId: 'sess:fallback', events: { publish } };
+    const client = makeClient(entry);
+
+    await client.extNotification('qwen/notify/session/model-fallback', {
+      v: 1,
+      sessionId: entry.sessionId,
+      fromModel: 'qwen3-coder',
+      toModel: 'qwen3-coder-flash',
+      statusCode: 429,
+      fallbackIndex: 1,
+    });
+
+    const frame = publish.mock.calls.find(
+      ([event]) => event.type === 'model_fallback',
+    )?.[0];
+    expect(frame).toMatchObject({
+      data: {
+        sessionId: 'sess:fallback',
+        fromModel: 'qwen3-coder',
+        toModel: 'qwen3-coder-flash',
+        statusCode: 429,
+        fallbackIndex: 1,
+      },
+    });
+  });
+
+  it('drops turn progress notifications for a session with no live entry', async () => {
+    const publish = vi.fn();
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      vi.fn(),
+      { request: vi.fn(), cancelForPrompt: vi.fn() },
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('qwen/notify/session/retry', {
+      v: 1,
+      sessionId: 'sess:gone',
+      attempt: 1,
+      maxRetries: 3,
+      delayMs: 1000,
+    });
+    await client.extNotification('qwen/notify/session/model-fallback', {
+      v: 1,
+      sessionId: 'sess:gone',
+      fromModel: 'a',
+      toModel: 'b',
+      fallbackIndex: 0,
+    });
+
+    expect(publish).not.toHaveBeenCalled();
+  });
+});
+
 describe('BridgeClient — original timestamp preservation', () => {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run');

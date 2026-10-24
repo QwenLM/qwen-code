@@ -15,6 +15,8 @@ import {
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
+  RETRY_SCHEDULED_EVENT,
+  MODEL_FALLBACK_EVENT,
   reduceDaemonAuthEvent,
   reduceDaemonAuthEvents,
   reduceDaemonSessionEvent,
@@ -56,6 +58,113 @@ describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
     expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(
       MID_TURN_MESSAGE_INJECTED_EVENT,
     );
+  });
+});
+
+describe('turn progress events (#12020)', () => {
+  it('pins the wire literals and registers both as known event types', () => {
+    expect(RETRY_SCHEDULED_EVENT).toBe('retry_scheduled');
+    expect(MODEL_FALLBACK_EVENT).toBe('model_fallback');
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(RETRY_SCHEDULED_EVENT);
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(MODEL_FALLBACK_EVENT);
+  });
+
+  it('narrows a retry_scheduled frame with the full payload', () => {
+    const event: DaemonEvent = {
+      id: 20,
+      v: 1,
+      type: RETRY_SCHEDULED_EVENT,
+      data: {
+        sessionId: 's-1',
+        attempt: 2,
+        maxRetries: 10,
+        delayMs: 60000,
+        message: '429 Too Many Requests',
+        isContinuation: true,
+      },
+      promptId: 'p-1',
+    };
+
+    const known = asKnownDaemonEvent(event);
+
+    expect(known).toBe(event);
+    if (known?.type === RETRY_SCHEDULED_EVENT) {
+      expect(known.data.attempt).toBe(2);
+      expect(known.data.maxRetries).toBe(10);
+      expect(known.data.delayMs).toBe(60000);
+      expect(known.data.message).toBe('429 Too Many Requests');
+      expect(known.data.isContinuation).toBe(true);
+    }
+    expect(isDaemonEventType(event, RETRY_SCHEDULED_EVENT)).toBe(true);
+    expect(isDaemonEventType(event, MODEL_FALLBACK_EVENT)).toBe(false);
+  });
+
+  it('accepts a retry_scheduled frame without the optional fields', () => {
+    const event: DaemonEvent = {
+      id: 21,
+      v: 1,
+      type: RETRY_SCHEDULED_EVENT,
+      data: { sessionId: 's-1', attempt: 1, maxRetries: 3, delayMs: 1000 },
+    };
+
+    expect(asKnownDaemonEvent(event)).toBe(event);
+  });
+
+  it('rejects a retry_scheduled frame with a missing count', () => {
+    const event = {
+      id: 22,
+      v: 1,
+      type: RETRY_SCHEDULED_EVENT,
+      data: { sessionId: 's-1', attempt: 1, delayMs: 1000 },
+    } as unknown as DaemonEvent;
+
+    expect(asKnownDaemonEvent(event)).toBeUndefined();
+  });
+
+  it('narrows a model_fallback frame and reduces both to a no-op', () => {
+    const fallback: DaemonEvent = {
+      id: 23,
+      v: 1,
+      type: MODEL_FALLBACK_EVENT,
+      data: {
+        sessionId: 's-1',
+        fromModel: 'qwen3-coder',
+        toModel: 'qwen3-coder-flash',
+        statusCode: 429,
+        fallbackIndex: 1,
+      },
+    };
+
+    const known = asKnownDaemonEvent(fallback);
+    expect(known).toBe(fallback);
+    if (known?.type === MODEL_FALLBACK_EVENT) {
+      expect(known.data.fromModel).toBe('qwen3-coder');
+      expect(known.data.toModel).toBe('qwen3-coder-flash');
+      expect(known.data.statusCode).toBe(429);
+      expect(known.data.fallbackIndex).toBe(1);
+    }
+
+    const state = createDaemonSessionViewState();
+    const afterFallback = reduceDaemonSessionEvent(state, fallback);
+    expect(afterFallback).toEqual({ ...state, lastEventId: 23 });
+    const afterRetry = reduceDaemonSessionEvent(state, {
+      id: 24,
+      v: 1,
+      type: RETRY_SCHEDULED_EVENT,
+      data: { sessionId: 's-1', attempt: 1, maxRetries: 3, delayMs: 1000 },
+    });
+    expect(afterRetry).toEqual({ ...state, lastEventId: 24 });
+  });
+
+  it('rejects a model_fallback frame without the model pair', () => {
+    const event = {
+      id: 25,
+      v: 1,
+      type: MODEL_FALLBACK_EVENT,
+      data: { sessionId: 's-1', fromModel: 'qwen3-coder', fallbackIndex: 1 },
+    } as unknown as DaemonEvent;
+
+    expect(asKnownDaemonEvent(event)).toBeUndefined();
   });
 });
 
