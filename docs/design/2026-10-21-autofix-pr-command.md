@@ -310,9 +310,12 @@ Event rules:
   thread (and in a review); its replies answer someone and are not
   requests. Once the comment a reply answered is deleted, GraphQL drops its
   `replyTo` and lists it first in the thread, so a bot comment that looks
-  as if it opened one, and is not known yet, is asked about once over REST
-  (`in_reply_to_id`, which stays); the gate also keeps bot replies as seen.
-  Otherwise a review bot that answers every reply would otherwise keep a
+  as if it opened one, and is not known yet, is asked about over REST, with one
+  listing of the PR's review comments (`in_reply_to_id` stays) and only for
+  an open thread of an open PR; when GitHub does not answer, such a comment
+  is neither a request nor seen until it does. The gate keeps bot replies
+  as seen.
+  Otherwise a review bot that answers every reply would keep a
   round going for each, and an untrusted commenter could have a bot speak
   for them, even after deleting their own comment.
 - Checks and suites belong to the commit, not to the PR: another PR of the
@@ -323,9 +326,11 @@ Event rules:
   path (`snapshot`). On a PR with any history the comments' bodies run far
   past what one line of tool output shows; the round reads the file, and the
   brief lists the items the fix agent handles, pointing to the file for
-  their text. A body is written as its lines, a line past 2,000 characters
-  folded across several, since `read_file` pages a file by lines and cuts
-  one past 25,000.
+  their text. A body is written as the array of its lines, and a line past
+  2,000 characters as the array of its pieces (never cut inside a
+  character), since `read_file` pages a file by lines and cuts what one
+  read returns at 25,000 characters; a read cut so is read again from its
+  last line shown.
 - `truncated` names the connections (`checks`, `reviewThreadComments`,
   `reviewThreads`, `reviews`, `comments`) that had more entries than the
   query reads.

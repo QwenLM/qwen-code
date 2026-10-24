@@ -789,32 +789,100 @@ describe('fetchPrData', () => {
         ],
       },
     } as Partial<PrData>);
-    mockGh
-      .mockReturnValueOnce(
-        JSON.stringify({
-          data: { viewer: { login: 'me' }, repository: { pullRequest: data } },
-        }),
-      )
-      .mockReturnValueOnce('3763973590\n')
-      .mockReturnValueOnce('null\n');
+    const resolved = botThread('RESOLVED', 13);
+    resolved.isResolved = true;
+    data.reviewThreads.nodes.push(resolved as never);
+    const respondWith = (listing: () => string) => {
+      mockGh
+        .mockReturnValueOnce(
+          JSON.stringify({
+            data: {
+              viewer: { login: 'me' },
+              repository: { pullRequest: structuredClone(data) },
+            },
+          }),
+        )
+        .mockImplementationOnce(listing);
+    };
+    respondWith(() =>
+      JSON.stringify([
+        [3764221067, 3763973590],
+        [11, null],
+      ]),
+    );
     const { pr: fetched } = fetchPrData(
       { owner: 'o', repo: 'r', prNumber: 7 },
       (id) => id === 'SEEN',
     );
-    // One REST call each for the two not seen yet.
-    expect(mockGh).toHaveBeenCalledTimes(3);
+    // One listing of the PR's review comments, not one call per comment.
+    expect(mockGh).toHaveBeenCalledTimes(2);
     expect(mockGh.mock.calls[1]).toContain(
-      'repos/o/r/pulls/comments/3764221067',
+      'repos/o/r/pulls/7/comments?per_page=100&page=1',
     );
     const replyTo = fetched.reviewThreads.nodes.map(
       (t) => t.comments.nodes[0]!.replyTo,
     );
-    expect(replyTo).toEqual([{ id: '#3763973590' }, null, null]);
+    expect(replyTo).toEqual([{ id: '#3763973590' }, null, null, null]);
     const ids = buildGateSnapshot(fetched, cursor()).snapshot!.events.flatMap(
       (event) =>
         event.type === 'review_thread' ? event.comments.map((c) => c.id) : [],
     );
     expect(ids).toEqual(['REAL', 'SEEN']);
+
+    // GitHub does not answer: the bot comments are neither requests nor
+    // seen, and are asked about on the next run.
+    mockGh.mockReset();
+    respondWith(() => {
+      throw new Error('HTTP 403: API rate limit exceeded');
+    });
+    const { pr: unanswered } = fetchPrData(
+      { owner: 'o', repo: 'r', prNumber: 7 },
+      (id) => id === 'SEEN',
+    );
+    const quiet = buildGateSnapshot(unanswered, cursor());
+    expect(
+      quiet.snapshot!.events.flatMap((event) =>
+        event.type === 'review_thread' ? event.comments.map((c) => c.id) : [],
+      ),
+    ).toEqual(['SEEN']);
+    expect(quiet.cursor.reportedCommentIds).not.toContain('ORPHAN');
+    expect(quiet.cursor.reportedCommentIds).not.toContain('REAL');
+
+    // A merged PR asks nothing over REST: its stop must get through.
+    mockGh.mockReset();
+    mockGh.mockReturnValueOnce(
+      JSON.stringify({
+        data: {
+          viewer: { login: 'me' },
+          repository: {
+            pullRequest: { ...structuredClone(data), state: 'MERGED' },
+          },
+        },
+      }),
+    );
+    fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 }, () => false);
+    expect(mockGh).toHaveBeenCalledTimes(1);
+
+    // Nor does a resolved thread, which no round reads.
+    mockGh.mockReset();
+    mockGh.mockReturnValueOnce(
+      JSON.stringify({
+        data: {
+          viewer: { login: 'me' },
+          repository: {
+            pullRequest: {
+              ...structuredClone(data),
+              reviewThreads: {
+                pageInfo: { hasNextPage: false },
+                nodes: [structuredClone(resolved)],
+              },
+            },
+          },
+        },
+      }),
+    );
+    fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 }, () => false);
+    expect(mockGh).toHaveBeenCalledTimes(1);
   });
 
   it('pages check suites back to the oldest, where a push put the code triggered ones', () => {
@@ -1209,13 +1277,15 @@ describe('runSnapshot --gate', () => {
     );
     const written = JSON.parse(whole) as {
       action: string;
-      events: Array<{ id: string; body: string[] }>;
+      events: Array<{ id: string; body: Array<string | string[]> }>;
     };
     expect(written).toMatchObject({
       action: 'fix',
       events: [{ type: 'issue_comment', id: 'I1' }],
     });
-    expect(written.events[0]!.body.join('')).toBe(long);
+    // The long line is one entry: the array of its pieces.
+    expect(written.events[0]!.body).toHaveLength(1);
+    expect((written.events[0]!.body[0] as string[]).join('')).toBe(long);
   });
 
   it('wakes the session a watch was taken from, and moves no cursor for it', () => {

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildSnapshot, type PrData } from './snapshot.js';
+import { bodyLines, buildSnapshot, type PrData } from './snapshot.js';
 import { REPLY_MARKER, type AutofixPrState } from './state.js';
 
 const HEAD = 'a'.repeat(40);
@@ -173,6 +173,23 @@ describe('buildSnapshot', () => {
         }),
       ).action,
     ).toBe('wait');
+  });
+
+  it('writes a body as its lines, folding a long one without cutting a character', () => {
+    const emoji = '😀';
+    const long = `${'x'.repeat(1_999)}${emoji}${'y'.repeat(10)}`;
+    const lines = bodyLines(`first\n${long}\nlast`);
+    expect(lines[0]).toBe('first');
+    expect(lines[2]).toBe('last');
+    const pieces = lines[1] as string[];
+    expect(Array.isArray(pieces)).toBe(true);
+    expect(pieces.join('')).toBe(long);
+    // The emoji is whole in one piece.
+    expect(pieces.some((piece) => piece.includes(emoji))).toBe(true);
+    // Two bodies that differ by a line break stay apart.
+    expect(bodyLines(`${'a'.repeat(2_000)}b`)).not.toEqual(
+      bodyLines(`${'a'.repeat(2_000)}\nb`),
+    );
   });
 
   it('counts only the latest run of each workflow the code triggered, once, with no rollup at all', () => {

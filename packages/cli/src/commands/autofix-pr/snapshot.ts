@@ -198,6 +198,8 @@ export interface CommentNode {
   state?: string;
   /** Thread comments: the comment this one answers, when it is a reply. */
   replyTo?: { id: string } | null;
+  /** GitHub could not say whether this bot comment is a reply. */
+  replyUnknown?: true;
 }
 
 type CheckContext =
@@ -629,6 +631,7 @@ function commentEvents(
       // have a bot speak for them. A reply stays one when the comment it
       // answered is deleted, and the gate keeps it as seen, so it never
       // turns into a new request.
+      if (trust === 'bot' && node.replyUnknown) continue;
       if (
         trust === 'bot' &&
         (node.replyTo || node.databaseId !== thread.root.nodes[0]?.databaseId)
@@ -1122,21 +1125,28 @@ function graphql(query: string, target: PrTarget, extra: string[]): unknown {
   );
 }
 
+/** Review comments listed over REST for `in_reply_to_id`: pages of 100. */
+const MAX_REVIEW_COMMENT_PAGES = 10;
+
 /**
  * Marks the bot comments that look as if they opened a thread but answer
  * a comment since deleted: GraphQL drops `replyTo` along with the parent,
- * while REST keeps `in_reply_to_id`. Each one is asked about once — until
- * `known` (what the caller has reported or handled) holds it — so a quiet
- * PR asks nothing.
+ * while REST keeps `in_reply_to_id`. Asked only when an open thread starts
+ * with a bot comment `known` (what the caller has reported or handled)
+ * does not hold yet, with one listing of the PR's review comments. When
+ * GitHub does not answer, those comments are neither requests nor seen
+ * this time, and are asked about again.
  */
 function markOrphanReplies(
   target: PrTarget,
   pr: PrData,
   known: (id: string) => boolean,
 ): void {
+  const candidates: CommentNode[] = [];
   for (const thread of pr.reviewThreads.nodes) {
     const first = thread.comments.nodes[0];
     if (
+      thread.isResolved ||
       !first ||
       first.replyTo ||
       first.author?.__typename !== 'Bot' ||
@@ -1146,15 +1156,32 @@ function markOrphanReplies(
     ) {
       continue;
     }
-    const parent = gh(
-      'api',
-      `repos/${target.owner}/${target.repo}/pulls/comments/${first.databaseId}`,
-      '--jq',
-      '.in_reply_to_id',
-    ).trim();
-    if (parent !== '' && parent !== 'null') {
-      first.replyTo = { id: `#${parent}` };
+    candidates.push(first);
+  }
+  if (candidates.length === 0) return;
+  const parents = new Map<number, string>();
+  try {
+    for (let page = 1; page <= MAX_REVIEW_COMMENT_PAGES; page++) {
+      const listed = JSON.parse(
+        gh(
+          'api',
+          `repos/${target.owner}/${target.repo}/pulls/${target.prNumber}/comments?per_page=100&page=${page}`,
+          '--jq',
+          '[.[] | [.id, .in_reply_to_id]]',
+        ),
+      ) as Array<[number, number | null]>;
+      for (const [id, parent] of listed) {
+        if (parent !== null) parents.set(id, String(parent));
+      }
+      if (listed.length < 100) break;
     }
+  } catch {
+    for (const node of candidates) node.replyUnknown = true;
+    return;
+  }
+  for (const node of candidates) {
+    const parent = parents.get(node.databaseId!);
+    if (parent !== undefined) node.replyTo = { id: `#${parent}` };
   }
 }
 
@@ -1264,7 +1291,8 @@ export function fetchPrData(
     threads.nodes.push(...more.nodes);
     threads.pageInfo = more.pageInfo;
   }
-  if (known) markOrphanReplies(target, pr, known);
+  // A merged or closed PR asks nothing more: its `stop` must get through.
+  if (known && pr.state === 'OPEN') markOrphanReplies(target, pr, known);
   return { pr, viewer: data.data.viewer.login };
 }
 
@@ -1429,8 +1457,8 @@ export function runSnapshot(args: SnapshotArgs): void {
   const snapshot = buildSnapshot(pr, state, branchHead);
   const paths = autofixPrPaths(repoRoot(), args.pr);
   // A body is written as its lines, and a long line folded: `read_file`
-  // pages a file by lines and cuts one past 25,000 characters, and GitHub
-  // takes bodies of 65,536.
+  // pages a file by lines and cuts what one read returns at 25,000
+  // characters, and GitHub takes bodies of 65,536.
   atomicWriteFileSync(
     paths.snapshotPath,
     `${JSON.stringify(
@@ -1454,19 +1482,21 @@ export function runSnapshot(args: SnapshotArgs): void {
 /** The longest line a body keeps in the snapshot file; longer ones fold. */
 const BODY_LINE_MAX = 2_000;
 
-/** A body as the snapshot file holds it: its lines, long ones folded. */
-export function bodyLines(body: string): string[] {
-  const lines: string[] = [];
-  for (const line of body.split('\n')) {
-    if (line.length <= BODY_LINE_MAX) {
-      lines.push(line);
-      continue;
+/**
+ * A body as the snapshot file holds it: its lines, and a line too long for
+ * one entry as the array of its pieces — joined without a break, and never
+ * cut inside a character.
+ */
+export function bodyLines(body: string): Array<string | string[]> {
+  return body.split('\n').map((line) => {
+    if (line.length <= BODY_LINE_MAX) return line;
+    const characters = [...line];
+    const pieces: string[] = [];
+    for (let at = 0; at < characters.length; at += BODY_LINE_MAX) {
+      pieces.push(characters.slice(at, at + BODY_LINE_MAX).join(''));
     }
-    for (let at = 0; at < line.length; at += BODY_LINE_MAX) {
-      lines.push(line.slice(at, at + BODY_LINE_MAX));
-    }
-  }
-  return lines;
+    return pieces;
+  });
 }
 
 /** What a watch has handled or posted: no comment to ask GitHub about. */
