@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, type ReactNode } from 'react';
+import { act, useState, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSettingDescriptor,
@@ -754,6 +754,79 @@ describe('SettingsMessage user-scope editing', () => {
       list!.dispatchEvent(event);
     });
     expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('resets navigation after the saved value updates and the field is refocused', async () => {
+    const calls: string[] = [];
+    function UpdatingPanel() {
+      const [effective, setEffective] = useState('French');
+      return (
+        <I18nProvider language="en">
+          <SettingsMessage
+            settingsState={makeState(
+              [outputLanguageSetting(effective)],
+              vi.fn(),
+            )}
+            embedded
+            onLanguageChange={noop}
+            onOutputLanguageChange={(next) => {
+              calls.push(next);
+              setEffective(next);
+              return true;
+            }}
+            onThemeChange={noop}
+            onSubDialog={noop}
+            chatWidthMode="1000"
+            onChatWidthModeChange={noop}
+          />
+        </I18nProvider>
+      );
+    }
+
+    const container = render(<UpdatingPanel />);
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Eng');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(calls).toEqual(['English']);
+
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      input!.focus();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    // The second Enter is unedited and un-navigated: it must not submit auto
+    // from the previous round's highlight.
+    expect(calls).toEqual(['English']);
   });
 
   it('keeps the exact typed language when Enter does not follow navigation', async () => {

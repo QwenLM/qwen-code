@@ -402,6 +402,8 @@ function OutputLanguageCombobox({
 
   useEffect(() => {
     setDraft(currentValue);
+    setNavigated(false);
+    setActiveIndex(0);
     lastCommittedRef.current = null;
   }, [currentValue]);
 
@@ -439,6 +441,8 @@ function OutputLanguageCombobox({
     if (pending) return;
     const trimmed = next.trim();
     setOpen(false);
+    setNavigated(false);
+    setActiveIndex(0);
     if (
       trimmed === currentValue.trim() ||
       trimmed === lastCommittedRef.current
@@ -526,7 +530,13 @@ function OutputLanguageCombobox({
           setNavigated(false);
           setOpen(true);
         }}
-        onFocus={() => setOpen(true)}
+        onFocus={() => {
+          // A new interaction starts un-navigated, so Enter keeps the saved
+          // value instead of reusing the previous round's highlight.
+          setNavigated(false);
+          setActiveIndex(0);
+          setOpen(true);
+        }}
         onBlur={commitDraft}
         onKeyDown={(event) => {
           if (event.key === 'ArrowDown') {
