@@ -1488,10 +1488,12 @@ describe('EmbeddedHarnessScheduler', () => {
     for (let run = 1; run <= 2; run++) {
       now = claimedAt + 30;
       await vi.advanceTimersToNextTimerAsync();
-      await waitUntil(() => renewCalls === ++renewals);
+      renewals++;
+      await waitUntil(() => renewCalls === renewals);
       now = claimedAt + 95;
       await vi.advanceTimersToNextTimerAsync();
-      await waitUntil(() => renewCalls === ++renewals);
+      renewals++;
+      await waitUntil(() => renewCalls === renewals);
       // The stale abandon re-queues the activation; its lease expired, so
       // the trailing pump re-claims it inline (real file IO).
       claimedAt = now;
@@ -1505,10 +1507,12 @@ describe('EmbeddedHarnessScheduler', () => {
     // written with a fresh claim because the remembered lease has expired.
     now = claimedAt + 30;
     await vi.advanceTimersToNextTimerAsync();
-    await waitUntil(() => renewCalls === ++renewals);
+    renewals++;
+    await waitUntil(() => renewCalls === renewals);
     now = claimedAt + 95;
     await vi.advanceTimersToNextTimerAsync();
-    await waitUntil(() => renewCalls === ++renewals);
+    renewals++;
+    await waitUntil(() => renewCalls === renewals);
     await advanceTimersUntil(() => store.get(item)?.status === 'released', 30);
     expect(store.get(item)?.outcome).toBe('failed');
     expect(runs).toBe(3);
