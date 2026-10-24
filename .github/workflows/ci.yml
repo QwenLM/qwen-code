@@ -833,12 +833,11 @@ jobs:
             retry_arg=(--retry="${VITEST_RETRY}")
           fi
           set +e
-          "${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"
+          # Every workspace suite, the standalone regression and scripts/tests,
+          # in two concurrent lanes; the script says why. Each command it runs
+          # inherits the capabilities test_runner drops.
+          "${test_runner[@]}" .github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"
           RC=$?
-          if [ "$RC" -eq 0 ]; then
-            "${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"
-            RC=$?
-          fi
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
           kill "$SAMPLER_PID" 2>/dev/null || true

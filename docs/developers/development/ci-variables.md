@@ -41,8 +41,9 @@ this page in the same change.
 ### Retry counts
 
 `QWEN_CI_VITEST_RETRY` and `QWEN_RELEASE_VITEST_RETRY` are passed to Vitest as
-`--retry=<n>` in the main CI test step (`npm run test:ci:workspaces` and
-`npm run test:scripts`) and on the release lane
+`--retry=<n>` in the main CI test step (every workspace's `test:ci`, which
+that step runs in two concurrent lanes, and `npm run test:scripts:unit`) and on
+the release lane
 (`npm run test:release:workspaces`) respectively. The two lanes have separate
 variables so they can be tuned independently.
 

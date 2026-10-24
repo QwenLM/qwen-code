@@ -116,7 +116,10 @@ describe('no-AK integration CI wiring', () => {
       let previous = -1;
       for (const command of [
         'set +e',
-        'npm run test:ci',
+        // The Linux job runs the suites through the lane script.
+        jobName === 'test'
+          ? '.github/scripts/ci/run-unit-test-lanes.sh'
+          : 'npm run test:ci',
         'RC=$?',
         'set -e',
         'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
