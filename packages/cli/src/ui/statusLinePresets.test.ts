@@ -356,6 +356,14 @@ describe('statusLinePresets', () => {
     expect(formatTokenCount(2_400_000)).toBe('2.4m');
   });
 
+  it('moves to the next unit when rounding reaches it', () => {
+    expect(formatTokenCount(999.4)).toBe('999');
+    expect(formatTokenCount(999.5)).toBe('1.0k');
+    expect(formatTokenCount(999_949)).toBe('999.9k');
+    expect(formatTokenCount(999_950)).toBe('1.0m');
+    expect(formatTokenCount(999_999)).toBe('1.0m');
+  });
+
   it('labels run states', () => {
     expect(getRunStateLabel(StreamingState.Idle)).toBe('Ready');
     expect(getRunStateLabel(StreamingState.Responding)).toBe('Working');
