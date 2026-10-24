@@ -4,21 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// managed-agent-server allocates Flyway versions by hand across two
-// directories that share one sequence — src/main/resources/db/migration (SQL)
-// and src/main/java/db/migration (BaseJavaMigration classes). On 2026-09-28
+// managed-agent-server allocates Flyway versions by hand under
+// src/main/resources/db/managed-schema. On 2026-09-28
 // two in-flight PRs each added a V16 and merged 23 minutes apart; each branch
 // was green in isolation, and Flyway refused to boot the merged result
 // ("Found more than one migration with version 16"), leaving main red for two
 // hours (#12940). The test that catches a duplicate boots a database and runs
 // only in the slow database-backed lanes, after the merge has landed. This
-// check is the fast lane: it scans both locations and fails when two files
+// check is the fast lane: it scans the runtime locations and fails when two files
 // claim the same version, naming them, in milliseconds and with no database.
 
 import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import {
   LOCATIONS,
+  MIGRATION_SOURCES,
   isMigrationFile,
   migrationFiles,
   migrationVersion,
@@ -51,15 +51,15 @@ if (modules.length === 0) {
   process.exit(2);
 }
 
-// Files shaped like a versioned migration of this location's kind, anywhere
+// Files shaped like a versioned migration of this source's kind, anywhere
 // under the source root EXCEPT inside the configured location. A renamed
-// location (db/migration → db/changelog) leaves the guard scanning an empty
+// location (db/managed-schema → db/changelog) leaves the guard scanning an empty
 // directory, so the renamed-away state must fail here — and so must a
 // location whose files moved while its sibling stayed populated.
-const outOfPlaceFiles = (module, location) => {
-  const sourceRoot = path.join(module, ...location.dir.slice(0, -2));
+const outOfPlaceFiles = (module, source) => {
+  const sourceRoot = path.join(module, ...source.dir);
   const configured = LOCATIONS.filter(
-    (entry) => entry.suffix === location.suffix,
+    (entry) => entry.suffix === source.suffix,
   ).map((entry) => path.join(module, ...entry.dir));
   const found = [];
   const walk = (dir) => {
@@ -68,7 +68,7 @@ const outOfPlaceFiles = (module, location) => {
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!configured.includes(file)) walk(file);
-      } else if (isMigrationFile(entry.name, location.suffix)) {
+      } else if (isMigrationFile(entry.name, source.suffix)) {
         found.push(file);
       }
     }
@@ -77,8 +77,8 @@ const outOfPlaceFiles = (module, location) => {
   return found;
 };
 
-// A db/migration* sibling under the location's OWN db root — including an
-// emptied rename such as db/migrations — marks the location as moved even
+// A managed-schema* sibling under the location's OWN db root — including an
+// emptied rename — marks the location as moved even
 // when nothing migration-shaped survives anywhere. A module with no such
 // directory at all simply has no sequence to check,
 // which is what lets one invocation cover every module that shares the
@@ -95,7 +95,7 @@ const hasMigrationDir = (module, location) => {
 };
 
 let failed = false;
-// Flyway resolves classpath:db/migration across every jar on the classpath,
+// Flyway resolves classpath:db/managed-schema across every jar on the classpath,
 // and managed-agent-server depends on the other modules at compile scope, so
 // the modules given in one invocation share one version namespace — a version
 // claimed in two modules collides exactly like two files in one module do.
@@ -116,7 +116,9 @@ for (const module of modules) {
   }
   let errored = false;
   let count = 0;
-  const probedRoots = new Set();
+  const misplaced = MIGRATION_SOURCES.flatMap((source) =>
+    outOfPlaceFiles(module, source),
+  );
   for (const location of LOCATIONS) {
     const files = migrationFiles(
       path.join(module, ...location.dir),
@@ -125,11 +127,6 @@ for (const module of modules) {
     // Out-of-place files must not join the claimants: invisible to Flyway,
     // they cannot collide at runtime — they are the moved location's error,
     // not a second claimant for their version.
-    const rootKey = `${location.dir.slice(0, -2).join('/')}:${location.suffix}`;
-    const misplaced = probedRoots.has(rootKey)
-      ? []
-      : outOfPlaceFiles(module, location);
-    probedRoots.add(rootKey);
     if (misplaced.length > 0 && files.length > 0) {
       // The location IS populated, so nothing moved: a stray file sits
       // outside the only place Flyway scans. Say that — claiming the

@@ -33,6 +33,8 @@ const SERVER = 'packages/managed-agent-server';
 const SDK = 'packages/sdk-java/qwencode';
 const MODULES = [SERVER, SDK];
 const sql = (name, module = SERVER) =>
+  `${module}/src/main/resources/db/managed-schema/${name}`;
+const legacySql = (name, module = SERVER) =>
   `${module}/src/main/resources/db/migration/${name}`;
 const java = (name, module = SERVER) =>
   `${module}/src/main/java/db/migration/${name}`;
@@ -245,10 +247,76 @@ describe('check-flyway-open-prs', () => {
     expect(byPr[20002].state).toBe('success');
   });
 
+  it('rejects added, modified and renamed migrations outside the runtime location without a previous status', async () => {
+    const files = [
+      legacySql('V54__legacy.sql'),
+      java('V54__legacy.java'),
+      `${SERVER}/src/main/resources/changelog/V54__moved.sql`,
+      `${SERVER}/src/main/java/com/example/V54__moved.java`,
+    ];
+    onMain(files[1]);
+    const { byPr } = await check([
+      pr(10001, [files[0]]),
+      pr(10002, [[files[1], 'MODIFIED']]),
+      pr(10003, [[files[2], 'RENAMED']]),
+      pr(10004, [files[3]]),
+    ]);
+    for (const number of [10001, 10002, 10003, 10004]) {
+      expect(byPr[number].state, String(number)).toBe('failure');
+      expect(byPr[number].description).toMatch(
+        /^Migration files outside src\/main\/resources\/db\/managed-schema:/,
+      );
+      expect(byPr[number].description).toContain(
+        files[number - 10001].split('/').pop(),
+      );
+    }
+  });
+
+  it('rejects retired locations in historical module paths', async () => {
+    const { byPr } = await check([
+      pr(10001, [
+        legacySql('V54__legacy.sql', 'packages/sdk-java/runtime-broker'),
+      ]),
+      pr(10002, [
+        java('V54__legacy.java', 'packages/sdk-java/managed-agent-server'),
+      ]),
+    ]);
+    expect(byPr[10001].state).toBe('failure');
+    expect(byPr[10002].state).toBe('failure');
+  });
+
+  it('clears a failure when the PR deletes its misplaced migration', async () => {
+    const { byPr } = await check([
+      pr(10001, [[legacySql('V54__legacy.sql'), 'DELETED']], {
+        current: { state: 'FAILURE', description: 'Misplaced migration' },
+      }),
+      pr(10002, [[java('V54__legacy.java'), 'DELETED']]),
+    ]);
+    expect(byPr[10001]).toMatchObject({
+      state: 'success',
+      description: 'No collision with main',
+    });
+    expect(byPr[10002]).toBeUndefined();
+  });
+
+  it('does not include misplaced migrations in another PR version claim', async () => {
+    const { byPr } = await check([
+      pr(10001, [sql('V54__next.sql')]),
+      pr(10002, [legacySql('V54__legacy.sql')]),
+      pr(10003, [java('V54__legacy.java')]),
+    ]);
+    expect(byPr[10001]).toMatchObject({
+      state: 'success',
+      description: 'No collision with main',
+    });
+    expect(byPr[10002].state).toBe('failure');
+    expect(byPr[10003].state).toBe('failure');
+  });
+
   it('passes a free version and names every other open PR claiming it', async () => {
     const { byPr } = await check([
       pr(13530, [sql('V55__agent_definition.sql')]),
-      pr(13545, [java('V55__backfill.java')]),
+      pr(13545, [sql('V55__backfill.sql')]),
       pr(13642, [sql('V0055__retention.sql')]),
       pr(13654, [sql('V56__async_verification.sql')]),
     ]);
@@ -264,29 +332,28 @@ describe('check-flyway-open-prs', () => {
     });
   });
 
-  it('applies Flyway version rules: leading zeros, trailing .0, both suffixes in any case, subdirectories', async () => {
+  it('applies Flyway version rules: leading zeros, trailing .0, underscores, suffix case, subdirectories', async () => {
     const { byPr } = await check([
       pr(10001, [sql('V053__zero_padded.sql')]),
-      pr(10002, [java('V1_0__trailing_zero.java')]),
+      pr(10002, [sql('V1_0__trailing_zero.sql')]),
       pr(10003, [sql('archive/V53__nested.SQL')]),
       pr(10004, [sql('V53__other_module.sql', SDK)]),
-      pr(10005, [java('V53__upper_case.JAVA')]),
+      pr(10005, [sql('V53__upper_case.SQL')]),
     ]);
     for (const number of [10001, 10002, 10003, 10004, 10005]) {
       expect(byPr[number].state, String(number)).toBe('failure');
     }
     expect(byPr[10002].description).toContain(
-      'V1 = V1__core.sql + V1_0__trailing_zero.java',
+      'V1 = V1__core.sql + V1_0__trailing_zero.sql',
     );
   });
 
-  it('ignores paths outside the scanned locations, and names that claim no version', async () => {
+  it('ignores files outside migration source roots, and names that claim no version', async () => {
     const { posts } = await check([
       pr(10001, [
         'packages/managed-agent-server/src/test/resources/db/migration/V53__fixture.sql',
         sql('V53__client.sql', 'packages/sdk-java/client'),
         sql('R__repeatable_view.sql'),
-        sql('V53__old.sql').replace('/migration/', '/migration_old/'),
         sql('V53__wrong_suffix.java'),
         java('V53__wrong_suffix.sql'),
         sql('README.md'),
@@ -321,7 +388,7 @@ describe('check-flyway-open-prs', () => {
       ]),
       pr(10002, [
         sql('V70__a.sql'),
-        java('V70__b.java'),
+        sql('V70__b.sql'),
         // A main file the PR edits is still one file in the merge result.
         [sql('V53__workspace_roles.sql'), 'MODIFIED'],
         sql('V53__c.sql'),
@@ -331,7 +398,7 @@ describe('check-flyway-open-prs', () => {
     expect(byPr[10002]).toMatchObject({
       state: 'failure',
       description:
-        'Version collision when merged into main: V70 = V70__a.sql + V70__b.java; V53 = V53__workspace_roles.sql + V53__c.sql',
+        'Version collision when merged into main: V70 = V70__a.sql + V70__b.sql; V53 = V53__workspace_roles.sql + V53__c.sql',
     });
   });
 
@@ -391,6 +458,7 @@ describe('check-flyway-open-prs', () => {
       pr(10001, [sql(`V53__${'x'.repeat(150)}.sql`)]),
       pr(10002, [sql('V53__naïve\nname.sql')]),
       pr(10003, [sql('V53__##[add-matcher]x::error::y.sql')]),
+      pr(10004, [legacySql('V54__##[add-matcher]x::error::y.sql')]),
     ]);
     expect(byPr[10001].description).toHaveLength(140);
     expect(byPr[10001].description.endsWith('...')).toBe(true);
@@ -399,6 +467,9 @@ describe('check-flyway-open-prs', () => {
     );
     expect(byPr[10003].description).toBe(
       'Version collision when merged into main: V53 = V53__workspace_roles.sql + V53__???add-matcher?x??error??y.sql',
+    );
+    expect(byPr[10004].description).toBe(
+      'Migration files outside src/main/resources/db/managed-schema: V54__???add-matcher?x??error??y.sql',
     );
     for (const line of lines) {
       expect(line).not.toMatch(/::|##\[|\n/);
@@ -492,6 +563,19 @@ describe('check-flyway-open-prs', () => {
       sql('V1__core.sql'),
       sql('V53__workspace_roles.sql'),
     ]);
+  });
+
+  it('compares against only the migrations main loads at runtime', async () => {
+    onMain(legacySql('V54__legacy.sql'), java('V54__legacy.java'));
+    expect(mainMigrations(root, MODULES).sort()).toEqual([
+      sql('V1__core.sql'),
+      sql('V53__workspace_roles.sql'),
+    ]);
+    const { byPr } = await check([pr(10001, [sql('V54__next.sql')])]);
+    expect(byPr[10001]).toMatchObject({
+      state: 'success',
+      description: 'No collision with main',
+    });
   });
 });
 
