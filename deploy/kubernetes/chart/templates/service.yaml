@@ -13,3 +13,8 @@ spec:
     - name: api
       port: 8080
       targetPort: api
+    {{- if .Values.web.enabled }}
+    - name: web
+      port: 4171
+      targetPort: web
+    {{- end }}

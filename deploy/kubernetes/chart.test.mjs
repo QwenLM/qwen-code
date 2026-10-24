@@ -191,6 +191,150 @@ test('bundled MySQL persists data and grants the actual Flyway boot probe', asyn
   }
 });
 
+test('LOCAL tools require a fixed node and persist private state outside Workspaces', async () => {
+  await assert.rejects(
+    render(['--set', 'runtime.enabled=true']),
+    /Set runtime.nodeName/,
+  );
+  const objects = await render([
+    '--set',
+    'runtime.enabled=true',
+    '--set',
+    'runtime.nodeName=trusted-node',
+    '--set',
+    'runtime.storage.className=local',
+  ]);
+  const pod = find(objects, 'Deployment').spec.template.spec;
+  assert.equal(pod.nodeName, undefined);
+  assert.deepEqual(
+    pod.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution
+      .nodeSelectorTerms[0].matchFields,
+    [{ key: 'metadata.name', operator: 'In', values: ['trusted-node'] }],
+  );
+  assert.equal(pod.securityContext.fsGroupChangePolicy, 'OnRootMismatch');
+  const [server, harness] = pod.containers;
+  const serverEnv = env(server);
+  for (const key of [
+    'QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED',
+    'QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED',
+    'QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED',
+    'QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED',
+    'QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS',
+  ]) {
+    assert.equal(serverEnv[key].value, 'true');
+  }
+  for (const key of [
+    'QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY',
+    'QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED',
+    'QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED',
+  ]) {
+    assert.equal(serverEnv[key].value, 'false');
+  }
+  assert.equal(serverEnv.QWEN_MANAGED_AGENT_APPROVAL_MODE.value, 'default');
+  assert.equal(
+    serverEnv.QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY.value,
+    '/runtime-data/state',
+  );
+  assert.equal(serverEnv.QWEN_HOME.value, '/runtime-data/home');
+  assert.equal(
+    serverEnv.QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT.value,
+    '/workspaces',
+  );
+  assert.deepEqual(
+    serverEnv.QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN.valueFrom,
+    env(harness).QWEN_MANAGED_RUNTIME_BROKER_TOKEN.valueFrom,
+  );
+  assert.deepEqual(
+    pod.volumes.find((volume) => volume.name === 'machine-id').hostPath,
+    { path: '/etc/machine-id', type: 'File' },
+  );
+  assert.equal(
+    server.volumeMounts.find((mount) => mount.name === 'machine-id').readOnly,
+    true,
+  );
+  assert(!harness.volumeMounts.some((mount) => mount.name === 'runtime-data'));
+  const claims = objects.filter(
+    (object) => object.kind === 'PersistentVolumeClaim',
+  );
+  assert.equal(claims.length, 2);
+  for (const claim of claims) {
+    assert.equal(claim.metadata.annotations['helm.sh/resource-policy'], 'keep');
+    assert.equal(claim.spec.storageClassName, 'local');
+  }
+  const key = find(objects, 'Secret').data['runtime-credential-key'];
+  assert.equal(
+    Buffer.from(Buffer.from(key, 'base64').toString(), 'base64').length,
+    32,
+  );
+});
+
+test('WebShell keeps its fixed identity and signing key server-side', async () => {
+  await assert.rejects(
+    render(['--set', 'web.enabled=true']),
+    /Set web.tenantId/,
+  );
+  const objects = await render([
+    '--set',
+    'web.enabled=true',
+    '--set',
+    'web.tenantId=tenant-a',
+    '--set',
+    'web.actorId=actor-a',
+    '--set',
+    'web.allowOrigins[0]=https://agent.example',
+  ]);
+  const pod = find(objects, 'Deployment').spec.template.spec;
+  const web = pod.containers.find((container) => container.name === 'web');
+  assert.equal(web.image, 'harness:test');
+  assert.deepEqual(web.args, [
+    'serve',
+    '--managed-web-config',
+    '/etc/qwen-web/config.json',
+    '--hostname',
+    '0.0.0.0',
+    '--port',
+    '4171',
+    '--allow-origin',
+    'https://agent.example',
+  ]);
+  const webEnv = env(web);
+  assert.equal(
+    webEnv.QWEN_SERVER_TOKEN.valueFrom.secretKeyRef.key,
+    'web-token',
+  );
+  assert(!webEnv.OPENAI_API_KEY);
+  assert(!webEnv.QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY);
+  assert(
+    !web.volumeMounts.some((mount) =>
+      ['workspace', 'workspaces', 'runtime-data'].includes(mount.name),
+    ),
+  );
+  const signingVolume = pod.volumes.find(
+    (volume) => volume.name === 'web-signing-key',
+  );
+  assert.deepEqual(signingVolume.secret.items, [
+    { key: 'auth-signing-key', path: 'auth-signing-key' },
+  ]);
+  const config = find(objects, 'ConfigMap');
+  assert.deepEqual(JSON.parse(config.data['managed-web.json']), {
+    apiUrl: 'http://127.0.0.1:8080',
+    tenantId: 'tenant-a',
+    actorId: 'actor-a',
+    signingKeyFile: '/run/qwen-web/auth-signing-key',
+  });
+  assert(!JSON.stringify(config).includes('fixture-key'));
+  const secret = find(objects, 'Secret');
+  assert.notEqual(secret.data['web-token'], secret.data['auth-signing-key']);
+  assert.match(web.readinessProbe.exec.command[2], /4171\/health/);
+  const service = objects.find(
+    (object) => object.kind === 'Service' && object.metadata.name === 'fixture',
+  );
+  assert.deepEqual(
+    service.spec.ports.map((port) => port.port),
+    [8080, 4171],
+  );
+});
+
 test('missing installation inputs or missing upgrade credentials fail closed', async () => {
   for (const key of [
     'server.image',
@@ -221,6 +365,7 @@ test('server-side Helm rendering preserves every existing credential on upgrade'
   const original = find(await render(), 'Secret');
   let storedSecret = original;
   let retainedClaim;
+  let retainedRuntime;
   const visited = [];
   const peer = createServer((request, response) => {
     visited.push(request.url);
@@ -249,6 +394,8 @@ test('server-side Helm rendering preserves every existing credential on upgrade'
       '/api/v1/namespaces/test-space/secrets/fixture-keys': storedSecret,
       '/api/v1/namespaces/test-space/persistentvolumeclaims/data-fixture-mysql-0':
         retainedClaim,
+      '/api/v1/namespaces/test-space/persistentvolumeclaims/fixture-runtime':
+        retainedRuntime,
     };
     const value = routes[request.url?.split('?')[0]];
     response.writeHead(value ? 200 : 404, {
@@ -307,6 +454,87 @@ test('server-side Helm rendering preserves every existing credential on upgrade'
     visited.includes('/api/v1/namespaces/test-space/secrets/fixture-keys'),
   );
   assert.deepEqual(upgraded.data, original.data);
+  storedSecret.data['operator-note'] =
+    Buffer.from('preserve-extra-key').toString('base64');
+  const optional = [
+    '--set',
+    'runtime.enabled=true',
+    '--set',
+    'runtime.nodeName=trusted-node',
+    '--set',
+    'web.enabled=true',
+    '--set',
+    'web.tenantId=tenant-a',
+    '--set',
+    'web.actorId=actor-a',
+  ];
+  const enabled = find(
+    await render([
+      '--is-upgrade',
+      '--dry-run=server',
+      '--kubeconfig',
+      kubeconfig,
+      ...optional,
+    ]),
+    'Secret',
+  );
+  for (const [key, value] of Object.entries(storedSecret.data)) {
+    assert.equal(enabled.data[key], value);
+  }
+  assert(enabled.data['runtime-broker-token']);
+  assert(enabled.data['runtime-credential-key']);
+  assert(enabled.data['web-token']);
+  storedSecret = enabled;
+  const disabled = find(
+    await render([
+      '--is-upgrade',
+      '--dry-run=server',
+      '--kubeconfig',
+      kubeconfig,
+    ]),
+    'Secret',
+  );
+  assert.deepEqual(disabled.data, enabled.data);
+  const external = ['--set', 'credentials.existingSecret=fixture-keys'];
+  delete storedSecret.data['runtime-credential-key'];
+  retainedRuntime = {
+    apiVersion: 'v1',
+    kind: 'PersistentVolumeClaim',
+    metadata: { name: 'fixture-runtime' },
+  };
+  await assert.rejects(
+    render([
+      '--is-upgrade',
+      '--dry-run=server',
+      '--kubeconfig',
+      kubeconfig,
+      ...optional,
+    ]),
+    /retained Runtime PVC is missing its credentials/,
+  );
+  await assert.rejects(
+    render([
+      '--dry-run=server',
+      '--kubeconfig',
+      kubeconfig,
+      ...optional,
+      ...external,
+    ]),
+    /missing runtime-credential-key/,
+  );
+  storedSecret.data['runtime-credential-key'] =
+    enabled.data['runtime-broker-token'];
+  storedSecret.data['web-token'] = storedSecret.data['auth-signing-key'];
+  await assert.rejects(
+    render([
+      '--dry-run=server',
+      '--kubeconfig',
+      kubeconfig,
+      ...optional,
+      ...external,
+    ]),
+    /web-token must differ/,
+  );
   storedSecret = undefined;
   retainedClaim = {
     apiVersion: 'v1',

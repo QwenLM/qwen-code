@@ -11,3 +11,9 @@ data:
     {{- dict "security" (dict "auth" (dict "selectedType" "openai")) "model" (dict "name" $model) "modelProviders" (dict "openai" (list (dict "id" $model "baseUrl" $baseUrl "envKey" "OPENAI_API_KEY"))) "telemetry" (dict "enabled" false) | toPrettyJson | nindent 4 }}
   mysql-init.sql: |
     GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'%';
+  {{- if .Values.web.enabled }}
+  managed-web.json: |
+    {{- $tenant := required "Set web.tenantId for the fixed browser identity." (.Values.web.tenantId | trim) }}
+    {{- $actor := required "Set web.actorId for the fixed browser identity." (.Values.web.actorId | trim) }}
+    {{- dict "apiUrl" "http://127.0.0.1:8080" "tenantId" $tenant "actorId" $actor "signingKeyFile" "/run/qwen-web/auth-signing-key" | toPrettyJson | nindent 4 }}
+  {{- end }}
