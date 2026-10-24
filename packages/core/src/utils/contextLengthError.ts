@@ -43,6 +43,13 @@ const CONTEXT_LENGTH_PATTERNS = [
   // llama.cpp: "request (279935 tokens) exceeds the available context size
   // (262144 tokens), try increasing it" (#13415).
   /\bexceeds the available context size\b/i,
+  // vLLM: "The decoder prompt (length 40000) is longer than the maximum model
+  // length of 32768." from the engine, and "The engine prompt length 40000
+  // exceeds the max_model_len 32768." from the Responses endpoint.
+  // Only the decoder wording: an encoder prompt is not the chat history, so
+  // compacting the history is no fix for it and neither number sizes it.
+  /\bdecoder prompt \(length[^\n]{0,160}?is longer than the maximum model length\b/i,
+  /\bexceeds the max_model_len\b/i,
 ];
 
 function parseInteger(value: string): number {
@@ -122,6 +129,30 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(llamaCppMatch[1]!),
       limitTokens: parseInteger(llamaCppMatch[2]!),
+      limitKind: 'total',
+    };
+  }
+
+  // vLLM names the decoder prompt length and `max_model_len`, the server's
+  // real window and often smaller than the one inferred from the id. The gap
+  // is bounded so a huge error body cannot make the lazy scan quadratic.
+  const vllmPromptMatch = text.match(
+    /\bdecoder prompt \(length[^\S\n]*(\d[\d,]{0,31})\)[^\n]{0,120}?longer than the maximum model length of[^\S\n]*(\d[\d,]{0,31})/i,
+  );
+  if (vllmPromptMatch) {
+    return {
+      actualTokens: parseInteger(vllmPromptMatch[1]!),
+      limitTokens: parseInteger(vllmPromptMatch[2]!),
+      limitKind: 'total',
+    };
+  }
+  const vllmResponsesMatch = text.match(
+    /prompt length[^\S\n]*(\d[\d,]{0,31})[^\S\n]*exceeds the max_model_len[^\S\n]*(\d[\d,]{0,31})/i,
+  );
+  if (vllmResponsesMatch) {
+    return {
+      actualTokens: parseInteger(vllmResponsesMatch[1]!),
+      limitTokens: parseInteger(vllmResponsesMatch[2]!),
       limitKind: 'total',
     };
   }

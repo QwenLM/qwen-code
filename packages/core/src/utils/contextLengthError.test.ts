@@ -9,6 +9,7 @@ import {
   getContextLengthExceededInfo,
   isContextLengthExceededError,
 } from './contextLengthError.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('contextLengthError', () => {
   it.each([
@@ -101,6 +102,75 @@ describe('contextLengthError', () => {
       expect(info.isExceeded).toBe(true);
       expect(info.actualTokens).toBe(279935);
       expect(info.limitTokens).toBe(262144);
+    });
+  });
+
+  // vLLM rejects an oversized prompt in its own words, so without these the
+  // reactive compaction path never fired for self-hosted vLLM servers.
+  describe('vLLM context overflow wording', () => {
+    it.each([
+      [
+        'The decoder prompt (length 40000) is longer than the maximum model length of 32768. Make sure that `max_model_len` is no smaller than the number of text tokens.',
+        40000,
+      ],
+      [
+        'The decoder prompt (length 32768) plus the number of requested output tokens (at least 1) is longer than the maximum model length of 32768. Make sure that `max_model_len` is no smaller than the number of text tokens (prompt + requested output tokens).',
+        32768,
+      ],
+      [
+        'The engine prompt length 40000 exceeds the max_model_len 32768. Please reduce prompt.',
+        40000,
+      ],
+    ])(
+      'detects overflow and parses both token counts: %s',
+      (message, actual) => {
+        const info = getContextLengthExceededInfo(new Error(`400 ${message}`));
+
+        expect(info.isExceeded).toBe(true);
+        expect(info.actualTokens).toBe(actual);
+        expect(info.limitTokens).toBe(32768);
+        expect(info.limitKind).toBe('total');
+      },
+    );
+
+    it('detects the wording nested in an SDK-style error object', () => {
+      const info = getContextLengthExceededInfo({
+        status: 400,
+        error: {
+          message:
+            'The decoder prompt (length 40000) is longer than the maximum model length of 32768.',
+        },
+      });
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(40000);
+      expect(info.limitTokens).toBe(32768);
+    });
+
+    // An encoder prompt is not the chat history, so compacting the history
+    // cannot fix it and the error is left for the user to see.
+    it('leaves an encoder prompt overflow to the user', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          '400 The encoder prompt (length 9000) is longer than the maximum model length of 8192.',
+        ),
+      );
+
+      expect(info.isExceeded).toBe(false);
+    });
+
+    it('stays fast on a huge error body with repeated prompt fragments', () => {
+      const body =
+        "This model's maximum context length is exceeded. " +
+        'The decoder prompt (length 1) '.repeat(20_000);
+      const start = performance.now();
+
+      const info = getContextLengthExceededInfo(new Error(body));
+
+      expect(info.isExceeded).toBe(true);
+      expectWithinLatencyBudget(performance.now() - start, 1_000, {
+        poolMultiplier: 10,
+      });
     });
   });
 
