@@ -5050,6 +5050,57 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
+  it('derives the multi-workspace total cap from serve.maxSessions', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ms-total-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxRegisteredWorkspaces: 2,
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        bootSettings: { serve: { maxSessions: 3 } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const res = await fetch(`${handle.url}/capabilities`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: {
+          maxSessionsPerWorkspace: number | null;
+          maxTotalSessions: number | null;
+        };
+      };
+      expect(body.limits.maxSessionsPerWorkspace).toBe(3);
+      // maxRegisteredWorkspaces: 2 keeps the capacity at or below the 25
+      // threshold, so the total is derived from the resolved per-workspace
+      // cap instead of the flat 800.
+      expect(body.limits.maxTotalSessions).toBe(6);
+    } finally {
+      await handle.close();
+    }
+    expect(createBridge).toHaveBeenCalledTimes(2);
+  });
+
   it('drains every lifecycle runtime before close yields', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-drain-')),

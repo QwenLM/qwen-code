@@ -24,6 +24,7 @@ import {
   type SettingsSchema,
 } from './settingsSchema.js';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
+import { advertisedMaxSessions } from '../serve/server/serve-features.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
@@ -865,7 +866,7 @@ describe('SettingsSchema', () => {
       const serve = getSettingsSchema().serve.properties;
       expect(serve.maxSessions.type).toBe('integer');
       expect(serve.maxSessions.minimum).toBe(0);
-      expect(serve.maxSessions.default).toBe(32);
+      expect(serve.maxSessions.default).toBe(advertisedMaxSessions(undefined));
       expect(serve.maxSessions.requiresRestart).toBe(true);
       expect(serve.maxConcurrentSubSessionsPerCaller.default).toBe(
         MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
