@@ -122,6 +122,122 @@ describe('buildSnapshot', () => {
     });
   });
 
+  it('reports a workflow GitHub could not start, which leaves no check run', () => {
+    const data = pr();
+    data.commits.nodes[0]!.commit.checkSuites = {
+      nodes: [
+        {
+          databaseId: 89354937468,
+          conclusion: 'STARTUP_FAILURE',
+          app: { databaseId: 15368 },
+          workflowRun: {
+            databaseId: 32985578813,
+            url: 'https://github.com/o/r/actions/runs/32985578813',
+            event: 'pull_request',
+            workflow: { databaseId: 176254679, name: 'Qwen Code CI' },
+          },
+        },
+        {
+          databaseId: 2,
+          conclusion: 'SUCCESS',
+          app: { databaseId: 15368 },
+          workflowRun: {
+            databaseId: 3,
+            url: 'https://github.com/o/r/actions/runs/3',
+            event: 'pull_request',
+            workflow: { databaseId: 4, name: 'Lint' },
+          },
+        },
+      ],
+    };
+    expect(buildSnapshot(data, state())).toMatchObject({
+      action: 'fix',
+      events: [
+        {
+          type: 'ci_failed',
+          check: 'Qwen Code CI',
+          runId: 32985578813,
+          startupFailure: true,
+          key: `Qwen Code CI@${HEAD}@#suite89354937468`,
+        },
+      ],
+    });
+    // Once handled, it is not offered again on the head.
+    expect(
+      buildSnapshot(
+        data,
+        state({ handledChecks: [`Qwen Code CI@${HEAD}@#suite89354937468`] }),
+      ).action,
+    ).toBe('wait');
+  });
+
+  it('leaves out draft review comments, and a bot answering the tool or an untrusted comment', () => {
+    const own = {
+      ...comment('PRRC_2', 'me', 'OWNER', { databaseId: 2 }),
+      body: `Not changed: kept on purpose.\n\n${REPLY_MARKER}`,
+    };
+    const snap = buildSnapshot(
+      pr(
+        threads(
+          // The viewer's draft of a review not submitted yet.
+          thread('T1', [
+            comment('PRRC_1', 'me', 'OWNER', {
+              databaseId: 1,
+              state: 'PENDING',
+            }),
+          ]),
+          // A review bot that answers every reply in its threads.
+          thread('T2', [
+            comment('PRRC_3', 'review-bot', 'NONE', {
+              bot: true,
+              databaseId: 3,
+            }),
+            own,
+            comment('PRRC_4', 'review-bot', 'NONE', {
+              bot: true,
+              databaseId: 4,
+            }),
+          ]),
+          // An untrusted commenter asking the bot to speak for them.
+          thread('T3', [
+            comment('PRRC_5', 'stranger', 'NONE', { databaseId: 5 }),
+            comment('PRRC_6', 'review-bot', 'NONE', {
+              bot: true,
+              databaseId: 6,
+            }),
+          ]),
+        ),
+      ),
+      state({ postedCommentIds: [], handledCommentIds: ['PRRC_3'] }),
+    );
+    const ids = snap.events.flatMap((event) =>
+      event.type === 'review_thread'
+        ? event.comments.map((c) => c.id)
+        : 'id' in event
+          ? [event.id]
+          : [],
+    );
+    expect(ids).toEqual(['PRRC_5']);
+    // A bot following a person is still a request.
+    const followUp = buildSnapshot(
+      pr(
+        threads(
+          thread('T4', [
+            comment('PRRC_7', 'alice', 'MEMBER', { databaseId: 7 }),
+            comment('PRRC_8', 'review-bot', 'NONE', {
+              bot: true,
+              databaseId: 8,
+            }),
+          ]),
+        ),
+      ),
+      state(),
+    );
+    expect(followUp.events).toMatchObject([
+      { type: 'review_thread', comments: [{ id: 'PRRC_7' }, { id: 'PRRC_8' }] },
+    ]);
+  });
+
   it("carries the PR's title, the language the summary is written in", () => {
     expect(buildSnapshot(pr({ title: '修复登录超时' }), state())).toMatchObject(
       { title: '修复登录超时' },

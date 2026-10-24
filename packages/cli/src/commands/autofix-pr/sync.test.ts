@@ -784,6 +784,25 @@ describe('runSync (real git, bare remote)', () => {
     expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
   });
 
+  it('with --discard quits a merge a fix left stopped on another branch', () => {
+    run(repo, 'switch', '-q', '-c', 'upstream2', featSha);
+    writeFileSync(join(repo, 'clash.txt'), 'theirs');
+    run(repo, 'add', 'clash.txt');
+    run(repo, 'commit', '-q', '-m', 'theirs');
+    run(repo, 'switch', '-q', 'main');
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/merge');
+    writeFileSync(join(paths.worktreePath, 'clash.txt'), 'ours');
+    run(paths.worktreePath, 'add', 'clash.txt');
+    run(paths.worktreePath, 'commit', '-q', '-m', 'ours');
+    expect(() =>
+      run(paths.worktreePath, 'merge', '-q', '--no-edit', 'upstream2'),
+    ).toThrow();
+    expect(runSync(7, true)).toMatchObject({ synced: true, headSha: featSha });
+    expect(run(paths.worktreePath, 'symbolic-ref', 'HEAD')).toBe(
+      `refs/heads/${paths.branch}`,
+    );
+  });
+
   it("fetches with the user's own ssh command", () => {
     const ssh = join(base, 'fake-ssh');
     writeFileSync(

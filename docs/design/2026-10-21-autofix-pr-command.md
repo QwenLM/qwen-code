@@ -75,7 +75,7 @@ Non-goals (first version):
 ## 4. User experience
 
 ```text
-/autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [instructions...]
+/autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions...]
 /autofix-pr status
 /autofix-pr stop [<pr-number>]
 ```
@@ -164,7 +164,7 @@ worktree included:
    scheduled task goes on, so `prepare --take-over` moves the watch — its
    history and budgets kept — to the session that asks, when the user says
    so; the helpers of the session it was taken from refuse from then on,
-   and its scheduled task stops at its next fire.
+   and its scheduled task stops at its next fire: until then its gate moves no cursor, and only wakes it (`watched_elsewhere`).
 6. Fetch `refs/pull/<n>/head` into local branch `qwen-autofix/pr-<n>` and
    create the worktree on it. `prepare` never discards earlier work: a
    leftover worktree, or a leftover branch that may hold commits beyond the
@@ -289,6 +289,17 @@ Event rules:
   while the branch still stands at the known head, the API is lagging
   (`lagging`, above). When the branch cannot be read, a head in
   `pushedShas` is taken for the watch's own.
+- `title` is the PR's title, the language the round's summary is written in.
+- A workflow GitHub could not start (`STARTUP_FAILURE`, often an invalid
+  workflow file) leaves no check run in the rollup, only its check suite:
+  it is a `ci_failed` with `startupFailure: true` and the run's id, keyed
+  by its suite (`<workflow>@<head>@#suite<id>`), with no log and nothing to
+  re-run, so the skill answers it as needing a human.
+- A comment of a review not submitted yet (`PENDING`) is a draft only its
+  author sees, and is skipped. A bot's thread comment that follows the
+  tool's own reply, or an untrusted comment, is not a request: a review
+  bot that answers every reply would otherwise keep a round going for
+  each, and an untrusted commenter could have a bot speak for them.
 - `truncated` names the connections (`checks`, `reviewThreadComments`,
   `reviewThreads`, `reviews`, `comments`) that had more entries than the
   query reads.
@@ -613,7 +624,7 @@ checkout is untouched), and checks the worktree as `push` does. Then:
   rebase), and nothing changes.
 
 A worktree with uncommitted changes is never moved or reset. `--discard`
-returns the worktree to the PR head — back on the watch's branch if a fix switched to another, which keeps its commits — whatever it holds — unpushed commits and
+returns the worktree to the PR head — back on the watch's branch if a fix switched to another, which keeps its commits, after quitting a merge, rebase, cherry-pick, revert or `am` it left stopped — whatever it holds — unpushed commits and
 uncommitted changes, nested repositories (`git clean -ffd`) and changes in
 checked-out submodules included (`git submodule foreach`, which never
 touches one that is not checked out) — to end a round whose work was not
@@ -820,8 +831,9 @@ weakening tests to make them pass; force-pushing; and changes unrelated to the
 PR. Such requests get a "needs a human decision" reply.
 
 Loop guards for bots: each review comment gets one fix attempt (a new
-comment in a thread already answered is a new request), and pushes are
-capped (Section 10). A bot that re-reviews every push therefore cannot keep the
+comment in a thread already answered is a new request), a bot answering the
+tool's own reply is no request (Section 6.2), and pushes are capped
+(Section 10). A bot that re-reviews every push therefore cannot keep the
 loop running forever.
 
 ## 9. Replies

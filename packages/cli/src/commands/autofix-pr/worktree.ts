@@ -49,11 +49,12 @@ export function requireWorktree(
   const branch = gitOpt('-C', worktreePath, 'symbolic-ref', '-q', 'HEAD');
   // Ending a round may take the worktree back to the watch's branch from
   // one a fix switched to: that branch keeps its commits, and what is not
-  // committed is discarded anyway. A rebase or a cherry-pick a fix left
-  // stopped holds HEAD detached and refuses the switch, so it is quit
-  // first; none of these touches a branch.
+  // committed is discarded anyway. A merge, rebase or cherry-pick a fix
+  // left stopped refuses the switch (a rebase holds HEAD detached), so it is
+  // quit first; none of these touches a branch.
   if (branch !== `refs/heads/${paths.branch}` && switchBack) {
     for (const quit of [
+      ['merge', '--quit'],
       ['rebase', '--quit'],
       ['cherry-pick', '--quit'],
       ['revert', '--quit'],

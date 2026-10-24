@@ -146,6 +146,20 @@ describe('bundled autofix-pr skill', () => {
     );
   });
 
+  it("forbids the fix agent's brief every write to GitHub, which only the main session makes", () => {
+    const { body } = loadSkill();
+    const never = /## Never([\s\S]*?)## Verify/.exec(body)?.[1] ?? '';
+    for (const write of [
+      'gh pr comment',
+      'gh pr edit',
+      'gh pr merge',
+      'gh api',
+      'git stash',
+    ]) {
+      expect(never).toContain(write);
+    }
+  });
+
   it('names a built-in subagent type for the fix agent, as working_dir requires', () => {
     const { body } = loadSkill();
     expect(body).toContain('`subagent_type` = `general-purpose`');

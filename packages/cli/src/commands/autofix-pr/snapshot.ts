@@ -37,6 +37,7 @@ import {
   assertOwnedBySession,
   autofixPrPaths,
   checkAttemptKey,
+  currentSessionId,
   readGateCursor,
   readState,
   repoRoot,
@@ -69,7 +70,7 @@ nodes {
   root: comments(first: 1) { nodes { databaseId } }
   comments(last: 100) {
     pageInfo { hasPreviousPage }
-    nodes { id databaseId author { __typename login } authorAssociation body url }
+    nodes { id databaseId author { __typename login } authorAssociation body url state }
   }
 }`;
 
@@ -92,6 +93,14 @@ const PR_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
               contexts(first: 100) {
                 pageInfo { hasNextPage endCursor }
                 ${CHECK_CONTEXT_FIELDS}
+              }
+            }
+            checkSuites(first: 50) {
+              nodes {
+                databaseId
+                conclusion
+                app { databaseId }
+                workflowRun { databaseId url event workflow { databaseId name } }
               }
             }
           }
@@ -198,6 +207,19 @@ interface CheckRollup {
   };
 }
 
+/** A check suite: what is left of a workflow GitHub could not start. */
+interface CheckSuite {
+  databaseId: number;
+  conclusion: string | null;
+  app?: { databaseId: number } | null;
+  workflowRun: {
+    databaseId: number;
+    url: string;
+    event: string;
+    workflow: { databaseId: number; name: string };
+  } | null;
+}
+
 interface ReviewThreads {
   pageInfo: { hasNextPage: boolean; endCursor?: string | null };
   nodes: Array<{
@@ -225,7 +247,11 @@ export interface PrData {
   author?: { login: string } | null;
   commits: {
     nodes: Array<{
-      commit: { oid: string; statusCheckRollup: CheckRollup | null };
+      commit: {
+        oid: string;
+        statusCheckRollup: CheckRollup | null;
+        checkSuites?: { nodes: CheckSuite[] };
+      };
     }>;
   };
   reviewThreads: ReviewThreads;
@@ -265,6 +291,9 @@ export type SnapshotEvent =
       /** Prepared mode only: the attempt's key, which `reply` records for a
        * failure handled without a push. */
       key?: string;
+      /** GitHub could not start the workflow: no job ran, so there is no
+       * log to fix from and nothing `gh run rerun --failed` re-runs. */
+      startupFailure?: true;
     }
   | {
       type: 'review_thread';
@@ -449,6 +478,31 @@ export function checkEvents(pr: PrData): {
       });
     }
   }
+  // A workflow GitHub could not start — an invalid workflow file, say —
+  // leaves no check run in the rollup, only its suite.
+  for (const suite of commit.checkSuites?.nodes ?? []) {
+    const run = suite.workflowRun;
+    if (suite.conclusion !== 'STARTUP_FAILURE' || !run) continue;
+    failed.push({
+      event: {
+        type: 'ci_failed',
+        check: run.workflow.name,
+        url: run.url,
+        runId: run.databaseId,
+        startupFailure: true,
+      },
+      attempt: `#suite${suite.databaseId}`,
+      identity: [
+        'run',
+        suite.app?.databaseId ?? '',
+        run.workflow.databaseId,
+        run.event,
+        '',
+      ].join(':'),
+      actions: false,
+      runDone: true,
+    });
+  }
   return { failed, pending, truncated: contexts.pageInfo.hasNextPage };
 }
 
@@ -460,6 +514,7 @@ export function checkEvents(pr: PrData): {
 function commentEvents(
   pr: PrData,
   prAuthor: string,
+  viewer: string,
   isNew: (node: CommentNode) => boolean,
 ): { events: SnapshotEvent[]; ids: string[]; truncated: string[] } {
   const ref = (node: CommentNode, trust: Trust): CommentRef => ({
@@ -488,9 +543,26 @@ function commentEvents(
       truncated.push('reviewThreadComments');
     }
     const comments: CommentRef[] = [];
-    for (const node of thread.comments.nodes.filter(isNew)) {
+    const nodes = thread.comments.nodes;
+    for (const [index, node] of nodes.entries()) {
+      // A comment of a review not submitted yet is a draft only its author
+      // sees.
+      if (!isNew(node) || node.state === 'PENDING') continue;
       const trust = classify(node, 'thread', prAuthor);
       if (trust === 'ignore') continue;
+      // A bot answering the tool's reply, or an untrusted comment, asks
+      // for nothing new: a review bot that answers every reply would keep
+      // a round going for each, and an untrusted commenter could have a
+      // bot speak for them.
+      const before = nodes[index - 1];
+      if (
+        trust === 'bot' &&
+        before &&
+        (isOwnReply(before, viewer) ||
+          classify(before, 'thread', prAuthor) === 'untrusted')
+      ) {
+        continue;
+      }
       ids.push(node.id);
       if (trust === 'untrusted') events.push(untrusted(node));
       else comments.push(ref(node, trust));
@@ -655,7 +727,12 @@ export function buildSnapshot(
 
   // The author GitHub names now, as the gate asks: a login can change
   // hands after a rename.
-  const comments = commentEvents(pr, pr.author?.login ?? state.prAuthor, isNew);
+  const comments = commentEvents(
+    pr,
+    pr.author?.login ?? state.prAuthor,
+    state.viewer,
+    isNew,
+  );
   events.push(...comments.events);
   truncated.push(...comments.truncated);
 
@@ -797,7 +874,7 @@ export function buildGateSnapshot(
   // or asking for more; only the tool's own replies are left out.
   const isNew = (node: CommentNode) =>
     !reportedComments.has(node.id) && !isOwnReply(node, cursor.viewer);
-  const comments = commentEvents(pr, cursor.prAuthor, isNew);
+  const comments = commentEvents(pr, cursor.prAuthor, cursor.viewer, isNew);
   candidates.push(...comments.events.map(withShortBodies));
   truncated.push(...comments.truncated);
 
@@ -1113,6 +1190,26 @@ function runGate(args: SnapshotArgs): void {
           deferredRuns: state.deferredRuns ?? [],
         }
       : { knownHeads: [], seenCommentIds: [] };
+
+  // After a take-over, the session the watch was taken from fires its task
+  // until one of its rounds runs. Its gate must not move the cursor the new
+  // owner's gate reads, or what it reported would reach a session that no
+  // longer acts on it: it wakes that session, whose round then stops.
+  const session = currentSessionId();
+  if (
+    state &&
+    sameRepository(state, target) &&
+    session !== '' &&
+    state.sessionId !== session
+  ) {
+    writeStdoutLine(
+      JSON.stringify({
+        action: 'stop',
+        events: [{ type: 'watched_elsewhere', session: state.sessionId }],
+      }),
+    );
+    return;
+  }
 
   setGhHost(target.host);
   ensureAuthenticated();

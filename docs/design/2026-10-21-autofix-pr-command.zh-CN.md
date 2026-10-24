@@ -47,7 +47,7 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
 ## 4. 用户体验
 
 ```text
-/autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [instructions...]
+/autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions...]
 /autofix-pr status
 /autofix-pr stop [<pr-number>]
 ```
@@ -106,7 +106,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 2. 动手之前先检查推送权限。同仓库 PR 要求仓库的 `viewerPermission` 为 `WRITE`、`MAINTAIN` 或 `ADMIN`。fork PR 要求当前用户就是 fork 的所有者，或者既有写权限又有 `maintainerCanModify`。否则拒绝并说明原因。
 3. 要求本地恰好有一个 remote 和 base 仓库匹配（使用 `review match-remote` 背后的匹配逻辑）。
 4. 确定推送目标。优先使用唯一一个和 head 仓库匹配、并且只推送到它的本地 remote：匹配器只读 fetch URL，所以该 remote 推送到的每一个 URL——它的 `pushurl`，或者多条 `url` 里的每一条——都用同一个匹配器再核对一遍，任何一个目的地在别处的 remote 都不算。没有的话，按 `gh config get git_protocol` 给出的协议使用 head 仓库的 URL。把结果记到状态文件里。
-5. 状态文件就是锁。它记录会话 id（`QWEN_CODE_SESSION_ID`）；由另一个会话写下的状态文件直接导致拒绝。`/clear` 和 `/resume` 会给会话换一个新 id，而它的定时任务继续运行，所以在用户同意时，`prepare --take-over` 把监视（连同历史和预算）移交给发起请求的会话；被移交的那个会话的辅助命令从此拒绝执行，它的定时任务在下一次触发时停止。
+5. 状态文件就是锁。它记录会话 id（`QWEN_CODE_SESSION_ID`）；由另一个会话写下的状态文件直接导致拒绝。`/clear` 和 `/resume` 会给会话换一个新 id，而它的定时任务继续运行，所以在用户同意时，`prepare --take-over` 把监视（连同历史和预算）移交给发起请求的会话；被移交的那个会话的辅助命令从此拒绝执行，它的定时任务在下一次触发时停止：在那之前它的闸门不推进游标，只把它唤醒（`watched_elsewhere`）。
 6. 把 `refs/pull/<n>/head` fetch 到本地分支 `qwen-autofix/pr-<n>`，并在它上面创建 worktree。`prepare` 从不丢弃之前的工作：残留的 worktree，或可能含有超出记录 head 的提交的残留分支，都会导致拒绝，并提示先运行 `cleanup`。
 7. 在拥有这次监视的会话里重新运行 `prepare`，且 worktree 还在时，直接报告现有状态并带上 `resumed: true`，不再调用其他任何东西。如果 worktree 已被删除（包括用 `rm -rf` 删除，`git worktree prune` 会清掉它的登记），就重新创建它，并保留已记录的 `pushedShas`、`handledCommentIds` 和 `postedCommentIds`。状态文件属于另一个仓库的同号 PR 时直接拒绝。仓库按 GitHub 的方式比较：owner 和仓库名不区分大小写；host 不区分大小写、忽略默认端口，但保留其他端口，因为不同端口可能是不同的实例。
 8. 输出 JSON 报告：worktree 路径、分支、head SHA、base/head ref、推送目标、当前用户和 PR 作者的 login、draft 和 fork 标志，以及 `localUnpushedCommits`，即用户自己那份 head 分支上 PR 还没有的提交数。worktree 看不到这些提交。只有 upstream 是推送 remote 上 head 分支的本地分支才算这份副本，因此 fork 的 `main` 永远不会和用户自己的 `main` 比较。
@@ -175,6 +175,9 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - 只有 CI 还在跑时，动作是 `wait`。CI 在跑的同时仍然可以修可信评论，因为下一次推送反正会重新触发 CI。
 - 评论 id 既不在 `handledCommentIds` 也不在 `postedCommentIds` 里、且不是工具自己的回复——即当前用户发的、正文以回复标记（第 9 节）结尾的评论——时，才算新评论。标记出现在别处（有人引用了一条回复）不会让评论被忽略。已 resolve 的 thread、空的或 pending 的 review、批准（它的正文表示接受这个 PR；其中的行内评论仍以 thread 的形式到达），以及被 dismiss 的 review（它已被撤回）会被跳过；outdated 的 thread 会保留，并带上 `outdated: true`。
 - head SHA 和 `lastKnownHeadSha` 不同时，如果分支本身（对推送目标执行 `git ls-remote`）也已离开已知 head——包括回退到本监视早先推送过的 head——记为 `head_moved_externally`；分支仍在已知 head 上时，是 API 滞后（上文的 `lagging`）。读不到分支时，`pushedShas` 里的 head 视为本监视自己的。
+- `title` 是 PR 的标题，这一轮的总结使用它的语言。
+- GitHub 没能启动的 workflow（`STARTUP_FAILURE`，常见原因是 workflow 文件无效）在 rollup 里没有任何 check run，只留下它的 check suite：它被报告为带 `startupFailure: true` 和 run id 的 `ci_failed`，按 suite 生成键（`<workflow>@<head>@#suite<id>`），没有日志也没有可重跑的 job，所以 skill 把它答复为需要人工处理。
+- 尚未提交的 review 里的评论（`PENDING`）是只有作者能看到的草稿，会被跳过。bot 在工具自己的回复或不受信任的评论之后发的 thread 评论不算请求：否则会回复每条回复的评审 bot 会让每次都多跑一轮，不受信任的评论者也能借 bot 之口提要求。
 - `truncated` 列出条目数超过查询读取范围的连接（`checks`、`reviewThreadComments`、`reviewThreads`、`reviews`、`comments`）。
 
 动作优先级：`stop`（已合并或已关闭）→ `resync`（head 被别人移动）→ `fix`（冲突、失败的检查或可信评论）→ `wait`。循环会再加两个输入：预算用完时为 `stop`，修复进行中（状态文件里有 `inFlight`）时为 `wait`，直到这次尝试结束（第 7 节）。
@@ -272,7 +275,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - worktree 落后于它且是干净的，就 fast-forward；
 - worktree 有某一轮未推送的提交时不动它：回答 `{"synced": false, "action": "merge"}` 并给出要合并的 head（不要 rebase），什么都不改。
 
-有未提交改动的 worktree 永远不会被移动或重置。`--discard` 把 worktree 恢复到 PR head（修复切到别的分支时先切回监视分支，那个分支保留它的提交），不管里面有什么——未推送的提交和未提交的改动，包括嵌套仓库（`git clean -ffd`）和已检出子模块里的改动（`git submodule foreach`，从不碰未检出的子模块）——用来结束一轮没能推送的工作，并报告丢弃了什么。之后 worktree 仍不干净时回答 `{"synced": false, "reason"}`。`sync` 每次移动 worktree 时，都以同样方式把已检出的子模块移到新 head 记录的提交上，子模块缺少的提交从它自己的远端获取（PR 的 fetch 不递归进子模块，所以取不到的子模块提交不会让它失败）。`foreach` 只用来列出已检出的子模块，每条记录以 NUL 结尾（PR 指定的路径里可能有换行，按行读取时换行之后的内容会被当成另一个子模块）；fetch（每个子模块有自己的一分钟时限，一次 `sync` 的所有子模块合计三分钟，并沿用 git 对子模块的协议限制）和 reset 都在它之外执行，因为 `foreach` 启动的子进程会活过只杀掉顶层 git 的超时，在 `sync` 返回之后继续改动子模块（超时的 fetch 会被杀掉；它启动的传输进程可能留到连接结束，但只会下载对象）。子模块逐层对齐，所以嵌套的子模块在父模块移动之后才取父模块记录的提交；worktree 已包含 PR head（某一轮合并过）时也会对齐——合并移动的是 gitlink，而不是已检出的子模块。这条路径事先没有检查未提交的改动，所以在这里，持有自己工作的子模块（有未提交的改动，或 HEAD 不被记录的提交包含）保持原样。列出的子模块只有同时满足以下条件才会被处理：位于 worktree 内部、是它自己仓库的顶层、git 目录在父仓库的 `modules` 目录下（`git submodule` 放置的位置）或在它自身内部。否则，在普通目录里 `git -C` 会找到外层仓库；通过指向别的仓库或目录的 `.git` 文件或 `core.worktree`，reset 会移动那个仓库的分支，或写入那个目录。不论 `submodule.recurse` 怎么设，reset 都不递归进子模块；之后仍不干净则回答 `synced: false`，所以修复永远不会把子模块提交回旧的提交。读不到 PR 分支时（PR 已关闭、分支被删、网络不通），改为恢复到监视上次知道的 head。
+有未提交改动的 worktree 永远不会被移动或重置。`--discard` 把 worktree 恢复到 PR head（修复切到别的分支时先结束它停在半途的 merge、rebase、cherry-pick、revert 或 `am`，再切回监视分支，那个分支保留它的提交），不管里面有什么——未推送的提交和未提交的改动，包括嵌套仓库（`git clean -ffd`）和已检出子模块里的改动（`git submodule foreach`，从不碰未检出的子模块）——用来结束一轮没能推送的工作，并报告丢弃了什么。之后 worktree 仍不干净时回答 `{"synced": false, "reason"}`。`sync` 每次移动 worktree 时，都以同样方式把已检出的子模块移到新 head 记录的提交上，子模块缺少的提交从它自己的远端获取（PR 的 fetch 不递归进子模块，所以取不到的子模块提交不会让它失败）。`foreach` 只用来列出已检出的子模块，每条记录以 NUL 结尾（PR 指定的路径里可能有换行，按行读取时换行之后的内容会被当成另一个子模块）；fetch（每个子模块有自己的一分钟时限，一次 `sync` 的所有子模块合计三分钟，并沿用 git 对子模块的协议限制）和 reset 都在它之外执行，因为 `foreach` 启动的子进程会活过只杀掉顶层 git 的超时，在 `sync` 返回之后继续改动子模块（超时的 fetch 会被杀掉；它启动的传输进程可能留到连接结束，但只会下载对象）。子模块逐层对齐，所以嵌套的子模块在父模块移动之后才取父模块记录的提交；worktree 已包含 PR head（某一轮合并过）时也会对齐——合并移动的是 gitlink，而不是已检出的子模块。这条路径事先没有检查未提交的改动，所以在这里，持有自己工作的子模块（有未提交的改动，或 HEAD 不被记录的提交包含）保持原样。列出的子模块只有同时满足以下条件才会被处理：位于 worktree 内部、是它自己仓库的顶层、git 目录在父仓库的 `modules` 目录下（`git submodule` 放置的位置）或在它自身内部。否则，在普通目录里 `git -C` 会找到外层仓库；通过指向别的仓库或目录的 `.git` 文件或 `core.worktree`，reset 会移动那个仓库的分支，或写入那个目录。不论 `submodule.recurse` 怎么设，reset 都不递归进子模块；之后仍不干净则回答 `synced: false`，所以修复永远不会把子模块提交回旧的提交。读不到 PR 分支时（PR 已关闭、分支被删、网络不通），改为恢复到监视上次知道的 head。
 
 和 `push` 一样，`sync` 先向 GitHub 查 PR 的 head 分支，并对照 clone 的 remote 检查目的地，所以改过的状态文件无法让 fetch 指向别的 ref 或仓库；head ref 按分支名规则校验（`git check-ref-format --branch`），因此不能夹带 refspec。它还会记下 GitHub 此刻给出的 PR base 分支。`remote` 和 `baseRefName` 会被这一轮的修复说明写进修复 agent 的合并命令，所以必须是不含 shell 特殊字符的分支名（名字含这类字符的 PR 或 remote，`prepare` 会拒绝）。辅助命令从状态文件读取的每个列表都必须是类型正确的列表；历史文件里格式不对的字段会被丢弃，其余部分照常合并。
 
@@ -341,7 +344,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 
 即使是可处理的评论，修复说明也禁止：泄露密钥或 token；修改 CI 配置来跳过、禁用或削弱检查；删除或削弱测试来让它们通过；强推；与 PR 无关的改动。这类请求会收到"需要人工决定"的回复。
 
-针对 bot 的循环防护：每条 review 评论只尝试修复一次（已回答过的 thread 里的新评论是新的请求），推送次数有上限（第 10 节）。因此每次推送都重新 review 的 bot 不能让循环无限进行下去。
+针对 bot 的循环防护：每条 review 评论只尝试修复一次（已回答过的 thread 里的新评论是新的请求），bot 回应工具自己的回复不算请求（第 6.2 节），推送次数有上限（第 10 节）。因此每次推送都重新 review 的 bot 不能让循环无限进行下去。
 
 ## 9. 回复
 
