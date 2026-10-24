@@ -193,7 +193,17 @@ describe.skipIf(process.platform === 'win32')(
         ).toBe(expected === 'on');
         expect(current).not.toContain("The user's message includes the");
       }
-      const transport = new AcpHttpTransport(daemon.base, daemon.token, fetch);
+      const capabilities = await daemon.client.capabilities();
+      expect(capabilities.features).toContain('workspace_qualified_acp');
+      const secondaryWorkspace = capabilities.workspaces?.find(
+        (workspace) => workspace.cwd === path.join(root, 'b'),
+      );
+      expect(secondaryWorkspace).toBeDefined();
+      const transport = new AcpHttpTransport(
+        `${daemon.base}/workspaces/${encodeURIComponent(secondaryWorkspace!.id)}`,
+        daemon.token,
+        fetch,
+      );
       const httpClient = new DaemonClient({
         baseUrl: daemon.base,
         token: daemon.token,
