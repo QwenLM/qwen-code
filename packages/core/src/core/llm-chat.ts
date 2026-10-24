@@ -3456,6 +3456,7 @@ export class LlmChat {
               entries,
               toolOutputBudget,
               true,
+              false,
             );
             if (
               preview !== entries &&
@@ -3468,6 +3469,8 @@ export class LlmChat {
               const aggregatePreview = enforceFunctionResponseBudget(
                 entries,
                 aggregateBudget,
+                false,
+                false,
               );
               // Keep full results if compaction will run anyway and the
               // aggregate-only request stays below hard. Persist only the
@@ -3487,6 +3490,7 @@ export class LlmChat {
             entries,
             toolOutputBudget,
             true,
+            false,
           );
           const cutResults = preview.flatMap((entry, index) => {
             const before = entries[index].responseParts[0].functionResponse;
@@ -6223,6 +6227,7 @@ export class LlmChat {
           ],
           0,
           true,
+          false,
         )[0].responseParts,
       },
     ];

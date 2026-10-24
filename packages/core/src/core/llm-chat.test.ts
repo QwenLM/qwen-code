@@ -6,6 +6,7 @@
 
 import {
   attachToolOutputProvenance,
+  getToolOutputProvenance,
   measureToolOutput,
 } from '../tools/tool-output-size.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
@@ -12985,6 +12986,28 @@ describe('LlmChat', async () => {
       );
       await sendDrain('start', 'first', target);
     };
+
+    it('does not certify a truncation the send never applied', async () => {
+      await reportUsage(NEAR_AUTO);
+      // Far smaller than any budget this send can offer, so the result ships
+      // byte-identical: the pressure measurement must not leave a stamp that
+      // reads as "truncated, applied_budget 0" on those very parts.
+      await sendDrain(
+        [fnResponse('shell', { output: 'y'.repeat(200) }, 'intact-result')],
+        'second',
+      );
+      const dispatched = (requestAt(1).contents as Content[]).flatMap(
+        (entry) => entry.parts ?? [],
+      );
+      const responses = dispatched.filter((part) => part.functionResponse);
+      expect(responses.length).toBeGreaterThan(0);
+      for (const part of responses) {
+        const provenance = getToolOutputProvenance(part);
+        expect(provenance?.truncated ?? false).toBe(false);
+        expect(provenance?.budget).toBeUndefined();
+      }
+      expect(resultChars(1)).toBe(200);
+    });
 
     it('shrinks results to the headroom left before auto-compaction', async () => {
       await reportUsage(NEAR_AUTO);

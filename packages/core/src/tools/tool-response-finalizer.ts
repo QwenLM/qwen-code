@@ -410,6 +410,7 @@ export function enforceFunctionResponseBudget(
   entries: ToolResponseBudgetEntry[],
   budget: number,
   allowZeroBudget = false,
+  stampProvenance = true,
 ): ToolResponseBudgetEntry[] {
   if (
     !Number.isFinite(budget) ||
@@ -438,7 +439,7 @@ export function enforceFunctionResponseBudget(
       const part = reduced[index].responseParts[partIndex];
       // Attribute this fallback to the model send policy, including when a
       // Hosted Skill applies it before saving its model-facing result.
-      if (part !== entries[index].responseParts[partIndex])
+      if (stampProvenance && part !== entries[index].responseParts[partIndex])
         updateToolOutputBudget([part], budget, 'send_guard');
     }
   return reduced;
