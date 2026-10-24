@@ -824,7 +824,6 @@ describe('Hosted Harness model boundary', () => {
     );
     await runHostedHarnessTextTurn({ ...input, history });
     expect(model.setHistory).toHaveBeenCalledWith([
-      // Restored legacy records also carry their record-derived rewind id.
       expect.objectContaining({ role: 'user', parts: answered }),
       { role: 'model', parts: visible },
     ]);

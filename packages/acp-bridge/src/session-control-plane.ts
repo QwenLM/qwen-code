@@ -16147,10 +16147,6 @@ export function createSessionControlPlane(
         entry.rewindGeneration += 1;
 
         const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
-        const daemonPromptId =
-          typeof response['daemonPromptId'] === 'string'
-            ? response['daemonPromptId']
-            : undefined;
         const filesChanged = (response['filesChanged'] as string[]) ?? [];
         const filesFailed = (response['filesFailed'] as string[]) ?? [];
         const artifactSnapshot = restoredArtifactSnapshotFromState(
@@ -16212,7 +16208,6 @@ export function createSessionControlPlane(
               sessionId,
               promptId: req.promptId,
               targetTurnIndex,
-              ...(daemonPromptId ? { daemonPromptId } : {}),
               filesChanged,
               filesFailed,
               ...(artifactWarnings.length > 0

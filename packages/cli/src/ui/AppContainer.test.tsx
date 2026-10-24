@@ -1117,6 +1117,8 @@ describe('AppContainer State Management', () => {
     history?: HistoryItem[];
     contextFilePaths?: string[];
     recordedTurnIndex?: number;
+    recordedTurnIndices?: Record<string, number>;
+    snapshots?: Array<{ promptId: string }>;
   };
 
   const renderRewindHarness = (options: RewindHarnessOptions = {}) => {
@@ -1186,7 +1188,7 @@ describe('AppContainer State Management', () => {
         },
       );
     }
-    const snapshots = [
+    const snapshots = options.snapshots ?? [
       { promptId: 'prompt-1' },
       { promptId: 'prompt-2' },
       { promptId: 'prompt-3' },
@@ -1198,11 +1200,19 @@ describe('AppContainer State Management', () => {
     } as unknown as ReturnType<Config['getFileHistoryService']>);
 
     const rewindRecording = vi.fn();
-    const getRewindTurnIndex = vi.fn(
-      (promptId: string) =>
-        options.recordedTurnIndex ??
-        ['prompt-1', 'prompt-2', 'prompt-3'].indexOf(promptId),
-    );
+    const getRewindTurnIndex = vi.fn((promptId: string) => {
+      if (options.recordedTurnIndices) {
+        return options.recordedTurnIndices[promptId] ?? -1;
+      }
+      const targetId =
+        target.type === 'user'
+          ? (target.promptId ?? target.rewindId)
+          : undefined;
+      if (options.recordedTurnIndex !== undefined && promptId === targetId) {
+        return options.recordedTurnIndex;
+      }
+      return ['prompt-1', 'prompt-2', 'prompt-3'].indexOf(promptId);
+    });
     vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
       rewindRecording,
       getRewindTurnIndex,
@@ -8756,6 +8766,7 @@ describe('AppContainer State Management', () => {
             apiUser('second prompt', key),
           ],
           recordedTurnIndex: 3,
+          ...(field === 'rewindId' ? { snapshots: [] } : {}),
         });
         await runRewind(target, 'conversation');
         expect(harness.getRewindTurnIndex).toHaveBeenCalledWith(key);
@@ -8763,11 +8774,139 @@ describe('AppContainer State Management', () => {
         expect(harness.rewindRecording).toHaveBeenCalledWith(
           3,
           expect.any(Object),
-          expect.any(Array),
+          field === 'rewindId' ? [] : harness.snapshots.slice(0, 2),
         );
         expect(harness.rewind).not.toHaveBeenCalled();
       },
     );
+
+    it('preserves checkpoint snapshots through hidden recorded turns', async () => {
+      const snapshots = [
+        { promptId: 'prompt-1' },
+        { promptId: 'older-unmapped' },
+        { promptId: 'hidden-image' },
+        { promptId: 'prompt-2' },
+        { promptId: 'prompt-3' },
+      ];
+      const harness = renderRewindHarness({
+        snapshots,
+        recordedTurnIndices: {
+          'prompt-1': 0,
+          'hidden-image': 1,
+          'prompt-2': 3,
+          'prompt-3': 4,
+        },
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).toHaveBeenCalledWith('prompt-2', true);
+      expect(harness.rewindRecording).toHaveBeenCalledWith(
+        3,
+        { truncatedCount: 2 },
+        [snapshots[0], snapshots[1], snapshots[2], snapshots[3]],
+      );
+    });
+
+    it('excludes future snapshots after earlier checkpoints have been evicted', async () => {
+      const target = rewindUserItem(7, 'target', 'prompt-102');
+      const snapshots = [
+        { promptId: 'prompt-101' },
+        { promptId: 'prompt-102' },
+        { promptId: 'prompt-103' },
+      ];
+      const harness = renderRewindHarness({
+        history: [
+          rewindUserItem(1, 'first prompt', 'prompt-1'),
+          { id: 2, type: 'gemini', text: 'first response' },
+          rewindUserItem(3, 'second prompt', 'prompt-2'),
+          { id: 4, type: 'gemini', text: 'second response' },
+          rewindUserItem(5, 'retained checkpoint', 'prompt-101'),
+          { id: 6, type: 'gemini', text: 'prior response' },
+          target,
+          { id: 8, type: 'gemini', text: 'target response' },
+        ],
+        apiHistory: [
+          apiUser('retained checkpoint', 'prompt-101'),
+          apiModel('prior response'),
+          apiUser('target', 'prompt-102'),
+        ],
+        snapshots,
+        recordedTurnIndices: {
+          'prompt-101': 100,
+          'prompt-102': 101,
+          'prompt-103': 102,
+        },
+      });
+
+      await runRewind(target, 'conversation');
+
+      expect(harness.rewindRecording).toHaveBeenCalledWith(
+        101,
+        { truncatedCount: 2 },
+        [snapshots[0], snapshots[1]],
+      );
+    });
+
+    it('refuses duplicate target checkpoints before changing files or conversation', async () => {
+      const harness = renderRewindHarness({
+        snapshots: [{ promptId: 'prompt-2' }, { promptId: 'prompt-2' }],
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: This turn has no unique checkpoint association.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('refuses an unlinked checkpoint when a legacy target has no checkpoint', async () => {
+      const key = 'legacy-record:target';
+      const target: HistoryItem = {
+        id: 3,
+        type: 'user',
+        text: 'legacy target',
+        rewindId: key,
+      };
+      const harness = renderRewindHarness({
+        history: [
+          rewindUserItem(1, 'first prompt', 'prompt-1'),
+          { id: 2, type: 'gemini', text: 'first response' },
+          target,
+        ],
+        apiHistory: [
+          apiUser('first prompt', 'prompt-1'),
+          apiModel('first response'),
+          apiUser('legacy target', key),
+        ],
+        snapshots: [{ promptId: 'prompt-1' }, { promptId: 'unlinked' }],
+        recordedTurnIndices: { 'prompt-1': 0, [key]: 2 },
+      });
+
+      await runRewind(target, 'conversation');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: This turn has no unique checkpoint association.',
+        }),
+        expect.any(Number),
+      );
+    });
 
     it('refuses an unlinked recorded boundary before changing files or conversation', async () => {
       const harness = renderRewindHarness({ recordedTurnIndex: -1 });

@@ -2713,8 +2713,6 @@ const EN: Messages = {
   'rewind.confirm': 'Confirm rewind',
   'rewind.empty': 'No rewind snapshots are available for this session.',
   'rewind.failed': (v) => `Failed to rewind session: ${v?.reason ?? ''}`,
-  'rewind.identityUnavailable':
-    'This snapshot has no prompt identity to rewind to.',
   'rewind.loading': 'Loading rewind snapshots...',
   'rewind.promptFallback': (v) => `Prompt ${v?.id ?? ''}`,
   'rewind.rewinding': 'Rewinding...',
@@ -7049,7 +7047,6 @@ const ZH: Messages = {
   'rewind.confirm': '确认回退',
   'rewind.empty': '当前会话没有可回退的快照。',
   'rewind.failed': (v) => `回退会话失败：${v?.reason ?? ''}`,
-  'rewind.identityUnavailable': '该快照没有可回退的 prompt 身份。',
   'rewind.loading': '正在加载可回退的 prompt...',
   'rewind.promptFallback': (v) => `Prompt ${v?.id ?? ''}`,
   'rewind.rewinding': '回退中...',

@@ -21,15 +21,6 @@ import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreTo
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
-  buildSessionHistoryFromConversation,
-  cloneApiHistory,
-  findApiHistoryPromptIndex,
-  getApiHistoryPromptId,
-  getLastApiHistoryPromptId,
-  getLastApiPromptCancellation,
-  markApiHistoryPrompt,
-} from '@qwen-code/qwen-code-core/services/session-api-history.js';
-import {
   getTurnToolCallCapHalt,
   shouldRemindTurnToolCallCap,
 } from '@qwen-code/qwen-code-core/services/loopDetectionService.js';
@@ -177,6 +168,7 @@ import {
   resolveMainSessionOutputStyle,
   wrapSystemReminder,
   isSystemReminderContent,
+  findApiRewindCutPoint,
   countApiUserPrompts,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
@@ -306,6 +298,13 @@ import {
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  buildSessionHistoryFromConversation,
+  getLastApiHistoryPromptId,
+  getLastApiPromptCancellation,
+  markApiHistoryPrompt,
+  cloneApiHistory,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -616,20 +615,6 @@ const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
 const TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX =
   ' This is the final automatic continuation. Before ending, either complete/update the todos or report the completed progress and the exact blocker.';
-/**
- * Whether the entry is a tool-lap continuation: the turn's tool results being
- * sent back to the model. It belongs to the turn without starting it, so only
- * this shape may carry the turn's id without competing with the prompt entry
- * as the rewind anchor. A mid-turn takeover prompt has no `functionResponse`
- * and is answered inside the turn, so it is not a continuation here.
- */
-function isToolLapContinuation(message: Content | null): message is Content {
-  return (
-    message !== null &&
-    message.parts?.some((part) => 'functionResponse' in part) === true
-  );
-}
-
 // Content has no private metadata slot, so history cleanup recognizes only
 // these exact templates; byte-identical user text is intentionally ambiguous.
 function isTodoStopGuardPromptText(text: unknown): text is string {
@@ -2516,7 +2501,6 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
-  private readonly rewindDaemonPromptIds = new Map<string, string>();
   private codeModeNestedSequence = 0;
   private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
@@ -5213,7 +5197,6 @@ export class Session implements SessionContext {
   ): {
     targetTurnIndex: number;
     apiTruncateIndex: number;
-    daemonPromptId?: string;
   } {
     this.assertHistoryContextAvailable();
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
@@ -5233,27 +5216,17 @@ export class Session implements SessionContext {
     const llmClient = this.config.getLlmClient()!;
     const chat = llmClient.getChat();
     const apiHistory = chat.getHistoryShallow();
-    const snapshotsBeforeRewind = this.config
-      .getFileHistoryService()
-      .getSnapshots();
-    const promptId = snapshotsBeforeRewind[targetTurnIndex]?.promptId;
-    const apiTruncateIndex = promptId ? this.getRewindCutPoint(promptId) : -1;
-    const recorder = this.config.getChatRecordingService();
-    const recordingTurnIndex = promptId
-      ? (recorder?.getRewindTurnIndex(promptId) ?? -1)
-      : -1;
+    const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
+      apiHistory,
+      targetTurnIndex,
+    );
 
-    // `getRewindCutPoint` already returns -1 when the recorder cannot resolve
-    // this promptId, so a negative `recordingTurnIndex` never reaches here on
-    // its own.
-    if (!promptId || apiTruncateIndex < 0) {
+    if (apiTruncateIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
-        'Cannot rewind to the requested turn. It may have been compressed or does not exist, or its model-history identity is missing or ambiguous.',
+        'Cannot rewind to the requested turn. It may have been compressed or does not exist.',
       );
     }
-
-    const daemonPromptId = this.getRewindDaemonPromptId(promptId);
 
     llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
@@ -5282,46 +5255,39 @@ export class Session implements SessionContext {
     //
     // The file path keeps the target snapshot: the agent restores files by
     // promptId after this returns, so that snapshot must still be findable.
+    const snapshotsBeforeRewind = fileHistoryService.getSnapshots();
     const survivingSnapshots = rewindFiles
       ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
       : snapshotsBeforeRewind.slice(0, targetTurnIndex);
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     const approvalMode = this.config.getApprovalMode();
-    recorder?.rewindRecording(
-      recordingTurnIndex,
-      { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
-      survivingSnapshots,
-      {
-        mode: approvalMode,
-        ...(approvalMode === ApprovalMode.PLAN
-          ? {
-              prePlanMode: this.config.getPrePlanMode() ?? ApprovalMode.DEFAULT,
-              ...(this.config.getPlanExecutionMode?.()
-                ? { planExecutionMode: this.config.getPlanExecutionMode() }
-                : {}),
-            }
-          : {}),
-      },
-    );
+    this.config
+      .getChatRecordingService()
+      ?.rewindRecording(
+        targetTurnIndex,
+        { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
+        survivingSnapshots,
+        {
+          mode: approvalMode,
+          ...(approvalMode === ApprovalMode.PLAN
+            ? {
+                prePlanMode:
+                  this.config.getPrePlanMode() ?? ApprovalMode.DEFAULT,
+                ...(this.config.getPlanExecutionMode?.()
+                  ? { planExecutionMode: this.config.getPlanExecutionMode() }
+                  : {}),
+              }
+            : {}),
+        },
+      );
 
     if (shouldDrainAutomaticQueues) {
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
     }
 
-    return {
-      targetTurnIndex,
-      apiTruncateIndex,
-      ...(daemonPromptId ? { daemonPromptId } : {}),
-    };
-  }
-
-  getRewindDaemonPromptId(promptId: string): string | undefined {
-    const recorder = this.config.getChatRecordingService();
-    return recorder
-      ? recorder.getRewindDaemonPromptId(promptId)
-      : this.rewindDaemonPromptIds.get(promptId);
+    return { targetTurnIndex, apiTruncateIndex };
   }
 
   async deleteMessageGroups(request: { snapshot: string; groupIds: string[] }) {
@@ -5400,26 +5366,6 @@ export class Session implements SessionContext {
     return history;
   }
 
-  getRewindCutPoint(promptId: string): number {
-    const recorder = this.config.getChatRecordingService();
-    if (recorder && recorder.getRewindTurnIndex(promptId) < 0) return -1;
-    if (
-      this.config
-        .getFileHistoryService()
-        .getSnapshots()
-        .filter((snapshot) => snapshot.promptId === promptId).length > 1
-    )
-      return -1;
-    // Read-only resolve. The snapshot listing calls this once per row, and
-    // capturing here would overwrite the boundary `restoreHistory` compares.
-    const history = this.config.getLlmClient()!.getChat().getHistoryShallow();
-    return findApiHistoryPromptIndex(
-      history,
-      promptId,
-      getStartupContextLength(history, { includeCompressed: true }),
-    );
-  }
-
   getRewindableUserTurnCount(): number {
     return countApiUserPrompts(
       this.config.getLlmClient()!.getChat().getHistoryShallow(),
@@ -5436,22 +5382,9 @@ export class Session implements SessionContext {
     }
 
     const restored = cloneApiHistory(history);
-    history.forEach((content, index) => {
-      const { rewindId } = content as Content & { rewindId?: unknown };
-      if (rewindId === undefined) return;
-      const copy = restored[index] as
-        | (Content & { rewindId?: unknown })
-        | undefined;
-      if (!copy) return;
-      delete copy.rewindId;
-      markApiHistoryPrompt(copy, getApiHistoryPromptId(content) ?? rewindId);
-    });
-    // Hash `restored`, not `history`: the wire echo carries a string
-    // `rewindId` the captured boundary never had, and `restored` is the
-    // transport-stripped form that gets installed.
     if (
       this.historySnapshotBoundary?.hash ===
-      createHash('sha256').update(JSON.stringify(restored)).digest('hex')
+      createHash('sha256').update(JSON.stringify(history)).digest('hex')
     ) {
       markCompressedHistory(
         restored,
@@ -5465,6 +5398,17 @@ export class Session implements SessionContext {
     // of continuing work the restore removed.
     this.activeTodoWorkChainPromptId = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
+  }
+
+  #computeApiTruncationIndexForUserTurn(
+    apiHistory: Content[],
+    targetTurnIndex: number,
+  ): number {
+    return findApiRewindCutPoint(
+      apiHistory,
+      targetTurnIndex,
+      ACP_API_USER_PROMPT_OPTIONS,
+    );
   }
 
   #classifyPromptCancelAbortReason(requestedReason: string): string {
@@ -6993,12 +6937,7 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              strippedOrphanEntries =
-                this.config
-                  .getLlmClient()!
-                  .stripOrphanedUserEntriesFromHistory() ?? null;
-              orphanPushCountSnapshot =
-                this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
+              this.config.getLlmClient()!.stripOrphanedUserEntriesFromHistory();
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -7184,26 +7123,6 @@ export class Session implements SessionContext {
               !isContinue &&
               !isRestoreAskUserQuestion &&
               !isRuntimeContinuation;
-            const strippedPromptIds = (strippedOrphanEntries ?? [])
-              .map(getApiHistoryPromptId)
-              .filter((id) => id !== undefined);
-            // Only re-lend an id that no longer exists in the surviving
-            // history. A turn cancelled between tool laps leaves a
-            // continuation stamped with the same id as its surviving prompt
-            // entry; lending it again would mark a second entry and the
-            // unique-match resolver would then refuse the turn. The strip
-            // comes back in history order and the recorder keys the retried
-            // turn by its newest id, so only the last dead id is this turn's.
-            const survivingHistory = this.#getCurrentChat().getHistoryShallow();
-            const lastStrippedId = strippedPromptIds.at(-1);
-            const historyPromptId = isFreshUserTurn
-              ? promptId
-              : lastStrippedId !== undefined &&
-                  !survivingHistory.some(
-                    (entry) => getApiHistoryPromptId(entry) === lastStrippedId,
-                  )
-                ? lastStrippedId
-                : undefined;
             // Channel markers cover both automated and human messages. Keep
             // that class excluded until its producers distinguish them; see
             // docs/design/daemon-user-prompt-submit-provenance.md.
@@ -7333,23 +7252,6 @@ export class Session implements SessionContext {
                 }
               } catch (e) {
                 debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
-              }
-            }
-
-            if (
-              isFreshUserTurn &&
-              daemonPromptId &&
-              !this.config.getChatRecordingService()
-            ) {
-              this.rewindDaemonPromptIds.set(promptId, daemonPromptId);
-              const retainedIds = new Set(
-                this.config
-                  .getFileHistoryService()
-                  .getSnapshots()
-                  .map((snapshot) => snapshot.promptId),
-              );
-              for (const id of this.rewindDaemonPromptIds.keys()) {
-                if (!retainedIds.has(id)) this.rewindDaemonPromptIds.delete(id);
               }
             }
 
@@ -7501,18 +7403,7 @@ export class Session implements SessionContext {
               ]);
             }
 
-            // Mark unconditionally: a fresh turn's send-path mark
-            // (llm-chat.ts markApiHistoryPrompt) never runs when the turn
-            // is aborted or cancelled before the send, yet the loop-top
-            // abort and #preserveUnsentMessageHistory still push
-            // `nextMessage` into model history — unmarked, it would stay
-            // unrewindable for the rest of the session. markApiHistoryPrompt
-            // ignores non-string ids, so this cannot double-mark. A tool-lap
-            // continuation later carries the same id (the entry belongs to
-            // this turn), but only this prompt entry starts it, and the
-            // resolver treats that one as the turn's anchor.
             let nextMessage: Content | null = { role: 'user', parts };
-            markApiHistoryPrompt(nextMessage, historyPromptId);
             let turnCount = 0;
             let restorePostAnswerNoticesAttached = false;
             const toolLoopState = createDaemonToolLoopState(
@@ -7655,16 +7546,7 @@ export class Session implements SessionContext {
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
                   const chat = this.#getCurrentChat();
-                  // Take the turn id only on a tool-lap continuation: it is
-                  // the entry that belongs to this turn without starting it.
-                  // An unmarked prompt entry is either the prompt this turn
-                  // already marked above, or a mid-turn takeover input that
-                  // is answered inside this turn — stamping either with the
-                  // transport id would duplicate a turn's mark (and make it
-                  // unresolvable) or promote a takeover to a rewind anchor.
-                  if (isToolLapContinuation(nextMessage)) {
-                    markApiHistoryPrompt(nextMessage, responseCapture.turnId);
-                  }
+                  markApiHistoryPrompt(nextMessage, responseCapture.turnId);
                   chat.addHistory(nextMessage);
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
@@ -7729,12 +7611,11 @@ export class Session implements SessionContext {
                             (part) => part.functionResponse,
                           )
                             ? continuesCurrentWorkChain
-                              ? historyPromptId
+                              ? continuedPromptId
                               : promptId
                             : undefined,
                         consumeInitialMemory:
                           isFreshUserTurn && turnCount === 1,
-                        promptId: turnCount === 1 ? historyPromptId : undefined,
                       },
                     );
                   if (!sendResult.responseStream) {
@@ -7746,10 +7627,7 @@ export class Session implements SessionContext {
                     // user never got an answer to.
                     const preserveFullMessage =
                       isContinue || sendResult.stopReason === 'cancelled';
-                    if (
-                      preserveFullMessage &&
-                      isToolLapContinuation(nextMessage)
-                    ) {
+                    if (preserveFullMessage && nextMessage) {
                       markApiHistoryPrompt(nextMessage, responseCapture.turnId);
                     }
                     this.#preserveUnsentMessageHistory(
@@ -9697,7 +9575,6 @@ export class Session implements SessionContext {
         context: BeforeModelSendContext,
       ) => Promise<BeforeModelSendDecision>;
       consumeInitialMemory?: boolean;
-      promptId?: string;
     } = {},
   ): Promise<AutoCompressionSendResult> {
     const llmClient = this.config.getLlmClient()!;
@@ -9874,16 +9751,14 @@ export class Session implements SessionContext {
     const goalPermit = goalTurnContext.getStore();
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
-      const historyPromptId = options.historyPromptId ?? options.promptId;
-      sourceStream = await chat.sendMessageStream(
-        model,
-        request,
-        promptId,
-        goalPermit,
-        historyPromptId !== undefined
-          ? { promptId: historyPromptId }
-          : undefined,
-      );
+      sourceStream =
+        options.historyPromptId !== undefined
+          ? await chat.sendMessageStream(model, request, promptId, goalPermit, {
+              promptId: options.historyPromptId,
+            })
+          : goalPermit
+            ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+            : await chat.sendMessageStream(model, request, promptId);
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;

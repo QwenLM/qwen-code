@@ -3,10 +3,6 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
-import {
-  findDaemonRewindUserBlock,
-  isDaemonRewindUserBlock,
-} from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
@@ -21,6 +17,19 @@ interface RewindDialogProps {
   rewind: (promptId: string) => Promise<void>;
   onError: (error: unknown) => void;
   onClose: () => void;
+}
+
+function promptTextForTurn(
+  blocks: readonly DaemonTranscriptBlock[],
+  turnIndex: number,
+): string {
+  let userIndex = 0;
+  for (const block of blocks) {
+    if (block.kind !== 'user') continue;
+    if (userIndex === turnIndex) return block.text.trim();
+    userIndex += 1;
+  }
+  return '';
 }
 
 function formatSnapshotTime(timestamp: string): string {
@@ -70,45 +79,16 @@ export function RewindDialog({
     };
   }, [loadSnapshots, onError]);
 
-  const items = useMemo(() => {
-    // One pass each: the ordinal map is shared by every row (a per-snapshot
-    // rescan is quadratic in a long transcript), and the identity census makes
-    // duplicate detection a lookup instead of a nested filter.
-    const ordinals = new Map<DaemonTranscriptBlock, number>();
-    for (const block of blocks) {
-      if (isDaemonRewindUserBlock(block)) ordinals.set(block, ordinals.size);
-    }
-    const identityCounts = new Map<string, number>();
-    for (const snapshot of snapshots) {
-      const identity = snapshot.daemonPromptId;
-      if (identity !== undefined) {
-        identityCounts.set(identity, (identityCounts.get(identity) ?? 0) + 1);
-      }
-    }
-    return snapshots
-      .map((snapshot) => {
-        const identity = snapshot.daemonPromptId;
-        // A duplicated identity cannot be resolved to one turn, so both rows
-        // refuse rather than pointing at the same checkpoint twice.
-        const usable =
-          identity !== undefined && identityCounts.get(identity) === 1;
-        const block = usable
-          ? findDaemonRewindUserBlock(blocks, identity)
-          : undefined;
-        return {
+  const items = useMemo(
+    () =>
+      snapshots
+        .map((snapshot) => ({
           snapshot,
-          promptText: block?.text.trim() ?? '',
-          turnIndex: block ? ordinals.get(block) : undefined,
-          // The rewind itself carries only the prompt identity, so a turn
-          // outside the loaded transcript window stays targetable: the block
-          // lookup above supplies the preview text and the ordinal badge, not
-          // the permission. Only a snapshot with no usable identity is
-          // unavailable, and it says why.
-          available: usable,
-        };
-      })
-      .sort((a, b) => a.snapshot.turnIndex - b.snapshot.turnIndex);
-  }, [blocks, snapshots]);
+          promptText: promptTextForTurn(blocks, snapshot.turnIndex),
+        }))
+        .sort((a, b) => a.snapshot.turnIndex - b.snapshot.turnIndex),
+    [blocks, snapshots],
+  );
 
   // Keep the cursor in range as snapshots load / change.
   useEffect(() => {
@@ -122,12 +102,6 @@ export function RewindDialog({
 
   const handleRewind = (promptId: string | null) => {
     if (!promptId || rewindingPromptId) return;
-    if (
-      !items.some(
-        (item) => item.snapshot.promptId === promptId && item.available,
-      )
-    )
-      return;
     setRewindingPromptId(promptId);
     setMessage(null);
     rewind(promptId)
@@ -150,7 +124,7 @@ export function RewindDialog({
   // button, consistent with the other destructive dialogs (delete / release).
   const commitRow = (index: number) => {
     const item = items[index];
-    if (item?.available) {
+    if (item) {
       setCursorIdx(index);
       setSelectedPromptId(item.snapshot.promptId);
     }
@@ -201,35 +175,31 @@ export function RewindDialog({
           items.length > 0 ? optionId(cursorIdx) : undefined
         }
       >
-        {items.map(({ snapshot, promptText, turnIndex, available }, index) => {
+        {items.map(({ snapshot, promptText }, index) => {
           const isCursor = index === cursorIdx;
           const isSelected = selectedPromptId === snapshot.promptId;
           const label =
             promptText ||
-            (snapshot.daemonPromptId
-              ? t('rewind.promptFallback', {
-                  id: snapshot.promptId.slice(-8),
-                })
-              : t('rewind.identityUnavailable'));
+            t('rewind.promptFallback', {
+              id: snapshot.promptId.slice(-8),
+            });
           return (
             <div
               key={snapshot.promptId}
               id={optionId(index)}
               role="option"
               aria-selected={isSelected}
-              aria-disabled={isRewinding || !available || undefined}
+              aria-disabled={isRewinding || undefined}
               className={`${styles.item} ${isCursor ? styles.itemCursor : ''} ${
                 isSelected ? styles.itemSelected : ''
-              } ${isRewinding || !available ? styles.itemDisabled : ''}`}
+              } ${isRewinding ? styles.itemDisabled : ''}`}
               onClick={() => {
                 if (!isRewinding) commitRow(index);
               }}
               onMouseMove={() => setCursorIdx(index)}
             >
               <div className={styles.prompt} title={label}>
-                {turnIndex !== undefined && (
-                  <span className={styles.turn}>#{turnIndex + 1}</span>
-                )}{' '}
+                <span className={styles.turn}>#{snapshot.turnIndex + 1}</span>{' '}
                 {label}
               </div>
               <div className={styles.time}>
@@ -257,12 +227,7 @@ export function RewindDialog({
           type="button"
           className={`${dp('dialog-danger-button')} ${styles.dangerButton}`}
           onClick={() => handleRewind(selectedPromptId)}
-          disabled={
-            !items.some(
-              (item) =>
-                item.snapshot.promptId === selectedPromptId && item.available,
-            ) || rewindingPromptId !== null
-          }
+          disabled={!selectedPromptId || rewindingPromptId !== null}
         >
           {rewindingPromptId ? t('rewind.rewinding') : t('rewind.confirm')}
         </button>

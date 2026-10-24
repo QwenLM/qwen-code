@@ -207,7 +207,7 @@ export function isApiUserPrompt(
  *   only because nothing sits between the startup prelude and the first user
  *   prompt today.
  *
- * Live Ink and ACP resolve identities rather than using this walk.
+ * Live Ink resolves identities rather than using this walk.
  * `computeApiTruncationIndex` (`ui/utils/historyMapping.ts`) calls
  * `findApiHistoryPromptIndex`.
  */

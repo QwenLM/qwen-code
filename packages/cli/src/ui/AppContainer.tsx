@@ -26,6 +26,7 @@ import {
 } from './contexts/UIActionsContext.js';
 import { ConfigContext } from './contexts/ConfigContext.js';
 import type { Part } from '@google/genai';
+import type { FileHistorySnapshot } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import {
   type HistoryItem,
   type HistoryItemUser,
@@ -159,7 +160,6 @@ import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
   isRetainedUserTurn,
-  isRealUserTurn,
   isRewindableUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
@@ -4529,6 +4529,7 @@ export const AppContainer = (props: AppContainerProps) => {
         const recordingService = config.getChatRecordingService();
         let apiTruncateIndex = -1;
         let recordingTurnIndex = -1;
+        let survivingFileHistorySnapshots: FileHistorySnapshot[] | undefined;
         let conversationSkippedNoClient = false;
         if (needsConversation) {
           if (!llmClient) {
@@ -4593,6 +4594,43 @@ export const AppContainer = (props: AppContainerProps) => {
                 );
                 return;
               }
+              const snapshots = config.getFileHistoryService().getSnapshots();
+              const checkpointPromptId =
+                userItem.type === 'user' ? userItem.promptId : undefined;
+              const targetCheckpointIndex = checkpointPromptId
+                ? snapshots.findIndex((s) => s.promptId === checkpointPromptId)
+                : -1;
+              const snapshotTurnIndices =
+                targetCheckpointIndex < 0
+                  ? snapshots.map((s) =>
+                      recordingService.getRewindTurnIndex(s.promptId),
+                    )
+                  : [];
+              if (
+                (targetCheckpointIndex >= 0 &&
+                  snapshots.findLastIndex(
+                    (s) => s.promptId === checkpointPromptId,
+                  ) !== targetCheckpointIndex) ||
+                snapshotTurnIndices.some((index) => index < 0)
+              ) {
+                historyManager.addItem(
+                  {
+                    type: 'error',
+                    text: t('Rewind failed: {{error}}', {
+                      error: 'This turn has no unique checkpoint association.',
+                    }),
+                  },
+                  Date.now(),
+                );
+                return;
+              }
+              survivingFileHistorySnapshots =
+                targetCheckpointIndex >= 0
+                  ? snapshots.slice(0, targetCheckpointIndex + 1)
+                  : snapshots.filter(
+                      (_, index) =>
+                        snapshotTurnIndices[index]! <= recordingTurnIndex,
+                    );
             }
           }
         }
@@ -4661,12 +4699,6 @@ export const AppContainer = (props: AppContainerProps) => {
             ? originalHistory.length - 1
             : originalHistory.length;
 
-          let targetTurnIndex = 0;
-          for (const h of originalHistory) {
-            if (h.id === userItem.id) break;
-            if (isRealUserTurn(h)) targetTurnIndex++;
-          }
-
           llmClient.truncateHistory(apiTruncateIndex);
 
           // Strip suppressOnRestore flags and filter out collapse-summary items
@@ -4701,12 +4733,7 @@ export const AppContainer = (props: AppContainerProps) => {
           recordingService?.rewindRecording(
             recordingTurnIndex,
             { truncatedCount: effectiveLength - truncatedUi.length },
-            !hasRestoreFailure
-              ? config
-                  .getFileHistoryService()
-                  .getSnapshots()
-                  .slice(0, targetTurnIndex + 1)
-              : undefined,
+            !hasRestoreFailure ? survivingFileHistorySnapshots : undefined,
           );
         }
 

@@ -62,8 +62,8 @@ export function isRewindableUserTurn(item: HistoryItem): boolean {
  * Checks if a Content entry is a user-initiated text prompt
  * as opposed to a tool result (functionResponse).
  *
- * Kept for the dormant OpenTUI positional mapper. Live Ink and ACP rewind
- * resolve identities instead; content shape is not a turn identity.
+ * Kept for the dormant OpenTUI positional mapper. Live Ink rewind resolves
+ * identities instead; content shape is not a turn identity.
  */
 export function isUserTextContent(content: Content): boolean {
   return isApiUserPrompt(content, TUI_API_USER_PROMPT_OPTIONS);
