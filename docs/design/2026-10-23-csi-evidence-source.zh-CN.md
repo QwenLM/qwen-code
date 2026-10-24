@@ -6,7 +6,7 @@
 
 2026-10-24，运维方同意将完整 CSI 审计移出 [#13395](https://github.com/QwenLM/qwen-code/issues/13395) 首版前置条件。本文件沿用原路径并替代此前 P1 证据来源提案。[已发布的原提案](https://github.com/QwenLM/qwen-code/issues/13395#issuecomment-6363776281) 转为历史记录；原 P1 → P2 → P3 → P4 依赖链由下述交付计划替代。首版不再等待插件提供审计 hook。
 
-审计撤出时，未发布切片已恢复到其历史基准 `7ab5a95c61d5785ac66e50144e41ce29a7cf4cd5`。后续 S1 验收单独固定为 main `2c0c9fa8dc4a8ea5ec688060549e0ff0aed717b4`，文档分支在该版本上没有生产改动。本次范围调整不新增回收服务。平台托管回收、自动释放物理归属和跨 Workspace 卷交接仍是后续工作。范围调整不代表整个 issue 已通过验收。
+审计撤出时，未发布切片已恢复到其历史基准 `7ab5a95c61d5785ac66e50144e41ce29a7cf4cd5`。后续 S1 验收单独固定为 main `2c0c9fa8dc4a8ea5ec688060549e0ff0aed717b4`。文档分支没有新增生产改动；后续同步主干不会将原生验收结论扩展到已测版本之外。本次范围调整不新增回收服务。平台托管回收、自动释放物理归属和跨 Workspace 卷交接仍是后续工作。范围调整不代表整个 issue 已通过验收。
 
 ## 现有实现
 
@@ -33,7 +33,7 @@
 
 撤出本任务尚未提交的 `CsiEvidenceProtocol`、`CsiEvidenceStore` 及其 fixtures/tests，同时撤出 `CSI_EVIDENCE`/`CSI_EVIDENCE_PAGE` schema 和 operation kind、证据专属 retention 与 inventory 改动。对应 tracked Java/SQL/测试文件精确恢复到已核对基准。撤出文件和测试历史保存在本任务忽略目录快照中；此前测试描述被撤出的源码，不代表本版或平台资格验收。
 
-保留已有 `WORKSPACE_RETIREMENT`、`POD_DELETE_ATTEMPT`、私有 CSI 退役、runtime recovery、retention 和诊断 reader。不增加无消费者的 feature flag、来源配置或 ingress。最终交付只改变文档与计划，运行时代码和 schema 等于单独固定的 S1 main 版本。归档的撤出比较指向此前历史基准，不代表当前主干验收。
+保留已有 `WORKSPACE_RETIREMENT`、`POD_DELETE_ATTEMPT`、私有 CSI 退役、runtime recovery、retention 和诊断 reader。不增加无消费者的 feature flag、来源配置或 ingress。最终交付只改变文档与计划，运行时代码和 schema 相对文档分支的 main 基准保持不变。归档的撤出比较指向此前历史基准，不代表当前主干验收。
 
 ## 后续平台托管回收
 
@@ -58,7 +58,9 @@
 
 在 `2c0c9fa8dc4a8ea5ec688060549e0ff0aed717b4` 上的原生 S1 验收发现一项放置阻塞：某个常驻 binding 进入 `DRAINING` 后，同租户的新 Workspace 即使拥有不同的注册磁盘和存储身份，也可能因 `runtime_placement_recovery_required` 失败。放置围栏还会匹配共同的 `/workspace` 规范路径。已有的独立 binding 仍能继续使用，但这不能证明独立冷启动不受影响。在 [#13395](https://github.com/QwenLM/qwen-code/issues/13395) 中保留该失败；独立测试租户上的验收不能冲销它。S1 需要先解决并验证这一边界，才能通过验收。
 
-本次调整验证 Server 的 Java/SQL/测试与固定的 S1 main 版本一致，同时归档的撤出记录保留其历史基准比较；撤出源码和 evidence kind 不再有生产引用、双语内容一致，以及 Markdown 格式和相对引用。没有新增运行时行为，本次文档变更不需要新的 CLI、Maven 或 MySQL 测试作为证据。此前证据来源测试快照保留为历史。
+同一轮原生测试还发现第二项公开工具边界阻塞：实际模型 catalog 声明了 `web_fetch`，原 resident worker 却返回 HTTP 409 拒绝。没有注入响应故障，已 dispatch 的调用仍停在 SQL `UNKNOWN`，后续 Session 被 `workspace_busy` 拒绝。携带真实鉴权的探测确认同一原 worker 精确拒绝不支持的工具，前后 Read 均成功，但这不能证明公开 catalog 正确。S1 验收前需要让声明能力与 resident 准入一致，并验证已知不支持的调用不会卡住 Workspace。MCP catalog 和缺少 Hook catalog 的观察不代表有副作用的 MCP 或 Hook 执行通过验收。
+
+本次调整验证文档分支相对其 main 基准没有生产 Java/SQL/测试改动，同时保留精确的 S1 源码 pin 和归档撤出的历史比较；检查撤出源码和 evidence kind 不再有生产引用、双语内容一致，以及 Markdown 格式和相对引用。没有新增运行时行为，本次文档变更不需要新的 CLI、Maven 或 MySQL 测试作为证据。此前证据来源测试快照保留为历史。
 
 后续 S1/S2/S3 验收继续区分源码实现、定向测试、CI、原生 ACK 资格与生产就绪。此前在 `c61044fae46cfeed70b882140730c0caaa944524` 上的 ACK 测试覆盖同 Pod/PVC 文件交接和有界退役，不能验证新的源码版本或物理回收。先解决 S1 验收阻塞，再推进 S2 的完成/隔离契约；插件审计能力是否可用不再是前提。
 
