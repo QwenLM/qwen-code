@@ -8,7 +8,15 @@
 // a mocked `gh`. Remote matching is steered because `git remote -v` prints
 // the local path of the bare repository; lib/remote-match.test.ts covers it.
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  afterAll,
+  vi,
+} from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -17,10 +25,11 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  writeFileSync,
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const mocks = vi.hoisted(() => ({
   gh: vi.fn((..._args: string[]): string => ''),
@@ -68,7 +77,13 @@ import {
   runPrepare,
   type PrView,
 } from './prepare.js';
-import { autofixPrPaths, readState, writeState } from './state.js';
+import {
+  autofixPrPaths,
+  historyPath,
+  readState,
+  withWatchLock,
+  writeState,
+} from './state.js';
 
 function prView(overrides: Partial<PrView> = {}): PrView {
   return {
@@ -149,6 +164,20 @@ describe('eligibilityError', () => {
       eligibilityError(prView({ headRepository: null }), writable, 'me'),
     ).toMatch(/no longer exists/);
   });
+
+  it('refuses branch names git cannot take, or a base the brief cannot put in a command', () => {
+    expect(
+      eligibilityError(prView({ headRefName: 'a..b' }), writable, 'me'),
+    ).toMatch(/head branch "a\.\.b" is not a name/);
+    for (const base of ['main;id', 'rel$(id)', '-x']) {
+      expect(
+        eligibilityError(prView({ baseRefName: base }), writable, 'me'),
+      ).toMatch(/base branch .* cannot be named in a command/);
+    }
+    expect(
+      eligibilityError(prView({ baseRefName: 'release/2.0' }), writable, 'me'),
+    ).toBeNull();
+  });
 });
 
 describe('pushUrl', () => {
@@ -179,8 +208,19 @@ describe('runPrepare (real git)', () => {
   let savedSession: string | undefined;
   let savedHost: string | undefined;
 
+  // The runner may have no git identity of its own: a commit the test
+  // makes in a repository it configures none for (a submodule's checkout)
+  // takes this one, while a repository's own config still wins over it.
+  const gitHome = mkdtempSync(join(tmpdir(), 'autofix-git-'));
+  const gitConfig = join(gitHome, 'config');
+  writeFileSync(gitConfig, '[user]\n\tname = t\n\temail = t@example.com\n');
+  afterAll(() => rmSync(gitHome, { recursive: true, force: true }));
   const run = (cwd: string, ...args: string[]) =>
-    execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: gitConfig },
+    }).trim();
   const lastReport = () =>
     JSON.parse(mocks.stdout.mock.calls.at(-1)![0]) as Record<string, unknown>;
 
@@ -232,6 +272,48 @@ describe('runPrepare (real git)', () => {
     if (savedHost === undefined) delete process.env['GH_HOST'];
     else process.env['GH_HOST'] = savedHost;
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a remote whose name a command cannot carry, before creating anything', () => {
+    run(clone, 'remote', 'rename', 'origin', 'up$(id)');
+    mocks.matched.mockImplementation(() => ['up$(id)']);
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      /cannot be named in a command as it is/,
+    );
+    expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
+  });
+
+  it('starts one watch at a time: a second start waits for the lock', () => {
+    const paths = autofixPrPaths(clone, 7);
+    mkdirSync(dirname(paths.lockPath), { recursive: true });
+    withWatchLock(paths, 7, () => {
+      expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+        /another autofix-pr helper is working on PR #7/,
+      );
+    });
+    expect(existsSync(paths.worktreePath)).toBe(false);
+    expect(run(clone, 'branch', '--list', paths.branch)).toBe('');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(existsSync(paths.worktreePath)).toBe(true);
+  });
+
+  it('takes the worktree and branch back when a hook fails the worktree add', () => {
+    // A post-checkout hook that fails leaves the worktree made.
+    const hooks = join(dir, 'hooks');
+    mkdirSync(hooks);
+    writeFileSync(join(hooks, 'post-checkout'), '#!/bin/sh\nexit 1\n', {
+      mode: 0o755,
+    });
+    run(clone, 'config', 'core.hooksPath', hooks);
+    const paths = autofixPrPaths(clone, 7);
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow();
+    expect(existsSync(paths.worktreePath)).toBe(false);
+    expect(existsSync(paths.statePath)).toBe(false);
+    expect(run(clone, 'branch', '--list', paths.branch)).toBe('');
+    // With the hook fixed, the next prepare works.
+    run(clone, 'config', '--unset', 'core.hooksPath');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(run(paths.worktreePath, 'rev-parse', 'HEAD')).toBe(headSha);
   });
 
   it('creates a worktree at the PR head and records the state', () => {
@@ -418,11 +500,190 @@ describe('runPrepare (real git)', () => {
     execFileSync('git', ['worktree', 'remove', '--force', paths.worktreePath], {
       cwd: clone,
     });
-    writeState(paths.statePath, { ...state, handledCommentIds: ['C1'] });
+    const budgets = {
+      pendingPosts: [
+        { where: 101, handled: ['C3'], bodyHash: 'h', sha: headSha },
+      ],
+      deferredRuns: [60],
+      handledChecks: [`Test@${headSha}@#5`],
+      rerunChecks: [`run:1:2:push:Test@${headSha}`],
+      handledConflictSha: headSha,
+      pushCount: 4,
+      summarizedSha: headSha,
+    };
+    writeState(paths.statePath, {
+      ...state,
+      handledCommentIds: ['C1'],
+      ...budgets,
+    });
     runPrepare({ pr: 7, repo: 'o/r' });
     expect(existsSync(paths.worktreePath)).toBe(true);
-    expect(readState(paths.statePath)!.handledCommentIds).toEqual(['C1']);
+    // The history and the budgets survive: a removed worktree must not
+    // reset the push count or the re-runs already spent.
+    expect(readState(paths.statePath)).toMatchObject({
+      handledCommentIds: ['C1'],
+      ...budgets,
+    });
     expect(lastReport()).toMatchObject({ resumed: false });
+  });
+
+  it("reports whether the PR's author could push", () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    // The user's own PR.
+    expect(lastReport()).toMatchObject({ authorCanPush: true });
+    const paths = autofixPrPaths(clone, 7);
+    const restart = () => {
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', paths.worktreePath],
+        { cwd: clone },
+      );
+      execFileSync('git', ['branch', '-D', paths.branch], { cwd: clone });
+      rmSync(paths.statePath);
+    };
+    restart();
+    let permission = 'read';
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        return JSON.stringify(
+          prView({ headRefOid: headSha, author: { login: 'outsider' } }),
+        );
+      }
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      if (args[0] === 'api') {
+        expect(args[1]).toBe('repos/o/r/collaborators/outsider/permission');
+        return permission;
+      }
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ authorCanPush: false });
+    restart();
+    permission = 'write';
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ authorCanPush: true });
+  });
+
+  it('starts a new watch from what earlier watches of the PR posted and handled', () => {
+    const paths = autofixPrPaths(clone, 7);
+    mkdirSync(
+      dirname(
+        historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
+      ),
+      { recursive: true },
+    );
+    const history = {
+      version: 1,
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      handledCommentIds: ['C1'],
+      postedCommentIds: ['P1'],
+      handledChecks: [`Test@${headSha}@#5`],
+      rerunChecks: [`run:1:2:push:Test@${headSha}`],
+      handledConflictSha: headSha,
+      pendingPosts: [
+        { where: 101, handled: ['C2'], bodyHash: 'h', sha: headSha },
+      ],
+      deferredRuns: [50],
+    };
+    writeFileSync(
+      historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
+      JSON.stringify(history),
+    );
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(paths.statePath)).toMatchObject({
+      handledCommentIds: ['C1'],
+      postedCommentIds: ['P1'],
+      handledChecks: history.handledChecks,
+      rerunChecks: history.rerunChecks,
+      handledConflictSha: headSha,
+      pendingPosts: history.pendingPosts,
+      deferredRuns: [50],
+    });
+    // Not another repository's PR of the same number.
+    execFileSync('git', ['worktree', 'remove', '--force', paths.worktreePath], {
+      cwd: clone,
+    });
+    execFileSync('git', ['branch', '-D', paths.branch], { cwd: clone });
+    rmSync(paths.statePath);
+    writeFileSync(
+      historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
+      JSON.stringify({ ...history, owner: 'elsewhere' }),
+    );
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(paths.statePath)).toMatchObject({
+      handledCommentIds: [],
+      postedCommentIds: [],
+    });
+  });
+
+  it('fetches a PR whose submodule commit no remote has, without recursing into submodules', () => {
+    const sub = join(dir, 'sub');
+    run(dir, 'init', '-q', '-b', 'main', sub);
+    run(
+      sub,
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      's1',
+      '--author',
+      't <t@example.com>',
+    );
+    // The user's clone has the submodule checked out.
+    run(clone, 'config', 'user.email', 't@example.com');
+    run(clone, 'config', 'user.name', 't');
+    run(
+      clone,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'vendor/sub',
+    );
+    run(clone, 'commit', '-q', '-m', 'add sub');
+    run(
+      join(clone, 'vendor', 'sub'),
+      'config',
+      'protocol.file.allow',
+      'always',
+    );
+    // The PR records a submodule commit its author never pushed.
+    const src = join(dir, 'src');
+    run(
+      src,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'vendor/sub',
+    );
+    run(
+      src,
+      'update-index',
+      '--cacheinfo',
+      `160000,${'e'.repeat(40)},vendor/sub`,
+    );
+    run(src, 'commit', '-q', '-m', 'bump to an unpushed commit');
+    const prHead = run(src, 'rev-parse', 'HEAD');
+    run(src, 'push', '-q', join(dir, 'bare.git'), `+HEAD:refs/pull/7/head`);
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr')
+        return JSON.stringify(prView({ headRefOid: prHead }));
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    expect(run(paths.worktreePath, 'rev-parse', 'HEAD')).toBe(prHead);
   });
 
   it('recreates a worktree deleted with rm -rf', () => {
@@ -488,6 +749,59 @@ describe('runPrepare (real git)', () => {
     expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
       /watched by another session \(session-a\)/,
     );
+  });
+
+  it('hands a watch to this session with --take-over, keeping what it recorded', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      handledCommentIds: ['C1'],
+      pushCount: 3,
+    });
+    // A /clear started a new session.
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    runPrepare({ pr: 7, repo: 'o/r', takeOver: true });
+    expect(lastReport()).toMatchObject({ resumed: true, tookOver: true });
+    expect(readState(paths.statePath)).toMatchObject({
+      sessionId: 'session-b',
+      handledCommentIds: ['C1'],
+      pushCount: 3,
+    });
+    // The session it was taken from is refused now.
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      /watched by another session \(session-b\)/,
+    );
+    // Another repository's PR of the same number is never taken over.
+    expect(() => runPrepare({ pr: 7, repo: 'x/r', takeOver: true })).toThrow(
+      /is a watch of/,
+    );
+  });
+
+  it('reads the watch again under its lock, so a take-over meanwhile stands', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    // The worktree is gone, so prepare goes on to make it again.
+    run(clone, 'worktree', 'remove', '--force', paths.worktreePath);
+    const answer = mocks.gh.getMockImplementation()!;
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        // Another session takes the watch over while this one reads the PR.
+        writeState(paths.statePath, {
+          ...readState(paths.statePath)!,
+          sessionId: 'session-b',
+        });
+      }
+      return answer(...args);
+    });
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      /watched by another session \(session-b\)/,
+    );
+    expect(readState(paths.statePath)).toMatchObject({
+      sessionId: 'session-b',
+    });
+    expect(existsSync(paths.worktreePath)).toBe(false);
   });
 
   it('refuses when no single remote serves the repository', () => {
