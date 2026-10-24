@@ -38,12 +38,12 @@ The Phase-2 facts table (probed 2026-08-13 against maxcompute/odps_src with
 a1 v0.1.90) already covers everything this phase reads, plus the a1 command
 surface re-checked 2026-08-21 via help (no auth needed):
 
-| Need               | a1 surface                                                                                                                                            | Notes                                                                                                       |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| MR metadata        | `a1 repo mr view <id> -f json` → `title, description, state, sourceBranch (head SHA under AGit-Flow), targetBranch, author, detailUrl`                | no additions/deletions stats — the context header degrades                                                  |
-| All comments       | `a1 repo mr comment list --mr <id> -f json [--sort asc]` → `id, note, author, closed, outdated, path, line, side, parentNoteId, isAiComment, isDraft` | one flat collection; `path` present ⇔ inline; NO pagination flags (full list returned); default sort `desc` |
-| Reviews / verdicts | none — no review object exists on Aone                                                                                                                | approvals surface only through `mr status` checks                                                           |
-| Current user       | `a1 auth whoami -f json` → `account`                                                                                                                  |                                                                                                             |
+| Need               | a1 surface                                                                                                                                            | Notes                                                                                                        |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| MR metadata        | `a1 repo mr view <id> -f json` → `title, description, state, sourceBranch, targetBranch, author, detailUrl`                                           | `sourceBranch` is a full SHA under AGit-Flow and a branch name otherwise; no separate head SHA or diff stats |
+| All comments       | `a1 repo mr comment list --mr <id> -f json [--sort asc]` → `id, note, author, closed, outdated, path, line, side, parentNoteId, isAiComment, isDraft` | one flat collection; `path` present ⇔ inline; NO pagination flags (full list returned); default sort `desc`  |
+| Reviews / verdicts | none — no review object exists on Aone                                                                                                                | approvals surface only through `mr status` checks                                                            |
+| Current user       | `a1 auth whoami -f json` → `account`                                                                                                                  |                                                                                                              |
 
 Probe-pending shapes RESOLVED 2026-08-21 against live MRs once a1 auth was
 restored:
@@ -57,11 +57,12 @@ restored:
 - The comment envelope also carries `updatedAt`, `adopted`, `labels` —
   unread.
 
-One NEW gap surfaced by the same E2E (filed as #9620, pre-existing, out of
-this phase's scope): `mr view` carries NO head-SHA field, and
-`sourceBranch` is a branch NAME on branch-based (non-AGit-Flow) MRs — the
-provider's sourceBranch-as-SHA assumption (facts table, submit's drift gate,
-`meta`'s headSha) only holds under AGit-Flow.
+One gap surfaced by the same E2E: `mr view` carries no separate head-SHA
+field, and `sourceBranch` is a branch name on branch-based MRs. Resolved for
+#9620: the provider now resolves the exact MR-head ref only from a verified
+target clone. Clone-less context keeps the branch name but renders the SHA as
+unavailable; safety and write paths fail closed if a known branch cannot be
+resolved.
 
 ## Design decisions
 
@@ -109,7 +110,7 @@ interface ReviewContext {
   authorLogin: string;
   state: string;
   baseRefName: string;
-  headRefName: string; // branch name (GitHub); Aone: sourceBranch — a bare SHA under AGit-Flow
+  headRefName: string; // branch name; under AGit-Flow, Aone's sourceBranch is a bare SHA
   headRefOid: string;
   additions?: number; // absent where the platform reports no stats
   deletions?: number;
@@ -167,12 +168,12 @@ One flat comment collection serves three GitHub channels:
 ### D3 — Metadata mapping
 
 From `mr view`: `title`, `description` → body, `author` → authorLogin,
-`state` passthrough, `targetBranch` → baseRefName, `sourceBranch` →
-headRefOid (it IS the head SHA under AGit-Flow). `headRefName` =
-`sourceBranch` as well: under AGit-Flow that string is the head SHA, and
-rendering `master ← <sha>` in the context header is truthful and
-informative; a non-AGit-Flow MR's real branch name renders the same way
-GitHub's does. Diff stats have no Aone source: the header line degrades to
+`state` passthrough, `targetBranch` → baseRefName, and trimmed `sourceBranch`
+→ headRefName. A full 40-hex `sourceBranch` also supplies headRefOid directly.
+For a branch name, headRefOid comes from
+`refs/merge-requests/<global-id>/head` only when the cwd `origin` is verified
+against the MR's full repository path; otherwise it is unavailable. Diff
+stats have no Aone source: the header line degrades to
 "not reported by the platform" instead of printing zeros (zeros would assert
 an empty diff). pr-context does not compute them locally — the worktree
 belongs to fetch-pr, and duplicating its merge-base arithmetic here would be
@@ -274,7 +275,7 @@ forced-cap pins flip to parity pins.
    un-paginated JSON payload; the 64 MiB aone-client bound covers it, but a
    monster thread's context file crosses the read_file threshold — the
    existing size warning + paging guidance already handles that shape.
-3. Branch-based (non-AGit-Flow) MRs carry a branch NAME in `sourceBranch`
-   and `mr view` exposes no head-SHA field — the provider's
-   sourceBranch-as-SHA assumption breaks on them (submit's drift gate then
-   refuses every post). Pre-existing, filed as #9620, out of this phase.
+3. ~~Branch-based MRs carry a branch name in `sourceBranch`, so the provider
+   cannot treat it as the head SHA.~~ Resolved for #9620 by verified clone-side
+   MR-ref resolution, honest clone-less degradation, and fail-closed safety
+   consumers.
