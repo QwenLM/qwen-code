@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { homedir } from 'node:os';
 import {
   extractShellOperations,
   extractShellOperationsAcrossCommand,
@@ -583,6 +584,174 @@ describe('extractShellOperationsAcrossCommand', () => {
     ],
   ])('%s', (_title, command, expected) => {
     expect(across(command)).toEqual(expected);
+  });
+
+  // A bare `cd` goes to bash's `$HOME`, which the analyzer reads from its own
+  // environment. Once the command reassigns HOME, that reading is no longer
+  // what bash expands, so the target must stay unknown instead of certifying
+  // the analyzer's HOME (#14095 R3-7). The analyzer's HOME is pinned so the
+  // assertions do not depend on the machine running the suite.
+  it('forfeits the analyzer HOME for a bare `cd` after the command reassigns it', () => {
+    const previous = process.env['HOME'];
+    process.env['HOME'] = '/home/tester';
+    try {
+      expect(
+        across('export HOME=/tmp/attacker && cd && echo {} > settings.json'),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      expect(
+        across('HOME=/tmp/attacker ; cd ; echo {} > settings.json'),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      expect(across('unset HOME && cd && echo {} > settings.json')).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+      // `unset -v` is the documented way to unset a variable, and `unset`
+      // clears every listed name, not just the first argument.
+      expect(across('unset -v HOME && cd && echo {} > settings.json')).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+      expect(across('unset FOO HOME ; cd ; echo {} > settings.json')).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+      // `HOME+=…` appends, so it changes the value just like `HOME=…`.
+      expect(across('HOME+=/.qwen ; cd ; echo {} > settings.json')).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+      // `~` and `~/…` expand `HOME` too, so a reassignment makes them unknown.
+      expect(
+        across('export HOME=/tmp/attacker && cd ~ && echo {} > settings.json'),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      expect(
+        across(
+          'export HOME=/tmp/attacker && cd ~/work && echo {} > settings.json',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // `~` in a redirect expands the same reassigned value, with no `cd` at
+      // all: the resolved `$HOME/settings.json` is not what bash writes.
+      expect(
+        across('export HOME=/tmp/attacker ; echo {} > ~/settings.json'),
+      ).toEqual([
+        uncertainWrite(`${homedir().replace(/\\/g, '/')}/settings.json`),
+      ]);
+      // The latch must survive the shell-wrapper unwrap, which recurses with
+      // the HOME state as a positional argument.
+      expect(
+        across(
+          "export HOME=/tmp/attacker && bash -lc 'cd && echo {} > settings.json'",
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+    } finally {
+      if (previous === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = previous;
+    }
+  });
+
+  // The latch is applied in segment order: a reassignment in a *later* segment
+  // must not reach back and turn an earlier, properly resolved `cd` dynamic.
+  it('does not apply a later HOME reassignment to an earlier bare `cd`', () => {
+    const previous = process.env['HOME'];
+    process.env['HOME'] = '/home/tester';
+    try {
+      expect(
+        across('cd ; export HOME=/tmp/attacker ; echo {} > settings.json'),
+      ).toEqual([write('/home/tester/settings.json')]);
+    } finally {
+      if (previous === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = previous;
+    }
+  });
+
+  // Over-correction guard: a form that does *not* leave the shell's HOME
+  // changed must keep the bare `cd` statically known, or a hard `deny` on the
+  // analyzer's HOME would be downgraded to a confirmation prompt. Each command
+  // below reuses `HOME=`/`HOME` in a position where bash leaves the parent's
+  // value alone, so a latch here shows up as an uncertain write.
+  it('keeps a bare `cd` static for HOME forms that do not persist', () => {
+    const previous = process.env['HOME'];
+    process.env['HOME'] = '/home/tester';
+    try {
+      // A `HOME=`-shaped argument is not an assignment at all.
+      expect(
+        across('git commit -m HOME=x && cd && echo {} > settings.json'),
+      ).toEqual([write('/home/tester/settings.json')]);
+      expect(
+        across('echo HOME=/tmp/attacker ; cd ; echo {} > settings.json'),
+      ).toEqual([write('/home/tester/settings.json')]);
+      expect(
+        across("echo 'HOME=/tmp/attacker' ; cd ; echo {} > settings.json"),
+      ).toEqual([write('/home/tester/settings.json')]);
+      expect(across('echo "HOME=/tmp" && cd && make > build.log')).toEqual([
+        write('/home/tester/build.log'),
+      ]);
+      // Command-scoped prefixes and `env HOME=` apply to one command only.
+      expect(
+        across('HOME=/tmp/fake npm test && cd && echo {} > settings.json'),
+      ).toEqual([write('/home/tester/settings.json')]);
+      expect(
+        across(
+          'env HOME=/tmp/app node build.js && cd && echo {} > settings.json',
+        ),
+      ).toEqual([write('/home/tester/settings.json')]);
+      // Backgrounded assignments run in a subshell.
+      expect(across('HOME=/x sleep 1 & cd && echo {} > settings.json')).toEqual(
+        [write('/home/tester/settings.json')],
+      );
+      expect(
+        across('(export HOME=/tmp/attacker) ; cd ; echo {} > settings.json'),
+      ).toEqual([write('/home/tester/settings.json')]);
+      // A builtin name in argument position is not the command: bash runs
+      // `echo` here, so the parent's HOME keeps its value.
+      expect(
+        across('echo unset HOME && cd && echo {} > settings.json'),
+      ).toEqual([write('/home/tester/settings.json')]);
+      // Every element of a pipeline is a subshell, so an `export` there never
+      // reaches the shell that runs the following `cd`.
+      expect(
+        across(
+          'export HOME=/tmp/attacker | cat ; cd && echo {} > settings.json',
+        ),
+      ).toEqual([write('/home/tester/settings.json')]);
+    } finally {
+      if (previous === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = previous;
+    }
+  });
+
+  // A `HOME` prefix on the `cd` itself is scoped to that builtin, so bash
+  // changes directory against the prefixed value, not the analyzer's HOME.
+  it('resolves a `cd` prefixed with its own HOME assignment as unknown', () => {
+    const previous = process.env['HOME'];
+    process.env['HOME'] = '/home/tester';
+    try {
+      expect(across('HOME=/repo/.qwen cd && echo {} > settings.json')).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+      // A prefix on an earlier command does not carry over to the bare `cd`.
+      expect(
+        across('HOME=/repo/.qwen npm test ; cd ; echo {} > settings.json'),
+      ).toEqual([write('/home/tester/settings.json')]);
+    } finally {
+      if (previous === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = previous;
+    }
+  });
+
+  // Over-correction guard: with no reassignment the bare `cd` still resolves to
+  // the analyzer's HOME, so ordinary `cd && …` stays statically known.
+  it('still resolves a bare `cd` to the analyzer HOME when nothing reassigns it', () => {
+    const previous = process.env['HOME'];
+    process.env['HOME'] = '/home/tester';
+    try {
+      expect(across('cd && echo {} > settings.json')).toEqual([
+        write('/home/tester/settings.json'),
+      ]);
+      // `export HOME` without a value does not change it.
+      expect(across('export HOME && cd && echo {} > settings.json')).toEqual([
+        write('/home/tester/settings.json'),
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = previous;
+    }
   });
 
   // A backgrounded `cd` runs in a subshell, so the parent's cwd is untouched
