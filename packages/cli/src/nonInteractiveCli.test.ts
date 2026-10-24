@@ -20,7 +20,7 @@ import type {
   SessionMetrics,
   WorkflowApprovalRequestCallback,
 } from '@qwen-code/qwen-code-core';
-import type { CLIUserMessage } from './nonInteractive/types.js';
+import type { CLIMessage, CLIUserMessage } from './nonInteractive/types.js';
 import {
   executeToolCall,
   isTelemetrySdkInitialized,
@@ -58,6 +58,7 @@ import {
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { EventEmitter } from 'node:events';
@@ -91,6 +92,7 @@ import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import type { ICommandLoader } from './services/types.js';
 import {
   _resetCleanupFunctionsForTest,
+  registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
@@ -526,6 +528,343 @@ describe('runNonInteractive', () => {
       yield event;
     }
   }
+
+  describe('output token limits', () => {
+    const finished = (reason?: FinishReason): ServerLlmStreamEvent => ({
+      type: LlmEventType.Finished,
+      value: { reason, usageMetadata: { totalTokenCount: 10 } },
+    });
+
+    function readMessages(format: OutputFormat): CLIMessage[] {
+      const stdout = processStdoutSpy.mock.calls
+        .map(([text]) => String(text))
+        .join('');
+      return format === OutputFormat.JSON
+        ? JSON.parse(stdout)
+        : stdout
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line));
+    }
+
+    function queueDrainTurn(): void {
+      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+        cb?.('Monitor ready', '<task-notification>ready</task-notification>', {
+          monitorId: 'mon_output_limit',
+          toolUseId: 'tool_monitor',
+          status: 'running',
+          eventCount: 1,
+        });
+      });
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([finished(FinishReason.STOP)]),
+      );
+    }
+
+    beforeEach(() => setupMetricsMock());
+
+    it.each(
+      [OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON].flatMap(
+        (format) => [
+          { format, text: '', reason: FinishReason.MAX_TOKENS, exitCode: 1 },
+          {
+            format,
+            text: 'Unfinished answer',
+            reason: FinishReason.MAX_TOKENS,
+            exitCode: 1,
+          },
+          {
+            format,
+            text: 'Complete answer without tools',
+            reason: FinishReason.STOP,
+            exitCode: 0,
+          },
+        ],
+      ),
+    )(
+      'reports $reason for "$text" in $format',
+      async ({ format, text, reason, exitCode }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            text
+              ? { type: LlmEventType.Content, value: text }
+              : {
+                  type: LlmEventType.Thought,
+                  value: {
+                    subject: 'Thinking',
+                    description: 'Still reasoning',
+                  },
+                },
+            finished(reason),
+          ]),
+        );
+
+        await expect(
+          runNonInteractive(mockConfig, mockSettings, 'test', 'output-limit'),
+        ).resolves.toBe(exitCode);
+        expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+        expect(process.exit).not.toHaveBeenCalled();
+        if (format === OutputFormat.TEXT) {
+          if (exitCode === 1) {
+            expect(processStderrSpy).toHaveBeenCalledExactlyOnceWith(
+              'Response truncated due to token limits.\n',
+            );
+          } else {
+            expect(processStdoutSpy).toHaveBeenCalledWith(`${text}\n`);
+            expect(processStderrSpy).not.toHaveBeenCalled();
+          }
+          return;
+        }
+        const messages = readMessages(format);
+        const results = messages.filter((message) => message.type === 'result');
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject(
+          exitCode === 1
+            ? {
+                is_error: true,
+                subtype: 'error_during_execution',
+                error: { message: 'Response truncated due to token limits.' },
+              }
+            : { is_error: false, result: text },
+        );
+        if (text) {
+          expect(messages).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: 'assistant',
+                message: expect.objectContaining({
+                  content: expect.arrayContaining([{ type: 'text', text }]),
+                }),
+              }),
+            ]),
+          );
+        }
+      },
+    );
+
+    it('reports a truncated monitor drain instead of the successful main turn', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
+      queueDrainTurn();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Partial monitor response' },
+          finished(FinishReason.MAX_TOKENS),
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'drain-output-limit',
+        ),
+      ).resolves.toBe(1);
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      const messages = readMessages(OutputFormat.STREAM_JSON);
+      expect(messages.filter((message) => message.type === 'result')).toEqual([
+        expect.objectContaining({ is_error: true }),
+      ]);
+      const streamEvents = messages.flatMap((message) =>
+        message.type === 'stream_event' ? [message.event.type] : [],
+      );
+      expect(
+        streamEvents.filter((type) => type === 'message_start').length,
+      ).toBe(streamEvents.filter((type) => type === 'message_stop').length);
+    });
+
+    it.each([
+      { restart: 'retry', drain: false, reason: FinishReason.STOP },
+      { restart: 'continuation', drain: false, reason: undefined },
+      { restart: 'fallback', drain: false, reason: FinishReason.STOP },
+      { restart: 'retry', drain: true, reason: undefined },
+      { restart: 'continuation', drain: true, reason: FinishReason.STOP },
+      { restart: 'fallback', drain: true, reason: undefined },
+    ])(
+      'accepts recovery through $restart (drain=$drain, reason=$reason)',
+      async ({ restart, drain, reason }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        if (drain) queueDrainTurn();
+        const restartEvent: ServerLlmStreamEvent =
+          restart === 'fallback'
+            ? {
+                type: LlmEventType.ModelFallback,
+                fromModel: 'primary',
+                toModel: 'fallback',
+                fallbackIndex: 0,
+              }
+            : {
+                type: LlmEventType.Retry,
+                isContinuation: restart === 'continuation',
+              };
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Partial ' },
+            finished(FinishReason.MAX_TOKENS),
+            restartEvent,
+            { type: LlmEventType.Content, value: 'recovered answer' },
+            ...(reason ? [finished(reason)] : []),
+          ]),
+        );
+
+        await expect(
+          runNonInteractive(
+            mockConfig,
+            mockSettings,
+            'test',
+            'recovered-limit',
+          ),
+        ).resolves.toBe(0);
+
+        const messages = readMessages(OutputFormat.STREAM_JSON);
+        expect(messages.filter((message) => message.type === 'result')).toEqual(
+          [
+            expect.objectContaining({
+              is_error: false,
+              result:
+                restart === 'continuation'
+                  ? 'Partial recovered answer'
+                  : 'recovered answer',
+            }),
+          ],
+        );
+        const lastAssistant = messages.findLast(
+          (message) => message.type === 'assistant',
+        );
+        expect(lastAssistant?.message.stop_reason).not.toBe('max_tokens');
+      },
+    );
+
+    it.each([false, true])(
+      'lets truncated tools receive recovery feedback before finishing (drain=%s)',
+      async (drain) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.JSON,
+        );
+        if (drain) queueDrainTurn();
+        const request: ToolCallRequestInfo = {
+          callId: 'truncated-tool',
+          name: 'test-tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'tool-output-limit',
+          wasOutputTruncated: true,
+        };
+        const responseParts: Part[] = [
+          {
+            functionResponse: {
+              id: request.callId,
+              name: request.name,
+              response: { error: 'Arguments were truncated; retry the call.' },
+            },
+          },
+        ];
+        mockCoreExecuteToolCall.mockResolvedValueOnce({
+          callId: request.callId,
+          responseParts,
+          resultDisplay: 'Arguments were truncated; retry the call.',
+          error: new Error('Arguments were truncated; retry the call.'),
+          errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        });
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents([
+              { type: LlmEventType.ToolCallRequest, value: request },
+              finished(FinishReason.MAX_TOKENS),
+            ]),
+          )
+          .mockReturnValueOnce(
+            createStreamFromEvents([
+              { type: LlmEventType.Content, value: 'Recovered after feedback' },
+              finished(FinishReason.STOP),
+            ]),
+          );
+
+        await expect(
+          runNonInteractive(
+            mockConfig,
+            mockSettings,
+            'test',
+            'tool-output-limit',
+          ),
+        ).resolves.toBe(0);
+
+        expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+        expect(mockCoreExecuteToolCall.mock.calls[0][1]).toBe(request);
+        expect(mockLlmClient.sendMessageStream).toHaveBeenLastCalledWith(
+          expect.arrayContaining(responseParts),
+          expect.any(AbortSignal),
+          expect.any(String),
+          expect.objectContaining({ type: SendMessageType.ToolResult }),
+        );
+        expect(
+          readMessages(OutputFormat.JSON).filter(
+            (message) => message.type === 'result',
+          ),
+        ).toEqual([expect.objectContaining({ is_error: false })]);
+      },
+    );
+
+    it('keeps a shared stream-json session usable after a truncated turn', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      const sessionCleanup = vi.fn();
+      registerCleanup(sessionCleanup);
+      const adapter = new StreamJsonOutputAdapter(mockConfig);
+      const options = {
+        adapter,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+        recoverableCancellation: true,
+      };
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Incomplete first response' },
+            finished(FinishReason.MAX_TOKENS),
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Second response' },
+            finished(FinishReason.STOP),
+          ]),
+        );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'first', 'first', options),
+      ).resolves.toBe(1);
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'second',
+          'second',
+          options,
+        ),
+      ).resolves.toBe(0);
+
+      expect(sessionCleanup).not.toHaveBeenCalled();
+      expect(process.exit).not.toHaveBeenCalled();
+      expect(mockMonitorRegistry.abortAll).not.toHaveBeenCalled();
+      expect(
+        readMessages(OutputFormat.STREAM_JSON).filter(
+          (message) => message.type === 'result',
+        ),
+      ).toEqual([
+        expect.objectContaining({ is_error: true }),
+        expect.objectContaining({ is_error: false, result: 'Second response' }),
+      ]);
+    });
+  });
 
   it.each([false, true])(
     'scopes review lease cleanup to the ordinary runtime (sandbox=%s)',

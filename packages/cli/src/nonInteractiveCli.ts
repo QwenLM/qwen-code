@@ -89,6 +89,7 @@ import {
   buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
 import type { JsonOutputAdapterInterface } from './nonInteractive/io/BaseJsonOutputAdapter.js';
 import { JsonOutputAdapter } from './nonInteractive/io/JsonOutputAdapter.js';
@@ -120,6 +121,13 @@ export class TurnInterruptedError extends Error {
   constructor() {
     super('Operation cancelled.');
     this.name = 'TurnInterruptedError';
+  }
+}
+
+class OutputTruncatedError extends Error {
+  constructor() {
+    super('Response truncated due to token limits.');
+    this.name = 'OutputTruncatedError';
   }
 }
 
@@ -2562,6 +2570,7 @@ export async function runNonInteractive(
         );
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
+        let finishReason: FinishReason | undefined;
         const attemptPreviewLength = plainTextPreview.length;
         const apiStartTime = Date.now();
         const responseStream = llmClient.sendMessageStream(
@@ -2627,6 +2636,14 @@ export async function runNonInteractive(
         adapter.startAssistantMessage();
 
         for await (const event of responseStream) {
+          if (event.type === LlmEventType.Finished) {
+            finishReason = event.value.reason;
+          } else if (
+            event.type === LlmEventType.Retry ||
+            event.type === LlmEventType.ModelFallback
+          ) {
+            finishReason = undefined;
+          }
           captureActiveInteractionOwner();
           if (abortController.signal.aborted) {
             // Pair the startAssistantMessage() above so stream-json mode
@@ -2690,6 +2707,15 @@ export async function runNonInteractive(
 
         if (loopDetected) {
           return emitLoopDetectedResult();
+        }
+
+        // Core may recover from MAX_TOKENS within the same stream. Pending
+        // tool calls also retain their existing scheduler recovery path.
+        if (
+          finishReason === FinishReason.MAX_TOKENS &&
+          toolCallRequests.length === 0
+        ) {
+          throw new OutputTruncatedError();
         }
 
         let shouldFinalizeTurn = toolCallRequests.length === 0;
@@ -2952,8 +2978,17 @@ export async function runNonInteractive(
               itemIsFirstTurn = false;
 
               adapter.startAssistantMessage();
+              let finishReason: FinishReason | undefined;
 
               for await (const event of itemStream) {
+                if (event.type === LlmEventType.Finished) {
+                  finishReason = event.value.reason;
+                } else if (
+                  event.type === LlmEventType.Retry ||
+                  event.type === LlmEventType.ModelFallback
+                ) {
+                  finishReason = undefined;
+                }
                 captureActiveInteractionOwner();
                 if (abortController.signal.aborted) {
                   // Pair the startAssistantMessage() above so stream-json
@@ -3016,6 +3051,13 @@ export async function runNonInteractive(
 
               if (loopDetected) {
                 return;
+              }
+
+              if (
+                finishReason === FinishReason.MAX_TOKENS &&
+                itemToolCallRequests.length === 0
+              ) {
+                throw new OutputTruncatedError();
               }
 
               if (itemToolCallRequests.length > 0) {
@@ -3084,11 +3126,10 @@ export async function runNonInteractive(
                 if (structuredSubmission !== undefined) return;
                 await drainBatch();
               }
-            })();
-            drainPromise = p;
-            void p.finally(() => {
+            })().finally(() => {
               if (drainPromise === p) drainPromise = null;
             });
+            drainPromise = p;
             return p;
           };
 
@@ -3439,6 +3480,10 @@ export async function runNonInteractive(
       }
       if (recoverableCancellation) {
         return 130;
+      }
+      if (error instanceof OutputTruncatedError) {
+        // Reusable stream-json sessions own process-wide cleanup and exit.
+        return 1;
       }
       await handleError(error, config);
     } finally {
