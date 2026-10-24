@@ -203,6 +203,42 @@ describe('batch-client', () => {
     ]);
   });
 
+  it('publishes a complete download without leaving a partial file', async () => {
+    const content = Buffer.from(
+      '{"custom_id":"0","text":"完整结果"}\n{"custom_id":"1"}\n',
+    );
+    // 58 bytes with the midpoint at 29 — that lands inside 整 (E6 95 B4 at
+    // bytes 28-30), so the first chunk ends mid-codepoint. That split is this
+    // case's whole point: a per-chunk text decode would corrupt 完整结果
+    // instead of reassembling it, and no other assertion here would notice.
+    const midpoint = Math.floor(content.length / 2);
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(content.subarray(0, midpoint));
+            controller.enqueue(content.subarray(midpoint));
+            controller.close();
+          },
+        }),
+      ),
+    );
+
+    const target = path.join(dir, 'output.jsonl');
+    await downloadRemoteFile(ep, 'out', target);
+
+    expect(fs.readFileSync(target)).toEqual(content);
+    // The route is the only place a wrong URL still downloads *something*:
+    // `/files/out` returns metadata, which parses as JSON and would ship an
+    // envelope instead of the paid results.
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://x/v1/files/out/content',
+    ]);
+    // Directory contents rather than `${target}.part`: a staging-suffix rename
+    // would silently turn a name-based check into a no-op.
+    expect(fs.readdirSync(dir)).toEqual(['output.jsonl']);
+  });
+
   it('leaves nothing under the final name when a download is cut short', async () => {
     // A truncated body written straight to the target looks complete: its
     // last line is still valid JSON, so a short paid result reads as whole.
