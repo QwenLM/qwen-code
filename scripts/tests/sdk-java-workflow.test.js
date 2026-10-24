@@ -142,15 +142,18 @@ describe('SDK Java self-hosted workflow guards', () => {
     // class puts this tier's ticket ahead of waiting full-tier tickets, so
     // the pin is the sourced helper, its budget, and the tier argument. The
     // acquisition only gates the best-effort write-back, so its timeout is
-    // rewritten to a non-fatal warning below.
+    // rewritten to a non-fatal warning below. The 9600 s budget is headroom
+    // for chained write-back holds; no constant budget bounds the queue
+    // (#14566, #15031), and run 39754359013 burned the old 5400 s behind the
+    // MariaDB lane's verify hold, a shape #15128 removed.
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    expect(block).toContain('sdk_java_lock_acquire 5400 "${TIER}"');
+    expect(block).toContain('sdk_java_lock_acquire 9600 "${TIER}"');
     // release-sdk-java.yml resumes an existing tag by checking out that
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.
-    expect(block).toContain('flock --wait 5400 9');
+    expect(block).toContain('flock --wait 9600 9');
     expect(block).toContain('::warning::sdk-java host lock wait exhausted');
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -1860,9 +1863,11 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(step.run).toContain('::warning::sdk-java host lock wait exhausted');
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
     // The fast tier owns the same lock: it overtakes this job only while
-    // this ticket still waits, then waits out its hold, so one acquisition
-    // budget applies to every lane; run 39229303984 died at the old
-    // 60-minute wait before Maven started.
+    // this ticket still waits, then waits out its hold. This write-back
+    // keeps the shorter budget because its hold is the bounded copy and it
+    // waits after the ~3-hour verify; the sibling test lane carries the
+    // longer budget pinned below. Run 39229303984 died at the old 60-minute
+    // wait before Maven started.
     expect(seconds).toBe(90 * 60);
     // This site stays in the normal class: a tier argument here would put
     // full-tier MariaDB holds ahead of fast PR-feedback work.
@@ -1913,19 +1918,25 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + writeBackBound + 30 * 60);
-    // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait, the unlocked 925 s suite (the sdk-java suite plus
-    // the managed-agent H2 suite), its own 300 s write-back backstop and
-    // ~11 minutes of setup.
+    // The sibling test job shares the same per-host lock but carries a longer
+    // budget, because a waiting test leg can queue behind several holds. Its
+    // ceiling must cover that full wait plus the unlocked 925 s suite (the
+    // sdk-java suite plus the managed-agent H2 suite), its own 300 s
+    // write-back backstop and ~11 minutes of setup.
     const testStep = parsed.jobs.test.steps.find((candidate) =>
       candidate.run?.includes('sdk-java-tests.lock'),
     );
+    const testBudget = Number(
+      testStep.run.match(/sdk_java_lock_acquire (\d+) "\$\{TIER\}"/)?.[1],
+    );
+    expect(testBudget).toBe(9600);
+    expect(testBudget).toBeGreaterThan(seconds);
     const testWriteBackBound = Number(
       testStep.run.match(/timeout (\d+) find \. /)?.[1],
     );
     expect(testWriteBackBound).toBe(300);
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      seconds + 925 + testWriteBackBound + 11 * 60,
+      testBudget + 925 + testWriteBackBound + 11 * 60,
     );
   });
 

@@ -15,6 +15,7 @@ import {
   RELAUNCH_SUPERVISED_ENV,
   NPM_RUNTIME_CONTEXT,
 } from '../utils/env-provenance.js';
+import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
 export { PRIVATE_RELAUNCH_ENV_PROVENANCE };
 
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
@@ -263,6 +264,16 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // operator set in the daemon's launch env still apply.
   'QWEN_CDP_MCP_COMMAND',
   'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
+  // The serve daemon bearer token, resolved from --token, the operator's
+  // exported environment, or — only on a non-loopback bind with neither
+  // source present — a generated ephemeral bearer. A project `.env`,
+  // `.qwen/.env`, or workspace settings.env supplying it would let a cloned
+  // repository preset the daemon credential for the operator who launches
+  // `qwen serve` there; the full loader already rejects the key on the reload
+  // tier, and the fast path must not be a second, weaker entry point. The
+  // operator channels (export/--token) and home-scoped `.env` files are
+  // unaffected; settings.env is rejected at every scope.
+  'QWEN_SERVER_TOKEN',
   // QWEN_SERVE_NEW_FILE_MODE decides the creation mode of every agent-written
   // NEW file (owner-only 0600 vs umask-derived). A project `.env` flipping it
   // to `system` would silently widen file visibility daemon-wide — including
@@ -296,6 +307,13 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // piped, one-shot run exit as if its supervisor had gone.
   RELAUNCH_SUPERVISED_ENV,
   NPM_RUNTIME_CONTEXT,
+  // Where a `/verify-pr --publish` round publishes its evidence. A project
+  // `.env` or settings.env is repository-controlled, so letting either fill
+  // these would send a maintainer's screenshots to a fork the operator did
+  // not choose. The launch environment, a home `.env`, or the operator-scope
+  // `verifyPr.*` settings may supply them. Derived from the coordinate map so
+  // a coordinate added there is gated here without a second edit.
+  ...Object.values(VERIFY_PR_COORDINATE_ENV),
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
