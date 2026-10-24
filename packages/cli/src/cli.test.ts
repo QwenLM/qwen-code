@@ -46,6 +46,8 @@ const mocks = vi.hoisted(() => ({
   initCpuProfiler: vi.fn(),
   mcpHandler: vi.fn(),
   mcpBuilder: vi.fn(),
+  memoryHandler: vi.fn(),
+  memoryImportHandler: vi.fn(),
   mcpListHandler: vi.fn(),
   mcpAddHandler: vi.fn(),
   mcpRemoveHandler: vi.fn(),
@@ -130,6 +132,24 @@ vi.mock('./commands/mcp.js', () => ({
         .demandCommand(1, 'You need at least one command before continuing.');
     },
     handler: mocks.mcpHandler,
+  },
+}));
+
+vi.mock('./commands/memory.js', () => ({
+  memoryCommand: {
+    command: 'memory',
+    describe: 'Preview and import external memories',
+    builder: (yargs: Argv) =>
+      yargs
+        .command({
+          command: 'import codex',
+          describe:
+            'Preview Codex memory; explicitly confirm selected sections to consolidate',
+          handler: mocks.memoryImportHandler,
+        })
+        .demandCommand(1, 'You need at least one command before continuing.')
+        .version(false),
+    handler: mocks.memoryHandler,
   },
 }));
 
@@ -1046,6 +1066,47 @@ describe('runCliEntry', () => {
     expect(mocks.main).not.toHaveBeenCalled();
   });
 
+  it('prints memory help to stdout and exits 0 when no subcommand is given', async () => {
+    await runCliEntry(['memory']);
+
+    expect(stdout.join('')).toContain('Usage: qwen memory <command>');
+    expect(stdout.join('')).toContain('qwen memory import codex');
+    expect(stderr.join('')).toBe('');
+    expect(process.exitCode).toBeUndefined();
+    expect(mocks.memoryHandler).not.toHaveBeenCalled();
+    expect(mocks.memoryImportHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints memory help for the -h alias without loading the full CLI', async () => {
+    await runCliEntry(['memory', '-h']);
+
+    expect(stdout.join('')).toContain('Usage: qwen memory <command>');
+    expect(stderr.join('')).toBe('');
+    expect(process.exitCode).toBeUndefined();
+    expect(mocks.memoryHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('executes memory subcommands through the fast path', async () => {
+    await runCliEntry(['memory', 'import', 'codex']);
+
+    expect(mocks.memoryImportHandler).toHaveBeenCalledTimes(1);
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
+    expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('does not treat an option-shifted memory argv as a bare help request', async () => {
+    await runCliEntry(['memory', '--json', 'import', 'codex']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stdout.join('')).not.toContain('Usage: qwen memory <command>');
+    expect(stderr.join('')).toContain('Unknown command: codex');
+    expect(mocks.memoryImportHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
   it('prints the version instead of executing mcp remove on version argv', async () => {
     await runCliEntry(['mcp', 'remove', 'victim', '-v']);
 
@@ -1324,6 +1385,7 @@ describe('bootstrap import boundaries', () => {
     expect(source).toContain('function isInProcessFastPath()');
     expect(source).toContain("first === 'serve'");
     expect(source).toContain("first === 'mcp'");
+    expect(source).toContain("first === 'memory'");
     expect(source).toContain("hasFlag('--help', '-h')");
     expect(source).toContain("hasFlag('--version', '-v')");
     expect(source).toContain('UPDATE_COMPLETE_EXIT_CODE = 44');
@@ -1840,6 +1902,8 @@ describe('bootstrap import boundaries', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
       ['agentsCommand', 'agents'],
+      ['attachCommand', 'attach'],
+      ['autofixPrCommand', 'autofix-pr'],
       ['authCommand', 'auth'],
       ['batchCommand', 'batch'],
       ['boardCommand', 'board'],
@@ -1848,6 +1912,7 @@ describe('bootstrap import boundaries', () => {
       ['extensionsCommand', 'extensions'],
       ['hooksCommand', 'hooks'],
       ['mcpCommand', 'mcp'],
+      ['memoryCommand', 'memory'],
       ['reviewCommand', 'review'],
       ['sandboxCommand', 'sandbox'],
       ['serveCommand', 'serve'],

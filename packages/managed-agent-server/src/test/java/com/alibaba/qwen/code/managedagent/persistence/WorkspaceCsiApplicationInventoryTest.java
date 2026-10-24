@@ -770,7 +770,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(32);
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(743);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(747);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -866,13 +866,19 @@ class WorkspaceCsiApplicationInventoryTest {
         var owner = before.table("ma_session").rows().getFirst();
         assertThat(owner.cell("selected_approval_mode").isNull()).isTrue();
         assertThat(owner.number("approval_revision")).isZero();
+        assertThat(owner.cell("permission_rules_json").isNull()).isTrue();
         assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
         jdbc.update("UPDATE ma_session SET selected_approval_mode = 'auto-edit', approval_revision = 2");
         jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
                 + "status,gmt_create,gmt_modified,approval_mode,approval_revision)"
                 + " VALUES ('tenant',?,'turn','prompt','[]','digest','COMPLETED',1,1,'default',3)", session);
+        String rules = "{\"allow\":[\"Read\"],\"ask\":[],\"deny\":[]}";
+        jdbc.update("UPDATE ma_session SET permission_rules_json = ?", rules);
+        jdbc.update("UPDATE ma_turn SET permission_rules_json = ?", rules);
         var after = inspect();
         assertThat(after.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
+        assertThat(after.table("ma_session").rows().getFirst().text("permission_rules_json")).isEqualTo(rules);
+        assertThat(after.table("ma_turn").rows().getFirst().text("permission_rules_json")).isEqualTo(rules);
         assertThat(after.table("ma_session").rows().getFirst().text("selected_approval_mode")).isEqualTo("auto-edit");
         assertThat(after.table("ma_session").rows().getFirst().number("approval_revision")).isEqualTo(2);
         assertThat(after.table("ma_turn").rows().getFirst().text("approval_mode")).isEqualTo("default");

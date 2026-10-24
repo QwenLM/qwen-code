@@ -20,6 +20,8 @@ Project complete recorded rows through the existing projector. Keep their origin
 
 Both renderers use the existing shared rewind transaction for API history, visible history and file rollback. A real builtin slash rewind can open its selector during its own artificial command-responding state; unrelated model, shell or replacement-command ownership cannot borrow that exception. Preserve prompt identities, code/conversation/both choices, file failures and stale successor checks.
 
+Preserve main's source-identity rewind contract when sharing the transaction: resolve the recorded boundary independently through `promptId` or the conversation-only `rewindId`, and retain checkpoint snapshots by their actual association rather than visible row counts. Refuse missing recorded boundaries or ambiguous checkpoint associations before changing files or conversation. Recording-disabled sessions retain conversation rewind; a recovered legacy identity never authorizes file restore. Native rewind carries that recovered key through its existing canonical history row, and both selectors offer only identity-backed turns. This carries the existing upstream fix into the extracted transaction rather than introducing another rewind authority.
+
 OpenTUI owns the selector's actual available region. Resize, tiny regions and labels too narrow to identify an action cannot commit an invisible target. Keep pending restore single-owner and preserve the draft only while the committed rewind remains current. Restored image and typed-file display use the original user form and saved model context rather than re-reading changed files.
 
 ## Ordinary native journal
