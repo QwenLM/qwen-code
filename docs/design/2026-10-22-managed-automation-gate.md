@@ -286,8 +286,8 @@ api graphql` with the worker's environment.
   its cursor, so a PR too big to read in 20 s fails every slot the same way (a
   `gate_failed` streak) without losing events. These times depend on the
   Runtime host's path to GitHub: a separate check from a workstation measured
-  the merged PR below at 9–10 s a quiet run through a proxy and 21–29 s over a
-  direct connection, past the limit.
+  a quiet run on the merged PR below at 9–10 s through a proxy and 21–29 s
+  over a direct connection, past the limit.
 - **Output that drains over several fires.** A probe holds a run to a 12 KiB
   budget, inside the 16 KiB cap (§4.3), and leaves what does not fit for the
   next fire. Each of those fires is a turn. The first fire on a PR reports
