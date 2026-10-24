@@ -73,9 +73,18 @@ export function resolveAttachToken(
         'listener identity unverified; not sending an ambient bearer token. Pass --token to use an explicit token.',
     };
   }
-  const token =
-    process.env['QWEN_SERVER_TOKEN']?.trim() ||
-    readDaemonToken(record.port, record.pid);
+  let token: string | undefined;
+  try {
+    token =
+      process.env['QWEN_SERVER_TOKEN']?.trim() ||
+      readDaemonToken(record.port, record.pid);
+  } catch (error) {
+    return {
+      error: `could not read the daemon token: ${formatAttachError(
+        error instanceof Error ? error.message : String(error),
+      )}`,
+    };
+  }
   return token
     ? { token }
     : {
@@ -95,6 +104,13 @@ export function resolveAttachWorkspace(
 
 async function handleAttach(argv: AttachArgs): Promise<void> {
   ignoreBrokenPipe();
+  let shuttingDown = false;
+  const earlyShutdown = (): void => {
+    shuttingDown = true;
+    process.exitCode = 130;
+  };
+  process.once('SIGINT', earlyShutdown);
+  process.once('SIGTERM', earlyShutdown);
   const target = selectAttachRecord(readDaemonDiscoveries().entries, argv.port);
   if (!target.record) {
     writeStderrLine(`qwen attach: ${formatAttachError(target.error ?? '')}`);
@@ -132,6 +148,11 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
       )}${workspaceHint}`,
     );
     process.exitCode = 1;
+    return;
+  }
+
+  if (shuttingDown) {
+    await session.detach().catch(() => {});
     return;
   }
 
@@ -188,8 +209,13 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   }
   endLine();
 
+  if (shuttingDown) {
+    await session.detach().catch(() => {});
+    return;
+  }
+
   const subscriptionAbort = new AbortController();
-  let shuttingDown = false;
+  let shutdownStarted = false;
   const iterator = session.events({ signal: subscriptionAbort.signal });
   const eventsDone = (async () => {
     try {
@@ -225,7 +251,8 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     if (!terminalClosed && promptInFlight === 0) rl.prompt();
   };
   const shutdown = (): void => {
-    if (shuttingDown) return;
+    if (shutdownStarted) return;
+    shutdownStarted = true;
     shuttingDown = true;
     terminalClosed = true;
     subscriptionAbort.abort();
@@ -236,6 +263,9 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   rl.on('close', shutdown);
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
+  process.removeListener('SIGINT', earlyShutdown);
+  process.removeListener('SIGTERM', earlyShutdown);
+  if (shuttingDown) shutdown();
   rl.on('line', (line) => {
     atLineStart = true;
     const text = line.trim();
@@ -269,9 +299,12 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   try {
     await eventsDone;
   } finally {
+    shutdownStarted = true;
     shuttingDown = true;
     terminalClosed = true;
     subscriptionAbort.abort();
+    process.removeListener('SIGINT', earlyShutdown);
+    process.removeListener('SIGTERM', earlyShutdown);
     process.removeListener('SIGINT', shutdown);
     process.removeListener('SIGTERM', shutdown);
     rl.close();
