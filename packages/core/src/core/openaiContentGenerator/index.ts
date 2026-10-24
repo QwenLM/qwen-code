@@ -17,6 +17,7 @@ import {
   ModelScopeOpenAICompatibleProvider,
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
+  OllamaOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
   CerebrasOpenAICompatibleProvider,
   FireworksOpenAICompatibleProvider,
@@ -103,6 +104,11 @@ export function determineProvider(
       contentGeneratorConfig,
       cliConfig,
     );
+  }
+
+  // Check for Ollama provider
+  if (OllamaOpenAICompatibleProvider.isOllamaProvider(config)) {
+    return new OllamaOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
   }
 
   // Check for Mistral provider
