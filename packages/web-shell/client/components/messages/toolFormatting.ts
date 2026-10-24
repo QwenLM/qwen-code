@@ -205,6 +205,92 @@ export function truncateText(text: string, max: number): string {
   return text.slice(0, max) + '...';
 }
 
+/** Longest payload stretch a transcript card renders before "Show more". */
+export const MAX_TOOL_PAYLOAD_LENGTH = 4000;
+
+/** Ceiling after "Show more", matching the trajectory inspector. */
+export const EXPANDED_TOOL_PAYLOAD_LENGTH = 40_000;
+
+export function stringifyValue(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  const text = typeof value === 'string' ? value : safeJson(value);
+  return text.trim();
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Pretty-prints a JSON object or array for display. Anything else — plain
+ * text, a primitive, an already truncated document, JSON Lines — is returned
+ * unchanged so the caller can fall back to text; JSON Lines are re-indented
+ * per line but stay plain text because they are not one JSON document.
+ *
+ * Numbers that JSON.parse cannot round-trip (beyond 2^53 or non-finite) keep
+ * the payload unformatted rather than silently changing the recorded values.
+ */
+export function formatJsonPayload(text: string): {
+  text: string;
+  json: boolean;
+} {
+  const trimmed = text.trim();
+  if (!trimmed) return { text, json: false };
+
+  const document = formatJsonDocument(trimmed);
+  if (document !== undefined) return { text: document, json: true };
+
+  const lines = trimmed.split(/\r?\n/);
+  if (lines.length > 1) {
+    const formatted = lines.map((line) => {
+      const entry = line.trim();
+      return entry ? formatJsonDocument(entry) : '';
+    });
+    if (formatted.every((entry) => entry !== undefined)) {
+      return { text: formatted.join('\n'), json: false };
+    }
+  }
+
+  return { text, json: false };
+}
+
+function formatJsonDocument(text: string): string | undefined {
+  if (!/^[[{]/.test(text)) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (value === null || typeof value !== 'object') return undefined;
+  if (containsUnsafeNumber(value)) return undefined;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return undefined;
+  }
+}
+
+function containsUnsafeNumber(root: unknown): boolean {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) return true;
+      if (Number.isInteger(value) && !Number.isSafeInteger(value)) return true;
+    } else if (Array.isArray(value)) {
+      for (const entry of value) stack.push(entry);
+    } else if (value !== null && typeof value === 'object') {
+      for (const entry of Object.values(value)) stack.push(entry);
+    }
+  }
+  return false;
+}
+
 // The tool-header description is shown single-line (CSS-ellipsised) when the
 // row is collapsed and fully wrapped when it is expanded, so we keep the whole
 // string rather than hard-capping it at a line's worth of characters. A
