@@ -47,7 +47,7 @@ import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import {
   createUserPromptSubmitContextPart,
   hasUserPromptSubmitContext,
-} from '@qwen-code/qwen-code-core/userPromptSubmitContext';
+} from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';

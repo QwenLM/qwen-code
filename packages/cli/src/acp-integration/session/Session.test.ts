@@ -60,7 +60,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
-import { createUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/userPromptSubmitContext';
+import { createUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
 import {
   getApiHistoryPromptId,
   markApiHistoryPrompt,
