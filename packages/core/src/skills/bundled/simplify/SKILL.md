@@ -13,6 +13,8 @@ allowedTools:
 
 # Simplify Recent Changes
 
+Search compatibility: when `glob` and `grep_search` are not exposed, use read-only `run_shell_command` calls with `rg --files` and `rg` instead.
+
 You are running a structured cleanup workflow over recent code changes. Your goal is not just to comment on the code, but to safely improve it.
 
 ## Step 1: Identify the review scope
