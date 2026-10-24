@@ -37144,7 +37144,11 @@ describe('sessionLanguage multi-session propagation', () => {
   });
 
   it('adds and removes a workspace directory across live sessions and settings', async () => {
-    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ws-dirs-'));
+    // Canonicalize the temp root: macOS `os.tmpdir()` returns `/var/...` while
+    // the handler resolves entries through `realpath` (`/private/var/...`).
+    const scratch = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ws-dirs-')),
+    );
     const workspaceRoot = path.join(scratch, 'ws');
     const extra = path.join(scratch, 'extra');
     await fs.mkdir(workspaceRoot);

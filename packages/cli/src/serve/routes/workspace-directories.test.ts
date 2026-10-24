@@ -16,7 +16,11 @@ let scratch: string;
 let workspace: string;
 
 beforeEach(async () => {
-  scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-ws-dirs-'));
+  // Canonicalize the temp root: macOS `os.tmpdir()` returns `/var/...` while
+  // the route resolves entries through `realpath` (`/private/var/...`).
+  scratch = await fsp.realpath(
+    await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-ws-dirs-')),
+  );
   workspace = path.join(scratch, 'ws');
   await fsp.mkdir(workspace);
 });
