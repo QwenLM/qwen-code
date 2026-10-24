@@ -21,6 +21,7 @@ const SETTING_KEYS = {
   'setting:review-approach-rounds': 'review.approachRounds',
   'setting:timestamps': 'output.showTimestamps',
   'setting:theme': 'ui.theme',
+  'setting:loading-phrases': 'ui.accessibility.enableLoadingPhrases',
   'setting:workflow-keyword-trigger': 'ui.disableWorkflowKeywordTrigger',
   'setting:status-in-title': 'ui.showStatusInTitle',
   'setting:response-speed': 'ui.showResponseTokensPerSecond',
