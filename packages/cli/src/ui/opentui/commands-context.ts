@@ -97,6 +97,7 @@ export interface OpenTuiCommandServices {
   config: Config | null;
   settings: LoadedSettings;
   logger: Logger | null;
+  onInputProcessed?: () => void;
   extensionRefreshState?: ExtensionRefreshState;
 }
 
