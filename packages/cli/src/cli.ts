@@ -50,6 +50,10 @@ type BootstrapRoute =
 export const TOP_LEVEL_COMMANDS = [
   ['agents <command>', 'Session agents: join a coordinator as a runtime'],
   [
+    'attach --session <session-id>',
+    'Attach a terminal to a running daemon session',
+  ],
+  [
     'autofix-pr <command>',
     'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, cleanup)',
   ],
