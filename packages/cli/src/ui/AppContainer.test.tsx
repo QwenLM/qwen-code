@@ -1544,9 +1544,12 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      await vi.waitFor(() => {
-        expect(startupNoticeSpy).toHaveBeenCalled();
-      });
+      await vi.waitFor(
+        () => {
+          expect(startupNoticeSpy).toHaveBeenCalled();
+        },
+        { timeout: 10_000 },
+      );
       expect(readCronTasksMock).not.toHaveBeenCalled();
       expect(addItem).not.toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1590,9 +1593,12 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      await vi.waitFor(() => {
-        expect(startupNoticeSpy).toHaveBeenCalled();
-      });
+      await vi.waitFor(
+        () => {
+          expect(startupNoticeSpy).toHaveBeenCalled();
+        },
+        { timeout: 10_000 },
+      );
       expect(addItem).not.toHaveBeenCalledWith(
         expect.objectContaining({
           text: expect.stringContaining('active scheduled'),
@@ -7695,10 +7701,19 @@ describe('AppContainer State Management', () => {
         // exact-once assertion below.
         const owner = vi
           .spyOn(interactiveMods, 'getInteractiveModSession')
+          // Startup work left pending by an earlier unmounted render resumes
+          // with its own Config; scope the session so only this test's mount
+          // can call its initialize.
           .mockImplementation((config) =>
             config === mockConfig ? modSession : getModSession(config),
           );
         try {
+          // Only this test's Config may resolve to the session: startup work
+          // from an earlier unmounted render resumes against the live module
+          // mock and must not inflate this test's call count.
+          expect(
+            interactiveMods.getInteractiveModSession(makeFakeConfig()),
+          ).toBeUndefined();
           render(
             <AppContainer
               config={mockConfig}

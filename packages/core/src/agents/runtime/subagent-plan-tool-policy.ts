@@ -5,6 +5,7 @@
  */
 
 import { ToolNames } from '../../tools/tool-names.js';
+import { ToolMode } from '../../tools/code-mode.js';
 import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
 import type { ToolConfig } from './agent-types.js';
@@ -82,6 +83,49 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.MANAGE_MEMORY,
 ]);
 
+type AgentSkillContext = Pick<
+  Config,
+  'getToolMode' | 'getToolRegistry' | 'getVisibleTools'
+>;
+
+export function isAgentSkillEagerHidden(
+  context: AgentSkillContext,
+  registryWillBeRebuilt = false,
+): boolean {
+  const registry = context.getToolRegistry?.();
+  // Lazy factories may not have a Tool instance yet. Registry rebuilds copy
+  // discovery metadata, but deliberately leave transient reveals behind.
+  return (
+    context.getToolMode?.() === ToolMode.CodeMode &&
+    registry?.isPermissionDeferred?.(ToolNames.SKILL) === true &&
+    !context.getVisibleTools?.().has(ToolNames.SKILL) &&
+    (registryWillBeRebuilt ||
+      registry?.isDeferredToolRevealed?.(ToolNames.SKILL) !== true)
+  );
+}
+
+export function hasAgentSkillExecBinding(
+  context: AgentSkillContext,
+  registryWillBeRebuilt = false,
+): boolean {
+  const mode = context.getToolMode?.();
+  // The exec route needs exec itself registered, in either code mode: a deny
+  // rule or a legacy coreTools allowlist can keep it out of the registry
+  // while the mode alone still answers code_mode_only. Read registration
+  // metadata (getAllToolNames counts an unwarmed lazy factory), not
+  // isDeferredAndHidden — callers run before prepareTools()'s warmAll().
+  if (
+    !context.getToolRegistry?.()?.getAllToolNames().includes(ToolNames.EXEC)
+  ) {
+    return false;
+  }
+  return (
+    mode === ToolMode.CodeModeOnly ||
+    (mode === ToolMode.CodeMode &&
+      !isAgentSkillEagerHidden(context, registryWillBeRebuilt))
+  );
+}
+
 /**
  * Whether an agent running with `toolConfig` is declared the Skill tool.
  *
@@ -96,25 +140,28 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * listing and the pointer cannot disagree about whether a skill can actually
  * be loaded — the disagreement #12424 reports.
  *
- * Tool mode is an input; registry state deliberately is not. A
- * `permissions.deny` or `excludeTools` entry is a registry property, and
- * `resolveBundledReferenceRoute` answers the route from it. The per-agent
- * policy is the one input that resolver cannot see (#12424).
+ * Callers supply whether exec bindings are reachable in the current mode and
+ * registry, and whether the Skill factory is registered there at all. A
+ * finite list naming exec can therefore reach Skill without naming it
+ * directly. CodeModeOnly retains eager-deferred nested targets;
+ * The eager-hidden input vetoes every route in Hybrid, including wildcards
+ * and explicit Skill entries. Other permission bounds stay in prepareTools().
+ * Registry deny/exclude rules remain the bundled-reference resolver's concern;
+ * this predicate supplies the per-agent policy that resolver cannot see.
  *
- * Of the two `ToolMode.CodeModeOnly` arms, this predicate covers the `exec`
- * gateway: `prepareTools()` additionally admits every `code-mode-callable`
- * registry tool when the configured names include `exec`
- * (`inheritsCodeModeBindings`, `agent-core.ts`), and `getToolExposure(SKILL)`
- * is `code-mode-callable` because SKILL is in neither `HIDDEN_TOOLS` nor
- * `DIRECT_ONLY_TOOLS`. So an agent whose finite list names `exec` but not
- * `skill` reaches the Skill tool, and callers must pass the mode — with it
- * omitted this answers `false` for that shape, which would withhold the manager
- * and, through the `config.ts` registration guard, the Skill tool itself.
- *
- * The `exec` arm also holds when a `tools.eager` allowlist demotes `skill`:
- * `prepareTools()` keeps eager-demoted tools in the code-mode allowlist
- * (#12898), where they stay callable and discoverable through `tool_search`,
- * so the pointer this answer leads to can be followed (#12809).
+ * In CodeModeOnly the exec gateway is the ONLY Skill route — the invocation
+ * gate (`AgentCore.canInvokeSkill`) never counts a direct Skill declaration
+ * there — so when that route is closed no `toolConfig` shape reaches Skill:
+ * not the wildcard, not registry inheritance, not an explicit entry. The
+ * route is closed when `skill` itself is missing from the registry — `exec`
+ * binds only registered tools, and a deny rule, a legacy coreTools allowlist,
+ * or a skill-withheld parent Config keeps the factory out (Config registers
+ * it for a subagent only when that subagent holds a SkillManager) — when
+ * `exec` itself is missing from the registry (a deny rule or a legacy
+ * coreTools allowlist keeps it out), when the agent blocklists `exec`
+ * (`prepareTools()` drops it from the declarations), or when an execution
+ * allowlist names neither `skill` nor `exec` (`skill` stays out of
+ * `codeModeAllowedToolNames`).
  *
  * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
  * configured names to canonical tool names before they reach a `ToolConfig`.
@@ -127,9 +174,19 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  */
 export function toolConfigAllowsSkill(
   toolConfig: ToolConfig | undefined,
+  execBindingsAvailable = false,
+  skillEagerHidden = false,
   codeModeOnly = false,
+  skillRegistered = true,
 ): boolean {
-  if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
+  if (skillEagerHidden || EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
+    return false;
+  }
+  // exec binds only registered tools, so a registry without the Skill
+  // factory (a deny rule or a legacy coreTools allowlist keeps it out, or a
+  // skill-withheld parent's Config never registered it) closes the gateway
+  // just as a missing exec does.
+  if (codeModeOnly && !(execBindingsAvailable && skillRegistered)) {
     return false;
   }
   // No per-agent config inherits the whole registry.
@@ -147,9 +204,24 @@ export function toolConfigAllowsSkill(
   // list holding only inline declarations inherits: both take the explicit
   // branch there, which declares no registry tool.
   const inheritsRegistry = names.includes('*');
-  // Under CodeModeOnly, naming `exec` inherits every code-mode-callable
-  // binding (`prepareTools()`), and `skill` is one of them.
-  const reachesThroughExec = codeModeOnly && names.includes(ToolNames.EXEC);
+  // The exec wrapper does not need an execution-list entry in code modes.
+  // An explicit nested list is authoritative; otherwise either Skill itself
+  // or the exec carve-out grants the nested binding, as in AgentCore.
+  const execRouteOpen =
+    !matchesAgentToolBlocklist(toolConfig.disallowedTools, ToolNames.EXEC) &&
+    (toolConfig.nestedExecutionAllowedTools !== undefined
+      ? toolConfig.nestedExecutionAllowedTools.includes(ToolNames.SKILL)
+      : toolConfig.executionAllowedTools === undefined ||
+        toolConfig.executionAllowedTools.includes(ToolNames.SKILL) ||
+        toolConfig.executionAllowedTools.includes(ToolNames.EXEC));
+  // In CodeModeOnly a closed exec route reaches no skill whatever the
+  // declaration list says. Ordered after the `!toolConfig` early return:
+  // execRouteOpen is only defined for a concrete config.
+  if (codeModeOnly && !execRouteOpen) {
+    return false;
+  }
+  const reachesThroughExec =
+    execBindingsAvailable && execRouteOpen && names.includes(ToolNames.EXEC);
   return (
     inheritsRegistry || names.includes(ToolNames.SKILL) || reachesThroughExec
   );

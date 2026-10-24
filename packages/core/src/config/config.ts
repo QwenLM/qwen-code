@@ -135,6 +135,8 @@ import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
+  isCodeModeEnabled,
+  isToolMode,
   ToolMode,
   type ToolMode as ToolModeValue,
 } from '../tools/code-mode.js';
@@ -1250,8 +1252,8 @@ export interface ConfigParameters {
    * auto-approval and never affects registration (#10075).
    */
   eagerTools?: string[];
-  /** Replace ordinary model-facing tools with the isolated exec bridge. */
-  codeModeOnly?: boolean;
+  /** Select how model-facing tools are exposed. */
+  toolMode?: ToolModeValue;
   /** Use Responses Custom Tool text input for exec in Code Mode Only. */
   freeform?: boolean;
   /**
@@ -3313,6 +3315,7 @@ export class Config {
   private readonly advisorUsage = { calls: 0 };
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
+  private readonly codeModeWarnings = { containerFallback: false };
   /**
    * Per-session web_search call count. An object that is never reassigned:
    * derived Configs (`deriveConfig` → `Object.create(base)`) must mutate the
@@ -3692,9 +3695,11 @@ export class Config {
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
     this.toolMode =
-      params.codeModeOnly && !this.bareMode && !this.safeMode
-        ? ToolMode.CodeModeOnly
-        : ToolMode.Direct;
+      this.bareMode || this.safeMode
+        ? ToolMode.Direct
+        : isToolMode(params.toolMode)
+          ? params.toolMode
+          : ToolMode.Direct;
     this.freeform =
       this.toolMode === ToolMode.CodeModeOnly && params.freeform === true;
     if (this.safeMode) {
@@ -8521,6 +8526,17 @@ export class Config {
   }
 
   getToolMode(): ToolModeValue {
+    // Container execution cannot host exec and the registry falls back to
+    // direct tools there, so report the effective mode rather than the
+    // configured one. CodeModeOnly is excluded: registry creation rejects
+    // it. The virtual getter matters because derived (e.g. container
+    // subagent) configs supply the environment by overriding it.
+    if (
+      this.toolMode === ToolMode.CodeMode &&
+      this.getExecutionEnvironment() !== undefined
+    ) {
+      return ToolMode.Direct;
+    }
     return this.toolMode;
   }
 
@@ -12783,6 +12799,7 @@ export class Config {
       this,
       this.eventEmitter,
       sendSdkMcpMessage,
+      options?.forSubAgent,
     );
     // The registry refuses every other tool of a Managed session, but its
     // manager still connects a runtime-added server.
@@ -12852,7 +12869,7 @@ export class Config {
     };
 
     const registerExecIfEnabled = async (): Promise<void> => {
-      if (this.getToolMode() !== ToolMode.CodeModeOnly) return;
+      if (!isCodeModeEnabled(this.getToolMode())) return;
       await registerLazy(ToolNames.EXEC, async () => {
         const { ExecTool } = await import('../tools/exec.js');
         return new ExecTool(this);
@@ -12911,7 +12928,17 @@ export class Config {
     if (environment) {
       if (this.getCodeModeOnly()) {
         throw new Error(
-          'Container execution cannot be combined with tools.codeModeOnly.',
+          'Container execution cannot be combined with tools.mode = "code_mode_only".',
+        );
+      }
+      if (
+        this.toolMode === ToolMode.CodeMode &&
+        !this.codeModeWarnings.containerFallback
+      ) {
+        this.codeModeWarnings.containerFallback = true;
+        // eslint-disable-next-line no-console -- the fallback must be visible without debug logging
+        console.warn(
+          'Container execution does not support exec; continuing with direct tools for tools.mode = "code_mode".',
         );
       }
       const [{ createExecutionTools }, { wrapExecutionTool }] =

@@ -45,20 +45,11 @@ const POINTER = `## Writing the prompt
 Before writing a delegation prompt, load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill — what to put in the prompt, what not to delegate, how a fork prompt differs, and a worked example.`;
 
 /**
- * Leads the inlined reference, mirroring the workflow reference's note: the
- * body is written for sessions that can load skills, so say up front that the
- * pointers inside it do not apply here. The "even one named in a skill
- * listing" clause is load-bearing, not courtesy: a session whose
- * `tools.eager` allowlist withholds the Skill tool still gets an
- * `<available_skills>` prelude naming this skill in the same request, and
- * without the clause the description contradicts the listing. The workflow
- * note's second clause ("Where it points at another skill…") is dropped on
- * purpose: this reference names no other skill. A rule separator follows,
- * because the body opens with its own title and would otherwise read as a
- * continuation of the fork section above it.
+ * Inline guidance must also work when a shared registry cannot prove that the
+ * current agent can load skills. Avoid claims about session-wide availability.
  */
 const INLINE_NOTE =
-  'Skills cannot be loaded in this session, even one named in a skill listing, so the delegation reference follows in full.';
+  'The delegation reference follows in full. Use this inline guidance directly.';
 
 /**
  * The Agent tool's prompt-writing section for this session.

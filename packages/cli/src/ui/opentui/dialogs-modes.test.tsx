@@ -1887,14 +1887,14 @@ describe('OpenTuiSettingsDialog region budget', () => {
       />,
     );
     press('tab'); // → back to the settings list
-    press('down'); // tools.codeModeOnly — a boolean
+    press('down'); // tools.mode — an enum
     press('return');
 
     expect(setValue).toHaveBeenCalledTimes(1);
     expect(setValue).toHaveBeenCalledWith(
       SettingScope.User,
-      'tools.codeModeOnly',
-      true,
+      'tools.mode',
+      'code_mode',
     );
   });
 
@@ -1932,14 +1932,14 @@ describe('OpenTuiSettingsDialog region budget', () => {
       />,
     );
     press('tab'); // → back to the settings list
-    press('down'); // tools.codeModeOnly — a boolean
+    press('down'); // tools.mode — an enum
     press('return');
 
     expect(setValue).toHaveBeenCalledTimes(1);
     expect(setValue).toHaveBeenCalledWith(
       SettingScope.User,
-      'tools.codeModeOnly',
-      true,
+      'tools.mode',
+      'code_mode',
     );
   });
 
@@ -1987,7 +1987,7 @@ describe('OpenTuiSettingsDialog region budget', () => {
     );
     expect(screen.getByText(items[2]!.label)).not.toBeNull();
 
-    press('down'); // tools.codeModeOnly — a boolean that requires restart
+    press('down'); // tools.mode — an enum that requires restart
     press('return');
 
     expect(
@@ -2022,7 +2022,7 @@ describe('OpenTuiSettingsDialog region budget', () => {
     // 19 - 16 chrome rows: three list rows paint before the toggle.
     expect(screen.getByText(items[2]!.label)).not.toBeNull();
 
-    press('down'); // tools.codeModeOnly — a boolean that requires restart
+    press('down'); // tools.mode — an enum that requires restart
     press('return');
 
     expect(
@@ -2111,12 +2111,12 @@ describe('OpenTuiSettingsDialog region budget', () => {
       />,
     );
 
-    press('down'); // tools.codeModeOnly — a boolean that requires restart
+    press('down'); // tools.mode — an enum that requires restart
     press('return');
     expect(setValue).toHaveBeenCalledWith(
       SettingScope.User,
-      'tools.codeModeOnly',
-      true,
+      'tools.mode',
+      'code_mode',
     );
     expect(
       screen.getByText(/To see changes, Qwen Code must be restarted/),
@@ -2134,7 +2134,7 @@ describe('OpenTuiSettingsDialog region budget', () => {
     // would be invisible, and the description painted under the list is the
     // tell that it must not happen.
     const items = buildSettingsListItems();
-    expect(items[1]!.key).toBe('tools.codeModeOnly');
+    expect(items[1]!.key).toBe('tools.mode');
     expect(items[1]!.description).toBeTruthy();
     // The description line paints clipped to the frame's content width (ink's
     // wrap="truncate-end" parity), so the tell matches on a prefix.
@@ -2155,7 +2155,7 @@ describe('OpenTuiSettingsDialog region budget', () => {
         availableTerminalHeight={15}
       />,
     );
-    press('down'); // tools.codeModeOnly
+    press('down'); // tools.mode
     press('return'); // the restart prompt takes the last row — window is zero
     expect(descriptionPaints(1)).toBe(true);
 
@@ -2201,14 +2201,14 @@ describe('OpenTuiSettingsDialog region budget', () => {
     // the sequence alone classifies it as search input — while the
     // commit branch reads the name and toggles the row under the cursor. At
     // a zero-row window that is a write the user was never shown. The scope
-    // file below holds the key, so a toggle back to the default is still a
-    // real write (an empty scope stub would make the second toggle a skipped
-    // write and the probe blind).
+    // file below holds the key, the first toggle off the default is a real
+    // write, and a guard-broken second toggle advances the enum again —
+    // tools.mode persists even at its default — so the probe stays live.
     const setValue = vi.fn();
     const settings = {
       isTrusted: true,
       merged: {},
-      forScope: () => ({ settings: { tools: { codeModeOnly: false } } }),
+      forScope: () => ({ settings: { tools: { mode: 'direct' } } }),
       setValue,
     } as unknown as LoadedSettings;
     render(
@@ -2219,13 +2219,13 @@ describe('OpenTuiSettingsDialog region budget', () => {
       />,
     );
 
-    press('down'); // tools.codeModeOnly — a boolean that requires restart
+    press('down'); // tools.mode — an enum that requires restart
     press('return');
     expect(setValue).toHaveBeenCalledTimes(1);
     expect(setValue).toHaveBeenCalledWith(
       SettingScope.User,
-      'tools.codeModeOnly',
-      true,
+      'tools.mode',
+      'code_mode',
     );
     // The restart prompt takes the last list row — the window is now zero.
     expect(
