@@ -155,6 +155,17 @@ export function createJavaManagedAgentProvider(
     return { sessionId: result.sessionId };
   }
   return {
+    userMessages: {
+      query: (sessionId, options) =>
+        client.queryUserMessages(sessionId, options.signal),
+      command: (sessionId, command, options) =>
+        client.commandUserMessages(
+          sessionId,
+          command,
+          options.idempotencyKey,
+          options.signal,
+        ),
+    },
     lifecycle: {
       submit: (kind, sessionId, command) =>
         client.lifecycleCommand(

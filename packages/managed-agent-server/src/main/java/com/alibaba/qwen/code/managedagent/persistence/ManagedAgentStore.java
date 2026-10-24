@@ -1456,6 +1456,19 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active",
                     "The Session already has an active Turn.");
         }
+        var queuedInputs = jdbc.queryForList("SELECT message_id, state, turn_id, actor_id, input_json FROM ma_user_message"
+                + " WHERE tenant_id = ? AND session_id = ? AND state IN ('queued', 'claimed', 'recovery_blocked')"
+                + " ORDER BY sequence_number LIMIT 1", tenantId, sessionId);
+        if (!queuedInputs.isEmpty()) {
+            var first = queuedInputs.getFirst();
+            String messageId = new String((byte[]) first.get("message_id"), StandardCharsets.UTF_8);
+            String queuedActor = new String((byte[]) first.get("actor_id"), StandardCharsets.UTF_8);
+            if (!"claimed".equals(first.get("state")) || first.get("turn_id") != null
+                    || !("user-queue:" + messageId).equals(idempotencyKey) || !Objects.equals(actorId, queuedActor)
+                    || !readInput((String) first.get("input_json")).equals(input)) {
+                throw new ManagedAgentException(HttpStatus.CONFLICT, "user_message_queue_pending", "Send new input through the Session user message queue.");
+            }
+        }
         // The W2 handshake: an open execution operation on a bound Session
         // is the busy barrier the settlement re-verifies at commit; a
         // later Turn must not slide in underneath it. Narrower than
@@ -6478,7 +6491,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private void materializeEvent(EventRecord event, Map<String, List<ItemPartRecord>> projectedParts) {
         switch (event.type()) {
-            case "turn.accepted" -> materializeInput(event, projectedParts);
+            case "turn.accepted", "item.input.added" -> materializeInput(event, projectedParts);
             case "item.output_text.delta" -> materializeText(event,
                     "output_text", projectedParts);
             case "item.reasoning.delta" -> materializeText(event,
@@ -6515,7 +6528,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 continue;
             }
             replacePart(event, itemId,
-                    "part_" + event.turnId() + "_input_" + index,
+                    "part_" + ("item.input.added".equals(event.type()) ? itemId : event.turnId()) + "_input_" + index,
                     "input_text", text, projectedParts);
         }
     }
