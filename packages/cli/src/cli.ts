@@ -48,6 +48,10 @@ type BootstrapRoute =
 
 export const TOP_LEVEL_COMMANDS = [
   ['agents <command>', 'Session agents: join a coordinator as a runtime'],
+  [
+    'autofix-pr <command>',
+    'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, cleanup)',
+  ],
   ['auth', 'Configure authentication (removed)'],
   [
     'batch <command>',
@@ -70,6 +74,7 @@ export const TOP_LEVEL_COMMANDS = [
     'serve',
     'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
   ],
+  ['daemon <command>', 'Inspect and control local qwen serve daemons'],
   ['sessions <command>', 'Manage Qwen Code sessions'],
   ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;
@@ -526,11 +531,14 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
-  if (rawArgv.length === 1 && rawArgv[0] === 'managed-runtime-bootstrap') {
+  if (
+    rawArgv[0] === 'managed-runtime-bootstrap' &&
+    (rawArgv.length === 1 || (rawArgv.length === 2 && rawArgv[1] === '--help'))
+  ) {
     const { runManagedRuntimeBootstrap } = await import(
       './serve/managed-runtime-bootstrap.js'
     );
-    await runManagedRuntimeBootstrap();
+    await runManagedRuntimeBootstrap(rawArgv[1] === '--help');
     return;
   }
   if (

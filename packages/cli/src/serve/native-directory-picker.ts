@@ -16,6 +16,10 @@ const execFileAsync = promisify(execFile);
 // that spawned it is gone.
 const PICKER_TIMEOUT_MS = 300_000;
 
+// Zenity's wording for an unreachable display is version-specific: zenity 3
+// prints `cannot open display`, zenity 4 prints `Failed to open display`.
+const ZENITY_DISPLAY_FAILURE = /(cannot|failed to) open display/i;
+
 export class NativeDirectoryPickerUnavailableError extends Error {}
 
 interface MacOsSessionUids {
@@ -139,11 +143,11 @@ export async function pickNativeDirectory(
       (process.platform === 'darwin' &&
         (result.stderr?.includes('(-128)') ||
           result.stderr?.includes('User canceled'))) ||
-      // Zenity exits 1 both for a deliberate cancel and for "cannot open
-      // display" on headless Linux; only the former is a silent cancel.
+      // Zenity exits 1 both for a deliberate cancel and for an unreachable
+      // display on headless Linux; only the former is a silent cancel.
       (process.platform === 'linux' &&
         result.code === 1 &&
-        !result.stderr?.includes('cannot open display'))
+        !ZENITY_DISPLAY_FAILURE.test(result.stderr ?? ''))
     ) {
       return undefined;
     }

@@ -13,7 +13,9 @@ import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   RELAUNCH_SUPERVISED_ENV,
+  NPM_RUNTIME_CONTEXT,
 } from '../utils/env-provenance.js';
+import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
 export { PRIVATE_RELAUNCH_ENV_PROVENANCE };
 
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
@@ -294,6 +296,14 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // Only a relaunch supervisor marks its child; a forged marker would make a
   // piped, one-shot run exit as if its supervisor had gone.
   RELAUNCH_SUPERVISED_ENV,
+  NPM_RUNTIME_CONTEXT,
+  // Where a `/verify-pr --publish` round publishes its evidence. A project
+  // `.env` or settings.env is repository-controlled, so letting either fill
+  // these would send a maintainer's screenshots to a fork the operator did
+  // not choose. The launch environment, a home `.env`, or the operator-scope
+  // `verifyPr.*` settings may supply them. Derived from the coordinate map so
+  // a coordinate added there is gated here without a second edit.
+  ...Object.values(VERIFY_PR_COORDINATE_ENV),
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
@@ -339,6 +349,7 @@ const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
   PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
   PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
   RELAUNCH_SUPERVISED_ENV.toLowerCase(),
+  NPM_RUNTIME_CONTEXT.toLowerCase(),
   'sandbox',
   'sandbox_enforcement',
 ]);

@@ -4,6 +4,13 @@
 
 [English](2026-10-04-managed-agent-event-transport.md) | [简体中文](2026-10-04-managed-agent-event-transport.zh-CN.md)
 
+> **Wake 恢复更新（2026-10-19）：** 本文早期仅依赖来源账本的兜底描述已由
+> [Hosted SQL wake 扫描](2026-10-18-hosted-wake-recovery.zh-CN.md)取代。writer 丢失后，
+> 它发现已提交、未消费的 monitor/后台 Shell、channel、child/workflow、automation
+> 和 Session message 输入。公共前台 Turn 仍归 dispatcher；私有 CSI 和其他来源保留
+> 原有恢复路径。真实 MQ 开启、部署及跨平台扫描验收仍未验证。下方历史 MQ 门禁不证明
+> 这一新扫描；其故障验收见链接设计。
+
 **状态：设计预留·未交付。** 传输侧仍未实现：仓库中不存在 MQ 客户端、
 消费者以及跨节点唤醒。（成文时仓库中尚不存在 `EventTransport` 类型；MQ1
 此后已落地该接口与组合 seam——见

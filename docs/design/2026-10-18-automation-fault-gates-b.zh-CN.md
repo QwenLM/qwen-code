@@ -26,13 +26,14 @@ Issue #14446 是 #12380 F 阶段的 FG11 轮：为 automation 两个域 `schedul
 
 每个用例结束时，该租户都没有 `skipped` 或 `unknown` 的 occurrence。
 
-留给 FG11b 第二片：Harness 侧的存储故障。
+Harness 侧的存储故障属于 FG11b 第二片：
 
-- 拒绝一个 run 的 revision 1 或 revision 2。
-- 拒绝 `schedule` projection，让它随 journal 一起回滚。
+- 拒绝一个 run 的 revision 1 或 revision 2；
+- 拒绝 `schedule` projection，让它随 journal 一起回滚；
 - 让 Harness 的 store 传输失败。
 
-这些会让 Harness 上的 Session 停止写入，所以门禁需要像 FG9b 和 FG10c 那样重启 Harness。
+这些会让 Harness 上的 Session 停止写入，所以这些用例需要重启 Harness。见
+[第 2 片的设计](2026-10-18-automation-fault-gates-b2.zh-CN.md)。
 
 ## 当前状态
 
@@ -76,8 +77,8 @@ trigger 之前数出拒绝次数。这一行还记录被拒绝的是什么（occ
   那一刻由后台任务提交更新，然后放开它。被挂住超过连接器 30 s 请求超时的 fire 会被单独重驱。
   早先一版在 settle 阶段才发更新，正好暴露了这一点：被挂住的请求还在等待时，重驱已经用
   revision 1 fire 了出去。
-- teardown 会删掉所有 trigger 并放开所有挂住，所以不会有东西泄漏到共享 fork schema 上之后运行
-  的类里。
+- teardown 会放开所有挂住，然后逐个删除 trigger（一个删除失败不会让其他 trigger 留下），再删除
+  拒绝计数表，所以不会有东西泄漏到共享 fork schema 上之后运行的类里。
 
 ## 变异见证
 
@@ -115,7 +116,8 @@ job 上限从 195 调到 200（各 step 合计 185，加上未设上限的准备
 
 ## 未决问题
 
-- 第二片的 Harness 侧故障会让 Session 停止写入。每一个都需要重启，它的预期（可重试的
-  `503 automation_operation_failed`，然后是一次完成的 replay）要在重新加载的 Session 上验证。
+- 第二片的 Harness 侧故障会让 Session 停止写入。每一个都需要重启，它的预期要在重新加载的 Session
+  上验证。[第 2 片](2026-10-18-automation-fault-gates-b2.zh-CN.md) 回答了这个问题：公开应答是可重试的
+  `503 automation_operation_unknown`，重新加载的 Session 只完成一次该操作。
 - `revision-race` 是否也应覆盖被挂住超过请求超时的 fire。那种交错会在原请求仍在路上时，用旧
   revision 重驱。本切片只记录它的存在。

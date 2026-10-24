@@ -3,11 +3,12 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
   parseHostedApprovalSelection,
   hostedTurnApproval,
+  createHostedLiveApprovalReader,
 } from './hosted-approval-selection.js';
 
 function committed(selection?: unknown, promptId = 'prompt') {
@@ -121,5 +122,99 @@ describe('Hosted approval selection', () => {
         initial,
       ),
     ).rejects.toThrow();
+  });
+  it('reads the current policy in both directions without changing the Turn snapshot or timeout', async () => {
+    const admission = {
+      mode: 'auto-edit' as const,
+      revision: 3,
+      planMode: true as const,
+    };
+    let selected = {
+      mode: 'yolo' as 'default' | 'auto-edit' | 'yolo',
+      revision: 4,
+    };
+    const read = createHostedLiveApprovalReader(
+      { mode: 'auto-edit', timeoutMs: 12345 },
+      admission,
+      async () => selected,
+    );
+    await expect(read()).resolves.toEqual({ mode: 'yolo', timeoutMs: 12345 });
+    selected = { mode: 'default', revision: 5 };
+    await expect(read()).resolves.toEqual({
+      mode: 'default',
+      timeoutMs: 12345,
+    });
+    expect(admission).toEqual({
+      mode: 'auto-edit',
+      revision: 3,
+      planMode: true,
+    });
+    selected = { mode: 'yolo', revision: 4 };
+    await expect(read()).rejects.toThrow('regressed');
+  });
+  it.each([
+    undefined,
+    { mode: 'default' as const, revision: 1 },
+    { mode: 'yolo' as const, revision: 2 },
+  ])(
+    'refuses missing or regressed live policy %j without a fallback',
+    async (selection) => {
+      const read = createHostedLiveApprovalReader(
+        { mode: 'default', timeoutMs: 1000 },
+        { mode: 'default', revision: 2 },
+        async () => selection,
+      );
+      await expect(read()).rejects.toThrow('missing or regressed');
+    },
+  );
+  it('does not fall back after a policy transport failure', async () => {
+    const read = createHostedLiveApprovalReader(
+      { mode: 'yolo', timeoutMs: 1000 },
+      undefined,
+      async () => {
+        throw new Error('writer fenced');
+      },
+    );
+    await expect(read()).rejects.toThrow('writer fenced');
+  });
+  it('serializes concurrent policy queries before comparing their revisions', async () => {
+    let release!: (selection: { mode: 'default'; revision: number }) => void;
+    const firstQuery = new Promise<{ mode: 'default'; revision: number }>(
+      (resolve) => {
+        release = resolve;
+      },
+    );
+    const query = vi
+      .fn()
+      .mockReturnValueOnce(firstQuery)
+      .mockResolvedValueOnce({ mode: 'yolo', revision: 1 });
+    const read = createHostedLiveApprovalReader(
+      { mode: 'default', timeoutMs: 1000 },
+      undefined,
+      query,
+    );
+    const first = read();
+    const second = read();
+    await Promise.resolve();
+    expect(query).toHaveBeenCalledOnce();
+    release({ mode: 'default', revision: 0 });
+    await expect(first).resolves.toEqual({ mode: 'default', timeoutMs: 1000 });
+    await expect(second).resolves.toEqual({ mode: 'yolo', timeoutMs: 1000 });
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+  it('keeps the serialized reader usable after a failed query', async () => {
+    const query = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('transport down'))
+      .mockResolvedValueOnce({ mode: 'yolo', revision: 1 });
+    const read = createHostedLiveApprovalReader(
+      { mode: 'default', timeoutMs: 1000 },
+      undefined,
+      query,
+    );
+    const first = read();
+    const second = read();
+    await expect(first).rejects.toThrow('transport down');
+    await expect(second).resolves.toEqual({ mode: 'yolo', timeoutMs: 1000 });
   });
 });

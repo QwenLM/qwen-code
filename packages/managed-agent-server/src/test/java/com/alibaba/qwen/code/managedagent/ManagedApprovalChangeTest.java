@@ -1,21 +1,22 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalChangeResult;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalSelection;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.model.ApiModels;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -99,7 +100,81 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
+    @ValueSource(booleans = {false, true})
+    void changesLivePolicyWithoutRewritingTheAdmittedTurnOrPendingAction(boolean custom) throws Exception {
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        if (custom) {
+            session = customSession("hosted-workspace-shell/1", "default");
+        }
+        var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "hello"));
+        var admitted = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "live-turn", "digest",
+                session, input, SubmitHarnessTurn.computePayloadDigest(input)));
+        var turn = store.findTurn(tenant, session, admitted.turnId()).orElseThrow();
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
+                + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
+                + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
+                ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
+                "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
+        assertThat(service.queryWebShellSessionApproval(tenant, "actor", session).liveSupported()).isTrue();
+        assertThat(change("actor", "live-change", "yolo", 0).approvalRevision()).isEqualTo(1);
+        assertThat(change("actor", "live-change", "yolo", 0).replayed()).isTrue();
+        assertThat(store.findTurnApprovalSelection(tenant, session, turn.promptId()))
+                .isEqualTo(new WebShellApprovalSelection("default", 0));
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_record WHERE tenant_id=? AND session_id=?"
+                + " AND record_kind='ACTION'", String.class, tenant, session)).isEqualTo("requested");
+        when(harness.supportsPlanMode()).thenReturn(true);
+        assertCode(() -> transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "plan-active", "yolo", 1, true)), "turn_active");
+        assertCode(() -> change("actor", "live-stale", "default", 0), "approval_selection_conflict");
+        change("actor", "live-tighten", "default", 1);
+        assertThat(service.getWebShellSession(tenant, "actor", session).approvalMode()).isEqualTo("default");
+    }
+
+    @Test
+    void liveApprovalReadsRequireTheCurrentWriterAndReturnTheDurableSelection() {
+        var privateStore = new ManagedSessionStore(jdbc);
+        String token = "live-approval-writer-token-0123456789";
+        var grant = transaction().execute(status -> privateStore.acquireWriter(tenant, session, token,
+                new AcquireWriterRequest("ws", "writer", 60_000L)));
+        var request = new AuthorizeLifecycleRequest("ws", "writer", grant.writerGeneration());
+        var initial = transaction().execute(status -> privateStore.approvalSelection(tenant, session, token, request));
+        assertThat(initial).containsEntry("mode", "default").containsEntry("revision", 0L);
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        change("actor", "durable-live", "yolo", 0);
+        var selected = transaction().execute(status -> privateStore.approvalSelection(tenant, session, token, request));
+        assertThat(selected).containsEntry("mode", "yolo").containsEntry("revision", 1L);
+        assertCode(() -> transaction().execute(status -> privateStore.approvalSelection(tenant, session, token,
+                new AuthorizeLifecycleRequest("ws", "writer", grant.writerGeneration() + 1))),
+                "managed_session_writer_conflict");
+        assertCode(() -> transaction().execute(status -> privateStore.approvalSelection(tenant, session, token,
+                new AuthorizeLifecycleRequest("other", "writer", grant.writerGeneration()))),
+                "managed_session_not_found");
+    }
+
+    @Test
+    void liveChangesStillRefuseCancellationAndRecovery() {
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "hello"));
+        transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "cancel-turn", "digest",
+                session, input, SubmitHarnessTurn.computePayloadDigest(input)));
+        for (String state : List.of("CANCELLING", "RECOVERY_BLOCKED")) {
+            jdbc.update("UPDATE ma_turn SET status=? WHERE tenant_id=?", state, tenant);
+            assertCode(() -> change("actor", "blocked-" + state, "yolo", 0), "session_context_busy");
+        }
+        for (String code : List.of(com.alibaba.qwen.code.managedagent.session.AgentStateStore.RUNTIME_RECOVERY_BLOCKED,
+                com.alibaba.qwen.code.managedagent.session.AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                com.alibaba.qwen.code.managedagent.session.AgentStateStore.HARNESS_RECOVERY_BLOCKED)) {
+            jdbc.update("UPDATE ma_turn SET status='RUNNING', error_code=? WHERE tenant_id=?", code, tenant);
+            assertCode(() -> change("actor", "blocked-" + code, "yolo", 0), "session_context_busy");
+            assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
+                    Long.class, tenant, session)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id=?"
+                    + " AND operation='SET_APPROVAL'", Integer.class, tenant)).isZero();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
     void persistsPlanIndependentlyAndFreezesItWithTheTurnPolicy(String profile) throws Exception {
         when(harness.supportsPlanMode()).thenReturn(true);
         session = customSession(profile, "default");
@@ -251,7 +326,7 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
     void changesStoredDefinitionSessionsWithoutChangingTheirInitialIdentityOrCreationOptions(String profile) throws Exception {
         session = customSession(profile, "default");
         var initial = store.requireSession(tenant, session);
@@ -402,8 +477,10 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"true,false", "false,false", "true,true", "false,true"})
-    void serializesTurnAdmissionAndPolicyChangeUnderTheSessionLock(boolean changeFirst, boolean custom) throws Exception {
+    @CsvSource({"true,false,false", "false,false,false", "true,true,false", "false,true,false",
+            "true,false,true", "false,false,true", "true,true,true", "false,true,true"})
+    void serializesTurnAdmissionAndPolicyChangeUnderTheSessionLock(boolean changeFirst, boolean custom, boolean live) throws Exception {
+        when(harness.supportsLiveApprovalSelection()).thenReturn(live);
         if (custom) {
             session = customSession("hosted-workspace-shell/1", "default");
         }
@@ -440,8 +517,8 @@ class ManagedApprovalChangeTest {
                     }
                     try {
                         change("actor", "race", "yolo", 0);
-                        return "unexpected-change";
-                    } catch (ApiException conflict) {
+                        return "changed";
+                    } catch (ManagedAgentException conflict) {
                         return conflict.getCode();
                     }
                 });
@@ -449,7 +526,7 @@ class ManagedApprovalChangeTest {
                 String initial = first.get(10, TimeUnit.SECONDS);
                 String after = second.get(10, TimeUnit.SECONDS);
                 if (!changeFirst) {
-                    assertThat(after).isEqualTo("turn_active");
+                    assertThat(after).isEqualTo(live ? "changed" : "turn_active");
                 }
                 var turn = store.findTurn(tenant, session, changeFirst ? after : initial).orElseThrow();
                 assertThat(store.findTurnApprovalSelection(tenant, session, turn.promptId()))
@@ -472,7 +549,7 @@ class ManagedApprovalChangeTest {
                 start.await();
                 try {
                     return Long.toString(change("actor", UUID.randomUUID().toString(), "yolo", 0).approvalRevision());
-                } catch (ApiException conflict) {
+                } catch (ManagedAgentException conflict) {
                     return conflict.getCode();
                 }
             };
@@ -541,7 +618,7 @@ class ManagedApprovalChangeTest {
     private ManagedAgentStore store() {
         var properties = new ManagedAgentProperties();
         properties.setDefinitionToolProfiles(List.of("hosted-workspace-files/1", "hosted-workspace-shell/1",
-                "hosted-workspace-shell/2", "hosted-workspace-files/2", "hosted-workspace-read/1"));
+                "hosted-workspace-files/2", "hosted-workspace-read/1"));
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode("default");
@@ -585,7 +662,7 @@ class ManagedApprovalChangeTest {
     private TransactionTemplate transaction() { return new TransactionTemplate(manager); }
 
     private void assertCode(Runnable action, String code) {
-        assertThatThrownBy(action::run).isInstanceOfSatisfying(ApiException.class,
+        assertThatThrownBy(action::run).isInstanceOfSatisfying(ManagedAgentException.class,
                 error -> assertThat(error.getCode()).isEqualTo(code));
     }
 }

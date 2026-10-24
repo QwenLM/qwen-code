@@ -1,14 +1,15 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PermissionResponse;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicActionList;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellActionGetRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellActionQueryRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellActionRespondRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
-import com.alibaba.qwen.code.managedagent.service.ManagedActionService;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PermissionResponse;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicActionList;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellActionGetRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellActionQueryRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellActionRespondRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.session.ManagedActionService;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -35,8 +36,9 @@ public class ManagedActionController {
             TenantContext tenant,
             @PathVariable String sessionId,
             @RequestParam(required = false) String cursor,
-            @RequestParam(defaultValue = "20") int limit) {
-        return actions.listPublic(tenant.tenantId(), tenant.actorId(), sessionId, cursor, limit);
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestParam(name = "include_children", defaultValue = "false") boolean includeChildren) {
+        return actions.listPublic(tenant.tenantId(), tenant.actorId(), sessionId, cursor, limit, includeChildren);
     }
 
     @GetMapping("/v1/agents/sessions/{sessionId}/actions/{actionId}")
@@ -76,7 +78,7 @@ public class ManagedActionController {
                 tenant.actorId(),
                 request.sessionId(),
                 request.cursor(),
-                request.limit() == null ? 20 : request.limit());
+                request.limit() == null ? 20 : request.limit(), Boolean.TRUE.equals(request.includeChildren()));
     }
 
     @PostMapping("/api/agent/web-shell/v1/actions/get")

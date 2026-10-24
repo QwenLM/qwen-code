@@ -21,6 +21,10 @@ import {
 } from '../ui/select';
 import { Switch } from '../ui/switch';
 import {
+  WorkspaceExecutionSelect,
+  type WorkspaceExecutionMode,
+} from '../workspaces/WorkspaceExecutionSelect';
+import {
   CornerLeftUpIcon,
   FolderOpenIcon,
   LaptopIcon,
@@ -46,6 +50,9 @@ export interface WorkspaceLocationOption {
 }
 
 interface AddWorkspaceDialogProps {
+  executionMode?: WorkspaceExecutionMode;
+  onExecutionModeChange?: (mode: WorkspaceExecutionMode) => void;
+  executionModeLocked?: boolean;
   browseDirectories?: boolean;
   initialPath?: string;
   pathHint?: string;
@@ -80,6 +87,9 @@ function isAbsoluteLike(value: string): boolean {
 }
 
 export function AddWorkspaceDialog({
+  executionMode,
+  onExecutionModeChange,
+  executionModeLocked,
   browseDirectories = false,
   initialPath = '',
   pathHint,
@@ -393,6 +403,13 @@ export function AddWorkspaceDialog({
     >
       <form className="flex flex-col gap-6" onSubmit={handleSubmit}>
         <FieldGroup>
+          {executionMode && onExecutionModeChange && (
+            <WorkspaceExecutionSelect
+              value={executionMode}
+              onValueChange={onExecutionModeChange}
+              disabled={submitting || browsing || executionModeLocked}
+            />
+          )}
           {browseDirectories &&
             locations &&
             locations.length > 0 &&
