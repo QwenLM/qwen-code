@@ -3260,17 +3260,40 @@ export class ExtensionManager {
             extensionIdentifier.toLowerCase(),
       );
       if (!extension) {
-        throw new Error(`Extension not found.`);
+        // The directory can be gone (a hand cleanup after a failed uninstall, or
+        // a directory removed on Windows) while the store entry survives.
+        // Resolve the name from the store so the entry can still be cleared:
+        // otherwise `install` refuses on the name conflict and `uninstall`
+        // refuses as "not found", leaving the user with no supported path.
+        const snapshot = await this.extensionStore.readSnapshot();
+        const match = Object.entries(snapshot.extensions).find(
+          ([, policy]) =>
+            policy.name.toLowerCase() === extensionIdentifier.toLowerCase(),
+        );
+        if (!match) {
+          throw new Error(`Extension not found.`);
+        }
+        const [id, policy] = match;
+        // No `declarationOnly` short-circuit here: the store also flips that
+        // flag onto an *installed* policy whose artifact went missing
+        // (`mutateMany`), so returning early would report success while
+        // clearing nothing. `commitArtifact` raises its own
+        // `Extension "<name>" is not installed.` for a declaration, which is
+        // the honest answer.
+        return await this.uninstallResolvedPolicy(
+          id,
+          policy,
+          isUpdate,
+          telemetryConfig,
+          onCommitted,
+        );
       }
-      return await this.uninstallExtensionPolicy(
-        { id: extension.id, name: extension.name },
-        extension.installMetadata?.type === 'link'
-          ? path.join(this.configDir, extension.name)
-          : extension.path,
+      return await this.uninstallResolvedPolicy(
+        extension.id,
+        extension,
         isUpdate,
         telemetryConfig,
         onCommitted,
-        extension.installMetadata?.credentialPersistence === 'stored',
       );
     } finally {
       endMutation();
@@ -3288,27 +3311,51 @@ export class ExtensionManager {
       const snapshot = await this.extensionStore.readSnapshot();
       const policy = snapshot.extensions[extensionId];
       if (!policy || policy.declarationOnly) return snapshot;
-      const extension = this.getLoadedExtensions().find(
-        (candidate) => candidate.id === extensionId,
-      );
-      const destinationDirectory =
-        extension && extension.installMetadata?.type !== 'link'
-          ? extension.path
-          : path.join(this.configDir, policy.name);
-      const installMetadata =
-        extension?.installMetadata ??
-        this.loadInstallMetadata(destinationDirectory);
-      return await this.uninstallExtensionPolicy(
-        { id: extensionId, name: policy.name },
-        destinationDirectory,
+      return await this.uninstallResolvedPolicy(
+        extensionId,
+        policy,
         isUpdate,
         this.getTelemetryConfig(cwd ?? this.workspaceDir),
         onCommitted,
-        installMetadata?.credentialPersistence === 'stored',
       );
     } finally {
       endMutation();
     }
+  }
+
+  /**
+   * Uninstalls the policy a caller already resolved from the store.
+   *
+   * Both entrances share this so the artifact directory and the credential flag
+   * are derived one way only: the loaded extension's own path when there is one
+   * (a `link` install lives in `configDir`), otherwise the policy's name under
+   * `configDir`, with the metadata read from that directory.
+   */
+  private async uninstallResolvedPolicy(
+    id: string,
+    policy: { name: string },
+    isUpdate: boolean,
+    telemetryConfig: Config,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const extension = this.getLoadedExtensions().find(
+      (candidate) => candidate.id === id,
+    );
+    const destinationDirectory =
+      extension && extension.installMetadata?.type !== 'link'
+        ? extension.path
+        : path.join(this.configDir, policy.name);
+    const installMetadata =
+      extension?.installMetadata ??
+      this.loadInstallMetadata(destinationDirectory);
+    return await this.uninstallExtensionPolicy(
+      { id, name: policy.name },
+      destinationDirectory,
+      isUpdate,
+      telemetryConfig,
+      onCommitted,
+      installMetadata?.credentialPersistence === 'stored',
+    );
   }
 
   private async uninstallExtensionPolicy(

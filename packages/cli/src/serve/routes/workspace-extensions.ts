@@ -1762,20 +1762,22 @@ export function registerWorkspaceExtensionRoutes(
           { name },
           res,
           async (extensionManager, _signal, context) => {
+            // The loaded set is only the fast path: an entry whose directory is
+            // gone is resolvable by name from the store, which is the case the
+            // CLI path now handles. Resolving here as well keeps a web-shell or
+            // SDK client from being the only surface that still refuses.
             const extension = findLoadedExtension(extensionManager, name);
-            if (!extension) {
-              throw new Error(`Extension "${name}" not found`);
-            }
+            const identifier = extension?.name ?? name;
             await context!.commit(
               async (onCommitted) =>
                 await extensionManager.uninstallExtension(
-                  extension.name,
+                  identifier,
                   false,
                   ctrl.boundWorkspace,
                   onCommitted,
                 ),
             );
-            return { status: 'uninstalled', name: extension.name };
+            return { status: 'uninstalled', name: identifier };
           },
           {
             ...globalReconciliationOptions(),
