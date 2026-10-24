@@ -527,7 +527,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. */
+        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. */
         post: operations["changeWebShellSessionApproval"];
         delete?: never;
         options?: never;
@@ -1103,7 +1103,7 @@ export interface components {
             foregroundShell?: boolean;
             /** @description The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply. */
             modelChange?: boolean;
-            /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1 or hosted-workspace-shell/1 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
+            /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
             approvalModeChange?: boolean;
             /** @description Optional deployment capability; missing means false. */
             inputAttachments?: boolean;
