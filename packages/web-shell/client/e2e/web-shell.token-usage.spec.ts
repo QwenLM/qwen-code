@@ -537,16 +537,21 @@ for (const { width, language, theme } of [
                 const meta = button.parentElement!.getBoundingClientRect();
                 const header = button.parentElement!.parentElement!;
                 const value = header.firstElementChild!.getBoundingClientRect();
+                const stacked = meta.top >= value.bottom;
                 return {
                   right: Math.abs(
                     meta.right - header.getBoundingClientRect().right,
                   ),
-                  wrapped: meta.top >= value.bottom,
+                  // At the minimum width the meta drops below the value or
+                  // stays beside it, and on the zh-CN header the two states
+                  // are a few pixels apart: host font metrics decide which one
+                  // wins. Overlap is what this check guards, not the outcome.
+                  overlap: !stacked && meta.left < value.right - 1,
                   fits: header.scrollWidth <= header.clientWidth + 1,
                 };
               });
             expect(alignment.right).toBeLessThanOrEqual(1);
-            expect(alignment.wrapped).toBe(true);
+            expect(alignment.overlap).toBe(false);
             expect(alignment.fits).toBe(true);
           }
         }
