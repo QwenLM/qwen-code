@@ -416,6 +416,7 @@ import {
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
+import { formatCompressionTokenCount } from '../../ui/utils/compression-text.js';
 import {
   MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX,
   MID_TURN_RESPONSE_USER_MESSAGE_PREFIX,
@@ -9677,17 +9678,11 @@ export class Session implements SessionContext {
           // Estimated counts (#9309) get a '~' prefix so the notice doesn't
           // read as an API-reported figure on a different scale than a later
           // banner.
-          const formatCount = (count?: number, isEstimated?: boolean) =>
-            count === undefined
-              ? 'unknown'
-              : isEstimated
-                ? `~${count}`
-                : String(count);
           compressionDiagnostic =
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
-            `${formatCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} to ` +
-            `${formatCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)} tokens).` +
+            `${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} to ` +
+            `${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)} tokens).` +
             warningSuffix;
         }
       } catch (compressionError) {

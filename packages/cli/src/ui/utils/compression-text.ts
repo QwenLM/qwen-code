@@ -10,10 +10,14 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
+// Estimated counts (#9309) carry '~' in interactive and headless text.
+// An omitted flag leaves the display unmarked; compression token accounting
+// instead defaults missing estimate flags to true. Keep those defaults distinct.
 export const formatCompressionTokenCount = (
-  count: number,
+  count: number | undefined,
   isEstimated?: boolean,
-) => (isEstimated ? `~${count}` : String(count));
+) =>
+  count === undefined ? 'unknown' : isEstimated ? `~${count}` : String(count);
 
 export interface CompressionStatusTextOptions {
   isPending?: boolean;
