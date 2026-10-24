@@ -363,12 +363,15 @@ export interface WebShellSidebarSessionActionsOptions {
   /** Session action items to show. Defaults to all. */
   items?: readonly WebShellSidebarSessionActionItem[];
   /**
-   * Which items appear as inline buttons (on hover). Defaults to ['pin'];
+   * Which items appear as inline buttons on standard session rows (on hover).
+   * Defaults to ['pin'];
    * archive stays in the dropdown so a stray click on the hover slot cannot
    * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
    * Only items with working inline handlers are accepted
    * (details/group/archive are dropdown-only).
+   * Recent sessions use dedicated Pin and Archive buttons instead of this
+   * layout; the items policy still controls whether those actions are enabled.
    */
   inlineItems?: readonly WebShellSidebarSessionInlineActionItem[];
 }
@@ -1845,6 +1848,11 @@ export function WebShellSidebar({
   const autoOpenedContextRef = useRef<string | null>(null);
   const resizeTeardownRef = useRef<((updateState: boolean) => void) | null>(
     null,
+  );
+  const [visibleRecentRows, setVisibleRecentRows] = useState('[]');
+  const visibleRecentRowKeys = useMemo<Set<string>>(
+    () => new Set(JSON.parse(visibleRecentRows) as string[]),
+    [visibleRecentRows],
   );
   const [selectedSessionRow, setSelectedSessionRow] = useState<{
     identity: string;
@@ -4994,7 +5002,16 @@ export function WebShellSidebar({
       const isSelected =
         currentSessionActive &&
         isCurrent &&
-        (selectedSessionRow?.identity === rowIdentity
+        (selectedSessionRow?.identity === rowIdentity &&
+        (!selectedSessionRow.recent ||
+          visibleRecentRowKeys.has(
+            JSON.stringify([
+              standalone || recent?.isStandalone
+                ? undefined
+                : getSessionWorkspaceCwd(session),
+              session.sessionId,
+            ]),
+          ))
           ? selectedSessionRow.recent === Boolean(recent)
           : !recent);
       const openRow = () => {
@@ -5491,6 +5508,7 @@ export function WebShellSidebar({
       handleUnarchive,
       isCurrentSession,
       selectedSessionRow,
+      visibleRecentRowKeys,
       connection.error,
       onSelectCurrentSession,
       openGroupMenuFromAnchor,
@@ -5673,6 +5691,7 @@ export function WebShellSidebar({
   const handleArchiveRecentStandalone = useCallback(
     (session: DaemonSessionSummary) => {
       if (
+        !sessionActionItems.has('archive') ||
         session.sessionId === connection.sessionId ||
         session.hasActivePrompt ||
         session.activeWorkState === 'active' ||
@@ -5710,6 +5729,7 @@ export function WebShellSidebar({
       handleStandaloneMutation,
       onError,
       setSessionBusy,
+      sessionActionItems,
       t,
       workspace.client,
     ],
@@ -7650,6 +7670,7 @@ export function WebShellSidebar({
                 workspaceQualifiedRestCoreEnabled && (
                   <RecentSessions
                     client={workspace.client}
+                    onVisibleRowsChange={setVisibleRecentRows}
                     onNewSession={() => handleNewSession(undefined, true)}
                     newSessionDisabled={newSessionDisabled}
                     refreshPaused={sessionTransitioning}
@@ -7695,6 +7716,7 @@ export function WebShellSidebar({
                         busy ||
                         isCurrent ||
                         running ||
+                        !sessionActionItems.has('archive') ||
                         (!isStandalone && !canArchiveSession(session));
                       return renderSessionRow(session, {
                         searchSnippet: '',

@@ -2737,50 +2737,60 @@ describe('Recent sessions shared rows', () => {
     expect(recent.textContent).toContain('Pinned chat');
   });
 
-  it('highlights only the clicked list copy while protecting the actual current session', async () => {
-    enableRecentSessions();
-    connection.sessionId = 'session-a';
-    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
-      sessions: [active.sessions[0]],
-    });
-    renderSidebar();
-    await flushSidebar();
-    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
-    const rows = [
-      ...container.querySelectorAll<HTMLElement>(
+  it.each(['/tmp/project', undefined])(
+    'highlights only the clicked list copy with workspace %s while protecting the actual current session',
+    async (workspaceCwd) => {
+      enableRecentSessions();
+      active.sessions = [{ ...active.sessions[0], workspaceCwd }];
+      active.data = active.sessions;
+      connection.sessionId = 'session-a';
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: [active.sessions[0]],
+      });
+      renderSidebar();
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      const rows = [
+        ...container.querySelectorAll<HTMLElement>(
+          `div.${sidebarStyles.sessionRow}`,
+        ),
+      ];
+      const original = rows.find(
+        (row) =>
+          !recent.contains(row) && row.textContent?.includes('API review'),
+      )!;
+      const copy = recent.querySelector<HTMLElement>(
         `div.${sidebarStyles.sessionRow}`,
-      ),
-    ];
-    const original = rows.find(
-      (row) => !recent.contains(row) && row.textContent?.includes('API review'),
-    )!;
-    const copy = recent.querySelector<HTMLElement>(
-      `div.${sidebarStyles.sessionRow}`,
-    )!;
-    click(copy);
-    await flushSidebar();
-    expect(copy.getAttribute('aria-current')).toBe('page');
-    expect(original.hasAttribute('aria-current')).toBe(false);
-    renderSidebar(false, { currentSessionActive: false });
-    await flushSidebar();
-    expect(copy.hasAttribute('aria-current')).toBe(false);
-    expect(original.hasAttribute('aria-current')).toBe(false);
-    expect(
-      copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!.disabled,
-    ).toBe(true);
-    renderSidebar(false, { currentSessionActive: true });
-    await flushSidebar();
-    expect(copy.getAttribute('aria-current')).toBe('page');
-    expect(original.hasAttribute('aria-current')).toBe(false);
-    click(original);
-    await flushSidebar();
-    expect(original.getAttribute('aria-current')).toBe('page');
-    expect(copy.hasAttribute('aria-current')).toBe(false);
-    expect(
-      copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!.disabled,
-    ).toBe(true);
-    expect(loadSession).not.toHaveBeenCalled();
-  });
+      )!;
+      click(copy);
+      await flushSidebar();
+      expect(copy.getAttribute('aria-current')).toBe('page');
+      expect(original.hasAttribute('aria-current')).toBe(false);
+      renderSidebar(false, { currentSessionActive: false });
+      await flushSidebar();
+      expect(copy.hasAttribute('aria-current')).toBe(false);
+      expect(original.hasAttribute('aria-current')).toBe(false);
+      expect(
+        copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!
+          .disabled,
+      ).toBe(true);
+      renderSidebar(false, { currentSessionActive: true });
+      await flushSidebar();
+      expect(copy.getAttribute('aria-current')).toBe('page');
+      expect(original.hasAttribute('aria-current')).toBe(false);
+      click(original);
+      await flushSidebar();
+      expect(original.getAttribute('aria-current')).toBe('page');
+      expect(copy.hasAttribute('aria-current')).toBe(false);
+      expect(
+        copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!
+          .disabled,
+      ).toBe(true);
+      expect(loadSession).not.toHaveBeenCalled();
+    },
+  );
 
   it('moves standalone selection across copies without restoring the current session again', async () => {
     enableRecentSessions();
@@ -2930,6 +2940,83 @@ describe('Recent sessions shared rows', () => {
     },
   );
 
+  it.each(['collapse', 'pin'])(
+    'restores a visible selection after Recent %s',
+    async (action) => {
+      enableRecentSessions();
+      connection.sessionId = 'session-a';
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: [active.sessions[0]],
+      });
+      renderSidebar();
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      const copy = recent.querySelector<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      )!;
+      click(copy);
+      await flushSidebar();
+      expect(copy.getAttribute('aria-current')).toBe('page');
+      if (action === 'collapse') {
+        click(
+          recent.querySelector<HTMLButtonElement>('button[aria-expanded]')!,
+        );
+      } else {
+        pinned.sessions = [{ ...active.sessions[0], isPinned: true }];
+        pinned.data = pinned.sessions;
+        renderSidebar();
+      }
+      await flushSidebar();
+      expect(
+        recent.querySelector(`div.${sidebarStyles.sessionRow}`),
+      ).toBeNull();
+      const originals = [
+        ...container.querySelectorAll<HTMLElement>(
+          `div.${sidebarStyles.sessionRow}`,
+        ),
+      ].filter(
+        (row) =>
+          !recent.contains(row) && row.textContent?.includes('API review'),
+      );
+      expect(originals.length).toBeGreaterThan(0);
+      expect(
+        originals.some((row) => row.getAttribute('aria-current') === 'page'),
+      ).toBe(true);
+    },
+  );
+
+  it('prevents standalone Recent archive when items excludes archive', async () => {
+    enableRecentSessions();
+    workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        makeSession('standalone-chat', {
+          sourceType: 'standalone',
+          displayName: 'Independent chat',
+        }),
+      ],
+    });
+    workspace.client.archiveStandaloneSessions.mockResolvedValue({
+      archived: ['standalone-chat'],
+      alreadyArchived: [],
+      errors: [],
+    });
+    renderSidebar(false, {
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { items: ['details'] },
+    });
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    expect(recent.textContent).toContain('Independent chat');
+    const archive = recent.querySelector<HTMLButtonElement>(
+      '[aria-label="Archive"]',
+    );
+    if (archive && !archive.disabled) click(archive);
+    await flushSidebar();
+    expect(workspace.client.archiveStandaloneSessions).not.toHaveBeenCalled();
+  });
   it('does not leave a pending Recent selection when creation is cancelled', async () => {
     enableRecentSessions();
     connection.sessionId = 'session-a';

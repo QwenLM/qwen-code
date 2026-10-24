@@ -81,6 +81,7 @@ interface RecentSessionsProps {
   onNewSession: () => void;
   newSessionDisabled: boolean;
   renderSession: (entry: RecentSessionEntry) => ReactNode;
+  onVisibleRowsChange?: (keys: string) => void;
 }
 
 export function RecentSessions({
@@ -93,6 +94,7 @@ export function RecentSessions({
   refreshKey,
   refreshPaused = false,
   renderSession,
+  onVisibleRowsChange,
   onNewSession,
   newSessionDisabled,
 }: RecentSessionsProps) {
@@ -184,6 +186,21 @@ export function RecentSessions({
     retry,
   ]);
 
+  const rows = expanded
+    ? entries
+        .slice(0, showAll ? LIMIT : SIDEBAR_SESSION_PREVIEW_LIMIT)
+        .map((entry) => ({
+          key: JSON.stringify([entry.workspaceCwd, entry.session.sessionId]),
+          node: renderSession(entry),
+        }))
+        .filter((row) => row.node !== null)
+    : [];
+  const visibleKeys = JSON.stringify(rows.map((row) => row.key));
+  useEffect(() => {
+    onVisibleRowsChange?.(visibleKeys);
+  }, [onVisibleRowsChange, visibleKeys]);
+  useEffect(() => () => onVisibleRowsChange?.('[]'), [onVisibleRowsChange]);
+
   return (
     <section
       aria-label={t('sidebar.recentSessions')}
@@ -249,18 +266,9 @@ export function RecentSessions({
               {t('sidebar.noSessions')}
             </div>
           )}
-          {entries
-            .slice(0, showAll ? LIMIT : SIDEBAR_SESSION_PREVIEW_LIMIT)
-            .map((entry) => (
-              <Fragment
-                key={JSON.stringify([
-                  entry.workspaceCwd,
-                  entry.session.sessionId,
-                ])}
-              >
-                {renderSession(entry)}
-              </Fragment>
-            ))}
+          {rows.map((row) => (
+            <Fragment key={row.key}>{row.node}</Fragment>
+          ))}
           {!showAll && entries.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
             <button
               type="button"
