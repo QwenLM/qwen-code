@@ -283,6 +283,7 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   recording: {
     lastCompletedUuid: string;
     turnParentUuids: Array<string | null>;
+    turnPromptIds?: Array<string | undefined>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
@@ -413,6 +414,7 @@ function buildManagedSessionRestoreProjection(
       lastCompletedUuid:
         records[records.length - 1]?.uuid ?? input.fallbackLastCompletedUuid,
       turnParentUuids: turnStateValue.turnParentUuids,
+      turnPromptIds: turnStateValue.turnPromptIds,
       ...(input.customTitle !== undefined
         ? { customTitle: input.customTitle }
         : {}),
@@ -1811,6 +1813,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.turnResultPromptId) +
       estimateStringBytes(entry.daemonPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
+      estimateStringBytes(entry.turnHint.turnPromptId) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
@@ -3537,6 +3540,7 @@ export class SessionTranscriptReader {
       recording: {
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
+        turnPromptIds: turnStateValue.turnPromptIds,
         ...(customTitle !== undefined ? { customTitle } : {}),
         ...(titleSource !== undefined ? { titleSource } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),

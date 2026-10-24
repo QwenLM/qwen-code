@@ -1506,6 +1506,10 @@ class ManagedAgentApiContractTest {
         exchange(drift, "changeWebShellSessionApproval", 409,
                 post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant).principal(actor),
                 "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
+        exchange(drift, "changeWebShellSessionApproval", 400,
+                post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"default\",\"expectedRevision\":0,\"idempotencyKey\":\"invalid-rules\","
+                        + "\"permissionRules\":{\"allow\":[\"Read(/tmp/**)\"],\"ask\":[],\"deny\":[]}}");
         exchange(drift, "changeWebShellSessionApproval", 401,
                 post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
@@ -3030,6 +3034,28 @@ class ManagedAgentApiContractTest {
                          "input":[{"type":"input_text","text":"hi"}],
                          "metadata":{"clientId":"client-1","other":"trace"}}
                         """))).isEmpty();
+    }
+
+    @Test
+    void sessionPolicyContractsCarryClassifierRulesAndOmitAnEmptySelection() throws Exception {
+        var rules = Map.of("allow", List.of("Read"), "ask", List.<String>of(), "deny", List.of("Bash(rm *)"));
+        var options = new ApiModels.WebShellSessionApproval("auto", 1, List.of("default", "auto"), true,
+                false, false, true, true, rules);
+        JsonNode selected = objectMapper.valueToTree(options);
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellSessionApproval", selected)).isEmpty();
+        assertThat(selected.path("permissionRulesSupported").asBoolean()).isTrue();
+        var result = new ApiModels.WebShellApprovalChangeResult("session", "auto", 1, false, false, rules);
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellApprovalChangeResult", objectMapper.valueToTree(result))).isEmpty();
+        JsonNode legacy = objectMapper.valueToTree(new ApiModels.WebShellApprovalChangeResult("session", "default", 1, false));
+        assertThat(legacy.has("permissionRules")).isFalse();
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellApprovalChangeResult", legacy)).isEmpty();
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellChangeApprovalRequest", objectMapper.readTree("""
+                {"sessionId":"session","approvalMode":"auto","expectedRevision":0,"idempotencyKey":"rules",
+                 "permissionRules":{"allow":[],"ask":[],"deny":[]}}
+                """))).isEmpty();
+        assertThat(CONTRACT.validate("#/components/schemas/ManagedPermissionRules", objectMapper.readTree("""
+                {"allow":["Read","Read"],"ask":[],"deny":[]}
+                """))).isNotEmpty();
     }
 
     @Test

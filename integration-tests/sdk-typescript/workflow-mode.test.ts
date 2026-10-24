@@ -33,7 +33,10 @@ function currentText(body: Record<string, unknown>, marker: string): string {
     .join('\n');
 }
 
-describe('DW04: native SDK session Workflow mode', () => {
+describe.each([
+  { loop: 'legacy', shared: false },
+  { loop: 'shared', shared: true },
+])('DW04: native SDK session Workflow mode ($loop)', ({ shared }) => {
   let helper: SDKTestHelper;
   let server: FakeOpenAIServer;
   let cwd: string;
@@ -47,6 +50,7 @@ describe('DW04: native SDK session Workflow mode', () => {
       JSON.stringify({
         security: { auth: { selectedType: 'openai' } },
         tools: { workflowsEnabled: true },
+        experimental: { unifiedAgentLoop: shared },
         memory: {
           enableManagedAutoMemory: false,
           enableManagedAutoDream: false,
@@ -80,6 +84,7 @@ describe('DW04: native SDK session Workflow mode', () => {
       QWEN_CODE_SYSTEM_SETTINGS_PATH: join(cwd, 'system.json'),
       QWEN_CODE_SYSTEM_DEFAULTS_PATH: join(cwd, 'system.json'),
       QWEN_CODE_DISABLE_WORKFLOWS: '0',
+      QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '0',
       QWEN_CODE_DISABLE_CRON: '1',
       OPENAI_API_KEY: 'fake-key',
       OPENAI_BASE_URL: server.baseUrl,

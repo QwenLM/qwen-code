@@ -17,7 +17,10 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 
-describe('DW04: persistent headless Workflow mode', () => {
+describe.each([
+  { loop: 'legacy', shared: false },
+  { loop: 'shared', shared: true },
+])('DW04: persistent headless Workflow mode ($loop)', ({ shared }) => {
   let rig: TestRig;
   let server: FakeOpenAIServer;
   let restoreProxy: () => void;
@@ -31,6 +34,7 @@ describe('DW04: persistent headless Workflow mode', () => {
       'home/settings.json',
       JSON.stringify({
         tools: { workflowsEnabled: true },
+        experimental: { unifiedAgentLoop: shared },
         security: { auth: { selectedType: 'openai' } },
         memory: {
           enableManagedAutoMemory: false,
@@ -53,6 +57,7 @@ describe('DW04: persistent headless Workflow mode', () => {
       join(rig.testDir!, 'system.json'),
     );
     vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '0');
+    vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
     server = await startFakeOpenAIServer(
       () => ({ content: 'DW04_HEADLESS_DONE' }),
       fakeServerHostOptions(),

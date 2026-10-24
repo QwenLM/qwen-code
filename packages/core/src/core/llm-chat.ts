@@ -2004,8 +2004,13 @@ export const ORPHAN_TOOL_USE_REPAIR_REASON =
  *           when it landed in a non-adjacent later turn;
  *         - DROP duplicate fr copies for the same id.
  *       Then `useLlmStream.handleCompletedTools` dedupes the
- *       scheduler's late real result against `chat.history` so the
- *       synthetic and the real result never collide on the wire.
+ *       scheduler's late real result against `chat.history`: when the
+ *       existing response is one of these synthesized placeholders the
+ *       real result REPLACES it in place (`replaceSynthesizedToolResponse`,
+ *       detected via `isSynthesizedRepairPart`) so a tool that actually
+ *       finished is not reported to the model as "not recorded" (issue
+ *       #15297); only a genuine duplicate — a real response already
+ *       present for the same id — is still dropped on the wire.
  *
  * --- Partial-push marker lifecycle ---------------------------------------
  *
@@ -2021,6 +2026,33 @@ export const ORPHAN_TOOL_USE_REPAIR_REASON =
  * is a bug.
  * ============================================================================
  */
+
+/**
+ * Detect the synthesized `functionResponse` the repair subsystem plants
+ * for a dangling `functionCall` (`applyRepair` here and
+ * `buildSyntheticToolResponseParts` in turn-interruption.ts share this
+ * exact shape). The discriminator is the sentinel text AND the
+ * single-key `response` object, so a genuine tool failure whose error
+ * merely quotes the sentinel inside a richer response is never
+ * misidentified as a placeholder.
+ */
+export function isSynthesizedRepairPart(part: Part): boolean {
+  const fr = part.functionResponse;
+  if (!fr?.id) return false;
+  const response: unknown = fr.response;
+  if (
+    response === null ||
+    typeof response !== 'object' ||
+    Array.isArray(response)
+  ) {
+    return false;
+  }
+  const keys = Object.keys(response);
+  return (
+    keys.length === 1 &&
+    (response as { error?: unknown }).error === ORPHAN_TOOL_USE_REPAIR_REASON
+  );
+}
 
 /**
  * Walk `history` left-to-right and close every dangling
@@ -5918,6 +5950,49 @@ export class LlmChat {
       }
     }
     return ids;
+  }
+
+  /**
+   * Ids with a synthesized orphan-repair placeholder among their
+   * answering `functionResponse` parts. Walk-only, no clone — same
+   * rationale as {@link getHistoryFunctionResponseIds}; the scheduler's
+   * tool-completion handler calls both per batch.
+   */
+  getSynthesizedRepairCallIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const entry of this.history) {
+      if (entry.role !== 'user') continue;
+      for (const part of entry.parts ?? []) {
+        const id = part.functionResponse?.id;
+        if (id && isSynthesizedRepairPart(part)) ids.add(id);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Replace the synthesized orphan-repair placeholder answering `callId`
+   * with the tool's real response parts, in place: the placeholder's
+   * slot is the adjacency-correct position the repair pass chose, so the
+   * splice keeps the wire's tool_use → tool_result pairing intact.
+   * Returns false — leaving history untouched — when `callId` is not
+   * answered by a placeholder (either unanswered, or already answered by
+   * a genuine response the caller must keep treating as a duplicate).
+   */
+  replaceSynthesizedToolResponse(callId: string, realParts: Part[]): boolean {
+    for (const entry of this.history) {
+      if (entry.role !== 'user') continue;
+      const parts = entry.parts;
+      if (!parts) continue;
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!part || part.functionResponse?.id !== callId) continue;
+        if (!isSynthesizedRepairPart(part)) return false;
+        parts.splice(i, 1, ...realParts);
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
