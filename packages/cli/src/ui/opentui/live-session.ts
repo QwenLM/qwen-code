@@ -885,6 +885,9 @@ export async function* livePromptEvents(
         ]
       : [];
     const initialToolCallId = pending[0]?.callId;
+    if (initialTool?.restoreResponseBinding) {
+      initialTool.restoreResponseBinding.executionCallId = initialToolCallId;
+    }
     if (initialTool) {
       const request = pending[0];
       yield {

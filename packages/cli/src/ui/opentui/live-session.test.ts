@@ -335,6 +335,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               __cancelApproval?: boolean;
               __modOutput?: string;
               __restoreResult?: Record<string, unknown>;
+              __rewritten?: boolean;
             };
             return {
               nativeAttemptsObserved: a.__modOutput !== undefined,
@@ -342,7 +343,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                 ...c,
                 callId: c.callId,
                 name: c.name ?? 'test_tool',
-                args: c.args ?? {},
+                args: a.__rewritten
+                  ? { ...a, modified_by_user: true }
+                  : (c.args ?? {}),
               },
               // A No/Esc cancellation leaves the scheduler with a cancelled
               // call — the send loop must see it as terminal to stop.
@@ -1337,7 +1340,7 @@ describe('livePromptEvents', () => {
     ]);
   });
 
-  it.each(['success', 'cancelled', 'successor'] as const)(
+  it.each(['success', 'cancelled', 'successor', 'rewritten'] as const)(
     'pairs an actual initialTool completion only with its captured restore owner: %s',
     async (mode) => {
       const directory = await mkdtemp(
@@ -1364,6 +1367,7 @@ describe('livePromptEvents', () => {
       } as unknown as ChatRecordingService);
       const args = {
         __cancelled: mode === 'cancelled',
+        __rewritten: mode === 'rewritten',
         __restoreResult:
           mode === 'cancelled'
             ? { error: 'ACTUAL_CANCELLED_RESULT' }
@@ -1398,7 +1402,9 @@ describe('livePromptEvents', () => {
         const history = client.getHistoryShallow();
         if (mode === 'successor') expect(history).toHaveLength(1);
         else {
+          expect(binding.executionCallId).toMatch(/^test_tool-/);
           expect(history).toHaveLength(2);
+          expect(history[0].parts?.[0].functionCall?.args).toEqual(args);
           expect(history[1].parts).toEqual([
             {
               functionResponse: {
