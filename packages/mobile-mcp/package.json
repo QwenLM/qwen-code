@@ -12,12 +12,12 @@
   },
   "license": "Apache-2.0",
   "scripts": {
-    "build": "tsc && chmod +x lib/index.js",
+    "build": "tsc && node -e \"if (process.platform !== 'win32') require('node:fs').chmodSync('lib/index.js', 0o755)\"",
     "lint": "eslint .",
     "fixlint": "eslint . --fix",
     "test": "c8 playwright test",
     "watch": "tsc --watch",
-    "clean": "rm -rf lib",
+    "clean": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\"",
     "prepare": ""
   },
   "files": [

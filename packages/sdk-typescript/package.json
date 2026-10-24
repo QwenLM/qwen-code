@@ -58,7 +58,7 @@
     "lint:fix": "eslint src test --fix",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test-fence.json",
     "typecheck:public-surface": "tsc --noEmit -p tsconfig.public-surface.json",
-    "clean": "rm -rf dist",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "prepublishOnly": "npm run clean && npm run build && npm run bundle:cli",
     "prepack": "npm run build && npm run bundle:cli"
   },
