@@ -125,8 +125,23 @@ function normalizeRecallText(text: string): string {
   return text.normalize('NFKC').toLowerCase();
 }
 
-function tokenize(text: string): string[] {
-  const normalized = normalizeRecallText(text);
+function* recallTokenRuns(text: string): Generator<string> {
+  for (const match of normalizeRecallText(text).matchAll(RECALL_TOKEN_RUN)) {
+    const run = match[0];
+    if (!CJK_RUN_START.test(run)) {
+      yield run;
+      continue;
+    }
+    let previous = '';
+    for (const codePoint of run) {
+      if (previous) yield previous + codePoint;
+      previous = codePoint;
+    }
+  }
+}
+
+/** Distinct query tokens, bounded to the head and tail of a short query. */
+export function tokenizeMemoryRecallText(text: string): string[] {
   const edgeSize = MAX_HEURISTIC_QUERY_TOKENS / 2;
   const headTokens = new Set<string>();
   const tailTokens = new Set<string>();
@@ -147,20 +162,17 @@ function tokenize(text: string): string[] {
     }
   };
 
-  for (const match of normalized.matchAll(RECALL_TOKEN_RUN)) {
-    const run = match[0];
-    if (CJK_RUN_START.test(run)) {
-      let previous = '';
-      for (const codePoint of run) {
-        if (previous) addToken(previous + codePoint);
-        previous = codePoint;
-      }
-    } else {
-      addToken(run);
-    }
-  }
-
+  for (const run of recallTokenRuns(text)) addToken(run);
   return [...headTokens, ...tailTokens];
+}
+
+/**
+ * Every distinct token in a document. The bounded query tokenizer would evict
+ * tokens from the middle of an imported source, so document matching uses this
+ * uncapped view instead.
+ */
+export function tokenizeMemoryRecallTerms(text: string): Set<string> {
+  return new Set(recallTokenRuns(text));
 }
 
 function normalizeBody(body: string): string {
@@ -359,7 +371,7 @@ function isStrongFastMatch(
 ): boolean {
   if (matchesTitleOrKeyword(query, doc)) return true;
 
-  const queryTokens = tokenize(query);
+  const queryTokens = tokenizeMemoryRecallText(query);
   const metadata = normalizeRecallText(
     [doc.title, doc.description, ...doc.keywords, ...doc.usageScenarios].join(
       ' ',
@@ -382,7 +394,7 @@ export function selectRelevantAutoMemoryDocuments(
   limit = MAX_RELEVANT_DOCS,
   useStructuredMetadata = true,
 ): ScannedAutoMemoryDocument[] {
-  const queryTokens = tokenize(query);
+  const queryTokens = tokenizeMemoryRecallText(query);
   if (queryTokens.length === 0) {
     return [];
   }
