@@ -689,8 +689,16 @@ describe('OpenTuiApp shell wiring', () => {
       });
     }
 
+    const logger = {
+      getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+    } as unknown as NonNullable<AppProps['logger']>;
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} logger={logger} />);
+    });
+
     expect(mocks.state.dispatcherConstructions).toBe(1);
     expect(new Set(mocks.state.hosts).size).toBe(1);
+    expect((mocks.state.host as OpenTuiAppHost).logger).toBe(logger);
   });
 
   it('reserves the update-notification slot, hidden while a dialog is open', async () => {
@@ -870,6 +878,259 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
     expect(onSubmitPrompt).not.toHaveBeenCalled();
     expect(screen.getByText(/Exit shell mode and try again/)).toBeTruthy();
+  });
+
+  it.each([
+    { name: 'c', ctrl: true, sequence: '\x03' },
+    { name: 'escape', ctrl: false, sequence: '\x1b' },
+  ])(
+    'aborts the local shell signal on $name without cancelling the model lane',
+    async (key) => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      mocks.state.executeUserShell.mockImplementation(((
+        _config: unknown,
+        _command: string,
+        _emit: unknown,
+        signal: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return done;
+      }) as unknown as () => Promise<void>);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onInterrupt = vi.fn();
+      renderApp({ streaming: false, onInterrupt, onTranscriptEvent: vi.fn() });
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      try {
+        await submit('sleep 10');
+        expect(signals).toHaveLength(1);
+        expect(signals[0].aborted).toBe(false);
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'release',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(false);
+        expect(onInterrupt).not.toHaveBeenCalled();
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(true);
+        expect(onInterrupt).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => {
+          release();
+          await done;
+        });
+        await settle();
+      }
+    },
+  );
+
+  it.each([
+    { name: 'c', ctrl: true, sequence: '\x03' },
+    { name: 'escape', ctrl: false, sequence: '\x1b' },
+  ])(
+    'keeps a held local shell alive while the model owns $name, then cancels it when the model settles',
+    async (key) => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      mocks.state.executeUserShell.mockImplementation(((
+        _config: unknown,
+        _command: string,
+        _emit: unknown,
+        signal: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return done;
+      }) as unknown as () => Promise<void>);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onInterrupt = vi.fn();
+      const props: AppProps = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        getSessionStats,
+        streaming: true,
+        onInterrupt,
+        onTranscriptEvent: vi.fn(),
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      try {
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+        expect(onInterrupt).not.toHaveBeenCalled();
+        await act(async () => {
+          view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        });
+        await act(async () => {
+          (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+        });
+        await submit('sleep 10');
+        expect(signals).toHaveLength(1);
+        expect(signals[0].aborted).toBe(false);
+        await act(async () => {
+          view.rerender(<OpenTuiApp {...props} streaming />);
+        });
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(false);
+        expect(onInterrupt).not.toHaveBeenCalled();
+        await act(async () => {
+          view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        });
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(true);
+        expect(onInterrupt).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => {
+          release();
+          await done;
+        });
+        view.unmount();
+      }
+    },
+  );
+
+  it.each([
+    { name: 'c', ctrl: true, sequence: '\x03' },
+    { name: 'escape', ctrl: false, sequence: '\x1b' },
+  ])(
+    'leaves a held local shell to the dialog on $name until that dialog closes',
+    async (key) => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      mocks.state.executeUserShell.mockImplementation(((
+        _config: unknown,
+        _command: string,
+        _emit: unknown,
+        signal: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return done;
+      }) as unknown as () => Promise<void>);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onInterrupt = vi.fn();
+      renderApp({ streaming: false, onInterrupt, onTranscriptEvent: vi.fn() });
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      try {
+        await submit('sleep 10');
+        expect(signals).toHaveLength(1);
+        mocks.state.handleResult = {
+          kind: 'open_dialog',
+          request: { dialog: 'help' },
+        } satisfies OpenTuiDispatchOutcome;
+        await submit('/help');
+        expect(screen.getByText('dialog:help')).toBeTruthy();
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(false);
+        expect(onInterrupt).not.toHaveBeenCalled();
+        await act(async () => {
+          (mocks.state.dialogProps?.['onClose'] as () => void)();
+        });
+        await settle();
+        expect(screen.queryByText('dialog:help')).toBeNull();
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(true);
+        expect(onInterrupt).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => {
+          release();
+          await done;
+        });
+        await settle();
+      }
+    },
+  );
+
+  it('does not retry while a held shell owns the local lane', async () => {
+    let release!: () => void;
+    const shellDone = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocks.state.executeUserShell.mockReturnValue(shellDone);
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onRetryPrompt = vi.fn();
+    renderApp({ onRetryPrompt, onTranscriptEvent: vi.fn() });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    try {
+      await submit('sleep 1');
+      expect(mocks.state.executeUserShell).toHaveBeenCalledOnce();
+      act(() => {
+        (mocks.state.inputProps!['onRetry'] as () => void)();
+      });
+      expect(onRetryPrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        release();
+        await shellDone;
+      });
+      await settle();
+      act(() => {
+        (mocks.state.inputProps!['onRetry'] as () => void)();
+      });
+      expect(onRetryPrompt).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => {
+        release();
+        await shellDone;
+      });
+      await settle();
+    }
   });
 
   it('retains a previously accepted shell-blocked prompt when later live admission fails', async () => {
