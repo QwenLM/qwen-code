@@ -16,6 +16,8 @@ import {
   resolveWebShellSessions,
 } from '../../test/sidebarHarness';
 import { setLivePresence } from '../../live/live-presence';
+import sidebarStyles from './WebShellSidebar.module.css';
+import workspaceStyles from './WorkspaceSection.module.css';
 import { useSessionCatalogController } from '../../session-catalog/session-catalog-hooks';
 
 const {
@@ -149,6 +151,7 @@ const {
           }
         | undefined,
       client: {
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
         listStandaloneSessionsPage,
         archiveStandaloneSessions: archiveSessionsData,
         unarchiveStandaloneSessions: unarchiveSessionsData,
@@ -793,6 +796,9 @@ beforeEach(() => {
   workspace.refreshCapabilities.mockReset();
   workspace.refreshCapabilities.mockResolvedValue(capabilities);
   workspace.client.workspaceByCwd.mockReset();
+  workspace.client.listWorkspaceSessionsPage
+    .mockReset()
+    .mockResolvedValue({ sessions: [] });
   listWorkspaceSessions.mockReset();
   listWorkspaceSessions.mockResolvedValue([]);
   listStandaloneSessionsPage.mockReset();
@@ -1637,14 +1643,15 @@ describe('WebShellSidebar workspace removal', () => {
     expect(
       container.querySelector('button[aria-label="Create session group"]'),
     ).toBeNull();
-    const newTaskButtons = Array.from(
-      container.querySelectorAll<HTMLButtonElement>(
-        'button[aria-label="New task"]',
-      ),
+    const workspaceSection = Array.from(
+      container.querySelectorAll<HTMLElement>(`.${workspaceStyles.section}`),
+    ).find((section) => section.querySelector('[title="/tmp/other"]'))!;
+    const newTask = workspaceSection.querySelector<HTMLButtonElement>(
+      'button[aria-label="New task"]',
     );
-    expect(newTaskButtons.length).toBeGreaterThanOrEqual(2);
+    expect(newTask).not.toBeNull();
     await act(async () => {
-      click(newTaskButtons.at(-1)!);
+      click(newTask!);
       await Promise.resolve();
     });
     expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
@@ -5328,7 +5335,9 @@ describe('WebShellSidebar session source switch', () => {
       enabled: false,
     });
     expect(container.textContent).toContain('Legacy channel');
-    expect(container.querySelector('section[aria-label]')).toBeNull();
+    expect(
+      container.querySelector(`section.${sidebarStyles.sessionGroupSection}`),
+    ).toBeNull();
   });
 
   it('groups channel sessions by platform type and toggles each group', async () => {
@@ -6813,6 +6822,10 @@ describe('WebShellSidebar standalone grouping', () => {
   });
 
   it('keeps project lists mounted while Projects is collapsed', async () => {
+    window.localStorage.setItem(
+      'qwen.web-shell.sidebar.workspace-expanded:recent-sessions',
+      'false',
+    );
     const standaloneCapabilities = {
       ...capabilities,
       features: [...capabilities.features, 'standalone_sessions_v1'],
@@ -6840,6 +6853,10 @@ describe('WebShellSidebar standalone grouping', () => {
   });
 
   it('refreshes both standalone groups after archive and restore', async () => {
+    window.localStorage.setItem(
+      'qwen.web-shell.sidebar.workspace-expanded:recent-sessions',
+      'false',
+    );
     const standaloneCapabilities = {
       ...capabilities,
       features: [...capabilities.features, 'standalone_sessions_v1'],
