@@ -241,17 +241,17 @@ export function OpenTuiExtensionDiscoverTab(
     onLockChange(view !== 'list' || installing || opening);
     return () => onLockChange(false);
   }, [view, installing, opening, onLockChange]);
+  const footer = installing
+    ? t('Installing...')
+    : view === 'list'
+      ? t(
+          'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back',
+        )
+      : t('↑↓ navigate · Enter select · Esc to go back');
   useEffect(() => {
-    const footer = installing
-      ? t('Installing...')
-      : view === 'list'
-        ? t(
-            'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back',
-          )
-        : t('↑↓ navigate · Enter select · Esc to go back');
     onFooter(footer);
     return () => onFooter(null);
-  }, [view, installing, onFooter]);
+  }, [footer, onFooter]);
 
   const beginBatch = () => {
     const targets = plugins.filter(
@@ -405,45 +405,30 @@ export function OpenTuiExtensionDiscoverTab(
   };
 
   const actions: ActionItem[] = useMemo(() => {
+    const action = (value: Action, label: string): ActionItem => ({
+      key: value,
+      value,
+      label,
+    });
     if (view === 'scope-select')
       return [
-        { key: 'user', value: 'user', label: t('Global (User Scope)') },
-        { key: 'project', value: 'project', label: t('Project (Workspace)') },
+        action('user', t('Global (User Scope)')),
+        action('project', t('Project (Workspace)')),
       ];
-    const items: ActionItem[] = [];
-    if (detail && !detail.installed)
-      items.push(
-        {
-          key: 'user',
-          value: 'user',
-          label: t('Install for you (user scope)'),
-        },
-        {
-          key: 'project',
-          value: 'project',
-          label: t('Install for the current workspace (project scope)'),
-        },
-      );
-    if (detail?.homepage)
-      items.push({
-        key: 'homepage',
-        value: 'homepage',
-        label: t('Open homepage'),
-      });
-    items.push({
-      key: 'back',
-      value: 'back',
-      label: t('Back to extension list'),
-    });
-    return items;
+    return [
+      ...(detail && !detail.installed
+        ? [
+            action('user', t('Install for you (user scope)')),
+            action(
+              'project',
+              t('Install for the current workspace (project scope)'),
+            ),
+          ]
+        : []),
+      ...(detail?.homepage ? [action('homepage', t('Open homepage'))] : []),
+      action('back', t('Back to extension list')),
+    ];
   }, [view, detail]);
-  const footer = installing
-    ? t('Installing...')
-    : view === 'list'
-      ? t(
-          'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back',
-        )
-      : t('↑↓ navigate · Enter select · Esc to go back');
   const heading =
     t('Discover extensions') +
     ` (${filtered.length ? cursor + 1 : 0}/${filtered.length})` +
@@ -704,11 +689,7 @@ export function OpenTuiExtensionDiscoverTab(
   if (view === 'scope-select')
     return (
       <box flexDirection="column" gap={1}>
-        <text fg={C.text}>
-          {t('Install {{count}} extension(s) to which scope?', {
-            count: String(scopeTargets.length),
-          })}
-        </text>
+        <text fg={C.text}>{scopeHeading}</text>
         {installing ? <text fg={C.dim}>{t('Installing...')}</text> : actionList}
       </box>
     );
@@ -748,15 +729,7 @@ export function OpenTuiExtensionDiscoverTab(
     );
   return (
     <box flexDirection="column">
-      <text fg={C.text}>
-        {t('Discover extensions')}
-        {` (${filtered.length ? cursor + 1 : 0}/${filtered.length})`}
-        {props.marketplaceFilter
-          ? t(' · {{marketplace}} (Tab to clear)', {
-              marketplace: safe(props.marketplaceFilter),
-            })
-          : ''}
-      </text>
+      <text fg={C.text}>{heading}</text>
       <box
         flexDirection="row"
         borderStyle="rounded"

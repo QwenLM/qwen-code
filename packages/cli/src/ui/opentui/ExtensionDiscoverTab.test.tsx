@@ -9,6 +9,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import {
+  catalogKey,
+  catalogDeferred as deferred,
+} from '../../test-utils/opentui-catalog.js';
 import type { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 import type { DiscoveredPlugin } from '@qwen-code/qwen-code-core/extension/sourceRegistry.js';
 import type { ExtensionsStatusMessage } from './dialogs-extensions.js';
@@ -21,86 +25,32 @@ const mocks = vi.hoisted(() => {
     width: 100,
     height: 70,
   };
-  async function buildJsxRuntime() {
-    const React = await import('react');
-    const jsx = (
-      type: unknown,
-      props: { children?: unknown; key?: React.Key } | null,
-      key?: React.Key,
-    ) => {
-      const config = key === undefined ? props : { ...props, key };
-      const children = (config?.children ?? null) as React.ReactNode;
-      if (type === 'box' || type === 'text' || type === 'scrollbox') {
-        return React.createElement(
-          type === 'text' ? 'span' : 'div',
-          key === undefined ? null : { key },
-          children,
-        );
-      }
-      return React.createElement(
-        type as React.ElementType,
-        config as Record<string, unknown>,
-        children,
-      );
-    };
-    return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
-  }
-  return { state, buildJsxRuntime, open: vi.fn() };
+  return { state, open: vi.fn() };
 });
 
 vi.mock('open', () => ({ default: mocks.open }));
-vi.mock('@opentui/core', () => ({
-  SyntaxStyle: { fromStyles: () => ({}) },
-  MouseButton: { LEFT: 0 },
-  decodePasteBytes: (bytes: Uint8Array) => new TextDecoder().decode(bytes),
-}));
-vi.mock('@opentui/react', async () => {
-  const React = await import('react');
-  const useSubscription = (
-    handlers: Array<(event: unknown) => void>,
-    handler: (event: unknown) => void,
-  ) => {
-    const latest = React.useRef(handler);
-    latest.current = handler;
-    React.useEffect(() => {
-      const wrapped = (event: unknown) => latest.current(event);
-      handlers.push(wrapped);
-      return () => {
-        const index = handlers.indexOf(wrapped);
-        if (index >= 0) handlers.splice(index, 1);
-      };
-    }, [handlers]);
-  };
-  return {
-    useKeyboard: (handler: (event: unknown) => void) =>
-      useSubscription(mocks.state.keyboardHandlers, handler),
-    usePaste: (handler: (event: unknown) => void) =>
-      useSubscription(mocks.state.pasteHandlers, handler),
-    useRenderer: () => ({
-      addInputHandler: () => {},
-      removeInputHandler: () => {},
-    }),
-    useTerminalDimensions: () => ({
-      width: mocks.state.width,
-      height: mocks.state.height,
-    }),
-  };
-});
-vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
-vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+vi.mock(
+  '@opentui/core',
+  async () =>
+    (await import('../../test-utils/opentui-catalog.js')).catalogNativeCore,
+);
+vi.mock('@opentui/react', async () =>
+  (await import('../../test-utils/opentui-catalog.js')).catalogHooks(
+    mocks.state.keyboardHandlers,
+    mocks.state.pasteHandlers,
+    () => ({ width: mocks.state.width, height: mocks.state.height }),
+  ),
+);
+vi.mock('@opentui/react/jsx-runtime', async () =>
+  (await import('../../test-utils/opentui-catalog.js')).catalogRuntime(false),
+);
+vi.mock('@opentui/react/jsx-dev-runtime', async () =>
+  (await import('../../test-utils/opentui-catalog.js')).catalogRuntime(false),
+);
 vi.mock('./theme.js', () => ({ C: new Proxy({}, { get: () => '#ffffff' }) }));
 
 import { OpenTuiExtensionDiscoverTab } from './ExtensionDiscoverTab.js';
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
-}
 function plugin(overrides: Partial<DiscoveredPlugin> = {}): DiscoveredPlugin {
   return {
     name: 'alpha',
@@ -157,26 +107,6 @@ function renderTab(overrides: Partial<OpenTuiExtensionDiscoverTabProps> = {}) {
     },
   };
 }
-function key(
-  name: string,
-  sequence = name,
-  extra: Record<string, unknown> = {},
-) {
-  return {
-    name,
-    sequence,
-    ctrl: false,
-    meta: false,
-    shift: false,
-    option: false,
-    super: false,
-    hyper: false,
-    eventType: 'press',
-    preventDefault: () => {},
-    stopPropagation: () => {},
-    ...extra,
-  };
-}
 async function press(
   name: string,
   sequence = name,
@@ -184,7 +114,7 @@ async function press(
 ) {
   await act(async () => {
     for (const handler of [...mocks.state.keyboardHandlers])
-      handler(key(name, sequence, extra));
+      handler({ ...catalogKey(name, sequence), ...extra });
   });
 }
 async function settle<T>(pending: ReturnType<typeof deferred<T>>, value: T) {
@@ -193,10 +123,14 @@ async function settle<T>(pending: ReturnType<typeof deferred<T>>, value: T) {
     await pending.promise;
   });
 }
-async function openDetail(name = 'alpha') {
+async function waitForRow(name: string, market: string, installed = false) {
   await waitFor(() =>
-    expect(screen.getByText(row(name, 'market-a'))).toBeTruthy(),
+    expect(screen.getByText(row(name, market, installed))).toBeTruthy(),
   );
+}
+
+async function openDetail(name = 'alpha') {
+  await waitForRow(name, 'market-a');
   await press('return');
   expect(screen.getByText('Extension details')).toBeTruthy();
   expect(screen.getByText(name)).toBeTruthy();
@@ -242,9 +176,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
           tab.update({ isCurrent: () => true });
         }
       }
-      await waitFor(() =>
-        expect(screen.getByText(row('successor', 'market-a'))).toBeTruthy(),
-      );
+      await waitForRow('successor', 'market-a');
       await settle(old, [plugin({ name: 'abandoned' })]);
       expect(screen.queryByText(row('abandoned', 'market-a'))).toBeNull();
       expect(screen.getByText(row('successor', 'market-a'))).toBeTruthy();
@@ -263,9 +195,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
     service.discoverPlugins.mockImplementationOnce(() => old.promise);
     const tab = renderTab({ manager: service.manager });
     tab.update({ reloadSignal: 1 });
-    await waitFor(() =>
-      expect(screen.getByText(row('newest', 'market-a'))).toBeTruthy(),
-    );
+    await waitForRow('newest', 'market-a');
     await settle(old, [plugin({ name: 'superseded' })]);
     expect(screen.queryByText(row('superseded', 'market-a'))).toBeNull();
     expect(screen.getByText(row('newest', 'market-a'))).toBeTruthy();
@@ -292,9 +222,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
     current = false;
     service.discoverPlugins.mockResolvedValue([plugin({ name: 'successor' })]);
     tab.update({ isCurrent: () => true, install: vi.fn() });
-    await waitFor(() =>
-      expect(screen.getByText(row('successor', 'market-a'))).toBeTruthy(),
-    );
+    await waitForRow('successor', 'market-a');
     vi.mocked(tab.props.onStatus).mockClear();
     await settle(held, {
       type: 'warning',
@@ -314,9 +242,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
       plugin({ name: 'other' }),
     ]);
     const tab = renderTab({ manager: service.manager });
-    await waitFor(() =>
-      expect(screen.getByText(row('other', 'market-a'))).toBeTruthy(),
-    );
+    await waitForRow('other', 'market-a');
     await press('j', 'j');
     await press('k', 'k');
     expect(screen.getByText(row('jk-tool', 'market-a'))).toBeTruthy();
@@ -339,9 +265,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
   it('treats j/k as search characters and edits a pasted query through the native field', async () => {
     const service = managerFor([plugin(), plugin({ name: 'jk-tool' })]);
     renderTab({ manager: service.manager });
-    await waitFor(() =>
-      expect(screen.getByText(row('alpha', 'market-a'))).toBeTruthy(),
-    );
+    await waitForRow('alpha', 'market-a');
     const prevented = vi.fn();
     await act(async () => {
       for (const handler of mocks.state.pasteHandlers)
@@ -401,9 +325,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
       install,
       marketplaceFilter: 'market-a',
     });
-    await waitFor(() =>
-      expect(screen.getByText(row('shared', 'market-a'))).toBeTruthy(),
-    );
+    await waitForRow('shared', 'market-a');
     await press('space', ' ');
     tab.update({ marketplaceFilter: 'market-b' });
     await press('space', ' ');
@@ -417,9 +339,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
     ).toBeTruthy();
     await press('down');
     await press('return');
-    await waitFor(() =>
-      expect(screen.getByText(row('shared', 'market-a', true))).toBeTruthy(),
-    );
+    await waitForRow('shared', 'market-a', true);
     expect(install.mock.calls).toEqual([
       ['/fixtures/market-a:shared', 'project'],
       ['/fixtures/market-b:shared', 'project'],
@@ -442,9 +362,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
     expect(install).toHaveBeenCalledTimes(3);
     await press('down');
     await press('return');
-    await waitFor(() =>
-      expect(screen.getByText(row('broken', 'market-c', true))).toBeTruthy(),
-    );
+    await waitForRow('broken', 'market-c', true);
     expect(install).toHaveBeenCalledTimes(4);
     expect(install).toHaveBeenLastCalledWith(
       '/fixtures/market-c:broken',
@@ -470,9 +388,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
     const tab = renderTab({ manager: service.manager, install });
     await openDetail();
     await press('return');
-    await waitFor(() =>
-      expect(screen.getByText(row('alpha', 'market-a', true))).toBeTruthy(),
-    );
+    await waitForRow('alpha', 'market-a', true);
     expect(tab.props.onStatus).toHaveBeenLastCalledWith({
       type: 'warning',
       text: 'Installed 1 extension(s) with warnings: alpha: COMMITTED_ARTIFACT CATALOG_RELOAD_FAILED',
@@ -522,9 +438,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
 
   it('does not install after Escape cancels the scope picker', async () => {
     const tab = renderTab();
-    await waitFor(() =>
-      expect(screen.getByText(row('alpha', 'market-a'))).toBeTruthy(),
-    );
+    await waitForRow('alpha', 'market-a');
     await press('space', ' ');
     await press('return');
     expect(screen.getByText('Project (Workspace)')).toBeTruthy();
@@ -570,9 +484,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
       vi.stubEnv('NODE_ENV', 'test');
       const service = managerFor([plugin({ installed: true, homepage })]);
       const tab = renderTab({ manager: service.manager });
-      await waitFor(() =>
-        expect(screen.getByText(row('alpha', 'market-a', true))).toBeTruthy(),
-      );
+      await waitForRow('alpha', 'market-a', true);
       await press('return');
       await press('return');
       expect(mocks.open).not.toHaveBeenCalled();
@@ -589,9 +501,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
       plugin({ installed: true, homepage: 'https://example.test/plugin' }),
     ]);
     const tab = renderTab({ manager: service.manager });
-    await waitFor(() =>
-      expect(screen.getByText(row('alpha', 'market-a', true))).toBeTruthy(),
-    );
+    await waitForRow('alpha', 'market-a', true);
     await press('return');
     await press('return');
     expect(mocks.open).toHaveBeenCalledExactlyOnceWith(

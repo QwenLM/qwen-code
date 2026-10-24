@@ -17,9 +17,19 @@
  * native to OpenTUI: hover highlights, left-click selects, wheel scrolls.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { MouseButton } from '@opentui/core';
-import { useKeyboard, useTerminalDimensions } from '@opentui/react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { MouseButton, type KeyEvent } from '@opentui/core';
+import {
+  useAppContext,
+  useKeyboard,
+  useTerminalDimensions,
+} from '@opentui/react';
 import { C } from './theme.js';
 import { useBatchSafeCursor } from './batch-cursor.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
@@ -286,6 +296,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   const latestRef = useRef({
     items,
     activeIndex,
+    focused,
     onSelect,
     scrollOffset,
     maxItemsToShow,
@@ -293,6 +304,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   latestRef.current = {
     items,
     activeIndex,
+    focused,
     onSelect,
     scrollOffset,
     maxItemsToShow,
@@ -394,7 +406,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     onSelect?.(item.value);
   };
 
-  useKeyboard((key) => {
+  const handleKey = (key: KeyEvent) => {
     if (!focused || items.length === 0) return;
     const original = toOriginalKey(key);
 
@@ -458,6 +470,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
           // Flush against the highlight at timeout time, outside any setState
           // updater (updaters are pure and StrictMode re-runs them).
           const latest = latestRef.current;
+          if (!latest.focused) return;
           // The digit armed this against the window it was typed into; a
           // resize in between can leave the highlight unpainted, and the
           // flush commits it a second later with nothing on screen to show
@@ -516,7 +529,21 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       const item = items[cursorRef.current];
       if (item && !item.disabled) onSelect?.(item.value);
     }
+  };
+  const { keyHandler } = useAppContext();
+  const currentHandler = useRef(handleKey);
+  useLayoutEffect(() => {
+    currentHandler.current = handleKey;
+    if (!focused) clearNumberBuffer();
   });
+  useEffect(() => {
+    if (!focused) return;
+    const listener = (key: KeyEvent) => currentHandler.current(key);
+    keyHandler?.on('keypress', listener);
+    return () => {
+      keyHandler?.off('keypress', listener);
+    };
+  }, [keyHandler, focused]);
 
   return {
     activeIndex,

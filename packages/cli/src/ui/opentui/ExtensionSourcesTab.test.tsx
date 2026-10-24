@@ -9,6 +9,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { cleanup, render, screen } from '@testing-library/react';
+import {
+  catalogKey,
+  catalogDeferred as deferred,
+} from '../../test-utils/opentui-catalog.js';
 import type { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 
 const mocks = vi.hoisted(() => {
@@ -17,68 +21,27 @@ const mocks = vi.hoisted(() => {
     paste: [] as Array<(event: unknown) => void>,
     width: 100,
   };
-  async function runtime() {
-    const React = await import('react');
-    const jsx = (
-      type: unknown,
-      props: { children?: unknown; bg?: unknown } | null,
-      key?: React.Key,
-    ) => {
-      if (type === 'box' || type === 'text') {
-        return React.createElement(
-          type === 'box' ? 'div' : 'span',
-          {
-            key,
-            'data-caret': props?.bg === undefined ? undefined : 'true',
-          },
-          props?.children as React.ReactNode,
-        );
-      }
-      return React.createElement(
-        type as React.ElementType,
-        {
-          ...props,
-          key,
-        } as Record<string, unknown>,
-      );
-    };
-    return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
-  }
-  return { state, runtime };
+  return { state };
 });
 
-vi.mock('@opentui/core', () => ({
-  SyntaxStyle: { fromStyles: () => ({}) },
-  MouseButton: { LEFT: 0 },
-  decodePasteBytes: (bytes: Uint8Array) => new TextDecoder().decode(bytes),
-}));
-vi.mock('@opentui/react', async () => {
-  const React = await import('react');
-  function useListener(
-    handler: (event: unknown) => void,
-    listeners: Array<(event: unknown) => void>,
-  ) {
-    const ref = React.useRef(handler);
-    ref.current = handler;
-    React.useEffect(() => {
-      const wrapper = (event: unknown) => ref.current(event);
-      listeners.push(wrapper);
-      return () => {
-        listeners.splice(listeners.indexOf(wrapper), 1);
-      };
-    }, [listeners]);
-  }
-  return {
-    useKeyboard: (handler: (event: unknown) => void) =>
-      useListener(handler, mocks.state.keyboard),
-    usePaste: (handler: (event: unknown) => void) =>
-      useListener(handler, mocks.state.paste),
-    useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
-    useRenderer: () => ({ addInputHandler() {}, removeInputHandler() {} }),
-  };
-});
-vi.mock('@opentui/react/jsx-runtime', () => mocks.runtime());
-vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.runtime());
+vi.mock(
+  '@opentui/core',
+  async () =>
+    (await import('../../test-utils/opentui-catalog.js')).catalogNativeCore,
+);
+vi.mock('@opentui/react', async () =>
+  (await import('../../test-utils/opentui-catalog.js')).catalogHooks(
+    mocks.state.keyboard,
+    mocks.state.paste,
+    () => ({ width: mocks.state.width, height: 40 }),
+  ),
+);
+vi.mock('@opentui/react/jsx-runtime', async () =>
+  (await import('../../test-utils/opentui-catalog.js')).catalogRuntime(true),
+);
+vi.mock('@opentui/react/jsx-dev-runtime', async () =>
+  (await import('../../test-utils/opentui-catalog.js')).catalogRuntime(true),
+);
 vi.mock('./theme.js', () => ({ C: new Proxy({}, { get: () => '#ffffff' }) }));
 
 import {
@@ -98,28 +61,10 @@ const marketplace = {
   owner: { name: 'Owned', email: 'owned@example.invalid' },
   plugins: [],
 };
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
+
 async function press(name: string, sequence = name.length === 1 ? name : '') {
   await act(async () => {
-    const event = {
-      name,
-      sequence,
-      ctrl: false,
-      meta: false,
-      shift: false,
-      option: false,
-      super: false,
-      hyper: false,
-      eventType: 'press',
-      preventDefault() {},
-      stopPropagation() {},
-    };
+    const event = catalogKey(name, sequence);
     for (const handler of [...mocks.state.keyboard]) handler(event);
   });
 }
@@ -132,6 +77,13 @@ async function paste(text: string) {
     for (const handler of [...mocks.state.paste]) handler(event);
   });
 }
+async function submitSource(value: string, direction?: 'up' | 'down') {
+  if (direction) await press(direction);
+  await press('return');
+  await paste(value);
+  await press('return');
+}
+
 function fixture(initial: Source[] = []) {
   let sources = initial;
   const methods = {
@@ -204,10 +156,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
   it('adds with the explicit cwd and keeps Add selected after refresh', async () => {
     const f = fixture();
     await mount(f.props);
-    await press('down');
-    await press('return');
-    await paste('  ./marketplace  ');
-    await press('return');
+    await submitSource('  ./marketplace  ', 'down');
     expect(f.methods.addSource).toHaveBeenCalledExactlyOnceWith(
       './marketplace',
       { cwd: '/owned/workspace' },
@@ -227,9 +176,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
   it('delegates direct installation only to the parent with user scope', async () => {
     const f = fixture();
     await mount(f.props);
-    await press('return');
-    await paste('./owned-extension');
-    await press('return');
+    await submitSource('./owned-extension');
     expect(f.props.install).toHaveBeenCalledExactlyOnceWith(
       './owned-extension',
       'user',
@@ -245,9 +192,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
       .mockRejectedValueOnce(new Error('Permission denied'))
       .mockResolvedValueOnce({ type: 'success', text: 'Installed' });
     await mount({ ...f.props, install });
-    await press('return');
-    await paste('./retained');
-    await press('return');
+    await submitSource('./retained');
     expect(f.props.onStatus).toHaveBeenLastCalledWith({
       type: 'error',
       text: 'Permission denied',
@@ -335,9 +280,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
     const install = vi.fn(() => pending.promise);
     const props = { ...f.props, install };
     const ui = await mount(props);
-    await press('return');
-    await paste('./permission-owned');
-    await press('return');
+    await submitSource('./permission-owned');
     ui.rerender(<OpenTuiExtensionSourcesTab {...props} isActive={false} />);
     await press('escape');
     await paste('not-owned');
@@ -365,16 +308,10 @@ describe('OpenTuiExtensionSourcesTab', () => {
     const install = vi.fn(() => next.promise);
     const props = { ...f.props, install };
     const ui = await mount(props);
-    await press('down');
-    await press('return');
-    await paste('./old');
-    await press('return');
+    await submitSource('./old', 'down');
     const successor = { ...props, isCurrent: () => true };
     ui.rerender(<OpenTuiExtensionSourcesTab {...successor} />);
-    await press('up');
-    await press('return');
-    await paste('./new');
-    await press('return');
+    await submitSource('./new', 'up');
     await act(async () => {
       old.resolve(source('old'));
     });

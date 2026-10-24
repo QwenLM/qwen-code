@@ -23,6 +23,7 @@ import {
   dialogContentWidth,
   useDialogSelect,
   type DialogListItem,
+  type UseDialogSelectResult,
 } from './dialogs-shared.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import { normalizePastedText } from './input-prompt-model.js';
@@ -323,58 +324,37 @@ export function OpenTuiExtensionSourcesTab({
     }
   };
 
-  const rows: Row[] = useMemo(
-    () => [
-      {
-        key: 'heading:add',
-        value: '',
-        label: t('Add new'),
-        kind: 'heading',
-        disabled: true,
-      },
-      {
-        key: 'install',
-        value: 'install',
-        label: t('+ Install a new extension'),
-        kind: 'install',
-      },
-      {
-        key: 'add',
-        value: 'add',
-        label: t('+ Add new marketplace'),
-        kind: 'add',
+  const rows = useMemo(() => {
+    const row = (
+      key: string,
+      label: string,
+      kind: Row['kind'],
+      extra: Partial<Row> = {},
+    ): Row => ({ key, value: key, label, kind, ...extra });
+    const heading = (key: string, label: string) =>
+      row(key, label, 'heading', { value: '', disabled: true });
+    return [
+      heading('heading:add', t('Add new')),
+      row('install', t('+ Install a new extension'), 'install'),
+      row('add', t('+ Add new marketplace'), 'add', {
         right: t('Claude plugin marketplace'),
-      },
+      }),
       ...(sources.length
         ? [
-            {
-              key: 'heading:sources',
-              value: '',
-              label: t('Marketplaces') + ` (${sources.length})`,
-              kind: 'heading' as const,
-              disabled: true,
-            },
-            ...sources.map((source) => ({
-              key: 'source:' + source.name,
-              value: 'source:' + source.name,
-              label: source.name,
-              right: `${redactUrlCredentials(source.source)} (${source.type})`,
-              kind: 'source' as const,
-              source,
-            })),
+            heading(
+              'heading:sources',
+              t('Marketplaces') + ` (${sources.length})`,
+            ),
+            ...sources.map((source) =>
+              row('source:' + source.name, source.name, 'source', {
+                right: `${redactUrlCredentials(source.source)} (${source.type})`,
+                source,
+              }),
+            ),
           ]
-        : [
-            {
-              key: 'heading:empty',
-              value: '',
-              label: t('No marketplaces added yet.'),
-              kind: 'heading' as const,
-              disabled: true,
-            },
-          ]),
-    ],
-    [sources],
-  );
+        : [heading('heading:empty', t('No marketplaces added yet.'))]),
+    ];
+  }, [sources]);
   const listWindow = regionListWindow(
     bodyRows,
     { fixed: 0 },
@@ -421,43 +401,38 @@ export function OpenTuiExtensionSourcesTab({
     date && Number.isFinite(Date.parse(date))
       ? new Date(date).toLocaleDateString()
       : null;
-  const actions = useMemo<Array<DialogListItem<Action> & { label: string }>>(
-    () =>
-      detailLoading
-        ? []
-        : detailConfig
-          ? [
-              {
-                key: 'browse',
-                value: 'browse',
-                label: t('Browse extensions ({{count}})', {
-                  count: String(plugins.length),
-                }),
-              },
-              {
-                key: 'update',
-                value: 'update',
-                label: lastUpdated
-                  ? t('Update marketplace (last updated {{date}})', {
-                      date: lastUpdated,
-                    })
-                  : t('Update marketplace'),
-              },
-              {
-                key: 'remove',
-                value: 'remove',
-                label: t('Remove marketplace'),
-              },
-            ]
-          : [
-              {
-                key: 'remove',
-                value: 'remove',
-                label: t('Remove marketplace'),
-              },
-            ],
-    [detailLoading, detailConfig, plugins.length, lastUpdated],
-  );
+  const actions = useMemo<
+    Array<DialogListItem<Action> & { label: string }>
+  >(() => {
+    const action = (value: Action, label: string) => ({
+      key: value,
+      value,
+      label,
+    });
+    return detailLoading
+      ? []
+      : [
+          ...(detailConfig
+            ? [
+                action(
+                  'browse',
+                  t('Browse extensions ({{count}})', {
+                    count: String(plugins.length),
+                  }),
+                ),
+                action(
+                  'update',
+                  lastUpdated
+                    ? t('Update marketplace (last updated {{date}})', {
+                        date: lastUpdated,
+                      })
+                    : t('Update marketplace'),
+                ),
+              ]
+            : []),
+          action('remove', t('Remove marketplace')),
+        ];
+  }, [detailLoading, detailConfig, plugins.length, lastUpdated]);
   const detailChrome = detailConfig
     ? 3 +
       (installed.length ? 1 + preview.length + (hiddenInstalled ? 1 : 0) : 0)
@@ -598,6 +573,27 @@ export function OpenTuiExtensionSourcesTab({
     current,
     onFooter,
   ]);
+
+  const mouseProps = <T extends DialogListItem<unknown>>(
+    select: UseDialogSelectResult<T>,
+  ) => ({
+    onHover: (index: number) => {
+      if (isActive && current()) select.highlightIndex(index);
+    },
+    onSelectIndex: (index: number) => {
+      if (isActive && current()) select.selectIndex(index);
+    },
+    onWheel: (direction: 'up' | 'down') => {
+      if (isActive && current())
+        select.highlightIndex(
+          findNextEnabledIndex(
+            select.items,
+            select.activeIndexRef.current,
+            direction,
+          ),
+        );
+    },
+  });
 
   if (view === 'add' || view === 'install-extension') {
     const examples =
@@ -744,22 +740,7 @@ export function OpenTuiExtensionSourcesTab({
               showNumbers={false}
               showScrollArrows={actionWindow.showScrollArrows}
               focused={isActive && !busy}
-              onHover={(index) => {
-                if (isActive && current()) detailSelect.highlightIndex(index);
-              }}
-              onSelectIndex={(index) => {
-                if (isActive && current()) detailSelect.selectIndex(index);
-              }}
-              onWheel={(direction) => {
-                if (isActive && current())
-                  detailSelect.highlightIndex(
-                    findNextEnabledIndex(
-                      actions,
-                      detailSelect.activeIndexRef.current,
-                      direction,
-                    ),
-                  );
-              }}
+              {...mouseProps(detailSelect)}
               renderLabel={(item, context) => (
                 <text fg={context.titleColor}>
                   {drawn(item.label, contentWidth - 2)}
@@ -780,22 +761,7 @@ export function OpenTuiExtensionSourcesTab({
         showNumbers={false}
         showScrollArrows={listWindow.showScrollArrows}
         focused={isActive && !busy}
-        onHover={(index) => {
-          if (isActive && current()) list.highlightIndex(index);
-        }}
-        onSelectIndex={(index) => {
-          if (isActive && current()) list.selectIndex(index);
-        }}
-        onWheel={(direction) => {
-          if (isActive && current())
-            list.highlightIndex(
-              findNextEnabledIndex(
-                rows,
-                list.activeIndexRef.current,
-                direction,
-              ),
-            );
-        }}
+        {...mouseProps(list)}
         renderLabel={(item, context) => (
           <box flexDirection="row">
             <text

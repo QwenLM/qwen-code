@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { act, type ComponentProps } from 'react';
 import { cleanup, render, renderHook } from '@testing-library/react';
+import { catalogKey } from '../../test-utils/opentui-catalog.js';
 import type { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 
 const native = vi.hoisted(() => ({
@@ -15,67 +16,34 @@ const native = vi.hoisted(() => ({
   pastes: [] as Array<(e: unknown) => void>,
   scroll: vi.fn(),
 }));
-async function runtime() {
-  const React = await import('react');
-  const Scroll = React.forwardRef<unknown, { children?: React.ReactNode }>(
-    (props, ref) => {
-      React.useImperativeHandle(ref, () => ({ scrollBy: native.scroll }));
-      return React.createElement('div', null, props.children);
-    },
-  );
-  Scroll.displayName = 'Scroll';
-  const jsx = (
-    type: unknown,
-    props: Record<string, unknown> | null,
-    key?: React.Key,
-  ) => {
-    if (type === 'scrollbox')
-      return React.createElement(Scroll, { ...props, key });
-    if (type === 'markdown')
-      return React.createElement('div', { key }, props?.['content'] as string);
-    if (type === 'box' || type === 'text')
-      return React.createElement(
-        type === 'box' ? 'div' : 'span',
-        { key, 'data-caret': props?.['bg'] === undefined ? undefined : 'true' },
-        props?.['children'] as React.ReactNode,
-      );
-    return React.createElement(type as React.ElementType, { ...props, key });
-  };
-  return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
-}
-vi.mock('@opentui/react/jsx-runtime', () => runtime());
-vi.mock('@opentui/react/jsx-dev-runtime', () => runtime());
-vi.mock('@opentui/core', () => ({
-  SyntaxStyle: { fromStyles: () => ({}) },
-  MouseButton: { LEFT: 0 },
-  decodePasteBytes: (b: Uint8Array) => new TextDecoder().decode(b),
-}));
+vi.mock('@opentui/react/jsx-runtime', async () =>
+  (await import('../../test-utils/opentui-catalog.js')).catalogRuntime(
+    true,
+    native.scroll,
+  ),
+);
+vi.mock('@opentui/react/jsx-dev-runtime', async () =>
+  (await import('../../test-utils/opentui-catalog.js')).catalogRuntime(
+    true,
+    native.scroll,
+  ),
+);
+vi.mock(
+  '@opentui/core',
+  async () =>
+    (await import('../../test-utils/opentui-catalog.js')).catalogNativeCore,
+);
 vi.mock('./theme.js', () => ({
   C: new Proxy({}, { get: () => '#fff' }),
   SYNTAX: {},
 }));
-vi.mock('@opentui/react', async () => {
-  const React = await import('react');
-  function useListener(
-    list: Array<(e: unknown) => void>,
-    fn: (e: unknown) => void,
-  ) {
-    const ref = React.useRef(fn);
-    ref.current = fn;
-    React.useEffect(() => {
-      const entry = (e: unknown) => ref.current(e);
-      list.push(entry);
-      return () => {
-        list.splice(list.indexOf(entry), 1);
-      };
-    }, [list]);
-  }
-  return {
-    useKeyboard: (fn: (e: unknown) => void) => useListener(native.keys, fn),
-    usePaste: (fn: (e: unknown) => void) => useListener(native.pastes, fn),
-    useTerminalDimensions: () => ({ width: 100, height: 40 }),
-  };
-});
+vi.mock('@opentui/react', async () =>
+  (await import('../../test-utils/opentui-catalog.js')).catalogHooks(
+    native.keys,
+    native.pastes,
+    () => ({ width: 100, height: 40 }),
+  ),
+);
 import {
   OpenTuiExtensionPermission,
   useExtensionAcquisition,
@@ -129,16 +97,7 @@ async function key(
 ) {
   await act(async () => {
     for (const fn of [...native.keys])
-      fn({
-        name,
-        sequence,
-        eventType,
-        ctrl: false,
-        meta: false,
-        shift: false,
-        preventDefault() {},
-        stopPropagation() {},
-      });
+      fn(catalogKey(name, sequence, eventType));
   });
 }
 async function paste(text: string) {

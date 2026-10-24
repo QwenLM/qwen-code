@@ -7,19 +7,41 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { cleanup, renderHook } from '@testing-library/react';
+import { EventEmitter } from 'node:events';
+import type { KeyEvent } from '@opentui/core';
+import {
+  cleanup,
+  renderHook,
+  act as subscriptionAct,
+} from '@testing-library/react';
+import { catalogDeferred as deferred } from '../../test-utils/opentui-catalog.js';
 import type { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 
-vi.mock('@opentui/core', () => ({
-  SyntaxStyle: { fromStyles: () => ({}) },
-  MouseButton: { LEFT: 0 },
-  decodePasteBytes: (bytes: Uint8Array) => new TextDecoder().decode(bytes),
-}));
-vi.mock('@opentui/react', () => ({
-  useKeyboard: () => {},
-  usePaste: () => {},
-  useTerminalDimensions: () => ({ width: 100, height: 40 }),
-}));
+vi.mock(
+  '@opentui/core',
+  async () =>
+    (await import('../../test-utils/opentui-catalog.js')).catalogNativeCore,
+);
+const native = vi.hoisted(() => ({ keyHandler: null as EventEmitter | null }));
+vi.mock('@opentui/react', async () => {
+  const { useEffect, useRef } = await import('react');
+  return {
+    useAppContext: () => ({ keyHandler: native.keyHandler }),
+    useKeyboard: (handler: (key: KeyEvent) => void) => {
+      const latest = useRef(handler);
+      latest.current = handler;
+      useEffect(() => {
+        const emitter = native.keyHandler;
+        const subscribed = (key: KeyEvent) => latest.current(key);
+        emitter?.on('keypress', subscribed);
+        return () => {
+          emitter?.off('keypress', subscribed);
+        };
+      }, []);
+    },
+  };
+});
+
 vi.mock('@opentui/react/jsx-runtime', () => ({
   jsx: () => null,
   jsxs: () => null,
@@ -68,13 +90,7 @@ function marketplaceMetadata(): Metadata {
     },
   };
 }
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
+
 function fixture(initial = metadata()) {
   const methods = {
     parseInstallSource: vi
@@ -102,6 +118,28 @@ function fixture(initial = metadata()) {
   });
   return { methods, context, hook };
 }
+function requestPermissions(
+  f: ReturnType<typeof fixture>,
+  kind: 'consent' | 'setting' | 'both',
+  received?: (value: string) => unknown,
+) {
+  f.methods.installExtension.mockImplementation(
+    async (_metadata, askConsent, askSetting) => {
+      if (kind !== 'setting') await askConsent!(consent);
+      if (kind !== 'consent') {
+        const value = await askSetting!(setting);
+        received?.(value);
+      }
+      return extension;
+    },
+  );
+}
+async function answer<T>(request: { resolve: (value: T) => void }, value: T) {
+  await act(async () => {
+    request.resolve(value);
+  });
+}
+
 async function begin(
   hook: { result: { current: Acquisition } },
   scope: 'user' | 'project' = 'user',
@@ -132,6 +170,13 @@ function permission<K extends NonNullable<Acquisition['permission']>['kind']>(
     throw new Error(`Expected ${kind} permission`);
   return shown as Extract<NonNullable<Acquisition['permission']>, { kind: K }>;
 }
+function expectSettled(hook: { result: { current: Acquisition } }) {
+  expect(hook.result.current).toMatchObject({
+    pending: false,
+    permission: null,
+  });
+}
+
 function expectCancelled(outcome: Outcome, text: string) {
   expect(outcome.ok).toBe(false);
   if (!outcome.ok) expect(outcome.error).toEqual(new Error(text));
@@ -142,13 +187,7 @@ describe('useExtensionAcquisition', () => {
   it('parses the captured cwd, selects the nondefault unique plugin and uses operation-local permissions', async () => {
     const f = fixture(marketplaceMetadata());
     const receivedSettings: string[] = [];
-    f.methods.installExtension.mockImplementation(
-      async (_metadata, askConsent, askSetting) => {
-        await askConsent!(consent);
-        receivedSettings.push(await askSetting!(setting));
-        return extension;
-      },
-    );
+    requestPermissions(f, 'both', (value) => receivedSettings.push(value));
     const run = await begin(f.hook, 'project', true);
     expect(f.methods.parseInstallSource).toHaveBeenCalledExactlyOnceWith(
       './owned',
@@ -156,17 +195,11 @@ describe('useExtensionAcquisition', () => {
     );
     expect(f.methods.installExtension).not.toHaveBeenCalled();
     expect(f.hook.result.current.pending).toBe(true);
-    await act(async () => {
-      permission(f.hook, 'choice').resolve('chosen');
-    });
+    await answer(permission(f.hook, 'choice'), 'chosen');
     const request = permission(f.hook, 'consent');
     expect(request.text).toContain('owned-command');
-    await act(async () => {
-      request.resolve(true);
-    });
-    await act(async () => {
-      permission(f.hook, 'setting').resolve('actual-setting-value');
-    });
+    await answer(request, true);
+    await answer(permission(f.hook, 'setting'), 'actual-setting-value');
     expect(await finish(run)).toEqual({
       ok: true,
       status: { type: 'success', text: 'Installed extension "owned".' },
@@ -186,10 +219,7 @@ describe('useExtensionAcquisition', () => {
       'project',
     );
     expect(f.context.reload).toHaveBeenCalledTimes(1);
-    expect(f.hook.result.current).toMatchObject({
-      pending: false,
-      permission: null,
-    });
+    expectSettled(f.hook);
     expect(f.methods.requestConsent).not.toHaveBeenCalled();
     expect(f.methods.requestChoicePlugin).not.toHaveBeenCalled();
     expect(f.methods.requestSetting).not.toHaveBeenCalled();
@@ -209,13 +239,7 @@ describe('useExtensionAcquisition', () => {
   it('requests consent and settings afresh for each operation with distinct owned signals', async () => {
     const f = fixture();
     const values: string[] = [];
-    f.methods.installExtension.mockImplementation(
-      async (_metadata, askConsent, askSetting) => {
-        await askConsent!(consent);
-        values.push(await askSetting!(setting));
-        return extension;
-      },
-    );
+    requestPermissions(f, 'both', (value) => values.push(value));
     const ids: number[] = [];
     const signals: AbortSignal[] = [];
     for (const value of ['first-token', 'second-token']) {
@@ -225,12 +249,8 @@ describe('useExtensionAcquisition', () => {
       const args = f.methods.installExtension.mock.calls.at(-1)!;
       signals.push(args[6]!);
       expect(args[6]!.aborted).toBe(false);
-      await act(async () => {
-        question.resolve(true);
-      });
-      await act(async () => {
-        permission(f.hook, 'setting').resolve(value);
-      });
+      await answer(question, true);
+      await answer(permission(f.hook, 'setting'), value);
       expect((await finish(run)).ok).toBe(true);
       expect(args[6]!.aborted).toBe(true);
     }
@@ -250,10 +270,7 @@ describe('useExtensionAcquisition', () => {
     expectCancelled(await finish(run), 'Plugin selection cancelled.');
     expect(f.methods.installExtension).not.toHaveBeenCalled();
     expect(f.context.reload).not.toHaveBeenCalled();
-    expect(f.hook.result.current).toMatchObject({
-      pending: false,
-      permission: null,
-    });
+    expectSettled(f.hook);
   });
 
   it.each(['absent', 'duplicate'] as const)(
@@ -268,11 +285,10 @@ describe('useExtensionAcquisition', () => {
         });
       const f = fixture(input);
       const run = await begin(f.hook);
-      await act(async () => {
-        permission(f.hook, 'choice').resolve(
-          kind === 'absent' ? 'not-present' : 'chosen',
-        );
-      });
+      await answer(
+        permission(f.hook, 'choice'),
+        kind === 'absent' ? 'not-present' : 'chosen',
+      );
       expectCancelled(
         await finish(run),
         'Select a unique plugin from the marketplace.',
@@ -284,17 +300,9 @@ describe('useExtensionAcquisition', () => {
   it('denies real consent without requesting a setting, remembering scope or reloading', async () => {
     const f = fixture();
     const settingsRead = vi.fn();
-    f.methods.installExtension.mockImplementation(
-      async (_metadata, askConsent, askSetting) => {
-        await askConsent!(consent);
-        settingsRead(await askSetting!(setting));
-        return extension;
-      },
-    );
+    requestPermissions(f, 'both', settingsRead);
     const run = await begin(f.hook, 'project', true);
-    await act(async () => {
-      permission(f.hook, 'consent').resolve(false);
-    });
+    await answer(permission(f.hook, 'consent'), false);
     expectCancelled(await finish(run), 'Installation cancelled for "owned".');
     expect(settingsRead).not.toHaveBeenCalled();
     expect(f.methods.setExtensionScope).not.toHaveBeenCalled();
@@ -304,12 +312,7 @@ describe('useExtensionAcquisition', () => {
 
   it('cancels a setting and ignores a late resolver from that request', async () => {
     const f = fixture();
-    f.methods.installExtension.mockImplementation(
-      async (_metadata, _consent, askSetting) => {
-        await askSetting!(setting);
-        return extension;
-      },
-    );
+    requestPermissions(f, 'setting');
     const first = await begin(f.hook);
     const old = permission(f.hook, 'setting');
     await act(async () => {
@@ -336,32 +339,20 @@ describe('useExtensionAcquisition', () => {
 
   it('retains the permission and pending operation on same-owner parent re-render', async () => {
     const f = fixture();
-    f.methods.installExtension.mockImplementation(
-      async (_metadata, askConsent) => {
-        await askConsent!(consent);
-        return extension;
-      },
-    );
+    requestPermissions(f, 'consent');
     const run = await begin(f.hook);
     const shown = permission(f.hook, 'consent');
     f.hook.rerender({ owner: { ...f.context } });
     expect(f.hook.result.current.permission).toBe(shown);
     expect(f.hook.result.current.pending).toBe(true);
-    await act(async () => {
-      shown.resolve(true);
-    });
+    await answer(shown, true);
     expect((await finish(run)).ok).toBe(true);
     expect(f.methods.installExtension).toHaveBeenCalledTimes(1);
   });
 
   it('aborts the replaced owner and prevents its old resolver from clearing the successor', async () => {
     const f = fixture();
-    f.methods.installExtension.mockImplementation(
-      async (_metadata, askConsent) => {
-        await askConsent!(consent);
-        return extension;
-      },
-    );
+    requestPermissions(f, 'consent');
     const first = await begin(f.hook);
     const old = permission(f.hook, 'consent');
     const oldSignal = f.methods.installExtension.mock.calls[0][6]!;
@@ -377,9 +368,7 @@ describe('useExtensionAcquisition', () => {
     });
     expect(f.hook.result.current.permission).toBe(current);
     expect(f.hook.result.current.pending).toBe(true);
-    await act(async () => {
-      current.resolve(true);
-    });
+    await answer(current, true);
     expect((await finish(second)).ok).toBe(true);
     expect(f.context.reload).toHaveBeenCalledTimes(1);
     expect(f.methods.installExtension).toHaveBeenCalledTimes(2);
@@ -402,12 +391,7 @@ describe('useExtensionAcquisition', () => {
   it('aborts a waiting setting on unmount and settles it only once', async () => {
     const f = fixture();
     const received = vi.fn();
-    f.methods.installExtension.mockImplementation(
-      async (_metadata, _consent, askSetting) => {
-        received(await askSetting!(setting));
-        return extension;
-      },
-    );
+    requestPermissions(f, 'setting', received);
     const run = await begin(f.hook);
     const old = permission(f.hook, 'setting');
     const signal = f.methods.installExtension.mock.calls[0][6]!;
@@ -470,10 +454,7 @@ describe('useExtensionAcquisition', () => {
       'project',
     );
     expect(f.context.reload).toHaveBeenCalledTimes(1);
-    expect(f.hook.result.current).toMatchObject({
-      pending: false,
-      permission: null,
-    });
+    expectSettled(f.hook);
   });
 
   it('propagates a genuine install failure without recording scope or reloading', async () => {
@@ -486,5 +467,97 @@ describe('useExtensionAcquisition', () => {
     expect(f.methods.setExtensionScope).not.toHaveBeenCalled();
     expect(f.context.reload).not.toHaveBeenCalled();
     expect(f.hook.result.current.pending).toBe(false);
+  });
+});
+
+import { useDialogSelect } from './dialogs-shared.js';
+import { NUMBER_SELECT_TIMEOUT_MS } from './dialogs-core.js';
+const items = Array.from({ length: 15 }, (_, index) => ({
+  key: `item-${index}`,
+  value: `item-${index}`,
+}));
+function key(name: string) {
+  subscriptionAct(() => {
+    native.keyHandler!.emit('keypress', { name, sequence: name });
+  });
+}
+afterEach(() => {
+  vi.useRealTimers();
+  native.keyHandler = null;
+});
+
+describe('useDialogSelect focused subscription ownership', () => {
+  it('registers only the focused list and removes every subscription on unmount', () => {
+    const emitter = new EventEmitter();
+    native.keyHandler = emitter;
+    const view = renderHook(
+      ({ focused }) => {
+        useDialogSelect({ items, focused });
+        useDialogSelect({ items, focused: false });
+        useDialogSelect({ items, focused: false });
+      },
+      { initialProps: { focused: false } },
+    );
+    expect(emitter.listenerCount('keypress')).toBe(0);
+    for (let cycle = 0; cycle < 3; cycle++) {
+      view.rerender({ focused: true });
+      expect(emitter.listenerCount('keypress')).toBe(1);
+      view.rerender({ focused: false });
+      expect(emitter.listenerCount('keypress')).toBe(0);
+    }
+    view.unmount();
+    expect(emitter.listenerCount('keypress')).toBe(0);
+  });
+
+  it('keeps mounted cursor state and calls the latest callback after refocus', () => {
+    const emitter = new EventEmitter();
+    native.keyHandler = emitter;
+    const first = vi.fn();
+    const second = vi.fn();
+    const view = renderHook(
+      ({ focused, onSelect }) =>
+        useDialogSelect({ items, focused, numbers: false, onSelect }),
+      { initialProps: { focused: true, onSelect: first } },
+    );
+    key('down');
+    expect(view.result.current.activeIndex).toBe(1);
+    view.rerender({ focused: false, onSelect: second });
+    key('return');
+    expect(first).not.toHaveBeenCalled();
+    expect(second).not.toHaveBeenCalled();
+    expect(emitter.listenerCount('keypress')).toBe(0);
+    view.rerender({ focused: true, onSelect: second });
+    expect(view.result.current.activeIndex).toBe(1);
+    key('return');
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledExactlyOnceWith('item-1');
+    expect(emitter.listenerCount('keypress')).toBe(1);
+    view.unmount();
+    expect(emitter.listenerCount('keypress')).toBe(0);
+  });
+
+  it('cancels an armed numeric commit when its mounted list loses focus', () => {
+    vi.useFakeTimers();
+    const emitter = new EventEmitter();
+    native.keyHandler = emitter;
+    const onSelect = vi.fn();
+    const view = renderHook(
+      ({ focused }) =>
+        useDialogSelect({ items, focused, numbers: true, onSelect }),
+      { initialProps: { focused: true } },
+    );
+    key('1');
+    expect(onSelect).not.toHaveBeenCalled();
+    view.rerender({ focused: false });
+    subscriptionAct(() => {
+      vi.advanceTimersByTime(NUMBER_SELECT_TIMEOUT_MS + 10);
+    });
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(emitter.listenerCount('keypress')).toBe(0);
+    view.rerender({ focused: true });
+    key('return');
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith('item-0');
+    view.unmount();
+    expect(emitter.listenerCount('keypress')).toBe(0);
   });
 });
