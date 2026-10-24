@@ -519,7 +519,15 @@ fi
       // whenever that run ends cancelled (#15470). The report is filed with
       // the caveat instead, and the per-signature route hands it to a human
       // rather than autofix, so a stale one costs a close.
-      for (const successor of ['in_progress', 'queued']) {
+      // Every not-yet-final status counts, matching the vocabulary
+      // qwen-autofix.yml uses for the same question.
+      for (const successor of [
+        'in_progress',
+        'queued',
+        'waiting',
+        'requested',
+        'pending',
+      ]) {
         const resolved = detect(
           '1',
           {
@@ -1398,6 +1406,18 @@ fi
         'jq -r \'.searchMarkers[]?\' "${RUNNER_TEMP}/analysis.json"',
       );
     });
+
+    it('wires the provisional flag from the live step through to the writer', () => {
+      // Same chain shape, same failure mode: a retyped binding leaves
+      // PROVISIONAL empty, so every provisional filing silently loses its
+      // caveat; a dropped one is unbound and kills the writer outright.
+      expect(jobs.analyze.outputs.provisional).toBe(
+        '${{ steps.live.outputs.provisional }}',
+      );
+      expect(writer.env.PROVISIONAL).toBe(
+        '${{ needs.analyze.outputs.provisional }}',
+      );
+    });
     describe('per-signature routing', () => {
       const signatureTitle =
         'Main CI failed: SDK Java — src/Foo.test > Suite … > case bar';
@@ -2045,6 +2065,11 @@ printf '%s\\n' '{"jobs":[]}'
       // run.
       expect(String(rerunJob.if)).toContain(
         "needs.analyze.outputs.file_issue == 'true'",
+      );
+      // A provisional report is for a head main already replaced: the rerun
+      // would spend pool capacity on it and could not re-enter here.
+      expect(String(rerunJob.if)).toContain(
+        "needs.analyze.outputs.provisional != 'true'",
       );
     });
 

@@ -190,8 +190,8 @@ its own completion event. A successor that ended `cancelled`, `timed_out`,
 `skipped`, or `startup_failure` is never analyzed, so the original failure is
 reported instead.
 
-A successor that is still `queued` or `in_progress` settles nothing, and this
-job cannot wait for it — the pool the reporter runs on queued it for 20-100
+A successor that has not completed settles nothing, and this job cannot wait
+for it — the pool the reporter runs on queued it for 20-100
 minutes, so the tip's run is usually still young when the report is prepared.
 The failure is reported anyway, marked provisional at the top of the body. That
 is affordable because the per-signature route hands new issues to a human

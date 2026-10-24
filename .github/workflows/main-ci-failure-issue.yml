@@ -125,8 +125,8 @@ jobs:
           # report of a real regression. A completed success means the tree is
           # green at the tip, and a completed failure reports itself.
           #
-          # A queued or in-progress successor proves nothing yet, and waiting
-          # for it is not possible here: this job runs on a pool that queued it
+          # An unsettled successor proves nothing yet, and waiting for it is
+          # not possible here: this job runs on a pool that queued it
           # for 20-100 minutes (#15470), so the tip's run is usually still
           # young when the report is prepared, and the successor's own re-entry
           # only covers the failure conclusion. Reporting is therefore the
@@ -154,14 +154,18 @@ jobs:
                 )"; then
                   read -r successor_status successor_conclusion <<< "${successor}"
                   successor_owns=false
+                  # Complement, not an enumeration: only a settled successor
+                  # owns the result, and not-yet-final statuses grow.
                   case "${successor_status}" in
-                    queued | in_progress)
-                      provisional=true
-                      ;;
                     completed)
                       case "${successor_conclusion}" in
                         success | failure) successor_owns=true ;;
                       esac
+                      ;;
+                    none)
+                      ;;
+                    *)
+                      provisional=true
                       ;;
                   esac
                   if [[ "${successor_owns}" == 'true' ]]; then
@@ -419,10 +423,12 @@ jobs:
   # only for destinations that file (main runs and merged PRs). An open PR's
   # infra death is reported on the PR without dispatching a rerun, and the
   # classifier never grants an untrusted run actions: write.
+  # Not for a provisional report: that head is already replaced, and its rerun
+  # could not re-enter here — skipping lets file_issue record it instead.
   rerun_infra:
     name: 'Rerun infrastructure-only failures'
     needs: 'analyze'
-    if: "${{ needs.analyze.outputs.infra_only == 'true' && needs.analyze.outputs.file_issue == 'true' }}"
+    if: "${{ needs.analyze.outputs.infra_only == 'true' && needs.analyze.outputs.file_issue == 'true' && needs.analyze.outputs.provisional != 'true' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -480,12 +486,12 @@ jobs:
         run: |-
           set -euo pipefail
           if [[ "${PROVISIONAL}" == 'true' ]]; then
-            # The reader needs the caveat before the finding, and both the
-            # per-signature and the aggregate route build their body from this
-            # variable.
+            # Heads every route's body — both create paths and both
+            # comment-on-existing paths — so it must not assume this issue is
+            # the tracker for this occurrence.
             ISSUE_BODY="$(
               printf '%s\n\n%s' \
-                '> **Provisional.** Main advanced past this head while the report was being prepared, and the newer push run at the tip had not finished. If that run passes, this failure is already covered and this issue can be closed.' \
+                '> **Provisional.** Main advanced past this head while the report was being prepared, and the newer push run at the tip had not finished. If that run passes, this failure is already covered and this report can be dismissed.' \
                 "${ISSUE_BODY}"
             )"
           fi

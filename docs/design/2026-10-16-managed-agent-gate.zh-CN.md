@@ -157,7 +157,7 @@ workflow 共用的汇总 issue 上追加评论，找到匹配的已关闭 issue 
 事件上报。以 `cancelled`、`timed_out`、`skipped` 或 `startup_failure` 结束的后继永远
 不会被分析，因此此时仍然上报原始失败。
 
-仍在 `queued` 或 `in_progress` 的后继什么都证明不了，而本 job 也等不起它——报告所在
+尚未 `completed` 的后继什么都证明不了，而本 job 也等不起它——报告所在
 的 runner 池把它排了 20-100 分钟，准备好报告时 tip 上的运行通常刚开始不久。此时仍然
 上报，并在正文顶部标注为临时性（provisional）。之所以负担得起，是因为按签名路由的新
 issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关掉，丢掉一条则丢掉整个回归
