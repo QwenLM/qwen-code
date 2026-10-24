@@ -787,8 +787,18 @@ function mergeFastPathSettings(
   return merged;
 }
 
+export interface ServeFastPathLoadOptions {
+  /**
+   * Reports a workspace settings document that exists but cannot be read.
+   * Operator scopes are already read by then; a repo-local file must not be
+   * able to discard them (and with them `serve.maxSessions`).
+   */
+  onWorkspaceSettingsError?: (error: Error) => void;
+}
+
 export function loadServeFastPathSettings(
   workspaceDir: string,
+  options: ServeFastPathLoadOptions = {},
 ): ServeFastPathSettings {
   preResolveServeFastPathHomeEnvOverrides();
   const operator = readOperatorSandboxSettings();
@@ -845,14 +855,26 @@ export function loadServeFastPathSettings(
   );
   const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
   const ignoredWorkspaceKeys: string[] = [];
-  const workspaceFromDisk = workspaceSettingsActive
-    ? readSettingsSummary(
+  let workspaceFromDisk: ServeFastPathSettings = {};
+  if (workspaceSettingsActive) {
+    try {
+      workspaceFromDisk = readSettingsSummary(
         workspaceSettingsPath,
         startupChannelsTrusted,
         false,
         ignoredWorkspaceKeys,
-      )
-    : {};
+      );
+    } catch (err) {
+      // Default contract: throw so the fast-path launcher can fall back to the
+      // full settings loader. Callers that must preserve already-read operator
+      // settings (the serve boot) pass onWorkspaceSettingsError to skip only
+      // this scope and report it.
+      if (!options.onWorkspaceSettingsError) throw err;
+      options.onWorkspaceSettingsError(
+        err instanceof Error ? err : new Error(String(err)),
+      );
+    }
+  }
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);

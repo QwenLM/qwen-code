@@ -4227,7 +4227,15 @@ async function runQwenServeImpl(
   let sessionArtifactsPersistenceAvailable = true;
   try {
     bootSettings =
-      deps.bootSettings ?? loadServeFastPathSettings(boundWorkspace);
+      deps.bootSettings ??
+      loadServeFastPathSettings(boundWorkspace, {
+        onWorkspaceSettingsError: (error) => {
+          writeStderrLine(
+            `qwen serve: ignoring unreadable workspace settings for ${boundWorkspace} ` +
+              `(${error.message}); operator settings are still applied.`,
+          );
+        },
+      });
     sessionArtifactsPersistenceAvailable =
       sessionArtifactsPersistenceAvailableFromSettings(bootSettings);
     contextFilenameForInit = extractContextFilename(

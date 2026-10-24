@@ -1874,6 +1874,34 @@ describe('serve fast path environment bootstrap', () => {
     );
   });
 
+  it('keeps operator settings when the workspace document cannot be read', () => {
+    // A repo-local file must not be able to discard an operator-owned cap.
+    // `[]` is valid JSON but not an object; the second case is a parse error.
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-bad-workspace-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { maxSessions: 3, tokenQr: true } }),
+    );
+
+    const onWorkspaceSettingsError = vi.fn();
+    for (const contents of ['[]', '{not json']) {
+      writeFileSync(join(tempWorkspace, '.qwen', 'settings.json'), contents);
+      const settings = loadServeFastPathSettings(tempWorkspace, {
+        onWorkspaceSettingsError,
+      });
+      expect(settings.serve?.maxSessions).toBe(3);
+      expect(settings.serve?.tokenQr).toBe(true);
+    }
+    expect(onWorkspaceSettingsError).toHaveBeenCalledTimes(2);
+    expect(String(onWorkspaceSettingsError.mock.calls[0][0])).toContain(
+      'must be a JSON object',
+    );
+  });
+
   it('keeps user-scope serve.tokenQr when workspace startup channels merge', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
