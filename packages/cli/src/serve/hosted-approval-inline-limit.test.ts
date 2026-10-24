@@ -29,7 +29,7 @@ import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
 // The observed chain is a serial run of fsync-backed publishes and journal
 // commits; a fixed 10s budget flaked on a loaded runner (#14084, #15176).
 const WAIT_TIMEOUT_MS = slowHostBudgetMs(10_000, 45_000);
-const TEST_TIMEOUT_MS = slowHostBudgetMs(30_000, 60_000);
+const TEST_TIMEOUT_MS = slowHostBudgetMs(30_000, 75_000);
 
 it.each([
   { padding: 62_000, decision: 'allow' },
