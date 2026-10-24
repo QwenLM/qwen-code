@@ -39,6 +39,7 @@ import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import type { Mem0Settings } from './mem0-settings.js';
+import type { ModPluginConfigs } from '@qwen-code/qwen-code-core/mods/types.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -852,6 +853,38 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  verifyPr: {
+    type: 'object',
+    label: 'Verify PR',
+    category: 'General',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Coordinates for a manual /verify-pr publish round. Each value is surfaced at startup as the environment variable the skill already reads, so the host does not have to be repeated per round. Only honored from User, System, and SystemDefaults settings scopes.',
+    showInDialog: false,
+    properties: {
+      assetsRepo: {
+        type: 'string',
+        label: 'Assets repository: verify-pr',
+        category: 'General',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'The `owner/repo` that hosts the screenshots a `--publish` round links from its PR comment, surfaced as `QWEN_VERIFY_ASSETS_REPO`; `--assets-repo` still overrides it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot choose where its own verification evidence is published.',
+        showInDialog: false,
+      },
+      assetsBranch: {
+        type: 'string',
+        label: 'Assets branch: verify-pr',
+        category: 'General',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'The branch inside that repository, surfaced as `QWEN_VERIFY_ASSETS_BRANCH`; without it a round publishes to `assets/pr<n>-validation`. Only honored from User, System, and SystemDefaults settings scopes, for the same reason as `verifyPr.assetsRepo`.',
+        showInDialog: false,
+      },
+    },
+  },
   output: {
     type: 'object',
     label: 'Output',
@@ -945,6 +978,21 @@ const SETTINGS_SCHEMA = {
     description: 'User interface settings.',
     showInDialog: false,
     properties: {
+      allowedApprovalModes: {
+        type: 'array',
+        label: 'Web Shell Approval Modes',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        mergeStrategy: MergeStrategy.REPLACE,
+        description:
+          'Execution approval modes offered by Web Shell. Omit to show default, auto-edit, auto and yolo; an empty list offers none. Host allowedApprovalModes overrides this setting. Presentation only: does not change the current mode or enforce backend permissions. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored with a warning. Edit settings.json directly.',
+        showInDialog: false,
+        items: {
+          type: 'string',
+          enum: ['default', 'auto-edit', 'auto', 'yolo'],
+        },
+      },
       theme: {
         type: 'string',
         label: 'Theme',
@@ -1057,7 +1105,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.',
+          'When true, human submissions containing `workflow` or `ultracode` no longer softly steer the current turn toward the Workflow tool. Applies across terminal, IDE, Web and explicitly human-origin SDK messages when workflows are enabled. Plain headless prompts and automated messages do not trigger this reminder.',
         showInDialog: true,
       },
       showStatusInTitle: {
@@ -1293,6 +1341,16 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
+        showInDialog: true,
+      },
+      arrowKeysScrollTranscript: {
+        type: 'boolean',
+        label: 'Arrow Keys Scroll Transcript (Virtualized History)',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Let a bare ↑/↓ scroll the transcript while the composer is empty in Virtualized History, instead of recalling input history. Off by default: ↑/↓ walk your previous prompts, and the transcript scrolls with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Turn it on only for a terminal or multiplexer that does not pass mouse reporting through and turns wheel/trackpad scrolling into ↑/↓ key presses, where that burst of ↑/↓ would otherwise silently replace the composer with an older prompt. While it is on, use Ctrl+P / Ctrl+N for input history from an empty composer.',
         showInDialog: true,
       },
       showToolCallDetails: {
@@ -1620,6 +1678,48 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  pluginConfigs: {
+    type: 'object',
+    label: 'Plugin Configuration',
+    category: 'Extensions',
+    requiresRestart: true,
+    default: {} as ModPluginConfigs,
+    jsonSchemaOverride: {
+      type: 'object',
+      additionalProperties: {
+        type: 'object',
+        properties: {
+          toolDialect: {
+            type: 'string',
+            enum: ['native', 'claude'],
+            description:
+              'Mod tool input dialect. Defaults to native; claude exposes the supported Bash/Edit/Write input subset.',
+          },
+          unsupportedEvents: {
+            type: 'string',
+            enum: ['skip', 'reject'],
+            description:
+              'Hooks for Claude Code events Qwen Code does not support. Defaults to skip, which reports them at startup; reject fails initialization instead.',
+          },
+          options: {
+            type: 'object',
+            additionalProperties: {
+              anyOf: [
+                { type: 'string' },
+                { type: 'number' },
+                { type: 'boolean' },
+                { type: 'array', items: { type: 'string' } },
+              ],
+            },
+          },
+        },
+      },
+    },
+    description:
+      'Mod options, tool dialect and unsupported-event policy keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
+    showInDialog: false,
+  },
+
   advisorModel: {
     type: 'string',
     label: 'Advisor Model',
@@ -1883,8 +1983,23 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard.',
+          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard. Whether these guards remind or stop is set by model.loopProtection.',
         showInDialog: false,
+      },
+      loopProtection: {
+        type: 'enum',
+        label: 'Loop Protection',
+        category: 'Model',
+        requiresRestart: true,
+        default: 'warn',
+        description:
+          'What a loop detector does when it fires. "warn" (default) reminds the model once and does not stop the turn, except for content and thought repetition, which happens mid-stream where no reminder can be delivered; "stop" keeps every stop point: the always-on guards (identical calls, shell inspection, invalid tool parameters, and stuck repetition past the adaptive cap) remind the model once when the turn reaches their reminder point before the stop, and the opt-in heuristics stop without a reminder; "off" neither reminds nor stops and only records telemetry. Budgets (an explicit model.maxToolCallsPerTurn and the 1000-call backstop of the adaptive default) and the duplicate provider tool-call id guard stop in every mode, so under "warn" and "off" a stuck turn runs until a budget stops it. Applies to the CLI, subagents and daemon/ACP sessions; model.skipLoopDetection still decides whether the heuristic detectors run.',
+        showInDialog: false,
+        options: [
+          { value: 'warn', label: 'Remind only' },
+          { value: 'stop', label: 'Stop after a reminder' },
+          { value: 'off', label: 'Off' },
+        ],
       },
       maxToolCallsPerTurn: {
         type: 'integer',
@@ -1893,7 +2008,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
         description:
-          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
+          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it acts only when the model repeats the same call (a stuck loop; see model.loopProtection); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -2021,7 +2136,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: false,
             description:
-              "Force scope:'global' on Anthropic cache_control entries even when the base URL is not an Anthropic-native origin (e.g. proxy providers like Routify, OpenRouter). Requires the proxy to forward cache_control fields and the prompt-caching-scope-2026-01-05 beta.",
+              "Opt in to scope:'global' on Anthropic cache_control entries. Off by default for every base URL, api.anthropic.com included: the API only accepts a global breakpoint when every preceding block is globally scoped too, which a real tool list cannot satisfy within the four-breakpoint cap. Turn on only for a backend whose validation differs and that forwards cache_control fields plus the prompt-caching-scope-2026-01-05 beta.",
             parentKey: 'generationConfig',
             showInDialog: false,
           },
@@ -2440,7 +2555,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 0,
         description:
-          "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
+          "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review, memory metadata migration). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults. User/System/SystemDefaults scopes only; Workspace values are ignored with a warning.",
         showInDialog: false,
       },
       agentMaxTurns: {
@@ -2451,7 +2566,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 0,
         description:
-          "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit.",
+          "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit. User/System/SystemDefaults scopes only; Workspace values are ignored with a warning.",
         showInDialog: false,
       },
       enableTeamMemory: {
@@ -3822,7 +3937,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 1,
         description:
-          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit.',
+          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Foreground per-model launches are bounded by maxParallelAgentsByModel and do not consume this global background budget. Use maxParallelAgentsByModel to cap a specific model below this global limit.',
         showInDialog: false,
         jsonSchemaOverride: {
           type: 'integer',
@@ -3836,7 +3951,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as Record<string, number> | undefined,
         description:
-          'Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { "qwen3-max": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit.',
+          'Per-model maximum number of top-level sub-agents that can run concurrently on a given model, keyed by model ID (e.g. { "qwen3-max": 2 }). Bounds both background and foreground launches: a foreground launch on a capped model queues inline (showing "Waiting for a model slot") until a slot frees. Applies to top-level launches only — nested sub-agents, teammate fan-out, foreground interactive forks, external-executor subagents, and agents dispatched by a workflow script are not capped by this setting. For background launches the tighter of this cap and the global maxParallelAgents binds; foreground launches are bounded by this cap alone. Models not listed here fall back to the global maxParallelAgents for background launches and are uncapped for foreground launches — list a model here to bound its foreground fan-out.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.SHALLOW_MERGE,
         jsonSchemaOverride: {
@@ -4244,6 +4359,26 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
+      generatedUi: {
+        type: 'boolean',
+        label: 'Generated UI',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+        showInDialog: true,
+      },
+      mods: {
+        type: 'boolean',
+        label: 'Mods (Experimental)',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
+        showInDialog: true,
+      },
       liveVoice: {
         type: 'object',
         label: 'Live Voice',
@@ -4390,8 +4525,30 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable persistent workspace Agents collaborating on shared task threads (experimental). Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
+          'Enable persistent workspace Agents that you can @-mention in a chat session (experimental). Each mentioned Agent answers in the same session from its own native session. Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
         showInDialog: true,
+      },
+      agentChainLimit: {
+        type: 'number',
+        label: 'Agent Chain Limit',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: 0,
+        minimum: 0,
+        description:
+          'Maximum number of agent-to-agent hops when Agents @-mention each other in a chat session (experimental). A message from you resets the count. 0 means unlimited; every hop is a separate paid Agent run, and "Stop all agents" is always available.',
+        showInDialog: false,
+      },
+      agentTokenBudget: {
+        type: 'number',
+        label: 'Agent Token Budget',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: 1_000_000,
+        minimum: 0,
+        description:
+          'Tokens Agents may spend in one chat session between two of your messages before they stop waking each other (experimental). Agents still answer what they were asked; your next message resets the budget. 0 means unlimited.',
+        showInDialog: false,
       },
       artifact: {
         type: 'boolean',

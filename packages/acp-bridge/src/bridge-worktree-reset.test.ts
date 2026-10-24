@@ -398,6 +398,14 @@ describe('worktree reset session transfer', () => {
           ),
         ).rejects.toBeInstanceOf(SessionResetPendingError);
 
+        await expect(
+          bridge.deleteMessageGroups(
+            session.sessionId,
+            { snapshot: 'v1', groupIds: ['group-1'] },
+            context,
+          ),
+        ).rejects.toBeInstanceOf(SessionResetPendingError);
+
         // Nothing reached the child: the refusal is at admission, not a
         // dispatched-then-failed mutation.
         const dispatched = handle.agent.extMethodCalls.map(

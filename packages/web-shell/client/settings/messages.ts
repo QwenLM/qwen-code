@@ -16,6 +16,20 @@ type SettingsMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
+  'settings.label.general.outputLanguage': 'Language: Model output',
+  'settings.description.general.outputLanguage':
+    'Language the model replies in. Leave empty to follow your input language (auto). Changes rewrite the session’s output-language.md and apply to the running session.',
+  'settings.placeholder.general.outputLanguage': 'auto (follow input)',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `Use "${v?.value ?? ''}"`,
+  'settings.label.ui.accessibility.enableLoadingPhrases':
+    'Enable Loading Phrases',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    'Show rotating loading phrases. Turn off to hide both built-in and host-provided phrases.',
+  'settings.label.experimental.generatedUi': 'Generated UI',
+  'settings.description.experimental.generatedUi':
+    'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
@@ -109,6 +123,10 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
 };
 
 export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
+  'settings.label.experimental.generatedUi': 'Generated UI 生成式界面',
+  'settings.description.experimental.generatedUi':
+    '在受支持的本地会话中启用内置 Generated UI。重新创建所属会话后生效。',
+
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
@@ -222,6 +240,12 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.general.language': '语言：界面',
   'settings.description.general.language':
     '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
+  'settings.label.general.outputLanguage': '语言：模型输出',
+  'settings.description.general.outputLanguage':
+    '模型回复使用的语言。留空表示自动跟随你的输入语言（auto）。修改会重写当前会话读取的 output-language.md，并立即作用于当前会话。',
+  'settings.placeholder.general.outputLanguage': '自动（跟随输入）',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `使用“${v?.value ?? ''}”`,
   'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
   'settings.description.general.preventSystemSleep':
     '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
@@ -261,6 +285,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '一个 PR 要达到多少轮评审之后，评审才可以追加一段提示性文字，说明看起来成问题的是改动的方向而不是当前补丁本身。它只在 diff 自评审首次测量以来也膨胀了数倍时出现，且从不出现在 Approve 上。它仅是披露：不新增发现、不改变结论、不阻塞任何事——它存在的原因是每条发现都锚定在当前 diff 的某一行上，所以评审能报告某个方向在哪里漏，却永远说不出换个方向能一次性消除所有这些漏洞。保持 0 表示用内置的 5 轮阈值；调大让这段文字更晚出现；设得非常大则彻底关闭。非正整数的值会被忽略。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略，仓库无法为其评审者设定评审策略。',
   'settings.label.ui.theme': '主题',
   'settings.description.ui.theme': '界面的颜色主题。',
+  'settings.label.ui.allowedApprovalModes': 'Web Shell 审批模式',
+  'settings.description.ui.allowedApprovalModes':
+    'Web Shell 提供的执行审批模式。未配置时显示 default、auto-edit、auto 和 yolo；空列表不提供任何选项。宿主 allowedApprovalModes 优先于此设置。仅控制展示，不改变当前模式或强制约束后端权限。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略并产生警告。请直接编辑 settings.json。',
   'settings.label.ui.hideTips': '隐藏提示',
   'settings.description.ui.hideTips': '隐藏界面中的帮助提示。',
   'settings.label.ui.enableWelcomeBack': '显示欢迎回来对话框',
@@ -285,6 +312,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.description.ui.showStatusInTitle':
     '在终端窗口标题中显示 Qwen Code 会话名称和状态。',
   'settings.label.ui.showResponseTokensPerSecond': '显示回复 Tokens/秒',
+  'settings.label.ui.accessibility.enableLoadingPhrases': '启用加载文案',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    '显示轮换加载文案。关闭后隐藏内置及宿主提供的文案。',
   'settings.description.ui.showResponseTokensPerSecond':
     '模型流式输出时，在回复 token 计数旁显示实时的 tokens/秒估值。下个会话生效。',
   'settings.label.ui.showToolCallDetails': '显示工具调用详情',

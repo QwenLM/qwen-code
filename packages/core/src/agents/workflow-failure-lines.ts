@@ -21,6 +21,7 @@
 
 import { types } from 'node:util';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   sanitizeWorkflowText,
@@ -58,7 +59,11 @@ export function buildFailureLines(source: WorkflowFailureSource): string[] {
   if (failed.length === 0) return [];
   const shown = failed.slice(0, MAX_FAILURE_LINES);
   const lines = shown.map((dispatch) => {
-    const label = stripAnsiAndControl(dispatch.label || 'workflow-agent');
+    // Single line, without the bidi controls a label from a script or an
+    // edited snapshot could carry.
+    const label = stripDisplayControlChars(
+      stripAnsiAndControl(dispatch.label || 'workflow-agent'),
+    );
     const error = sanitizeWorkflowText(dispatch.error || 'dispatch failed');
     return truncateWorkflowText(`[${label}] ${error}`, MAX_FAILURE_LINE_CHARS);
   });
@@ -69,10 +74,13 @@ export function buildFailureLines(source: WorkflowFailureSource): string[] {
   return lines;
 }
 
+/** Result keys read as script-reported failures; at most one line each. */
+export const REPORTED_FAILURE_KEYS = ['failed', 'errors', 'error'] as const;
+
 /** Script-reported failures are data, independent of runtime dispatch status. */
 export function reportedFailureLines(result: unknown): string[] {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return [];
-  return ['failed', 'errors', 'error'].flatMap((key) => {
+  return REPORTED_FAILURE_KEYS.flatMap((key) => {
     try {
       const failure = (result as Record<string, unknown>)[key];
       if (

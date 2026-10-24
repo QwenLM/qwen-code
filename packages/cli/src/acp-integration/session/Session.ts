@@ -4,8 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
+import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
+import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
+  logLoopProtection,
+  logWorkflowKeyword,
+} from '@qwen-code/qwen-code-core/telemetry/loggers.js';
+import {
+  WorkflowKeywordEvent,
+  LoopProtectionEvent,
+  LoopReason,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
+import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import {
+  getTurnToolCallCapHalt,
+  shouldRemindTurnToolCallCap,
+} from '@qwen-code/qwen-code-core/services/loopDetectionService.js';
+import {
+  buildLoopReminder,
+  INVALID_PARAMS_REMINDER_AT,
+} from '@qwen-code/qwen-code-core/services/loop-protection.js';
+import type { LoopReminderInput } from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -16,7 +39,11 @@ import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  getStartupContextLength,
+  markCompressedHistory,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -27,10 +54,11 @@ import type {
   Part,
 } from '@google/genai';
 import {
-  type AgentRunContext,
+  createToolLifecycle,
   type Config,
   type ContentGeneratorConfig,
   type LlmChat,
+  type LoopStopDetail,
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
   type ToolResult,
@@ -113,6 +141,7 @@ import {
   ToolErrorType,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
   CreateSubSessionTool,
   fireNotificationHook,
@@ -190,7 +219,6 @@ import {
   GLOBAL_DUPLICATE_THRESHOLD,
   canonicalToolName,
   getToolCallRepeatKey,
-  shouldHaltOnTurnToolCallCap,
   logLoopDetected,
   logRepeatedToolFailureGuard,
   LoopDetectedEvent,
@@ -261,10 +289,6 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
-  runWithAgentRunContext,
-  requireAgentRunContext,
-  consumeAgentInput,
-  readThread,
   decideNotificationAdmission,
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
@@ -274,7 +298,13 @@ import {
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
-import { parsePromptAgentRun } from './agent-run-meta.js';
+import {
+  buildSessionHistoryFromConversation,
+  getLastApiHistoryPromptId,
+  getLastApiPromptCancellation,
+  markApiHistoryPrompt,
+  cloneApiHistory,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -296,18 +326,27 @@ import {
 import {
   type ActiveWorkHoldV1,
   type BridgeConversationDirectoryExpectation,
+  type BridgeSessionExternalRecordRequest,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_ATTACHMENT_CONTEXT_META_KEY,
+  IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+  USER_CANCEL_ABORT_REASON,
+  INTERRUPTED_PROMPT_ABORT_REASON,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
+import {
+  createAgentRecordTranscriptUpdate,
+  createTranscriptExecutionLifecycleUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
@@ -361,11 +400,19 @@ import type {
   SetSessionModelResponse,
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import {
+  readSettingsSnapshot,
+  SettingScope,
+  type LoadedSettings,
+} from '../../config/settings.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
-import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
+import {
+  MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX,
+  MID_TURN_RESPONSE_USER_MESSAGE_PREFIX,
+  prefixMidTurnUserMessageParts,
+} from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
   getAvailableCommands,
@@ -481,12 +528,22 @@ import {
   type RepeatedToolFailureGuardDecision,
   type RepeatedToolFailureGuardState,
 } from './repeated-tool-failure-guard.js';
+import {
+  getToolExplorationKind,
+  TOOL_EXPLORATION_REMINDER,
+  ToolExplorationBudget,
+} from '@qwen-code/qwen-code-core/services/tool-exploration-budget.js';
 
 const debugLogger = createDebugLogger('SESSION');
 const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
-const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
+/** Idempotency keys `appendExternalRecord` remembers (oldest dropped first). */
+const MAX_EXTERNAL_RECORD_KEYS = 1_024;
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
+// Cuts a streaming model response short so queued user input the user asked
+// to send now reaches the model; the turn itself goes on (see
+// `#openResponseInterrupt`).
+const MID_TURN_INPUT_ABORT_REASON = 'qwen:mid-turn-input';
 const GOAL_HELD_RECOVERY_COMMANDS =
   'Run:\n/goal pause\nThen, when ready:\n/goal resume';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
@@ -783,6 +840,7 @@ async function claimGoalTurn(
 type PendingToolResultRecord = {
   ordinal: number;
   sequence: number;
+  subtype?: 'code_mode_tool_result';
   callId: string;
   toolName: string;
   toolArgs: Record<string, unknown>;
@@ -808,7 +866,10 @@ type PendingToolResultRecord = {
 
 type QueueToolResultRecord = (
   fc: FunctionCall,
-  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence' | 'toolArgs'>,
+  record: Omit<
+    PendingToolResultRecord,
+    'ordinal' | 'sequence' | 'toolArgs' | 'subtype'
+  >,
 ) => void;
 
 type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
@@ -822,8 +883,21 @@ export type DaemonToolLoopState = {
   maxToolCallKeyRepeat: number;
   loopDetected: boolean;
   loopType?: LoopType;
+  /** Reason and tool-call numbers of the stop, for shared loop types. */
+  loopDetail?: LoopStopDetail;
+  /** Tool of the (tool, args) pair behind maxToolCallKeyRepeat. */
+  maxToolCallKeyName?: string;
+  /** Loop-protection patterns already reminded or observed this turn. */
+  loopProtectionHandled?: Set<string>;
+  /** Reminders for the next model request that carries tool results. */
+  pendingLoopReminders?: Array<{
+    text: string;
+    loopType: LoopType;
+    detail: LoopStopDetail;
+  }>;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
+  explorationBudget?: ToolExplorationBudget;
 };
 
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
@@ -854,6 +928,21 @@ type ManagedConversationActivation = {
   promise?: Promise<void>;
   error?: unknown;
 };
+
+/** Whether an activation failure is the liftable engine-quarantine refusal. */
+function isManagedEngineQuarantineRefusal(error: unknown): boolean {
+  // typeof null === 'object': a peer that serializes an absent `data` as
+  // null must read as no refusal at all, never throw inside the catch.
+  const data =
+    typeof error === 'object' && error !== null
+      ? (error as { data?: unknown }).data
+      : undefined;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { errorKind?: unknown }).errorKind === 'managed_engine_quarantined'
+  );
+}
 
 function sameManagedConversationExpectation(
   left: BridgeConversationDirectoryExpectation,
@@ -890,6 +979,7 @@ function createDaemonToolLoopState(
     loopDetected: false,
     repeatedToolFailureMode,
     repeatedToolFailureState: createRepeatedToolFailureGuardState(),
+    explorationBudget: new ToolExplorationBudget(),
   };
 }
 
@@ -976,17 +1066,19 @@ function recordDaemonLoopDetected(
   loopType: LoopType,
   message: string,
   loopState: DaemonToolLoopState,
-  options: { recordToQwenLogger?: boolean } = {},
+  options: { recordToQwenLogger?: boolean; loopDetail?: LoopStopDetail } = {},
 ): true {
   if (!loopState.loopDetected) {
+    const { loopDetail, ...logOptions } = options;
     loopState.loopDetected = true;
     loopState.loopType = loopType;
+    loopState.loopDetail = loopDetail;
     debugLogger.warn(message);
     try {
       logLoopDetected(
         config,
-        new LoopDetectedEvent(loopType, promptId),
-        options,
+        new LoopDetectedEvent(loopType, promptId, loopDetail),
+        logOptions,
       );
     } catch (error) {
       debugLogger.debug(
@@ -1015,10 +1107,18 @@ function managedOutcomeUnknownError(error: Error): RequestError {
 function createLoopDetectedTurnError(
   loopState: DaemonToolLoopState,
 ): RequestError {
+  const detail = loopState.loopDetail;
   return new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
     code: 'LOOP_DETECTED',
     errorKind: 'loop_detected',
     ...(loopState.loopType ? { loopType: loopState.loopType } : {}),
+    ...(detail?.loopReason ? { loopReason: detail.loopReason } : {}),
+    ...(detail?.toolCallCount !== undefined
+      ? { toolCallCount: detail.toolCallCount }
+      : {}),
+    ...(detail?.toolCallLimit !== undefined
+      ? { toolCallLimit: detail.toolCallLimit }
+      : {}),
   });
 }
 
@@ -1041,6 +1141,133 @@ function isLoopDetectedTurnError(error: unknown): boolean {
   );
 }
 
+function logDaemonLoopProtection(
+  config: Config,
+  promptId: string,
+  loopType: LoopType,
+  decision: 'reminded' | 'stopped' | 'observed',
+  detail: LoopStopDetail,
+): void {
+  try {
+    logLoopProtection(
+      config,
+      new LoopProtectionEvent({
+        prompt_id: promptId,
+        loop_type: loopType,
+        decision,
+        mode: config.getLoopProtection(),
+        loop_reason: detail.loopReason,
+      }),
+    );
+  } catch (error) {
+    debugLogger.debug(
+      '[Session] Failed to record loop protection telemetry',
+      error,
+    );
+  }
+}
+
+// One reminder per pattern.
+function remindDaemonLoop(
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: LoopReminderInput,
+  detail: LoopStopDetail,
+): void {
+  const handled = (loopState.loopProtectionHandled ??= new Set());
+  if (handled.has(key)) return;
+  handled.add(key);
+  (loopState.pendingLoopReminders ??= []).push({
+    text: buildLoopReminder(input),
+    loopType: input.loopType,
+    detail,
+  });
+}
+
+// Takes the queued reminders for the next request, logging them as
+// delivered.
+function takeDaemonLoopReminders(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState,
+): string | undefined {
+  const pending = loopState.pendingLoopReminders;
+  if (!pending?.length) return undefined;
+  loopState.pendingLoopReminders = undefined;
+  for (const { loopType, detail } of pending) {
+    logDaemonLoopProtection(config, promptId, loopType, 'reminded', detail);
+  }
+  return pending.map(({ text }) => text).join('\n\n');
+}
+
+// A governed detector reached its reminder point (#14828).
+function remindDaemonLoopBeforeStop(
+  config: Config,
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: Omit<LoopReminderInput, 'stops'>,
+  detail: LoopStopDetail = {},
+): void {
+  const mode = config.getLoopProtection();
+  if (mode === 'off') return;
+  remindDaemonLoop(
+    loopState,
+    key,
+    { ...input, stops: mode === 'stop' },
+    detail,
+  );
+}
+
+// A governed detector reached its stop point: `stop` halts, `warn` reminds,
+// `off` only records. Returns whether to halt.
+function onDaemonLoopStopPoint(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: Omit<LoopReminderInput, 'stops'>,
+  detail: LoopStopDetail,
+  stopMessage: string,
+): boolean {
+  switch (config.getLoopProtection()) {
+    case 'stop':
+      if (loopState.loopDetected) return true;
+      recordDaemonLoopDetected(
+        config,
+        promptId,
+        input.loopType,
+        stopMessage,
+        loopState,
+        { loopDetail: detail },
+      );
+      logDaemonLoopProtection(
+        config,
+        promptId,
+        input.loopType,
+        'stopped',
+        detail,
+      );
+      return true;
+    case 'warn':
+      remindDaemonLoop(loopState, key, { ...input, stops: false }, detail);
+      return false;
+    default: {
+      const handled = (loopState.loopProtectionHandled ??= new Set());
+      if (!handled.has(key)) {
+        handled.add(key);
+        logDaemonLoopProtection(
+          config,
+          promptId,
+          input.loopType,
+          'observed',
+          detail,
+        );
+      }
+      return false;
+    }
+  }
+}
+
 function recordDaemonToolCalls(
   config: Config,
   promptId: string,
@@ -1056,10 +1283,11 @@ function recordDaemonToolCalls(
     loopState.toolCallKeyCounts.set(key, count);
     if (count > loopState.maxToolCallKeyRepeat) {
       loopState.maxToolCallKeyRepeat = count;
+      loopState.maxToolCallKeyName = call.name ?? '';
     }
   }
   // Same per-turn cap semantics as the core LoopDetectionService — the
-  // shouldHaltOnTurnToolCallCap predicate is shared with core's
+  // getTurnToolCallCapHalt classifier is shared with core's
   // checkTurnToolCallCap so the two runtimes cannot drift (an explicit
   // model.maxToolCallsPerTurn is a hard cap; the default is adaptive —
   // past the soft cap a productive turn continues until the
@@ -1074,21 +1302,64 @@ function recordDaemonToolCalls(
   // daemon stream loops discard the failed attempt's accumulated calls
   // (functionCalls.length = 0) before re-streaming, so a failed attempt's
   // calls never reach this function to be double-counted.
-  if (
-    shouldHaltOnTurnToolCallCap(
+  const cap = config.getMaxToolCallsPerTurn();
+  const isExplicitCap = config.isMaxToolCallsPerTurnExplicit();
+  const capHalt = getTurnToolCallCapHalt(
+    loopState.totalToolCalls,
+    loopState.maxToolCallKeyRepeat,
+    cap,
+    isExplicitCap,
+  );
+  const capMessage = `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`;
+  const stuck = {
+    loopType: LoopType.TURN_TOOL_CALL_CAP,
+    toolName: loopState.maxToolCallKeyName,
+    count: loopState.maxToolCallKeyRepeat,
+    softCap: cap,
+  };
+  if (capHalt) {
+    const loopDetail = {
+      loopReason: capHalt.reason,
+      toolCallCount: loopState.totalToolCalls,
+      toolCallLimit: capHalt.limit,
+    };
+    // Budgets (an explicit cap, the backstop) stop in every mode.
+    if (capHalt.reason !== LoopReason.STUCK_REPETITION) {
+      return recordDaemonLoopDetected(
+        config,
+        promptId,
+        LoopType.TURN_TOOL_CALL_CAP,
+        capMessage,
+        loopState,
+        { loopDetail },
+      );
+    }
+    if (
+      onDaemonLoopStopPoint(
+        config,
+        promptId,
+        loopState,
+        'cap',
+        stuck,
+        loopDetail,
+        capMessage,
+      )
+    ) {
+      return true;
+    }
+  } else if (
+    shouldRemindTurnToolCallCap(
       loopState.totalToolCalls,
       loopState.maxToolCallKeyRepeat,
-      config.getMaxToolCallsPerTurn(),
-      config.isMaxToolCallsPerTurnExplicit(),
+      cap,
+      isExplicitCap,
     )
   ) {
-    return recordDaemonLoopDetected(
-      config,
-      promptId,
-      LoopType.TURN_TOOL_CALL_CAP,
-      `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
-      loopState,
-    );
+    remindDaemonLoopBeforeStop(config, loopState, 'cap', stuck, {
+      loopReason: LoopReason.STUCK_REPETITION,
+      toolCallCount: loopState.totalToolCalls,
+      toolCallLimit: cap,
+    });
   }
   // Mirror of core's checkGlobalDuplicate: the same (tool, args) pair
   // repeated GLOBAL_DUPLICATE_THRESHOLD times anywhere in the turn halts
@@ -1103,14 +1374,29 @@ function recordDaemonToolCalls(
   // would ship this halt on.
   if (
     !config.getSkipLoopDetection() &&
-    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD
-  ) {
-    return recordDaemonLoopDetected(
+    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD &&
+    onDaemonLoopStopPoint(
       config,
       promptId,
-      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
       loopState,
+      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      { loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE },
+      { loopReason: LoopReason.REPEATED_CALL },
+      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
+    )
+  ) {
+    return true;
+  }
+  // Deliberately after both halt checks: a halted batch is skipped whole and
+  // never executes, so its calls must not feed the exploration budget (nor
+  // trigger the registry lookups classifying them needs).
+  for (const call of calls) {
+    loopState.explorationBudget?.record(
+      getToolExplorationKind(
+        config.getToolRegistry(),
+        call.name ?? '',
+        call.args ?? {},
+      ),
     );
   }
   return false;
@@ -1130,13 +1416,31 @@ function recordDaemonInvalidToolParams(
   const key = toolName;
   const count = (loopState.invalidToolParamErrors.get(key) ?? 0) + 1;
   loopState.invalidToolParamErrors.set(key, count);
+  const invalid = {
+    loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+    toolName,
+    count,
+  };
+  if (
+    count >= INVALID_PARAMS_REMINDER_AT &&
+    count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
+  ) {
+    remindDaemonLoopBeforeStop(
+      config,
+      loopState,
+      `invalid:${toolName}`,
+      invalid,
+    );
+  }
   if (count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD) return false;
-  return recordDaemonLoopDetected(
+  return onDaemonLoopStopPoint(
     config,
     promptId,
-    LoopType.INVALID_TOOL_PARAMS_STAGNATION,
-    `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
     loopState,
+    `invalid:${toolName}`,
+    invalid,
+    {},
+    `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
   );
 }
 
@@ -1151,6 +1455,9 @@ const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
 // into an unrelated turn's context.
 const MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS = 30_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
+// Bounds resolving the input a finished turn keeps unsent: the turn only
+// records it, so its reply does not wait out media resolution.
+const MID_TURN_KEEP_RESOLVE_TIMEOUT_MS = 2_000;
 // `waitForActiveTurnsToSettle` polls at this interval when the active turn
 // publishes no completion promise to await — `goalProcessing` and
 // `historyMutationActive` both block `#hasActiveTurn()` without one. Yielding
@@ -1193,8 +1500,6 @@ type DrainedMidTurnMessage =
       content: ContentBlock[];
       displayText: string;
       attachmentReferences?: SessionAttachmentReference[];
-      messageId?: string;
-      agentRun?: AgentRunContext;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1316,7 +1621,7 @@ function extractTurnPromptText(content: ContentBlock[]): string {
     if (block.type === 'image') hasImage = true;
     if (block.type === 'text' && block.text.length > 0) return block.text;
   }
-  return hasImage ? '[image]' : '';
+  return hasImage ? IMAGE_ONLY_PROMPT_TEXT : '';
 }
 
 interface InFlightTurnRecording {
@@ -1327,7 +1632,7 @@ interface InFlightTurnRecording {
   cancelledAt?: number;
   promptText: string;
   promptTextTruncated: boolean;
-  finalAnswer: { finalText: string };
+  finalAnswer: { finalText: string; historyPromptId?: string };
   /**
    * Captured at turn start; settle writes against this instance (pinned to
    * the turn-start session by `Config.startNewSession`) instead of
@@ -1344,7 +1649,11 @@ function truncateTurnText(text: string): {
   if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
     return { text, truncated: false };
   }
-  return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
+  const end =
+    (text.codePointAt(TURN_RESULT_TEXT_MAX_CHARS - 1) ?? 0) > 0xffff
+      ? TURN_RESULT_TEXT_MAX_CHARS - 1
+      : TURN_RESULT_TEXT_MAX_CHARS;
+  return { text: text.slice(0, end), truncated: true };
 }
 
 function stripReferencedAttachmentDataParts(
@@ -1501,10 +1810,6 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               willPersistReferences,
             ),
             ...(attachmentReferences ? { attachmentReferences } : {}),
-            ...(typeof item['messageId'] === 'string'
-              ? { messageId: item['messageId'] }
-              : {}),
-            agentRun: parsePromptAgentRun({ _meta: item['_meta'] }),
           },
         ];
       },
@@ -1647,6 +1952,8 @@ interface CronFire {
   modelServiceId?: string;
   groupId?: string;
   name?: string;
+  /** A gated fire's task prompt; `prompt` is then the gate's delivered text. */
+  taskPrompt?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
 }
@@ -1676,6 +1983,7 @@ interface ChannelTaskResponseCapture {
 }
 
 interface AgentResponseCapture {
+  turnId?: string;
   channelTask?: ChannelTaskResponseCapture;
   backgroundResponse?: (text: string) => Promise<void>;
   goalProposalTurn?: {
@@ -1689,7 +1997,9 @@ interface AgentResponseCapture {
   };
   turnResult?: {
     finalText: string;
+    historyPromptId?: string;
   };
+  recordingService?: ChatRecordingService;
   agentOutput: AgentOutputMessageCapture;
 }
 
@@ -2172,6 +2482,7 @@ function isCallerCausedModelRefusal(error: Error): boolean {
 export class Session implements SessionContext {
   private readonly mcpAppCalls = new Map<string, AbortController>();
   private pendingPrompt: AbortController | null = null;
+  private readonly userPromptCancellations = new WeakMap<AbortSignal, number>();
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
    * Tracks the completion of the current prompt so that the next prompt
@@ -2239,6 +2550,19 @@ export class Session implements SessionContext {
   // batch so a transient stall can't silently lose them. See
   // `#drainMidTurnUserMessages`.
   private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
+  // The turn the user asked to send queued input now for. Cleared whenever a
+  // drain request goes out, since that request takes everything queued before
+  // it; a request left over from an earlier turn never matches a later one.
+  private midTurnSendNowFor: AbortSignal | undefined;
+  // Pulls queued input for the model response currently open to interruption.
+  private pullForOpenResponse: (() => void) | undefined;
+  // A drain started for an open response and still awaiting its answer. Later
+  // drains wait for it, so the messages it takes are never stranded.
+  private earlyMidTurnDrain: Promise<void> | undefined;
+  // Messages such a drain took, so the turn that took them can keep them in
+  // the conversation if it ends before sending them.
+  private readonly earlyDrainedMidTurnMessages =
+    new WeakSet<DrainedMidTurnMessage>();
   private readonly todoStopGuard: DaemonTodoStopGuard;
   private readonly repeatedToolFailureGuardMode: RepeatedToolFailureGuardMode;
   private todoStopGuardBackgroundBaseline: TodoStopGuardBackgroundBaseline;
@@ -2300,11 +2624,16 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
+  private pendingDeletedApiPromptIds: Set<string> | undefined;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
   private unsubscribeApprovalModeChange?: () => void;
+  private unsubscribeRequestLifecycle?: () => void;
+  private requestLifecycleSessionId: string;
+  private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
@@ -2386,6 +2715,24 @@ export class Session implements SessionContext {
   pendingRecoveredAgentsNotice: string | null = null;
 
   /**
+   * Session multi-agent: model text of `agent_mention` / `agent_message`
+   * records written since the main model's last ordinary turn, spliced into
+   * the next one (see `appendExternalRecord`). Live history needs it because
+   * writing the record does not touch `LlmChat` history; resume already gets
+   * the same text from the record itself via `appendApiHistoryRecord`, and
+   * this array lives only in memory, so the two never double up.
+   */
+  pendingExternalAgentContext: string[] = [];
+
+  /** recordKey -> record uuid of external records this process wrote. */
+  readonly #externalRecordIds = new Map<string, string>();
+  /** recordKey -> in-flight write, so a retried request does not write twice. */
+  readonly #externalRecordWrites = new Map<
+    string,
+    Promise<{ recordId: string; created: boolean; deferred?: boolean }>
+  >();
+
+  /**
    * Call ids of the ask_user_question being re-hung by the current restore
    * turn, if any. While set, a permission cancel that the bridge resolved as
    * an unattended timeout / session close, or an abort of the restore wait,
@@ -2400,6 +2747,7 @@ export class Session implements SessionContext {
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
   private readonly restoredHistoryGaps?: HistoryGap[];
+  private historySnapshotBoundary?: { hash: string; prefixLength: number };
   /**
    * Tail of this session's permission queue. The serialization unit is the
    * session, not the `AgentSideConnection`: one daemon child owns a single
@@ -2435,6 +2783,7 @@ export class Session implements SessionContext {
     ) => boolean = () => false,
   ) {
     this.sessionId = id;
+    this.requestLifecycleSessionId = id;
     // Config releases the restore projection after this Session is created.
     this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
     this.workflowHistory = [...workflowHistory];
@@ -2501,6 +2850,31 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+    this.unsubscribeRequestLifecycle = this.config.onRequestLifecycle?.(
+      (event) => {
+        if (this.disposed) return;
+        const key = JSON.stringify([
+          event.sessionId,
+          event.subagentId ?? null,
+          event.executionId,
+        ]);
+        if (
+          event.sessionId !== this.requestLifecycleSessionId &&
+          !(event.phase === 'ended' && this.requestLifecycleExecutions.has(key))
+        )
+          return;
+        if (event.phase === 'started') {
+          this.requestLifecycleExecutions.add(key);
+        } else {
+          this.requestLifecycleExecutions.delete(key);
+        }
+        void this.sendUpdate(
+          createTranscriptExecutionLifecycleUpdate(event),
+        ).catch((error) =>
+          debugLogger.warn('Failed to send request lifecycle:', error),
+        );
+      },
+    );
 
     this.unsubscribeApprovalModeChange = this.config.onApprovalModeChange?.(
       (mode, prePlanMode) => {
@@ -2604,6 +2978,7 @@ export class Session implements SessionContext {
    */
   rebindGoalRuntimeForNewSession(): void {
     if (this.disposed || this.closing) return;
+    this.requestLifecycleSessionId = this.config.getSessionId();
     this.goalRuntimeUnsubscribe?.();
     this.goalRuntimeUnsubscribe = undefined;
     this.goalHostUnbind?.();
@@ -2611,6 +2986,11 @@ export class Session implements SessionContext {
     this.lastGoalSnapshot = undefined;
     this.lastGoalPublicationKey = undefined;
     this.suppressedRecoveredGoalId = undefined;
+    // `/clear` starts a new transcript chain under this long-lived Session:
+    // agent text queued for the old chain must not reach the next model turn,
+    // and record ids from the finalized chain must not answer a re-send.
+    this.pendingExternalAgentContext = [];
+    this.#externalRecordIds.clear();
     this.#bindGoalRuntime();
   }
 
@@ -2807,7 +3187,10 @@ export class Session implements SessionContext {
     this.goalProcessing = true;
     this.#activeWorkChanged();
     this.activeGoalTurn = turn;
-    const parts = buildGoalContinuationParts(turn);
+    const parts = buildGoalContinuationParts(
+      turn,
+      this.config.getToolRegistry?.(),
+    );
     let result: PromptResponse | undefined;
     await this.#emitGoalStartTurn();
     try {
@@ -2893,7 +3276,9 @@ export class Session implements SessionContext {
         const pauseReason =
           turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
             ? GOAL_PAUSE_REASON_SESSION_DISPOSED
-            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON
+            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+                turn.controller.signal.reason ===
+                  INTERRUPTED_PROMPT_ABORT_REASON
               ? GOAL_PAUSE_REASON_USER_INTERRUPT
               : managedSessionBlock
                 ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
@@ -2941,9 +3326,10 @@ export class Session implements SessionContext {
           }`,
         );
       }
-      const cancelledByUser =
+      const cancelledTurn =
         result?.stopReason === 'cancelled' &&
-        turn.controller.signal.reason === USER_CANCEL_ABORT_REASON;
+        (turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+          turn.controller.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON);
       // A turn preempted by a newly arrived user prompt is a handoff, not a
       // failure. `this.pendingPrompt` is the goal turn's own controller while
       // a goal turn is in flight, so a new prompt aborts it with
@@ -2958,10 +3344,13 @@ export class Session implements SessionContext {
       // cause that names the pause. Enumerating them separately means a fifth
       // cause can compile, pause correctly, and fall through to the failure
       // arm -- mislabelling the stop in the journal, the `_meta.goalState`
-      // update and the card, with no test able to see it.
+      // update and the card, with no test able to see it. The two cancels in
+      // that list pause alike but do not read alike: the interrupted abort
+      // reason means the client or host cancelled the prompt, so only a user
+      // cancel may name the user.
       const pauseReason = supersededByNewPrompt
         ? undefined
-        : cancelledByUser
+        : cancelledTurn
           ? GOAL_PAUSE_REASON_USER_INTERRUPT
           : result?.stopReason === 'max_tokens'
             ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
@@ -3276,6 +3665,17 @@ export class Session implements SessionContext {
     }
     void this.#drainCronQueue();
     void this.#drainNotificationQueue();
+  }
+
+  /**
+   * Host request to deliver the queued mid-turn input now. A model response
+   * open to interruption takes it at once; otherwise the next drain does.
+   * Ignored between turns, where the host promotes the queue itself.
+   */
+  sendMidTurnInputNow(): void {
+    if (!this.pendingPrompt) return;
+    this.midTurnSendNowFor = this.pendingPrompt.signal;
+    this.pullForOpenResponse?.();
   }
 
   releaseTodoStopGuardQueuedPromptWait(promptId: string): boolean {
@@ -3672,6 +4072,7 @@ export class Session implements SessionContext {
             cron: req.cron,
             prompt: req.prompt,
             recurring: req.recurring,
+            ...(req.gate ? { gate: req.gate } : {}),
           },
         );
       } catch (error) {
@@ -3707,7 +4108,14 @@ export class Session implements SessionContext {
           'cron_create: bridge returned an invalid scheduled-task result',
         );
       }
-      return { id: resp['id'], cron: resp['cron'] };
+      // A daemon that predates gated tasks echoes no `gate`; cron_create
+      // reads the absence as a dropped gate.
+      const gate = resp['gate'];
+      return {
+        id: resp['id'],
+        cron: resp['cron'],
+        ...(typeof gate === 'string' || gate === null ? { gate } : {}),
+      };
     });
   }
 
@@ -4163,8 +4571,18 @@ export class Session implements SessionContext {
         activation.state = 'ready';
       })
       .catch((error: unknown) => {
-        activation.state = 'poisoned';
-        activation.error = error;
+        // A quarantined-engine refusal lifts once the stop is proven:
+        // poisoning the activation would outlive it, so the next commit
+        // retries. Any terminal refusal (the host is shutting down, the
+        // binding is broken) stays poisoned.
+        if (isManagedEngineQuarantineRefusal(error)) {
+          activation.state = 'pending';
+          activation.error = undefined;
+          activation.promise = undefined;
+        } else {
+          activation.state = 'poisoned';
+          activation.error = error;
+        }
         throw error;
       });
     activation.promise = promise;
@@ -4271,6 +4689,7 @@ export class Session implements SessionContext {
   }
 
   async assertCanStartTurn(): Promise<void> {
+    this.assertHistoryContextAvailable();
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -4334,6 +4753,18 @@ export class Session implements SessionContext {
       this.channelTaskCaptures.size === 0 &&
       !this.#hasActiveTurn()
     );
+  }
+
+  assertHistoryContextAvailable(): void {
+    if (this.pendingDeletedApiPromptIds) {
+      throw new RequestError(
+        -32000,
+        'Reload the session before using its history',
+        {
+          errorKind: 'session_history_context_unavailable',
+        },
+      );
+    }
   }
 
   isIdle(): boolean {
@@ -4486,7 +4917,7 @@ export class Session implements SessionContext {
     };
   }
 
-  beginClose(): () => void {
+  beginClose(cancelReason?: 'user'): () => void {
     if (this.closing) {
       throw RequestError.invalidParams(
         undefined,
@@ -4494,6 +4925,10 @@ export class Session implements SessionContext {
       );
     }
     this.closing = true;
+    this.closeAbortReason =
+      cancelReason === 'user'
+        ? USER_CANCEL_ABORT_REASON
+        : SESSION_DISPOSE_ABORT_REASON;
 
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
@@ -4512,6 +4947,7 @@ export class Session implements SessionContext {
       resolveGate();
       if (this.disposed) return;
       this.closing = false;
+      this.closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
       void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -4583,6 +5019,7 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.#dropDeferredExternalRecords();
     this.cancelMcpAppCalls();
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(SESSION_DISPOSE_ABORT_REASON);
@@ -4593,6 +5030,9 @@ export class Session implements SessionContext {
     this.clearActiveTodoPlanRevision();
     this.unsubscribeApprovalModeChange?.();
     this.unsubscribeApprovalModeChange = undefined;
+    this.unsubscribeRequestLifecycle?.();
+    this.unsubscribeRequestLifecycle = undefined;
+    this.requestLifecycleExecutions.clear();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -4758,6 +5198,7 @@ export class Session implements SessionContext {
     targetTurnIndex: number;
     apiTruncateIndex: number;
   } {
+    this.assertHistoryContextAvailable();
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
@@ -4849,13 +5290,85 @@ export class Session implements SessionContext {
     return { targetTurnIndex, apiTruncateIndex };
   }
 
+  async deleteMessageGroups(request: { snapshot: string; groupIds: string[] }) {
+    this.assertHistoryContextAvailable();
+    const release = this.beginHistoryMutation();
+    let persisted = false;
+    let deletedGroupIds: string[] = [];
+    let deletedPromptIds: string[] = [];
+    try {
+      const recording = this.config.getChatRecordingService();
+      if (!recording?.supportsMessageGroupDeletion())
+        throw new RequestError(-32602, 'History recording is unavailable', {
+          errorKind: 'session_message_deletion_unsupported',
+        });
+      const result = await recording.deleteMessageGroups(request);
+      persisted = true;
+      deletedGroupIds = result.deletedGroupIds;
+      deletedPromptIds = result.deletedPromptIds;
+      this.pendingDeletedApiPromptIds = new Set(result.removedApiPromptIds);
+      await this.installDeletedMessageHistory();
+      return { deletedGroupIds, deletedPromptIds };
+    } catch (error) {
+      if (persisted) {
+        throw new RequestError(
+          -32000,
+          'Messages were deleted, but the session must be reopened before sending another message',
+          {
+            errorKind: 'message_deletion_context_unavailable',
+            deletedGroupIds,
+            deletedPromptIds,
+          },
+        );
+      }
+      throw error;
+    } finally {
+      release();
+    }
+  }
+
+  async recoverMessageDeletionContext(): Promise<void> {
+    if (!this.pendingDeletedApiPromptIds) return;
+    const release = this.beginHistoryMutation();
+    try {
+      await this.installDeletedMessageHistory();
+    } finally {
+      release();
+    }
+  }
+
+  private async installDeletedMessageHistory(): Promise<void> {
+    const removed = this.pendingDeletedApiPromptIds!;
+    const records = await this.config
+      .getChatRecordingService()!
+      .readActiveTranscriptChain();
+    const restored = buildSessionHistoryFromConversation({ messages: records });
+    const current = this.captureHistorySnapshot();
+    const prelude = current.slice(0, getStartupContextLength(current));
+    const llmClient = this.config.getLlmClient()!;
+    llmClient.setHistory([...prelude, ...restored.apiHistory]);
+    llmClient.getChat().setCompletedToolCallIds(restored.completedToolCallIds);
+    const fileHistory = this.config.getFileHistoryService();
+    fileHistory.restoreFromSnapshots(
+      removeFileHistorySnapshots(fileHistory.getSnapshots(), removed),
+    );
+    this.pendingDeletedApiPromptIds = undefined;
+  }
+
   captureHistorySnapshot(): Content[] {
-    return this.config.getLlmClient()!.getChat().getHistoryShallow();
+    const history = this.config.getLlmClient()!.getChat().getHistoryShallow();
+    this.historySnapshotBoundary = {
+      hash: createHash('sha256').update(JSON.stringify(history)).digest('hex'),
+      prefixLength: getStartupContextLength(history, {
+        includeCompressed: true,
+      }),
+    };
+    return history;
   }
 
   getRewindableUserTurnCount(): number {
     return countApiUserPrompts(
-      this.captureHistorySnapshot(),
+      this.config.getLlmClient()!.getChat().getHistoryShallow(),
       ACP_API_USER_PROMPT_OPTIONS,
     );
   }
@@ -4868,7 +5381,17 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.setHistory(structuredClone(history));
+    const restored = cloneApiHistory(history);
+    if (
+      this.historySnapshotBoundary?.hash ===
+      createHash('sha256').update(JSON.stringify(history)).digest('hex')
+    ) {
+      markCompressedHistory(
+        restored,
+        this.historySnapshotBoundary.prefixLength,
+      );
+    }
+    this.config.getLlmClient()!.setHistory(restored);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -4888,7 +5411,41 @@ export class Session implements SessionContext {
     );
   }
 
-  async cancelPendingPrompt(): Promise<void> {
+  #classifyPromptCancelAbortReason(requestedReason: string): string {
+    if (this.disposed) return SESSION_DISPOSE_ABORT_REASON;
+    return this.closing ? this.closeAbortReason : requestedReason;
+  }
+
+  cancelPromptAdmission(
+    controller: AbortController,
+    requestedReason: string,
+  ): void {
+    const reason = this.#classifyPromptCancelAbortReason(requestedReason);
+    // AbortSignal.reason cannot change once aborted; retain later human intent
+    // on this admission only, without transferring it to another prompt.
+    if (
+      reason === USER_CANCEL_ABORT_REASON &&
+      !this.userPromptCancellations.has(controller.signal)
+    ) {
+      this.userPromptCancellations.set(controller.signal, Date.now());
+    }
+    controller.abort(reason);
+  }
+
+  #isUserPromptCancellation(signal?: AbortSignal): boolean {
+    if (signal === undefined) return false;
+    if (
+      signal.reason === USER_CANCEL_ABORT_REASON ||
+      this.userPromptCancellations.has(signal)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  async cancelPendingPrompt(
+    requestedAbortReason: string = USER_CANCEL_ABORT_REASON,
+  ): Promise<void> {
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
     const hadNotification =
@@ -4914,9 +5471,7 @@ export class Session implements SessionContext {
 
     this.todoStopGuard.suspend();
     const abortReason =
-      this.closing || this.disposed
-        ? SESSION_DISPOSE_ABORT_REASON
-        : USER_CANCEL_ABORT_REASON;
+      this.#classifyPromptCancelAbortReason(requestedAbortReason);
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(abortReason);
     }
@@ -5011,6 +5566,16 @@ export class Session implements SessionContext {
     if (managedSessionBlock) {
       throw managedOutcomeUnknownError(managedSessionBlock);
     }
+    if (params._meta?.[DAEMON_CONTINUE_META_KEY] === true) {
+      if (
+        (await this.#isContinueBlocked(
+          params._meta?.['qwen.daemon.confirmCancellation'],
+        )) ||
+        !this.#getRecoveryPlan(true)?.continuation
+      ) {
+        return { stopReason: 'end_turn' };
+      }
+    }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
     const controller = new AbortController();
     const channelTask =
@@ -5026,7 +5591,15 @@ export class Session implements SessionContext {
         : undefined;
     if (channelTask) this.channelTaskCaptures.add(channelTask);
     const recordAdmissionCancellation = () => {
-      if (turnRecording) turnRecording.cancelledAt ??= Date.now();
+      if (
+        turnRecording &&
+        this.#isUserPromptCancellation(admissionCancellation)
+      ) {
+        turnRecording.cancelledAt ??= admissionCancellation
+          ? (this.userPromptCancellations.get(admissionCancellation) ??
+            Date.now())
+          : Date.now();
+      }
     };
     admissionCancellation?.addEventListener(
       'abort',
@@ -5049,6 +5622,7 @@ export class Session implements SessionContext {
       if (channelTask && result.stopReason === 'end_turn') {
         result = await this.#waitForChannelTaskResult(channelTask, result);
       }
+      recordAdmissionCancellation();
       await this.#settleTurnRecording(
         result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
         turnRecording,
@@ -5056,13 +5630,16 @@ export class Session implements SessionContext {
       );
       return result;
     } catch (error) {
+      recordAdmissionCancellation();
       const pendingSend = turnRecording?.abortController;
       const abortReason =
         pendingSend?.signal.aborted === true
           ? pendingSend.signal.reason
           : undefined;
       // Mirror the send-loop's controlled-cancellation contract: explicit
-      // user cancels and session disposal settle as `cancelled`. A
+      // user cancels, a forwarded infrastructure interruption (response
+      // close, prompt deadline, teardown) and session disposal settle as
+      // `cancelled`. A
       // successor-prompt abort does so only when the thrown error is the
       // abort itself; the send loop deliberately excludes NEW_PROMPT from
       // controlled cancellation so infrastructure failures are not hidden
@@ -5076,8 +5653,13 @@ export class Session implements SessionContext {
           MANAGED_RUNTIME_OUTCOME_UNKNOWN;
       const controlledAbort =
         !managedOutcomeUnknown &&
-        (abortReason === USER_CANCEL_ABORT_REASON ||
+        ((this.closing &&
+          admissionCancellation?.aborted === true &&
+          (this.#isUserPromptCancellation(admissionCancellation) ||
+            admissionCancellation.reason === SESSION_DISPOSE_ABORT_REASON)) ||
+          abortReason === USER_CANCEL_ABORT_REASON ||
           abortReason === SESSION_DISPOSE_ABORT_REASON ||
+          abortReason === INTERRUPTED_PROMPT_ABORT_REASON ||
           (abortReason === NEW_PROMPT_ABORT_REASON &&
             this.#isAbortError(error)));
       if (controlledAbort) {
@@ -5202,6 +5784,7 @@ export class Session implements SessionContext {
     turnRecording: InFlightTurnRecording | null,
     channelTask?: ChannelTaskResponseCapture,
   ): Promise<PromptResponse> {
+    this.assertHistoryContextAvailable();
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -5301,7 +5884,8 @@ export class Session implements SessionContext {
     pendingSend.signal.addEventListener('abort', recordCancellation, {
       once: true,
     });
-    const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
+    const cancelPendingSend = () =>
+      pendingSend.abort(admissionCancellation?.reason);
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
         once: true,
@@ -5312,6 +5896,9 @@ export class Session implements SessionContext {
     const releasePendingSend = () => {
       admissionCancellation?.removeEventListener('abort', cancelPendingSend);
       pendingSend.signal.removeEventListener('abort', recordCancellation);
+      if (this.midTurnSendNowFor === pendingSend.signal) {
+        this.midTurnSendNowFor = undefined;
+      }
       if (this.pendingPrompt === pendingSend) {
         this.pendingPrompt = null;
         if (!scheduledGoalTurn)
@@ -5457,6 +6044,9 @@ export class Session implements SessionContext {
       ...(channelTask ? { channelTask } : {}),
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
       ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
+      recordingService:
+        turnRecording?.recordingService ??
+        this.config.getChatRecordingService(),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
     // One server-side channel classification, consumed by both the
@@ -5548,6 +6138,30 @@ export class Session implements SessionContext {
           proposalTurn.settlementBlocked !== true;
       }
       await this.#settleGoalProposal(responseCapture);
+      if (
+        !turnRecording &&
+        result.stopReason === 'cancelled' &&
+        responseCapture.turnId &&
+        (this.#isUserPromptCancellation(pendingSend.signal) ||
+          this.#isUserPromptCancellation(admissionCancellation))
+      ) {
+        const payload: TurnResultRecordPayload = {
+          promptId: responseCapture.turnId,
+          state: 'cancelled',
+          cancelledAt: Date.now(),
+          cancelReason: 'user',
+          endedAt: Date.now(),
+        };
+        responseCapture.recordingService?.recordTurnResult(
+          payload,
+          responseCapture.turnId,
+        );
+        try {
+          await responseCapture.recordingService?.flush();
+        } catch (error) {
+          debugLogger.warn(`Failed to flush cancellation: ${error}`);
+        }
+      }
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -5601,6 +6215,9 @@ export class Session implements SessionContext {
         this.config.getGoalProposalHostSupported() &&
         this.config.setGoalProposalTurnKey(undefined)
       ) {
+        this.config
+          .getToolRegistry()
+          .unrevealDeferredTool(ToolNames.PROPOSE_GOAL);
         try {
           await this.config.getLlmClient().setTools();
         } catch (error) {
@@ -5654,15 +6271,32 @@ export class Session implements SessionContext {
     }
   }
 
+  async #getTurnCancellation() {
+    const recorder = this.config.getChatRecordingService();
+    if (!recorder) throw new Error('Recovery requires a session transcript');
+    return getLastApiPromptCancellation(
+      this.#getCurrentChat().getHistoryShallow(),
+      await recorder.readActiveTranscriptChain(),
+    );
+  }
+
+  async #isContinueBlocked(confirmCancellation?: unknown): Promise<boolean> {
+    const cancellation = await this.#getTurnCancellation();
+    return (
+      (cancellation !== undefined &&
+        cancellation.confirmationId === undefined) ||
+      confirmCancellation !== cancellation?.confirmationId
+    );
+  }
+
   #getRecoveryPlan(fullHistory: boolean) {
     const llmClient = this.config.getLlmClient();
     if (!llmClient || !llmClient.isInitialized()) {
       return undefined;
     }
 
-    // Classify from a bounded, shallow tail — this accept/reject pre-check does
-    // not need to structuredClone the whole history. The authoritative
-    // re-detection inside the fired prompt() reads full history for the strip.
+    // Limit meaningful history while retaining trailing notifications for replay.
+    // The authoritative re-detection inside prompt() uses full history to strip.
     const chat = this.#getCurrentChat();
     // A trailing restorable ask_user_question is awaiting its restore
     // prompt, not an interruption to close: `interrupted_turn` would answer
@@ -5684,7 +6318,8 @@ export class Session implements SessionContext {
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
-        : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+        : (chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+          chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
           chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)),
       historyGaps: runtimeGaps?.length
         ? runtimeGaps
@@ -5719,6 +6354,28 @@ export class Session implements SessionContext {
     };
   }
 
+  async getRecoveryStatusForClient(): Promise<
+    NonNullable<ServeSessionContextStatus['recovery']>
+  > {
+    const initial = this.getRecoveryStatus();
+    if (!initial.canContinue) return initial;
+    try {
+      const cancellation = await this.#getTurnCancellation();
+      const status = this.getRecoveryStatus();
+      if (cancellation && !cancellation.confirmationId) {
+        return { ...status, canContinue: false };
+      }
+      return {
+        ...status,
+        ...(status.canContinue && cancellation?.confirmationId
+          ? { cancellationConfirmationId: cancellation.confirmationId }
+          : {}),
+      };
+    } catch {
+      return { kind: this.getRecoveryStatus().kind, canContinue: false };
+    }
+  }
+
   /**
    * Classify whether an unfinished previous turn can be resumed — an
    * interrupted prompt (the model never answered) or a turn left with dangling
@@ -5732,11 +6389,11 @@ export class Session implements SessionContext {
    * tracked like any other prompt; `prompt()` then re-detects/strips
    * authoritatively. Powers `qwen/control/session/continue`.
    */
-  async continueLastTurn(): Promise<{
+  async continueLastTurn(confirmCancellation?: string): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
-    const recovery = this.getRecoveryStatus();
+    const recovery = await this.getRecoveryStatusForClient();
     if (!recovery.canContinue && recovery.kind !== 'clean') {
       // Name the veto that fired. `canContinue` collapses `closing` plus the
       // ten `#hasActiveTurn()` members into one boolean and the only UI
@@ -5766,7 +6423,9 @@ export class Session implements SessionContext {
       });
     }
     return {
-      accepted: recovery.canContinue,
+      accepted:
+        recovery.canContinue &&
+        confirmCancellation === recovery.cancellationConfirmationId,
       interruption:
         recovery.kind === 'interrupted_prompt' ||
         recovery.kind === 'interrupted_turn'
@@ -5797,22 +6456,6 @@ export class Session implements SessionContext {
    * error here would propagate up through `prompt()` and break the
    * primary response path.
    */
-  /**
-   * Whether this daemon opted into workspace-agent collaboration.
-   *
-   * Guarded rather than called directly. This layer is handed Config-shaped
-   * objects that are not always a full Config — derived configs, shims and
-   * test doubles among them — and the same unguarded pattern in `acpAgent.ts`
-   * turned a missing method into a failed session. Absent means off, which is
-   * the safe reading: no run frame is established, and every consumer of one
-   * refuses in turn.
-   */
-  #collaborationEnabled(): boolean {
-    return typeof this.config.isAgentCollaborationEnabled === 'function'
-      ? this.config.isAgentCollaborationEnabled()
-      : false;
-  }
-
   #maybeEmitFollowupSuggestion(result: PromptResponse): void {
     if (result.stopReason !== 'end_turn') return;
     if (
@@ -5920,27 +6563,11 @@ export class Session implements SessionContext {
     // subprocesses (and hooks) read the CURRENT session's ID instead of
     // the process-global env slot, which in daemon mode only ever holds
     // the first session created in this process.
-    // Per turn, not per session. An agent session works many threads over its
-    // life, so a frame established once at spawn would bind the body to its
-    // first thread forever — the exact failure `runWithAgentRunContext`
-    // refuses to allow. Wrapping here means every prompt carries its own, and
-    // a prompt with no agent-run metadata (a person typing into the session)
-    // establishes none, so the thread tools correctly refuse.
-    // Belt and braces, not the only defence. The frame can only arrive on the
-    // trusted daemon channel, and with collaboration off the daemon never
-    // mounts the routes that dispatch, so in practice none is sent. Refusing to
-    // read one anyway means a daemon whose operator did not opt in cannot be
-    // talked into running an agent turn by a frame from any other source — and
-    // because every downstream consumer (mid-turn input, the thread tools)
-    // requires the frame this establishes, this one line shuts all of them.
-    const agentRun = this.#collaborationEnabled()
-      ? parsePromptAgentRun(params)
-      : undefined;
-    const execute = () => {
-      const inner = () =>
-        runWithInvocationContext(invocationContext, () =>
-          sessionIdContext.run(sessionId, () =>
-            this.#executePromptInner(
+    const execute = () =>
+      runWithInvocationContext(invocationContext, () =>
+        sessionIdContext.run(sessionId, async () => {
+          try {
+            return await this.#executePromptInner(
               params,
               pendingSend,
               responseCapture,
@@ -5948,11 +6575,12 @@ export class Session implements SessionContext {
               rejectOnLoopDetected,
               goalTurn,
               channelTurn,
-            ),
-          ),
-        );
-      return agentRun ? runWithAgentRunContext(agentRun, inner) : inner();
-    };
+            );
+          } finally {
+            await this.#keepUnsentEarlyMidTurnInput(pendingSend.signal);
+          }
+        }),
+      );
     return goalTurn
       ? goalTurnContext.run(goalTurn.permit, execute)
       : goalTurnContext.exit(execute);
@@ -6081,6 +6709,12 @@ export class Session implements SessionContext {
             responseCapture.goalProposalTurn?.turnKey,
           )
         ) {
+          // propose_goal is natively deferred: the key arms only inside a
+          // prompt, so without the reveal it would be filtered out of every
+          // announcement and never be discoverable in ACP/daemon sessions.
+          this.config
+            .getToolRegistry()
+            .revealDeferredTool(ToolNames.PROPOSE_GOAL);
           await this.config.getLlmClient().setTools();
         }
         const daemonPromptId = getInvocationContext()?.promptId;
@@ -6091,6 +6725,14 @@ export class Session implements SessionContext {
           promptMetadata?.[DAEMON_RETRY_META_KEY] === true ||
           promptMetadata?.[DAEMON_CONTINUE_META_KEY] === true ||
           promptMetadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
+        responseCapture.turnId = continuesCurrentWorkChain
+          ? getLastApiHistoryPromptId(
+              this.#getCurrentChat().getHistoryShallow(),
+            )
+          : promptId;
+        if (responseCapture.turnResult) {
+          responseCapture.turnResult.historyPromptId = responseCapture.turnId;
+        }
         // Bind the prompt ID for the remainder of this turn, mirroring the
         // sessionIdContext.run wrapper in #executePrompt. Shell subprocesses
         // read it via getShellContextEnvVars (QWEN_CODE_PROMPT_ID) — without
@@ -6173,6 +6815,11 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY
               ] === true;
+            const continuedPromptId = continuesCurrentWorkChain
+              ? getLastApiHistoryPromptId(
+                  this.#getCurrentChat().getHistoryShallow(),
+                )
+              : undefined;
             if (
               isRestoreAskUserQuestion &&
               !findRestorableAskUserQuestion(
@@ -6186,6 +6833,16 @@ export class Session implements SessionContext {
               // snapshots, `conversation_finished` — so each such no-op
               // restore doesn't persist phantom records.
               return { stopReason: 'end_turn' };
+            }
+            if (
+              (isRetry || isRestoreAskUserQuestion) &&
+              !isContinue &&
+              daemonPromptId
+            ) {
+              await responseCapture.recordingService?.recordTurnAttempt(
+                continuedPromptId,
+                daemonPromptId,
+              );
             }
             if (
               !isRetry &&
@@ -6227,7 +6884,11 @@ export class Session implements SessionContext {
                 goalTurn.permit,
               );
             } else if (isContinue) {
-              const recoveryPlan = this.#getRecoveryPlan(true);
+              const recoveryPlan = (await this.#isContinueBlocked(
+                promptMetadata?.['qwen.daemon.confirmCancellation'],
+              ))
+                ? undefined
+                : this.#getRecoveryPlan(true);
               if (!recoveryPlan?.continuation) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
@@ -6246,6 +6907,12 @@ export class Session implements SessionContext {
                   ),
                 );
                 return { stopReason: 'end_turn' };
+              }
+              if (daemonPromptId) {
+                await responseCapture.recordingService?.recordTurnAttempt(
+                  continuedPromptId,
+                  daemonPromptId,
+                );
               }
               void recordDaemonSessionApprovalModeFromConfig(this.config);
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
@@ -6303,41 +6970,6 @@ export class Session implements SessionContext {
                 promptId,
                 daemonPromptId,
               );
-              const agentRun = this.#collaborationEnabled()
-                ? parsePromptAgentRun(params)
-                : undefined;
-              if (agentRun) {
-                try {
-                  const thread = await readThread(
-                    this.config.getWorkingDir(),
-                    agentRun.threadId,
-                  );
-                  const delivered = thread?.messages.find(
-                    (message) =>
-                      message.sequence === agentRun.contextThroughSequence,
-                  );
-                  if (!delivered) {
-                    throw new Error(
-                      'Agent input requires a delivery watermark',
-                    );
-                  }
-                  // With chat recording off there is no transcript to flush;
-                  // the thread itself keeps the input.
-                  await recorder?.flush();
-                  await consumeAgentInput(
-                    this.config.getWorkingDir(),
-                    delivered.id,
-                    delivered.sequence,
-                  );
-                } catch (error) {
-                  // The model may run twice after a receipt failure; losing the
-                  // task would be worse than replaying its durable input.
-                  debugLogger.warn(
-                    'Agent input receipt failed; replay remains pending',
-                    error,
-                  );
-                }
-              }
             }
 
             if (
@@ -6629,6 +7261,46 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
+            const workflowHumanInput =
+              isUserSubmissionTurn &&
+              !isSlashInput &&
+              !isSlashCommand(submittedPrompt) &&
+              !goalTurn &&
+              !pendingSend.signal.aborted &&
+              submittedPrompt.trim().length > 0
+                ? { text: submittedPrompt }
+                : undefined;
+            if (workflowHumanInput && this.config.isWorkflowsEnabled?.()) {
+              try {
+                const liveSettings = readSettingsSnapshot(
+                  this.config.storage.getProjectRoot(),
+                  {
+                    environment: process.env,
+                    workspaceTrusted: this.config.isTrustedFolder(),
+                  },
+                );
+                this.config.setWorkflowKeywordTriggerEnabled(
+                  liveSettings.merged.ui?.disableWorkflowKeywordTrigger !==
+                    true,
+                );
+              } catch (error) {
+                this.config.setWorkflowKeywordTriggerEnabled(false);
+                debugLogger.warn(
+                  'Unable to read the live workflow keyword setting:',
+                  error,
+                );
+              }
+            }
+            // ACP sends through LlmChat, bypassing LlmClient's injection.
+            // Resolve here before the interrupted-prompt reminder deduplication.
+            const workflowIntent = resolveWorkflowIntent(
+              this.config,
+              workflowHumanInput,
+            );
+            if (workflowIntent) {
+              systemReminders.push({ text: workflowIntent.reminder });
+              logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
+            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
@@ -6682,6 +7354,26 @@ export class Session implements SessionContext {
               };
               parts = insertAfterFunctionResponses(parts, [noticePart]);
               this.pendingRecoveredAgentsNotice = null;
+            }
+
+            // Session multi-agent context written since the last turn (agent
+            // replies, @-mentions). Same gates as the notice above. Each text
+            // is already a complete envelope, so it goes in bare (no
+            // system-reminder wrapper): live history then matches what resume
+            // rebuilds from the records. Taken once, here.
+            // TODO(multi-agent): a turn that fails after this point drops the
+            // context from live history (resume restores it from the record).
+            if (
+              this.pendingExternalAgentContext.length > 0 &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              !isSlashInput
+            ) {
+              parts = insertAfterFunctionResponses(
+                parts,
+                this.pendingExternalAgentContext.map((text) => ({ text })),
+              );
+              this.pendingExternalAgentContext = [];
             }
 
             // A restore turn must not TAKE the reminder: `take` burns it and
@@ -6853,7 +7545,9 @@ export class Session implements SessionContext {
                 turnCount++;
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
-                  this.#getCurrentChat().addHistory(nextMessage);
+                  const chat = this.#getCurrentChat();
+                  markApiHistoryPrompt(nextMessage, responseCapture.turnId);
+                  chat.addHistory(nextMessage);
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
                   }
@@ -6863,6 +7557,12 @@ export class Session implements SessionContext {
                 const functionCalls: FunctionCall[] = [];
                 const preparationTracker = new ToolCallPreparationTracker(
                   this.toolCallEmitter,
+                );
+                const responseInterrupt = this.#openResponseInterrupt(
+                  pendingSend.signal,
+                  () =>
+                    functionCalls.length > 0 || preparationTracker.hasToolCall,
+                  !channelTurn,
                 );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
@@ -6901,9 +7601,19 @@ export class Session implements SessionContext {
                     await this.#sendMessageStreamWithAutoCompression(
                       promptId,
                       nextMessage?.parts ?? [],
-                      pendingSend.signal,
+                      responseInterrupt.signal,
                       {
                         modelOverride: fullTurnModelOverride,
+                        historyPromptId:
+                          turnCount === 1 &&
+                          goalTurn?.origin !== 'runtime' &&
+                          !nextMessage?.parts?.some(
+                            (part) => part.functionResponse,
+                          )
+                            ? continuesCurrentWorkChain
+                              ? continuedPromptId
+                              : promptId
+                            : undefined,
                         consumeInitialMemory:
                           isFreshUserTurn && turnCount === 1,
                       },
@@ -6917,6 +7627,9 @@ export class Session implements SessionContext {
                     // user never got an answer to.
                     const preserveFullMessage =
                       isContinue || sendResult.stopReason === 'cancelled';
+                    if (preserveFullMessage && nextMessage) {
+                      markApiHistoryPrompt(nextMessage, responseCapture.turnId);
+                    }
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
                       preserveFullMessage,
@@ -6933,7 +7646,9 @@ export class Session implements SessionContext {
                     this.#clearPendingRestoreNotices();
                   }
                   requestRouteKey = sendResult.requestRouteKey;
-                  const responseStream = sendResult.responseStream;
+                  const responseStream = responseInterrupt.watch(
+                    sendResult.responseStream,
+                  );
                   nextMessage = null;
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(responseCapture);
@@ -7055,13 +7770,20 @@ export class Session implements SessionContext {
                   }
 
                   // Explicit user cancellation and session disposal are
-                  // controlled aborts. Other AbortErrors still surface so
+                  // controlled aborts, and so is the bridge's forwarded
+                  // interruption token. Other AbortErrors still surface so
                   // infrastructure failures are not hidden as cancellations.
+                  // A response cut short by queued input gets here only when
+                  // the turn itself is stopped meanwhile, and the turn's
+                  // abort reason then decides; otherwise `watch` absorbs
+                  // whatever it throws once cut.
                   const isControlledCancellation =
                     pendingSend.signal.aborted &&
                     (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
                       pendingSend.signal.reason ===
-                        SESSION_DISPOSE_ABORT_REASON);
+                        SESSION_DISPOSE_ABORT_REASON ||
+                      pendingSend.signal.reason ===
+                        INTERRUPTED_PROMPT_ABORT_REASON);
                   if (isControlledCancellation) {
                     this.todoStopGuard.suspend();
                     return { stopReason: 'cancelled' };
@@ -7129,6 +7851,13 @@ export class Session implements SessionContext {
                     '',
                     durationMs,
                   );
+                }
+
+                if (functionCalls.length === 0) {
+                  // Input taken while the response streamed, which may have
+                  // cut it short, is answered within this turn.
+                  nextMessage =
+                    await responseInterrupt.takeInput(onFullTurnModel);
                 }
 
                 if (functionCalls.length > 0) {
@@ -7291,12 +8020,24 @@ export class Session implements SessionContext {
     loopProtectionStopped?: boolean;
   }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
+    // Foreground prompts only: cron and background turns run without external
+    // hooks, and channel turns deliver each response block as it ends.
+    const interruptible = allowExternalHooks && !channelTurn;
     let stopHookIterationCount = 0;
     // Whether the turn reaching the next Stop check was forced by a blocking
     // Stop hook. Kept apart from the iteration count, which also drives the
     // consecutive-block cap and continuation prompt ids.
     let stopHookForcedTurn = false;
     let stopHookReasons: string[] = [];
+    // Queued user input a continuation answered after cutting its response
+    // short replaces the turn, as input drained before a Stop check does.
+    let continuationAnsweredUserInput = false;
+    const onUserInputAnswered = () => {
+      continuationAnsweredUserInput = true;
+      stopHookForcedTurn = false;
+      stopHookIterationCount = 0;
+      stopHookReasons = [];
+    };
     const onFullTurnModel = (model: string) => {
       if (modelOverride === model) {
         return true;
@@ -7360,6 +8101,9 @@ export class Session implements SessionContext {
             rejectOnLoopDetected,
             ...(goalTurn ? { goalTurn } : {}),
             ...(channelTurn ? { channelTurn: true } : {}),
+            ...(interruptible
+              ? { interruptible: true, onUserInputAnswered }
+              : {}),
           },
         );
         if (continuation.kind === 'terminal') return continuation;
@@ -7409,6 +8153,9 @@ export class Session implements SessionContext {
               rejectOnLoopDetected,
               ...(goalTurn ? { goalTurn } : {}),
               ...(channelTurn ? { channelTurn: true } : {}),
+              ...(interruptible
+                ? { interruptible: true, onUserInputAnswered }
+                : {}),
             },
           );
           if (continuation.kind === 'terminal') {
@@ -7521,6 +8268,9 @@ export class Session implements SessionContext {
                 rejectOnLoopDetected,
                 ...(goalTurn ? { goalTurn } : {}),
                 ...(channelTurn ? { channelTurn: true } : {}),
+                ...(interruptible
+                  ? { interruptible: true, onUserInputAnswered }
+                  : {}),
               },
             );
             if (continuation.kind === 'terminal') {
@@ -7625,6 +8375,7 @@ export class Session implements SessionContext {
       }
       // Only a continuation carrying a Stop hook's reason is hook-forced.
       stopHookForcedTurn = Boolean(externalReason);
+      continuationAnsweredUserInput = false;
       const continuation = await this.#runStopContinuation(
         pendingSend,
         continuationPromptId,
@@ -7652,13 +8403,21 @@ export class Session implements SessionContext {
           rejectOnLoopDetected,
           ...(goalTurn ? { goalTurn } : {}),
           ...(channelTurn ? { channelTurn: true } : {}),
+          ...(interruptible
+            ? { interruptible: true, onUserInputAnswered }
+            : {}),
         },
       );
       if (continuation.supersededAutomaticContinuation) {
         // Queued user input replaced the continuation.
         stopHookForcedTurn = false;
       }
-      if (continuation.supersededAutomaticContinuation && externalReason) {
+      if (
+        continuation.supersededAutomaticContinuation &&
+        externalReason &&
+        // Already restarted by the input the continuation answered.
+        !continuationAnsweredUserInput
+      ) {
         stopHookIterationCount--;
         stopHookReasons = stopHookReasons.slice(0, -1);
       }
@@ -7684,6 +8443,10 @@ export class Session implements SessionContext {
       rejectOnLoopDetected?: boolean;
       goalTurn?: AcpGoalTurn;
       channelTurn?: boolean;
+      /** Let queued user input cut its model responses short. */
+      interruptible?: boolean;
+      /** Called when the continuation answers user input it cut in for. */
+      onUserInputAnswered?: () => void;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -7741,6 +8504,11 @@ export class Session implements SessionContext {
       const preparationTracker = new ToolCallPreparationTracker(
         this.toolCallEmitter,
       );
+      const responseInterrupt = this.#openResponseInterrupt(
+        pendingSend.signal,
+        () => functionCalls.length > 0 || preparationTracker.hasToolCall,
+        options.interruptible === true,
+      );
       let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
       const streamStartTime = Date.now();
       let streamFailed = false;
@@ -7777,7 +8545,7 @@ export class Session implements SessionContext {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
           promptIdForSend,
           nextMessage.parts ?? [],
-          pendingSend.signal,
+          responseInterrupt.signal,
           {
             skipCompression:
               skipCompression || (guardForThisSend?.attempt ?? 0) > 1,
@@ -8069,7 +8837,9 @@ export class Session implements SessionContext {
         }
 
         requestRouteKey = sendResult.requestRouteKey;
-        const responseStream = sendResult.responseStream;
+        const responseStream = responseInterrupt.watch(
+          sendResult.responseStream,
+        );
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.responseCapture,
@@ -8196,7 +8966,8 @@ export class Session implements SessionContext {
         const isControlledCancellation =
           pendingSend.signal.aborted &&
           (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON ||
+            pendingSend.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON);
         if (isControlledCancellation) {
           this.todoStopGuard.suspend();
           return {
@@ -8262,6 +9033,19 @@ export class Session implements SessionContext {
           '',
           durationMs,
         );
+      }
+
+      if (functionCalls.length === 0) {
+        // Input taken while the response streamed, which may have cut it
+        // short, is answered within this turn.
+        nextMessage = await responseInterrupt.takeInput(
+          options.onFullTurnModel,
+        );
+        if (nextMessage) {
+          nextGuardContinuation = undefined;
+          options.onUserInputAnswered?.();
+          continue;
+        }
       }
 
       if (functionCalls.length > 0) {
@@ -8444,6 +9228,10 @@ export class Session implements SessionContext {
         `Failed to emit Todo Stop Guard status: ${this.#formatError(error)}`,
       );
     }
+  }
+
+  isDisposed(): boolean {
+    return this.disposed;
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -8683,7 +9471,9 @@ export class Session implements SessionContext {
       ...(recording.startedAt !== undefined
         ? { startedAt: recording.startedAt }
         : {}),
-      ...(cancelledAt !== undefined ? { cancelledAt } : {}),
+      ...(cancelledAt !== undefined
+        ? { cancelledAt, cancelReason: 'user' as const }
+        : {}),
       endedAt: Date.now(),
       promptText: recording.promptText,
       ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
@@ -8699,8 +9489,11 @@ export class Session implements SessionContext {
         : {}),
     };
     try {
-      recording.recordingService?.recordTurnResult(payload);
-      if (cancelledAt !== undefined) {
+      recording.recordingService?.recordTurnResult(
+        payload,
+        recording.finalAnswer.historyPromptId,
+      );
+      if (state === 'cancelled') {
         await recording.recordingService?.flush();
       }
     } catch (recordError) {
@@ -8774,6 +9567,7 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     options: {
       skipCompression?: boolean;
+      historyPromptId?: string;
       modelOverride?: string;
       getModelOverride?: () => string | undefined;
       prepareBeforeCompression?: () => Promise<BeforeModelSendDecision>;
@@ -8957,9 +9751,14 @@ export class Session implements SessionContext {
     const goalPermit = goalTurnContext.getStore();
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
-      sourceStream = goalPermit
-        ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-        : await chat.sendMessageStream(model, request, promptId);
+      sourceStream =
+        options.historyPromptId !== undefined
+          ? await chat.sendMessageStream(model, request, promptId, goalPermit, {
+              promptId: options.historyPromptId,
+            })
+          : goalPermit
+            ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+            : await chat.sendMessageStream(model, request, promptId);
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;
@@ -9226,11 +10025,17 @@ export class Session implements SessionContext {
     // returned (#10953): real work advanced while the parent earned a
     // single tool turn, so the turn budget cannot come due on its own.
     // Force the reminder exactly where the progress information arrives.
-    const carriesAgentToolResult = toolRun.parts.some(
-      (part) =>
-        canonicalToolName(part.functionResponse?.name ?? '') ===
-        ToolNames.AGENT,
-    );
+    const carriesAgentToolResult =
+      toolRun.parts.some(
+        (part) =>
+          canonicalToolName(part.functionResponse?.name ?? '') ===
+          ToolNames.AGENT,
+      ) ||
+      toolRun.repeatedToolFailureBatch?.observations.some(
+        (observation) =>
+          canonicalToolName(observation.policyToolName ?? '') ===
+            ToolNames.AGENT && observation.executionStatus !== 'not_started',
+      );
     const activeTodoReminder = carriesAgentToolResult
       ? this.config.takeActiveTodoReminder(promptId, true)
       : this.config.takeActiveTodoReminder(promptId);
@@ -9278,9 +10083,20 @@ export class Session implements SessionContext {
         `[repeated-tool-failure-guard] mode=${toolLoopState.repeatedToolFailureMode} decision=${repeatedToolFailureDecision.kind} phase=${state.phase} candidate=${state.candidateOrdinal} failures=${state.failureCount} batches=${state.batchCount}`,
       );
     }
+    // A stop sends nothing, so its batch leaves the reminders unlogged.
+    const loopReminder =
+      repeatedToolFailureDecision.kind === 'stop'
+        ? undefined
+        : takeDaemonLoopReminders(this.config, promptId, toolLoopState);
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
+      ...(toolLoopState.explorationBudget?.takeReminder(
+        this.config.getMaxToolCallsPerTurn(),
+      )
+        ? [{ text: TOOL_EXPLORATION_REMINDER }]
+        : []),
+      ...(loopReminder ? [{ text: loopReminder }] : []),
       ...(repeatedToolFailureDecision.kind === 'warn'
         ? [{ text: REPEATED_TOOL_FAILURE_REMINDER }]
         : []),
@@ -9553,8 +10369,13 @@ export class Session implements SessionContext {
     options: {
       watchQueuedPrompt?: boolean;
       onFullTurnModel?: (model: string) => boolean;
+      preserveFallbackOnAbort?: boolean;
+      prefix?: string;
     } = {},
   ): Promise<MidTurnDrainResult> {
+    // An early drain for an open response may still be in flight; let it land
+    // so the messages it took are injected here rather than stranded.
+    if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
     // Flush anything recovered from a PRIOR timed-out drain first: the daemon
     // splices + SSE-publishes synchronously, so on a timeout the browser has
     // already deduped those messages — discarding the late response would lose
@@ -9570,20 +10391,68 @@ export class Session implements SessionContext {
       };
     }
 
+    const drained = await this.#requestMidTurnDrain(
+      this.#midTurnDrainPromptId(),
+      options.watchQueuedPrompt === true,
+    );
+    if (!drained) {
+      // Even on a failed/timed-out drain, still inject anything recovered from
+      // an EARLIER timeout so a transient stall never strands those messages.
+      return {
+        parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
+        hasQueuedPrompt: false,
+        reliable: false,
+      };
+    }
+    const { response } = drained;
+    return {
+      parts: await this.#buildMidTurnParts(
+        [...recovered, ...parseMidTurnDrainResponse(response)],
+        abortSignal,
+        options,
+      ),
+      hasQueuedPrompt:
+        isRecord(response) && response['hasQueuedPrompt'] === true,
+      reliable: isValidMidTurnDrainResponse(
+        response,
+        options.watchQueuedPrompt === true,
+      ),
+    };
+  }
+
+  /** The execution the host drains for: an active background turn, else the invocation. */
+  #midTurnDrainPromptId(): string | undefined {
+    const background = backgroundTurnContext.getStore();
+    return background?.active && background.sessionId === this.sessionId
+      ? background.turn.turnId
+      : getInvocationContext()?.promptId;
+  }
+
+  /**
+   * One drain round trip to the host. Resolves to the host's answer, or to
+   * `undefined` when the drain failed (and was latched off if permanently).
+   */
+  async #requestMidTurnDrain(
+    promptId: string | undefined,
+    watchQueuedPrompt: boolean,
+    sendNow?: {
+      /** Takes what a timed-out drain still hands over afterwards. */
+      onLate: (messages: DrainedMidTurnMessage[]) => void;
+    },
+  ): Promise<{ response: unknown } | undefined> {
+    // This request takes everything queued so far; a send-now request handled
+    // after it goes out sets the request again.
+    this.midTurnSendNowFor = undefined;
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
-      const background = backgroundTurnContext.getStore();
-      const promptId =
-        background?.active && background.sessionId === this.sessionId
-          ? background.turn.turnId
-          : getInvocationContext()?.promptId;
       drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
         sessionId: this.sessionId,
         ...(promptId ? { promptId } : {}),
         // Keep the legacy wire name for ACP host compatibility.
-        ...(options.watchQueuedPrompt
-          ? { todoStopGuardWatchQueuedPrompt: true }
-          : {}),
+        ...(watchQueuedPrompt ? { todoStopGuardWatchQueuedPrompt: true } : {}),
+        // Send-now takes the user's messages only; queue-only steering stays
+        // for the tool boundary.
+        ...(sendNow ? { userInputOnly: true } : {}),
       });
       let timeoutHandle: NodeJS.Timeout | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -9599,20 +10468,7 @@ export class Session implements SessionContext {
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
-      const reliable = isValidMidTurnDrainResponse(
-        response,
-        options.watchQueuedPrompt === true,
-      );
-      return {
-        parts: await this.#buildMidTurnParts(
-          [...recovered, ...parseMidTurnDrainResponse(response)],
-          abortSignal,
-          options,
-        ),
-        hasQueuedPrompt:
-          isRecord(response) && response['hasQueuedPrompt'] === true,
-        reliable,
-      };
+      return { response };
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
       // (`{ code, message, data }`), which is not an `Error` instance, so
@@ -9645,7 +10501,9 @@ export class Session implements SessionContext {
         // down with it. Swallow silently rather than log, since the logger is
         // itself one of the things that can throw here.
         if (drainPromise) {
-          void this.#recoverLateDrain(drainPromise).catch(() => {});
+          void this.#recoverLateDrain(drainPromise, sendNow?.onLate).catch(
+            () => {},
+          );
         }
       }
       // Repeated timeouts are also permanent: a conforming client answers
@@ -9667,13 +10525,7 @@ export class Session implements SessionContext {
       debugLogger.warn(
         `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
       );
-      // Even on a failed/timed-out drain, still inject anything recovered from
-      // an EARLIER timeout so a transient stall never strands those messages.
-      return {
-        parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
-        hasQueuedPrompt: false,
-        reliable: false,
-      };
+      return undefined;
     }
   }
 
@@ -9686,6 +10538,186 @@ export class Session implements SessionContext {
   }
 
   /**
+   * Opens one model response to interruption by queued user input. Send with
+   * `signal` and iterate the stream through `watch`. While the response
+   * streams without a tool call, started or complete, a send-now request
+   * drains the queue at once and, when that yields input, cuts the response
+   * short: `watch` then
+   * ends as if the stream had, with the part already delivered kept in
+   * history as on a cancel. When the response produced no function call,
+   * `takeInput` returns the user message to send next if this response's
+   * drain took input, or null.
+   */
+  #openResponseInterrupt(
+    turnSignal: AbortSignal,
+    hasFunctionCalls: () => boolean,
+    enabled: boolean,
+  ): {
+    signal: AbortSignal;
+    watch: (stream: AsyncGenerator<StreamEvent>) => AsyncGenerator<StreamEvent>;
+    takeInput: (
+      onFullTurnModel?: (model: string) => boolean,
+    ) => Promise<Content | null>;
+  } {
+    if (!enabled) {
+      return {
+        signal: turnSignal,
+        watch: (stream) => stream,
+        takeInput: async () => null,
+      };
+    }
+    const controller = new AbortController();
+    // Captured in the turn's context; send-now requests arrive outside it.
+    const promptId = this.#midTurnDrainPromptId();
+    let open = false;
+    let tookInput = false;
+    const pull = (): void => {
+      if (
+        !open ||
+        this.midTurnSendNowFor !== turnSignal ||
+        // A response that started a tool call is not cut short, so the queue
+        // stays with the host for the tool boundary, or for promotion when a
+        // tool ends the turn.
+        hasFunctionCalls() ||
+        this.earlyMidTurnDrain ||
+        this.midTurnDrainUnavailable ||
+        turnSignal.aborted
+      ) {
+        return;
+      }
+      // Drain before cutting the response: aborting first could leave nothing
+      // to send when the input was already taken or removed.
+      // Messages are already in the buffer every later drain reads first, so
+      // the input is delivered even when the response ends before it can be
+      // cut short.
+      const took = (messages: DrainedMidTurnMessage[]): void => {
+        tookInput = true;
+        for (const message of messages) {
+          this.earlyDrainedMidTurnMessages.add(message);
+        }
+        if (open && !hasFunctionCalls() && !turnSignal.aborted) {
+          controller.abort(MID_TURN_INPUT_ABORT_REASON);
+        }
+      };
+      const drain = (async () => {
+        const drained = await this.#requestMidTurnDrain(promptId, false, {
+          // A late answer counts only while this response still streams;
+          // after that it takes the existing late-recovery path, which
+          // delivers it at the next tool boundary.
+          onLate: (messages) => {
+            if (open) took(messages);
+          },
+        });
+        const messages = drained
+          ? parseMidTurnDrainResponse(drained.response)
+          : [];
+        if (messages.length === 0) return;
+        this.midTurnRecoveredMessages.push(...messages);
+        took(messages);
+      })().catch(() => {});
+      this.earlyMidTurnDrain = drain;
+      void drain.then(() => {
+        if (this.earlyMidTurnDrain === drain) {
+          this.earlyMidTurnDrain = undefined;
+        }
+        // A send-now request handled while this one was out may bring more
+        // input.
+        this.pullForOpenResponse?.();
+      });
+    };
+    const begin = () => {
+      open = true;
+      this.pullForOpenResponse = pull;
+      pull();
+    };
+    const end = () => {
+      open = false;
+      if (this.pullForOpenResponse === pull) {
+        this.pullForOpenResponse = undefined;
+      }
+    };
+    const interrupted = () => controller.signal.aborted && !turnSignal.aborted;
+    return {
+      signal: AbortSignal.any([turnSignal, controller.signal]),
+      async *watch(stream) {
+        begin();
+        try {
+          yield* stream;
+        } catch (error) {
+          // The cut can arrive as the abort reason itself or as a transport's
+          // own abort error, not always an AbortError. Whatever the response
+          // throws once cut is absorbed: it was given up, and a failure that
+          // persists surfaces from the next request.
+          if (!interrupted()) throw error;
+        } finally {
+          end();
+        }
+      },
+      takeInput: async (onFullTurnModel) => {
+        if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
+        // Without input taken here, delivery stays at tool boundaries. A
+        // stopped turn takes nothing more from the host, which promotes what
+        // is still queued; the input already taken is kept when the turn ends.
+        if (!tookInput || turnSignal.aborted) return null;
+        // The user already sees this input as delivered: keep it, as text if
+        // need be, even when the turn is cancelled while it is resolved.
+        const drained = await this.#drainMidTurnInput(turnSignal, {
+          onFullTurnModel,
+          preserveFallbackOnAbort: true,
+          prefix: interrupted()
+            ? MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX
+            : MID_TURN_RESPONSE_USER_MESSAGE_PREFIX,
+        });
+        if (drained.parts.length === 0) return null;
+        this.todoStopGuard.acceptMidTurnUserInput();
+        return { role: 'user', parts: drained.parts };
+      },
+    };
+  }
+
+  /**
+   * Keeps input an early drain took during this turn but never sent. The host
+   * has already handed it over and the user sees it as delivered, so a turn
+   * that is cancelled or fails first records it in the conversation, as a
+   * stopped tool run does, instead of carrying it into a later turn.
+   */
+  async #keepUnsentEarlyMidTurnInput(abortSignal: AbortSignal): Promise<void> {
+    try {
+      if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
+      const unsent = this.midTurnRecoveredMessages.filter((message) =>
+        this.earlyDrainedMidTurnMessages.has(message),
+      );
+      if (unsent.length === 0) return;
+      this.midTurnRecoveredMessages = this.midTurnRecoveredMessages.filter(
+        (message) => !this.earlyDrainedMidTurnMessages.has(message),
+      );
+      const deadline = new AbortController();
+      const timer = setTimeout(
+        () => deadline.abort(),
+        MID_TURN_KEEP_RESOLVE_TIMEOUT_MS,
+      );
+      let parts: Part[];
+      try {
+        parts = await this.#buildMidTurnParts(unsent, abortSignal, {
+          preserveFallbackOnAbort: true,
+          prefix: MID_TURN_RESPONSE_USER_MESSAGE_PREFIX,
+          deadline: deadline.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (parts.length > 0) {
+        this.#getCurrentChat().addHistory({ role: 'user', parts });
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `[mid-turn] failed to keep unsent input [session ${this.sessionId}]`,
+        error,
+      );
+    }
+  }
+
+  /**
    * After a drain times out, the request is still pending; the daemon settles it
    * shortly after (it splices + SSE-publishes synchronously, so the browser has
    * already deduped). Recover that late response for the next batch instead of
@@ -9695,6 +10727,7 @@ export class Session implements SessionContext {
    */
   async #recoverLateDrain(
     pending: ReturnType<AgentSideConnection['extMethod']>,
+    onLate?: (messages: DrainedMidTurnMessage[]) => void,
   ): Promise<void> {
     // Swallow a late rejection regardless of which branch of the race wins.
     pending.catch(() => {});
@@ -9727,6 +10760,7 @@ export class Session implements SessionContext {
         `[mid-turn] recovered ${lateMessages.length} message(s) from a timed-out drain [session ${this.sessionId}]`,
       );
       this.midTurnRecoveredMessages.push(...lateMessages);
+      onLate?.(lateMessages);
     }
   }
 
@@ -9742,8 +10776,14 @@ export class Session implements SessionContext {
     options: {
       onFullTurnModel?: (model: string) => boolean;
       preserveFallbackOnAbort?: boolean;
+      prefix?: string;
+      /** Also ends resolution, which then falls back to the message text. */
+      deadline?: AbortSignal;
     } = {},
   ): Promise<Part[]> {
+    const resolveSignal = options.deadline
+      ? AbortSignal.any([abortSignal, options.deadline])
+      : abortSignal;
     const proposalTurn = this.activeGoalProposalTurn;
     if (
       messages.length > 0 &&
@@ -9752,17 +10792,7 @@ export class Session implements SessionContext {
       proposalTurn.settlementBlocked = true;
     }
     const parts: Part[] = [];
-    for (const message of messages) {
-      if (message.kind === 'structured' && message.agentRun) {
-        try {
-          requireAgentRunContext('mid-turn agent input');
-          // Refuse a different run before its text can enter this turn.
-          runWithAgentRunContext(message.agentRun, () => {});
-        } catch (error) {
-          debugLogger.warn('Rejected stale agent input', error);
-          continue;
-        }
-      }
+    for (const [index, message] of messages.entries()) {
       const displayText =
         message.kind === 'text' ? message.message : message.displayText;
       let rawParts: Part[];
@@ -9771,7 +10801,7 @@ export class Session implements SessionContext {
           rawParts = [{ text: message.message }];
         } else {
           rawParts = await withTimeoutSignal(
-            abortSignal,
+            resolveSignal,
             MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
             (signal) =>
               this.#resolvePrompt(message.content, signal, {
@@ -9779,17 +10809,29 @@ export class Session implements SessionContext {
               }),
           );
           // Keep local resolution bounded, then let media bridges own their
-          // longer timeouts while remaining cancellable by the real turn.
+          // longer timeouts while remaining cancellable by the real turn. A
+          // deadline cancels them too, so nothing runs on or reports after
+          // it; their per-turn limits then count this input on its own.
           rawParts = await this.#applyBridgeConversionsIfNeeded(
             rawParts,
-            abortSignal,
+            message.content,
+            resolveSignal,
             options.onFullTurnModel,
           );
           // Bridges report cancellation as skipped instead of throwing.
-          abortSignal.throwIfAborted();
+          resolveSignal.throwIfAborted();
         }
       } catch (messageError) {
         if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
+          // Input an early drain took is kept when the turn ends, so give
+          // back what of it this drain did not build.
+          this.midTurnRecoveredMessages.unshift(
+            ...messages
+              .slice(index)
+              .filter((unbuilt) =>
+                this.earlyDrainedMidTurnMessages.has(unbuilt),
+              ),
+          );
           return parts;
         }
         if (!abortSignal.aborted) {
@@ -9806,7 +10848,11 @@ export class Session implements SessionContext {
           rawParts.push({ text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT });
         }
       }
-      const built = prefixMidTurnUserMessageParts(rawParts, displayText);
+      const built = prefixMidTurnUserMessageParts(
+        rawParts,
+        displayText,
+        options.prefix,
+      );
       const recorder = this.config.getChatRecordingService();
       if (message.kind === 'structured' && message.attachmentReferences) {
         const everyAttachmentBlockHasAReference =
@@ -9826,28 +10872,6 @@ export class Session implements SessionContext {
         }
       } else {
         recorder?.recordMidTurnUserMessage(built, displayText);
-      }
-      if (message.kind === 'structured' && message.agentRun) {
-        try {
-          if (
-            !message.messageId ||
-            message.agentRun.contextThroughSequence === undefined
-          ) {
-            throw new Error('Agent input requires a delivery watermark');
-          }
-          await recorder?.flush();
-          await consumeAgentInput(
-            this.config.getWorkingDir(),
-            message.messageId,
-            message.agentRun.contextThroughSequence,
-          );
-        } catch (error) {
-          // No receipt means durable replay; don't discard other built inputs.
-          debugLogger.warn(
-            'Agent input receipt failed; replay remains pending',
-            error,
-          );
-        }
       }
       parts.push(...built);
     }
@@ -9994,7 +11018,7 @@ export class Session implements SessionContext {
           // the built prompt, whose first line is the execution-context
           // header. Same shape the manual-run route gives its children.
           name: scheduledTaskRunSessionName(
-            job.name ?? job.prompt,
+            job.name ?? job.taskPrompt ?? job.prompt,
             triggeredAt,
           ),
           ...(job.id
@@ -10123,6 +11147,7 @@ export class Session implements SessionContext {
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
@@ -10139,6 +11164,7 @@ export class Session implements SessionContext {
 
   async #drainCronQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
@@ -11035,6 +12061,233 @@ export class Session implements SessionContext {
     }
   }
 
+  /**
+   * Session multi-agent: write an `agent_mention` / `agent_message` record
+   * the daemon sent (`qwen/control/session/external_record`), show it live,
+   * and queue its model text for the main model's next turn. Never starts a
+   * turn.
+   *
+   * Idempotent per `recordKey`: a repeat (including one that arrives while the
+   * first write is still in flight, and one re-sent after a restart, which
+   * the recorder finds by the key persisted on the record) returns the first
+   * record with `created: false` and emits nothing.
+   *
+   * Throws when the session is closing, when the recorder is unavailable, and
+   * when the write fails; a Managed session's refusal
+   * (`ManagedSessionRecordRefusedError`) propagates unchanged.
+   */
+  async appendExternalRecord(
+    request: BridgeSessionExternalRecordRequest,
+    /** Internal: the deferred queue's own drain, which must not re-queue. */
+    fromDeferredQueue = false,
+  ): Promise<{ recordId: string; created: boolean; deferred?: boolean }> {
+    const existingId = this.#externalRecordIds.get(request.recordKey);
+    if (existingId !== undefined) {
+      return { recordId: existingId, created: false };
+    }
+    const inFlight = this.#externalRecordWrites.get(request.recordKey);
+    if (inFlight) {
+      const first = await inFlight;
+      return {
+        recordId: first.recordId,
+        created: false,
+        ...(first.deferred ? { deferred: true } : {}),
+      };
+    }
+    const write = this.#writeExternalRecord(request, fromDeferredQueue);
+    this.#externalRecordWrites.set(request.recordKey, write);
+    try {
+      return await write;
+    } finally {
+      if (this.#externalRecordWrites.get(request.recordKey) === write) {
+        this.#externalRecordWrites.delete(request.recordKey);
+      }
+    }
+  }
+
+  async #writeExternalRecord(
+    request: BridgeSessionExternalRecordRequest,
+    fromDeferredQueue: boolean,
+  ): Promise<{ recordId: string; created: boolean; deferred?: boolean }> {
+    if (this.disposed || this.closing) {
+      throw new Error(`Session ${this.sessionId} is closing`);
+    }
+    const recording = this.config.getChatRecordingService();
+    if (!recording) {
+      throw new Error(`Session ${this.sessionId} has no chat recorder`);
+    }
+    // Before deferring: a request re-sent after a restart, for a record that
+    // is already in the transcript, must get its id back now rather than be
+    // deferred (and answered with an empty id) again.
+    const existing = await recording.findExternalAgentRecord(request.recordKey);
+    if (existing) {
+      this.#rememberExternalRecord(request.recordKey, existing.uuid);
+      return { recordId: existing.uuid, created: false };
+    }
+    if (this.disposed || this.closing) {
+      throw new Error(`Session ${this.sessionId} is closing`);
+    }
+    // A record must not land while a main-model turn is in flight: written
+    // between a functionCall and its functionResponse it would, on resume,
+    // rebuild as a user entry between them and break tool_use/tool_result
+    // adjacency. Agents finish whenever they finish, so instead of making the
+    // daemon wait (its ext call times out after ~10s) the write is deferred
+    // until the turn settles and the caller is told so.
+    // Nor may a direct write jump records still queued (or being drained)
+    // from an earlier turn: the transcript keeps the daemon's send order.
+    if (
+      !this.isTurnIdle() ||
+      (!fromDeferredQueue &&
+        (this.#deferredExternalRecords.length > 0 ||
+          this.#drainingDeferredExternalRecords))
+    ) {
+      this.#deferExternalRecord(request);
+      return { recordId: '', created: true, deferred: true };
+    }
+    const written = await this.#persistExternalRecord(request);
+    if (!written.created) {
+      return { recordId: written.uuid, created: false };
+    }
+    const recordId = written.uuid;
+    if (this.disposed || this.closing) return { recordId, created: true };
+
+    // The same projection replay produces for this record (timestamp
+    // included), so a client that reloads sees exactly what it saw live.
+    const update = createAgentRecordTranscriptUpdate({
+      recordId,
+      subtype: request.kind,
+      payload: request.payload,
+      timestamp: written.timestamp,
+    });
+    if (update) {
+      try {
+        await this.sendUpdate(update);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to publish external record [session ${this.sessionId}, record ${recordId}]: ${this.#formatError(error)}`,
+        );
+      }
+    }
+    this.pendingExternalAgentContext.push(request.modelText);
+    return { recordId, created: true };
+  }
+
+  /** Writes the record (deduped by key in the recorder) and remembers its id. */
+  async #persistExternalRecord(
+    request: BridgeSessionExternalRecordRequest,
+  ): Promise<{ uuid: string; timestamp: string; created: boolean }> {
+    const recording = this.config.getChatRecordingService();
+    if (!recording) {
+      throw new Error(`Session ${this.sessionId} has no chat recorder`);
+    }
+    const written = await recording.recordExternalAgentRecordStrict(request);
+    this.#rememberExternalRecord(request.recordKey, written.uuid);
+    return written;
+  }
+
+  #rememberExternalRecord(recordKey: string, recordId: string): void {
+    this.#externalRecordIds.set(recordKey, recordId);
+    if (this.#externalRecordIds.size > MAX_EXTERNAL_RECORD_KEYS) {
+      const oldest = this.#externalRecordIds.keys().next().value;
+      if (oldest !== undefined) this.#externalRecordIds.delete(oldest);
+    }
+  }
+
+  readonly #deferredExternalRecords: BridgeSessionExternalRecordRequest[] = [];
+  #deferredExternalRecordTimer: ReturnType<typeof setInterval> | undefined;
+  #drainingDeferredExternalRecords = false;
+
+  /**
+   * Hold an external record until no main-model turn is running, then write
+   * it through the normal path. Polling keeps this independent of the many
+   * turn-completion paths (prompt, cron, notification, goal, channel task).
+   * Idempotent per `recordKey`: a re-sent request already queued is not
+   * queued twice.
+   *
+   * While the session is closing the queue waits: a close that goes through
+   * writes it with {@link flushDeferredExternalRecords} before the recorder
+   * closes, and a released close gate (a live restore) lets the timer resume.
+   */
+  #deferExternalRecord(request: BridgeSessionExternalRecordRequest): void {
+    if (
+      this.#deferredExternalRecords.some(
+        (queued) => queued.recordKey === request.recordKey,
+      )
+    ) {
+      return;
+    }
+    this.#deferredExternalRecords.push(request);
+    if (this.#deferredExternalRecordTimer) return;
+    this.#deferredExternalRecordTimer = setInterval(() => {
+      if (this.disposed) {
+        this.#dropDeferredExternalRecords();
+        return;
+      }
+      // One drain at a time, so a second batch cannot interleave the first.
+      if (!this.isTurnIdle() || this.#drainingDeferredExternalRecords) return;
+      clearInterval(this.#deferredExternalRecordTimer);
+      this.#deferredExternalRecordTimer = undefined;
+      const pending = this.#deferredExternalRecords.splice(0);
+      this.#drainingDeferredExternalRecords = true;
+      void (async () => {
+        try {
+          for (const request of pending) {
+            try {
+              await this.appendExternalRecord(request, true);
+            } catch (error) {
+              debugLogger.warn(
+                `Deferred external record failed [session ${this.sessionId}, key ${request.recordKey}]: ${this.#formatError(error)}`,
+              );
+            }
+          }
+        } finally {
+          this.#drainingDeferredExternalRecords = false;
+        }
+      })();
+    }, 500);
+    this.#deferredExternalRecordTimer.unref?.();
+  }
+
+  /**
+   * Close path: write the external records still deferred, once the session's
+   * turns have settled and before its recorder is finalized and closed. No
+   * live update and no model text: the session is going away, and a later
+   * load reads both from the records. A record that cannot be written is
+   * dropped with a log line; the daemon re-sends it after the session is
+   * restored, and the key persisted on each record keeps that from
+   * duplicating one written here.
+   */
+  async flushDeferredExternalRecords(): Promise<void> {
+    clearInterval(this.#deferredExternalRecordTimer);
+    this.#deferredExternalRecordTimer = undefined;
+    // Writes the timer already started run to completion first.
+    await Promise.allSettled([...this.#externalRecordWrites.values()]);
+    const pending = this.#deferredExternalRecords.splice(0);
+    for (const request of pending) {
+      if (this.#externalRecordIds.has(request.recordKey)) continue;
+      try {
+        await this.#persistExternalRecord(request);
+      } catch (error) {
+        debugLogger.warn(
+          `Dropped deferred external record on close [session ${this.sessionId}, key ${request.recordKey}]: ${this.#formatError(error)}`,
+        );
+      }
+    }
+  }
+
+  #dropDeferredExternalRecords(): void {
+    clearInterval(this.#deferredExternalRecordTimer);
+    this.#deferredExternalRecordTimer = undefined;
+    const dropped = this.#deferredExternalRecords.splice(0);
+    if (dropped.length > 0) {
+      debugLogger.warn(
+        `Dropped ${dropped.length} deferred external record(s) on dispose [session ${this.sessionId}]; the daemon re-sends them after restore: ${dropped
+          .map((request) => request.recordKey)
+          .join(', ')}`,
+      );
+    }
+  }
+
   async #persistDaemonBackgroundNotification(
     item: BackgroundNotificationQueueItem,
   ): Promise<boolean> {
@@ -11165,6 +12418,7 @@ export class Session implements SessionContext {
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.notificationProcessing) return;
     if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
@@ -11187,6 +12441,7 @@ export class Session implements SessionContext {
 
   async #drainNotificationQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
@@ -12411,9 +13666,12 @@ export class Session implements SessionContext {
       ? this.sessionReasoningSelection
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
-    const thinkingMandatory = generation?.thinkingMandatory === true;
     const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
-    const gptCapabilities = getGptReasoningCapabilities(modelId);
+    const requestModel = getRequestModel(generation ?? {}, modelId);
+    const thinkingMandatory =
+      requestModel === (generation?.model ?? modelId) &&
+      generation?.thinkingMandatory === true;
+    const gptCapabilities = getGptReasoningCapabilities(requestModel);
     const configuredReasoning = parseModelReasoningCapabilities(modelReasoning);
     const gptModel = gptCapabilities !== undefined && !configuredReasoning;
     const supportsPreference = (value: ReasoningSelection | undefined) =>
@@ -12421,7 +13679,7 @@ export class Session implements SessionContext {
       value !== REASONING_EFFORT_DEFAULT &&
       ((gptModel && value !== REASONING_EFFORT_NONE) ||
         isReasoningSelectionSupported(
-          modelId,
+          requestModel,
           value,
           thinkingMandatory,
           modelReasoning,
@@ -12592,6 +13850,8 @@ export class Session implements SessionContext {
       }
       target.push({
         ...record,
+        // Calls outside the model's batch are nested Code Mode originals.
+        ...(ordinal === -1 ? codeModeToolResultStamp() : {}),
         toolArgs: (fc.args ?? {}) as Record<string, unknown>,
         ordinal: Math.max(0, ordinal),
         sequence: toolResultRecordSequence++,
@@ -12650,7 +13910,11 @@ export class Session implements SessionContext {
         const goalProvenance = ambientGoalToolResultProvenance(
           record.toolName,
           record.toolArgs,
+          finalized[index].responseParts,
         );
+        const options = record.subtype
+          ? { ...goalProvenance, subtype: record.subtype }
+          : goalProvenance;
         this.config.getChatRecordingService()?.recordToolResult(
           finalized[index].responseParts,
           {
@@ -12658,12 +13922,33 @@ export class Session implements SessionContext {
             persistedOutputFiles: finalized[index].persistedOutputFiles,
             artifacts: finalized[index].artifacts,
           },
-          // Passed only inside a Goal turn: outside one this call keeps its
-          // former two-argument shape, so nothing about ordinary recording
-          // changes.
-          ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+          ...(options ? ([options] as const) : ([] as const)),
         );
       });
+      // A Managed session's Runtime batch closes in order: the recorded
+      // results land first, then the settled receipts count as consumed and
+      // the checkpoint continuation settles. The model's next request leaves
+      // only after these commits. Test doubles without the outcome writer
+      // keep the Legacy shape.
+      const outcomes = this.config.getManagedRuntimeOutcomes?.();
+      if (outcomes !== undefined) {
+        // `ChatRecordingService` latches a write failure permanently, so a
+        // failed flush re-throws from then on (see the Goal turn flush
+        // above). Degrade like the fire-and-forget recorder does, and skip
+        // the batch close: the records never landed, and the next
+        // admission's leftover-batch repair closes it instead.
+        try {
+          await this.config.getChatRecordingService()?.flush();
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to flush Managed tool batch: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return finalized;
+        }
+        await outcomes.finalizeBatch();
+      }
       return finalized;
     };
     const finalizeNestedToolResult = async (
@@ -12735,6 +14020,18 @@ export class Session implements SessionContext {
         },
       };
       const error = new Error(message);
+      const skippedLifecycle =
+        toolName === ToolNames.TODO_WRITE
+          ? undefined
+          : createToolLifecycle(this.config, callId, toolName);
+      const lifecycle = skippedLifecycle?.finish('error', 'not_started');
+      if (lifecycle) {
+        void this.toolCallEmitter
+          .emitLifecycle(lifecycle)
+          .catch((error) =>
+            debugLogger.debug('Failed to emit skipped tool lifecycle', error),
+          );
+      }
       try {
         queueToolResultRecord(fc, {
           callId,
@@ -12816,6 +14113,7 @@ export class Session implements SessionContext {
           LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
           message,
           toolLoopState,
+          { loopDetail: { loopReason: LoopReason.PROVIDER_DUPLICATE_ID } },
         );
       } else {
         debugLogger.warn(message);
@@ -12946,7 +14244,26 @@ export class Session implements SessionContext {
       // Canonical names match core's isToolCallConcurrencySafe predicate,
       // where `task` is a live alias of the agent tool; concurrent batches
       // are therefore agent-only.
-      const isAgent = canonicalToolName(fc.name ?? '') === ToolNames.AGENT;
+      let executionToolName = canonicalToolName(fc.name ?? '');
+      // Skip the awaited bridge resolution once the turn is cancelled: the
+      // execution path bails on the same signal before resolving, so work
+      // spent here would be discarded anyway.
+      if (executionToolName === ToolNames.TOOL_CALL && !abortSignal.aborted) {
+        const pm = this.config.getPermissionManager?.();
+        const bridgeEnabled =
+          !pm ||
+          (await pm.isToolEnabled(ToolNames.TOOL_CALL).catch(() => false));
+        if (bridgeEnabled) {
+          const resolution = await resolveDeferredToolCall(
+            this.config.getToolRegistry(),
+            fc.args ?? {},
+            { maxSubagentDepth: this.config.getMaxSubagentDepth() },
+          );
+          if ('tool' in resolution)
+            executionToolName = canonicalToolName(resolution.tool.name);
+        }
+      }
+      const isAgent = executionToolName === ToolNames.AGENT;
       const last = batches[batches.length - 1];
       if (isAgent && last?.kind === 'execute' && last.concurrent) {
         last.calls.push(fc);
@@ -13462,6 +14779,38 @@ export class Session implements SessionContext {
       executionStartedAt === undefined
         ? undefined
         : Math.round(performance.now() - executionStartedAt);
+    let lifecycleExecutionDurationMs: number | undefined;
+    let lifecycleExecuted = false;
+    let lifecycleSettled = false;
+    let lifecycleActualStatus: ToolExecutionStatus = 'not_started';
+    let lifecycleTerminalOutcome: 'success' | 'error' | 'cancelled' | undefined;
+    const toolLifecycle =
+      modelFacingToolName === ToolNames.TODO_WRITE
+        ? undefined
+        : createToolLifecycle(this.config, callId, modelFacingToolName);
+    const publishToolLifecycle = (
+      event: ReturnType<NonNullable<typeof toolLifecycle>['start']>,
+    ) => {
+      if (!event || this.disposed) return;
+      void this.toolCallEmitter
+        .emitLifecycle(event)
+        .catch((error) =>
+          debugLogger.debug('Failed to emit tool lifecycle', error),
+        );
+    };
+    const finishToolLifecycle = (
+      outcome: 'success' | 'error' | 'cancelled',
+    ) => {
+      lifecycleTerminalOutcome = outcome;
+      if (lifecycleExecuted && !lifecycleSettled) return;
+      publishToolLifecycle(
+        toolLifecycle?.finish(
+          outcome,
+          lifecycleActualStatus,
+          lifecycleExecutionDurationMs,
+        ),
+      );
+    };
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     // Released when the call ends, however it ends, as the core scheduler does.
@@ -13538,9 +14887,12 @@ export class Session implements SessionContext {
       | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
 
-    const cleanupAgentToolResources = () => {
+    const cleanupSubAgentTracking = () => {
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());
       subAgentCleanupFunctions = [];
+    };
+    const cleanupAgentToolResources = () => {
+      cleanupSubAgentTracking();
       removeAgentToolAbortPropagation?.();
       removeAgentToolAbortPropagation = undefined;
     };
@@ -13553,11 +14905,13 @@ export class Session implements SessionContext {
     ) => {
       const durationMs = Date.now() - startTime;
       const modelFacingError =
-        status === 'cancelled' && modelFacingToolName === ToolNames.TOOL_CALL
+        status === 'cancelled' &&
+        modelFacingToolName === ToolNames.TOOL_CALL &&
+        executionStatus === 'not_started'
           ? `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}${error.message}`
           : status === 'error' &&
               modelFacingToolName === ToolNames.TOOL_CALL &&
-              toolName === ToolNames.TOOL_CALL &&
+              executionStatus === 'not_started' &&
               !error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)
             ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${error.message}`
             : error.message;
@@ -13626,6 +14980,7 @@ export class Session implements SessionContext {
     ) => {
       executionStatus = opts.executionStatus;
       terminalStatus = opts.status;
+      finishToolLifecycle(opts.status);
       spanError = opts.status === 'error' ? error.message : undefined;
       cleanupAgentToolResources();
       const errorParts = errorResponse(
@@ -13769,6 +15124,7 @@ export class Session implements SessionContext {
     }
 
     let toolName = fc.name;
+    let bridgedThroughToolCall = false;
     if (
       !appExecution &&
       this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
@@ -13843,6 +15199,7 @@ export class Session implements SessionContext {
       toolName = resolution.tool.name;
       args = resolution.arguments;
       tool = resolution.tool;
+      bridgedThroughToolCall = true;
     }
 
     if (!tool) {
@@ -13869,10 +15226,6 @@ export class Session implements SessionContext {
       tool instanceof DiscoveredMCPTool ? tool.serverName : undefined;
     const policyToolName = tool.name;
     guardContext.policyToolName = policyToolName;
-    const originalPolicyRequestArgs =
-      policyToolName === ToolNames.SHELL || policyToolName === ToolNames.MONITOR
-        ? structuredClone(args)
-        : args;
 
     const toolSpan = startToolSpan(
       policyToolName,
@@ -13930,7 +15283,22 @@ export class Session implements SessionContext {
           isTrustedLiveSpeakToUserTool;
         const toolEnabled =
           pm && !isTrustedLiveTool
-            ? await pm.isToolEnabled(policyToolName)
+            ? await pm.isToolEnabled(
+                policyToolName,
+                // Mirror the scheduler's L1 gate: a legacy-spelled MCP deny
+                // can only name the registered tool through its advertised
+                // aliases (#10199), and the server boundary only comes from
+                // the producer's own identity (R4-2).
+                tool instanceof DiscoveredMCPTool
+                  ? tool.permissionAliases
+                  : undefined,
+                tool instanceof DiscoveredMCPTool
+                  ? {
+                      serverName: tool.serverName,
+                      serverToolName: tool.serverToolName,
+                    }
+                  : undefined,
+              )
             : true;
         const enablementCancellation = cancelBeforeExecutionIfAborted(toolName);
         if (enablementCancellation) return enablementCancellation;
@@ -13945,6 +15313,59 @@ export class Session implements SessionContext {
             },
           );
         }
+
+        // ---- PreToolUse: once, before every input-dependent check ----
+        // A replacement input then goes through the same gates, validation,
+        // permission and approval as the model's input; the checks above fix
+        // the tool's identity, which the hook cannot change.
+        const toolUseId = generateToolUseId();
+        const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
+        const messageBusForTool = this.config.getMessageBus?.();
+        if (hooksEnabledForTool && messageBusForTool) {
+          const preHookResult = await firePreToolUseHook(
+            messageBusForTool,
+            policyToolName,
+            args,
+            toolUseId,
+            String(this.config.getApprovalMode()),
+            activeToolAbortSignal,
+            callId,
+            hookOwner,
+          );
+          preToolUseContext = preHookResult.additionalContext;
+          const preHookCancellation = cancelBeforeExecutionIfAborted(toolName);
+          if (preHookCancellation) return preHookCancellation;
+
+          if (!preHookResult.shouldProceed) {
+            // Hook blocked the tool execution - send notification to UI
+            const blockReason =
+              preHookResult.blockReason || 'Blocked by PreToolUse hook';
+            try {
+              await this.messageEmitter.emitAgentMessage(
+                `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
+              );
+            } catch (emitError) {
+              debugLogger.debug(
+                '[Session.runTool] Failed to emit PreToolUse block message',
+                emitError,
+              );
+            }
+            const blockMessageCancellation =
+              cancelBeforeExecutionIfAborted(toolName);
+            if (blockMessageCancellation) return blockMessageCancellation;
+            return earlyErrorResponse(new Error(blockReason), toolName, {
+              status: 'error',
+              errorType: ToolErrorType.EXECUTION_DENIED,
+              executionStatus: 'not_started',
+            });
+          }
+          if (preHookResult.updatedInput) args = preHookResult.updatedInput;
+        }
+        const originalPolicyRequestArgs =
+          policyToolName === ToolNames.SHELL ||
+          policyToolName === ToolNames.MONITOR
+            ? structuredClone(args)
+            : args;
 
         // ---- Media-policy modelAccess gate (mirrors CoreToolScheduler) ----
         // Every ACP-originated call is a model call: there is no in-process
@@ -14024,26 +15445,27 @@ export class Session implements SessionContext {
           }
         }
 
-        // Generate tool_use_id for hook tracking (aligned with core path)
-        const toolUseId = generateToolUseId();
-
         // Get approval mode for hook context (defined outside try for catch block access)
         let approvalMode = this.config.getApprovalMode();
 
         let toolBuildSucceeded = false;
         try {
-          const invocation = appExecution
-            ? appExecution.tool.buildForApp(
-                args,
-                appExecution.onResult,
-                this.config,
-              )
-            : tool.build(args);
-          builtInvocation = invocation;
-          const callIdAware = invocation as {
-            setCallId?: (id: string) => void;
+          const buildInvocation = (input: Record<string, unknown>) => {
+            const built = appExecution
+              ? appExecution.tool.buildForApp(
+                  input,
+                  appExecution.onResult,
+                  this.config,
+                )
+              : tool.build(input);
+            const callIdAware = built as {
+              setCallId?: (id: string) => void;
+            };
+            callIdAware.setCallId?.(callId);
+            return built;
           };
-          callIdAware.setCallId?.(callId);
+          let invocation = buildInvocation(args);
+          builtInvocation = invocation;
           toolBuildSucceeded = true;
 
           if (this.config.getSessionSourceType?.() === 'agent-host') {
@@ -14086,19 +15508,21 @@ export class Session implements SessionContext {
             }
           }
 
-          // Production AgentTool always initializes `eventEmitter` on its
-          // invocation (`agent.ts:392`). Be defensive about the `undefined`
-          // case too so an incomplete/custom AgentTool invocation degrades
-          // gracefully (no sub-agent event forwarding) instead of throwing
-          // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
-          // key-presence check passed for `{ eventEmitter: undefined }` and
-          // the ensuing `eventEmitter.on(...)` blew up.
-          const taskEventEmitter = (
-            invocation as {
-              eventEmitter?: AgentEventEmitter;
-            }
-          ).eventEmitter;
-          if (isAgentTool && taskEventEmitter) {
+          // Sub-agent tracking belongs to the invocation that can run.
+          const trackAgentInvocation = () => {
+            // Production AgentTool always initializes `eventEmitter` on its
+            // invocation (`agent.ts:392`). Be defensive about the `undefined`
+            // case too so an incomplete/custom AgentTool invocation degrades
+            // gracefully (no sub-agent event forwarding) instead of throwing
+            // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
+            // key-presence check passed for `{ eventEmitter: undefined }` and
+            // the ensuing `eventEmitter.on(...)` blew up.
+            const taskEventEmitter = (
+              invocation as {
+                eventEmitter?: AgentEventEmitter;
+              }
+            ).eventEmitter;
+            if (!isAgentTool || !taskEventEmitter) return;
             // Extract subagent metadata from AgentTool call
             const parentToolCallId = callId;
             const subagentType = (args['subagent_type'] as string) ?? '';
@@ -14125,7 +15549,8 @@ export class Session implements SessionContext {
               taskEventEmitter,
               activeToolAbortSignal,
             );
-          }
+          };
+          trackAgentInvocation();
 
           // L3→L4→L5 Permission Flow (aligned with coreToolScheduler)
           //
@@ -14157,6 +15582,7 @@ export class Session implements SessionContext {
                     toolParams,
                     this.config.getTargetDir(),
                     invocation.permissionAliases,
+                    invocation.mcpIdentity,
                   ),
                   requiresUserInteraction: false,
                   denyMessage: undefined,
@@ -14289,14 +15715,10 @@ export class Session implements SessionContext {
               `Auto mode: L4 allow overridden by protected-write guard for ${policyToolName}`,
             );
           }
-          let autoModeAllowed =
-            finalPermission === 'allow' &&
-            !forceAutoReviewForAllow &&
-            !planShellRequiresConfirmation;
-          if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
+          const recordAutoModeAllow = (params: Record<string, unknown>) => {
             const actionFingerprint = getAutoModeActionFingerprint(
               policyToolName,
-              toolParams,
+              params,
               this.config.getCwd(),
             );
             this.config.setAutoModeDenialState(
@@ -14305,23 +15727,29 @@ export class Session implements SessionContext {
                 actionFingerprint,
               ),
             );
-          }
-          let wasAutoModeManualFallback = false;
-          let autoModeFallback: AutoModeFallbackConfirmation | undefined;
-
+          };
           // ── L5: AUTO mode three-layer filter (duplicated from
           // coreToolScheduler.ts; ACP routes through this Session path).
-          // Returns 'allowed' / 'blocked' / 'fallback'. Blocked early-returns;
-          // allowed skips requestPermission; fallback drops through to the
-          // existing manual-approval flow below.
-          if (
-            !autoModeAllowed &&
-            !requiresUserInteraction &&
-            shouldRunAutoModeForCall(approvalMode, policyToolName)
-          ) {
+          // Returns 'approved' / 'blocked' / 'fallback', or the cancellation
+          // result when the call was cancelled meanwhile.
+          const classifyForAutoMode = async (
+            params: Record<string, unknown>,
+            ctx: typeof pmCtx,
+            forcedAsk: boolean,
+          ): Promise<
+            | {
+                cancelled: NonNullable<
+                  ReturnType<typeof cancelBeforeExecutionIfAborted>
+                >;
+              }
+            | {
+                outcome: ReturnType<typeof applyAutoModeDecision>;
+                denialState: Parameters<typeof applyAutoModeDecision>[2];
+              }
+          > => {
             const actionFingerprint = getAutoModeActionFingerprint(
               policyToolName,
-              toolParams,
+              params,
               this.config.getCwd(),
             );
             const { fallback } = prepareAutoModeFallback(
@@ -14339,9 +15767,9 @@ export class Session implements SessionContext {
             const trustedUserAnswers =
               llmClient?.getTrustedUserAnswers?.() ?? [];
             const decision = await evaluateAutoMode({
-              ctx: pmCtx,
-              pmForcedAsk,
-              toolParams,
+              ctx,
+              pmForcedAsk: forcedAsk,
+              toolParams: params,
               messages,
               trustedUserAnswers,
               config: this.config,
@@ -14352,7 +15780,8 @@ export class Session implements SessionContext {
             });
             const autoModeCancellation =
               cancelBeforeExecutionIfAborted(toolName);
-            if (autoModeCancellation) return autoModeCancellation;
+            if (autoModeCancellation)
+              return { cancelled: autoModeCancellation };
 
             // Apply decision via shared helper — eliminates ~40 lines of
             // line-for-line duplication with coreToolScheduler.ts and makes
@@ -14372,7 +15801,7 @@ export class Session implements SessionContext {
               decision,
               outcome,
               policyToolName,
-              toolParams,
+              params,
               callId,
               abortSignal,
               hookOwner,
@@ -14380,17 +15809,89 @@ export class Session implements SessionContext {
             const permissionDeniedHookCancellation =
               cancelBeforeExecutionIfAborted(toolName);
             if (permissionDeniedHookCancellation) {
-              return permissionDeniedHookCancellation;
+              return { cancelled: permissionDeniedHookCancellation };
             }
+            if (outcome.kind === 'blocked') {
+              debugLogger.warn(
+                `Auto mode blocked (${outcome.reason}): tool=${policyToolName}, ` +
+                  formatDenialStateLog(denialState),
+              );
+            }
+            return { outcome, denialState };
+          };
+
+          let autoModeAllowed =
+            finalPermission === 'allow' &&
+            !forceAutoReviewForAllow &&
+            !planShellRequiresConfirmation;
+          if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
+            recordAutoModeAllow(toolParams);
+          }
+          let wasAutoModeManualFallback = false;
+          let autoModeFallback: AutoModeFallbackConfirmation | undefined;
+          // Set when the fallback came from the deterministic destructive
+          // guard rather than the classifier, whose escalation shares the same
+          // reason code. Mirrors the scheduler's gate so a PermissionRequest
+          // hook cannot waive the guard on this path either.
+          let autoModeFallbackRequiresHuman = false;
+          // Recovery state follows the input whose classification was last
+          // decided, so approving a fallback resets the right counters.
+          const updateAutoModeFallback = (
+            outcome?: ReturnType<typeof applyAutoModeDecision>,
+            denialState?: Parameters<typeof applyAutoModeDecision>[2],
+          ) => {
+            wasAutoModeManualFallback = false;
+            autoModeFallback = undefined;
+            autoModeFallbackRequiresHuman = false;
+            if (outcome?.kind !== 'fallback') return;
+            autoModeFallbackRequiresHuman =
+              outcome.requiresHumanDecision === true;
+            wasAutoModeManualFallback =
+              isDenialFallbackReason(outcome.reason) ||
+              outcome.reason === 'classifier_unavailable' ||
+              outcome.reason === 'external_write' ||
+              outcome.reason === 'external_directory';
+
+            if (
+              outcome.message &&
+              (outcome.reason === 'classifier_unavailable' ||
+                outcome.reason === 'external_write' ||
+                outcome.reason === 'external_directory' ||
+                isDenialFallbackReason(outcome.reason))
+            ) {
+              autoModeFallback = {
+                reason: outcome.reason,
+                message: outcome.message,
+              };
+            }
+
+            if (wasAutoModeManualFallback && denialState) {
+              debugLogger.warn(
+                `Auto mode fallback to manual approval (${outcome.reason}): ` +
+                  formatDenialStateLog(denialState),
+              );
+            }
+          };
+
+          // Blocked early-returns; approved skips requestPermission;
+          // fallback drops through to the existing manual-approval flow.
+          if (
+            !autoModeAllowed &&
+            !requiresUserInteraction &&
+            shouldRunAutoModeForCall(approvalMode, policyToolName)
+          ) {
+            const classified = await classifyForAutoMode(
+              toolParams,
+              pmCtx,
+              pmForcedAsk,
+            );
+            if ('cancelled' in classified) return classified.cancelled;
+            const { outcome, denialState } = classified;
             switch (outcome.kind) {
               case 'approved':
                 autoModeAllowed = true;
                 break;
               case 'blocked':
-                debugLogger.warn(
-                  `Auto mode blocked (${outcome.reason}): tool=${policyToolName}, ` +
-                    formatDenialStateLog(denialState),
-                );
                 return earlyErrorResponse(
                   new Error(outcome.errorMessage),
                   toolName,
@@ -14402,31 +15903,7 @@ export class Session implements SessionContext {
                 );
               case 'fallback':
                 // Drop through to the manual-approval flow below.
-                wasAutoModeManualFallback =
-                  isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable' ||
-                  outcome.reason === 'external_write' ||
-                  outcome.reason === 'external_directory';
-
-                if (
-                  outcome.message &&
-                  (outcome.reason === 'classifier_unavailable' ||
-                    outcome.reason === 'external_write' ||
-                    outcome.reason === 'external_directory' ||
-                    isDenialFallbackReason(outcome.reason))
-                ) {
-                  autoModeFallback = {
-                    reason: outcome.reason,
-                    message: outcome.message,
-                  };
-                }
-
-                if (wasAutoModeManualFallback) {
-                  debugLogger.warn(
-                    `Auto mode fallback to manual approval (${outcome.reason}): ` +
-                      formatDenialStateLog(denialState),
-                  );
-                }
+                updateAutoModeFallback(outcome, denialState);
                 break;
               default: {
                 const _exhaustive: never = outcome;
@@ -14629,7 +16106,8 @@ export class Session implements SessionContext {
 
               if (
                 hookResult.hasDecision &&
-                (!hookResult.shouldAllow || !requiresUserInteraction)
+                (!hookResult.shouldAllow ||
+                  (!requiresUserInteraction && !autoModeFallbackRequiresHuman))
               ) {
                 hookHandled = true;
                 if (hookResult.shouldAllow) {
@@ -14679,22 +16157,191 @@ export class Session implements SessionContext {
                     recordAutoModeFallbackResolution(approval.outcome);
                   } else {
                     if (hookResult.updatedInput) {
-                      args = hookResult.updatedInput;
-                      invocation.params =
-                        hookResult.updatedInput as typeof invocation.params;
+                      // The replacement is checked like the input before it:
+                      // its gates, schema and permission rules. This hook's
+                      // allow then stands in only for an ordinary
+                      // confirmation of it; the original's is dropped.
+                      const reject = (
+                        message: string,
+                        errorType = ToolErrorType.EXECUTION_DENIED,
+                      ) =>
+                        earlyErrorResponse(new Error(message), toolName, {
+                          status: 'error',
+                          errorType,
+                          executionStatus: 'not_started',
+                        });
+                      const replacementGate = evaluateMediaPolicyToolCall({
+                        config: this.config,
+                        tool,
+                        args: hookResult.updatedInput,
+                        executionOrigin: { kind: 'model' },
+                      });
+                      if (replacementGate.outcome === 'reject') {
+                        return reject(
+                          replacementGate.message,
+                          replacementGate.reason === 'invalid_params'
+                            ? ToolErrorType.INVALID_TOOL_PARAMS
+                            : ToolErrorType.EXECUTION_DENIED,
+                        );
+                      }
+                      const replacementArgs = replacementGate.args;
+                      if (
+                        this.requiresManagedConversationBinding &&
+                        isAgentTool &&
+                        (replacementArgs['isolation'] === 'worktree' ||
+                          (typeof replacementArgs['working_dir'] === 'string' &&
+                            replacementArgs['working_dir'].trim().length > 0))
+                      ) {
+                        return reject(STANDALONE_WORKTREE_ACTION_ERROR);
+                      }
+                      let replacement: typeof invocation;
+                      try {
+                        replacement = buildInvocation(replacementArgs);
+                      } catch (error) {
+                        return reject(
+                          error instanceof Error
+                            ? error.message
+                            : String(error),
+                          ToolErrorType.INVALID_TOOL_PARAMS,
+                        );
+                      }
+                      // The replacement is released when the call ends,
+                      // even if a later check rejects it; the original
+                      // will not run, so release it now.
+                      const original = builtInvocation;
+                      builtInvocation = replacement;
+                      if (original?.release && original !== replacement) {
+                        void Promise.resolve()
+                          .then(() => original.release?.())
+                          .catch((error: unknown) => {
+                            debugLogger.warn(
+                              'Tool invocation resource cleanup failed:',
+                              error,
+                            );
+                          });
+                      }
+                      const replacementFlow = await evaluatePermissionFlow(
+                        this.config,
+                        replacement,
+                        policyToolName,
+                        replacement.params as Record<string, unknown>,
+                        activeToolAbortSignal,
+                      );
+                      const replacementFlowCancellation =
+                        cancelBeforeExecutionIfAborted(toolName);
+                      if (replacementFlowCancellation) {
+                        return replacementFlowCancellation;
+                      }
+                      if (replacementFlow.finalPermission === 'deny') {
+                        return reject(
+                          replacementFlow.denyMessage ??
+                            `Tool "${toolName}" is denied.`,
+                        );
+                      }
+                      if (replacementFlow.requiresUserInteraction) {
+                        return reject(
+                          `The PermissionRequest hook's replacement input for "${toolName}" needs a user decision, so it was not run.`,
+                        );
+                      }
+                      const replacementDetails =
+                        await replacement.getConfirmationDetails(
+                          activeToolAbortSignal,
+                        );
+                      const replacementDetailsCancellation =
+                        cancelBeforeExecutionIfAborted(toolName);
+                      if (replacementDetailsCancellation) {
+                        return replacementDetailsCancellation;
+                      }
+                      if (
+                        isPlanModeBlocked(
+                          isPlanMode,
+                          isExitPlanModeTool,
+                          isAskUserQuestionTool,
+                          replacementDetails,
+                          isEnterPlanModeTool,
+                        )
+                      ) {
+                        return reject(
+                          `Plan mode is active. The tool "${toolName}" cannot be executed because it modifies the system. ` +
+                            'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
+                        );
+                      }
+                      // AUTO mode judges the replacement like any input: its
+                      // own allow rule, else the classifier. A block denies it;
+                      // a destructive guard fallback still needs a human.
+                      const replacementParams = replacement.params as Record<
+                        string,
+                        unknown
+                      >;
+                      const replacementAllowed =
+                        replacementFlow.finalPermission === 'allow' &&
+                        !(
+                          approvalMode === ApprovalMode.AUTO &&
+                          (shouldForceAutoModeReviewForAllow(
+                            replacementFlow.pmCtx,
+                            this.config.getCwd(),
+                          ) ||
+                            shouldClassifyAllShellForAutoMode(
+                              policyToolName,
+                              this.config,
+                            ))
+                        );
+                      if (
+                        replacementAllowed &&
+                        approvalMode === ApprovalMode.AUTO
+                      ) {
+                        recordAutoModeAllow(replacementParams);
+                        updateAutoModeFallback();
+                      } else if (
+                        !replacementAllowed &&
+                        shouldRunAutoModeForCall(approvalMode, policyToolName)
+                      ) {
+                        const classified = await classifyForAutoMode(
+                          replacementParams,
+                          replacementFlow.pmCtx,
+                          replacementFlow.pmForcedAsk,
+                        );
+                        if ('cancelled' in classified) {
+                          return classified.cancelled;
+                        }
+                        if (classified.outcome.kind === 'blocked') {
+                          return reject(classified.outcome.errorMessage);
+                        }
+                        updateAutoModeFallback(
+                          classified.outcome,
+                          classified.denialState,
+                        );
+                      }
+                      cleanupSubAgentTracking();
+                      invocation = replacement;
+                      args = replacementArgs;
+                      confirmationDetails = replacementDetails;
+                      trackAgentInvocation();
                     }
 
-                    await confirmationDetails.onConfirm(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    );
-                    const hookConfirmationCancellation =
-                      cancelBeforeExecutionIfAborted(toolName);
-                    if (hookConfirmationCancellation) {
-                      return hookConfirmationCancellation;
+                    if (autoModeFallbackRequiresHuman) {
+                      if (autoModeFallback) {
+                        confirmationDetails =
+                          decorateAutoModeFallbackConfirmation(
+                            confirmationDetails,
+                            autoModeFallback.reason,
+                            autoModeFallback.message,
+                          );
+                      }
+                      hookHandled = false;
+                    } else {
+                      await confirmationDetails.onConfirm(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
+                      const hookConfirmationCancellation =
+                        cancelBeforeExecutionIfAborted(toolName);
+                      if (hookConfirmationCancellation) {
+                        return hookConfirmationCancellation;
+                      }
+                      recordAutoModeFallbackResolution(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
                     }
-                    recordAutoModeFallbackResolution(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    );
                   }
                 } else {
                   return earlyErrorResponse(
@@ -15118,52 +16765,7 @@ export class Session implements SessionContext {
             if (startEmissionCancellation) return startEmissionCancellation;
           }
 
-          // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
-          const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
-          const messageBusForTool = this.config.getMessageBus?.();
           const permissionMode = String(approvalMode);
-
-          if (hooksEnabledForTool && messageBusForTool) {
-            const preHookResult = await firePreToolUseHook(
-              messageBusForTool,
-              policyToolName,
-              args,
-              toolUseId,
-              permissionMode,
-              activeToolAbortSignal,
-              callId,
-              hookOwner,
-            );
-            preToolUseContext = preHookResult.additionalContext;
-            const preHookCancellation =
-              cancelBeforeExecutionIfAborted(toolName);
-            if (preHookCancellation) return preHookCancellation;
-
-            if (!preHookResult.shouldProceed) {
-              // Hook blocked the tool execution - send notification to UI
-              const blockReason =
-                preHookResult.blockReason || 'Blocked by PreToolUse hook';
-              try {
-                await this.messageEmitter.emitAgentMessage(
-                  `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
-                );
-              } catch (emitError) {
-                debugLogger.debug(
-                  '[Session.runTool] Failed to emit PreToolUse block message',
-                  emitError,
-                );
-              }
-              const blockMessageCancellation =
-                cancelBeforeExecutionIfAborted(toolName);
-              if (blockMessageCancellation) return blockMessageCancellation;
-              return earlyErrorResponse(new Error(blockReason), toolName, {
-                status: 'error',
-                errorType: ToolErrorType.EXECUTION_DENIED,
-                executionStatus: 'not_started',
-              });
-            }
-          }
-
           const toolInvocationGuard = this.config.getToolInvocationGuard?.();
           if (toolInvocationGuard) {
             const invocationContext = getInvocationContext();
@@ -15350,12 +16952,54 @@ export class Session implements SessionContext {
             executeAttempted = true;
             executionStartedAt = performance.now();
             try {
-              const execute = () =>
-                invocation.execute(
-                  activeToolAbortSignal,
-                  onToolProgress,
-                  this.config.getShellExecutionConfig(),
+              const execute = () => {
+                lifecycleExecuted = true;
+                executionStartedAt = performance.now();
+                publishToolLifecycle(
+                  toolLifecycle?.start(Date.now(), toolName),
                 );
+                const settle = (
+                  result?: ToolResult,
+                  error?: unknown,
+                  threw = false,
+                ) => {
+                  lifecycleExecutionDurationMs = elapsedExecutionMs();
+                  lifecycleSettled = true;
+                  const timeout =
+                    result?.error?.type === ToolErrorType.EXECUTION_TIMEOUT ||
+                    (error as { errorType?: ToolErrorType } | undefined)
+                      ?.errorType === ToolErrorType.EXECUTION_TIMEOUT;
+                  lifecycleActualStatus =
+                    activeToolAbortSignal.aborted && !timeout
+                      ? 'cancelled'
+                      : threw || result?.error
+                        ? 'error'
+                        : 'success';
+                  if (lifecycleTerminalOutcome)
+                    finishToolLifecycle(lifecycleTerminalOutcome);
+                };
+                try {
+                  return invocation
+                    .execute(
+                      activeToolAbortSignal,
+                      onToolProgress,
+                      this.config.getShellExecutionConfig(),
+                    )
+                    .then(
+                      (result) => {
+                        settle(result);
+                        return result;
+                      },
+                      (error: unknown) => {
+                        settle(undefined, error, true);
+                        throw error;
+                      },
+                    );
+                } catch (error) {
+                  settle(undefined, error, true);
+                  throw error;
+                }
+              };
               if (toolName !== ToolNames.EXEC) {
                 if (codeModeContext) {
                   let cancelExecution: (() => void) | undefined;
@@ -15505,7 +17149,8 @@ export class Session implements SessionContext {
                       !(
                         kind === Kind.Execute &&
                         !this.config.getDisableAllHooks?.() &&
-                        this.config.hasHooksForEvent?.('PermissionRequest')
+                        (this.config.hasHooksForEvent?.('PreToolUse') ||
+                          this.config.hasHooksForEvent?.('PermissionRequest'))
                       );
                     if (!safe) {
                       await Promise.all(executing);
@@ -15679,11 +17324,14 @@ export class Session implements SessionContext {
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
+                  this.config,
                 )
               : convertToFunctionResponse(
                   modelFacingToolName,
                   callId,
                   toolResult.llmContent,
+                  toolResult,
+                  this.config,
                 );
 
           // A tool can fail "softly" by returning toolResult.error without
@@ -15909,6 +17557,7 @@ export class Session implements SessionContext {
             );
           }
           terminalStatus = status;
+          finishToolLifecycle(status);
           const succeeded = status === 'success';
           const responseError =
             status === 'error' && toolResult.error
@@ -16075,7 +17724,15 @@ export class Session implements SessionContext {
         } catch (e) {
           // No failure to report: see the outer catch.
           if (e instanceof ManagedRuntimeOutcomeUnknownError) throw e;
-          const error = e instanceof Error ? e : new Error(String(e));
+          const caught = e instanceof Error ? e : new Error(String(e));
+          // Same labelling as the scheduler: a target reached through
+          // tool_call names itself when its own build() rejects the arguments.
+          const error =
+            bridgedThroughToolCall && !toolBuildSucceeded
+              ? new Error(
+                  describeBridgedArgumentError(toolName, caught.message),
+                )
+              : caught;
           const hooksEnabledForError = !this.config.getDisableAllHooks?.();
           const messageBusForError = this.config.getMessageBus?.();
           const executionTimeoutException =
@@ -16223,6 +17880,7 @@ export class Session implements SessionContext {
               });
         return this.#applyBridgeConversionsIfNeeded(
           [...attachmentParts, ...expandedPrompt],
+          attachmentBlocks,
           abortSignal,
           onFullTurnModel,
         );
@@ -16410,6 +18068,7 @@ export class Session implements SessionContext {
     const sshWorkspace = Boolean(this.config.getExecutionEnvironment?.());
 
     const embeddedContext: EmbeddedResourceResource[] = [];
+    const attachmentParts: Part[] = [];
     const extensionMentions = new Map<string, string>();
     const mcpServerMentions = new Map<string, string>();
     const textPathSpecsToRead = new Map<string, string>();
@@ -16421,11 +18080,20 @@ export class Session implements SessionContext {
         ? parts
         : this.#applyBridgeConversionsIfNeeded(
             parts,
+            message,
             abortSignal,
             options.onFullTurnModel,
           );
 
     const parts = message.map((part) => {
+      const attachmentContext =
+        part._meta?.[DAEMON_ATTACHMENT_CONTEXT_META_KEY];
+      if (
+        (part.type === 'image' || part.type === 'resource') &&
+        typeof attachmentContext === 'string'
+      ) {
+        attachmentParts.push({ text: attachmentContext });
+      }
       switch (part.type) {
         case 'text':
           if (sshWorkspace) return { text: part.text };
@@ -16573,13 +18241,18 @@ export class Session implements SessionContext {
     if (
       pathSpecsToRead.length === 0 &&
       embeddedContext.length === 0 &&
+      attachmentParts.length === 0 &&
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
     ) {
       return finish(partsToSend);
     }
 
-    if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
+    if (
+      pathSpecsToRead.length === 0 &&
+      embeddedContext.length === 0 &&
+      attachmentParts.length === 0
+    ) {
       return finish([...partsToSend, ...extensionParts, ...mcpServerParts]);
     }
 
@@ -16615,6 +18288,7 @@ export class Session implements SessionContext {
     // the "--- Content from ... ---" delimiter labels, not by position, so
     // leading with the content is safe.
     const referenceParts: Part[] = [
+      ...attachmentParts,
       ...partsToSend.filter((part) => 'inlineData' in part),
       ...extensionParts,
       ...mcpServerParts,
@@ -16692,6 +18366,7 @@ export class Session implements SessionContext {
 
   async #applyBridgeConversionsIfNeeded(
     originalParts: Part[],
+    sourceBlocks: ContentBlock[],
     abortSignal: AbortSignal,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
@@ -16730,11 +18405,23 @@ export class Session implements SessionContext {
 
     let bridgeResult: VisionBridgeResult;
     try {
+      const attachmentContexts = new Set(
+        sourceBlocks
+          .filter(
+            (block) => block.type === 'image' || block.type === 'resource',
+          )
+          .map((block) => block._meta?.[DAEMON_ATTACHMENT_CONTEXT_META_KEY])
+          .filter((context) => typeof context === 'string'),
+      );
       debugLogger.debug('vision bridge: gate matched, running conversion');
       bridgeResult = await runVisionBridge({
         config: this.config,
         parts,
         signal: abortSignal,
+        // Stored paths stay in model context, outside the bridge's focus budget.
+        intentText: collectText(
+          parts.filter((part) => !attachmentContexts.has(part.text ?? '')),
+        ),
       });
     } catch (error) {
       debugLogger.debug(

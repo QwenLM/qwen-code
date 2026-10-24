@@ -154,7 +154,7 @@ describe('skill hooks fire on both invocation paths', () => {
       `gate did not fire. Output tail:\n${output.slice(-1500)}`,
     ).toContain(GATE_MARKER);
     expect(executed).toBe(false);
-  }, 120000);
+  }, 240_000); // CI: 30s startup + 3 waits at the 60s default.
 
   it('user-invoked skill (/<skill-name>): the gate fires and blocks the shell call', async () => {
     const { output, executed } = await driveSession({
@@ -166,5 +166,5 @@ describe('skill hooks fire on both invocation paths', () => {
       `gate did not fire. Output tail:\n${output.slice(-1500)}`,
     ).toContain(GATE_MARKER);
     expect(executed).toBe(false);
-  }, 120000);
+  }, 360_000); // CI: 30s startup + 5 waits at the 60s default.
 });

@@ -266,6 +266,33 @@ describe.skipIf(process.platform === 'win32')('Codex subagent executor', () => {
     },
   );
 
+  it('delivers the memory catalog after the task only when a system prompt is sent', async () => {
+    const withSystem = params();
+    vi.spyOn(withSystem.runtimeContext, 'getAutoMemoryContext').mockReturnValue(
+      'CATALOG SENTINEL',
+    );
+    const withoutSystem = params();
+    withoutSystem.promptConfig.systemPrompt = '';
+    vi.spyOn(
+      withoutSystem.runtimeContext,
+      'getAutoMemoryContext',
+    ).mockReturnValue('CATALOG SENTINEL');
+
+    const prompts: string[] = [];
+    for (const options of [withSystem, withoutSystem]) {
+      const executor = await create(options);
+      await executor.execute(context());
+      prompts.push(JSON.parse(executor.getFinalText()).task.input[0].text);
+    }
+    const [withCatalog, withoutCatalog] = prompts;
+
+    expect(withCatalog).toContain('Check the result.');
+    expect(
+      withCatalog?.endsWith('Inspect this repository.\n\nCATALOG SENTINEL'),
+    ).toBe(true);
+    expect(withoutCatalog).toBe('Inspect this repository.');
+  });
+
   it.each([
     'terminal-blank',
     'terminal-invalid',

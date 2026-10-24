@@ -119,6 +119,10 @@ export class LocalJsonlManagedSessionJournalHandle
     });
   }
 
+  get writerSealed(): boolean {
+    return this.lease.isReleased;
+  }
+
   get takeoverCommitProof(): ManagedSessionCommitProof | undefined {
     const proof = this.lease.takeoverCommitProof;
     if (proof === undefined) return undefined;

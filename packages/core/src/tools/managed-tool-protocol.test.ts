@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ToolCallConfirmationDetails } from './tools.js';
 import {
   managedToolDigest,
+  managedToolResponseParts,
   parseManagedToolContentModification,
   parseManagedToolMediaContext,
   ManagedToolProtocolError,
@@ -63,6 +64,26 @@ describe('managed media context', () => {
     expect(() => parseManagedToolMediaContext(input)).toThrow(
       ManagedToolProtocolError,
     );
+  });
+});
+
+describe('managed tool response parts', () => {
+  it('strips the worker text marker and passes other parts through', () => {
+    expect(
+      managedToolResponseParts([
+        { type: 'text', text: 'the answer' },
+        { functionCall: { name: 'read_file' } },
+        'a bare string part',
+      ]),
+    ).toEqual([
+      { text: 'the answer' },
+      { functionCall: { name: 'read_file' } },
+      'a bare string part',
+    ]);
+    // Only a part that is null or undefined throws; anything else is passed
+    // to the model as-is.
+    expect(() => managedToolResponseParts([null])).toThrow(TypeError);
+    expect(() => managedToolResponseParts([undefined])).toThrow(TypeError);
   });
 });
 

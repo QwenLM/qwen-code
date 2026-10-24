@@ -48,6 +48,7 @@ import { isDisclosureText } from '../../omni/disclosure.js';
 import { evictOldestImagesBeyondCap } from './image-budget.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
+import { TrailingThinkingTagFilter } from './trailing-thinking-tag-filter.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -1236,12 +1237,31 @@ function extractTextFromContentUnion(contentUnion: unknown): string {
 function convertOpenAITextToParts(
   text: string,
   requestContext: RequestContext,
-  final = true,
+  final: boolean,
+  completed: boolean,
 ): Part[] {
+  // Tagged-thinking streams are out of scope for the trailing-tag filter: once
+  // a stream opens a literal thinking block, the parser below owns its tags.
   if (
     !requestContext.responseParsingOptions?.taggedThinkingTags &&
     !requestContext.taggedThinkingParser
   ) {
+    if (requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks) {
+      text = (requestContext.trailingThinkingTagFilter ??=
+        new TrailingThinkingTagFilter()).parse(
+        text,
+        final || requestContext.hasThinkingTagInReasoning === true,
+        completed && !requestContext.hasThinkingTagInReasoning,
+      );
+      const filter = requestContext.trailingThinkingTagFilter;
+      if (filter.sanitizedTagName) {
+        requestContext.protocolTagSanitized = {
+          tagName: filter.sanitizedTagName,
+          toolCallCount: 0,
+        };
+        filter.sanitizedTagName = undefined;
+      }
+    }
     return text ? [{ text }] : [];
   }
 
@@ -1266,6 +1286,30 @@ const STANDALONE_CLOSING_THINKING_TAG_PATTERN =
 const STANDALONE_OPENING_THINKING_TAG_PATTERN =
   /^\s*<(think|thinking)\s*>\s*$/i;
 const MAX_THINKING_TAG_CANDIDATE_LENGTH = 128;
+
+/**
+ * "Finished normally" for the trailing-tag filter, spelled with the same
+ * finish-reason mapper that stamps the candidate: `tool_calls`,
+ * `function_call`, an absent reason, and any casing a gateway uses all report
+ * `FinishReason.STOP` downstream, so all of them must suppress a trailing
+ * orphan tag. Truncation, safety and unknown reasons stay incomplete and
+ * release the tail verbatim instead.
+ *
+ * The `reasoningText` conjunct is the cross-channel guard, and it is not
+ * redundant: `hasThinkingTagInReasoning` is only set inside
+ * `convertOpenAIChunkToLlm`, so on the non-streaming path this is the only
+ * thing stopping the content channel from being stripped while tagged
+ * reasoning survives.
+ */
+function completedNormally(
+  finishReason: string | null | undefined,
+  reasoningText: string | null | undefined,
+): boolean {
+  return (
+    mapOpenAIFinishReasonToLlm(finishReason || 'stop') === FinishReason.STOP &&
+    !THINKING_TAG_PATTERN.test(reasoningText ?? '')
+  );
+}
 
 function canBeStandaloneThinkingTagPrefix(text: string): boolean {
   const candidate = text.trimStart().toLowerCase();
@@ -1367,7 +1411,12 @@ export function convertOpenAIResponseToLlm(
   if (choice) {
     const parts: Part[] = [];
     const textParts = choice.message.content
-      ? convertOpenAITextToParts(choice.message.content, requestContext)
+      ? convertOpenAITextToParts(
+          choice.message.content,
+          requestContext,
+          true,
+          completedNormally(choice.finish_reason, reasoningText),
+        )
       : [];
 
     // Handle reasoning content (thoughts).
@@ -1512,6 +1561,13 @@ export function convertOpenAIChunkToLlm(
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
 
+    if (
+      !requestContext.responseParsingOptions?.taggedThinkingTags &&
+      THINKING_TAG_PATTERN.test(reasoningText ?? '')
+    ) {
+      requestContext.hasThinkingTagInReasoning = true;
+    }
+
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
       const rawContent = choice.delta.content;
@@ -1552,8 +1608,13 @@ export function convertOpenAIChunkToLlm(
       ) {
         requestContext.taggedThinkingParser ??= new TaggedThinkingParser();
         requestContext.pendingThinkingTagCandidate = undefined;
+        // The takeover stops calling the trailing-tag filter for the rest of
+        // the turn, so a whitespace hold it still has is handed over rather
+        // than stranded between two prose runs.
+        const drainedWhitespace =
+          requestContext.trailingThinkingTagFilter?.drainWhitespace() ?? '';
         contentParts = requestContext.taggedThinkingParser.parse(
-          taggedThinkingCandidate,
+          drainedWhitespace + taggedThinkingCandidate,
           Boolean(choice.finish_reason),
         );
       } else if (normalizedContent || choice.finish_reason) {
@@ -1563,11 +1624,17 @@ export function convertOpenAIChunkToLlm(
           normalizedContent,
           requestContext,
           Boolean(choice.finish_reason),
+          completedNormally(choice.finish_reason, reasoningText),
         );
       }
     } else if (choice.finish_reason) {
       // Flush any buffered tagged-thinking content on stream end
-      contentParts = convertOpenAITextToParts('', requestContext, true);
+      contentParts = convertOpenAITextToParts(
+        '',
+        requestContext,
+        true,
+        completedNormally(choice.finish_reason, reasoningText),
+      );
     }
 
     if (
@@ -1861,6 +1928,14 @@ export function convertOpenAIChunkToLlm(
     const toolCallsTruncated = choice.finish_reason
       ? toolCallParser.hasIncompleteToolCalls()
       : false;
+    // The trailing-tag filter stamps this from inside convertOpenAITextToParts,
+    // which runs before tool calls are parsed, so it can only record the tag
+    // name. Fill the count in here, where it exists, so the two writers of one
+    // field agree on its meaning.
+    if (choice.finish_reason && requestContext.protocolTagSanitized) {
+      requestContext.protocolTagSanitized.toolCallCount =
+        completedToolCalls.length;
+    }
     if (
       choice.finish_reason &&
       requestContext.pendingThinkingTagCandidate?.closingTagName

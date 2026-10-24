@@ -238,6 +238,99 @@ describe('toolHookTriggers', () => {
       });
     });
 
+    it('returns a detached updatedInput that replaces the whole input', async () => {
+      const updatedInput = { file_path: '/b.txt' };
+      const result = await pre(
+        busWithOutput({
+          hookSpecificOutput: { permissionDecision: 'allow', updatedInput },
+        }),
+      );
+
+      expect(result).toEqual({
+        shouldProceed: true,
+        updatedInput: { file_path: '/b.txt' },
+      });
+      expect(result.updatedInput).not.toBe(updatedInput);
+    });
+
+    it('keeps an empty updatedInput as a replacement', async () => {
+      const result = await pre(
+        busWithOutput({ hookSpecificOutput: { updatedInput: {} } }),
+      );
+
+      expect(result).toEqual({ shouldProceed: true, updatedInput: {} });
+    });
+
+    it('carries updatedInput on an ask so the replacement is confirmed', async () => {
+      const result = await pre(
+        busWithOutput({
+          hookSpecificOutput: {
+            permissionDecision: 'ask',
+            updatedInput: { command: 'ls' },
+          },
+        }),
+      );
+
+      expect(result).toMatchObject({
+        shouldProceed: false,
+        blockType: 'ask',
+        updatedInput: { command: 'ls' },
+      });
+    });
+
+    it('ignores the legacy tool_input field for execution', async () => {
+      const result = await pre(
+        busWithOutput({ hookSpecificOutput: { tool_input: { path: 'b' } } }),
+      );
+
+      expect(result).toEqual({ shouldProceed: true });
+    });
+
+    it.each([null, ['a'], 'text', 1, new Map(), { fn: () => 1 }])(
+      'denies an invalid updatedInput %#',
+      async (updatedInput) => {
+        const result = await pre(
+          busWithOutput({
+            hookSpecificOutput: {
+              permissionDecision: 'allow',
+              updatedInput,
+              additionalContext: 'ctx',
+            },
+          }),
+        );
+
+        expect(result).toEqual({
+          shouldProceed: false,
+          blockType: 'denied',
+          blockReason: expect.stringContaining('invalid updatedInput'),
+          additionalContext: 'ctx',
+        });
+      },
+    );
+
+    it('keeps the reason of a deny or stop that comes with an invalid updatedInput', async () => {
+      expect(
+        await pre(
+          busWithOutput({
+            hookSpecificOutput: {
+              permissionDecision: 'deny',
+              permissionDecisionReason: 'policy',
+              updatedInput: [],
+            },
+          }),
+        ),
+      ).toMatchObject({ blockType: 'denied', blockReason: 'policy' });
+      expect(
+        await pre(
+          busWithOutput({
+            continue: false,
+            stopReason: 'halt',
+            hookSpecificOutput: { permissionDecision: 'ask', updatedInput: 1 },
+          }),
+        ),
+      ).toMatchObject({ blockType: 'stop', blockReason: 'halt' });
+    });
+
     it('should return shouldProceed: true with additional context when available', async () => {
       const result = await pre(
         busWithOutput({
@@ -315,6 +408,35 @@ describe('toolHookTriggers', () => {
         hookError: 'Network error',
       });
     });
+  });
+
+  describe('firePermissionRequestHook updatedInput', () => {
+    const permission = (decision: Record<string, unknown>) =>
+      firePermissionRequestHook(
+        busWithOutput({ hookSpecificOutput: { decision } }),
+        'test-tool',
+        {},
+        'default',
+      );
+
+    it('keeps an empty replacement', async () => {
+      expect(await permission({ behavior: 'allow', updatedInput: {} })).toEqual(
+        { hasDecision: true, shouldAllow: true, updatedInput: {} },
+      );
+    });
+
+    it.each([null, false, 0, '', ['a']])(
+      'denies an invalid replacement %j',
+      async (updatedInput) => {
+        expect(
+          await permission({ behavior: 'allow', updatedInput }),
+        ).toMatchObject({
+          hasDecision: true,
+          shouldAllow: false,
+          denyMessage: expect.stringContaining('invalid updatedInput'),
+        });
+      },
+    );
   });
 
   describe('firePostToolUseHook', () => {

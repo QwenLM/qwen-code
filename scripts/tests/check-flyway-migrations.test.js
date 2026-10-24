@@ -171,6 +171,27 @@ describe('check-flyway-migrations', () => {
     expect(result.status).toBe(0);
   });
 
+  it('checks the shared fresh managed-schema baseline', () => {
+    const dir = module('broker', {});
+    const baseline = join(dir, 'src/main/resources/db/managed-schema');
+    mkdirSync(baseline, { recursive: true });
+    writeFileSync(join(baseline, 'V1__managed_schema.sql'), '');
+    const result = check(dir);
+    expect(result.status).toBe(0);
+    expect(result.output).toContain('1 migrations, all versions unique');
+  });
+
+  it('detects a baseline collision across registered SQL locations', () => {
+    const dir = module('broker', { sql: ['V1__legacy.sql'] });
+    const baseline = join(dir, 'src/main/resources/db/managed-schema');
+    mkdirSync(baseline, { recursive: true });
+    writeFileSync(join(baseline, 'V1__managed_schema.sql'), '');
+    const result = check(dir);
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('2 migrations claim version 1');
+    expect(result.output).not.toContain('found no migration under');
+  });
+
   it('scans subdirectories, which Flyway scans too', () => {
     const dir = module('server', {
       sql: ['V1__core.sql', join('backfill', 'V1__again.sql')],
@@ -391,9 +412,9 @@ describe('check-flyway-migrations', () => {
   });
 
   it('passes a module that owns no migrations', () => {
-    // runtime-broker shares the classpath namespace but carries no migration
+    // A dependency can share the classpath namespace without a migration
     // sequence; requiring its SQL location would fail the whole invocation.
-    const dir = module('broker');
+    const dir = module('dependency');
     mkdirSync(join(dir, 'src/main/java/com/example'), { recursive: true });
     const result = check(dir);
     expect(result.output).toContain('no migration directories');

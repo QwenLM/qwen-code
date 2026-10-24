@@ -86,7 +86,23 @@ describe('local Shell result Session receipt', () => {
       await harness.ensureRunnable();
       const turnResult = await session.resources.publish(
         'managed-turn-result',
-        Buffer.from('{"state":"completed"}'),
+        Buffer.from(
+          JSON.stringify({
+            uuid: 'rec-turn-a',
+            parentUuid: null,
+            sessionId: sessionKey.sessionId,
+            timestamp: '2026-09-01T00:00:00.000Z',
+            type: 'system',
+            subtype: 'turn_result',
+            cwd: '/workspace',
+            version: 'test',
+            systemPayload: {
+              promptId: 'prompt-a',
+              state: 'completed',
+              stopReason: 'end_turn',
+            },
+          }),
+        ),
       );
       await session.authority.commitTurnComplete(
         command('settleTurn', 'settle-a'),
