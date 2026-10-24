@@ -23,17 +23,19 @@ Workspace 会话的工具面在一个地方声明与准入
 （`packages/cli/src/serve/hosted-workspace-tool-turn.ts`），由 Runtime Broker
 及其 Worker 执行，并由 Java 控制面部分重新校验。
 
-| 层次               | 位置                                                                                       | 现状职责                                            |
-| ------------------ | ------------------------------------------------------------------------------------------ | --------------------------------------------------- |
-| 声明列表           | `HOSTED_WORKSPACE_FILE_TOOLS`、`..._SHELL_TOOLS` 及其 `/2` 变体                            | 提供给模型的工具                                    |
-| 准入               | `HostedWorkspaceToolTurn.executeNative` 中的 `prepareRequests`                             | 按工具给出拒绝文案，逐批次处理，不消耗 Runtime 工作 |
-| 审批               | `hosted-tool-approval.ts` 中的 `hostedApprovalAsks`                                        | 按模式预先批准                                      |
-| Action 预览        | 本侧的 `HOSTED_INPUT_PREVIEW_TOOLS` 与 Java 侧 `ManagedActionService` 中的 `PREVIEW_TOOLS` | 哪些审批携带调用输入                                |
-| Broker             | `POST /executions:*`（Java `RuntimeBrokerService`）                                        | 拒绝不是 Worker 已知工具的调用                      |
-| Worker             | `managed-runtime-tool-executor.ts` 中的 `ADMITTED_TOOL_NAMES` 与 `createManagedToolSet`    | 真正执行的允许列表                                  |
-| Worker（provider） | `managed-runtime-provider-worker.ts` 中的 `ManagedRuntimeProviderWorker.createRuntime`     | 绑定 Workspace 的会话的每会话工具集                 |
+| 层次               | 位置                                                                                                              | 现状职责                                            |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| 声明列表           | `HOSTED_WORKSPACE_FILE_TOOLS`、`HOSTED_WORKSPACE_SHELL_TOOLS`、`HOSTED_GLOB_TOOL`，每回合在 `declarations()` 组合 | 提供给模型的工具                                    |
+| 准入               | `HostedWorkspaceToolTurn.executeNative` 中的 `prepareRequests`                                                    | 按工具给出拒绝文案，逐批次处理，不消耗 Runtime 工作 |
+| 审批               | `hosted-tool-approval.ts` 中的 `hostedApprovalAsks`                                                               | 按模式预先批准                                      |
+| Action 预览        | 本侧的 `HOSTED_INPUT_PREVIEW_TOOLS` 与 Java 侧 `ManagedActionService` 中的 `PREVIEW_TOOLS`                        | 哪些审批携带调用输入                                |
+| Broker             | `POST /executions:*`（Java `RuntimeBrokerService`）                                                               | 拒绝不是 Worker 已知工具的调用                      |
+| Worker             | `managed-runtime-tool-executor.ts` 中的 `ADMITTED_TOOL_NAMES` 与 `createManagedToolSet`                           | 真正执行的允许列表                                  |
+| Worker（provider） | `managed-runtime-provider-worker.ts` 中的 `ManagedRuntimeProviderWorker.createRuntime`                            | 绑定 Workspace 的会话的每会话工具集                 |
 
-当前有两个 profile：`/1`（`files`、`shell`）与 `/2`（各自加上 `glob`）。
+当前词汇是 `files/1`、`files/2`（另加 `glob`）、统一的 `shell/1`（自身声明
+`glob`）、`team-lead/1` 与 `read/1`。每回合在 `declarations()` 里由扁平常量与
+profile 谓词组合出工具列表，不存在按 profile 的声明数组。
 profile 名称随 Session 定义持久化，加载时改用其他 profile 会以
 `409 hosted_tool_profile_conflict` 拒绝（`hosted-harness-session.ts` 中的
 `hostedWorkspaceProfileConflictRefusal`）。因此新工具不能加宽已有 profile：
@@ -46,7 +48,8 @@ profile 名称随 Session 定义持久化，加载时改用其他 profile 会以
 - `hosted-workspace-files/3` —— `files/2` 的全部声明（`read_file`、
   `write_file`、`edit`、`web_fetch`、`glob`）再加 `todo_write`
 
-`files/3` 复用 `files/2` 的声明数组并追加一个新声明，因此既有声明保持逐字节一致。
+`files/3` 在 `files/2` 已有的组合上追加一个由谓词控制的声明
+（`HOSTED_TODO_WRITE_TOOL`），不改动任何既有声明常量。
 
 不存在 `hosted-workspace-shell/3`。先于本改动合并的 `#15330` 把 Shell 统一到
 `hosted-workspace-shell/1`、移除了 `/2`，并让 `AgentDefinitionCompiler` 拒绝
@@ -89,12 +92,23 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
    `status` 为三种状态之一，可选的 `blockedBy` 为 id 数组。精确规则仍留在核心
    工具中；准入只校验把畸形调用挡在持久化 Runtime 往返之外所必需的部分。
 8. **plan 模式不变。** `todo_write` 会写入，因此不加入公开 plan 模式的读取集合。
-   `/3` 会话目前也无法进入公开 plan 模式：构造函数只接受 `files/1`、`shell/1`
-   与 `shell/2`，所以本变更没有加入构建无法到达的 plan 分支。
+   `/3` 会话目前也无法进入公开 plan 模式：`hosted-workspace-tool-turn.ts` 与
+   `hosted-harness-session.ts` 的准入名单只列 `files/1` 与 `shell/1`（且 `#15330`
+   已移除 `shell/2`），所以本变更没有加入构建无法到达的 plan 分支。
 9. **团队看板仍是团队级面板。** hosted profile 已声明 `task_list`、
    `task_create` 与 `task_update`，它们属于团队作用域并由 lead 读取，不是单会话
    计划面，因此不满足本需求。固定到 `/3` 的团队成员会同时获得两者；看板优先，
    `todo_write` 是该成员当前轮自己的临时计划，lead 不会读到。
+
+### 已随本次改动交付
+
+- **`files/3` 的 Java profile 判定。** 只改 TypeScript 会让控制面与 Harness
+  判断不一致。`supportsApprovalSelection` 接纳 `files/3`，`approval:query` 读取点
+  返回它的选择，`ma_turn` 插入与轮次快照读取都点名它。按 `#15330`，
+  `isPublicShell` 保持只认 `/1`，Plan 判定沿用既有的 `FILES || isPublicShell`
+  形式——它本就把 `files/3` 排除在外，因此 Plan mode 在 `files/3` 上仍不可用，
+  不需要新判定。`lifecycleProtocol` 对 `files/3` 返回 0，与它对 `files/2` 的
+  返回值相同；两者都不发起 Workspace 生命周期调用。
 
 ### 本设计不覆盖的后续工作
 
@@ -102,13 +116,6 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
   与目标地址。本设计不复述也不扩展它。
 - **任务清单的稳定会话身份**，让计划跨轮存活。需要 Harness 向 Worker 传递稳定的
   Hosted Session id，并决定跨 Runtime 实例时清单存在哪里。
-- **`files/3` 的 Java profile 判定。** 已随本次改动交付：只改 TypeScript 会让
-  控制面与 Harness 判断不一致。`supportsApprovalSelection` 接纳 `files/3`，
-  `ma_turn` 插入与轮次快照读取都点名它。按 `#15330`，`isPublicShell` 保持只认
-  `/1`，Plan 判定沿用既有的 `FILES || isPublicShell` 形式——它本就把 `files/3`
-  排除在外，因此 Plan mode 在 `files/3` 上仍不可用，不需要新判定。
-  `lifecycleProtocol` 对 `files/3` 返回 0，与它对 `files/2` 的返回值相同；
-  两者都不发起 Workspace 生命周期调用。
 - **把任务清单作为持久 Session 记录投影到 Web Shell 或其他客户端。**
 - **在生产 connector 中启用 `/3`。** 哪个部署固定 `/3` 属于上线决策，与 `/2`
   相同。它要求先升级所有 Worker 并排空旧实例，正如 `/2` 的 ledger 条目所记录：
@@ -119,15 +126,20 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
 
 ## 涉及文件
 
-| 区域                 | 文件                                                                                                               |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Profile              | `packages/cli/src/serve/hosted-workspace-profiles.ts`                                                              |
-| 声明、准入、预览集合 | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                                             |
-| 参数校验             | `packages/cli/src/serve/hosted-workspace-tool-input.ts`                                                            |
-| 审批                 | `packages/cli/src/serve/hosted-tool-approval.ts`                                                                   |
-| Worker 准入与工具集  | `packages/cli/src/serve/managed-runtime-tool-executor.ts`                                                          |
-| Java action 预览     | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedActionService.java` |
-| 测试                 | 同目录的 `*.test.ts`，以及 Java 预览集合的测试                                                                     |
+| 区域                               | 文件                                                                                                                  |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Profile                            | `packages/cli/src/serve/hosted-workspace-profiles.ts`                                                                 |
+| 声明、准入、预览集合               | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                                                |
+| 参数校验                           | `packages/cli/src/serve/hosted-workspace-tool-input.ts`                                                               |
+| 审批                               | `packages/cli/src/serve/hosted-tool-approval.ts`                                                                      |
+| 会话接线（live、准入、selectable） | `packages/cli/src/serve/hosted-harness-session.ts`                                                                    |
+| 原生工具 continuation 集合         | `packages/cli/src/serve/hosted-approval-continuation.ts`                                                              |
+| Worker 准入与工具集                | `packages/cli/src/serve/managed-runtime-tool-executor.ts`                                                             |
+| Java action 预览                   | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedActionService.java`    |
+| Java profile 判定                  | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/workspace/WorkspaceToolProfiles.java` |
+| Java 轮次持久化与快照              | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedAgentStore.java`   |
+| Java `approval:query` 读取点       | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java` |
+| 测试                               | 同目录的 `*.test.ts`，以及 Java 的预览、审批与 profile 测试                                                           |
 
 不改 `packages/core` 的 TypeScript。不改 Java Broker：Broker 接收 Worker 已知的
 任何工具名对应的 payload，`managed-runtime-tools/1` 保持身份不变。
@@ -138,8 +150,10 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
    `glob`）声明 `todo_write`；任何 Shell profile 都不声明 `todo_write`。
 2. `/1` 或 `/2` 会话仍以既有的 `Hosted Workspace profile refused a tool call.`
    错误拒绝 `todo_write`，且不消耗 Runtime 工作。
-3. 畸形的 `todo_write` 参数得到模型可纠正的拒绝，作为工具结果提交，不获取、
-   不预留、不派发。
+3. 准入范围内的畸形 `todo_write` 参数——条目形状、未支持键、`id`/`content`/
+   `status`/`blockedBy` 上限、条目/依赖/字节上限——在获取 Runtime 之前得到
+   模型可纠正的拒绝。列表级规则（重复 id、重复 `blockedBy` 引用、未知或自依赖、
+   依赖环）仍由 core 负责，在派发之后拒绝，与标准 5 一致。
 4. 在 `default` 与 `auto-edit` 下，`todo_write` 不经审批请求即执行。
 5. Worker 准入 `todo_write`，保留会话内调用的清单，并拒绝依赖环；`web_fetch`
    也和 `main` 一样被准入。

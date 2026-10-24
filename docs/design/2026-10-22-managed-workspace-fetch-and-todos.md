@@ -27,17 +27,21 @@ The tool surface of a Workspace Session is declared and admitted in one place
 Runtime Broker and its worker, and partially re-validated by the Java control
 plane.
 
-| Layer             | Where                                                                                  | Role today                                                        |
-| ----------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Declaration list  | `HOSTED_WORKSPACE_FILE_TOOLS`, `..._SHELL_TOOLS`, and their `/2` variants              | What the model is offered                                         |
-| Admission         | `prepareRequests` in `HostedWorkspaceToolTurn.executeNative`                           | Refusal text per tool, batch by batch, with no Runtime work spent |
-| Approval          | `hostedApprovalAsks` in `hosted-tool-approval.ts`                                      | Per-mode pre-approval                                             |
-| Action preview    | `HOSTED_INPUT_PREVIEW_TOOLS` here and `PREVIEW_TOOLS` in `ManagedActionService` (Java) | Which approvals carry their input                                 |
-| Broker            | `POST /executions:*` (Java `RuntimeBrokerService`)                                     | Rejects a call that is not a Worker-known tool                    |
-| Worker            | `ADMITTED_TOOL_NAMES` and `createManagedToolSet` in `managed-runtime-tool-executor.ts` | The allow-list that runs                                          |
-| Worker (provider) | `ManagedRuntimeProviderWorker.createRuntime` in `managed-runtime-provider-worker.ts`   | The per-Session tool set for Workspace-bound sessions             |
+| Layer             | Where                                                                                                                    | Role today                                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| Declaration list  | `HOSTED_WORKSPACE_FILE_TOOLS`, `HOSTED_WORKSPACE_SHELL_TOOLS`, `HOSTED_GLOB_TOOL`, composed per turn in `declarations()` | What the model is offered                                         |
+| Admission         | `prepareRequests` in `HostedWorkspaceToolTurn.executeNative`                                                             | Refusal text per tool, batch by batch, with no Runtime work spent |
+| Approval          | `hostedApprovalAsks` in `hosted-tool-approval.ts`                                                                        | Per-mode pre-approval                                             |
+| Action preview    | `HOSTED_INPUT_PREVIEW_TOOLS` here and `PREVIEW_TOOLS` in `ManagedActionService` (Java)                                   | Which approvals carry their input                                 |
+| Broker            | `POST /executions:*` (Java `RuntimeBrokerService`)                                                                       | Rejects a call that is not a Worker-known tool                    |
+| Worker            | `ADMITTED_TOOL_NAMES` and `createManagedToolSet` in `managed-runtime-tool-executor.ts`                                   | The allow-list that runs                                          |
+| Worker (provider) | `ManagedRuntimeProviderWorker.createRuntime` in `managed-runtime-provider-worker.ts`                                     | The per-Session tool set for Workspace-bound sessions             |
 
-Two profiles are current: `/1` (`files`, `shell`) and `/2` (each plus `glob`).
+The current vocabulary is `files/1`, `files/2` (plus `glob`), the unified
+`shell/1` (itself declaring `glob`), `team-lead/1` and `read/1`. Each turn
+composes its list in `declarations()` from the flat constants plus the profile
+predicates; there is no per-profile declaration array.
+
 A profile name is persisted with the Session definition, and a load that names
 a different profile is refused with `409 hosted_tool_profile_conflict`
 (`hostedWorkspaceProfileConflictRefusal` in `hosted-harness-session.ts`). So a
@@ -51,8 +55,9 @@ Add `todo_write` through one new profile:
 - `hosted-workspace-files/3` — everything `files/2` declares (`read_file`,
   `write_file`, `edit`, `web_fetch`, `glob`) plus `todo_write`
 
-`files/3` borrows its tool array from the `files/2` declarations and appends
-one new declaration, so the existing declarations stay byte-identical.
+`files/3` adds one predicate-gated declaration (`HOSTED_TODO_WRITE_TOOL`) to
+the composition `files/2` already takes, so no existing declaration constant
+is edited.
 
 There is no `hosted-workspace-shell/3`. `#15330`, merged before this change
 landed, unified Shell under `hosted-workspace-shell/1`, removed `/2`, and made
@@ -114,14 +119,28 @@ read profile belongs to a snapshot child that must not write.
    to keep a malformed call out of a durable Runtime round trip.
 8. **Plan mode is unchanged.** `todo_write` writes, so it does not join the
    public plan-mode read set. `/3` Sessions also cannot enter public plan mode
-   today: the constructor admits only `files/1`, `shell/1` and `shell/2`, so
-   this change adds no plan-mode branch that the build cannot reach.
+   today: the admission lists in `hosted-workspace-tool-turn.ts` and
+   `hosted-harness-session.ts` name `files/1` and `shell/1` only (and `#15330`
+   removed `shell/2`), so this change adds no plan-mode branch that the build
+   cannot reach.
 9. **The team board stays the team surface.** The hosted profiles already
    declare `task_list`, `task_create` and `task_update`, which are scoped to a
    team and read by its lead. They are not a single-session plan surface, so
    they do not satisfy this request. A team member pinned to `/3` is offered
    both; the board takes precedence, and `todo_write` is that member's own
    scratch plan for the current turn, which its lead never reads.
+
+### Delivered with this change
+
+- **Java profile predicates for `files/3`.** A TypeScript-only profile would
+  leave the control plane disagreeing with the Harness.
+  `supportsApprovalSelection` admits `files/3`, the `approval:query` reader
+  returns its selection, and the `ma_turn` insert and the turn-snapshot reader
+  name it. `isPublicShell` stays `/1`-only per `#15330`, and the Plan gates keep
+  their existing `FILES || isPublicShell` form, which already excludes
+  `files/3`, so Plan mode stays unavailable there without a new predicate.
+  `lifecycleProtocol` returns 0 for `files/3`, as it does for `files/2`;
+  neither version issues Workspace lifecycle calls.
 
 ### Follow-ups this design does not cover
 
@@ -132,15 +151,6 @@ read profile belongs to a snapshot child that must not write.
   turn. This needs the Harness to pass a stable hosted Session id to the
   Worker, and a decision on where that list is stored across Runtime
   instances.
-- **Java profile predicates for `files/3`.** Delivered with this change,
-  because a TypeScript-only profile would leave the control plane disagreeing
-  with the Harness. `supportsApprovalSelection` admits `files/3`, and the
-  `ma_turn` insert and the turn-snapshot reader name it. `isPublicShell` stays
-  `/1`-only per `#15330`, and the Plan gates keep their existing
-  `FILES || isPublicShell` form, which already excludes `files/3`, so Plan mode
-  stays unavailable there without a new predicate. `lifecycleProtocol` returns
-  0 for `files/3`, as it does for `files/2`; neither version issues Workspace
-  lifecycle calls.
 - **Projecting the task list to Web Shell or another client** as a durable
   Session record.
 - **Enabling `/3` in the production connector.** Which deployment pins `/3`
@@ -154,15 +164,20 @@ read profile belongs to a snapshot child that must not write.
 
 ## Files affected
 
-| Area                                | File                                                                                                               |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Profiles                            | `packages/cli/src/serve/hosted-workspace-profiles.ts`                                                              |
-| Declaration, admission, preview set | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                                             |
-| Argument validation                 | `packages/cli/src/serve/hosted-workspace-tool-input.ts`                                                            |
-| Approval                            | `packages/cli/src/serve/hosted-tool-approval.ts`                                                                   |
-| Worker admission and tool set       | `packages/cli/src/serve/managed-runtime-tool-executor.ts`                                                          |
-| Java action preview                 | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedActionService.java` |
-| Tests                               | Collocated `*.test.ts` files, and the Java test for the preview set                                                |
+| Area                                         | File                                                                                                                  |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Profiles                                     | `packages/cli/src/serve/hosted-workspace-profiles.ts`                                                                 |
+| Declaration, admission, preview set          | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                                                |
+| Argument validation                          | `packages/cli/src/serve/hosted-workspace-tool-input.ts`                                                               |
+| Approval                                     | `packages/cli/src/serve/hosted-tool-approval.ts`                                                                      |
+| Session wiring (live, admission, selectable) | `packages/cli/src/serve/hosted-harness-session.ts`                                                                    |
+| Native-tool continuation set                 | `packages/cli/src/serve/hosted-approval-continuation.ts`                                                              |
+| Worker admission and tool set                | `packages/cli/src/serve/managed-runtime-tool-executor.ts`                                                             |
+| Java action preview                          | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedActionService.java`    |
+| Java profile predicates                      | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/workspace/WorkspaceToolProfiles.java` |
+| Java turn persistence and snapshot           | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedAgentStore.java`   |
+| Java `approval:query` reader                 | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java` |
+| Tests                                        | Collocated `*.test.ts` files, and the Java tests for preview, approval and profiles                                   |
 
 No TypeScript change to `packages/core`. No Java Broker change: the Broker
 admits a payload for any tool name the Worker knows, and
@@ -176,8 +191,12 @@ admits a payload for any tool name the Worker knows, and
 2. A `/1` or `/2` Session still refuses `todo_write` with the existing
    `Hosted Workspace profile refused a tool call.` error and spends no Runtime
    work.
-3. A malformed `todo_write` argument earns a model-correctable refusal,
-   committed as a tool result, without acquisition, reservation or dispatch.
+3. A malformed `todo_write` argument in admission's scope — a bad item shape,
+   an unsupported key, the `id`/`content`/`status`/`blockedBy` limits, or the
+   item/dependency/byte caps — earns a model-correctable refusal before the
+   Runtime is acquired. List-level rules (duplicate ids, duplicate `blockedBy`
+   references, unknown or self dependencies, cycles) stay with core and are
+   refused after dispatch, as criterion 5 states.
 4. Under `default` and `auto-edit`, `todo_write` runs without an approval
    request.
 5. The Worker admits `todo_write`, keeps the list for the Session's calls, and
