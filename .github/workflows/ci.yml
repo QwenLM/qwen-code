@@ -889,13 +889,20 @@ jobs:
           reporter: 'java-junit'
           fail-on-error: 'false'
 
-      - name: 'Upload Test Results Artifact (for forks)'
+      - name: 'Upload Test Results Artifact'
         if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}
+        # Advisory like the publisher above: a transient artifact-service
+        # failure must not turn a green suite red. `always()` also fires on a
+        # run cancelled mid-suite, so a partial report can be retained under
+        # the complete run's name.
+        continue-on-error: true
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'test-results-fork-22.x-ubuntu-latest'
+          name: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'test-results-fork-22.x-ubuntu-latest' || 'test-results-22.x-ubuntu-latest' }}"
           path: 'packages/*/junit.xml'
+          if-no-files-found: 'ignore'
+          retention-days: 7
 
       # Push only: that is the one lane where QWEN_CI_COVERAGE turns
       # collection on, so a pull-request run has nothing to upload.
@@ -1471,15 +1478,19 @@ jobs:
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
+    # Gate on the classifier's own profile output instead of the copy `test`
+    # re-derives: it is the same value (the classifier already forces an
+    # unknown one to `full`), and dropping the `test` edge lets this
+    # 35-minute lane run beside Test instead of behind it. `|| 'full'`
+    # extends that fail-safe to a classifier that emitted nothing at all.
     needs:
       - 'classify_pr'
-      - 'test'
     if: |-
       ${{
         !cancelled() &&
         (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
-        needs.test.outputs.ci_profile == 'full'
+        (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
       }}
     # Keep the classifier's trust and hosted overrides, but use ARM64 for
     # this lane independently of the ordinary Linux CI fleet. The history
