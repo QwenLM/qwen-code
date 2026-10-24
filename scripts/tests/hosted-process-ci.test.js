@@ -241,7 +241,7 @@ describe('Hosted real-process gates', () => {
       step: 'Hosted process suite',
       after: /^Run tests and generate reports$/,
       condition:
-        "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}",
+        "${{ !cancelled() && steps.install.outcome == 'success' && needs.classify_pr.outputs.skip_ci != 'true' }}",
       run: windowsRun,
       minutes: 10,
     },
@@ -260,16 +260,34 @@ describe('Hosted real-process gates', () => {
     },
   );
 
+  it('gates the Windows Hosted suite on a successful install', () => {
+    const steps = ci.jobs.test_windows.steps;
+    // An unknown step id reads as '' and silently disables the condition
+    // above, so the suite would never run again.
+    expect(steps.find((step) => step.name === 'Install dependencies').id).toBe(
+      'install',
+    );
+  });
+
   it('keeps Hosted MySQL separate from the non-Hosted MySQL slice and fails on missing tests', () => {
     const job = java.jobs['hosted-harness-mysql'];
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
     expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
+    // The non-Hosted slice runs once per engine, so the Hosted lane stays the
+    // only place Hosted*IT executes while MariaDB keeps a real leg (#14971).
+    const nonHostedLane = java.jobs['mysql-integration'];
+    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
+      expect.objectContaining({ image: 'mysql:8.4.6' }),
+    );
+    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
+      expect.objectContaining({ image: 'mariadb:10.11.18' }),
+    );
     expect(
-      java.jobs['mysql-integration'].steps.find(
-        (step) => step.name === 'Start MySQL without native AIO',
+      nonHostedLane.steps.find(
+        (step) => step.name === 'Start the database without native AIO',
       ).run,
-    ).toContain('mysql:8.4.6 --innodb-use-native-aio=0');
+    ).toContain('"${DATABASE_IMAGE}" "${engine_args[@]}"');
     // Keep daily coverage and run the same suite before Java publication.
     expect(Object.keys(java.on).sort()).toEqual([
       'schedule',
@@ -354,8 +372,9 @@ describe('Hosted real-process gates', () => {
     );
     expect(mysqlRun.run).toContain('-Pmysql-integration');
     expect(mysqlRun.run).not.toContain('-Dit.test');
-    // The H2 unit suite runs once, in the non-Hosted MySQL job: the Hosted job's three
-    // Maven steps would each repeat it, and the non-Hosted MySQL job must keep it.
+    // The H2 unit suite belongs to the non-Hosted profile: the Hosted job's
+    // three Maven steps would each repeat it. Both engine legs run it, so this
+    // lane pays that suite twice — the accepted cost of keeping MariaDB covered.
     const profile = (id) =>
       pom.split(`<id>${id}</id>`)[1].split('</profile>')[0];
     const skipsUnits =
@@ -368,6 +387,37 @@ describe('Hosted real-process gates', () => {
       expect(profile(id), id).toMatch(skipsUnits);
     }
     expect(profile('mysql-integration')).not.toContain('maven-surefire-plugin');
+    const mysqlProfile = profile('mysql-integration');
+    expect(mysqlProfile).toContain(
+      '<mysql.integration.forks>1</mysql.integration.forks>',
+    );
+    const mysqlFailsafe = mysqlProfile
+      .split('<artifactId>maven-failsafe-plugin</artifactId>')[1]
+      .split('</plugin>')[0];
+    expect(mysqlFailsafe).toContain(
+      '<forkCount>${mysql.integration.forks}</forkCount>',
+    );
+    expect(mysqlFailsafe).toContain('<reuseForks>true</reuseForks>');
+    expect(mysqlFailsafe).toContain(
+      'junit.jupiter.execution.parallel.enabled = false',
+    );
+    const routingProperties = mysqlFailsafe
+      .split('<systemPropertyVariables>')[1]
+      .split('</systemPropertyVariables>')[0];
+    expect(routingProperties).toContain(
+      '<qwen.mysql.forkCount>${mysql.integration.forks}</qwen.mysql.forkCount>',
+    );
+    expect(routingProperties).toContain(
+      '<qwen.mysql.forkNumber>0${surefire.forkNumber}</qwen.mysql.forkNumber>',
+    );
+    expect(pom.match(/<qwen\.mysql\.forkCount>/g)).toHaveLength(1);
+    expect(pom.match(/<qwen\.mysql\.forkNumber>/g)).toHaveLength(1);
+    expect(
+      read(
+        'packages/managed-agent-server/src/test/resources/META-INF/services/org.junit.platform.launcher.LauncherSessionListener',
+      ).trim(),
+    ).toBe('com.alibaba.qwen.code.managedagent.MySqlForkRoutingListener');
+    expect(mysqlRun.run).not.toMatch(/-DforkCount\b/);
     // The step stages the SDK with -DskipTests before the MySQL run; only
     // the integration command itself must keep its tests.
     const mysqlVerify = mysqlRun.run.slice(
@@ -530,9 +580,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (197 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 287, 300],
+    ['hosted-harness-mysql', 291, 304],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -776,13 +826,22 @@ describe('Hosted real-process gates', () => {
       // to 10983 and the step to 194 minutes; the FG13a registration-settle
       // ack-loss cell adds 150 s, moving the fork to 11133 and the step to
       // 196 minutes; the FG11e stream cells add 42 s (2x their measured
-      // 14.1 s and 6.1 s), moving the fork to 11175 and the step to 197
-      // minutes):
+      // 14.1 s and 6.1 s), moving the fork to 11175; the FG11d cancel-retry cell adds 12 s (2x its
+      // measured 5.8 s), moving the fork to 11187; the FG11d second-fire refusal
+      // cell adds 25 s (2x its measured 12.3 s), moving the fork to 11212; the FG11d
+      // cancel-isolation cell adds 11 s (2x its measured 5.1 s), moving the fork to
+      // 11223 and the step to 198 minutes; the FG11d queue-one cell adds 13 s
+      // (2x its measured 6.5 s), moving the fork to 11236 and leaving the step at
+      // 198 minutes; the FG12e Runtime connection replacement cell adds 28 s
+      // (2x its measured 13.8 s), moving the fork to 11264 and leaving the step
+      // at 198 minutes). The pool fixture provisionally adds 180 s (its
+      // 120 s method ceiling plus 60 s for process/context cleanup), moving
+      // the fork to 11444 and the step to 201 minutes until CI measures it:
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11175);
+        expect(forkSeconds).toBe(11444);
       }
     },
   );
@@ -873,13 +932,20 @@ describe('Hosted real-process gates', () => {
   // ack-loss cell adds 150s, so it becomes 10233s; the FG13a dispatch
   // ack-loss cell adds 150s, so it becomes 10383s; the FG13a registration-settle
   // ack-loss cell adds 150s, so it becomes 10533s; the FG11e stream cells
-  // add 42s (2x their measured 14.1s and 6.1s), so it becomes 10575s. The
+  // add 42s (2x their measured 14.1s and 6.1s), so it becomes 10575s; the cancel-retry cell adds 12s (2x its measured
+  // 5.8s), so it becomes 10587s; the second-fire refusal cell adds 25s (2x its
+  // measured 12.3s), so it becomes 10612s; the cancel-isolation cell adds 11s (2x its measured
+  // 5.1s), so it becomes 10623s; the queue-one cell adds 13s (2x its measured
+  // 6.5s), so it becomes 10636s; the FG12e Runtime connection replacement cell
+  // adds 28s (2x its measured 13.8s), so it becomes 10664s. The pool fixture
+  // provisionally reserves 180s (its 120s method ceiling plus 60s for
+  // process/context cleanup), so it becomes 10844s until CI measures it. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10575;
+  const hostedForkHealthySeconds = 10844;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -948,6 +1014,7 @@ describe('Hosted real-process gates', () => {
       'HostedEventStreamLivenessIT',
       'HostedExtensionsIT',
       'HostedHarnessMySqlIT',
+      'HostedHarnessPoolMySqlIT',
       'HostedHookCancelFaultGatesIT',
       'HostedHookFaultGatesIT',
       'HostedHookMessageDisplayReloadIT',

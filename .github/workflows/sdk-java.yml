@@ -38,15 +38,24 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    # One per-host lock wait plus the locked Maven work it guards. A
-    # hold measures 925 s (the sdk-java suite plus the managed-agent H2
-    # suite), so the 5400-second wait covers about 5.8 of them; the
-    # ticketed queue in .github/scripts/sdk-java-lock.sh makes that wait
-    # deterministic instead of a wake-up race against sibling holds.
+    # One per-host lock wait plus the locked Maven work it guards. The test
+    # lane runs its whole suite under the lock, so a waiter can queue behind
+    # several sibling holds. The 2026-10-22 run 39754359013 burned the then
+    # 5400-second budget behind the MariaDB lane's verify hold — the shape
+    # #15128 removed (qwen-code#15243) — and the 9600-second wait is headroom
+    # for about ten chained test-lane holds, sized from the hold length
+    # rather than an observed chain (the design doc's Goals restates this);
+    # no constant budget bounds the queue itself (#14566, #15031). The
+    # ticketed queue in .github/scripts/sdk-java-lock.sh serves the fast
+    # class first: a fast-tier leg waits for the running hold, at most one
+    # parked full-tier head and older fast-class tickets, overtaking only
+    # full-tier tickets younger than SDK_JAVA_LOCK_PROMOTE_AFTER (under a
+    # longer hold the queue is plain sequence order), while a full-tier leg
+    # (the default) keeps its FIFO position among the other rank-1 tickets.
     # The ceiling is that wait plus one hold plus ~11 minutes of uncapped
-    # setup and margin: 150. Hosted lanes never take the lock and inherit
+    # setup and margin: 200. Hosted lanes never take the lock and inherit
     # this ceiling as a bound, not as an expected duration.
-    timeout-minutes: 150
+    timeout-minutes: 200
     strategy:
       fail-fast: false
       matrix:
@@ -234,11 +243,12 @@ jobs:
           MATRIX_JAVA: '${{ matrix.java }}'
           TIER: '${{ inputs.tier }}'
         run: |-
-          # Ticketed queue, not a bare flock: only the oldest live ticket
-          # retries the lock — see the sourced helper.
+          # Ticketed queue, not a bare flock: only the head ticket — lowest
+          # class, then oldest — retries the lock, and the fast class is
+          # served first — see the sourced helper.
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            sdk_java_lock_acquire 5400
+            sdk_java_lock_acquire 9600 "${TIER}"
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
@@ -246,8 +256,8 @@ jobs:
             # before Maven and wedging the release.
             mkdir -p "${HOME}/.cache/qwen-code-ci"
             exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-            if ! flock --wait 5400 9; then
-              echo "::error::sdk-java host lock not acquired within 90 minutes"
+            if ! flock --wait 9600 9; then
+              echo "::error::sdk-java host lock not acquired within 160 minutes"
               exit 1
             fi
           fi
@@ -440,24 +450,48 @@ jobs:
         run: 'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode'
 
   mysql-integration:
-    name: 'Runtime Broker and Managed Agent MySQL / Java 21'
+    name: 'Runtime Broker and Managed Agent ${{ matrix.label }} / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     # Pool routing per the flyway job (#13245): hosted queue starvation fails
     # a zero-step job outright (#13623), the pool does not. The job is
-    # pool-safe: the database is a per-job container on a random host
-    # port, and every Maven run holds the test job's per-host sdk-java lock.
+    # pool-safe: the database is a per-leg container on a random host port,
+    # both Maven runs use a job-local repository, and only the shared cache
+    # write-back holds the test job's per-host sdk-java lock.
+    # Both legs run the same non-Hosted *IT family, as before #14936 removed
+    # the MariaDB service. The MariaDB leg is what keeps the published
+    # MariaDB-only V12 repair (RTRIM, error 1901) and the schema catalog's
+    # MariaDB branches falsifiable in CI (#14971).
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # On the pool this job takes the per-host sdk-java lock once, around the
-    # single step that runs both Maven commands. Run 39353663670's verify
-    # acquisition waited the full 90 minutes after the install step released
-    # the lock, so a per-step lock let this job lose its place in the host
-    # queue between installing and verifying. The ceiling absorbs that wait,
-    # the ~60 minutes of measured Maven work, and 30 minutes of uncapped
-    # setup plus 20 minutes of margin: 200. Hosted lanes never take the lock
-    # and inherit this ceiling as a bound, not as an expected duration.
-    timeout-minutes: 200
+    strategy:
+      # One engine's failure must not cancel the other leg's evidence.
+      fail-fast: false
+      matrix:
+        include:
+          - database: 'mysql'
+            label: 'MySQL'
+            image: 'mysql:8.4.6'
+            client: 'mysql'
+            engine_args: '--innodb-use-native-aio=0 --skip-log-bin'
+          - database: 'mariadb'
+            label: 'MariaDB'
+            image: 'mariadb:10.11.18'
+            client: 'mariadb'
+            engine_args: '--innodb-use-native-aio=0'
+    # On the pool this job takes the per-host sdk-java lock only for its
+    # shared Maven cache write-back: both Maven runs resolve from a job-local
+    # repository, so holding the lock across the whole integration suite
+    # serialized the fast tier behind a multi-hour hold (run 39628985638 held
+    # it 15:54-18:57 while run 39627609266's fast-tier job burned its full
+    # 90-minute wait). The ceiling absorbs that wait, the ~3-hour Maven run,
+    # the 5-minute write-back backstop and 30 minutes of uncapped setup: 310.
+    # Hosted lanes never take the lock and inherit this ceiling as a bound,
+    # not as an expected duration.
+    timeout-minutes: 310
     env:
-      MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
+      MYSQL_CONTAINER: 'qwen-code-sdk-java-${{ matrix.database }}-${{ github.run_id }}-${{ github.run_attempt }}'
+      DATABASE_IMAGE: '${{ matrix.image }}'
+      DATABASE_CLIENT: '${{ matrix.client }}'
+      DATABASE_ENGINE_ARGS: '${{ matrix.engine_args }}'
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -604,43 +638,65 @@ jobs:
       # Pool hosts share one host-wide fs.aio-nr budget across concurrent
       # jobs, and a mysqld that reserves native AIO contexts can exhaust it
       # and fail to boot with `io_setup() failed with EAGAIN` (#14416).
-      # Service containers cannot take a command, so MySQL starts here
-      # instead, with native AIO disabled and its datadir on tmpfs. MySQL 8
-      # also binary-logs by default into that uncapped tmpfs, and this
+      # Service containers cannot take a command, so the database starts here
+      # instead, with native AIO disabled and its datadir on tmpfs. The MySQL
+      # leg also binary-logs by default into that uncapped tmpfs, and this
       # disposable container has no replica and nothing reads the log.
-      # The only schema is the one the JDBC URL creates on first connect.
-      - name: 'Start MySQL without native AIO'
+      # Each fork needs its own instance: lock tests assert server-wide
+      # InnoDB deadlock counters, which separate schemas cannot isolate.
+      - name: 'Start the database without native AIO'
         shell: 'bash'
         run: |-
           set -euo pipefail
-          docker run --detach --name "${MYSQL_CONTAINER}" \
-            --publish '127.0.0.1::3306' \
-            --mount type=tmpfs,destination=/var/lib/mysql \
-            --env MYSQL_ROOT_PASSWORD='runtime-broker' \
-            mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin
-          for attempt in {1..60}; do
-            if docker exec "${MYSQL_CONTAINER}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent >/dev/null 2>&1; then
-              break
+          engine_args=()
+          if [[ -n "${DATABASE_ENGINE_ARGS}" ]]; then
+            read -r -a engine_args <<< "${DATABASE_ENGINE_ARGS}"
+          fi
+          for fork in 1 2; do
+            container="${MYSQL_CONTAINER}-${fork}"
+            docker run --detach --name "${container}" \
+              --publish '127.0.0.1::3306' \
+              --mount type=tmpfs,destination=/var/lib/mysql \
+              --env MYSQL_ROOT_PASSWORD='runtime-broker' \
+              "${DATABASE_IMAGE}" "${engine_args[@]}"
+            # MariaDB ships healthcheck.sh; the MySQL image does not, so each
+            # leg waits on the readiness signal its own image provides.
+            if [[ "${DATABASE_CLIENT}" == 'mariadb' ]]; then
+              health=(docker exec "${container}" healthcheck.sh --connect --innodb_initialized)
+            else
+              health=(docker exec "${container}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent)
             fi
-            if ! docker inspect --format '{{.State.Running}}' "${MYSQL_CONTAINER}" | grep -qx true; then
-              docker logs "${MYSQL_CONTAINER}" || true
-              exit 1
-            fi
-            if [[ "${attempt}" == '60' ]]; then
-              docker logs "${MYSQL_CONTAINER}" || true
-              exit 1
-            fi
-            sleep 2
+            # A probe that is itself broken (image bump, renamed healthcheck.sh)
+            # is otherwise indistinguishable from a server still starting.
+            probe_out="${RUNNER_TEMP:-/tmp}/readiness-probe-${fork}.out"
+            for attempt in {1..60}; do
+              if "${health[@]}" >"${probe_out}" 2>&1; then
+                break
+              fi
+              if ! docker inspect --format '{{.State.Running}}' "${container}" | grep -qx true; then
+                docker logs "${container}" || true
+                echo "::error::${DATABASE_IMAGE} container stopped during startup; last ${DATABASE_CLIENT} readiness probe said: $(cat "${probe_out}")"
+                exit 1
+              fi
+              if [[ "${attempt}" == '60' ]]; then
+                docker logs "${container}" || true
+                echo "::error::${DATABASE_IMAGE} not ready after 60 probes; last ${DATABASE_CLIENT} readiness probe said: $(cat "${probe_out}")"
+                exit 1
+              fi
+              sleep 2
+            done
+            port="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "${container}")"
+            echo "MYSQL_PORT_${fork}=${port}" >> "${GITHUB_ENV}"
           done
-          MYSQL_PORT="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "${MYSQL_CONTAINER}")"
-          echo "MYSQL_PORT=${MYSQL_PORT}" >> "${GITHUB_ENV}"
-      - name: 'Configure MySQL packet budget for large-object tests'
+      - name: 'Configure the database packet budget for large-object tests'
         run: |-
           # Connector/J hex-encodes the 32 MiB LONGBLOB fixture into a ~67 MiB
           # query, so the budget must sit above it: the inventory's byte-limit
           # gate, not the server packet limit, is what the test exercises.
-          # Set this job's disposable container before its first JDBC connection.
-          docker exec "${MYSQL_CONTAINER}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
+          # Set both disposable containers before their first JDBC connections.
+          for fork in 1 2; do
+            docker exec "${MYSQL_CONTAINER}-${fork}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" '"${DATABASE_CLIENT}"' --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
+          done
       - name: 'Set up Node.js 22 (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -681,11 +737,33 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           set -o pipefail
-          # One acquisition spans both Maven runs: run 39353663670's verify
-          # step waited the full 90 minutes after the install step released
-          # the lock, so a per-step lock let this job lose its place in the
-          # host queue between installing and verifying. The ticketed queue
-          # in sdk-java-lock.sh makes that one wait FIFO instead of a
+          # Seed from the host-shared repo (cache-restored on hosted runners)
+          # so it and the egress proxy keep paying off for the job-local copy.
+          # The seed only reads the host cache and is best-effort, so it takes
+          # no lock and cannot delay the lane.
+          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          # Both Maven runs resolve from the job-local copy above, so they do
+          # not touch host-shared state and must not hold the per-host lock:
+          # a MySQL verify can run for hours under pool contention, and the
+          # fast tier's wait expires behind it (run 39627609266 waited
+          # 17:38-19:15, burning its then-90-minute budget, behind run
+          # 39628985638's integration hold).
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+          cd packages/managed-agent-server
+          # Keep mysql.url for release runs that check out an older tag.
+          mvn --batch-mode --no-transfer-progress -Pmysql-integration \
+            -Dmysql.integration.forks=2 \
+            -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.url.1="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.url.2="jdbc:mysql://127.0.0.1:${MYSQL_PORT_2}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
+          # Only the write-back mutates host-shared state, so only it takes
+          # the per-host lock. One acquisition spans the write-back: run
+          # 39353663670's verify step waited the full 90 minutes after the
+          # install step released the lock, so a per-step lock let this job
+          # lose its place in the host queue between installing and verifying.
+          # The ticketed queue in sdk-java-lock.sh orders that one wait (fast
+          # PR legs overtake it until it parks or is promoted) instead of a
           # wake-up race against sibling holds (qwen-code#14743).
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
@@ -694,7 +772,7 @@ jobs:
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
             # back to the bare lock this queue replaced rather than dying
-            # before Maven and wedging the release.
+            # before the write-back and wedging the release.
             mkdir -p "${HOME}/.cache/qwen-code-ci"
             exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
             if ! flock --wait 5400 9; then
@@ -702,32 +780,34 @@ jobs:
               exit 1
             fi
           fi
-          # Seed from the host-shared repo (cache-restored on hosted runners)
-          # so it and the egress proxy keep paying off for the job-local copy.
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
-          # The shell owns the lock; Maven children must not extend its lifetime.
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install 9>&-
-          cd packages/managed-agent-server
-          mvn --batch-mode --no-transfer-progress -Pmysql-integration \
-            -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
-            -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check 9>&-
-          # Close the cache loop inside the same lock: the one-way seed
-          # above alone does not recapture the Server dependency tree after
-          # a pom key rotation. The excludes name the two in-house
-          # fixed release coordinates rather than the whole com/alibaba
-          # group, so third-party artifacts under it (druid) still
-          # recapture into the host-shared ~/.m2. Best-effort like the
-          # seed: the warning arm keeps a copy failure from reddening the
-          # gate after mvn has already passed, and pipefail keeps a
-          # failing left-hand tar from being masked by the extractor.
+          # Close the cache loop inside that lock: the one-way seed above
+          # alone does not recapture the Server dependency tree after a pom
+          # key rotation. The excludes name the two in-house fixed release
+          # coordinates rather than the whole com/alibaba group, so
+          # third-party artifacts under it (druid) still recapture into the
+          # host-shared ~/.m2. Best-effort like the seed: the warning arms
+          # keep a copy failure from reddening the gate after mvn has already
+          # passed.
           # On a fresh ECS host nothing creates ~/.m2/repository anymore
           # (the hosted-only cache no longer restores it), so create it
           # before the write-back or every job re-resolves through the
           # egress proxy instead of bootstrapping the shared repository.
-          mkdir -p "${HOME}/.m2/repository"
-          tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . \
-            | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - \
-            || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+          # Publish only this job's downloads: seeded files are hardlinks
+          # (nlink >= 2), so the delta is nlink == 1. Taring the whole tree
+          # took up to 61 minutes (run 39563394993). Each link is atomic and
+          # -n never replaces a host file, so the backstop can leave an
+          # artifact missing for the next job to re-resolve, never truncated.
+          # No write-back child inherits fd 9, or a cancelled job's survivor
+          # would hold the host lock until it exits.
+          mkdir -p "${HOME}/.m2/repository" 9>&-
+          cd "${RUNNER_TEMP}/m2-repo"
+          write_back=0
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          if [ "${write_back}" -eq 124 ]; then
+            echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
+          elif [ "${write_back}" -ne 0 ]; then
+            echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+          fi
 
       # Maven passes a selection narrowed by a profile, MAVEN_ARGS or
       # .mvn/maven.config, so compare what ran with the source tree.
@@ -736,16 +816,19 @@ jobs:
 
       # The host's docker cleanup service fires once a day and reaps qwen-code-*
       # containers only past a strict 24h age gate, so a cancelled job can strand
-      # a running mysqld on the shared pool for up to ~48h.
-      - name: 'Remove the MySQL container'
+      # a running database server on the shared pool for up to ~48h.
+      - name: 'Remove the database containers'
         if: '${{ always() }}'
         shell: 'bash'
         run: |-
           set -uo pipefail
-          if docker inspect "${MYSQL_CONTAINER}" >/dev/null 2>&1; then
-            docker rm --force "${MYSQL_CONTAINER}" ||
-              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it within ~48h"
-          fi
+          for fork in 1 2; do
+            container="${MYSQL_CONTAINER}-${fork}"
+            if docker inspect "${container}" >/dev/null 2>&1; then
+              docker rm --force "${container}" ||
+                echo "::warning::could not remove ${container}; the host cleanup service reaps it within ~48h"
+            fi
+          done
 
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
@@ -810,13 +893,25 @@ jobs:
     # moving the fork to 10983 s and Verify to 194 minutes; the FG13a
     # registration-settle ack-loss cell adds 150 s, moving the fork to
     # 11133 s and Verify to 196 minutes; the FG11e stream cells add 42 s,
-    # moving the fork to 11175 s and Verify to 197 minutes, wrapping fork +
-    # 600 s plus margin (11775 s of fork plus wrap);
+    # moving the fork to 11175 s and Verify to 197 minutes; the FG11d
+    # cancel-retry cell adds 12 s, moving the fork to 11187 s; the FG11d
+    # second-fire refusal cell adds 25 s, moving the fork to 11212 s; the FG11d
+    # cancel-isolation cell adds 11 s, moving the fork to 11223 s and raising
+    # Verify to 198 minutes, wrapping fork + 600 s plus margin (11823 s of fork
+    # plus wrap); the FG11d queue-one cell adds 13 s, moving the fork to
+    # 11236 s and leaving Verify at 198 minutes, wrapping fork + 600 s plus
+    # margin (11836 s of fork plus wrap); the FG12e Runtime connection
+    # replacement cell adds 28 s, moving the fork to 11264 s and leaving
+    # Verify at 198 minutes, wrapping fork + 600 s plus margin (11864 s of
+    # fork plus wrap, 16 s left). The pool fixture provisionally reserves
+    # 180 s (its 120 s method ceiling plus 60 s for process/context cleanup),
+    # pending CI measurement: fork 11444 s, Verify 201 minutes, and 12044 s
+    # of fork plus wrap with the same 16 s left;
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 287 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 300
+    # checks): 291 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 304
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -916,8 +1011,10 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 11175 s, so the step wraps to fork + 600 s plus margin (197 min).
-        timeout-minutes: 197
+        # 11444 s, so the step wraps to fork + 600 s plus margin (201 min,
+        # 16 s left before the step must move), including the provisional
+        # 180 s pool-fixture reservation pending CI measurement.
+        timeout-minutes: 201
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -1897,7 +1994,7 @@ jobs:
           for attempt in 1 2 3; do
             if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
               if [[ "${attempt}" != "1" ]]; then
-                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step skips prepare's build, so check the failure class before counting it toward #11726."
               fi
               break
             fi

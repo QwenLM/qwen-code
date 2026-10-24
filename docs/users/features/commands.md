@@ -156,10 +156,11 @@ These commands invoke bundled skills that provide specialized workflows.
 | `/coordinate` | Coordinate read-only workers and one optional worktree writer | `/coordinate investigate and fix the authentication regression`           |
 | `/loop`       | Run a prompt on a recurring schedule                          | `/loop 5m check the build`                                                |
 | `/goal-draft` | Turn a fuzzy intention into a verifiable `/goal` objective    | `/goal-draft make the auth tests pass`                                    |
+| `/autofix-pr` | Watch a PR and fix its CI, review feedback and conflicts      | `/autofix-pr 123`, `/autofix-pr 123 --once`, `/autofix-pr stop 123`       |
 | `/simplify`   | Review recent changes and apply safe cleanup edits directly   | `/simplify`, `/simplify focus on duplication`                             |
 | `/qc-helper`  | Answer questions about Qwen Code usage and configuration      | `/qc-helper how do I configure MCP?`                                      |
 
-See [Code Review](./code-review.md) for full `/review` documentation.
+See [Code Review](./code-review.md) for full `/review` documentation, and [Autofix a Pull Request](./autofix-pr.md) for `/autofix-pr`.
 
 ### 1.6 Side Question (`/btw`)
 

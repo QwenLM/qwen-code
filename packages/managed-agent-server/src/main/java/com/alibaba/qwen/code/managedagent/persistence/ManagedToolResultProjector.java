@@ -61,11 +61,6 @@ public class ManagedToolResultProjector {
             return;
         }
         try {
-            store.backfillOnePage();
-        } catch (RuntimeException error) {
-            LOG.warn("Managed tool result backfill could not advance: {}", error.getClass().getSimpleName());
-        }
-        try {
             for (int index = 0; index < 8; index++) {
                 var claim = store.claim();
                 if (claim.isEmpty()) {

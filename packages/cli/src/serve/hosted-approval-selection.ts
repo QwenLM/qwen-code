@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isDeepStrictEqual } from 'node:util';
+import {
+  parseManagedPermissionRules,
+  nonEmptyManagedPermissionRules,
+  type ManagedPermissionRules,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-permission-rules.js';
 import type {
   HostedApprovalMode,
   HostedApprovalSettings,
@@ -16,6 +22,7 @@ export interface HostedApprovalSelection {
   mode: HostedApprovalMode;
   revision: number;
   planMode?: true;
+  permissionRules?: ManagedPermissionRules;
 }
 
 export function parseHostedApprovalSelection(
@@ -27,26 +34,43 @@ export function parseHostedApprovalSelection(
   const selection = value as Record<string, unknown>;
   if (
     Object.keys(selection).length !==
-      (selection['planMode'] === true ? 3 : 2) ||
+      (selection['planMode'] === true ? 3 : 2) +
+        (selection['permissionRules'] === undefined ? 0 : 1) ||
     (Object.hasOwn(selection, 'planMode') && selection['planMode'] !== true) ||
     (selection['mode'] !== 'default' &&
       selection['mode'] !== 'auto-edit' &&
-      selection['mode'] !== 'yolo') ||
+      selection['mode'] !== 'yolo' &&
+      selection['mode'] !== 'auto') ||
     typeof selection['revision'] !== 'number' ||
     !Number.isSafeInteger(selection['revision']) ||
     selection['revision'] < (selection['planMode'] === true ? 1 : 0)
+  )
+    throw new Error('Invalid Hosted approval selection.');
+  const permissionRules =
+    selection['permissionRules'] === undefined
+      ? undefined
+      : nonEmptyManagedPermissionRules(
+          parseManagedPermissionRules(selection['permissionRules']),
+        );
+  if (
+    selection['revision'] === 0 &&
+    (selection['mode'] === 'auto' || permissionRules)
   )
     throw new Error('Invalid Hosted approval selection.');
   return {
     mode: selection['mode'] as HostedApprovalMode,
     revision: selection['revision'],
     ...(selection['planMode'] === true ? { planMode: true as const } : {}),
+    ...(permissionRules ? { permissionRules } : {}),
   };
 }
 
 export async function readHostedTurnApprovalSelection(
   session: ManagedSession,
   promptId: string,
+  readWakeSelection?: () => Promise<
+    ManagedSessionApprovalSelection | undefined
+  >,
 ): Promise<HostedApprovalSelection | undefined> {
   const accepted = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
@@ -55,7 +79,16 @@ export async function readHostedTurnApprovalSelection(
         event.kind === 'input.accepted' &&
         event.payload['inputId'] === promptId,
     );
-  if (accepted?.payload['source'] !== 'hosted-harness') return undefined;
+  if (accepted?.payload['source'] !== 'hosted-harness') {
+    if (!accepted || !readWakeSelection) return undefined;
+    const selection = parseHostedApprovalSelection(await readWakeSelection());
+    // A wake whose store holds no selection has nothing to pin: fall back to
+    // the Session's own approval settings, exactly as a hosted-harness input
+    // without an admission does. Only a malformed stored selection is an
+    // error, and parseHostedApprovalSelection raises that itself.
+    if (!selection) return undefined;
+    return selection;
+  }
   const rawRef = accepted?.payload['admissionRef'];
   if (rawRef === undefined) return undefined;
   const ref = assertManagedSessionDurableRef(
@@ -84,14 +117,28 @@ export async function hostedTurnApproval(
   session: ManagedSession,
   promptId: string,
   initial: HostedApprovalSettings | undefined,
+  pinned?: HostedApprovalSelection,
 ): Promise<HostedApprovalSettings | undefined> {
-  const selection = await readHostedTurnApprovalSelection(session, promptId);
+  const selection =
+    pinned ?? (await readHostedTurnApprovalSelection(session, promptId));
   if (!selection) return initial;
-  if (!initial || (selection.revision === 0 && selection.mode !== initial.mode))
+  if (
+    !initial ||
+    (selection.revision === 0 &&
+      (selection.mode !== initial.mode ||
+        !isDeepStrictEqual(selection.permissionRules, initial.permissionRules)))
+  )
     throw new Error(
       'Hosted approval selection conflicts with the Session definition.',
     );
-  return { ...initial, mode: selection.mode };
+  const permissionRules = nonEmptyManagedPermissionRules(
+    selection.permissionRules,
+  );
+  return {
+    mode: selection.mode,
+    timeoutMs: initial.timeoutMs,
+    ...(permissionRules ? { permissionRules } : {}),
+  };
 }
 
 export function createHostedLiveApprovalReader(
@@ -102,6 +149,9 @@ export function createHostedLiveApprovalReader(
   let previous: ManagedSessionApprovalSelection = admission ?? {
     mode: initial.mode,
     revision: 0,
+    ...(initial.permissionRules
+      ? { permissionRules: initial.permissionRules }
+      : {}),
   };
   let tail = Promise.resolve();
   return () => {
@@ -110,14 +160,29 @@ export function createHostedLiveApprovalReader(
       if (
         !selection ||
         selection.revision < previous.revision ||
+        !isDeepStrictEqual(
+          selection.permissionRules,
+          initial.permissionRules,
+        ) ||
         (selection.revision === previous.revision &&
-          selection.mode !== previous.mode)
+          (selection.mode !== previous.mode ||
+            !isDeepStrictEqual(
+              selection.permissionRules,
+              previous.permissionRules,
+            )))
       )
         throw new Error(
           'Hosted live approval selection is missing or regressed.',
         );
       previous = selection;
-      return { ...initial, mode: selection.mode };
+      const permissionRules = nonEmptyManagedPermissionRules(
+        selection.permissionRules,
+      );
+      return {
+        mode: selection.mode,
+        timeoutMs: initial.timeoutMs,
+        ...(permissionRules ? { permissionRules } : {}),
+      };
     });
     tail = work.then(
       () => undefined,
