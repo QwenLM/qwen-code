@@ -1363,12 +1363,13 @@ export class LiveSessionCoordinator {
         error: 'Live Voice could not persist the final transcript.',
       };
     }
-    if (!this.isActive(context)) return;
-    if (discardPendingInput) {
-      this.invalidateRealtime(context);
-      realtime?.close({ discardPendingInput: true });
+    if (this.isActive(context)) {
+      if (discardPendingInput) {
+        this.invalidateRealtime(context);
+        realtime?.close({ discardPendingInput: true });
+      }
+      await this.closeContext(context);
     }
-    await this.closeContext(context);
     if (!this.isActive(context) && !context.finishStop) return;
     if (context.stopDrainTimer) clearTimeout(context.stopDrainTimer);
     context.stopDrainTimer = undefined;
@@ -1382,19 +1383,24 @@ export class LiveSessionCoordinator {
     error: string,
     discardPendingInput: boolean,
   ): void {
-    if (!this.isActive(context) || !context.finishStop) return;
+    if (!context.finishStop) return;
     context.stopDrainTimer = undefined;
-    if (discardPendingInput) {
-      const realtime = context.realtime;
-      this.invalidateRealtime(context);
-      realtime?.close({ discardPendingInput: true });
+    if (this.isActive(context)) {
+      if (discardPendingInput) {
+        const realtime = context.realtime;
+        this.invalidateRealtime(context);
+        realtime?.close({ discardPendingInput: true });
+      }
+      if (context.runtime && context.coordinator) {
+        void context.runtime.bridge
+          .setSessionLiveConversationActive(
+            context.coordinator.sessionId,
+            false,
+          )
+          .catch(() => undefined);
+      }
+      this.closeContextNow(context);
     }
-    if (context.runtime && context.coordinator) {
-      void context.runtime.bridge
-        .setSessionLiveConversationActive(context.coordinator.sessionId, false)
-        .catch(() => undefined);
-    }
-    this.closeContextNow(context);
     const finish = context.finishStop;
     context.finishStop = undefined;
     finish({ error });
