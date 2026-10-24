@@ -5,6 +5,7 @@
 ../../
 !LICENSE
 !NOTICES.txt
+!package.nls*.json
 !assets/
 !schemas/
 !schemas/**
