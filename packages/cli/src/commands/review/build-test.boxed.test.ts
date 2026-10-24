@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from './build-test.js';
+import { CONTAINER_HOME, containerCommandEnv } from './lib/sandboxed-exec.js';
 
 // `run()` on its boxed branch: a sandboxed review is how `/review` runs a
 // PR's own commands, and no runtime is needed to see the argv it is handed.
@@ -111,15 +112,27 @@ describe('run (boxed): the declared heap reaches the container', () => {
       expect(args).toContain('--userconfig');
       expect(args).toContain('--globalconfig');
       expect(opts.cwd).toBe(root);
-      // What npm needs to start, and nothing a `${VAR}` could name.
+      // The container's own environment, where npm expands a `${VAR}` — and
+      // of the host's, only what npm needs to start.
+      const startup = ['path', 'pathext', 'systemroot', 'comspec'];
+      const own = containerCommandEnv({
+        tmpDir: root,
+        kind: 'build',
+        heapMb: 6144,
+      }).map((e) => e.slice(0, e.indexOf('=')));
       expect(
-        Object.keys(opts.env).every((k) =>
-          ['path', 'pathext', 'systemroot', 'comspec'].includes(
-            k.toLowerCase(),
-          ),
+        Object.keys(opts.env).filter((k) => !startup.includes(k.toLowerCase())),
+      ).toEqual(expect.arrayContaining([...own, 'PWD']));
+      expect(
+        Object.keys(opts.env).every(
+          (k) =>
+            startup.includes(k.toLowerCase()) || own.includes(k) || k === 'PWD',
         ),
       ).toBe(true);
-      expect(Object.keys(opts.env).length).toBeGreaterThan(0);
+      expect(opts.env['PWD']).toBe('/workspace/review-pr-9');
+      expect(opts.env['HOME']).toBe(CONTAINER_HOME);
+      // A stand-in, so no preload runs on the host.
+      expect(opts.env['NODE_OPTIONS']).not.toContain('--max-old-space-size');
     } finally {
       vi.unstubAllEnvs();
     }

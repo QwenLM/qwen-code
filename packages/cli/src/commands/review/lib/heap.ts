@@ -17,15 +17,14 @@ const HEAP_TOKEN_RE = new RegExp(
 );
 
 /**
- * The largest heap (MB) an options string sets, or undefined when it sets
- * none. The largest, because one value is applied for the whole string and a
- * smaller one would starve whatever needed the larger.
+ * The heap (MB) an options string sets, or undefined when it sets none. With
+ * several, the last: it is the one V8 applies.
  */
 export function heapFlagMb(options: string): number | undefined {
   let mb: number | undefined;
   for (const m of options.matchAll(HEAP_TOKEN_RE)) {
     const value = m[1] || m[2];
-    if (value) mb = Math.max(mb ?? 0, Number(value));
+    if (value) mb = Number(value);
   }
   return mb;
 }
@@ -42,6 +41,23 @@ export function withoutHeapFlag(options: string): string {
 export function raiseHeap(options: string, mb: number): string | undefined {
   if ((heapFlagMb(options) ?? 0) >= mb) return undefined;
   return `${withoutHeapFlag(options)} --max-old-space-size=${mb}`.trim();
+}
+
+/** npm's `${VAR}`, with the backslashes that escape it (`@npmcli/config`). */
+const NPM_ENV_REF_RE = /(?<!\\)(\\*)\$\{([^${}]+)\}/g;
+
+/**
+ * `raiseHeap` for npm's own `node-options`, as the value to hand back through
+ * `npm_config_node_options`. npm expands a `${VAR}` in what it reads there,
+ * and `options` is already expanded (`npmNodeOptions`), so each one is
+ * escaped the way npm unescapes it: the script gets the value as npm
+ * computed it, not a second expansion of it.
+ */
+export function raiseNpmHeap(options: string, mb: number): string | undefined {
+  return raiseHeap(options, mb)?.replace(
+    NPM_ENV_REF_RE,
+    (_, esc: string, name: string) => `${esc}${esc}\\\${${name}}`,
+  );
 }
 
 /**

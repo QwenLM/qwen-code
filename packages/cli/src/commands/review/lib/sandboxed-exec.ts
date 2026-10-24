@@ -63,7 +63,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { operatorReviewSettings } from './review-settings.js';
 import { mountRootFor } from './worktree.js';
-import { raiseHeap } from './heap.js';
+import { raiseNpmHeap } from './heap.js';
 import { CUSTOM_SANDBOX_IMAGE_ENV_VAR } from '../../../utils/processUtils.js';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
 import { readPackageUpSync } from 'read-package-up';
@@ -468,9 +468,10 @@ export interface ContainerCommandOptions {
    */
   heapMb?: number;
   /**
-   * The tree's own npm `node-options` (`npmNodeOptions`, isolated), which npm
-   * inside the container hands a lifecycle script in place of
-   * `NODE_OPTIONS`. Raised to `heapMb` with the rest kept, never replaced.
+   * The tree's own npm `node-options`, as npm inside the container computes
+   * them (`npmNodeOptions`, asked in the environment `containerCommandEnv`
+   * builds), which it hands a lifecycle script in place of `NODE_OPTIONS`.
+   * Raised to `heapMb` with the rest kept, never replaced.
    */
   npmNodeOptions?: string;
   runtime: ContainerRuntime;
@@ -602,27 +603,39 @@ export function containerCommand(
   // root-owned by default, and `--user` would then be unable to write its own
   // HOME — the very failure this HOME exists to prevent.
   args.push('--tmpfs', `${CONTAINER_HOME}:rw,mode=1777`);
-  for (const entry of containerEnv(join(opts.tmpDir, '.npm-cache'))) {
-    args.push('--env', entry);
-  }
-  // The declared heap, on both channels the direct spawn raises
-  // (`buildRunEnv`). Nothing larger can be inherited here: `containerEnv`
-  // passes no `NODE_OPTIONS`. npm's own `node-options` — the mounted tree's
-  // `.npmrc` can set it, and npm replaces `NODE_OPTIONS` with it — is raised
-  // only where it sets less, keeping its other options — and any `${VAR}` in
-  // it, for the container's npm to expand (`npmNodeOptions`). Pushed here, not
-  // added to `containerEnv`, which subagent workers share; and before the
-  // image, or the runtime hands them to `sh -lc` as arguments.
-  if (opts.kind !== 'test' && opts.heapMb !== undefined) {
-    args.push('--env', `NODE_OPTIONS=--max-old-space-size=${opts.heapMb}`);
-    const npm =
-      opts.npmNodeOptions === undefined
-        ? undefined
-        : raiseHeap(opts.npmNodeOptions, opts.heapMb);
-    if (npm !== undefined) args.push('--env', `npm_config_node_options=${npm}`);
-  }
+  // Before the image, or the runtime hands them to `sh -lc` as arguments.
+  for (const entry of containerCommandEnv(opts)) args.push('--env', entry);
+  // npm's own `node-options` — the mounted tree's `.npmrc` can set it, and npm
+  // replaces `NODE_OPTIONS` with it — raised only where it sets less, keeping
+  // its other options.
+  const npm =
+    opts.kind === 'test' ||
+    opts.heapMb === undefined ||
+    opts.npmNodeOptions === undefined
+      ? undefined
+      : raiseNpmHeap(opts.npmNodeOptions, opts.heapMb);
+  if (npm !== undefined) args.push('--env', `npm_config_node_options=${npm}`);
   args.push(opts.image, 'sh', '-lc', command);
   return { file: opts.runtime, args };
+}
+
+/**
+ * The environment a review command's container gets, as `KEY=value` entries:
+ * the `containerEnv` allowlist and, for a build or an install, the declared
+ * heap — the channel the direct spawn raises (`buildRunEnv`). Nothing larger
+ * can be inherited here: `containerEnv` passes no `NODE_OPTIONS`. The heap is
+ * added here, not to `containerEnv`, which subagent workers share. Exported
+ * because the host asks npm its `node-options` in this same environment
+ * (`npmNodeOptions`).
+ */
+export function containerCommandEnv(
+  opts: Pick<ContainerCommandOptions, 'tmpDir' | 'kind' | 'heapMb'>,
+): string[] {
+  const entries = containerEnv(join(opts.tmpDir, '.npm-cache'));
+  if (opts.kind !== 'test' && opts.heapMb !== undefined) {
+    entries.push(`NODE_OPTIONS=--max-old-space-size=${opts.heapMb}`);
+  }
+  return entries;
 }
 
 /**

@@ -39,13 +39,20 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { devNull } from 'node:os';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   boxedRunLeftContainer,
   containerCommand,
+  containerCommandEnv,
   containerName,
   containerPathFor,
   handOffRefused,
@@ -73,7 +80,7 @@ import {
 } from './lib/toolchain.js';
 import { type TestScope } from './lib/workspace-scope.js';
 import { declaredBuildHeapMb } from './lib/workspaces.js';
-import { heapBannerIn, raiseHeap } from './lib/heap.js';
+import { heapBannerIn, raiseHeap, raiseNpmHeap } from './lib/heap.js';
 
 /**
  * The root toolchains build-test can select. One today; the registry exists so
@@ -358,9 +365,10 @@ export function trimOutput(s: string): string {
  *
  * Two channels reach a lifecycle script, and each is raised on its own,
  * keeping everything else it says. `NODE_OPTIONS`, unless npm has
- * `node-options` of its own (`npmNodeOptions`) — then npm REPLACES the
- * script's `NODE_OPTIONS` with those, so they are raised too and handed back
- * through `npm_config_node_options`, which outranks every `.npmrc`.
+ * `node-options` of its own (`npmNodeOptions`, as npm computes them in this
+ * environment) — then npm REPLACES the script's `NODE_OPTIONS` with those, so
+ * they are raised too and handed back through `npm_config_node_options`,
+ * which outranks every `.npmrc`.
  */
 export function buildRunEnv(
   base: NodeJS.ProcessEnv = process.env,
@@ -381,7 +389,7 @@ export function buildRunEnv(
   const npmOptions =
     npmNodeOptions === undefined
       ? undefined
-      : raiseHeap(npmNodeOptions, heapMb);
+      : raiseNpmHeap(npmNodeOptions, heapMb);
   if (npmOptions !== undefined) {
     // One spelling: npm reads the variable case-insensitively, and two of
     // them leave the winner to the environment's order.
@@ -395,8 +403,43 @@ export function buildRunEnv(
 
 const npmNodeOptionsCache = new Map<string, string | undefined>();
 
-/** What npm needs to start: the host variables an isolated query keeps. */
+/** What npm needs to start: the host variables a container's query keeps. */
 const NPM_STARTUP_ENV = new Set(['path', 'pathext', 'systemroot', 'comspec']);
+
+/**
+ * Stands in for `NODE_OPTIONS` while npm is asked: an option that does
+ * nothing, so a preload there neither runs in the query nor prints into its
+ * answer.
+ */
+const NODE_OPTIONS_STAND_IN = '--title=qwen-review-node-options';
+
+/** `env` with `name` set to `value`, in one spelling (Windows has `Path`). */
+function withEnvVar(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  value: string,
+): NodeJS.ProcessEnv {
+  const out = Object.fromEntries(
+    Object.entries(env).filter(([k]) => k.toUpperCase() !== name),
+  );
+  out[name] = value;
+  return out;
+}
+
+/**
+ * The `PWD` a command's POSIX shell reports: the directory it starts in, as
+ * `getcwd` spells it. (A shell keeps an inherited `PWD` that already names
+ * that directory: another spelling of the same place.) `cmd.exe` sets none,
+ * so on Windows the inherited one stands: undefined.
+ */
+function shellPwd(cwd: string): string | undefined {
+  if (process.platform === 'win32') return undefined;
+  try {
+    return realpathSync(cwd);
+  } catch {
+    return cwd;
+  }
+}
 
 /**
  * The `node-options` npm hands a lifecycle script in place of its
@@ -404,35 +447,36 @@ const NPM_STARTUP_ENV = new Set(['path', 'pathext', 'systemroot', 'comspec']);
  * tree's `.npmrc`, the user's or the global one, `npm_config_node_options` —
  * so it is asked of npm itself, in the tree the command runs in.
  *
- * npm expands a `${VAR}` in it from its own environment and leaves one it has
- * no value for as written; the value goes back through
- * `npm_config_node_options`, and the npm the command runs expands what is
- * left from the command's environment. So the query is not given a variable
- * the command sees differently: `PWD`, which the command's shell sets to the
- * tree, and `NODE_OPTIONS`, which `buildRunEnv` raises — and whose preloads
- * would run in this npm and print into its answer. `isolated` asks what a
- * container sees: the tree's own `.npmrc` only, as its HOME is empty and
- * `containerEnv` passes no npm configuration. That query keeps no host
- * variable but what npm needs to start, so a `${VAR}` naming a host secret
- * stays as written, for the container to expand from its own allowlist.
+ * npm expands a `${VAR}` in it from its own environment, so it is asked in
+ * the command's: `env`, with `PWD` set to `pwd`, the directory the command's
+ * shell reports — this process's `PWD` names another. `NODE_OPTIONS` alone is
+ * not passed as is: a preload there would run in this npm and print into its
+ * answer, so a stand-in goes in its place and the answer gets the real value
+ * back. `isolated` asks for a container: the tree's own `.npmrc` only, as its
+ * HOME is empty and `containerEnv` passes no npm configuration — and `env` is
+ * then the container's, so a `${VAR}` naming a host variable expands as it
+ * does there.
  *
  * A query that fails, or answers more than one line, reads as none. Once per
- * tree: nothing a review runs changes it.
+ * tree and environment.
  */
 export function npmNodeOptions(
   cwd: string,
-  base: NodeJS.ProcessEnv = process.env,
-  isolated = false,
+  {
+    env = buildRunEnv(process.env),
+    pwd = shellPwd(cwd),
+    isolated = false,
+  }: { env?: NodeJS.ProcessEnv; pwd?: string; isolated?: boolean } = {},
 ): string | undefined {
-  const key = `${isolated}\0${cwd}`;
+  const nodeOptions = Object.entries(env).find(
+    ([k]) => k.toUpperCase() === 'NODE_OPTIONS',
+  )?.[1];
+  let query = pwd === undefined ? env : withEnvVar(env, 'PWD', pwd);
+  if (nodeOptions !== undefined) {
+    query = withEnvVar(query, 'NODE_OPTIONS', NODE_OPTIONS_STAND_IN);
+  }
+  const key = JSON.stringify([cwd, isolated, nodeOptions, query]);
   if (npmNodeOptionsCache.has(key)) return npmNodeOptionsCache.get(key);
-  const env = Object.fromEntries(
-    Object.entries(isolated ? base : buildRunEnv(base)).filter(([k]) =>
-      isolated
-        ? NPM_STARTUP_ENV.has(k.toLowerCase())
-        : !['pwd', 'node_options'].includes(k.toLowerCase()),
-    ),
-  );
   const r = spawnSync(
     'npm',
     [
@@ -447,7 +491,7 @@ export function npmNodeOptions(
     ],
     {
       cwd,
-      env,
+      env: query,
       encoding: 'utf8',
       timeout: 30_000,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -461,9 +505,22 @@ export function npmNodeOptions(
     value === 'undefined' ||
     /[\r\n]/.test(value)
       ? undefined
-      : value;
+      : value.split(NODE_OPTIONS_STAND_IN).join(nodeOptions ?? '');
   npmNodeOptionsCache.set(key, options);
   return options;
+}
+
+/**
+ * The environment a command runs with outside a container: `buildRunEnv`,
+ * with npm's own `node-options` read in that same environment.
+ */
+function directRunEnv(
+  cwd: string,
+  heapMb: number | undefined,
+): NodeJS.ProcessEnv {
+  const env = buildRunEnv(process.env, heapMb);
+  if (heapMb === undefined) return env;
+  return buildRunEnv(process.env, heapMb, npmNodeOptions(cwd, { env }));
 }
 
 /**
@@ -563,6 +620,21 @@ function containerised(
   const workdir = containerPathFor(cwd);
   if (workdir === null) return null;
   const name = containerName();
+  // npm is asked in the container's environment: its own entries, and of the
+  // host's only what npm needs to start.
+  const containerQueryEnv = (): NodeJS.ProcessEnv => ({
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([k]) =>
+        NPM_STARTUP_ENV.has(k.toLowerCase()),
+      ),
+    ),
+    ...Object.fromEntries(
+      containerCommandEnv({ tmpDir, kind, heapMb }).map((entry) => {
+        const eq = entry.indexOf('=');
+        return [entry.slice(0, eq), entry.slice(eq + 1)];
+      }),
+    ),
+  });
   return {
     ...containerCommand(command, {
       cwd: workdir,
@@ -570,7 +642,14 @@ function containerised(
       kind,
       ...(heapMb === undefined
         ? {}
-        : { heapMb, npmNodeOptions: npmNodeOptions(cwd, process.env, true) }),
+        : {
+            heapMb,
+            npmNodeOptions: npmNodeOptions(cwd, {
+              env: containerQueryEnv(),
+              pwd: workdir,
+              isolated: true,
+            }),
+          }),
       name,
       runtime: verdict.runtime,
       rootless: runtimeIsRootless(verdict.runtime),
@@ -643,11 +722,7 @@ export function run(
           maxBuffer: 64 * 1024 * 1024,
           // A build that asks a question is a build that hangs until the deadline.
           stdio: ['ignore', 'pipe', 'pipe'],
-          env: buildRunEnv(
-            process.env,
-            heapMb,
-            heapMb === undefined ? undefined : npmNodeOptions(cwd),
-          ),
+          env: directRunEnv(cwd, heapMb),
         },
       );
   if (boxed && boxedRunLeftContainer(r.status)) {

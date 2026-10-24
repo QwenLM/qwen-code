@@ -30,6 +30,7 @@ import { isolateOperatorReviewSettings } from './test-utils.js';
 import * as environment from '../../../config/environment.js';
 import {
   containerCommand,
+  containerCommandEnv,
   firstAnsweringRuntime,
   killContainer,
   containerPathFor,
@@ -755,6 +756,32 @@ describe('containerCommand', () => {
         (e) =>
           e.startsWith('NODE_OPTIONS=') ||
           e.startsWith('npm_config_node_options='),
+      ),
+    ).toBe(false);
+    // Already expanded by npm: escaped, so the container's npm does not
+    // expand it again.
+    expect(passed(argv('build', '-r /w/${X}.cjs'))).toContain(
+      'npm_config_node_options=-r /w/\\${X}.cjs --max-old-space-size=6144',
+    );
+  });
+
+  it('builds the environment entries it passes from containerCommandEnv', () => {
+    const opts = {
+      ...base,
+      cwd: join(tmpDir, 'review-pr-9'),
+      kind: 'build' as const,
+      heapMb: 6144,
+    };
+    const args = containerCommand('npm run build', opts).args;
+    expect(args.filter((_, i) => args[i - 1] === '--env')).toEqual(
+      containerCommandEnv(opts),
+    );
+    expect(containerCommandEnv(opts)).toContain(
+      'NODE_OPTIONS=--max-old-space-size=6144',
+    );
+    expect(
+      containerCommandEnv({ ...opts, kind: 'test' }).some((e) =>
+        e.startsWith('NODE_OPTIONS='),
       ),
     ).toBe(false);
   });

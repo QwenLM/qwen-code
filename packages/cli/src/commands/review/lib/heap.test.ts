@@ -10,6 +10,7 @@ import {
   heapFlagMb,
   killedFromOutside,
   raiseHeap,
+  raiseNpmHeap,
   withoutHeapFlag,
 } from './heap.js';
 
@@ -17,18 +18,24 @@ const BANNER =
   'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory';
 
 describe('heapFlagMb / withoutHeapFlag', () => {
-  it('reads the largest heap an options string sets, in any spelling V8 accepts', () => {
+  it('reads the heap an options string sets, in any spelling V8 accepts', () => {
     expect(heapFlagMb('--max-old-space-size=6144')).toBe(6144);
     expect(heapFlagMb('--max_old_space_size=1024 --enable-source-maps')).toBe(
       1024,
     );
     expect(heapFlagMb('--max-old-space-size 2048')).toBe(2048);
-    expect(
-      heapFlagMb('--max-old-space-size=1024 --max-old-space-size=8192'),
-    ).toBe(8192);
     expect(heapFlagMb('--enable-source-maps')).toBeUndefined();
     expect(heapFlagMb('--max-old-space-size=')).toBeUndefined();
     expect(heapFlagMb('--max-old-space-size=12abc')).toBeUndefined();
+  });
+
+  it('reads the last of several, which is the one V8 applies', () => {
+    expect(
+      heapFlagMb('--max-old-space-size=1024 --max-old-space-size=8192'),
+    ).toBe(8192);
+    expect(
+      heapFlagMb('--max-old-space-size=8192 -r x --max_old_space_size=512'),
+    ).toBe(512);
   });
 
   it('takes every heap flag and its value out, and leaves the rest', () => {
@@ -51,6 +58,37 @@ describe('raiseHeap', () => {
   it('leaves options that already set as much or more', () => {
     expect(raiseHeap('--max-old-space-size=6144', 6144)).toBeUndefined();
     expect(raiseHeap('-r x --max_old_space_size=8192', 6144)).toBeUndefined();
+  });
+
+  it('raises a larger heap that a later, smaller one overrides', () => {
+    expect(
+      raiseHeap(
+        '--max-old-space-size=8192 -r x --max-old-space-size=512',
+        6144,
+      ),
+    ).toBe('-r x --max-old-space-size=6144');
+  });
+});
+
+describe('raiseNpmHeap', () => {
+  it('escapes each ${VAR} the way npm unescapes it, and nothing else', () => {
+    expect(
+      raiseNpmHeap(
+        '--require=/a/${X}/p.cjs --title=\\${Y} --max-old-space-size=512',
+        6144,
+      ),
+    ).toBe(
+      '--require=/a/\\${X}/p.cjs --title=\\\\\\${Y} --max-old-space-size=6144',
+    );
+    expect(raiseNpmHeap('--require=C:\\p\\x.cjs ${unclosed', 6144)).toBe(
+      '--require=C:\\p\\x.cjs ${unclosed --max-old-space-size=6144',
+    );
+  });
+
+  it('leaves options that already set enough', () => {
+    expect(
+      raiseNpmHeap('-r ${X} --max-old-space-size=8192', 6144),
+    ).toBeUndefined();
   });
 });
 

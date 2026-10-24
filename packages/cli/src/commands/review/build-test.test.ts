@@ -12,6 +12,7 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   utimesSync,
@@ -217,6 +218,9 @@ describe.skipIf(process.platform === 'win32')(
               'cross-env NODE_OPTIONS="--max-old-space-size=6144" node b.js',
             probe:
               "node -e \"const mb = require('v8').getHeapStatistics().heap_size_limit / 1048576; console.log(process.env.PRELOADED, mb >= 6144 ? 'heap-ok' : 'heap-low:' + Math.round(mb))\"",
+            limit:
+              "node -e \"console.log(process.env.PRELOADED, 'limit=' + Math.round(require('v8').getHeapStatistics().heap_size_limit / 1048576))\"",
+            opts: 'node -e "console.log(process.env.NODE_OPTIONS)"',
           },
         }),
       );
@@ -241,49 +245,80 @@ describe.skipIf(process.platform === 'win32')(
           'node-options=--max-old-space-size=512\n',
         );
         expect(npmNodeOptions(other)).toBe('--max-old-space-size=512');
-        expect(npmNodeOptions(other, process.env, true)).toBe(
-          '--max-old-space-size=512',
-        );
+        expect(
+          npmNodeOptions(other, {
+            env: { PATH: process.env['PATH'] },
+            isolated: true,
+          }),
+        ).toBe('--max-old-space-size=512');
       } finally {
         rmSync(other, { recursive: true, force: true });
       }
     });
 
-    it("asks a container's question without the environment's npm config", () => {
-      const env = {
-        ...process.env,
-        npm_config_node_options: '--max-old-space-size=700',
-      };
-      expect(npmNodeOptions(root, env)).toBe('--max-old-space-size=700');
-      expect(npmNodeOptions(root, env, true)).toBeUndefined();
+    it("asks a container's question without the user's or the global npmrc", () => {
+      const userrc = join(root, 'user.npmrc');
+      writeFileSync(userrc, 'node-options=--max-old-space-size=700\n');
+      const env = { PATH: process.env['PATH'], npm_config_userconfig: userrc };
+      expect(npmNodeOptions(root, { env })).toBe('--max-old-space-size=700');
+      expect(npmNodeOptions(root, { env, isolated: true })).toBeUndefined();
     });
 
-    it('leaves a variable the command sees differently for its own npm to expand', () => {
+    it("expands each variable as the command's npm would", () => {
       writeFileSync(
         join(root, '.npmrc'),
         'node-options=--require=${PWD}/preload.cjs --conditions=${QWEN_BT_SECRET} --title=ci-${CI} --max-old-space-size=512\n',
       );
-      const env = {
+      // This process's PWD is not the command's; `buildRunEnv` sets its CI.
+      const env = buildRunEnv({
         ...process.env,
         PWD: tmpdir(),
         QWEN_BT_SECRET: 'host-secret',
         CI: 'true',
-      };
-      // The command's shell sets its own PWD; `buildRunEnv` sets its CI.
-      expect(npmNodeOptions(root, env)).toBe(
-        '--require=${PWD}/preload.cjs --conditions=host-secret --title=ci-1 --max-old-space-size=512',
+      });
+      expect(npmNodeOptions(root, { env })).toBe(
+        `--require=${realpathSync(root)}/preload.cjs --conditions=host-secret --title=ci-1 --max-old-space-size=512`,
       );
-      // A container sees none of the host's variables.
-      expect(npmNodeOptions(root, env, true)).toBe(
-        '--require=${PWD}/preload.cjs --conditions=${QWEN_BT_SECRET} --title=ci-${CI} --max-old-space-size=512',
+      // A container's own environment, which has no host variable.
+      expect(
+        npmNodeOptions(root, {
+          env: { PATH: process.env['PATH'], CI: '1' },
+          pwd: '/workspace/t',
+          isolated: true,
+        }),
+      ).toBe(
+        '--require=/workspace/t/preload.cjs --conditions=${QWEN_BT_SECRET} --title=ci-1 --max-old-space-size=512',
+      );
+    });
+
+    it("asks with a stand-in for NODE_OPTIONS, and answers with the command's", () => {
+      writeFileSync(join(root, 'logging.cjs'), "console.log('preload ready');");
+      writeFileSync(
+        join(root, '.npmrc'),
+        'node-options=${NODE_OPTIONS} --title=t\n',
+      );
+      const ambient = `--require=${join(root, 'logging.cjs')} --max-old-space-size=8192`;
+      expect(
+        npmNodeOptions(root, {
+          env: { ...buildRunEnv(process.env), NODE_OPTIONS: ambient },
+        }),
+      ).toBe(`${ambient} --title=t`);
+      // Unset for the command, so left as written for it too.
+      const { NODE_OPTIONS: _, ...withoutNodeOptions } = buildRunEnv(
+        process.env,
+      );
+      expect(npmNodeOptions(root, { env: withoutNodeOptions })).toBe(
+        '${NODE_OPTIONS} --title=t',
       );
     });
 
     it('reads an answer of more than one line as none', () => {
       expect(
         npmNodeOptions(root, {
-          ...process.env,
-          npm_config_node_options: 'preload ready\n--max-old-space-size=512',
+          env: {
+            ...process.env,
+            npm_config_node_options: 'preload ready\n--max-old-space-size=512',
+          },
         }),
       ).toBeUndefined();
     });
@@ -310,6 +345,30 @@ describe.skipIf(process.platform === 'win32')(
       const r = run('npm run -s probe', root, 60_000, 'build');
       expect(r.exitCode).toBe(0);
       expect(r.output).toContain('preloaded heap-ok');
+    });
+
+    it("keeps a larger inherited heap the .npmrc's ${NODE_OPTIONS} carries", () => {
+      writeFileSync(
+        join(root, '.npmrc'),
+        `node-options=\${NODE_OPTIONS} --require=${join(root, 'preload.cjs')}\n`,
+      );
+      vi.stubEnv('NODE_OPTIONS', '--max-old-space-size=8192');
+      const r = run('npm run -s limit', root, 60_000, 'build');
+      expect(r.exitCode).toBe(0);
+      const limit = Number(/preloaded limit=(\d+)/.exec(r.output)?.[1]);
+      expect(limit).toBeGreaterThanOrEqual(8192);
+    });
+
+    it('hands the script the value npm computed, not a second expansion of it', () => {
+      // `\${HOME}` is npm's escape for a literal `${HOME}`.
+      writeFileSync(
+        join(root, '.npmrc'),
+        'node-options=--title=\\${HOME} --max-old-space-size=512\n',
+      );
+      vi.stubEnv('NODE_OPTIONS', '');
+      const r = run('npm run -s opts', root, 60_000, 'build');
+      expect(r.exitCode).toBe(0);
+      expect(r.output).toContain('--title=${HOME} --max-old-space-size=6144');
     });
 
     it('still reads the .npmrc under an ambient preload that prints', () => {
