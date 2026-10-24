@@ -16,8 +16,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 
+import integrationConfig from '../../integration-tests/vitest.config.js';
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
@@ -225,6 +227,9 @@ describe('no-AK integration CI wiring', () => {
       './interactive/workflow-completion.test.ts',
       './interactive/workflow-intent.test.ts',
       './interactive/mods-tool-middleware.test.ts',
+      './interactive/statusline-parity.test.ts',
+      './interactive/tui-editor-parity.test.ts',
+      './interactive/tui-input-ownership.test.ts',
       './sdk-typescript/abort-and-lifecycle.test.ts',
       './sdk-typescript/permission-control.test.ts',
       './sdk-typescript/sdk-mcp-server.test.ts',
@@ -248,6 +253,133 @@ describe('no-AK integration CI wiring', () => {
         entry,
       ).toBe(true);
     }
+  });
+
+  it('accounts for every runnable integration test and every no-AK filter', () => {
+    const integrationRoot = path.join(ROOT, 'integration-tests');
+    const collectedFiles = new Set(
+      globSync(integrationConfig.test.include, {
+        cwd: integrationRoot,
+        ignore: integrationConfig.test.exclude,
+        dot: true,
+        nodir: true,
+        posix: true,
+      }),
+    );
+    const candidates = execFileSync(
+      'git',
+      ['ls-files', '-z', '--', 'integration-tests'],
+      { cwd: ROOT, encoding: 'utf8' },
+    )
+      .split('\0')
+      .map((file) => file.slice('integration-tests/'.length))
+      .filter((file) => file.endsWith('.test.ts') && collectedFiles.has(file));
+    const packageJson = JSON.parse(
+      readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
+    );
+    const entries = packageJson.scripts[NO_AK_SCRIPT].split(/\s+/).filter(
+      (arg, index, args) =>
+        arg.startsWith('./') && args[index - 1] !== '--root',
+    );
+    const selected = new Set();
+    for (const entry of entries) {
+      const filter = entry.slice(2).toLocaleLowerCase();
+      const matches = candidates
+        .filter((file) => file.toLocaleLowerCase().includes(filter))
+        .sort();
+      if (entry === './test-helper.test.ts') {
+        // Existing substring collision; pin both files without expanding CI.
+        expect(matches, entry).toEqual([
+          'sdk-typescript/test-helper.test.ts',
+          'test-helper.test.ts',
+        ]);
+      } else {
+        expect(matches, `${entry}: ${matches.join(', ')}`).toHaveLength(1);
+      }
+      for (const file of matches) selected.add(file);
+    }
+
+    // The no-AK job has a 20-minute budget. Keep existing omissions explicit;
+    // credential-free suites need a runtime-budget decision before enrollment.
+    const exemptions = {
+      'channel-plugin.test.ts': 'Real model required',
+      'chat-transcript-document.test.ts': 'Browser gate; runtime budget',
+      'cli/_first-output-benchmark.test.ts': 'Runtime budget',
+      'cli/acp-cron.test.ts': 'Runtime budget',
+      'cli/acp-integration.test.ts': 'Runtime budget',
+      'cli/advisor-tool.test.ts': 'Runtime budget',
+      'cli/cron-tools.test.ts': 'Real model required',
+      'cli/edit.test.ts': 'Real model required',
+      'cli/extensions-install.test.ts': 'Runtime budget',
+      'cli/external-context-mem0-daemon-delete.test.ts': 'Runtime budget',
+      'cli/external-context-mem0-daemon-write.test.ts': 'Runtime budget',
+      'cli/file-system.test.ts': 'Real model required',
+      'cli/gen-ai-telemetry.test.ts': 'Runtime budget',
+      'cli/hosted-latency-baseline.test.ts': 'Runtime budget',
+      'cli/json-output.test.ts': 'Runtime budget',
+      'cli/json-schema.test.ts': 'Real model required',
+      'cli/mcp_server_cyclic_schema.test.ts': 'Real model required',
+      'cli/mock-acp-typecheck.test.ts': 'Runtime budget',
+      'cli/monitor.test.ts': 'Real model required',
+      'cli/notebook-edit.test.ts': 'Real model required',
+      'cli/qwen-config-dir.test.ts': 'Real model required',
+      'cli/qwen-daemon-startup-benchmark.test.ts': 'Benchmark runtime budget',
+      'cli/qwen-daemon-vs-cli-benchmark.test.ts': 'Benchmark runtime budget',
+      'cli/qwen-serve-baseline.test.ts': 'Benchmark runtime budget',
+      'cli/qwen-serve-channel-workers.test.ts': 'Runtime budget',
+      'cli/qwen-serve-client-mcp.test.ts': 'Runtime budget',
+      'cli/qwen-serve-live-journal-recovery.test.ts': 'Runtime budget',
+      'cli/qwen-serve-web-shell-live-journal-recovery.test.ts':
+        'Runtime budget',
+      'cli/read_many_files.test.ts': 'Real model required',
+      'cli/run_shell_command.test.ts': 'Real model required',
+      'cli/save_memory.test.ts': 'Real model required',
+      'cli/settings-migration.test.ts': 'Runtime budget',
+      'cli/simple-mcp-server.test.ts': 'Real model required',
+      'cli/sleep-interception.test.ts': 'Real model required',
+      'cli/stdin-context.test.ts': 'Real model required',
+      'cli/subagent-hook-owner.test.ts': 'Runtime budget',
+      'cli/telemetry.test.ts': 'Real model required',
+      'cli/todo_write.test.ts': 'Real model required',
+      'cli/tool-search.test.ts': 'Real model required',
+      'cli/utf-bom-encoding.test.ts': 'Runtime budget',
+      'cli/write_file.test.ts': 'Real model required',
+      'export-artifact-contract.test.ts': 'Runtime budget',
+      'globalSetup.test.ts': 'Runtime budget',
+      'helpers/hosted-relay-headers.test.ts': 'Runtime budget',
+      'helpers/wire-rows.test.ts': 'Runtime budget',
+      'interactive/command-output-visibility.test.ts': 'Runtime budget',
+      'interactive/context-compress-interactive.test.ts': 'Runtime budget',
+      'interactive/cron-interactive.test.ts': 'Real model required',
+      'interactive/ctrl-c-exit.test.ts': 'Runtime budget',
+      'interactive/external-context-auto-recall.test.ts': 'Runtime budget',
+      'interactive/external-context-mem0-write.test.ts': 'Runtime budget',
+      'interactive/file-system-interactive.test.ts': 'Runtime budget',
+      'interactive/hooks-command.test.ts': 'Runtime budget',
+      'interactive/interactive-session-viewport.test.ts': 'Runtime budget',
+      'interactive/interactive-session.test.ts': 'Runtime budget',
+      'interactive/mid-turn-submit-interactive.test.ts': 'Runtime budget',
+      'interactive/mixed-input-crash.test.ts': 'Runtime budget',
+      'interactive/protocol-tags-interactive.test.ts': 'Runtime budget',
+      'interactive/submitted-prompt-provenance.test.ts': 'Runtime budget',
+      'interactive/tui-dual-output.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-migration.test.ts': 'Runtime budget',
+      'renderer-matrix.test.ts': 'Runtime budget',
+      'scratch-dir.test.ts': 'Runtime budget',
+      'sdk-typescript/configuration-options.test.ts': 'Real model required',
+      'sdk-typescript/mcp-server.test.ts': 'Real model required',
+      'sdk-typescript/message-event-pairing.test.ts': 'Real model required',
+      'sdk-typescript/multi-turn.test.ts': 'Real model required',
+      'sdk-typescript/session-id.test.ts': 'Real model required',
+      'sdk-typescript/single-turn.test.ts': 'Real model required',
+    };
+    for (const [file, reason] of Object.entries(exemptions)) {
+      expect(reason, `${file}: exemption reason`).toMatch(/\S/);
+    }
+    expect(
+      candidates.filter((file) => !selected.has(file)).sort(),
+      'Every runnable test must be selected or explicitly exempted with a reason',
+    ).toEqual(Object.keys(exemptions).sort());
   });
 
   it('runs the no-AK integration script as its own check on PRs and the merge queue', () => {
@@ -910,8 +1042,11 @@ describe('no-AK integration CI wiring', () => {
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    expect(webShellJob).toContain(
-      "runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''[\"ubuntu-latest\"]'') }}'",
+    // The lane still takes its runner from the classifier, so an untrusted
+    // fork PR cannot reach a self-hosted host; the architecture override it
+    // applies on top is pinned in scripts/tests/ci-platform-lanes.test.js.
+    expect(webShellJob).toMatch(
+      /runs-on: .*needs\.classify_pr\.outputs\.ubuntu_runner/,
     );
     const hostedInstall = getWorkflowStep(
       webShellJob,
@@ -1077,4 +1212,47 @@ describe('Windows temp short-alias guard', () => {
     // beats realpathSync(undefined)'s TypeError.
     expect(() => runGuard({ TEMP: '', TMP: '' })).toThrow(/TEMP is not set/);
   });
+
+  it('annotates an unset temp so the failure reaches the check UI', () => {
+    // A bare console.error leaves the run reporting only "Process completed
+    // with exit code 1". The `::error::` prefix is what GitHub turns into an
+    // annotation attached to the check — the same channel the
+    // hosted-process-suite step in this workflow already uses.
+    let err;
+    try {
+      runGuard({ TEMP: '', TMP: '' });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.stderr).toContain('::error::');
+    expect(err.stderr).toContain('TEMP is not set');
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'annotates a short alias so the failure reaches the check UI',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+
+        let err;
+        try {
+          runGuard({ TEMP: alias, TMP: alias });
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeDefined();
+        expect(err.stderr).toContain('::error::');
+        expect(err.stderr).toContain('TEMP carries a short alias');
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
 });

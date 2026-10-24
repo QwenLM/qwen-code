@@ -21,7 +21,8 @@
 - 每个改到 Managed Agent 路径的 PR，在最终 head 上通过全量套件后才能合入。
 - push 时的反馈保持快速（约 25 分钟）。
 - 没改到这些路径的 PR，除几秒钟的路径匹配外不付出额外成本。
-- 仍然漏进 main 的回归，经现有 `main-ci-failure-issue.yml` 路线自动开 issue。
+- 仍然漏进 main 的回归，经现有 `main-ci-failure-issue.yml` 路线自动开 issue；
+  例外是 main 已越过失败 head、且更新的运行拥有该结果的情形。
 
 ## 非目标
 
@@ -143,9 +144,19 @@ fork 代码留在托管 runner 上，在那里跑全量也不需要任何 secret
 
 ### 失败上报
 
-`main-ci-failure-issue.yml` 也监听 `Managed Agent gate`，合入后快闸变红会和其他 main
-失败一样开去重的 autofix issue。`qwen-triage-finalize.yml` 用 `Managed Agent gate`
-替换了 `SDK Java`——后者自 #14205 起已没有 `pull_request` 触发。
+`main-ci-failure-issue.yml` 也监听 `Managed Agent gate`，合入后快闸变红会经该路线记录：
+能识别失败用例的 run 按测试 marker 复用或新开按签名去重的 issue；识别不了的则在每个
+workflow 共用的汇总 issue 上追加评论，找到匹配的已关闭 issue 时会重新打开。新汇总单使用
+`scope/ci-cd` 和 `status/needs-triage` 标签供人工分诊，不自动指派 autofix。
+`qwen-triage-finalize.yml` 用 `Managed Agent gate` 替换了 `SDK Java`——后者自 #14205
+起已没有 `pull_request` 触发。
+
+当合入后 push 失败的 head 已不再是 main 的 tip 时，如果新 tip 上存在同一 workflow
+的更新 push 运行、且它能自行上报结果，这次失败只记录在 analyze 运行的步骤摘要里，
+不会记录到 workflow issue 上。仍在排队或运行中的后继算作延迟上报；以 `success` 或
+`failure` 结束的后继同样算数——失败后继自己的完成事件会重新进入本 workflow。以
+`cancelled`、`timed_out`、`skipped` 或 `startup_failure` 结束的后继永远不会被分析，
+因此此时仍然上报原始失败。
 
 ## 成本
 

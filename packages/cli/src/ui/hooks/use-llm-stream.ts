@@ -5002,6 +5002,10 @@ export const useLlmStream = (
 
   const handleCompletedTools = useCallback(
     async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
+      const sessionId = config.getSessionId();
+      const chat = llmClient?.getChat();
+      const isCurrentSession = () =>
+        config.getSessionId() === sessionId && llmClient?.getChat() === chat;
       const completedAndReadyToSubmitTools =
         completedToolCallsFromScheduler.filter(
           (
@@ -5032,8 +5036,13 @@ export const useLlmStream = (
       // `useReactToolScheduler.allToolCallsCompleteHandler` is single-shot
       // per batch, so a later active-stream early-return would leave
       // the tool stuck in `completed-but-not-submitted` forever (Race A
-      // surfaced in PR #4176 review). The real result is dropped on the
-      // wire — same trade-off upstream Claude Code makes when its
+      // surfaced in PR #4176 review). When the existing response is one
+      // of those synthesized placeholders, the real result REPLACES it
+      // in place (and is recorded to the transcript) so a tool that
+      // actually finished is not reported to the model as "not
+      // recorded" (issue #15297); only a genuine duplicate — a real
+      // response already present for the same id — is dropped on the
+      // wire, the trade-off upstream Claude Code makes when its
       // `StreamingToolExecutor.discard()` follows a
       // `yieldMissingToolResultBlocks` synthesis (`query.ts:733` + `:984`).
       // Walk raw history WITHOUT cloning — `llmClient.getHistory()`
@@ -5055,11 +5064,108 @@ export const useLlmStream = (
       );
       const dedupedCallIds = dedupedTools.map((tc) => tc.request.callId);
       if (dedupedCallIds.length > 0) {
-        debugLogger.warn(
-          `[REPAIR] Dropping ${dedupedCallIds.length} late tool result(s) ` +
-            `whose callId already has a functionResponse in history: ` +
-            `${dedupedCallIds.join(', ')}`,
+        // Optional-call with an empty fallback: some unit-test mocks
+        // predate this accessor, and a missing accessor must degrade to
+        // the old drop behavior rather than crash the batch.
+        const synthesizedRepairCallIds: Set<string> =
+          llmClient?.getSynthesizedRepairCallIds?.() ?? new Set<string>();
+        const replaceableTools = dedupedTools.filter((tc) =>
+          synthesizedRepairCallIds.has(tc.request.callId),
         );
+        const replacedCallIds: string[] = [];
+        let abandonedSessionId: string | null = null;
+        if (replaceableTools.length > 0 && llmClient) {
+          const finalizedReplaceable = await finalizeToolResponses(
+            config,
+            replaceableTools.map(({ request, response }) => ({
+              callId: request.callId,
+              toolName: request.name,
+              responseParts: response.responseParts,
+              persistedOutputFiles: response.persistedOutputFiles,
+              artifacts: response.artifacts,
+            })),
+            new Map(
+              replaceableTools.flatMap(({ request }) =>
+                request.prompt_id
+                  ? [[request.callId, request.prompt_id] as const]
+                  : [],
+              ),
+            ),
+          );
+          // A session swap (/clear, /resume, daemon churn) during the
+          // finalize await leaves the captured chat abandoned: splicing
+          // it is invisible, but recordToolResult resolves its session
+          // at write time and would land the old session's result in the
+          // NEW session's transcript. Skip both; the ids fall through to
+          // the drop bookkeeping below.
+          if (isCurrentSession()) {
+            finalizedReplaceable.forEach((entry, index) => {
+              const { request, response, status } = replaceableTools[index]!;
+              if (
+                !llmClient.replaceSynthesizedToolResponse?.(
+                  entry.callId,
+                  entry.responseParts,
+                )
+              ) {
+                return;
+              }
+              replacedCallIds.push(entry.callId);
+              // Every other completion path emits to the sidecar; without
+              // this a stream-json consumer never sees the late real result.
+              dualOutput?.emitToolResult(request, response);
+              // The drop path never reaches `recordToolResult`, so without
+              // this the transcript keeps a `model[functionCall]` whose
+              // response exists nowhere on disk — the exact phantom shape
+              // reported in issue #15297. The placeholder was itself
+              // in-memory only, so the real result is the first durable
+              // answer for this callId. On `--resume` the repair pass hoists
+              // it back only while it still sits in the user run right after
+              // the call; once a model turn intervenes the scan stops there
+              // and synthesizes a fresh placeholder instead, leaving the
+              // recorded result durable but unreferenced.
+              config.getChatRecordingService?.()?.recordToolResult?.(
+                entry.responseParts,
+                {
+                  callId: entry.callId,
+                  status,
+                  resultDisplay: response.resultDisplay,
+                  persistedOutputFiles: entry.persistedOutputFiles,
+                  artifacts: entry.artifacts,
+                  error: response.error,
+                  errorType: response.errorType,
+                  executionStatus: response.executionStatus,
+                },
+                goalToolResultProvenance(request, entry.responseParts),
+              );
+            });
+            if (replacedCallIds.length > 0) {
+              debugLogger.warn(
+                `[REPAIR] Replaced synthesized placeholder(s) with late ` +
+                  `real tool result(s) for callId(s): ` +
+                  `${replacedCallIds.join(', ')}`,
+              );
+            }
+          } else {
+            abandonedSessionId = sessionId;
+          }
+        }
+        const replacedSet = new Set(replacedCallIds);
+        const droppedCallIds = dedupedCallIds.filter(
+          (id) => !replacedSet.has(id),
+        );
+        if (droppedCallIds.length > 0) {
+          debugLogger.warn(
+            `[REPAIR] Dropping ${droppedCallIds.length} late tool result(s) ` +
+              `whose callId already has a functionResponse in history: ` +
+              `${droppedCallIds.join(', ')}` +
+              // Without this the warning reads as "genuine duplicate" for
+              // ids that were only skipped because the session moved on.
+              (abandonedSessionId
+                ? ` (session ${abandonedSessionId} was abandoned during ` +
+                  `finalize, so its placeholder(s) were not replaced)`
+                : ``),
+          );
+        }
         // Even though the wire-side submission is dropped, the tool DID
         // run locally — `toolCallCount` and `skillsModifiedInSession`
         // must reflect that. Without this, deduped skill-write tools
@@ -5483,6 +5589,10 @@ export const useLlmStream = (
           });
         }
       }
+      if (!isCurrentSession()) {
+        if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+        return;
+      }
       if (newSuccessfulMemorySaves.length > 0) {
         if (!didRefreshManagedMemory) {
           // Perform the legacy save_memory refresh only when the managed-memory
@@ -5634,6 +5744,10 @@ export const useLlmStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
+      if (!isCurrentSession()) {
+        if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+        return;
+      }
       orderedResponses.forEach(({ request, response, status }, index) => {
         config.getChatRecordingService?.()?.recordToolResult?.(
           finalizedResponses[index].responseParts,
@@ -5656,18 +5770,23 @@ export const useLlmStream = (
       });
 
       if (continuationWasCancelled()) {
-        // This is the branch a cancelled Goal tool batch actually takes: the
+        // This is the branch a cancelled tool batch actually takes: the
         // controller retained across tool execution feeds the continuation
         // owner's signal, so pressing Esc while tools run aborts it here
         // rather than at either of the branches below. `markToolsAsSubmitted`
         // stops these callIds ever being submitted, so unless the responses
         // are written now the model's function calls stay unanswered and the
-        // next `/goal resume` sends a history with an unpaired call. The
+        // next turn sends a history with an unpaired call. The
         // all-cancelled branch below writes them for the batch it handles;
         // this branch owes its own batch the same pairing, whether or not
         // every tool in it was cancelled.
-        if (toolGoalBinding && llmClient) {
-          llmClient.addHistory({ role: 'user', parts: responsesToSend });
+        if (llmClient) {
+          const pairedCallIds = llmClient.getHistoryFunctionResponseIds();
+          const unpairedParts = finalizedResponses
+            .filter((entry) => !pairedCallIds.has(entry.callId))
+            .flatMap((entry) => entry.responseParts);
+          if (unpairedParts.length > 0)
+            llmClient.addHistory({ role: 'user', parts: unpairedParts });
         }
         markToolsAsSubmitted(
           llmTools.map((toolCall) => toolCall.request.callId),
@@ -6768,6 +6887,10 @@ export const useLlmStream = (
           void submitQuery(item.modelText, item.sendMessageType, undefined, {
             notificationDisplayText: item.displayText,
             todoWorkChainId: item.todoWorkChainId,
+            // A cron prompt is never a shell command, whatever mode the
+            // composer happens to be in when the queue drains — with a gate
+            // the text also carries a command's untrusted output.
+            shellMode: false,
             onDelivered: item.onDelivered,
             onDeliveryFailed: () => {
               restoreDroppedSummary();
