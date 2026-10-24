@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
@@ -3602,11 +3603,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
                     && ((request.isManagedContext() && brokerFailure.getStatusCode() == 409
                             && "workspace_csi_busy".equals(brokerFailure.getCode()))
-                            || (!request.isManagedContext() && brokerFailure.getStatusCode() == 503
+                            || (!request.isManagedContext()
                                     && (("kubernetes-scratch".equals(request.getProvisionerKind())
+                                            && brokerFailure.getStatusCode() == 503
                                             && "runtime_kubernetes_capacity".equals(brokerFailure.getCode()))
-                                            || ("external-scratch".equals(request.getProvisionerKind())
-                                                    && "runtime_external_capacity".equals(brokerFailure.getCode())))));
+                                            || (ExternalRuntimeProvisioner.KIND.equals(request.getProvisionerKind())
+                                                    && (claimed.getResourceHandle() == null
+                                                            || (brokerFailure.getStatusCode() == 503
+                                                                    && "runtime_external_capacity".equals(
+                                                                            brokerFailure.getCode())))))));
             if (!busy) {
                 blockRecoveryQuietly(claimed, failure);
             }

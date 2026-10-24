@@ -523,8 +523,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     + " without credentials, query or fragment");
         }
         String token = runtimeBroker.getExternalProviderToken();
-        if (token == null || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
+        if (token == null || token.startsWith("replace-") || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
             throw new IllegalStateException("External Runtime provider token must be 16-4096 safe characters");
+        }
+        if (harness.getCapabilityDigest() == null
+                || !harness.getCapabilityDigest().matches("sha256:[0-9a-f]{64}")) {
+            throw new IllegalStateException("External Runtime Harness capability digest must match sha256:[0-9a-f]{64}");
         }
         BrokerValues.requireId(runtimeBroker.getExternalProviderId(), "External Runtime provider ID");
         BrokerValues.requireId(runtimeBroker.getWorkspaceId(), "External Runtime workspace ID");

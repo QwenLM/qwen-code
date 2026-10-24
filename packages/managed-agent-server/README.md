@@ -1066,15 +1066,24 @@ For the external scratch provisioner, no local worker entry or state directory
 is used. Set instead:
 
 ```bash
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN='replace-with-a-private-broker-token'
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID='external-v1'
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY='replace-with-base64-encoded-32-byte-key'
+export QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY='false'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID='scratch'
 export QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER='external-scratch'
 export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL='https://provider.example/'
-export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_TOKEN='replace-with-a-long-random-token'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_TOKEN='<operator-issued-provider-token>'
 export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID='external'
 export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT='30s'
 export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT='3m'
 export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/workspace'
 ```
 
+Replace the credential placeholders before starting. Set
+`QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` to the worker capability digest
+(`sha256:` followed by 64 lowercase hexadecimal characters), even with Harness disabled.
 Keep Workspace files and Shell disabled and trusted local reboot recovery off;
 the provider URL must be HTTP(S) without credentials, query or fragment, and the
 cwd is the worker-side path. The provider implements authenticated `provision`
@@ -1172,7 +1181,7 @@ warns. Cadences bound through `@Scheduled` placeholders —
 and the startup warning cannot see them, so always write the suffix
 there.
 
-When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
+For `local-process`, when `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical
 workspace path. An explicitly configured ID must match that value or startup
 fails before traffic is accepted.

@@ -56,14 +56,15 @@ class RuntimeBrokerStorageAdmissionTest {
     @ParameterizedTest
     @CsvSource({
             "kubernetes-scratch, runtime_kubernetes_capacity",
-            "external-scratch, runtime_external_capacity"
+            "external-scratch, runtime_external_capacity",
+            "external-scratch, runtime_external_unavailable"
     })
-    void scratchCapacityPreservesTheOriginalSeedAcrossPreCreateRetries(String kind, String code) {
+    void scratchAdmissionPreservesTheOriginalSeedAcrossPreCreateRetries(String kind, String code) {
         var bindings = new InMemoryRuntimeBindingRepository();
         var provisioner = new AdmissionProvisioner();
         provisioner.provisionerKind = kind;
         provisioner.admit = binding -> {
-            throw new RuntimeBrokerException(503, code, "Capacity exhausted.", true);
+            throw new RuntimeBrokerException(503, code, "Temporarily unavailable.", true);
         };
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
         for (int round = 0; round < 2; round++) {
@@ -89,13 +90,13 @@ class RuntimeBrokerStorageAdmissionTest {
     @ParameterizedTest
     @CsvSource({
             "kubernetes-scratch, runtime_kubernetes_capacity",
-            "external-scratch, runtime_external_capacity"
+            "external-scratch, runtime_external_unavailable"
     })
-    void scratchCapacityAfterEnteringEnsureRemainsRecoveryBlocked(String kind, String code) {
+    void scratchFailureAfterEnteringEnsureRemainsRecoveryBlocked(String kind, String code) {
         var bindings = new InMemoryRuntimeBindingRepository();
         var provisioner = new AdmissionProvisioner();
         provisioner.provisionerKind = kind;
-        provisioner.ensureFailure = new RuntimeBrokerException(503, code, "Capacity exhausted.", true);
+        provisioner.ensureFailure = new RuntimeBrokerException(503, code, "Temporarily unavailable.", true);
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
         try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
             assertEquals(code, failure(broker.warm("harness")).getCode());

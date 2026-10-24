@@ -51,6 +51,7 @@ class ExternalRuntimeProvisionerTest {
             assertFalse(handle.toJson().contains(seed.getToken()));
             var boot = (Map<?, ?>) api.provisionRequest.get("boot");
             assertEquals(seed.getLeaseId(), boot.get("leaseId"));
+            assertEquals(seed.getToken(), boot.get("token"));
             assertEquals(seed.getGatewayIncarnation(), boot.get("runtimeIncarnation"));
             assertEquals("/workspace", boot.get("workspaceCwd"));
         }
@@ -63,6 +64,88 @@ class ExternalRuntimeProvisionerTest {
             assertTrue(restored.isUsable(lease));
         }
         assertEquals(1, api.provisions);
+    }
+
+    @Test
+    void permanentProvisionFailureFreesOneSlotWithoutEvictingOtherSeeds() {
+        var api = new Provider();
+        try (var provider = provisioner(api)) {
+            var request = request(provider);
+            var bindings = new InMemoryRuntimeBindingRepository();
+            var binding = bindings.findOrCreate(request);
+            var claimed = bindings.claimOperation(binding.getBindingId(), "owner", Duration.ofSeconds(30));
+            provider.reserveResource(claimed);
+            var seed = claimed.getProvisionSeed();
+            var handle = join(provider.ensureResource(request, seed, null));
+            for (int n = 1; n < ExternalRuntimeProvisioner.MAX_PLACEMENTS; n++) {
+                join(provider.ensureResource(request, RuntimeProvisionSeed.create("binding-" + n, 1), null));
+            }
+            assertEquals(handle, join(provider.ensureResource(request, seed, handle)));
+            assertEquals(0, api.provisions);
+            var extra = bindings.findOrCreate(provider.createRequest(request.getScope(), "extra"));
+            var extraClaim = bindings.claimOperation(extra.getBindingId(), "owner", Duration.ofSeconds(30));
+            var capacity = assertThrows(RuntimeBrokerException.class, () -> provider.reserveResource(extraClaim));
+            assertEquals(503, capacity.getStatusCode());
+            assertEquals("runtime_external_capacity", capacity.getCode());
+            assertTrue(capacity.isRetryable());
+            api.provisionFailure = new RuntimeBrokerException(404, "runtime_external_provider_failed", "not found", false);
+            var failed = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                    () -> join(provider.provision(request, seed))).getCause();
+            assertFalse(failed.isRetryable());
+            assertEquals(api.provisionFailure, failed.getCause());
+            assertThrows(CompletionException.class, () -> join(provider.provision(request, seed)));
+            assertEquals(1, api.provisions);
+            provider.reserveResource(extraClaim);
+            join(provider.ensureResource(extraClaim.getRequest(), extraClaim.getProvisionSeed(), null));
+        }
+    }
+
+    @Test
+    void shutdownDuringObservationIsUnknownRatherThanIdentityConflict() {
+        for (boolean reconcile : new boolean[] {false, true}) {
+            var api = new Provider();
+            try (var provider = provisioner(api)) {
+                var request = request(provider);
+                var seed = RuntimeProvisionSeed.create("binding", 1);
+                var handle = join(provider.ensureResource(request, seed, null));
+                var lease = join(provider.provision(request, seed));
+                api.onObserve = provider::close;
+                if (reconcile) {
+                    assertEquals(RuntimeObservation.Outcome.UNKNOWN,
+                            join(provider.reconcile(request, seed, handle, lease)).getOutcome());
+                } else {
+                    var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                            () -> join(provider.provision(request, seed))).getCause();
+                    assertEquals("runtime_external_unavailable", failure.getCode());
+                    assertTrue(failure.isRetryable());
+                }
+            }
+        }
+    }
+
+    @Test
+    void pollsStartingUntilReadyAndTimesOutWithoutDiscardingIdentity() {
+        var api = new Provider();
+        api.startingObservations = 2;
+        try (var provider = provisioner(api)) {
+            var request = request(provider);
+            var seed = RuntimeProvisionSeed.create("binding", 1);
+            join(provider.ensureResource(request, seed, null));
+            assertEquals(seed.getLeaseId(), join(provider.provision(request, seed)).getLeaseId());
+            assertEquals(3, api.observations);
+        }
+        api = new Provider();
+        api.state = "STARTING";
+        try (var provider = new ExternalRuntimeProvisioner(api, "external", Duration.ofMillis(1))) {
+            var request = request(provider);
+            var seed = RuntimeProvisionSeed.create("binding", 1);
+            var handle = join(provider.ensureResource(request, seed, null));
+            var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                    () -> join(provider.provision(request, seed))).getCause();
+            assertEquals("runtime_external_unavailable", failure.getCode());
+            assertTrue(failure.isRetryable());
+            assertEquals(handle, join(provider.ensureResource(request, seed, handle)));
+        }
     }
 
     @Test
@@ -256,6 +339,8 @@ class ExternalRuntimeProvisionerTest {
         private String state = "RUNNING";
         private int provisions;
         private int observations;
+        private int startingObservations;
+        private Runnable onObserve = () -> { };
 
         @Override
         public CompletionStage<Map<String, Object>> provision(Map<String, Object> request) {
@@ -271,10 +356,11 @@ class ExternalRuntimeProvisionerTest {
         @Override
         public CompletionStage<Map<String, Object>> observe(Map<String, Object> request) {
             observations++;
+            onObserve.run();
             if (failure != null) {
                 return CompletableFuture.failedFuture(failure);
             }
-            return CompletableFuture.completedFuture(Map.of("protocolVersion", 1, "state", state,
+            return CompletableFuture.completedFuture(Map.of("protocolVersion", 1, "state", observations <= startingObservations ? "STARTING" : state,
                     "endpoint", endpoint));
         }
     }

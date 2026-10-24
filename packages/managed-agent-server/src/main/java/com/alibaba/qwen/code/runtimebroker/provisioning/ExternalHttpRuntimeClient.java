@@ -36,7 +36,7 @@ public final class ExternalHttpRuntimeClient implements ExternalRuntimeClient {
                 || base.getFragment() != null) {
             throw new IllegalArgumentException("External Runtime provider URL must be an HTTP(S) URL");
         }
-        if (token == null || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
+        if (token == null || token.startsWith("replace-") || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
             throw new IllegalArgumentException("External Runtime provider token must be at least 16 safe characters");
         }
         if (client == null || client.followRedirects() != HttpClient.Redirect.NEVER
@@ -81,7 +81,7 @@ public final class ExternalHttpRuntimeClient implements ExternalRuntimeClient {
         var result = exchange.thenApply(response -> {
             int status = response.statusCode();
             if (status != 200) {
-                // 404/409 from the provider are definite answers; everything else may be transient.
+                // Only 408/429/5xx are retried; other non-200 statuses are permanent answers.
                 throw failure(status, status == 408 || status == 429 || status >= 500);
             }
             if (response.body().overflow()) {

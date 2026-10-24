@@ -131,14 +131,13 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             body.put("scope", scope(request));
             body.put("boot", boot(request, seed));
             body.put("handle", saved.handle().getValue().get("provider"));
-            Map<String, Object> response = call(client.provision(Map.copyOf(body)));
-            if (!saved.handle().getValue().get("provider").equals(response.get("handle"))) {
-                forgetPlacement(saved);
-                throw conflict();
-            }
-            long deadline = System.nanoTime() + startupTimeout.toNanos();
-            long pause = 200;
             try {
+                Map<String, Object> response = call(client.provision(Map.copyOf(body)));
+                if (!saved.handle().getValue().get("provider").equals(response.get("handle"))) {
+                    throw conflict();
+                }
+                long deadline = System.nanoTime() + startupTimeout.toNanos();
+                long pause = 200;
                 while (System.nanoTime() < deadline) {
                     RuntimeObservation observed = observe(request, seed, saved.handle());
                     if (observed.getOutcome() == RuntimeObservation.Outcome.READY) {
@@ -303,8 +302,11 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     private void savePlacement(Placement value) {
         synchronized (placements) {
+            if (executor.isShutdown()) {
+                throw unavailable();
+            }
             Placement current = placements.get(value.seed());
-            if (executor.isShutdown() || current == null || !current.request().equals(value.request())
+            if (current == null || !current.request().equals(value.request())
                     || (current.handle() != null && !current.handle().equals(value.handle()))) {
                 throw conflict();
             }
@@ -421,10 +423,10 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             }
             return response;
         } catch (CompletionException error) {
-            if (error.getCause() instanceof RuntimeBrokerException failure) {
-                throw failure.isRetryable() ? unavailable() : conflict();
-            }
-            throw unavailable();
+            RuntimeBrokerException mapped = error.getCause() instanceof RuntimeBrokerException failure
+                    && !failure.isRetryable() ? conflict() : unavailable();
+            throw new RuntimeBrokerException(mapped.getStatusCode(), mapped.getCode(), mapped.getMessage(),
+                    mapped.isRetryable(), error.getCause());
         }
     }
 

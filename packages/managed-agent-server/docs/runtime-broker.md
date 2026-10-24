@@ -154,7 +154,10 @@ provider URL must be HTTP(S) without credentials, query or fragment; use HTTPS
 for anything outside a trusted control plane. Workspace files and Shell must stay
 disabled, and the configured `workspace-cwd` is the worker-side path, so the
 Broker host does not need that directory. Preflight validates configuration only;
-reachability and worker identity are checked on first use.
+reachability and worker identity are checked on first use. The complete
+[external setup recipe](../README.md#broker-deployment) also enables the Broker,
+sets its private token and seed-encryption key, supplies an explicit Workspace ID
+and capability digest, and disables trusted local reboot recovery.
 
 The provider implements two authenticated POST routes, `provision` and `observe`.
 `provision` is idempotent on `provisionRequestId`: the Broker persists a
@@ -169,7 +172,12 @@ bearer/lease protocol and keeps every lease, epoch and execution decision.
 
 Transient provider failures stay retryable against the same request and lease, so
 a temporary outage does not invalidate a healthy binding; endpoint or identity
-mismatch does. There is deliberately no `release` route. Release can run after an
+mismatch does. Set provider ID, Workspace ID/generation/cwd and Harness capability
+digest before the first Session: these settings enter the
+[handle identity](../../../docs/design/2026-10-23-external-runtime-provider.md#scratch-http-contract),
+and changing them invalidates affected persisted bindings; this scratch mode has
+no operator recovery/unblock path. The lease token is excluded from that digest.
+There is deliberately no `release` route. Release can run after an
 operation loses its CAS or fails attestation, so it cannot authorize stopping a
 worker another Broker may own. Closing a Session therefore does not stop its
 scratch worker: budget the provider's own TTL and inspect retained resources.
