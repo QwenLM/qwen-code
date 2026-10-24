@@ -35,7 +35,8 @@ public class ManagedActionService {
             LoggerFactory.getLogger(ManagedActionService.class);
     private static final int INPUT_PREVIEW_BYTES = 8192;
     private static final Set<String> PREVIEW_TOOLS =
-            Set.of("read_file", "write_file", "edit", "run_shell_command",
+            Set.of("web_fetch", "read_file", "write_file", "edit", "run_shell_command",
+                    "todo_write",
                     "agent", "send_message", "team_create", "task_create",
                     "task_update", "workflow", "request_shutdown", "exit_plan_mode",
                     "team_plan_approval");
@@ -73,6 +74,78 @@ public class ManagedActionService {
                 page.stream().map(a -> view(tenant, session, a, false)).toList(),
                 more,
                 more ? cursor(page.get(page.size() - 1)) : null);
+    }
+
+    public PublicActionList listPublic(String tenant, String actor, String session,
+            String cursor, int limit, boolean includeChildren) {
+        if (!includeChildren) {
+            return listPublic(tenant, actor, session, cursor, limit);
+        }
+        var rows = childPage(tenant, actor, session, cursor, limit);
+        boolean more = rows.size() > limit;
+        var page = rows.subList(0, Math.min(limit, rows.size()));
+        return new PublicActionList(page.stream().map(row -> view(tenant, row.sessionId(), row.action(), false)).toList(),
+                more, more ? childCursor(tenant, session, page.getLast()) : null);
+    }
+
+    public WebShellPage<JsonNode> listWebShell(String tenant, String actor, String session,
+            String cursor, int limit, boolean includeChildren) {
+        if (!includeChildren) {
+            return listWebShell(tenant, actor, session, cursor, limit);
+        }
+        var rows = childPage(tenant, actor, session, cursor, limit);
+        boolean more = rows.size() > limit;
+        var page = rows.subList(0, Math.min(limit, rows.size()));
+        return new WebShellPage<>(page.stream().map(row -> view(tenant, row.sessionId(), row.action(), true)).toList(),
+                more ? childCursor(tenant, session, page.getLast()) : null, more);
+    }
+
+    private String childCursorScope(String tenant, String session) {
+        return "children:" + org.apache.commons.codec.digest.DigestUtils.sha256Hex(tenant + "\u0000" + session) + ":";
+    }
+
+    private List<ManagedActionStore.ScopedAction> childPage(String tenant, String actor, String session,
+            String cursor, int limit) {
+        var root = sessions.requireReadableSession(tenant, actor, session);
+        if (root.publicChildAgentsVersion() != 1 || limit < 1 || limit > 100) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Child Action aggregation is unavailable");
+        }
+        Long before = null;
+        String beforeSession = null;
+        String beforeId = null;
+        if (cursor != null && !cursor.isEmpty()) {
+            try {
+                if (cursor.length() > 512) {
+                    throw new IllegalArgumentException();
+                }
+                String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
+                String scope = childCursorScope(tenant, session);
+                if (!decoded.startsWith(scope)) {
+                    throw new IllegalArgumentException();
+                }
+                String[] parts = decoded.substring(scope.length()).split(":", -1);
+                if (parts.length != 3 || !parts[0].matches("0|[1-9][0-9]{0,18}")
+                        || !parts[1].matches("[0-9a-f-]{36}") || !parts[2].matches("tool_approval_[0-9a-f]{32}")) {
+                    throw new IllegalArgumentException();
+                }
+                before = Long.parseLong(parts[0]);
+                beforeSession = parts[1];
+                beforeId = parts[2];
+            } catch (IllegalArgumentException invalid) {
+                throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_cursor", "Child Action cursor is invalid");
+            }
+        }
+        var rows = actions.listWithChildren(tenant, session, before, beforeSession, beforeId, limit + 1);
+        for (var row : rows) {
+            sessions.requireReadableSession(tenant, actor, row.sessionId());
+        }
+        return rows;
+    }
+
+    private String childCursor(String tenant, String session, ManagedActionStore.ScopedAction row) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString((childCursorScope(tenant, session)
+                + row.action().options().path("createdAt").asLong() + ":" + row.sessionId() + ":"
+                + row.action().id()).getBytes(StandardCharsets.UTF_8));
     }
 
     public WebShellPage<JsonNode> listWebShell(

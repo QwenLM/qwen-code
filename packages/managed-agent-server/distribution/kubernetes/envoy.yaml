@@ -1,0 +1,102 @@
+static_resources:
+  listeners:
+    - name: 'harness_mtls'
+      address:
+        socket_address:
+          address: '0.0.0.0'
+          port_value: 8443
+      filter_chains:
+        - transport_socket:
+            name: 'envoy.transport_sockets.tls'
+            typed_config:
+              '@type': 'type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext'
+              require_client_certificate: true
+              common_tls_context:
+                tls_params:
+                  tls_minimum_protocol_version: 'TLSv1_2'
+                tls_certificates:
+                  - certificate_chain:
+                      filename: '/etc/qwen/tls/tls.crt'
+                    private_key:
+                      filename: '/etc/qwen/tls/tls.key'
+                validation_context:
+                  trusted_ca:
+                    filename: '/etc/qwen/tls/client-ca.crt'
+                  match_typed_subject_alt_names:
+                    - san_type: 'URI'
+                      matcher:
+                        exact: 'spiffe://qwen.internal/managed-agent-server'
+          filters:
+            - name: 'envoy.filters.network.http_connection_manager'
+              typed_config:
+                '@type': 'type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager'
+                stat_prefix: 'hosted_harness'
+                use_remote_address: true
+                normalize_path: true
+                merge_slashes: true
+                path_with_escaped_slashes_action: 'REJECT_REQUEST'
+                stream_idle_timeout: '60s'
+                request_headers_timeout: '10s'
+                max_request_headers_kb: 32
+                route_config:
+                  name: 'harness_private'
+                  virtual_hosts:
+                    - name: 'harness'
+                      domains:
+                        - '*'
+                      request_headers_to_remove:
+                        - 'x-envoy-retry-on'
+                        - 'x-envoy-retry-grpc-on'
+                        - 'x-envoy-max-retries'
+                        - 'x-envoy-upstream-rq-timeout-ms'
+                        - 'x-envoy-upstream-rq-per-try-timeout-ms'
+                      routes:
+                        - match:
+                            prefix: '/'
+                            headers:
+                              - name: 'origin'
+                                present_match: true
+                          direct_response:
+                            status: 403
+                        - match:
+                            path: '/capabilities'
+                          route: &upstream
+                            cluster: 'harness_loopback'
+                            host_rewrite_literal: '127.0.0.1:4170'
+                            timeout: '0s'
+                            retry_policy:
+                              retry_on: ''
+                              num_retries: 0
+                        - match:
+                            path: '/health'
+                          route: *upstream
+                        - match:
+                            path: '/session'
+                          route: *upstream
+                        - match:
+                            prefix: '/session/'
+                          route: *upstream
+                        - match:
+                            prefix: '/internal/hosted-harness/v1/'
+                          route: *upstream
+                        - match:
+                            prefix: '/'
+                          direct_response:
+                            status: 404
+                http_filters:
+                  - name: 'envoy.filters.http.router'
+                    typed_config:
+                      '@type': 'type.googleapis.com/envoy.extensions.filters.http.router.v3.Router'
+  clusters:
+    - name: 'harness_loopback'
+      type: 'STATIC'
+      connect_timeout: '2s'
+      load_assignment:
+        cluster_name: 'harness_loopback'
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: '127.0.0.1'
+                      port_value: 4170

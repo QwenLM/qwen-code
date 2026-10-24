@@ -3,6 +3,10 @@ import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { AgentsManagerPage } from '../agents/AgentsManagerPage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
 import { McpManagerPage } from '../mcp/McpManagerPage';
+import {
+  ManagedMcpManagerPage,
+  type ManagedMcpManagerPageProps,
+} from '../managed/ManagedMcpManagerPage';
 import { SkillsManagerPage } from '../skills/SkillsManagerPage';
 import {
   Select,
@@ -26,6 +30,7 @@ interface PluginManagerPageProps {
   skillsWorkspaceCwd?: string;
   onSkillsWorkspaceChange?: (cwd: string) => void;
   managedSkills?: boolean;
+  managedMcp?: ManagedMcpManagerPageProps;
 }
 
 export function PluginManagerPage({
@@ -36,6 +41,7 @@ export function PluginManagerPage({
   skillsWorkspaceCwd,
   onSkillsWorkspaceChange,
   managedSkills = false,
+  managedMcp,
 }: PluginManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -109,7 +115,7 @@ export function PluginManagerPage({
   };
 
   const workspaceSelect = (disabled: boolean) =>
-    (activeTab === 'mcp' ||
+    ((activeTab === 'mcp' && !managedMcp) ||
       (activeTab === 'skills' && splitSkillsRuntimeAvailable)) &&
     workspaces.length > 1 ? (
       <Select
@@ -202,6 +208,8 @@ export function PluginManagerPage({
             onClose={onClose}
             embedded={embedded}
           />
+        ) : managedMcp ? (
+          <ManagedMcpManagerPage {...managedMcp} />
         ) : (
           <McpManagerPage
             key={`mcp-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}

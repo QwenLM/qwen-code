@@ -152,6 +152,22 @@ class ManagedApprovalChangeTest {
     }
 
     @Test
+    void liveApprovalReadsReturnTheSelectionForTheFilesV3Profile() throws Exception {
+        session = customSession("hosted-workspace-files/3", "default");
+        var privateStore = new ManagedSessionStore(jdbc);
+        String token = "live-approval-v3-writer-token-0123456789";
+        var grant = transaction().execute(status -> privateStore.acquireWriter(tenant, session, token,
+                new AcquireWriterRequest("ws", "writer", 60_000L)));
+        var request = new AuthorizeLifecycleRequest("ws", "writer", grant.writerGeneration());
+        var initial = transaction().execute(status -> privateStore.approvalSelection(tenant, session, token, request));
+        assertThat(initial).containsEntry("mode", "default").containsEntry("revision", 0L);
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        change("actor", "durable-live-v3", "yolo", 0);
+        var selected = transaction().execute(status -> privateStore.approvalSelection(tenant, session, token, request));
+        assertThat(selected).containsEntry("mode", "yolo").containsEntry("revision", 1L);
+    }
+
+    @Test
     void liveChangesStillRefuseCancellationAndRecovery() {
         when(harness.supportsLiveApprovalSelection()).thenReturn(true);
         var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "hello"));
@@ -162,14 +178,19 @@ class ManagedApprovalChangeTest {
             assertCode(() -> change("actor", "blocked-" + state, "yolo", 0), "session_context_busy");
         }
         for (String code : List.of(com.alibaba.qwen.code.managedagent.session.AgentStateStore.RUNTIME_RECOVERY_BLOCKED,
-                com.alibaba.qwen.code.managedagent.session.AgentStateStore.WORKFLOW_RECOVERY_BLOCKED)) {
+                com.alibaba.qwen.code.managedagent.session.AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                com.alibaba.qwen.code.managedagent.session.AgentStateStore.HARNESS_RECOVERY_BLOCKED)) {
             jdbc.update("UPDATE ma_turn SET status='RUNNING', error_code=? WHERE tenant_id=?", code, tenant);
             assertCode(() -> change("actor", "blocked-" + code, "yolo", 0), "session_context_busy");
+            assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
+                    Long.class, tenant, session)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id=?"
+                    + " AND operation='SET_APPROVAL'", Integer.class, tenant)).isZero();
         }
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
     void persistsPlanIndependentlyAndFreezesItWithTheTurnPolicy(String profile) throws Exception {
         when(harness.supportsPlanMode()).thenReturn(true);
         session = customSession(profile, "default");
@@ -321,7 +342,8 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1",
+            "hosted-workspace-files/3"})
     void changesStoredDefinitionSessionsWithoutChangingTheirInitialIdentityOrCreationOptions(String profile) throws Exception {
         session = customSession(profile, "default");
         var initial = store.requireSession(tenant, session);
@@ -353,6 +375,30 @@ class ManagedApprovalChangeTest {
         assertThat(definitions.pinnedContent(retained)).isEqualTo(content);
         assertThat(service.queryWebShellSessionOptions(tenant, "actor", initial.agentId()).availableApprovalModes())
                 .containsExactly("default");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = "hosted-workspace-files/3")
+    void snapshotsTheApprovalSelectionOnTurnsOfTheNewProfileVersions(String profile) throws Exception {
+        session = customSession(profile, "default");
+        var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "hello"));
+        var turn = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "new-profile",
+                "digest", session, input, SubmitHarnessTurn.computePayloadDigest(input)));
+        String prompt = store.findTurn(tenant, session, turn.turnId()).orElseThrow().promptId();
+        assertThat(store.findTurnApprovalSelection(tenant, session, prompt))
+                .isEqualTo(new WebShellApprovalSelection("default", 0));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"hosted-workspace-files/1,true", "hosted-workspace-shell/1,true",
+            "hosted-workspace-files/3,false"})
+    void keepsPlanModeOnlyOnTheProfilesThatDeclareIt(String profile, boolean planMode) throws Exception {
+        session = customSession(profile, "default");
+        var stored = store.requireSession(tenant, session);
+        when(harness.supportsPlanMode()).thenReturn(true);
+        assertThat(store.supportsPlanMode(stored)).isEqualTo(planMode);
+        assertThat(service.queryWebShellSessionOptions(tenant, "actor", stored.agentId()).planModeSupported())
+                .isEqualTo(planMode);
     }
 
     @Test
@@ -613,7 +659,7 @@ class ManagedApprovalChangeTest {
     private ManagedAgentStore store() {
         var properties = new ManagedAgentProperties();
         properties.setDefinitionToolProfiles(List.of("hosted-workspace-files/1", "hosted-workspace-shell/1",
-                "hosted-workspace-shell/2", "hosted-workspace-files/2", "hosted-workspace-read/1"));
+                "hosted-workspace-files/2", "hosted-workspace-files/3", "hosted-workspace-read/1"));
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode("default");

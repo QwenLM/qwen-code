@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  parsePublicChildModelRoute,
+  type PublicChildModelRoute,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
@@ -26,7 +31,14 @@ import {
 import { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 import { readHostedTurnApprovalSelection } from './hosted-approval-selection.js';
 
-const NATIVE_TOOLS = new Set(['read_file', 'write_file', 'edit', 'glob']);
+const NATIVE_TOOLS = new Set([
+  'read_file',
+  'write_file',
+  'edit',
+  'glob',
+  'todo_write',
+  'web_fetch',
+]);
 
 export interface HostedNativePlannedCall {
   readonly call: ToolCallRequestInfo;
@@ -45,10 +57,15 @@ export interface HostedNativePlannedCall {
   readonly partIndex: number;
   readonly refusal: string | null;
   readonly actionId: string | null;
+  readonly publicationId?: string | null;
 }
 
 export interface HostedApprovalContinuation {
   readonly v: 1;
+  readonly publicChildModel?: {
+    readonly modelId: string;
+    readonly route: PublicChildModelRoute;
+  };
   readonly sessionKey: ManagedSessionKey;
   readonly promptId: string;
   readonly definitionRef: ManagedSessionDurableRef;
@@ -97,7 +114,7 @@ export async function readHostedApprovalContinuation(
   const plan = raw as unknown as HostedApprovalContinuation;
   const header = session.authority.sessionHeader;
   if (
-    Object.keys(raw).length !== 15 ||
+    Object.keys(raw).length !== 15 + (plan.publicChildModel ? 1 : 0) ||
     plan.promptId !== promptId ||
     !['approval', 'final'].includes(plan.stage) ||
     !isDeepStrictEqual(plan.definitionRef, header.definitionRef) ||
@@ -156,6 +173,26 @@ export async function readHostedApprovalContinuation(
     throw new Error(
       'Original assistant batch does not match the continuation.',
     );
+  const publicShell = plan.publicChildModel !== undefined;
+  if (publicShell) {
+    const model = plan.publicChildModel!;
+    parsePublicChildModelRoute(model.route);
+    if (
+      Object.keys(model).sort().join(',') !== 'modelId,route' ||
+      typeof model.modelId !== 'string' ||
+      !model.modelId.trim() ||
+      Buffer.byteLength(model.modelId) > 512
+    )
+      throw new Error('Invalid public child model pin.');
+    const definition = JSON.parse(
+      (await session.resources.read(header.definitionRef)).toString('utf8'),
+    );
+    if (
+      definition.publicChildAgentsVersion !== 1 ||
+      definition.toolProfile !== 'hosted-workspace-shell/1'
+    )
+      throw new Error('Public child recovery profile changed.');
+  }
   const ids = new Set<string>();
   const runtimeIds = new Set<string>();
   const partIndexes = new Set<number>();
@@ -167,9 +204,22 @@ export async function readHostedApprovalContinuation(
       true;
   for (const [ordinal, item] of plan.calls.entries()) {
     if (
-      Object.keys(item).length !== 11 ||
+      Object.keys(item).length !==
+        11 + (Object.hasOwn(item, 'publicationId') ? 1 : 0) ||
+      (Object.hasOwn(item, 'publicationId') &&
+        (!publicShell ||
+          item.call?.name !== 'run_shell_command' ||
+          (item.publicationId !== null &&
+            (typeof item.publicationId !== 'string' ||
+              !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(
+                item.publicationId,
+              ))))) ||
       !item.call ||
-      !(NATIVE_TOOLS.has(item.call.name) || publicPlanExit) ||
+      !(
+        NATIVE_TOOLS.has(item.call.name) ||
+        publicPlanExit ||
+        (publicShell && ['agent', 'run_shell_command'].includes(item.call.name))
+      ) ||
       item.call.prompt_id !== promptId ||
       item.call.wasOutputTruncated ||
       item.call.hadIncompleteArguments ||

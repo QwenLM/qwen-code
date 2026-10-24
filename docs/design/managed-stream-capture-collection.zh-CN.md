@@ -136,7 +136,10 @@ qwen_managed_session_resource_collection
    `recovery_active`（`CAPTURING` 或 `VERIFYING` 状态的恢复或迁移操作钉住了该
    Session）。每次失败都按与发布回收器相同的退避分类法重排：
    `recovery_protected` 等 24 小时，`grace_period` 等到
-   `retired_at + grace`，其它 blocker 一律 60 秒。
+   `retired_at + grace`，`reader_active` 等到最后一个读租约到期（但不超过一个
+   claim 周期），其它 blocker
+   一律 60 秒。Session 台账尚未收尾时，发布回收器以 5 秒间隔重查
+   `resource_referenced`，因为该交接由 Session 回收器负责。
 3. 确认的 claim 持有账本 60 秒。每一页在一个属于自己的新事务里完成：claim 的锁
    与 blocker 评估已随 claim 事务提交，因此分页首先按 claim 的顺序重新获取 tenant
    与 Session 锁，并以加锁读重新评估恢复钉住 —— 唯一可能在 claim→page 间隙内新生

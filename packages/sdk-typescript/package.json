@@ -27,6 +27,11 @@
       "import": "./dist/daemon/transcript.js",
       "require": "./dist/daemon/transcript.cjs"
     },
+    "./daemon/ui": {
+      "types": "./dist/daemon/ui/index.d.ts",
+      "import": "./dist/daemon/ui/index.js",
+      "require": "./dist/daemon/ui/index.cjs"
+    },
     "./peer": {
       "types": "./dist/peer/index.d.ts",
       "import": "./dist/peer/index.js",

@@ -1,3 +1,7 @@
+import {
+  MANAGED_LIFECYCLE_MESSAGES_EN,
+  MANAGED_LIFECYCLE_MESSAGES_ZH,
+} from './components/managed/managed-lifecycle-messages.js';
 import { plural } from './utils/plural.js';
 import {
   MESSAGE_DELETION_MESSAGES_EN,
@@ -56,6 +60,11 @@ import {
   WORKSPACE_REGISTRATION_MESSAGES_EN,
   WORKSPACE_REGISTRATION_MESSAGES_ZH,
 } from './components/managed/managed-workspace-messages.js';
+
+import {
+  MANAGED_MCP_MESSAGES_EN,
+  MANAGED_MCP_MESSAGES_ZH,
+} from './components/managed/managed-mcp-messages.js';
 
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
@@ -154,6 +163,8 @@ const EN: Messages = {
   'managed.empty': 'No managed tasks yet.',
   'managed.loading': 'Loading…',
   'managed.more': 'Load more',
+  'managed.titleSearch': 'Search session titles',
+  'managed.titleSearchPlaceholder': 'Filter by title…',
   'managed.prompt': 'Message the managed agent',
   'managed.runtime': 'Environment',
   'managed.unavailable': 'Managed Agents is unavailable on this daemon.',
@@ -1793,6 +1804,7 @@ const EN: Messages = {
   'scheduledTasks.repeats': 'Repeats',
   'scheduledTasks.runsOnce': 'Runs once',
   'scheduledTasks.lastFired': (v) => `Last run: ${v?.when ?? ''}`,
+  'scheduledTasks.lastChecked': (v) => `Last checked: ${v?.when ?? ''}`,
   'scheduledTasks.runNow': 'Run now',
   'scheduledTasks.enable': 'Enable',
   'scheduledTasks.disable': 'Disable',
@@ -1812,6 +1824,8 @@ const EN: Messages = {
   'scheduledTasks.error.workspaceUnavailable':
     'The selected workspace is unavailable or untrusted',
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
+  'scheduledTasks.error.gateUnavailable':
+    'This daemon does not accept gate changes; undo the gate change, or reconnect to a daemon that supports gate commands',
   'scheduledTasks.error.promptTooLong': (v) =>
     `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
   'scheduledTasks.error.goalActive':
@@ -1868,12 +1882,20 @@ const EN: Messages = {
   'scheduledTasks.group.hint': 'Each run conversation is placed in this group.',
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
-  'scheduledTasks.condition': 'Precondition (optional)',
-  'scheduledTasks.conditionPlaceholder':
-    'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
-  'scheduledTasks.condition.hint':
-    "Checked in this task's own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.",
-  'scheduledTasks.condition.cardPrefix': 'If:',
+  'scheduledTasks.gate': 'Gate command (optional)',
+  'scheduledTasks.gatePlaceholder':
+    'e.g. ./check-pr.sh 15057 — a command that prints only what changed',
+  'scheduledTasks.gate.hint':
+    'Runs from the project directory before each scheduled fire, outside the model. Exit 0 with output wakes the session with that output attached as data; exit 0 with nothing on stdout skips the fire with no turn; a non-zero exit reports only its stderr, and only when the gate starts failing. It runs unattended only where the session would run the same command without asking — a saved Monitor(…) or Bash(…) rule, a read-only command, or an auto or yolo session; otherwise every fire is blocked.',
+  'scheduledTasks.gate.cardPrefix': 'Gate:',
+  'scheduledTasks.gate.notRunYet': 'gate not run yet',
+  'scheduledTasks.gate.neverDelivered': 'never',
+  'scheduledTasks.gate.lastFailed': 'last run failed',
+  'scheduledTasks.gate.lastBlocked': 'blocked',
+  'scheduledTasks.gate.status': (v) =>
+    `quiet ×${v?.quiet ?? 0} · last delivered ${v?.delivered ?? 'never'} · ${v?.failures ?? 0} ${v?.failures === 1 ? 'failure' : 'failures'}`,
+  'scheduledTasks.runKind.gateFailed': 'gate failed',
+  'scheduledTasks.runKind.gateBlocked': 'gate blocked',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
   'turnOutputs.imagePreview': 'Image Preview',
   'turnOutputs.viewChanges': 'View changes',
@@ -2034,6 +2056,8 @@ const EN: Messages = {
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New task',
   'sidebar.newWorktreeTask': 'New worktree task',
+  'sidebar.moveWorkspaceUp': 'Move up',
+  'sidebar.moveWorkspaceDown': 'Move down',
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
   'sidebar.sessionSource': 'Session source',
@@ -2044,6 +2068,9 @@ const EN: Messages = {
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
+  'sidebar.recentSessions': 'Recent sessions',
+  'sidebar.standalonePinUnavailable':
+    'Pinning no-workspace sessions is not supported yet.',
   'sidebar.workspaceSelectLabel': 'Workspace',
   'sidebar.noWorkspace': 'No workspace',
   'sidebar.noWorkspaceSessions': 'No-workspace sessions',
@@ -2526,7 +2553,7 @@ const EN: Messages = {
   'language.invalid': 'Invalid language. Available: en, zh-CN',
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
-  'language.usage': 'Usage: /language ui [en|zh-CN]',
+  'language.usage': 'Usage: /language ui [en|zh-CN] | output <language>',
   'localCommand.noSession':
     'No active session yet. Send your first message before using this command.',
   'localCommand.diffNoWorkspace':
@@ -2561,6 +2588,8 @@ const EN: Messages = {
   'local.summary': 'Generate a project summary file',
   'local.workflows':
     'List workflow runs or cooperatively pause/resume a live run',
+  'skilldesc.autofixPr':
+    'Watch a pull request and fix its CI, review feedback and conflicts',
   'skilldesc.batch': 'Run batch operations across many files in parallel',
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
@@ -3288,11 +3317,19 @@ const EN: Messages = {
   'skills.install.error.folderRequired': 'Enter a folder path.',
   'skills.install.error.githubRequired': 'Enter a GitHub SKILL.md URL.',
   'skills.install.error.invalidName':
-    'The skill name is missing or contains unsupported characters.',
+    'Enter a name such as my-skill using only ASCII letters, digits, dots, underscores, or hyphens.',
   'skills.install.error.manifestMissing':
     'The package must contain a SKILL.md file at its root.',
   'skills.install.error.invalidPackage':
-    'The skill package is invalid. Check its structure and SKILL.md content.',
+    'Correct the reported file or package structure, then upload the skill again.',
+  'skills.install.error.frontmatter':
+    'Put the opening --- on the first line of SKILL.md (remove any leading blank lines), and add a closing --- after the YAML fields.',
+  'skills.install.error.invalidManifest':
+    'Open SKILL.md, correct the field reported above, then upload the skill again.',
+  'skills.install.error.nameMismatch':
+    'Make the entered skill name match the name in SKILL.md, then upload the skill again.',
+  'skills.install.error.unsafePath':
+    'Use a regular skill directory and files instead of symbolic links, and check the reported installation path.',
   'skills.install.error.zipTooLarge': 'The ZIP file must not exceed 6 MB.',
   'skills.install.error.invalidFolder': 'Enter a valid local skill folder.',
   'skills.install.error.githubFailed':
@@ -3434,6 +3471,20 @@ const EN: Messages = {
   'contextUsage.compress': 'Compress context',
   'contextUsage.compressing': 'Compressing…',
   'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
+  'contextUsage.compressedUnknown':
+    'Compression completed. Context usage will be observed on the next turn.',
+  'managed.compression.unconfirmed':
+    'Compression is unconfirmed. Check its status before continuing.',
+  'managed.compression.recoveryBlocked': 'Compression is waiting for recovery.',
+  'managed.compression.confirm': 'Check compression status',
+  'managed.compression.storage':
+    'Could not save the compression request. Compression was not started.',
+  'managed.compression.storageUpdate':
+    'Could not save the latest compression status. Check it again after refreshing.',
+  'managed.compression.conflict':
+    'The context changed. Review its latest state and try again.',
+  'managed.compression.busy':
+    'The session is busy. Wait until it is idle before compressing.',
   'contextUsage.compressCancelled':
     'Cancellation requested. Refresh to check current usage.',
   'contextUsage.compressInterrupted':
@@ -3442,7 +3493,7 @@ const EN: Messages = {
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
-    'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
+    'Requires an idle, connected session with permission to compress context.',
   'contextCompression.result': (v) =>
     `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
@@ -4486,7 +4537,9 @@ const EN: Messages = {
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
+  ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
+  ...MANAGED_MCP_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -4569,6 +4622,8 @@ const ZH: Messages = {
   'managed.empty': '暂无托管任务。',
   'managed.loading': '加载中…',
   'managed.more': '加载更多',
+  'managed.titleSearch': '搜索会话标题',
+  'managed.titleSearchPlaceholder': '按标题筛选…',
   'managed.prompt': '向托管 Agent 发送消息',
   'managed.runtime': '执行环境',
   'managed.unavailable': '当前 daemon 未启用托管 Agent。',
@@ -6158,6 +6213,7 @@ const ZH: Messages = {
   'scheduledTasks.repeats': '重复',
   'scheduledTasks.runsOnce': '仅一次',
   'scheduledTasks.lastFired': (v) => `上次运行：${v?.when ?? ''}`,
+  'scheduledTasks.lastChecked': (v) => `上次检查：${v?.when ?? ''}`,
   'scheduledTasks.runNow': '立即运行',
   'scheduledTasks.enable': '启用',
   'scheduledTasks.disable': '停用',
@@ -6176,6 +6232,8 @@ const ZH: Messages = {
   'scheduledTasks.error.invalidSchedule': '计划无效',
   'scheduledTasks.error.workspaceUnavailable': '所选工作区不可用或不受信任',
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
+  'scheduledTasks.error.gateUnavailable':
+    '当前 daemon 不接受闸门修改：请撤销对闸门的修改，或重新连接支持闸门命令的 daemon',
   'scheduledTasks.error.promptTooLong': (v) =>
     `提示词超过 ${v?.max ?? 100_000} 字符限制`,
   'scheduledTasks.error.goalActive': '目标运行期间无法启动定时任务。',
@@ -6229,12 +6287,20 @@ const ZH: Messages = {
   'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
-  'scheduledTasks.condition': '前置条件（可选）',
-  'scheduledTasks.conditionPlaceholder':
-    '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
-  'scheduledTasks.condition.hint':
-    '每次触发前，先在本任务自己的会话中检查该条件。只有判定为"是"，才会新建会话执行命令；否则跳过本次运行。',
-  'scheduledTasks.condition.cardPrefix': '若：',
+  'scheduledTasks.gate': '闸门命令（可选）',
+  'scheduledTasks.gatePlaceholder':
+    '例如：./check-pr.sh 15057 —— 一条只打印变化的命令',
+  'scheduledTasks.gate.hint':
+    '每次定时触发前在模型之外、从项目目录运行。退出码 0 且有输出时唤醒会话，并把输出作为数据附上；退出码 0 且 stdout 为空则跳过本次触发、不产生回合；非零退出只报告其 stderr，且只在闸门开始失败时报告。只有在会话本身不经询问就会运行这条命令时(已保存的 Monitor(…) 或 Bash(…) 规则、只读命令，或 auto/yolo 模式)才会无人值守运行，否则每次触发都会被阻止。',
+  'scheduledTasks.gate.cardPrefix': '闸门：',
+  'scheduledTasks.gate.notRunYet': '闸门尚未运行',
+  'scheduledTasks.gate.neverDelivered': '从未',
+  'scheduledTasks.gate.lastFailed': '上次运行失败',
+  'scheduledTasks.gate.lastBlocked': '被阻止',
+  'scheduledTasks.gate.status': (v) =>
+    `安静 ×${v?.quiet ?? 0} · 上次投递 ${v?.delivered ?? '从未'} · 失败 ${v?.failures ?? 0} 次`,
+  'scheduledTasks.runKind.gateFailed': '闸门失败',
+  'scheduledTasks.runKind.gateBlocked': '闸门被阻止',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'turnOutputs.imagePreview': '图片预览',
   'turnOutputs.viewChanges': '查看更改',
@@ -6384,6 +6450,8 @@ const ZH: Messages = {
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建任务',
   'sidebar.newWorktreeTask': '新建 Worktree 任务',
+  'sidebar.moveWorkspaceUp': '上移',
+  'sidebar.moveWorkspaceDown': '下移',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
   'sidebar.sessionSource': '会话来源',
@@ -6394,6 +6462,8 @@ const ZH: Messages = {
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
+  'sidebar.recentSessions': '最近会话',
+  'sidebar.standalonePinUnavailable': '暂不支持置顶无工作区会话。',
   'sidebar.workspaceSelectLabel': '工作区',
   'sidebar.noWorkspace': '无工作区',
   'sidebar.noWorkspaceSessions': '无工作区会话',
@@ -6836,7 +6906,7 @@ const ZH: Messages = {
   'language.invalid': '语言无效。可用值：en, zh-CN',
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
-  'language.usage': '用法：/language ui [en|zh-CN]',
+  'language.usage': '用法：/language ui [en|zh-CN] | output <language>',
   'localCommand.noSession':
     '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'localCommand.diffNoWorkspace': '当前还没有可用于查看变更的工作区。',
@@ -6866,6 +6936,7 @@ const ZH: Messages = {
   'local.remember': '将持久记忆保存到记忆系统',
   'local.summary': '生成项目摘要文件',
   'local.workflows': '列出工作流运行，或协作式暂停/恢复运行中的任务',
+  'skilldesc.autofixPr': '盯住一个 PR，修复其 CI、评审意见和冲突',
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
@@ -7536,11 +7607,20 @@ const ZH: Messages = {
   'skills.install.error.authentication': '上传技能需要身份认证。',
   'skills.install.error.folderRequired': '请输入文件夹路径。',
   'skills.install.error.githubRequired': '请输入 GitHub SKILL.md 地址。',
-  'skills.install.error.invalidName': '技能名称缺失或包含不支持的字符。',
+  'skills.install.error.invalidName':
+    '请输入仅含英文字母、数字、点、下划线或连字符的名称，例如 my-skill。',
   'skills.install.error.manifestMissing':
     '技能包根目录中必须包含 SKILL.md 文件。',
   'skills.install.error.invalidPackage':
-    '技能包无效，请检查目录结构和 SKILL.md 内容。',
+    '请修正上述文件或技能包目录结构，然后重新上传。',
+  'skills.install.error.frontmatter':
+    '请让 SKILL.md 第一行直接以 --- 开始（删除前面的空行），并在 YAML 字段后添加结束标记 ---。',
+  'skills.install.error.invalidManifest':
+    '请打开 SKILL.md，修正上述字段后重新上传。',
+  'skills.install.error.nameMismatch':
+    '请将输入的技能名称与 SKILL.md 中的 name 保持一致，然后重新上传。',
+  'skills.install.error.unsafePath':
+    '请使用普通技能目录和文件，避免符号链接，并检查上述安装路径。',
   'skills.install.error.zipTooLarge': 'ZIP 文件不能超过 6 MB。',
   'skills.install.error.invalidFolder': '请输入有效的本地技能文件夹路径。',
   'skills.install.error.githubFailed':
@@ -7674,6 +7754,16 @@ const ZH: Messages = {
   'contextUsage.compress': '手动压缩',
   'contextUsage.compressing': '正在压缩…',
   'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
+  'contextUsage.compressedUnknown': '压缩完成，下一轮会重新观测上下文用量。',
+  'managed.compression.unconfirmed':
+    '尚未确认压缩结果，请先查询状态再继续操作。',
+  'managed.compression.recoveryBlocked': '压缩正在等待恢复。',
+  'managed.compression.confirm': '查询压缩状态',
+  'managed.compression.storage': '无法保存压缩请求，尚未开始压缩。',
+  'managed.compression.storageUpdate':
+    '无法保存最新压缩状态，刷新后请重新查询。',
+  'managed.compression.conflict': '上下文已变化，请确认最新状态后重试。',
+  'managed.compression.busy': '会话忙碌，请等待空闲后再压缩。',
   'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
   'contextUsage.compressInterrupted':
     '压缩期间连接发生变化，请刷新查看当前使用量。',
@@ -7681,7 +7771,7 @@ const ZH: Messages = {
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
-    '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
+    '会话连接正常、空闲且有上下文压缩权限时可用。',
   'contextCompression.result': (v) =>
     `上下文已压缩 ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
@@ -8639,7 +8729,9 @@ const ZH: Messages = {
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
+  ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
+  ...MANAGED_MCP_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,

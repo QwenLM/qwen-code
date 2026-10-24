@@ -4,24 +4,64 @@ on:
   pull_request:
     paths:
       - 'packages/**'
-      - 'scripts/tui-parity/**'
-      - 'scripts/build*'
+      - 'scripts/**'
       - 'integration-tests/**'
+      - 'integrations/**'
+      - 'patches/**'
       - 'esbuild.config.js'
       - '.github/workflows/tui-parity.yml'
+      - '.github/actions/**'
+      - '.github/scripts/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig.json'
+      - '.npmrc'
+      - '.nvmrc'
   workflow_dispatch:
 
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}'
+  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
+
 jobs:
+  changes:
+    name: 'Check TUI impact'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      pull-requests: 'read'
+    outputs:
+      required: '${{ steps.changes.outputs.result }}'
+    steps:
+      - uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        id: 'changes'
+        with:
+          script: |-
+            if (context.eventName !== 'pull_request') return true;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo,
+              pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            // The files API caps results at 3,000. An incomplete diff must run.
+            if (files.length !== context.payload.pull_request.changed_files || files.length >= 3000) return true;
+            const unrelated = (path) =>
+              path.startsWith('packages/managed-agent-server/') || path.startsWith('docs/');
+            return files.some((file) =>
+              !unrelated(file.filename) || (file.previous_filename && !unrelated(file.previous_filename)));
+
   parity:
     name: 'TUI parity snapshots (ink vs opentui)'
+    needs: 'changes'
+    if: "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}"
     # Same-repo PRs, write-access authors and dispatches run on the ECS pool
     # (#13245: both jobs sat 26+ minutes in the hosted queue); other fork PRs
     # stay hosted because these jobs build the PR's code. Kill-switch:
     # MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 30
+    # Cold setup/build plus three serial product legs can exceed 30 minutes.
+    timeout-minutes: 45
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -79,7 +119,7 @@ jobs:
             echo "QWEN_CODE_SYSTEM_DEFAULTS_PATH=$fixture_root/defaults.json"
           } >> "$GITHUB_ENV"
       - name: 'Build cli'
-        run: 'npm run build'
+        run: 'npm run build -- --cli-only'
       - name: 'Component parity snapshots (ink vs opentui)'
         run: 'bash scripts/tui-parity/component-parity.sh'
       - name: 'Bundle the product for runtime and renderer comparison'
@@ -99,7 +139,7 @@ jobs:
           for leg in node:ink bun:ink bun:opentui; do
             export QWEN_E2E_RUNTIME="${leg%%:*}"
             export QWEN_E2E_RENDERER="${leg#*:}"
-            npx vitest run interactive/tui-migration.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
+            npx vitest run interactive/tui-migration.test.ts interactive/tui-input-ownership.test.ts interactive/tui-editor-parity.test.ts interactive/statusline-parity.test.ts interactive/tui-dual-output.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
           done
           exit "$failed"
       - name: 'Upload product acceptance evidence'
@@ -115,7 +155,9 @@ jobs:
 
   noflicker:
     name: 'OpenTUI no-flicker gate'
-    # No-flicker gate; always runs. With secrets.QWEN_API_KEY it drives a
+    needs: 'changes'
+    if: "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}"
+    # With secrets.QWEN_API_KEY it drives a
     # real model conversation; without it (fork PRs never receive secrets)
     # accept-noflicker.sh falls back to the offline scripted-stream gate.
     # Routed like `parity` above.
@@ -163,7 +205,7 @@ jobs:
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
       - name: 'Build cli'
-        run: 'npm run build'
+        run: 'npm run build -- --cli-only'
       - name: 'OpenTUI no-flicker gate (0 clears, balanced DEC2026)'
         env:
           # The script's default report dir is a fixed /tmp path, which

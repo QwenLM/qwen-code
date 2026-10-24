@@ -58,6 +58,7 @@ import {
   HOSTED_WORKSPACE_FILE_TOOLS,
   HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_INPUT_PREVIEW_TOOLS,
+  HOSTED_TODO_WRITE_TOOL,
   HOSTED_MEMBER_PLAN_TOOL,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
@@ -70,6 +71,7 @@ import {
   HOSTED_TOOL_APPROVAL_POLICY,
   HostedApprovalWaiters,
   hostedActionAllowed,
+  hostedApprovalAsks,
   resolveHostedAction,
   type HostedApprovalMode,
   type HostedApprovalSettings,
@@ -1542,7 +1544,98 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
-it('offers glob only under the /2 and the read Workspace profiles', async () => {
+it.each([
+  { url: 'http://example.com', prompt: 'Read' },
+  { url: 'https://user:secret@example.com', prompt: 'Read' },
+  { url: 'https://example.com', prompt: '' },
+  { url: 'https://example.com', prompt: 'Read', format: 'json' },
+  { url: 'https://example.com', prompt: 'Read', headers: {} },
+])(
+  'refuses invalid web_fetch arguments before acquiring a Runtime: %j',
+  async (args) => {
+    const call = { ...calls[0], name: 'web_fetch', args };
+    const result = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(result)).toContain('Hosted web_fetch requires');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['default', 'auto-edit'] as const)(
+  'requires %s web_fetch approval with the actual destination and persists the result',
+  async (mode) => {
+    turn = createTurn(false, { mode });
+    const call = {
+      ...calls[0],
+      name: 'web_fetch',
+      args: {
+        url: 'https://github.com/QwenLM/qwen-code/blob/main/README.md',
+        prompt: 'Summarize',
+      },
+    };
+    const running = turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const requestId = await requested();
+    const input = JSON.parse(
+      (
+        await session.resources.read(
+          (await checkpoint()).approval!.invocationRef!,
+        )
+      ).toString(),
+    );
+    expect(JSON.parse(input.payloadJson).input.url).toBe(
+      'https://raw.githubusercontent.com/QwenLM/qwen-code/main/README.md',
+    );
+    expect(broker.prepare).not.toHaveBeenCalled();
+    await resolveHostedAction(session, waiters, requestId, answer('allow'));
+    const result = await running;
+    expect(broker.execute).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toMatchObject({
+      url: 'https://raw.githubusercontent.com/QwenLM/qwen-code/main/README.md',
+      prompt: 'Summarize',
+    });
+    expect(result[0].functionResponse?.response?.['executionStatus']).toBe(
+      'success',
+    );
+    expect((await session.sink.project()).at(-1)?.message?.parts).toEqual(
+      JSON.parse(JSON.stringify(result)),
+    );
+    await turn.consumeResults();
+    await turn.finish();
+  },
+);
+
+it('does not dispatch a denied web_fetch', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const call = {
+    ...calls[0],
+    name: 'web_fetch',
+    args: { url: 'https://example.com/docs', prompt: 'Summarize' },
+  };
+  const running = turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  expect(JSON.stringify(await running)).toContain('denied');
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+});
+
+it('offers glob under the unified Shell, file-search and read profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
     (
@@ -1561,21 +1654,21 @@ it('offers glob only under the /2 and the read Workspace profiles', async () => 
         { profile },
       ).declarations(signal)
     ).map((tool) => tool.name);
-  const file = ['read_file', 'write_file', 'edit'];
+  const file = ['read_file', 'write_file', 'edit', 'web_fetch'];
   const shellTools = [...file, 'run_shell_command', 'monitor'];
   await expect(advertised()).resolves.toEqual(file);
   await expect(advertised('hosted-workspace-files/1')).resolves.toEqual(file);
-  await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual(
-    shellTools,
-  );
+  await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual([
+    ...shellTools,
+    'glob',
+  ]);
   await expect(advertised('hosted-workspace-files/2')).resolves.toEqual([
     ...file,
     'glob',
   ]);
-  await expect(advertised('hosted-workspace-shell/2', true)).resolves.toEqual([
-    ...shellTools,
-    'glob',
-  ]);
+  await expect(
+    advertised('hosted-workspace-team-lead/1', true),
+  ).resolves.toEqual(shellTools);
   // #13753 I3: the read profile declares its two read tools, whatever
   // lane the Session has.
   await expect(advertised('hosted-workspace-read/1')).resolves.toEqual([
@@ -1631,6 +1724,7 @@ it('dispatches read_file and glob on the read profile', async () => {
 // #13753 I3: every tool that writes, and every other tool, is refused on
 // the read profile before the Broker is acquired.
 it.each([
+  ['web_fetch', { url: 'https://example.com/docs', prompt: 'Summarize' }],
   ['write_file', { file_path: 'a.txt', content: 'x' }],
   ['edit', { file_path: 'a.txt', old_string: 'a', new_string: 'b' }],
   ['run_shell_command', { command: 'touch a.txt' }],
@@ -1666,96 +1760,105 @@ it.each([
 // #13905 (item 41): the approval wiring keys on the Session's own profile,
 // not the call's name — a read-profile glob asks nothing under `default`,
 // while an MCP-declared glob on files/1 still asks.
-it('pre-approves glob only where the profile declares it', async () => {
-  const globCall = {
-    ...calls[0],
-    callId: 'call-glob',
-    name: 'glob',
-    args: { pattern: '**/*.ts' },
-  };
-  const globParts: Part[] = [
-    {
-      functionCall: {
-        id: globCall.callId,
-        name: globCall.name,
-        args: globCall.args,
-      },
-    },
-  ];
-  const read = new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    commit,
-    messageFitsInline,
-    undefined,
-    undefined,
-    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
-    { profile: 'hosted-workspace-read/1' },
-  );
-  const responses = await read.execute(
-    [globCall],
-    globParts,
-    'model',
-    new AbortController().signal,
-  );
-  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
-  expect(actionIds()).toEqual([]);
-  expect(
-    broker.execute.mock.calls.map(
-      (args: unknown[]) => JSON.parse(args[1] as string).toolName,
-    ),
-  ).toEqual(['glob']);
-  await read.consumeResults();
-  await read.finish();
-
-  const mcp = {
-    broker,
-    ensureReady: async () => undefined,
-    refresh: async () => undefined,
-    tools: () => [{ name: 'glob', parametersJsonSchema: { type: 'object' } }],
-    toolInput: () => ({ toolName: 'managed_mcp_call', input: {} }),
-  };
-  turn = new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    commit,
-    messageFitsInline,
-    undefined,
-    undefined,
-    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
-    {
-      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
-    },
-  );
-  const mcpGlobCall = { ...globCall, callId: 'call-glob-mcp' };
-  const running = turn.execute(
-    [mcpGlobCall],
-    [
+it.each([
+  ['hosted-workspace-read/1', 'default'],
+  ['hosted-workspace-shell/1', 'default'],
+  ['hosted-workspace-shell/1', 'auto-edit'],
+] as const)(
+  'pre-approves native glob on %s in %s mode',
+  async (profile, mode) => {
+    const globCall = {
+      ...calls[0],
+      callId: 'call-glob',
+      name: 'glob',
+      args: { pattern: '**/*.ts' },
+    };
+    const globParts: Part[] = [
       {
         functionCall: {
-          id: mcpGlobCall.callId,
-          name: mcpGlobCall.name,
-          args: mcpGlobCall.args,
+          id: globCall.callId,
+          name: globCall.name,
+          args: globCall.args,
         },
       },
-    ],
-    'model',
-    new AbortController().signal,
-  );
-  // The files/1 Session must ask before dispatching even this name.
-  const requestId = await requested();
-  expect(actionIds()).toEqual([requestId]);
-  expect(broker.execute).toHaveBeenCalledOnce();
-  await resolveHostedAction(session, waiters, requestId, answer('allow'));
-  await running;
-  expect(broker.execute).toHaveBeenCalledTimes(2);
-  await turn.consumeResults();
-  await turn.finish();
-});
+    ];
+    const native = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      profile === 'hosted-workspace-shell/1'
+        ? { resources: session.resources, assertWritable: async () => {} }
+        : undefined,
+      undefined,
+      { settings: { mode, timeoutMs: 60_000 }, waiters },
+      { profile },
+    );
+    const responses = await native.execute(
+      [globCall],
+      globParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
+    expect(actionIds()).toEqual([]);
+    expect(
+      broker.execute.mock.calls.map(
+        (args: unknown[]) => JSON.parse(args[1] as string).toolName,
+      ),
+    ).toEqual(['glob']);
+    await native.consumeResults();
+    await native.finish();
+
+    const mcp = {
+      broker,
+      ensureReady: async () => undefined,
+      refresh: async () => undefined,
+      tools: () => [{ name: 'glob', parametersJsonSchema: { type: 'object' } }],
+      toolInput: () => ({ toolName: 'managed_mcp_call', input: {} }),
+    };
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+      {
+        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
+    );
+    const mcpGlobCall = { ...globCall, callId: 'call-glob-mcp' };
+    const running = turn.execute(
+      [mcpGlobCall],
+      [
+        {
+          functionCall: {
+            id: mcpGlobCall.callId,
+            name: mcpGlobCall.name,
+            args: mcpGlobCall.args,
+          },
+        },
+      ],
+      'model',
+      new AbortController().signal,
+    );
+    // The files/1 Session must ask before dispatching even this name.
+    const requestId = await requested();
+    expect(actionIds()).toEqual([requestId]);
+    expect(broker.execute).toHaveBeenCalledOnce();
+    await resolveHostedAction(session, waiters, requestId, answer('allow'));
+    await running;
+    expect(broker.execute).toHaveBeenCalledTimes(2);
+    await turn.consumeResults();
+    await turn.finish();
+  },
+);
 
 function createSearchTurn() {
   return new HostedWorkspaceToolTurn(
@@ -1772,7 +1875,7 @@ function createSearchTurn() {
   );
 }
 
-it('refuses a glob call a /1 profile never advertised', async () => {
+it('refuses a glob call the files/1 profile never advertised', async () => {
   const call = {
     ...calls[0],
     name: 'glob',
@@ -1791,6 +1894,199 @@ it('refuses a glob call a /1 profile never advertised', async () => {
     ),
   ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
   expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+// #15076: `todo_write` ships only with the `/3` profiles.
+function createV3Turn(profile = 'hosted-workspace-files/3') {
+  return new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile },
+  );
+}
+
+it('declares todo_write on hosted-workspace-files/3', async () => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-files/3' },
+  );
+  const declarations = await turn.declarations(new AbortController().signal);
+  const names = declarations.map((tool) => tool.name);
+  expect(names).toContain('todo_write');
+  expect(names).toContain('glob');
+  // files/3 keeps everything files/2 declares, including the shipped fetch.
+  expect(names).toContain('web_fetch');
+  expect(names).not.toContain('run_shell_command');
+  // The byte budget is enforced, so the declaration has to expose it too.
+  expect(
+    JSON.stringify(
+      declarations.find((tool) => tool.name === 'todo_write')
+        ?.parametersJsonSchema,
+    ),
+  ).toContain('16,000 bytes');
+});
+
+it.each(['hosted-workspace-files/1', 'hosted-workspace-files/2'])(
+  'never offers todo_write on %s',
+  async (profile) => {
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile },
+    );
+    const names = (await turn.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    );
+    expect(names).not.toContain('todo_write');
+  },
+);
+
+it('refuses todo_write on a /2 profile before the Broker', async () => {
+  turn = createSearchTurn();
+  const call = {
+    ...calls[0],
+    name: 'todo_write',
+    args: { todos: [{ id: 'a', content: 'a', status: 'pending' }] },
+  };
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+// #15076: a malformed task-list call is refused before the Runtime is
+// acquired, so its correction costs no durable work.
+it.each([
+  {},
+  { todos: 'x' },
+  { todos: [{}] },
+  { todos: [{ id: '', content: 'a', status: 'pending' }] },
+  { todos: [{ id: 'a', content: '  ', status: 'pending' }] },
+  { todos: [{ id: 'a', content: 'a', status: 'done' }] },
+  { todos: [{ id: 'a', content: 'a', status: 'pending', blockedBy: 'b' }] },
+  { todos: [{ id: 'a', content: 'a', status: 'pending', extra: 1 }] },
+  {
+    todos: [{ id: 'a'.repeat(501), content: 'a', status: 'pending' }],
+  },
+  // The declared and enforced bounds: each trips on its own, so removing a
+  // bound turns exactly one case red.
+  {
+    todos: [{ id: 'a', content: 'x'.repeat(1001), status: 'pending' }],
+  },
+  {
+    todos: Array.from({ length: 65 }, (_, index) => ({
+      id: `t${index}`,
+      content: 'a',
+      status: 'pending',
+    })),
+  },
+  {
+    todos: Array.from({ length: 40 }, (_, index) => ({
+      id: `t${index}`,
+      content: 'x'.repeat(500),
+      status: 'pending',
+    })),
+  },
+])(
+  'persists a correctable todo_write argument error without dispatch: %j',
+  async (args) => {
+    turn = createV3Turn();
+    const call = { ...calls[0], name: 'todo_write', args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const error = responses[0].functionResponse?.response?.['error'];
+    expect(responses[0].functionResponse?.id).toBe(call.callId);
+    expect(error).toContain('todo_write');
+    expect(error).toContain('retry');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  },
+);
+
+it('dispatches an admitted todo_write with its argument payload', async () => {
+  turn = createV3Turn();
+  const args = { todos: [{ id: 'a', content: 'audit', status: 'pending' }] };
+  const call = { ...calls[0], name: 'todo_write', args };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
+  expect(broker.acquire).toHaveBeenCalled();
+  expect(
+    broker.execute.mock.calls.map((entry: unknown[]) =>
+      JSON.parse(entry[1] as string),
+    ),
+  ).toEqual([{ toolName: 'todo_write', input: args }]);
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+it('declares the preservation rule for omitted dependencies', async () => {
+  turn = createV3Turn();
+  const todo = (await turn.declarations(new AbortController().signal)).find(
+    (tool) => tool.name === 'todo_write',
+  );
+  const schema = todo?.parametersJsonSchema as
+    | {
+        properties?: {
+          todos?: {
+            items?: { properties?: Record<string, { description?: string }> };
+          };
+        };
+      }
+    | undefined;
+  const description =
+    schema?.properties?.todos?.items?.properties?.['blockedBy']?.description;
+  expect(description).toContain('preserved');
+  expect(description).toContain('[]');
+});
+
+it('pre-approves todo_write under default and auto-edit, and yolo never asks', () => {
+  expect(
+    hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'todo_write'),
+  ).toBe(false);
+  expect(
+    hostedApprovalAsks({ mode: 'auto-edit', timeoutMs: 60_000 }, 'todo_write'),
+  ).toBe(false);
+  expect(
+    hostedApprovalAsks({ mode: 'yolo', timeoutMs: 60_000 }, 'todo_write'),
+  ).toBe(false);
 });
 
 it.each([
@@ -2888,6 +3184,7 @@ it.each(['files', 'shell', 'mcp'])(
         'read_file',
         'write_file',
         'edit',
+        'web_fetch',
         'mcp_write',
       ]);
       expect(declarations.at(-1)).toEqual(remote);
@@ -2977,6 +3274,60 @@ it('keeps native file tools in the MCP profile on their existing shared runtime'
   expect(broker.release).not.toHaveBeenCalled();
   expect(broker.workspaceContext).not.toHaveBeenCalled();
   expect(slot.value).toBeUndefined();
+});
+
+it('backs up ordinary file tools on the shared Shell and MCP owner without releasing it at Turn completion', async () => {
+  const slot = contextSlot();
+  const mcp = {
+    broker: { ...broker, runtimeSessionId: 'mcp:session' },
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [{ name: 'mcp_echo', description: 'Fixture MCP tool.' }],
+    toolInput: () => undefined,
+  };
+  const combined = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    { resources: session.resources, assertWritable: async () => undefined },
+    undefined,
+    undefined,
+    {
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      profile: 'hosted-workspace-shell/1',
+      context: slot,
+    },
+  );
+  const declarations = await combined.declarations(
+    new AbortController().signal,
+  );
+  expect(declarations.map((tool) => tool.name)).toEqual(
+    expect.arrayContaining([
+      'read_file',
+      'write_file',
+      'edit',
+      'run_shell_command',
+      'mcp_echo',
+    ]),
+  );
+  expect(
+    declarations.find((tool) => tool.name === 'edit')?.description,
+  ).toContain('preimages are backed up');
+  await combined.execute(calls, parts, 'model', new AbortController().signal);
+  await combined.consumeResults();
+  await combined.finish();
+  expect(
+    broker.fileHistory.mock.calls.map(([operation]) => operation.action),
+  ).toEqual(['bind', 'prepare', 'snapshot']);
+  expect(await readHostedFileHistory(session)).toMatchObject({
+    pendingTurn: null,
+    pendingUndo: null,
+  });
+  expect(broker.release).not.toHaveBeenCalled();
+  expect(broker.workspaceContext).toHaveBeenCalledOnce();
 });
 
 it('executes against the declarations actually advertised before a catalog replacement', async () => {
@@ -4525,12 +4876,15 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
   // set is pinned here and each name must still be a declared native tool —
   // the child launch declares through HOSTED_AGENT_TOOL, a session message
   // through its two send_message declarations and the team board through
-  // HOSTED_TEAM_TOOLS, not the shell set.
+  // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is appended only for
+  // `files/3` (which is not a shell profile), so it joins the set on its own.
   expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
+    'web_fetch',
     'read_file',
     'write_file',
     'edit',
     'run_shell_command',
+    'todo_write',
     'agent',
     'send_message',
     'team_create',
@@ -4543,6 +4897,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
   ]);
   const declared = [
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
+    HOSTED_TODO_WRITE_TOOL.name,
     HOSTED_AGENT_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_PARENT_TOOL.name,
@@ -4853,6 +5208,1159 @@ function hookSession(fire: HostedHookSession['fire']): HostedHookSession {
   } as unknown as HostedHookSession;
 }
 
+it('executes corrected Unicode after a refused batch with exact command bytes', async () => {
+  turn = createTurn(true);
+  const invalid = {
+    ...calls[0],
+    name: 'run_shell_command',
+    args: { command: '\ud800' },
+  };
+  const run = (call: ToolCallRequestInfo) =>
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+  await run(invalid);
+  await turn.consumeResults();
+  broker.execute.mockResolvedValue({
+    executionStatus: 'not_started',
+    responseParts: [],
+    error: { message: 'fixture stop' },
+    capture: null,
+  });
+  const args = {
+    command: ' printf 中文😀é\\ud800\x1b\x01\x7f\u2028\u2029 ',
+    description: '中文😀',
+  };
+  await run({ ...invalid, callId: 'corrected-unicode', args });
+  const input = JSON.parse(broker.execute.mock.calls[0][1]).input;
+  expect(input).toEqual({ ...args, is_background: false });
+  expect(broker.execute).toHaveBeenCalledOnce();
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('refuses an oversized assistant record on the early Unicode refusal path', async () => {
+  turn = createTurn(true);
+  const call = {
+    ...calls[0],
+    name: 'run_shell_command',
+    args: { command: '\ud800' },
+  };
+  messageFitsInline.mockImplementation((type) => type !== 'assistant');
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow(
+    'Hosted assistant record exceeds the inline Session Store limit.',
+  );
+  expect(await session.sink.project()).toEqual([]);
+});
+
+it('refuses an oversized tool refusal on the early Unicode refusal path', async () => {
+  turn = createTurn(true);
+  const call = {
+    ...calls[0],
+    name: 'run_shell_command',
+    args: { command: '\ud800' },
+  };
+  messageFitsInline.mockImplementation((type) => type !== 'tool_result');
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow(
+    'Hosted tool refusal exceeds the inline Session Store limit.',
+  );
+  expect(await session.sink.project()).toEqual([]);
+});
+
+it.each([false, true])(
+  'preserves an acquired owner for a later Unicode refusal (commit failure: %s)',
+  async (failCommit) => {
+    const original = commit;
+    let resultCommits = 0;
+    commit = async (...args) => {
+      if (args[0] === 'tool_result' && ++resultCommits === 2 && failCommit)
+        throw new Error('refusal commit failed');
+      return original(...args);
+    };
+    turn = createTurn(true);
+    await turn.execute(
+      [calls[0]],
+      [parts[0]],
+      'model',
+      new AbortController().signal,
+    );
+    await turn.consumeResults();
+    const call = {
+      ...calls[0],
+      callId: 'later-invalid',
+      name: 'run_shell_command',
+      args: { command: '\ud800' },
+    };
+    const execution = turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    if (failCommit)
+      await expect(execution).rejects.toBeInstanceOf(
+        HostedToolRecoveryRequiredError,
+      );
+    else {
+      const response = await execution;
+      expect(response[0].functionResponse?.response?.['error']).toContain(
+        'unpaired UTF-16 surrogate',
+      );
+      await turn.consumeResults();
+    }
+    expect(broker.acquire).toHaveBeenCalledOnce();
+    expect(broker.execute).toHaveBeenCalledOnce();
+    expect(broker.release).not.toHaveBeenCalled();
+    if (failCommit)
+      await expect(turn.finish()).rejects.toBeInstanceOf(
+        HostedToolRecoveryRequiredError,
+      );
+    else await turn.finish();
+    expect(broker.release).toHaveBeenCalledTimes(failCommit ? 0 : 1);
+  },
+);
+
+it.each(
+  [false, true].flatMap((publication) =>
+    [1, 2].flatMap((version) =>
+      ['command', 'description'].flatMap((field) =>
+        ['\ud800', '\udc00', '😀\ud800', '\udc00\ud800'].flatMap((value) =>
+          [false, true].map((invalidLast) => ({
+            publication,
+            version,
+            field,
+            value,
+            invalidLast,
+          })),
+        ),
+      ),
+    ),
+  ),
+)(
+  'durably refuses malformed Shell Unicode before Hooks and acquisition: %j',
+  async ({ publication, version, field, value, invalidLast }) => {
+    const owner = {
+      owner: vi.fn(),
+      request: vi.fn(),
+      rememberAdmission: vi.fn(),
+    } as unknown as HttpToolPublicationOwner;
+    const fire = vi.fn<HostedHookSession['fire']>();
+    const makeTurn = () =>
+      new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        publication
+          ? { owner, captureBytes: 1024 }
+          : {
+              resources: session.resources,
+              assertWritable: async () => undefined,
+            },
+        undefined,
+        { settings: { mode: 'default', timeoutMs: 100 }, waiters },
+        {
+          hooks: hookSession(fire),
+          profile: 'hosted-workspace-shell/' + version,
+        },
+      );
+    turn = makeTurn();
+    const invalid = {
+      ...calls[0],
+      name: 'run_shell_command',
+      args: { command: 'printf valid', [field]: value },
+    };
+    const siblingShell = {
+      ...invalid,
+      callId: 'valid-shell',
+      args: { command: 'pwd' },
+    };
+    const siblingWrite = {
+      ...calls[1],
+      name: 'write_file',
+      args: { file_path: 'sibling.txt', content: 'unexecuted' },
+    };
+    const batch = invalidLast
+      ? [siblingShell, siblingWrite, invalid]
+      : [invalid, siblingShell, siblingWrite];
+    const invalidIndex = invalidLast ? 2 : 0;
+    const input = batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    }));
+    const responses = await turn.execute(
+      batch,
+      input,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses.map((part) => part.functionResponse?.id)).toEqual(
+      batch.map((call) => call.callId),
+    );
+    expect(responses[invalidIndex].functionResponse?.response?.['error']).toBe(
+      'Hosted Shell ' +
+        field +
+        ' contains an unpaired UTF-16 surrogate. Provide valid Unicode and retry.',
+    );
+    for (const [index, response] of responses.entries())
+      if (index !== invalidIndex)
+        expect(response.functionResponse?.response?.['error']).toContain(
+          'not executed',
+        );
+    expect(fire).not.toHaveBeenCalled();
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.registerPublisher).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.prepareV3).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(owner.request).not.toHaveBeenCalled();
+    const history = await session.sink.project();
+    expect(history.map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history[0].message?.parts).toEqual(input);
+    expect(history[1].message?.parts).toEqual(
+      JSON.parse(JSON.stringify(responses)),
+    );
+    const restored = makeTurn();
+    expect(
+      await restored.resumeHookResults(
+        responses,
+        'model',
+        new AbortController().signal,
+      ),
+    ).toEqual(responses);
+    expect(await session.sink.project()).toEqual(history);
+    await expect(
+      restored.resumeHookResults(
+        responses.slice(0, 1),
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(fire).not.toHaveBeenCalled();
+    await turn.finish();
+    await restored.close();
+  },
+);
+
+it.each([
+  {
+    name: 'run_shell_command',
+    args: { command: 'pwd', timeout: 0 },
+    error: 'Hosted Shell timeout must be an integer from 1 to 600000 ms.',
+  },
+  {
+    name: 'run_shell_command',
+    args: { command: 'pwd', description: 7 },
+    error: 'Hosted Shell description must be a string.',
+  },
+])(
+  'preserves the $name validation error beside malformed Unicode',
+  async ({ name, args, error }) => {
+    turn = createTurn(true);
+    const batch = [
+      { ...calls[0], name, args },
+      { ...calls[1], name: 'run_shell_command', args: { command: '\ud800' } },
+    ];
+    const responses = await turn.execute(
+      batch,
+      batch.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(error);
+    expect(responses[1].functionResponse?.response?.['error']).toContain(
+      'unpaired UTF-16 surrogate',
+    );
+    expect((await session.sink.project())[1].message?.parts).toEqual(
+      JSON.parse(JSON.stringify(responses)),
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each([false, true])(
+  'replays a Unicode refusal with optional sibling args (omitted: %s)',
+  async (omitted) => {
+    const fire = vi.fn<HostedHookSession['fire']>();
+    const makeTurn = () =>
+      createTurn(true, { mode: 'default' }, hookSession(fire));
+    turn = makeTurn();
+    const batch = [
+      { ...calls[0], name: 'run_shell_command', args: { command: '\ud800' } },
+      { ...calls[1], name: 'read_file', args: {} },
+    ];
+    const input = batch.map((call, index) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        ...(omitted && index === 1 ? {} : { args: call.args }),
+      },
+    }));
+    const responses = await turn.execute(
+      batch,
+      input,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'unpaired UTF-16 surrogate',
+    );
+    expect(responses[1].functionResponse?.response?.['error']).toContain(
+      'require file_path',
+    );
+    const restored = makeTurn();
+    expect(
+      await restored.resumeHookResults(
+        responses,
+        'model',
+        new AbortController().signal,
+      ),
+    ).toEqual(responses);
+    expect((await session.sink.project())[0].message?.parts).toEqual(input);
+    expect(fire).not.toHaveBeenCalled();
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await turn.finish();
+    await restored.close();
+  },
+);
+
+it.each([false, true])(
+  'checks malformed Shell before permission Hooks on an MCP turn (declared: %s)',
+  async (declared) => {
+    const fire = vi.fn<HostedHookSession['fire']>();
+    const mcp = {
+      broker: { ...broker, runtimeSessionId: 'prompt' },
+      ensureReady: async () => undefined,
+      refresh: vi.fn(async () => undefined),
+      tools: () => [],
+      toolInput: () => undefined,
+    };
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      declared
+        ? {
+            resources: session.resources,
+            assertWritable: async () => undefined,
+          }
+        : undefined,
+      undefined,
+      { settings: { mode: 'default', timeoutMs: 100 }, waiters },
+      {
+        profile: declared
+          ? 'hosted-workspace-shell/1'
+          : 'hosted-workspace-files/1',
+        hooks: hookSession(fire),
+        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
+    );
+    const call = {
+      ...calls[0],
+      name: 'run_shell_command',
+      args: { command: '\ud800' },
+    };
+    const batch = declared ? [call, calls[1]] : [call];
+    const execution = turn.execute(
+      batch,
+      batch.map((item) => ({
+        functionCall: { id: item.callId, name: item.name, args: item.args },
+      })),
+      'model',
+      new AbortController().signal,
+    );
+    if (declared) {
+      const responses = await execution;
+      expect(responses[0].functionResponse?.response?.['error']).toContain(
+        'unpaired UTF-16 surrogate',
+      );
+      expect(responses[1].functionResponse?.response?.['error']).toContain(
+        'not executed',
+      );
+      expect((await session.sink.project()).map((entry) => entry.type)).toEqual(
+        ['assistant', 'tool_result'],
+      );
+      await turn.finish();
+    } else {
+      await expect(execution).rejects.toThrow(
+        'Hosted Workspace profile refused a tool call.',
+      );
+      expect(await session.sink.project()).toEqual([]);
+    }
+    expect(mcp.refresh).toHaveBeenCalled();
+    expect(fire).not.toHaveBeenCalled();
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(broker.release).not.toHaveBeenCalled();
+  },
+);
+
+it.each(
+  ['assistant', 'tool_result'].flatMap((failedType) =>
+    [false, true].map((lostReply) => ({ failedType, lostReply })),
+  ),
+)(
+  'keeps malformed Shell Unicode recovery blocked after $failedType commit failure (lost reply: $lostReply)',
+  async ({ failedType, lostReply }) => {
+    const original = commit;
+    commit = async (...args) => {
+      if (args[0] === failedType) {
+        if (lostReply) await original(...args);
+        throw new Error('lost Unicode refusal commit');
+      }
+      return original(...args);
+    };
+    turn = createTurn(true);
+    const call = {
+      ...calls[0],
+      name: 'run_shell_command',
+      args: { command: '\ud800' },
+    };
+    await expect(
+      turn.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    await expect(turn.finish()).rejects.toBeInstanceOf(
+      HostedToolRecoveryRequiredError,
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    const history = await session.sink.project();
+    expect(history.map((entry) => entry.type)).toEqual(
+      failedType === 'assistant'
+        ? lostReply
+          ? ['assistant']
+          : []
+        : lostReply
+          ? ['assistant', 'tool_result']
+          : ['assistant'],
+    );
+  },
+);
+
+it.each<{
+  event: HookEventName;
+  deny: boolean;
+  denySibling?: HookEventName;
+  failResult?: boolean;
+  bothEvents?: boolean;
+  unstartedSibling?: boolean;
+  cancelledSizePlan?: 'not_started_proven' | 'settled';
+  bounded?: boolean;
+}>([
+  { event: HookEventName.PermissionRequest, deny: false },
+  {
+    event: HookEventName.PermissionRequest,
+    deny: false,
+    unstartedSibling: true,
+  },
+  { event: HookEventName.PreToolUse, deny: false, bounded: true },
+  { event: HookEventName.PermissionRequest, deny: false, bounded: true },
+  ...(['not_started_proven', 'settled'] as const).map((cancelledSizePlan) => ({
+    event: HookEventName.PermissionRequest,
+    deny: false,
+    cancelledSizePlan,
+  })),
+  { event: HookEventName.PreToolUse, deny: false },
+  { event: HookEventName.PreToolUse, deny: true },
+  {
+    event: HookEventName.PreToolUse,
+    deny: false,
+    denySibling: HookEventName.PermissionRequest,
+  },
+  {
+    event: HookEventName.PreToolUse,
+    deny: false,
+    denySibling: HookEventName.PreToolUse,
+  },
+  { event: HookEventName.PreToolUse, deny: false, failResult: true },
+  { event: HookEventName.PermissionRequest, deny: false, bothEvents: true },
+])(
+  'refuses a durable malformed $event rewrite for the entire batch (deny: $deny, sibling: $denySibling, fault: $failResult, concurrent marker reads: $bothEvents, unstarted sibling: $unstartedSibling, cancelled size plan: $cancelledSizePlan, bounded: $bounded) across reconstruction',
+  async ({
+    event,
+    deny,
+    denySibling,
+    failResult,
+    bothEvents,
+    unstartedSibling,
+    cancelledSizePlan,
+    bounded,
+  }) => {
+    const pin = {
+      catalogId: 'unicode',
+      catalogRevision: 1,
+      definitionDigest: 'a'.repeat(64),
+    };
+    const malformed = { command: 'echo \ud800' };
+    const hookControl = vi.fn<HostedWorkspaceBroker['hookControl']>(
+      async (operation) => ({
+        operationId: operation.operationId,
+        state: 'settled',
+        ...(operation.kind === 'hook-catalog'
+          ? {
+              catalog: {
+                ...pin,
+                hooks: [
+                  ...new Set([
+                    event,
+                    ...(denySibling ? [denySibling] : []),
+                    ...(bothEvents
+                      ? [
+                          HookEventName.PreToolUse,
+                          HookEventName.PermissionRequest,
+                        ]
+                      : []),
+                    HookEventName.PostToolBatch,
+                  ]),
+                ].flatMap((eventName) => {
+                  const hook = {
+                    hookId: eventName,
+                    eventName,
+                    matcher:
+                      bothEvents || unstartedSibling || cancelledSizePlan
+                        ? undefined
+                        : 'run_shell_command',
+                    sequential: bounded ?? false,
+                    async: false,
+                    failClosed: true,
+                    onceKey: null,
+                    config: { type: 'command' as const },
+                  };
+                  return bounded && event === HookEventName.PermissionRequest
+                    ? [{ ...hook, hookId: `${eventName}:metadata` }, hook]
+                    : [hook];
+                }),
+              },
+            }
+          : {
+              result: {
+                success: true,
+                outcome: 'success',
+                duration: 0,
+                output:
+                  bounded && event === HookEventName.PermissionRequest
+                    ? {
+                        hookSpecificOutput:
+                          operation.kind === 'hook-execute' &&
+                          operation.hookId.endsWith(':metadata')
+                            ? {
+                                decision: {
+                                  behavior: 'allow',
+                                  message: 'x'.repeat(40 * 1024),
+                                },
+                              }
+                            : {
+                                updatedInput: {
+                                  command: 'x'.repeat(40 * 1024),
+                                  description: '\ud800',
+                                },
+                              },
+                      }
+                    : bounded
+                      ? {
+                          hookSpecificOutput: {
+                            tool_input: { description: '\ud800' },
+                            padding: 'x'.repeat(40 * 1024),
+                          },
+                        }
+                      : {
+                          hookSpecificOutput:
+                            operation.kind === 'hook-execute' &&
+                            operation.hookId === HookEventName.PermissionRequest
+                              ? {
+                                  decision: {
+                                    behavior:
+                                      denySibling &&
+                                      operation.kind === 'hook-execute' &&
+                                      'tool_use_id' in operation.input &&
+                                      operation.input.tool_use_id ===
+                                        'denied-sibling'
+                                        ? 'deny'
+                                        : 'allow',
+                                    ...(event ===
+                                      HookEventName.PermissionRequest &&
+                                    'tool_name' in operation.input &&
+                                    operation.input.tool_name ===
+                                      'run_shell_command'
+                                      ? { updatedInput: malformed }
+                                      : {}),
+                                  },
+                                }
+                              : {
+                                  ...(denySibling &&
+                                  operation.kind === 'hook-execute' &&
+                                  'tool_use_id' in operation.input &&
+                                  operation.input.tool_use_id ===
+                                    'denied-sibling'
+                                    ? denySibling === HookEventName.PreToolUse
+                                      ? {
+                                          permissionDecision: 'deny',
+                                          permissionDecisionReason:
+                                            'recorded policy denial',
+                                        }
+                                      : {}
+                                    : event === HookEventName.PreToolUse
+                                      ? {
+                                          updatedInput: malformed,
+                                          ...(deny
+                                            ? { permissionDecision: 'deny' }
+                                            : {}),
+                                        }
+                                      : {}),
+                                },
+                        },
+              },
+            }),
+      }),
+    );
+    const hookBroker = {
+      ...broker,
+      runtimeSessionId: 'prompt',
+      runtime: {
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      },
+      hookControl,
+    } as unknown as HostedWorkspaceBroker;
+    const makeHooks = () =>
+      new HostedHookSession(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        pin,
+        hookBroker,
+      );
+    const approval = {
+      mode:
+        event === HookEventName.PermissionRequest ||
+        denySibling === HookEventName.PermissionRequest ||
+        bothEvents
+          ? ('default' as const)
+          : ('yolo' as const),
+    };
+    const hooks = makeHooks();
+    turn = createTurn(true, approval, hooks);
+    const shellCall = {
+      ...calls[0],
+      name: 'run_shell_command',
+      args: { command: bounded ? 'x'.repeat(40 * 1024) : 'echo valid' },
+    };
+    const batch = denySibling
+      ? [{ ...shellCall, callId: 'denied-sibling' }, shellCall]
+      : [
+          shellCall,
+          cancelledSizePlan
+            ? {
+                ...calls[1],
+                args: { ...calls[1].args, new_string: 'x'.repeat(60 * 1024) },
+              }
+            : calls[1],
+        ];
+    if (unstartedSibling || cancelledSizePlan) {
+      await hooks.ensureReady();
+      const sibling = batch[1];
+      const occurrenceId = hostedHookOccurrenceId(
+        HookEventName.PermissionRequest,
+        `prompt:${sibling.callId}`,
+      );
+      const original = session.authority.commitExtensionRecord.bind(
+        session.authority,
+      );
+      const crash = vi
+        .spyOn(session.authority, 'commitExtensionRecord')
+        .mockImplementation(async (...args) => {
+          const result = await original(...args);
+          const record = args[1].record as {
+            hookExecutionId?: string;
+            hookId?: string;
+            run: { execution: string };
+          };
+          if (
+            record.hookId === '__plan__' &&
+            record.hookExecutionId === occurrenceId &&
+            record.run.execution ===
+              (cancelledSizePlan === 'settled' ? 'dispatch_started' : 'intent')
+          )
+            throw new Error('crash after plan commit');
+          return result;
+        });
+      try {
+        await expect(
+          hooks.fire(
+            HookEventName.PermissionRequest,
+            `prompt:${sibling.callId}`,
+            {
+              tool_name: sibling.name,
+              tool_input: sibling.args,
+              tool_use_id: sibling.callId,
+              prompt_id: 'prompt',
+            },
+            new AbortController().signal,
+            undefined,
+            undefined,
+            HOSTED_TOOL_INPUT_ORDER,
+          ),
+        ).rejects.toThrow('crash after plan');
+      } finally {
+        crash.mockRestore();
+      }
+      const marker = await hooks.status(occurrenceId, true);
+      if (cancelledSizePlan === 'settled')
+        expect(marker.resultRef).not.toBeNull();
+      else expect(marker.resultRef).toBeNull();
+      expect(marker.run).toMatchObject({
+        state: 'cancelled',
+        execution: cancelledSizePlan ?? 'not_started_proven',
+      });
+      if (cancelledSizePlan) {
+        const plan = JSON.parse(
+          (await session.resources.read(marker.planRef)).toString(),
+        );
+        expect(plan).toMatchObject({
+          refusedInputDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+          hooks: [],
+        });
+        expect(plan.input.tool_use_id).toBeUndefined();
+      }
+    }
+    const publish = bounded
+      ? vi.spyOn(session.resources, 'publish')
+      : undefined;
+    const originalCommit = commit;
+    if (failResult)
+      commit = async (...args) => {
+        if (args[0] === 'tool_result')
+          throw new Error('store unavailable while refusing rewrite');
+        return originalCommit(...args);
+      };
+    if (failResult) turn = createTurn(true, approval, hooks);
+    const settle = vi.spyOn(harness, 'settleConsumedRuntimeContinuation');
+    const execution = turn.execute(
+      batch,
+      batch.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    );
+    if (failResult) {
+      const error = await execution.catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
+      expect((error as HostedToolRecoveryRequiredError).cause).toEqual(
+        new Error('store unavailable while refusing rewrite'),
+      );
+      await expect(turn.finish()).rejects.toBeInstanceOf(
+        HostedToolRecoveryRequiredError,
+      );
+      expect(settle).not.toHaveBeenCalled();
+      expect(hooks.mountHeld).toBe(true);
+      expect((await session.sink.project()).map((entry) => entry.type)).toEqual(
+        ['assistant'],
+      );
+      expect(broker.execute).not.toHaveBeenCalled();
+      return;
+    }
+    const responses = await execution;
+    expect(
+      responses[denySibling ? 1 : 0].functionResponse?.response?.['error'],
+    ).toContain('unpaired UTF-16 surrogate');
+    if (denySibling)
+      expect(responses[0].functionResponse?.response?.['error']).toBe(
+        denySibling === HookEventName.PermissionRequest
+          ? 'PermissionRequest Hook denied the call.'
+          : 'recorded policy denial',
+      );
+    else
+      expect(responses[1].functionResponse?.response?.['error']).toContain(
+        cancelledSizePlan
+          ? 'Hook data exceeds the 60 KiB'
+          : unstartedSibling
+            ? 'PermissionRequest Hook denied the call.'
+            : 'not executed',
+      );
+    if (bounded) {
+      for (const [kind, bytes] of publish!.mock.calls)
+        if (kind === 'managed-hook-result')
+          expect(bytes.length).toBeLessThanOrEqual(60 * 1024);
+      const marker = session.authority.extensionRecord(
+        'hook_execution',
+        hostedHookOccurrenceId(event, `prompt:${shellCall.callId}`),
+      )!.record as { resultRef: ManagedSessionDurableRef };
+      const saved = JSON.parse(
+        (await session.resources.read(marker.resultRef)).toString(),
+      );
+      expect(saved.output).toMatchObject({
+        reason: expect.stringContaining('60 KiB'),
+        stopReason:
+          'Hosted Shell description contains an unpaired UTF-16 surrogate. Provide valid Unicode and retry.',
+      });
+      if (event === HookEventName.PermissionRequest) {
+        expect(saved.output.hookSpecificOutput).toEqual({
+          decision: { behavior: 'deny', interrupt: true },
+        });
+        expect(broker.acquire).toHaveBeenCalledOnce();
+      } else expect(saved.output.hookSpecificOutput).toBeUndefined();
+    }
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    const history = await session.sink.project();
+    expect(history.map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    const executed = hookControl.mock.calls.filter(
+      ([operation]) => operation.kind === 'hook-execute',
+    );
+    expect(
+      executed.map(
+        ([operation]) => operation.kind === 'hook-execute' && operation.hookId,
+      ),
+    ).toEqual(
+      denySibling === HookEventName.PermissionRequest
+        ? [
+            HookEventName.PreToolUse,
+            HookEventName.PreToolUse,
+            HookEventName.PermissionRequest,
+          ]
+        : denySibling
+          ? [event, event]
+          : bothEvents
+            ? [
+                HookEventName.PreToolUse,
+                HookEventName.PreToolUse,
+                HookEventName.PermissionRequest,
+                HookEventName.PermissionRequest,
+              ]
+            : bounded && event === HookEventName.PermissionRequest
+              ? [`${event}:metadata`, event]
+              : [event],
+    );
+    const restored = createTurn(true, approval, makeHooks());
+    const count = hookControl.mock.calls.length;
+    const markerRefs = bothEvents
+      ? new Set(
+          [HookEventName.PermissionRequest, HookEventName.PreToolUse].flatMap(
+            (eventName) => {
+              const record = session.authority.extensionRecord(
+                'hook_execution',
+                hostedHookOccurrenceId(eventName, `prompt:${shellCall.callId}`),
+              )!.record as {
+                inputRef: ManagedSessionDurableRef;
+                resultRef: ManagedSessionDurableRef;
+              };
+              return [record.inputRef, record.resultRef].map(
+                (ref) => ref.resourceId,
+              );
+            },
+          ),
+        )
+      : undefined;
+    const read = session.resources.read.bind(session.resources);
+    let unblock = () => {};
+    const gate = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const reads: string[] = [];
+    const spy = bothEvents
+      ? vi.spyOn(session.resources, 'read').mockImplementation(async (ref) => {
+          if (markerRefs!.has(ref.resourceId)) {
+            reads.push(ref.resourceId);
+            await gate;
+          }
+          return read(ref);
+        })
+      : undefined;
+    const resuming = restored.resumeHookResults(
+      responses,
+      'model',
+      new AbortController().signal,
+    );
+    const drained = Promise.allSettled([resuming]);
+    try {
+      if (bothEvents)
+        await vi.waitFor(() => expect(reads).toHaveLength(4), {
+          timeout: 10_000,
+        });
+    } finally {
+      unblock();
+      await drained;
+      spy?.mockRestore();
+    }
+    expect(await resuming).toEqual(responses);
+    expect(
+      await restored.resumeHookResults(
+        responses,
+        'model',
+        new AbortController().signal,
+      ),
+    ).toEqual(responses);
+    expect(hookControl).toHaveBeenCalledTimes(count);
+    expect(await session.sink.project()).toEqual(history);
+    await turn.finish();
+    if (event === HookEventName.PreToolUse) {
+      expect(settle).toHaveBeenCalledOnce();
+      expect((await harness.ensureRunnable()).continuation.phase).toBe(
+        'before_model',
+      );
+      expect(hooks.mountHeld).toBe(true);
+    }
+    if (unstartedSibling) {
+      const originalView = session.authority.extensionRecord.bind(
+        session.authority,
+      );
+      const blocked = vi
+        .spyOn(session.authority, 'extensionRecord')
+        .mockImplementation((domain, id) => {
+          const entry = originalView(domain, id);
+          if (
+            entry &&
+            domain === 'hook_execution' &&
+            id ===
+              hostedHookOccurrenceId(
+                HookEventName.PermissionRequest,
+                `prompt:${batch[1].callId}`,
+              )
+          ) {
+            const record = entry.record as { run: Record<string, unknown> };
+            return {
+              ...entry,
+              record: {
+                ...record,
+                run: {
+                  ...record.run,
+                  state: 'recovery_blocked',
+                  reason: 'handler_unavailable',
+                },
+              },
+            };
+          }
+          return entry;
+        });
+      try {
+        await expect(
+          createTurn(true, approval, makeHooks()).resumeHookResults(
+            responses,
+            'model',
+            new AbortController().signal,
+          ),
+        ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+      } finally {
+        blocked.mockRestore();
+      }
+    }
+    await restored.close();
+  },
+);
+
+it.each(['live arguments', 'persisted error text'] as const)(
+  'rejects contradictory Unicode refusal evidence: %s',
+  async (mismatch) => {
+    const hooks = hookSession(vi.fn());
+    const call = {
+      ...calls[0],
+      name: 'run_shell_command',
+      args: { command: '\ud800' },
+    };
+    turn = createTurn(true, undefined, hooks);
+    const assistant = [
+      {
+        functionCall: {
+          id: call.callId,
+          name: call.name,
+          args:
+            mismatch === 'live arguments'
+              ? { command: 'different\ud800' }
+              : call.args,
+        },
+      },
+    ];
+    if (mismatch === 'live arguments') {
+      await expect(
+        turn.execute([call], assistant, 'model', new AbortController().signal),
+      ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    } else {
+      const responses = await turn.execute(
+        [call],
+        assistant,
+        'model',
+        new AbortController().signal,
+      );
+      const tampered = structuredClone(responses);
+      tampered[0].functionResponse!.response!['error'] = 'different error';
+      await expect(
+        createTurn(true, undefined, hooks).resumeHookResults(
+          tampered,
+          'model',
+          new AbortController().signal,
+        ),
+      ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+      await expect(
+        createTurn(true, undefined, hooks).resumeHookResults(
+          responses,
+          'model',
+          new AbortController().signal,
+        ),
+      ).resolves.toEqual(responses);
+    }
+    expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(hooks.fire).not.toHaveBeenCalled();
+  },
+);
+
+it('keeps Unicode refusal replay blocked by a real unresolved sibling Hook', async () => {
+  const pin = {
+    catalogId: 'unresolved',
+    catalogRevision: 1,
+    definitionDigest: 'a'.repeat(64),
+  };
+  const hookControl = vi.fn<HostedWorkspaceBroker['hookControl']>(
+    async (operation) => ({
+      operationId: operation.operationId,
+      ...(operation.kind === 'hook-catalog'
+        ? {
+            state: 'settled' as const,
+            catalog: {
+              ...pin,
+              hooks: [
+                {
+                  hookId: 'unresolved',
+                  eventName: HookEventName.PermissionRequest,
+                  sequential: false,
+                  async: false,
+                  failClosed: true,
+                  onceKey: null,
+                  config: { type: 'command' as const },
+                },
+              ],
+            },
+          }
+        : { state: 'outcome_unknown' as const }),
+    }),
+  );
+  const hookBroker = {
+    ...broker,
+    runtimeSessionId: 'prompt',
+    hookControl,
+    runtime: {
+      bindingId: 'binding',
+      generation: '1',
+      workspaceGeneration: '1',
+    },
+  } as unknown as HostedWorkspaceBroker;
+  const makeHooks = () =>
+    new HostedHookSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      pin,
+      hookBroker,
+    );
+  const hooks = makeHooks();
+  const malformed = {
+    ...calls[0],
+    name: 'run_shell_command',
+    args: { command: '\ud800' },
+  };
+  const batch = [malformed, calls[1]];
+  turn = createTurn(true, undefined, hooks);
+  const responses = await turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  const sibling = batch[1];
+  await expect(
+    hooks.fire(
+      HookEventName.PermissionRequest,
+      `prompt:${sibling.callId}`,
+      {
+        tool_name: sibling.name,
+        tool_input: sibling.args,
+        tool_use_id: sibling.callId,
+        prompt_id: 'prompt',
+      },
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Hook requires reconciliation');
+  const child = session.authority
+    .extensionRecordsInDomain('hook_execution')
+    .map(
+      (entry) =>
+        entry.record as { hookId: string; run: Record<string, unknown> },
+    )
+    .find((record) => record.hookId === 'unresolved')!;
+  expect(child.run).toMatchObject({
+    state: 'recovery_blocked',
+    execution: 'outcome_unknown',
+  });
+  const marker = await hooks.status(
+    hostedHookOccurrenceId(
+      HookEventName.PermissionRequest,
+      `prompt:${sibling.callId}`,
+    ),
+    true,
+  );
+  expect(marker.resultRef).toBeNull();
+  expect(marker.run.execution).toBe('dispatch_started');
+  await expect(
+    createTurn(true, undefined, makeHooks()).resumeHookResults(
+      responses,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
 it.each(['assistant-commit', 'second-call'] as const)(
   'settles every tool refusal when cancelled before a new Hook plan (%s)',
   async (window) => {
@@ -5152,14 +6660,19 @@ it.each(['allow', 'deny'] as const)(
   },
 );
 
-it.each([
+it.each<{
+  decision: 'allow' | 'deny' | 'ask';
+  oversized: boolean;
+  ordered?: boolean;
+}>([
   { decision: 'allow', oversized: false },
   { decision: 'deny', oversized: false },
   { decision: 'ask', oversized: false },
   { decision: 'allow', oversized: true },
-] as const)(
-  'restores PreToolUse context from its durable receipt without duplicate effects ($decision, oversized: $oversized)',
-  async ({ decision, oversized }) => {
+  { decision: 'allow', oversized: false, ordered: true },
+])(
+  'restores PreToolUse context from its durable receipt without duplicate effects ($decision, oversized: $oversized, ordered: $ordered)',
+  async ({ decision, oversized, ordered }) => {
     if (oversized) {
       const remote = createHttpManagedSessionStores({
         baseUrl: 'http://127.0.0.1:1',
@@ -5192,6 +6705,7 @@ it.each([
               catalog: {
                 ...pin,
                 hooks: [
+                  ...(ordered ? [HookEventName.PermissionRequest] : []),
                   HookEventName.PreToolUse,
                   HookEventName.PostToolUse,
                 ].map((eventName) => ({
@@ -5213,18 +6727,37 @@ it.each([
                 output: {
                   hookSpecificOutput:
                     operation.kind === 'hook-execute' &&
-                    operation.hookId === HookEventName.PreToolUse
+                    operation.hookId === HookEventName.PermissionRequest
                       ? {
-                          permissionDecision: decision,
-                          additionalContext: oversized
-                            ? 'x'.repeat(36 * 1024)
-                            : 'before <tool>',
+                          decision: {
+                            behavior: 'allow',
+                            updatedInput: {
+                              file_path: 'permission.txt',
+                              content: 'fixture',
+                            },
+                          },
                         }
-                      : {
-                          additionalContext: oversized
-                            ? 'y'.repeat(36 * 1024)
-                            : 'after tool',
-                        },
+                      : operation.kind === 'hook-execute' &&
+                          operation.hookId === HookEventName.PreToolUse
+                        ? {
+                            permissionDecision: decision,
+                            ...(ordered
+                              ? {
+                                  updatedInput: {
+                                    file_path: 'pre.txt',
+                                    content: 'fixture',
+                                  },
+                                }
+                              : {}),
+                            additionalContext: oversized
+                              ? 'x'.repeat(36 * 1024)
+                              : 'before <tool>',
+                          }
+                        : {
+                            additionalContext: oversized
+                              ? 'y'.repeat(36 * 1024)
+                              : 'after tool',
+                          },
                 },
               },
             }),
@@ -5247,10 +6780,18 @@ it.each([
         pin,
         hookBroker,
       );
-    turn = createTurn(false, { mode: 'yolo' }, createHooks());
+    const mode = ordered ? 'default' : 'yolo';
+    turn = createTurn(false, { mode }, createHooks());
+    const call = ordered
+      ? {
+          ...calls[0],
+          name: 'write_file',
+          args: { file_path: 'original.txt', content: 'fixture' },
+        }
+      : calls[0];
     const running = turn.execute(
-      [calls[0]],
-      [parts[0]],
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
       'model',
       new AbortController().signal,
     );
@@ -5262,6 +6803,48 @@ it.each([
         answer('deny'),
       );
     const responses = await running;
+    if (ordered) {
+      expect(
+        hookControl.mock.calls.find(
+          ([operation]) =>
+            operation.kind === 'hook-execute' &&
+            operation.hookId === HookEventName.PreToolUse,
+        )?.[0],
+      ).toMatchObject({
+        input: { tool_input: { file_path: 'original.txt' } },
+      });
+      expect(
+        hookControl.mock.calls.find(
+          ([operation]) =>
+            operation.kind === 'hook-execute' &&
+            operation.hookId === HookEventName.PermissionRequest,
+        )?.[0],
+      ).toMatchObject({ input: { tool_input: { file_path: 'pre.txt' } } });
+      expect(
+        hookControl.mock.calls
+          .filter(([operation]) => operation.kind === 'hook-execute')
+          .map(
+            ([operation]) =>
+              operation.kind === 'hook-execute' && operation.hookId,
+          ),
+      ).toEqual([
+        HookEventName.PreToolUse,
+        HookEventName.PermissionRequest,
+        HookEventName.PostToolUse,
+      ]);
+      expect(JSON.parse(broker.execute.mock.calls[0][1])).toMatchObject({
+        input: { file_path: 'permission.txt' },
+      });
+      expect(
+        hookControl.mock.calls.find(
+          ([operation]) =>
+            operation.kind === 'hook-execute' &&
+            operation.hookId === HookEventName.PostToolUse,
+        )?.[0],
+      ).toMatchObject({
+        input: { tool_input: { file_path: 'permission.txt' } },
+      });
+    }
     const contexts = responses.filter((part) => typeof part.text === 'string');
     expect(contexts).toEqual(
       decision === 'ask' || oversized
@@ -5283,7 +6866,7 @@ it.each([
     }
     const history = await session.sink.project();
     const controls = hookControl.mock.calls.length;
-    const restored = createTurn(false, { mode: 'yolo' }, createHooks());
+    const restored = createTurn(false, { mode }, createHooks());
     expect(
       await restored.resumeHookResults(
         responses,
@@ -7756,6 +9339,7 @@ function backgroundTurnRig(
     closeResults?: ReadonlyArray<'NOT_STARTED' | 'MISSING'>;
     executionCallIds?: readonly string[];
     hooks?: HostedHookSession;
+    approval?: 'default';
   } = {},
 ) {
   enablement.childRun = true;
@@ -7901,12 +9485,14 @@ function backgroundTurnRig(
     (type: string) => options.fitsInline?.(type) ?? true,
     { owner, captureBytes: 1024 * 1024 },
     undefined,
-    undefined,
+    options.approval
+      ? { settings: { mode: options.approval, timeoutMs: 100 }, waiters }
+      : undefined,
     {
+      hooks: options.hooks,
       childRuns: orchestrator as never,
       backgroundLane: options.lane,
       foregroundOnly: options.foregroundOnly,
-      hooks: options.hooks,
     },
   );
   return {
@@ -8650,6 +10236,7 @@ it('keeps the SSH foreground-only declaration and admission free of detached too
     'read_file',
     'write_file',
     'edit',
+    'web_fetch',
     'run_shell_command',
   ]);
   const shell = declarations.find((tool) => tool.name === 'run_shell_command');
@@ -10415,4 +12002,40 @@ it('keeps the deliberate refusal while child_run stays disabled', async () => {
   expect(rig.orchestrator.calls).toHaveLength(0);
   expect(broker.executeV3).not.toHaveBeenCalled();
   expect(broker.prepareV3).not.toHaveBeenCalled();
+});
+
+it('refuses a malformed permission rewrite on an admitted background Shell', async () => {
+  const fire = vi
+    .fn<HostedHookSession['fire']>()
+    .mockImplementation(async (event) =>
+      event === HookEventName.PermissionRequest
+        ? {
+            hookSpecificOutput: {
+              decision: {
+                behavior: 'allow',
+                updatedInput: { command: '\ud800', is_background: true },
+              },
+            },
+          }
+        : undefined,
+    );
+  const rig = backgroundTurnRig(
+    { executionStatus: 'success', responseParts: [], capture: null },
+    { hooks: hookSession(fire), approval: 'default' },
+  );
+  turn = rig.turn;
+  const { call, parts: input } = backgroundCall();
+  const responses = await turn.execute(
+    [call],
+    input,
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toContain(
+    'unpaired UTF-16 surrogate',
+  );
+  expect(rig.orchestrator.calls).toHaveLength(0);
+  expect(broker.prepareV3).not.toHaveBeenCalled();
+  expect(broker.executeV3).not.toHaveBeenCalled();
+  expect(broker.acquire).toHaveBeenCalledOnce();
 });
