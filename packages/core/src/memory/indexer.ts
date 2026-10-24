@@ -35,16 +35,22 @@ import {
   INDEX_TRUNCATION_NOTICE,
   MAX_INDEX_LINE_CHARS,
   MAX_INDEX_LINES,
+  MIN_INDEX_TITLE_CHARS,
   trimIndexToBudget,
 } from './index-budget.js';
 
 const MAX_INDEX_FIELD_CHARS = 120;
-// The description is the only optional part of an entry, so it absorbs all the
-// shortening. A hook that would have to be CUT below this length is not worth
-// the bytes it costs, so the entry is then emitted without one — but a hook
-// that fits whole in the leftover room is kept however small that room is.
+// The description and the title are both optional parts of an entry, so the
+// shortening is split between them: the title is capped by the line budget and
+// the description absorbs what is left. A hook that would have to be CUT below
+// this length is not worth the bytes it costs, so the entry is then emitted
+// without one — but a hook that fits whole in the leftover room is kept however
+// small that room is.
 const MIN_INDEX_HOOK_CHARS = 24;
 const INDEX_HOOK_SEPARATOR = ' — ';
+// Chars the `- [](…)` wrapper spends around the title and the link target, i.e.
+// `- [`, `](` and the closing `)`.
+const INDEX_LINK_AFFIX_CHARS = '- []()'.length;
 const INDEX_ALSO_OPEN = ' (also: ';
 
 /**
@@ -175,24 +181,51 @@ function encodeIndexPathTarget(value: string): string {
 }
 
 /**
- * Render one index entry. The link is built first and never shortened, because
- * it is the entry's only functional part; the description takes whatever room
- * the link leaves, and is dropped entirely when that room is too small to be
- * useful. An entry whose link alone exceeds {@link MAX_INDEX_LINE_CHARS} is
- * therefore allowed to run long — a resolving long link beats a short dead one.
- * Grouped siblings reserve their space before the description is rendered;
- * targets that do not fit are dropped whole, never sliced.
+ * Render one index entry. The link target is never shortened, because it is the
+ * entry's only functional part; the title yields to {@link MAX_INDEX_LINE_CHARS}
+ * so `- [title](target)` fits whenever the encoded path leaves room for at least
+ * {@link MIN_INDEX_TITLE_CHARS}, and the description takes whatever room the
+ * link leaves — dropped entirely when that room is too small to be useful.
+ *
+ * "Fits" ends earlier than it looks. The title is floored at
+ * {@link MIN_INDEX_TITLE_CHARS}, so any encoded target longer than
+ * `MAX_INDEX_LINE_CHARS - INDEX_LINK_AFFIX_CHARS - MIN_INDEX_TITLE_CHARS` — 120
+ * characters — already pushes the line past {@link MAX_INDEX_LINE_CHARS}, not
+ * just a path longer than the whole budget. A resolving long link beats a short
+ * dead one, so those lines are allowed to run long. Grouped siblings reserve
+ * their space before the description is rendered; targets that do not fit are
+ * dropped whole, never sliced.
  */
 function docIndexLine(
   doc: ScannedAutoMemoryDocument,
   others: ScannedAutoMemoryDocument[] = [],
 ): string {
-  const title = sanitizeIndexField(doc.title) || doc.type;
-  const link = `- [${title}](${encodeIndexPathTarget(doc.relativePath)})`;
+  const target = encodeIndexPathTarget(doc.relativePath);
+  const description = sanitizeIndexField(doc.description) || doc.type;
+  // Reserve the hook's own bytes before the title takes the line budget. The
+  // title is what yields, and a truncated title otherwise consumes the whole
+  // line: `room` lands below MIN_INDEX_HOOK_CHARS and the hook is dropped — on
+  // exactly the population issue #13910 names, entries whose title is long
+  // relative to their path. Subtracted INSIDE the Math.max, never after it: the
+  // floor is what keeps a starved title from collapsing, and subtracting after
+  // the floor would push those lines back over the cap this fix enforces.
+  const hookReserve =
+    INDEX_HOOK_SEPARATOR.length +
+    Math.min(description.length, MIN_INDEX_HOOK_CHARS);
+  // Derived from the encoded target, not the raw path.
+  const titleLimit = Math.max(
+    MIN_INDEX_TITLE_CHARS,
+    MAX_INDEX_LINE_CHARS - INDEX_LINK_AFFIX_CHARS - target.length - hookReserve,
+  );
+  const title = truncateIndexField(
+    sanitizeIndexField(doc.title) || doc.type,
+    titleLimit,
+  );
+  const link = `- [${title}](${target})`;
   let also = '';
   for (const other of others) {
-    const target = encodeIndexPathTarget(other.relativePath);
-    const next = also ? `${also}, ${target}` : target;
+    const siblingTarget = encodeIndexPathTarget(other.relativePath);
+    const next = also ? `${also}, ${siblingTarget}` : siblingTarget;
     if (
       link.length + INDEX_ALSO_OPEN.length + next.length + 1 >
       MAX_INDEX_LINE_CHARS
@@ -210,7 +243,6 @@ function docIndexLine(
     link.length -
     suffix.length -
     INDEX_HOOK_SEPARATOR.length;
-  const description = sanitizeIndexField(doc.description) || doc.type;
   // A hook that FITS whole costs nothing beyond its bytes — keep it. Drop the
   // hook only when it would have to be CUT below MIN_INDEX_HOOK_CHARS.
   if (description.length > room && room < MIN_INDEX_HOOK_CHARS) {
