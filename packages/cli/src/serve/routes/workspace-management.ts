@@ -297,6 +297,21 @@ export function registerWorkspaceManagementRoutes(
       );
     });
   };
+  // A clone target that contains a reserved root is just as unsafe: the
+  // clone's cancel/failure cleanup deletes the target recursively, and a
+  // reserved root created inside it while the job runs would go with it.
+  const containsReservedWorkspaceRoot = (candidate: string): boolean => {
+    const resolvedCandidate = resolve(candidate);
+    const canonicalCandidate = canonicalizeIfPresent(candidate);
+    return reservedWorkspaceRoots.some((configuredRoot) => {
+      const resolvedRoot = resolve(configuredRoot);
+      const canonicalRoot = canonicalizeIfPresent(configuredRoot);
+      return (
+        isWithinRoot(resolvedRoot, resolvedCandidate) ||
+        isWithinRoot(canonicalRoot, canonicalCandidate)
+      );
+    });
+  };
   // Serialize runtime addition, persistence promotion/forget, updates, and
   // removal by canonical cwd so conflicting management mutations cannot cross
   // their validation and persistence commit points concurrently.
@@ -436,21 +451,30 @@ export function registerWorkspaceManagementRoutes(
     if (activeCloneTargets.has(canonical)) {
       throw new Error('Workspace path is being cloned');
     }
-    const nestingConflict = [
+    const nestingWithRegistered = [
       ...workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
       ...[...inFlight].flatMap(([cwd, operation]) =>
         operation === 'addition' ? [cwd] : [],
       ),
-      ...activeCloneTargets,
     ].some((cwd) => {
       if (cwd === canonical) return false;
       if (isWithinRoot(cwd, canonical)) return true;
       return provenance !== 'live-conversation' && isWithinRoot(canonical, cwd);
     });
+    // A clone's cancel/failure cleanup deletes its target recursively, so
+    // even the Live runtime must stay outside an active clone target in both
+    // directions. The Live exemption only covers one fixed, daemon-owned root
+    // relative to user workspaces, never a target that may disappear.
+    const nestingWithActiveClone = [...activeCloneTargets].some(
+      (target) =>
+        target === canonical ||
+        isWithinRoot(target, canonical) ||
+        isWithinRoot(canonical, target),
+    );
     // Live uses one fixed, daemon-owned root and every request resolves its
     // runtime exactly; user-selected and scratch runtimes keep the strict
     // no-nesting boundary.
-    if (nestingConflict) {
+    if (nestingWithRegistered || nestingWithActiveClone) {
       throw new Error('Workspace path nests with an existing workspace');
     }
     // The owned Conversations runtime is daemon infrastructure: user
@@ -1064,11 +1088,14 @@ export function registerWorkspaceManagementRoutes(
   const validateGitCloneTarget = (
     candidate: string,
   ): TargetRejection | undefined => {
-    if (isReservedWorkspacePath(candidate)) {
+    if (
+      isReservedWorkspacePath(candidate) ||
+      containsReservedWorkspaceRoot(candidate)
+    ) {
       return {
         status: 409,
         code: 'target_reserved',
-        message: 'Workspace path is reserved for Conversations.',
+        message: 'Workspace path overlaps a reserved Conversations root.',
       };
     }
     if (

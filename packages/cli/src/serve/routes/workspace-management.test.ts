@@ -3845,6 +3845,76 @@ describe('git clone target reservations', () => {
     }
   });
 
+  it('rejects a clone target that contains a reserved root', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-reserved-parent-'));
+    const target = join(root, 'Qwen Code');
+    const conversations = join(target, 'Conversations');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [conversations],
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(stat(conversations)).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the Live runtime outside an active clone target', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-live-clone-'));
+    const target = join(root, 'Qwen Code');
+    const conversations = join(target, 'Conversations');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    const registry = createMockRegistry([
+      makeRuntime('/Users/test', { primary: true }),
+    ]);
+    const runtime = makeRuntime(conversations, {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const createWorkspaceRuntime = vi.fn().mockResolvedValue(runtime);
+    try {
+      const { app, handle } = createApp({
+        workspaceRegistry: registry,
+        workspaceGitCloner: cloner,
+        createWorkspaceRuntime,
+        runtimeRemoval: createRemovalController(),
+      });
+      const started = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(started.status).toBe(202);
+
+      await expect(
+        handle.publishOwnedRuntime(
+          conversations,
+          'live-conversation',
+          () => undefined,
+        ),
+      ).rejects.toThrow('nests with an existing workspace');
+      expect(createWorkspaceRuntime).not.toHaveBeenCalled();
+
+      await cloner.cancel(started.body.jobId);
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects extra fields on a git clone request', async () => {
     const { app } = createApp({
       workspaceGitCloner: createWorkspaceGitCloner({ runner: blockingRunner }),
