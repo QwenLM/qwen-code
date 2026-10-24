@@ -188,7 +188,7 @@ async function openCards(page: Page, testInfo: TestInfo, count = 1) {
     await expect(app(index).locator('#continue-analysis')).toBeEnabled();
   }
   expect(workers).toHaveLength(count);
-  return { daemon, scenario, app };
+  return { daemon, scenario, app, cards };
 }
 
 function parameters(text: string): SnapshotMessage {
@@ -313,7 +313,8 @@ test('reviews normalized parameters, freezes the message, and sends only after c
 test('cancels without dispatch and keeps identical cards independent @smoke', async ({
   page,
 }, testInfo) => {
-  const { app, daemon } = await openCards(page, testInfo, 2);
+  const { app, daemon, cards } = await openCards(page, testInfo, 2);
+  await cards.nth(0).scrollIntoViewIfNeeded();
   await app(0).locator('#continue-analysis').click();
   let review = page.getByRole('dialog', { name: 'Review App message' });
   const first = parameters((await review.locator('pre').textContent())!);
@@ -325,6 +326,7 @@ test('cancels without dispatch and keeps identical cards independent @smoke', as
   );
   expect(daemon.promptRequests()).toHaveLength(0);
 
+  await cards.nth(1).scrollIntoViewIfNeeded();
   await app(1).locator('#continue-analysis').click();
   review = page.getByRole('dialog', { name: 'Review App message' });
   const second = parameters((await review.locator('pre').textContent())!);
