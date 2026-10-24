@@ -1844,6 +1844,31 @@ describe('EmbeddedApp message edit rewind', () => {
     expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
   });
 
+  // The clear has to happen before the branch can throw, not after the
+  // snapshot fetch: with no session there is no rewind to retry, so a refused
+  // send must leave edit mode instead of re-entering the branch every time.
+  it('leaves edit mode when the submission has no session to rewind', async () => {
+    const initialSessionId = document.body.dataset.qwenSessionId;
+    delete document.body.dataset.qwenSessionId;
+    try {
+      const props = await renderApp();
+      const prepareSubmit = await startEditing(props, 0);
+
+      await act(async () => {
+        await expect(
+          prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
+        ).rejects.toThrow(
+          'The message cannot be edited before the session is ready.',
+        );
+      });
+      expect(sdkMocks.getRewindSnapshots).not.toHaveBeenCalled();
+
+      await expectNextSubmitIsOrdinary('session-1');
+    } finally {
+      document.body.dataset.qwenSessionId = initialSessionId;
+    }
+  });
+
   it('leaves edit mode after a refused edit so the next send is not stuck', async () => {
     const props = await renderApp();
     const prepareSubmit = await startEditing(props, 0);
