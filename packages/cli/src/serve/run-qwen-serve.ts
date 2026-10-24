@@ -510,6 +510,8 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_SESSION_PROMPT_SETTLED_CLOSE_GRACE_MS = 0;
 const WORKSPACE_SETTING_SCOPE =
   'Workspace' as import('../config/settings.js').SettingScope;
+const USER_SETTING_SCOPE =
+  'User' as import('../config/settings.js').SettingScope.User;
 
 type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
   token?: string;
@@ -520,6 +522,8 @@ type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
 type PersistDisabledSkillsBatchResult =
   import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
+type PersistUserSkillActivationResult =
+  import('./workspace-service/types.js').PersistUserSkillActivationResult;
 type ServeWorkspaceSkillStatus =
   import('@qwen-code/acp-bridge/status').ServeWorkspaceSkillStatus;
 type ChannelWebhookConfigRuntime = {
@@ -2461,6 +2465,7 @@ function currentServeFeaturesForRunQwenServe(
       ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
       : {}),
     persistSettingAvailable: true,
+    userSkillActivationAvailable: true,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
@@ -6163,6 +6168,111 @@ async function runQwenServeImpl(
         }
         return { outcomes, settingsChanges };
       });
+    // User-scope writes are keyed on the primary workspace: every other
+    // user-scope writer (`/workspace/settings`, `/workspace/config/mcp`)
+    // already serializes there, so this lock orders against them too.
+    const persistUserSkillActivationFn = (
+      workspace: string,
+      skillNames: readonly string[],
+      enabled: boolean,
+      mode: import('../config/skill-settings.js').SkillDisableMode,
+      assertGenerationOpen?: () => void,
+    ): Promise<PersistUserSkillActivationResult> =>
+      withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
+        const {
+          skillSettingStrings,
+          skillToggleBlockForName,
+          updateSkillActivationLists,
+        } = await import('../config/skill-settings.js');
+        const fresh = loadSettingsForPersistence(workspace);
+        const initial = {
+          disabled: skillSettingStrings(fresh, USER_SETTING_SCOPE, 'disabled'),
+          defaultDisabled: skillSettingStrings(
+            fresh,
+            USER_SETTING_SCOPE,
+            'defaultDisabled',
+          ),
+          enabled: skillSettingStrings(fresh, USER_SETTING_SCOPE, 'enabled'),
+        };
+        const skillIdentities = enabled
+          ? await resolveSkillToggleIdentities(workspace, skillNames)
+          : skillNames.map((name) => ({ name }));
+        let next = initial;
+        const outcomes: PersistUserSkillActivationResult['outcomes'] =
+          skillNames.map((skillName) => ({ skillName, changed: false }));
+        // A grant a standing entry still forbids is not a write: the merged
+        // config would keep the skill disabled while the route reported an
+        // enable. A User entry another name in this batch already removed
+        // no longer forbids it, so refused names are rechecked until the
+        // batch converges and the result does not depend on request order.
+        const stillBlocked = (index: number) => {
+          const block = skillToggleBlockForName(
+            fresh,
+            skillIdentities[index]!,
+            USER_SETTING_SCOPE,
+          );
+          if (!block || block.scope !== 'User') return block;
+          const removed = !next[block.list].some(
+            (name) => name.trim().toLowerCase() === block.entry,
+          );
+          return removed ? null : block;
+        };
+        let pending = skillNames.map((_, index) => index);
+        for (let pass = 0; pass < skillNames.length; pass += 1) {
+          const refused: number[] = [];
+          let listChanged = false;
+          for (const index of pending) {
+            const skillName = skillNames[index]!;
+            const block = enabled ? stillBlocked(index) : null;
+            if (block) {
+              outcomes[index] = { skillName, changed: false, block };
+              refused.push(index);
+              continue;
+            }
+            const updated = updateSkillActivationLists(
+              next,
+              skillName,
+              enabled,
+              mode,
+            );
+            const changed = JSON.stringify(updated) !== JSON.stringify(next);
+            outcomes[index] = { skillName, changed };
+            next = updated;
+            listChanged ||= changed;
+          }
+          pending = refused;
+          if (pending.length === 0 || !listChanged) break;
+        }
+
+        const settingsChanges: PersistUserSkillActivationResult['settingsChanges'] =
+          [];
+        for (const [list, key] of [
+          ['disabled', 'skills.disabled'],
+          ['defaultDisabled', 'skills.defaultDisabled'],
+          ['enabled', 'skills.enabled'],
+        ] as const) {
+          if (JSON.stringify(next[list]) === JSON.stringify(initial[list])) {
+            continue;
+          }
+          settingsChanges.push({
+            key,
+            value: next[list].length > 0 ? next[list] : undefined,
+          });
+        }
+        if (settingsChanges.length > 0) {
+          assertGenerationOpen?.();
+          fresh.setValues(
+            settingsChanges.map((change) => ({
+              scope: USER_SETTING_SCOPE,
+              ...change,
+            })),
+            undefined,
+            assertGenerationOpen,
+          );
+        }
+        return { outcomes, settingsChanges };
+      });
     const persistSettingFn = (
       workspace: string,
       scope: import('../config/settings.js').SettingScope,
@@ -8697,6 +8807,7 @@ async function runQwenServeImpl(
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
+      persistUserSkillActivation: persistUserSkillActivationFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       sessionArtifactsPersistenceAvailable:

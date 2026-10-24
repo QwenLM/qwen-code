@@ -115,6 +115,16 @@ export class WorkspaceRuntimeCoordinator {
 
   private skillsRevision = 0;
 
+  /**
+   * User-settings Skill writes outstanding against this runtime. The child
+   * re-reads the user file only when asked, and a later workspace-only
+   * reconcile must not drop the request, so it stays pending until a refresh
+   * carrying it succeeds.
+   */
+  private skillsUserSettingsRequested = 0;
+
+  private skillsUserSettingsApplied = 0;
+
   private mcpRevision = 0;
 
   private mcpConfigRevision = 0;
@@ -329,7 +339,10 @@ export class WorkspaceRuntimeCoordinator {
     }
   }
 
-  reconcileSkillsConfiguration(): 'deferred' | 'reconciling' {
+  reconcileSkillsConfiguration(
+    options: { userSettings?: boolean } = {},
+  ): 'deferred' | 'reconciling' {
+    if (options.userSettings) this.skillsUserSettingsRequested += 1;
     this.skillsRevision += 1;
     this.skillsRefreshRetryRevision = undefined;
     this.skillsRefreshFailedRevision = undefined;
@@ -457,13 +470,28 @@ export class WorkspaceRuntimeCoordinator {
   }
 
   private async refreshSkillsRevision(revision: number): Promise<void> {
+    const userSettingsRequest = this.skillsUserSettingsRequested;
+    const includeUserSettings =
+      userSettingsRequest > this.skillsUserSettingsApplied;
     const result =
       await this.bridge.invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
         SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-        { cwd: this.runtime.workspaceCwd, reason: 'all' },
+        {
+          cwd: this.runtime.workspaceCwd,
+          reason: 'all',
+          ...(includeUserSettings
+            ? { settingsScopes: ['workspace', 'user'] }
+            : {}),
+        },
       );
     if ((result.configsFailed ?? 0) > 0) {
       throw new Error('Skills runtime refresh failed');
+    }
+    if (includeUserSettings) {
+      this.skillsUserSettingsApplied = Math.max(
+        this.skillsUserSettingsApplied,
+        userSettingsRequest,
+      );
     }
     if (revision === this.skillsRefreshRetryRevision) {
       this.skillsRefreshRetryRevision = undefined;

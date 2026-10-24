@@ -15,15 +15,27 @@ import {
 import { WorkspaceSkillManagementError } from '../workspace-skill-management.js';
 import {
   WorkspaceSkillNotFoundError,
+  type PersistUserSkillActivationResult,
   type WorkspaceSkillBatchToggleResult,
   type WorkspaceSkillToggleResult,
 } from '../workspace-service/types.js';
+import type { SkillDisableMode } from '../../config/skill-settings.js';
 import {
   registerWorkspaceQualifiedSkillsRoutes,
   registerWorkspaceSkillsRoutes,
 } from './workspace-skills.js';
 
-function createHarness(trusted = true, runtimeLive = false) {
+function createHarness(
+  trusted = true,
+  runtimeLive = false,
+  options: {
+    persistUserSkillActivation?: (
+      skillNames: readonly string[],
+      enabled: boolean,
+      mode: SkillDisableMode,
+    ) => Promise<PersistUserSkillActivationResult>;
+  } = {},
+) {
   const configStatus = {
     v: 1 as const,
     workspaceCwd: '/workspace',
@@ -110,7 +122,9 @@ function createHarness(trusted = true, runtimeLive = false) {
       errors: [],
     }),
   );
+  const publishWorkspaceEvent = vi.fn();
   const bridge = {
+    publishWorkspaceEvent,
     knownClientIds: () => new Set(['client-1']),
     getSessionSummary: vi.fn((sessionId: string) => {
       if (sessionId === 'session-1') return { sessionId };
@@ -167,6 +181,9 @@ function createHarness(trusted = true, runtimeLive = false) {
     deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
       deleteWorkspaceSkill(workspaceCwd, scope, skillName, installedPath),
     parseAndValidateClientId: () => 'client-1',
+    ...(options.persistUserSkillActivation
+      ? { persistUserSkillActivation: options.persistUserSkillActivation }
+      : {}),
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
     ...routeDeps,
@@ -175,6 +192,8 @@ function createHarness(trusted = true, runtimeLive = false) {
   return {
     app,
     runtime,
+    publishWorkspaceEvent,
+    invalidateWorkspaceSkillsStatus,
     refreshWorkspaceSkills,
     workspaceRegistry,
     configStatus,
@@ -1018,5 +1037,200 @@ describe('workspace Skill management routes', () => {
     expect(response.status).toBe(503);
     expect(response.body.code).toBe('workspace_runtime_unavailable');
     expect(harness.setWorkspaceSkillsEnabled).toHaveBeenCalledOnce();
+  });
+});
+
+describe('user Skill activation routes', () => {
+  const persistResult = (
+    outcomes: PersistUserSkillActivationResult['outcomes'],
+    settingsChanges: PersistUserSkillActivationResult['settingsChanges'] = [],
+  ): PersistUserSkillActivationResult => ({ outcomes, settingsChanges });
+
+  it('answers 501 when the host cannot persist user settings', async () => {
+    const h = createHarness();
+    const single = await request(h.app)
+      .put('/skills/pdf/activation')
+      .send({ state: 'disabled' });
+    expect(single.status).toBe(501);
+    expect(single.body.code).toBe('user_skill_activation_unsupported');
+    const batch = await request(h.app)
+      .put('/skills/activation')
+      .send({ skillNames: ['pdf'], state: 'disabled' });
+    expect(batch.status).toBe(501);
+  });
+
+  it('validates state, mode, and skill names before persisting', async () => {
+    const persist = vi.fn();
+    const h = createHarness(true, false, {
+      persistUserSkillActivation: persist,
+    });
+    const badState = await request(h.app)
+      .put('/skills/pdf/activation')
+      .send({ state: 'off' });
+    expect(badState.status).toBe(400);
+    expect(badState.body.code).toBe('invalid_skill_activation_state');
+    const legacyFlag = await request(h.app)
+      .put('/skills/pdf/activation')
+      .send({ enabled: false });
+    expect(legacyFlag.body.code).toBe('invalid_skill_activation_state');
+    const badMode = await request(h.app)
+      .put('/skills/pdf/activation')
+      .send({ state: 'disabled', mode: 'soft' });
+    expect(badMode.status).toBe(400);
+    expect(badMode.body.code).toBe('invalid_skill_activation_mode');
+    const badNames = await request(h.app)
+      .put('/skills/activation')
+      .send({ skillNames: [], state: 'enabled' });
+    expect(badNames.status).toBe(400);
+    expect(badNames.body.code).toBe('invalid_skill_names');
+    const blankName = await request(h.app)
+      .put('/skills/activation')
+      .send({ skillNames: ['  '], state: 'enabled' });
+    expect(blankName.body.code).toBe('invalid_skill_name');
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('writes a hard disable by default and reconciles every runtime', async () => {
+    const persist = vi
+      .fn()
+      .mockResolvedValue(
+        persistResult(
+          [{ skillName: 'rust:pdf', changed: true }],
+          [{ key: 'skills.disabled', value: ['rust:pdf'] }],
+        ),
+      );
+    const h = createHarness(true, false, {
+      persistUserSkillActivation: persist,
+    });
+    const secondaryPublish = vi.fn();
+    const secondaryInvalidate = vi.fn();
+    h.workspaceRegistry.add({
+      ...h.runtime,
+      workspaceId: 'workspace-2',
+      workspaceCwd: '/secondary',
+      primary: false,
+      bridge: { ...h.runtime.bridge, publishWorkspaceEvent: secondaryPublish },
+      workspaceService: {
+        ...h.runtime.workspaceService,
+        invalidateWorkspaceSkillsStatus: secondaryInvalidate,
+      },
+    });
+
+    const response = await request(h.app)
+      .put(`/skills/${encodeURIComponent('rust:pdf')}/activation`)
+      .send({ state: 'disabled' });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      scope: 'user',
+      state: 'disabled',
+      mode: 'hard',
+      activation: 'deferred',
+      skillName: 'rust:pdf',
+      changed: true,
+    });
+    expect(persist).toHaveBeenCalledWith(['rust:pdf'], false, 'hard');
+    expect(h.invalidateWorkspaceSkillsStatus).toHaveBeenCalled();
+    expect(secondaryInvalidate).toHaveBeenCalled();
+    expect(h.invalidateSkillsConfigStatus).toHaveBeenCalledWith('/secondary');
+    const event = {
+      type: 'settings_changed',
+      data: expect.objectContaining({
+        key: 'skills.disabled',
+        value: ['rust:pdf'],
+        scope: 'user',
+        mutation: expect.objectContaining({
+          kind: 'skill_toggle',
+          skills: [{ name: 'rust:pdf', enabled: false }],
+        }),
+      }),
+    };
+    expect(h.publishWorkspaceEvent).toHaveBeenCalledWith({
+      ...event,
+      originatorClientId: 'client-1',
+    });
+    expect(secondaryPublish).toHaveBeenCalledWith(event);
+  });
+
+  it('passes the default mode through and omits mode when enabling', async () => {
+    const persist = vi.fn(async (skillNames: readonly string[]) =>
+      persistResult(
+        skillNames.map((skillName) => ({ skillName, changed: true })),
+        [{ key: 'skills.defaultDisabled', value: [...skillNames] }],
+      ),
+    );
+    const h = createHarness(true, false, {
+      persistUserSkillActivation: persist,
+    });
+    const disabled = await request(h.app)
+      .put('/skills/activation')
+      .send({
+        skillNames: ['pdf', 'PDF', 'review'],
+        state: 'disabled',
+        mode: 'default',
+      });
+    expect(disabled.status).toBe(200);
+    expect(persist).toHaveBeenLastCalledWith(
+      ['pdf', 'review'],
+      false,
+      'default',
+    );
+    expect(disabled.body).toMatchObject({
+      scope: 'user',
+      state: 'disabled',
+      mode: 'default',
+      results: [
+        { skillName: 'pdf', changed: true },
+        { skillName: 'review', changed: true },
+      ],
+    });
+
+    const enabled = await request(h.app)
+      .put('/skills/pdf/activation')
+      .send({ state: 'enabled', mode: 'default' });
+    expect(enabled.status).toBe(200);
+    expect(persist).toHaveBeenLastCalledWith(['pdf'], true, 'default');
+    expect(enabled.body).not.toHaveProperty('mode');
+  });
+
+  it('reports a refused enable without reconciling or publishing', async () => {
+    const block = {
+      reason: 'hard' as const,
+      list: 'disabled' as const,
+      entry: 'pdf',
+      scope: 'System' as const,
+    };
+    const persist = vi
+      .fn()
+      .mockResolvedValue(
+        persistResult([{ skillName: 'pdf', changed: false, block }]),
+      );
+    const h = createHarness(true, false, {
+      persistUserSkillActivation: persist,
+    });
+    const response = await request(h.app)
+      .put('/skills/pdf/activation')
+      .send({ state: 'enabled' });
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      skillName: 'pdf',
+      changed: false,
+      activation: 'applied',
+      block,
+    });
+    expect(h.invalidateWorkspaceSkillsStatus).not.toHaveBeenCalled();
+    expect(h.publishWorkspaceEvent).not.toHaveBeenCalled();
+  });
+
+  it('surfaces persistence failures through the bridge error mapper', async () => {
+    const persist = vi.fn().mockRejectedValue(new Error('disk full'));
+    const h = createHarness(true, false, {
+      persistUserSkillActivation: persist,
+    });
+    const response = await request(h.app)
+      .put('/skills/activation')
+      .send({ skillNames: ['pdf'], state: 'disabled' });
+    expect(response.status).toBe(500);
+    expect(h.invalidateSkillsConfigStatus).toHaveBeenCalled();
   });
 });

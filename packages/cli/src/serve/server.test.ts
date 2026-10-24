@@ -897,6 +897,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_permissions',
   'workspace_voice',
   'workspace_voice_transcription',
+  'user_skill_activation',
   'workspace_trust',
   'workspace_trust_grant',
   'workspace_trust_hot_reload',
@@ -3685,6 +3686,22 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               persistSettingAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'user_skill_activation') {
+          expect(predicate({ userSkillActivationAvailable: true })).toBe(true);
+          expect(predicate({ userSkillActivationAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({ persistSettingAvailable: true })).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              userSkillActivationAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(

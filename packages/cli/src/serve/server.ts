@@ -686,6 +686,16 @@ export interface ServeAppDeps {
   ) => Promise<void>;
   persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
   persistDisabledSkillsBatch?: DaemonWorkspaceServiceDeps['persistDisabledSkillsBatch'];
+  /** Persist skill activation changes to the user settings scope. */
+  persistUserSkillActivation?: (
+    workspace: string,
+    skillNames: readonly string[],
+    enabled: boolean,
+    mode: import('../config/skill-settings.js').SkillDisableMode,
+    assertGenerationOpen?: () => void,
+  ) => Promise<
+    import('./workspace-service/types.js').PersistUserSkillActivationResult
+  >;
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
@@ -1166,6 +1176,8 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      userSkillActivationAvailable:
+        deps.persistUserSkillActivation !== undefined,
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
       sessionGenerationAvailable: () => {
@@ -3701,6 +3713,22 @@ export function createServeApp(
       ),
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+    ...(deps.persistUserSkillActivation
+      ? {
+          persistUserSkillActivation: (
+            skillNames: readonly string[],
+            enabled: boolean,
+            mode: import('../config/skill-settings.js').SkillDisableMode,
+          ) =>
+            deps.persistUserSkillActivation!(
+              primaryBoundWorkspace,
+              skillNames,
+              enabled,
+              mode,
+              capturePrimaryGenerationAssertion(),
+            ),
+        }
+      : {}),
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
     getSkillsSnapshot: (workspaceCwd) =>
