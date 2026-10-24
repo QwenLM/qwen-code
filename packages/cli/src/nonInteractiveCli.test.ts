@@ -7761,6 +7761,59 @@ describe('runNonInteractive', () => {
     },
   );
 
+  it.each(bothLoops)(
+    'answers an interrupt during a tool call with its result ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      // A stream-json session interrupts the running turn this way.
+      const abortController = new AbortController();
+      mockCoreExecuteToolCall.mockImplementation(async () => {
+        abortController.abort(new TurnInterruptedError());
+        return {
+          callId: 'interrupted-call',
+          responseParts: [{ text: 'cancelled' }],
+          resultDisplay: 'cancelled',
+          error: new Error('cancelled'),
+          errorType: undefined,
+        };
+      });
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'interrupted-call',
+              name: 'run_shell_command',
+              args: { command: 'sleep 10' },
+              isClientInitiated: false,
+              prompt_id: 'interrupted-tool',
+            },
+          },
+        ]),
+      );
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Run it',
+        'interrupted-tool',
+        { abortController, recoverableCancellation: true },
+      );
+
+      expect(exitCode).toBe(130);
+      const messages = JSON.parse(
+        processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+      );
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: true,
+        error: { message: 'Operation cancelled.' },
+      });
+    },
+  );
+
   it('ends the run at the client session turn limit on the shared loop (#15325)', async () => {
     setupMetricsMock();
     Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => true });

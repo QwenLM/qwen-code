@@ -2981,7 +2981,9 @@ export async function runNonInteractive(
             case 'loop_detected':
               return emitLoopDetectedResult();
             case 'cancelled':
-              return routeAbort();
+              // Awaited, so a recoverable interrupt reaches the catch below and
+              // ends with its result, as on the current loop.
+              return await routeAbort();
             case 'max_session_turns':
               // The client counts turns across the whole session (#15325).
               await failClosedActiveGoalTurn(
