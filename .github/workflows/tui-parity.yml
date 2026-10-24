@@ -95,7 +95,7 @@ jobs:
       # silently follow 'latest'.
       - uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2.2.0
         with:
-          bun-version: '1.3.14'
+          bun-version: '1.4.4'
       - name: 'Install dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -198,7 +198,7 @@ jobs:
       # silently follow 'latest'.
       - uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2.2.0
         with:
-          bun-version: '1.3.14'
+          bun-version: '1.4.4'
       - name: 'Install dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -212,3 +212,41 @@ jobs:
           # concurrent runs on one ECS host would share.
           OUT: '${{ runner.temp }}/opentui-noflicker-out'
         run: 'bash scripts/tui-parity/accept-noflicker.sh'
+
+  installed-npm:
+    name: 'Installed npm Node26 private Bun acceptance'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 60
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '26.4.0'
+          package-manager-cache: false
+      - name: 'Capture actual npm product toolchain'
+        run: |-
+          set -euo pipefail
+          echo "QWEN_INSTALLED_NODE=$(command -v node)" >> "$GITHUB_ENV"
+          echo "QWEN_INSTALLED_NPM=$(realpath "$(command -v npm)")" >> "$GITHUB_ENV"
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+      - name: 'Install dependencies'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+      - name: 'Build and bundle checkout'
+        run: 'npm run build && npm run bundle'
+      - name: 'Nine installed npm acceptance cases'
+        env:
+          QWEN_INSTALLED_OUT: '${{ runner.temp }}/qwen-installed-${{ github.run_id }}-${{ github.run_attempt }}'
+          QWEN_E2E_RENDERER: 'opentui'
+        run: 'npx vitest run --config integration-tests/vitest.installed.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false'
+      - name: 'Upload installed npm evidence'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
+        with:
+          name: 'installed-npm-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/qwen-installed-${{ github.run_id }}-${{ github.run_attempt }}'
+          if-no-files-found: 'error'

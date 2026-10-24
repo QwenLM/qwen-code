@@ -16,7 +16,6 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { JsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { NPM_RUNTIME_CONTEXT } from './env-provenance.js';
 import {
-  isOpenTuiRuntimeSupported,
   OPEN_TUI_RENDERER_VALUE,
   TUI_RENDERER_ENV_VAR,
   TUI_RENDERER_STRICT_ENV_VAR,
@@ -127,8 +126,7 @@ export function selectNpmBunHandoff({
     protocolMode ||
     sandbox ||
     env['SANDBOX'] ||
-    versions.bun ||
-    isOpenTuiRuntimeSupported(versions)
+    versions.bun
   ) {
     return undefined;
   }
