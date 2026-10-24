@@ -40,6 +40,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'modalities',
   'splitToolMedia',
   'toolResultContentFormat',
+  'toolParametersMandatory',
 ] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
 
 /**

@@ -2216,6 +2216,17 @@ const SETTINGS_SCHEMA = {
               { value: 'string', label: 'String' },
             ],
           },
+          toolParametersMandatory: {
+            type: 'boolean',
+            label: 'Require Tool Parameters',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: false,
+            description:
+              'Set true for an OpenAI-compatible server that types `tools[].function.parameters` as a required field and rejects the request with a validation error when a parameterless tool omits it; that rejection reads `tools[N].function: missing field parameters` on serde-based Rust servers and litellm routers, or `Field required` on Pydantic-based ones. Such a tool is then sent with `"parameters": { "type": "object", "properties": {} }` instead of the omission. Leave false unless a server demands the field: it is omitted by default because #10080 keeps an empty `properties` off older llama.cpp grammars. That shape returns HTTP 200 on the three llama.cpp builds #10080 verified (b10068 / b10745 / b10425) and the LM Studio validator accepts it, but the rejection behind that relaxation has no live reproducer and nothing wider than those three builds has been measured (QwenLM/qwen-code#10080, #11431), so do not opt in on a server that rejects an empty `properties` object. The HTTP 400 in QwenLM/qwen-code#11410 rejected the bare `{ "type": "object" }` shape for lacking `properties`, not this shape. A route whose hostname matches a MiniMax host always sends the field, and this setting cannot turn that off (#11834). See the `toolParametersMandatory` note under `model.generationConfig` in docs/users/configuration/settings.md for the schema carve-outs, the wires that ignore it, and how each route and side model resolves the value.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
           schemaCompliance: {
             type: 'enum',
             label: 'Tool Schema Compliance',
