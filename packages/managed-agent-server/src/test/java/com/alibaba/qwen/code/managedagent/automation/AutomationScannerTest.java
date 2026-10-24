@@ -30,6 +30,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -38,7 +40,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -374,6 +381,38 @@ class AutomationScannerTest {
     private AutomationScanner scanner(String owner) {
         return new AutomationScanner(ledger, connector, settings,
                 clock::get, owner);
+    }
+
+    private AutomationScanner scanner(String owner, ExecutorService pool) {
+        return new AutomationScanner(ledger, connector, settings,
+                clock::get, owner, pool);
+    }
+
+    /** A real bounded row pool, shut down by each test that opens one. */
+    private ThreadPoolTaskExecutor rowPool(int threads) {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(threads);
+        executor.setMaxPoolSize(threads);
+        executor.setThreadNamePrefix("automation-scan-test-");
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.afterPropertiesSet();
+        return executor;
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(error);
+        }
+    }
+
+    private long leaseUntilOf(String automationId) {
+        Long until = jdbc.queryForObject("SELECT lease_until FROM ma_schedule"
+                        + " WHERE tenant_id = ? AND schedule_id = ?",
+                Long.class, tenant, automationId);
+        return until == null ? -1 : until;
     }
 
     private PublicAutomation define(String cron, String overlap,
@@ -2245,6 +2284,222 @@ class AutomationScannerTest {
                 .orElseThrow();
         assertThat(row.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
         assertThat(fake.fires()).isEqualTo(2);
+    }
+
+    @Test
+    void firesDueTogetherSettleAcrossTheRowPool() {
+        // #15418: three slow fires due on the same minute must overlap each
+        // other on one node's scanner instead of queueing behind the tick's
+        // single thread. The latch only opens once every fire is in flight,
+        // so a pool that ever lets fewer than three probes run at once
+        // deadlocks this test until its timeout fails it.
+        PublicAutomation firstAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        PublicAutomation secondAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        PublicAutomation thirdAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        CountDownLatch arrived = new CountDownLatch(3);
+        AtomicInteger inFlight = new AtomicInteger();
+        AtomicInteger peak = new AtomicInteger();
+        HookedConnector hooked = new HookedConnector(fake);
+        hooked.onFire = body -> {
+            int now = inFlight.incrementAndGet();
+            peak.accumulateAndGet(now, Math::max);
+            try {
+                arrived.countDown();
+                awaitLatch(arrived);
+            } finally {
+                inFlight.decrementAndGet();
+            }
+        };
+        ThreadPoolTaskExecutor rows = rowPool(3);
+        try {
+            AutomationScanner pooled = new AutomationScanner(ledger, hooked,
+                    settings, clock::get, "scanner-pool",
+                    rows.getThreadPoolExecutor());
+            clock.set(T0 + MINUTE + 1_000);
+            assertThat(pooled.tick(clock.get())).isEqualTo(3);
+            assertThat(peak.get()).isEqualTo(3);
+        } finally {
+            rows.destroy();
+        }
+        String slot = "schedule:2026-06-01T10:01:00Z";
+        assertThat(occurrence(firstAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(occurrence(secondAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(occurrence(thirdAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+    }
+
+    @Test
+    void theLeaseRunsFromTheClaimNotTheTick() {
+        // #15418: with rows on a pool the first row's fire can run halfway
+        // through the lease before the second row starts. A lease anchored
+        // at the tick's start would already be (close to) expired when the
+        // second claim lands; anchoring at the claim keeps it whole. The row
+        // order inside the tick is the store's, so the slow fire is
+        // whichever runs first.
+        define("* * * * *", "allow", "none", null, true);
+        define("* * * * *", "allow", "none", null, true);
+        HookedConnector hooked = new HookedConnector(fake);
+        Map<String, Long> leased = new java.util.concurrent
+                .ConcurrentHashMap<>();
+        AtomicInteger inFire = new AtomicInteger();
+        hooked.onFire = body -> {
+            String id = String.valueOf(body.get("scheduleId"));
+            // The fire runs under the claim: the lease each definition
+            // holds by now is anchored at its own claim, never the tick.
+            leased.put(id, leaseUntilOf(id));
+            if (inFire.incrementAndGet() == 1) {
+                clock.addAndGet(30_000);
+            }
+        };
+        AutomationScanner serial = new AutomationScanner(ledger, hooked,
+                settings, clock::get, "scanner-slow-first");
+        long t1 = T0 + MINUTE + 1_000;
+        clock.set(t1);
+        assertThat(serial.tick(t1)).isEqualTo(2);
+        assertThat(leased.values()).containsExactlyInAnyOrder(t1 + 60_000,
+                t1 + 30_000 + 60_000);
+    }
+
+    @Test
+    void aHolderThatLostItsLeaseMidFireCannotSettleAndTheNewOwnerRedrives()
+            throws Exception {
+        // A fire's relay (up to 150 s with the Session load) can outlive
+        // the row's lease. The next owner must take the row over and the
+        // stale holder's settle must no-op, or one lost answer would
+        // produce two Harness-side runs.
+        PublicAutomation automation = define("* * * * *", "allow", "none",
+                null, true);
+        settings.setLease(Duration.ofSeconds(5));
+        CountDownLatch inFire = new CountDownLatch(1);
+        CountDownLatch stillFiring = new CountDownLatch(1);
+        HookedConnector hooked = new HookedConnector(fake);
+        hooked.onFire = body -> {
+            if (automation.id().equals(body.get("scheduleId"))
+                    && inFire.getCount() > 0) {
+                inFire.countDown();
+                awaitLatch(stillFiring);
+            }
+        };
+        AutomationScanner stale = new AutomationScanner(ledger, hooked,
+                settings, clock::get, "scanner-stale");
+        long t1 = T0 + MINUTE + 1_000;
+        clock.set(t1);
+        Thread first = new Thread(() -> stale.tick(t1));
+        first.start();
+        awaitLatch(inFire);
+        clock.set(t1 + 6_000);
+        AutomationScanner next = new AutomationScanner(ledger, hooked,
+                settings, clock::get, "scanner-next");
+        assertThat(next.tick(clock.get())).isEqualTo(1);
+        stillFiring.countDown();
+        first.join(10_000);
+        assertThat(first.isAlive()).isFalse();
+        AutomationLedgerStore.OccurrenceRow row = occurrence(automation.id(),
+                "schedule:2026-06-01T10:01:00Z");
+        assertThat(row.outcome()).isEqualTo(AutomationLedgerStore
+                .OUTCOME_FIRED);
+        assertThat(row.attempts()).isEqualTo(0);
+        assertThat(fake.fires()).isEqualTo(2);
+        assertThat(fake.runCount(sessionId)).isEqualTo(1);
+    }
+
+    @Test
+    void aBacklogDeeperThanThePoolStillCompletesWithinTheTick() {
+        // More candidates than threads queue inside the executor (up to
+        // 2×SCAN_LIMIT by construction), and the join leaves none of them
+        // outstanding when the tick answers.
+        PublicAutomation firstAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        PublicAutomation secondAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        PublicAutomation thirdAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        ThreadPoolTaskExecutor rows = rowPool(2);
+        try {
+            AutomationScanner pooled = scanner("scanner-backlog",
+                    rows.getThreadPoolExecutor());
+            clock.set(T0 + MINUTE + 1_000);
+            assertThat(pooled.tick(clock.get())).isEqualTo(3);
+            assertThat(rows.getActiveCount()).isEqualTo(0);
+        } finally {
+            rows.destroy();
+        }
+        String slot = "schedule:2026-06-01T10:01:00Z";
+        assertThat(occurrence(firstAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(occurrence(secondAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(occurrence(thirdAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+    }
+
+    @Test
+    void aTickJoinsEveryRowBeforeItReportsOneFailure() {
+        // A row task that escapes claimed() — here, the claim write itself
+        // going down — must not abort the tick: every row is still worked,
+        // and the FIRST failure is what the tick reports.
+        define("* * * * *", "allow", "none", null, true);
+        define("* * * * *", "allow", "none", null, true);
+        AtomicInteger claims = new AtomicInteger();
+        AutomationLedgerStore downAtClaim = new AutomationLedgerStore(jdbc) {
+            @Override
+            public long claim(String tenantId, String scheduleId,
+                    String owner, long leaseUntil, long now) {
+                claims.incrementAndGet();
+                throw new IllegalStateException("claim store down");
+            }
+        };
+        AutomationScanner broken = new AutomationScanner(downAtClaim,
+                connector, settings, clock::get, "scanner-broken-store");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThatThrownBy(() -> broken.tick(clock.get()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("claim store down");
+        assertThat(claims.get()).isEqualTo(2);
+    }
+
+    @Test
+    void theScannerWorksRowsOnItsOwnBoundedPool() {
+        ThreadPoolTaskExecutor executor = applicationContext.getBean(
+                "automationScannerExecutor", ThreadPoolTaskExecutor.class);
+        assertThat(executor).isNotSameAs(applicationContext.getBean(
+                "managedAutomationScheduler"));
+        assertThat(executor.getThreadNamePrefix())
+                .isEqualTo("automation-scan-");
+        ManagedAgentProperties properties = applicationContext
+                .getBean(ManagedAgentProperties.class);
+        int threads = properties.getAutomation().getScannerThreads();
+        assertThat(executor.getCorePoolSize()).isEqualTo(threads);
+        assertThat(executor.getMaxPoolSize()).isEqualTo(threads);
+        // The scan tick joins on the row pool, so the scheduler must stay a
+        // one-thread driver: scanning on its own pool would deadlock the
+        // tick on the pool's only thread.
+        ThreadPoolTaskScheduler scheduler = (ThreadPoolTaskScheduler)
+                applicationContext.getBean("managedAutomationScheduler");
+        assertThat(scheduler.getPoolSize()).isEqualTo(1);
+    }
+
+    /** A fake connector whose fires run a test hook before answering. */
+    static final class HookedConnector extends FakeConnector {
+        private volatile Consumer<Map<String, Object>> onFire = body -> {};
+
+        HookedConnector(AutomationHarnessFake fake) {
+            super(fake);
+        }
+
+        @Override
+        public Map<String, Object> runAutomationOperation(String tenantId,
+                String sessionId, Map<String, Object> body) {
+            if ("fire_run".equals(body.get("kind"))) {
+                onFire.accept(body);
+            }
+            return super.runAutomationOperation(tenantId, sessionId, body);
+        }
     }
 
     /** The connector the control plane sees: only the automation verb answers. */
