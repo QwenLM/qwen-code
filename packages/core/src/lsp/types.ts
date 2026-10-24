@@ -403,6 +403,13 @@ export interface LspClient {
    * Re-read LSP configuration and reconcile live server connections.
    */
   reinitialize?(): Promise<LspServiceReinitializeResult>;
+
+  /**
+   * Stop every language server this client fronts. Called from
+   * ``Config.shutdown()``; without it the server subprocesses outlive the
+   * session's Config and leak until the host process exits (#14751).
+   */
+  stop?(): Promise<void>;
 }
 
 // ============================================================================
