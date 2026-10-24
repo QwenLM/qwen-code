@@ -197,15 +197,15 @@ runtime 构造引擎。
 Managed 引擎切片实现该评估。它读取实际的工作区 runtime，对读取的内容绝不迁移、修复、
 加锁或写入。
 
-| 输入        | 只有满足以下条件才兼容                                                                                                                                                                      |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 工作区      | 已受信，且请求的规范化 cwd 等于 runtime 工作区                                                                                                                                              |
-| 环境与 argv | 以 runtime 的有效环境（它决定 settings 与扩展的位置并替换 settings 变量）以及转发给子进程的参数（`--experimental-lsp`、`--restore-ask-user-question`）评估；启用延期能力的参数为 `deferred` |
-| Settings    | 每一层（system defaults、system、user，以及受信时的 workspace）读取时都不写迁移、不备份、不重置，已知的旧版本只在内存中迁移；未知的 `$version` 或无法读取的层为 `unknown`                   |
-| MCP         | 任何来源都没有 server：settings 各层、`.mcp.json`（保留其读取与解析错误）、`mcp.serverCommand`、扩展、agent 定义、运行时添加的 server、WebSocket 上的客户端 MCP，以及注入会话的 server      |
-| Hooks       | 任何 settings 层（system、user，以及受信时的 project）、活动扩展，以及 skill 与 agent 定义的动态注册都没有 Hooks                                                                            |
-| 扩展        | 以只读方式证明已安装集合为空，不经过 store 的加锁、恢复或 cache 刷新；部分或过期的证据为 `unknown`                                                                                          |
-| 请求选项    | 引擎能够绑定所请求的模型服务、启动配置与审批模式                                                                                                                                            |
+| 输入        | 只有满足以下条件才兼容                                                                                                                                                                                                                                                                                                                            |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 工作区      | 已受信，且请求的规范化 cwd 等于 runtime 工作区                                                                                                                                                                                                                                                                                                    |
+| 环境与 argv | 以 runtime 的有效环境（它决定 settings 与扩展的位置并替换 settings 变量）以及转发给子进程的参数（`--experimental-lsp`、`--restore-ask-user-question`）评估；runtime 的会话解析出开启的能力为 `deferred`——对 LSP 而言即参数、`tools.lspEnabled` 设置或 `QWEN_CODE_ENABLE_LSP` 环境变量对，且禁用开关优先——而仅转发 `--experimental-lsp` 属已知参数 |
+| Settings    | 每一层（system defaults、system、user，以及受信时的 workspace）读取时都不写迁移、不备份、不重置，已知的旧版本只在内存中迁移；未知的 `$version` 或无法读取的层为 `unknown`                                                                                                                                                                         |
+| MCP         | 任何来源都没有 server：settings 各层、`.mcp.json`（保留其读取与解析错误）、`mcp.serverCommand`、扩展、agent 定义、运行时添加的 server、WebSocket 上的客户端 MCP，以及注入会话的 server                                                                                                                                                            |
+| Hooks       | 任何 settings 层（system、user，以及受信时的 project）、活动扩展，以及 skill 与 agent 定义的动态注册都没有 Hooks                                                                                                                                                                                                                                  |
+| 扩展        | 以只读方式证明已安装集合为空，不经过 store 的加锁、恢复或 cache 刷新；部分或过期的证据为 `unknown`                                                                                                                                                                                                                                                |
+| 请求选项    | 引擎能够绑定所请求的模型服务、启动配置与审批模式                                                                                                                                                                                                                                                                                                  |
 
 `deferred` 表示存在首阶段 Managed 引擎不支持的能力；`unknown` 表示有内容无法证明。
 选择器与引擎的重新核验对可比较的输入使用同一规则，因此选择与初始化之间发生的变化会

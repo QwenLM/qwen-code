@@ -329,7 +329,10 @@ export async function runHostedHarnessTextTurn(input: {
     undefined,
     undefined,
     true,
-    { toolInvocationGuard: () => ({ allowed: false }) },
+    {
+      toolInvocationGuard: () => ({ allowed: false }),
+      lspDisabled: true,
+    },
   );
   const outputBudget = config.getToolOutputBatchBudget?.();
   if (outputBudget !== undefined)

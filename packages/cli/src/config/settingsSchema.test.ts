@@ -268,6 +268,14 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should warn that an execution sandbox refuses the LSP setting', () => {
+      const description =
+        getSettingsSchema().tools.properties.lspEnabled?.description ?? '';
+
+      expect(description).toContain('tools.executionSandbox');
+      expect(description).toContain('--safe-mode');
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties

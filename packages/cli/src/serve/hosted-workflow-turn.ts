@@ -236,6 +236,7 @@ export async function runHostedWorkflowTurn(input: {
     undefined,
     undefined,
     true,
+    { lspDisabled: true },
   );
   const model = input.agentDefinition?.model;
   await applyHostedModelPin(config, model);

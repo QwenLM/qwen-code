@@ -751,14 +751,17 @@ export async function main() {
         undefined,
         undefined,
         undefined,
-        privateAcpParentCapability === undefined
-          ? {
-              workflowAncestorTrustProvider:
-                createLocalWorkflowAncestorTrustProvider(
-                  getOperatorTrustSettings(settings),
-                ),
-            }
-          : undefined,
+        {
+          lspDisabled: true,
+          ...(privateAcpParentCapability === undefined
+            ? {
+                workflowAncestorTrustProvider:
+                  createLocalWorkflowAncestorTrustProvider(
+                    getOperatorTrustSettings(settings),
+                  ),
+              }
+            : {}),
+        },
         buildEnabledSkillNamesProvider(settings),
       );
 
