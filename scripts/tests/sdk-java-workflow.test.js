@@ -147,7 +147,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     // The ticketed queue makes the wake order deterministic and the fast
     // class puts this tier's ticket ahead of waiting full-tier tickets, so
-    // the pin is the sourced helper, its budget, and the tier argument.
+    // the pin is the sourced helper, its budget, and the tier argument. The
+    // 5400 s budget covers eighteen write-back holds, the only locked work
+    // this lane does now that its suite resolves from a job-local repository.
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
@@ -157,6 +159,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     // fallback keeps acquisition independent of the checkout's ref.
     expect(block).toContain('flock --wait 5400 9');
     expect(block).toContain('::error::sdk-java host lock not acquired within');
+    expect(block).toContain(
+      '::error::sdk-java host lock not acquired within 90 minutes',
+    );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
@@ -1643,11 +1648,16 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(step.run).toContain(
       '::error::sdk-java host lock not acquired within',
     );
+    expect(step.run).toContain(
+      '::error::sdk-java host lock not acquired within 90 minutes',
+    );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
     // The fast tier owns the same lock: it overtakes this job only while
-    // this ticket still waits, then waits out its hold, so one acquisition
-    // budget applies to every lane; run 39229303984 died at the old
-    // 60-minute wait before Maven started.
+    // this ticket still waits, then waits out its hold. This write-back
+    // keeps the shorter budget because its hold is the bounded copy and it
+    // waits after the ~3-hour verify; the sibling test lane carries the
+    // longer budget pinned below. Run 39229303984 died at the old 60-minute
+    // wait before Maven started.
     expect(seconds).toBe(90 * 60);
     // This site stays in the normal class: a tier argument here would put
     // full-tier MariaDB holds ahead of fast PR-feedback work.

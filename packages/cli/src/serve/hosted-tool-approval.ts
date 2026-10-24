@@ -41,16 +41,26 @@ export interface HostedApprovalSettings {
 
 // Listing what each mode pre-approves means a tool added to a profile later
 // is asked about until someone decides otherwise. `task_list` only reads the
-// Session's own team board (H4e-b1).
+// Session's own team board (H4e-b1). `todo_write` only writes the Session's
+// own task list, so it is as safe to pre-approve as a read. A tool that
+// reaches the network would not join this list: it contacts a URL nobody in
+// the Session chose.
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
-  default: ['read_file', 'task_list', 'exit_plan_mode', 'team_plan_approval'],
+  default: [
+    'read_file',
+    'task_list',
+    'todo_write',
+    'exit_plan_mode',
+    'team_plan_approval',
+  ],
   'auto-edit': [
     'read_file',
     'write_file',
     'edit',
     'task_list',
+    'todo_write',
     'exit_plan_mode',
     'team_plan_approval',
   ],
