@@ -70,12 +70,12 @@ The facts below are from `main` at `13a4fea516` plus PR #15069.
   hooks run Runtime-side manifest commands under an operation grant.
 - **Policy.** A Session's tool profile decides which tools exist:
   `run_shell_command` belongs to `hosted-workspace-shell/1` (and `/2` until
-  #15330) and `team-lead/1`; a no-tool Session refuses every tool call. Under
-  `default` and `auto-edit` the Harness opens an approval Action for a shell
-  call. An automation turn starts from the Session's pinned settings; on a
-  `hosted-workspace-files/1` or `hosted-workspace-shell/1` (and `/2` until
-  #15330) Session that is not a child, it reads the Session's current approval
-  selection at each check.
+  #15330) and `hosted-workspace-team-lead/1`; a no-tool Session refuses every
+  tool call. Under `default` and `auto-edit` the Harness opens an approval
+  Action for a shell call. An automation turn starts from the Session's pinned
+  settings; on a `hosted-workspace-files/1` or `hosted-workspace-shell/1` (and
+  `/2` until #15330) Session that is not a child, it reads the Session's
+  current approval selection at each check.
 - **Relay.** `HostedHarnessClient.runAutomationOperation` requires a `202`
   with `state: settled` and the same `operationId`; anything else, including
   the client's 30 s request timeout, raises `MutationOutcomeUnknownException`,
@@ -284,7 +284,10 @@ api graphql` with the worker's environment.
   takes about 3 s and each further page about 1.5 s. `snapshot` reads up to
   ten pages each of check contexts and review threads, all before it writes
   its cursor, so a PR too big to read in 20 s fails every slot the same way (a
-  `gate_failed` streak) without losing events.
+  `gate_failed` streak) without losing events. These times depend on the
+  Runtime host's path to GitHub: a separate check from a workstation measured
+  the merged PR below at 9–10 s a quiet run through a proxy and 21–29 s over a
+  direct connection, past the limit.
 - **Output that drains over several fires.** A probe holds a run to a 12 KiB
   budget, inside the 16 KiB cap (§4.3), and leaves what does not fit for the
   next fire. Each of those fires is a turn. The first fire on a PR reports
