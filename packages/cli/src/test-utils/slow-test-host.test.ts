@@ -45,6 +45,13 @@ describe('isSlowTestHost', () => {
     expect(isSlowTestHost()).toBe(true);
   });
 
+  it('treats a host loaded exactly to its core count as slow', () => {
+    delete process.env['RUNNER_NAME'];
+    vi.mocked(os.availableParallelism).mockReturnValue(4);
+    vi.mocked(os.loadavg).mockReturnValue([4, 0, 0]);
+    expect(isSlowTestHost()).toBe(true);
+  });
+
   it('keeps an unsaturated host fast without RUNNER_NAME', () => {
     delete process.env['RUNNER_NAME'];
     vi.mocked(os.loadavg).mockReturnValue([2, 0, 0]);
