@@ -394,6 +394,77 @@ describe('statsCommand', () => {
       expect(result.content).toContain('Estimated cost: $0.9000');
     });
 
+    it('stats model derives cost output from aggregate totals for both reasoning conventions', async () => {
+      const modelSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'model',
+      );
+      if (!modelSubCommand?.action) throw new Error('Subcommand has no action');
+
+      const context = createMockCommandContext({
+        executionMode: 'non_interactive',
+      });
+      (context.services.settings as unknown as Record<string, unknown>)[
+        'merged'
+      ] = {
+        modelPricing: {
+          'kimi-k3.1-pro': {
+            inputPerMillionTokens: 0,
+            outputPerMillionTokens: 1,
+          },
+          'gemini-2.5-pro': {
+            inputPerMillionTokens: 0,
+            outputPerMillionTokens: 1,
+          },
+          'openai-compatible-no-usable-total': {
+            inputPerMillionTokens: 0,
+            outputPerMillionTokens: 1,
+          },
+        },
+      };
+      context.session.stats.metrics.models = {
+        'kimi-k3.1-pro': toModelMetrics({
+          tokens: {
+            prompt: 100000,
+            candidates: 150000,
+            cached: 0,
+            total: 250000,
+            thoughts: 120000,
+          },
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+        }),
+        'gemini-2.5-pro': toModelMetrics({
+          tokens: {
+            prompt: 100000,
+            candidates: 50000,
+            cached: 0,
+            total: 270000,
+            thoughts: 120000,
+          },
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+        }),
+        'openai-compatible-no-usable-total': toModelMetrics({
+          tokens: {
+            prompt: 100000,
+            candidates: 200000,
+            cached: 0,
+            total: 100000,
+            thoughts: 50000,
+          },
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+        }),
+      };
+
+      const result = (await modelSubCommand.action(context, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.content).toContain('Estimated cost: $0.1500');
+      expect(result.content).toContain('Estimated cost: $0.1700');
+      expect(result.content).toContain('Estimated cost: $0.2000');
+      expect(result.content).not.toContain('Estimated cost: $0.2700');
+    });
+
     it('stats model does not show cost when pricing is not configured', async () => {
       const modelSubCommand = statsCommand.subCommands?.find(
         (sc) => sc.name === 'model',

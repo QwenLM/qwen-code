@@ -17,7 +17,10 @@ import {
   CommandKind,
 } from './types.js';
 import { getCurrentLanguage, t } from '../../i18n/index.js';
-import { calculateCost } from '../../utils/costCalculator.js';
+import {
+  calculateCost,
+  getCostOutputTokens,
+} from '../../utils/costCalculator.js';
 import {
   formatTokenUsageSummaryAsCsv,
   formatTokenUsageSummaryAsJson,
@@ -781,8 +784,7 @@ export const statsCommand: SlashCommand = {
             );
             const cost = calculateCost({
               inputTokens: modelMetrics.tokens.prompt,
-              outputTokens:
-                modelMetrics.tokens.candidates + modelMetrics.tokens.thoughts,
+              outputTokens: getCostOutputTokens(modelMetrics.tokens),
               pricing: pricing?.[modelName],
             });
             if (cost != null) {

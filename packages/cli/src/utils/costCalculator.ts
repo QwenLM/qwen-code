@@ -4,9 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getUsageOutputTokenCountForPromptEstimate } from '@qwen-code/qwen-code-core/services/tokenEstimation.js';
+
 export interface ModelPricing {
   inputPerMillionTokens?: number;
   outputPerMillionTokens?: number;
+}
+
+interface CostTokenMetrics {
+  prompt: number;
+  candidates: number;
+  total: number;
+  thoughts: number;
+}
+
+export function getCostOutputTokens(tokens: CostTokenMetrics): number {
+  return getUsageOutputTokenCountForPromptEstimate({
+    promptTokenCount: tokens.prompt,
+    // An absent or inconsistent aggregate must not clamp output cost to zero.
+    totalTokenCount: tokens.total > tokens.prompt ? tokens.total : undefined,
+    candidatesTokenCount: tokens.candidates,
+    thoughtsTokenCount: tokens.thoughts,
+  });
 }
 
 export function calculateCost(args: {
