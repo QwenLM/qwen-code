@@ -853,9 +853,29 @@ fi
       expect(retitled.migratedBody).toBeNull();
     });
 
-    it.each([{ failBodyRead: true }, { failEdit: true }])(
-      'keeps the recorded occurrence when marker migration fails: %j',
-      (failure) => {
+    it.each([
+      [
+        'read',
+        {
+          failBodyRead: true,
+          markerIssues: [
+            {
+              number: 42,
+              title: 'Main CI failed: SDK Java',
+              user: { login: 'qwen-code-dev-bot' },
+              body: '<!-- main-ci-failure-aggregate:1234 -->',
+            },
+          ],
+        },
+      ],
+      ['edit', { failEdit: true, markerIssues: [] }],
+    ])(
+      'keeps the recorded occurrence when marker migration fails on %s: %j',
+      (_kind, failure) => {
+        // The per-issue view and the migration edit are both decoration-side
+        // reads/writes after the record; the marker fallback's listing scan
+        // rescues an unreadable aggregate, and a failed migration edit is
+        // only warned about.
         const result = run([botIssue(42)], {
           issueBody: 'Original unmarked body',
           ...failure,
@@ -870,14 +890,31 @@ fi
     );
 
     it('prefers an exact-titled aggregate over an older legacy candidate', () => {
-      // The exact machine title certifies the aggregate without a body read,
-      // so it wins over an older legacy candidate that could otherwise absorb
-      // the occurrence while unreadable or unmarked.
+      // Machine-titled candidates sort first, so the standing aggregate wins
+      // over an older legacy candidate that could otherwise absorb the
+      // occurrence while unreadable or unmarked.
       const result = run([botIssue(50), botIssue(42, ' on abc123')]);
       expect(result.calls).toContain('issue comment 50');
       expect(result.output).toContain(
         'issue_url=https://github.com/QwenLM/qwen-code/issues/50',
       );
+    });
+
+    it('does not adopt a per-signature issue retitled to the exact machine title', () => {
+      // Machine shapes are exempt from nothing: a human can retitle a
+      // per-signature issue to the exact title, so every adoption candidate
+      // passes the same body screen regardless of title.
+      const result = run([botIssue(9)], {
+        issueBodies: { 9: '<!-- qwen-main-ci-failure-test:aaa111bbb222 -->\n' },
+        closedIssues: [
+          { ...botIssue(42), body: '<!-- main-ci-failure-aggregate:1234 -->' },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue reopen 42');
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toContain('issue comment 9');
+      expect(result.calls).not.toContain('issue edit 9');
     });
 
     it('retries a transient light lookup failure and still records the failure', () => {
@@ -1148,11 +1185,20 @@ fi
       it('falls back to the workflow aggregate when a candidate body cannot be read', () => {
         // A miss cannot be certified against an unreadable body, so the run is
         // recorded on the aggregate the way an unidentified failure is — losing
-        // precision, never the record.
+        // precision, never the record. The aggregate itself is located by the
+        // marker fallback's listing scan even when its own view also fails.
         const result = run([botIssue(42)], {
           signatureTitle,
           testMarkers: markerA,
           failBodyRead: true,
+          markerIssues: [
+            {
+              number: 42,
+              title: 'Main CI failed: SDK Java',
+              user: { login: 'qwen-code-dev-bot' },
+              body: '<!-- main-ci-failure-aggregate:1234 -->',
+            },
+          ],
         });
         expect(result.status).toBe(0);
         expect(result.stdout).toContain(
@@ -1313,6 +1359,28 @@ fi
             issueBodies: { 20: owned(markerA), 21: owned(markerB) },
           },
         );
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 20');
+        expect(result.calls).not.toContain('issue edit');
+      });
+
+      it('does not accrete a marker a human-retitled tracker already owns', () => {
+        // The retitled owner is out of the title family, so ownership can
+        // only be settled through the scoped-body scan the route already has.
+        const retitled = {
+          number: 9,
+          title: 'Investigating the C flake',
+          user: { login: 'qwen-code-dev-bot' },
+          body: `<!-- ${markerB} -->\n<!-- main-ci-failure-scope:1234 -->\n`,
+        };
+        const result = run([botIssue(20, ' — A.test')], {
+          signatureTitle,
+          testMarkers: `${markerA}\n${markerB}`,
+          issueBodies: {
+            20: `<!-- ${markerA} -->\n<!-- main-ci-failure-scope:1234 -->\n`,
+          },
+          markerIssues: [retitled],
+        });
         expect(result.status).toBe(0);
         expect(result.calls).toContain('issue comment 20');
         expect(result.calls).not.toContain('issue edit');

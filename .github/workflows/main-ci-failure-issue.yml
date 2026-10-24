@@ -406,6 +406,10 @@ jobs:
           scope_key="main-ci-failure-scope:${WORKFLOW_ID}"
           # Writes get the same transient-failure tolerance the lookups have
           # had all along; a one-shot write that dies loses the occurrence.
+          # Retrying create/comment after a lost response can mint one
+          # duplicate when the first attempt succeeded server-side — accepted:
+          # same-marker duplicates converge on the oldest next run, which
+          # beats the recorded failure vanishing with no trace.
           gh_write() {
             local attempt
             for attempt in 1 2 3; do
@@ -618,6 +622,42 @@ jobs:
                     echo '::warning::Could not read every sibling tracker body; skipping marker accretion this run.'
                     accrete=()
                   fi
+                  if [[ "${#accrete[@]}" -gt 0 ]]; then
+                    # A tracker a human retitled out of the family owns its
+                    # markers the same way; only its scoped body settles that.
+                    # The retitled scan's pages are reused when it already ran.
+                    if [[ -z "${retitled_pages:-}" || ! -s "${retitled_pages}" ]]; then
+                      retitled_pages="${RUNNER_TEMP}/open-bot-issues.pages"
+                      lookup_ok=false
+                      for attempt in 1 2 3; do
+                        if gh api --paginate "repos/${REPO}/issues?state=open&per_page=100" \
+                          > "${retitled_pages}"; then
+                          lookup_ok=true
+                          break
+                        fi
+                        sleep "${attempt}"
+                      done
+                    fi
+                    if [[ "${lookup_ok:-false}" != true ]]; then
+                      echo '::warning::Could not scan retitled trackers for marker ownership; skipping marker accretion this run.'
+                      accrete=()
+                    else
+                      markers_json="$(printf '%s\n' "${accrete[@]}" | jq -R . | jq -sc .)"
+                      if ! kept="$(jq -sr --arg bot "${BOT_LOGIN}" --arg scope "${scope_key}" --argjson ms "${markers_json}" '
+                        (add | map(select(.pull_request == null and .user.login == $bot)
+                          | select((.body // "") | contains($scope))
+                          | (.body // ""))) as $bodies
+                        | [$ms[] | . as $m | select(any($bodies[]; contains($m)) | not)]
+                        | join("\n")' "${retitled_pages}")"; then
+                        echo '::error::Could not parse the retitled-issues listing; not writing.'
+                        exit 1
+                      fi
+                      accrete=()
+                      while IFS= read -r kept_marker; do
+                        [[ -z "${kept_marker}" ]] || accrete+=("${kept_marker}")
+                      done <<< "${kept}"
+                    fi
+                  fi
                 else
                   accrete=()
                 fi
@@ -665,43 +705,41 @@ jobs:
           existing_issue=''
           match_kind=''
           via_title_lookup=false
-          # An exact machine title certifies the aggregate without a body read
-          # — per-signature titles always carry the " — " suffix, and every
-          # create below embeds the workflow marker — so it wins first, before
-          # any read that a transient failure could strand.
+          # Exact machine titles win first — a per-signature filing's title
+          # always carries the " — " suffix — but a title alone is never
+          # enough: a human can retitle a per-signature issue to the exact
+          # shape, so every candidate passes the same body screen in order.
+          family_ordered=()
           for family_line in "${family[@]}"; do
-            if [[ "${family_line#*$'\t'}" == exact ]]; then
-              existing_issue="${family_line%%$'\t'*}"
-              match_kind='exact'
-              via_title_lookup=true
+            [[ "${family_line#*$'\t'}" == exact ]] && family_ordered+=("${family_line}")
+          done
+          for family_line in "${family[@]}"; do
+            [[ "${family_line#*$'\t'}" == exact ]] || family_ordered+=("${family_line}")
+          done
+          for family_line in "${family_ordered[@]}"; do
+            candidate="${family_line%%$'\t'*}"
+            candidate_body="${RUNNER_TEMP}/family-${candidate}.md"
+            if ! gh issue view "${candidate}" --repo "${REPO}" \
+              --json body --jq '.body // ""' > "${candidate_body}"; then
+              # An unreadable candidate cannot be certified, and adopting the
+              # NEXT admissible one on sight could hand the occurrence to a
+              # per-commit filing; the body-marker fallback finds the real
+              # aggregate without per-issue reads.
+              rm -f "${candidate_body}"
+              echo "::warning::Could not read issue #${candidate}; leaving adoption to the marker fallback."
               break
             fi
+            # Both marker classes mean an already-adopted aggregate; test
+            # markers alone mean a per-signature issue, whatever its title.
+            if grep -qF 'qwen-main-ci-failure-test:' "${candidate_body}" &&
+              ! grep -qF -- "${marker}" "${candidate_body}"; then
+              continue
+            fi
+            existing_issue="${candidate}"
+            match_kind="${family_line#*$'\t'}"
+            via_title_lookup=true
+            break
           done
-          if [[ -z "${existing_issue}" ]]; then
-            for family_line in "${family[@]}"; do
-              candidate="${family_line%%$'\t'*}"
-              candidate_body="${RUNNER_TEMP}/family-${candidate}.md"
-              if ! gh issue view "${candidate}" --repo "${REPO}" \
-                --json body --jq '.body // ""' > "${candidate_body}"; then
-                # An unreadable candidate cannot be certified, and adopting
-                # the NEXT admissible one on sight could hand the occurrence
-                # to a per-commit filing; the body-marker fallback finds the
-                # real aggregate without per-issue reads.
-                echo "::warning::Could not read issue #${candidate}; leaving adoption to the marker fallback."
-                break
-              fi
-              # Both marker classes mean an already-adopted aggregate; test
-              # markers alone mean a per-signature issue.
-              if grep -qF 'qwen-main-ci-failure-test:' "${candidate_body}" &&
-                ! grep -qF -- "${marker}" "${candidate_body}"; then
-                continue
-              fi
-              existing_issue="${candidate}"
-              match_kind='legacy'
-              via_title_lookup=true
-              break
-            done
-          fi
 
           if [[ -z "${existing_issue}" ]]; then
             # A bot-owned aggregate remains recognizable after a human retitles it.
