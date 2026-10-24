@@ -8944,147 +8944,165 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
-  it('retains cleanup debt after interrupted channel settlement until original-owner release succeeds', async () => {
-    const channelTurn = await prewriteChannelWriteInterruption(true);
-    mockBrokerBroker();
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
-      state: 'settled',
-    });
-    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
-    let finishAutomaticRetry!: () => void;
-    const automaticRetry = new Promise<void>((resolve) => {
-      finishAutomaticRetry = resolve;
-    });
-    release.mockRejectedValueOnce(new Error('release unavailable'));
-    release.mockImplementationOnce(() => automaticRetry);
-    const kick = HostedMonitorWakeScheduler.prototype.kick;
-    let wake: HostedMonitorWakeScheduler | undefined;
-    vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick').mockImplementation(
-      function (this: HostedMonitorWakeScheduler) {
-        if (wake) return;
-        wake = this;
-        kick.call(this);
-      },
-    );
-    const server = await app(true);
-    const loaded = await headers(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({
-      managedSessionStore: store(),
-      toolProfile: 'hosted-workspace-files/1',
-    });
-    expect(loaded.status).toBe(200);
-    const authorize = (request: supertest.Test) =>
-      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-    const readJournal = () =>
-      LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+  it.each([false, true])(
+    'retains cleanup debt after interrupted channel settlement until original-owner release succeeds (retry refused: %s)',
+    async (retryRefused) => {
+      const channelTurn = await prewriteChannelWriteInterruption(true);
+      mockBrokerBroker();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+        state: 'settled',
+      });
+      const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+      let finishAutomaticRetry!: () => void;
+      const automaticRetry = new Promise<void>((resolve) => {
+        finishAutomaticRetry = resolve;
+      });
+      release.mockRejectedValueOnce(new Error('release unavailable'));
+      release.mockImplementationOnce(async () => {
+        await automaticRetry;
+        if (retryRefused) throw new Error('retry unavailable');
+      });
+      const kick = HostedMonitorWakeScheduler.prototype.kick;
+      let wake: HostedMonitorWakeScheduler | undefined;
+      // Drive the retry at a barrier so the load overlaps it without racing
+      // the scheduler's clock.
+      vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick').mockImplementation(
+        function (this: HostedMonitorWakeScheduler) {
+          if (wake) return;
+          wake = this;
+          kick.call(this);
+        },
       );
-    await vi.waitFor(
-      async () => {
-        expect(release).toHaveBeenCalledTimes(1);
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).expect(200);
-        expect(status.body.recoveryBlocked).toBe(true);
-      },
-      // #14101: the debt settle crosses fsync-backed journal commits; the
-      // default 1s waitFor window flaked on a loaded ubuntu-latest runner.
-      { timeout: SETTLE_TIMEOUT_MS },
-    );
-    const parked = await readJournal();
-    const terminals = parked.events.filter(
-      (event) => event.kind === 'turn.settled',
-    );
-    expect(terminals).toHaveLength(1);
-    expect(terminals[0]!.payload['turnId']).toBe(channelTurn);
-    expect(
-      parked.events.filter((event) => event.kind === 'hosted.cleanup'),
-    ).toHaveLength(1);
-    expect(release).toHaveBeenLastCalledWith({
-      bindingId: 'binding',
-      generation: '1',
-    });
-    expect(state.model).not.toHaveBeenCalled();
-    const nextPrompt = [{ type: 'text', text: 'must remain blocked' }];
-    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-      .send({
-        prompt: nextPrompt,
-        promptId: randomUUID(),
-        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
-      })
-      .expect(409);
-    expect((await readJournal()).events).toHaveLength(parked.events.length);
-    expect(state.model).not.toHaveBeenCalled();
-    const redriven = await (async () => {
-      let initialPassFinished = false;
-      await wake!.exclusive(async () => {
-        initialPassFinished = true;
-      }, SETTLE_TIMEOUT_MS);
-      expect(initialPassFinished).toBe(true);
-      kick.call(wake!);
-      const cleanup = await import('./hosted-turn-cleanup.js');
-      const debt = vi.spyOn(cleanup, 'hasHostedCleanupDebt');
-      try {
-        await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(2), {
-          timeout: SETTLE_TIMEOUT_MS,
-        });
-        const loading = headers(
-          supertest(server).post(`/session/${SESSION_ID}/load`),
-        )
-          .send({
-            managedSessionStore: store(),
-            passiveManagedRuntimeRecovery: true,
-          })
-          .then((response) => response);
-        await vi.waitFor(
-          () => expect(debt).toHaveBeenCalledWith(capturedWakeSession().managed),
-          { timeout: SETTLE_TIMEOUT_MS },
+      const server = await app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      });
+      expect(loaded.status).toBe(200);
+      const authorize = (request: supertest.Test) =>
+        headers(request).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
         );
-        finishAutomaticRetry();
-        return await loading;
-      } finally {
-        finishAutomaticRetry();
-        debt.mockRestore();
+      const readJournal = () =>
+        LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+      await vi.waitFor(
+        async () => {
+          expect(release).toHaveBeenCalledTimes(1);
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).expect(200);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        // #14101: the debt settle crosses fsync-backed journal commits; the
+        // default 1s waitFor window flaked on a loaded ubuntu-latest runner.
+        { timeout: SETTLE_TIMEOUT_MS },
+      );
+      const parked = await readJournal();
+      const terminals = parked.events.filter(
+        (event) => event.kind === 'turn.settled',
+      );
+      expect(terminals).toHaveLength(1);
+      expect(terminals[0]!.payload['turnId']).toBe(channelTurn);
+      expect(
+        parked.events.filter((event) => event.kind === 'hosted.cleanup'),
+      ).toHaveLength(1);
+      expect(release).toHaveBeenLastCalledWith({
+        bindingId: 'binding',
+        generation: '1',
+      });
+      expect(state.model).not.toHaveBeenCalled();
+      const nextPrompt = [{ type: 'text', text: 'must remain blocked' }];
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({
+          prompt: nextPrompt,
+          promptId: randomUUID(),
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+        })
+        .expect(409);
+      expect((await readJournal()).events).toHaveLength(parked.events.length);
+      expect(state.model).not.toHaveBeenCalled();
+      const redriven = await (async () => {
+        let initialPassFinished = false;
+        await wake!.exclusive(async () => {
+          initialPassFinished = true;
+        }, SETTLE_TIMEOUT_MS);
+        expect(initialPassFinished).toBe(true);
+        kick.call(wake!);
+        const cleanup = await import('./hosted-turn-cleanup.js');
+        const debt = vi.spyOn(cleanup, 'hasHostedCleanupDebt');
+        try {
+          await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(2), {
+            timeout: SETTLE_TIMEOUT_MS,
+          });
+          debt.mockClear();
+          const managed = capturedWakeSession().managed;
+          const loading = headers(
+            supertest(server).post(`/session/${SESSION_ID}/load`),
+          )
+            .send({
+              managedSessionStore: store(),
+              passiveManagedRuntimeRecovery: true,
+            })
+            .then((response) => response);
+          await vi.waitFor(
+            () =>
+              expect(
+                debt.mock.calls.some(([session]) => session === managed),
+              ).toBe(true),
+            { timeout: SETTLE_TIMEOUT_MS },
+          );
+          finishAutomaticRetry();
+          return await loading;
+        } finally {
+          finishAutomaticRetry();
+          debt.mockRestore();
+        }
+      })();
+      expect(redriven.status).toBe(200);
+      expect(redriven.body.clientId).toBe(loaded.body.clientId);
+      expect(release).toHaveBeenCalledTimes(retryRefused ? 3 : 2);
+      expect(release).toHaveBeenLastCalledWith({
+        bindingId: 'binding',
+        generation: '1',
+      });
+      for (const [owner] of release.mock.calls) {
+        expect(owner).toEqual({ bindingId: 'binding', generation: '1' });
       }
-    })();
-    process.stderr.write(
-      `CLEANUP_RACE_WITNESS ${JSON.stringify({
-        root: state.root,
-        releaseCalls: release.mock.calls,
-        owners: release.mock.contexts.map(
-          (owner) => (owner as HostedWorkspaceBroker).runtimeSessionId,
-        ),
-        redrivenStatus: redriven.status,
-      })}\n`,
-    );
-    expect(redriven.status).toBe(200);
-    expect(redriven.body.clientId).toBe(loaded.body.clientId);
-    expect(release).toHaveBeenCalledTimes(2);
-    expect(release).toHaveBeenLastCalledWith({
-      bindingId: 'binding',
-      generation: '1',
-    });
-    const status = await authorize(
-      supertest(server).get(`/session/${SESSION_ID}/status`),
-    ).expect(200);
-    expect(status.body.recoveryBlocked).toBe(false);
-    const journal = await readJournal();
-    const confirmed = journal.events.filter(
-      (event) =>
-        event.kind === 'hosted.cleanup' &&
-        event.payload['state'] === 'confirmed',
-    );
-    expect(confirmed).toHaveLength(1);
-    expect(confirmed[0]!.sequence).toBeGreaterThan(terminals[0]!.sequence);
-    expect(
-      journal.events.filter((event) => event.kind === 'turn.settled'),
-    ).toHaveLength(1);
-    await authorize(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
-      204,
-    );
-  });
+      for (const broker of release.mock.contexts) {
+        expect((broker as HostedWorkspaceBroker).runtimeSessionId).toBe(
+          hostedRuntimeSessionId(channelTurn),
+        );
+      }
+      const status = await authorize(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).expect(200);
+      expect(status.body.recoveryBlocked).toBe(false);
+      const journal = await readJournal();
+      const confirmed = journal.events.filter(
+        (event) =>
+          event.kind === 'hosted.cleanup' &&
+          event.payload['state'] === 'confirmed',
+      );
+      expect(confirmed).toHaveLength(1);
+      expect(confirmed[0]!.sequence).toBeGreaterThan(terminals[0]!.sequence);
+      expect(
+        journal.events.filter((event) => event.kind === 'turn.settled'),
+      ).toHaveLength(1);
+      await authorize(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      ).expect(204);
+    },
+  );
 
   it('crosses a durable store fault to 503 instead of mislabelling it as 400 (F10)', async () => {
     const server = await app(true);

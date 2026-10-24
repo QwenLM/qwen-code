@@ -2405,6 +2405,8 @@ async function retryHostedCleanup(
   options: HostedWorkspaceBrokerOptions,
 ): Promise<void> {
   if (unsettledPromptId(session)) return;
+  // A load can overlap the wake pump's retry. Re-read the debt with each
+  // caller's authority after the previous attempt settles.
   const retry = (session.cleanupRetry ?? Promise.resolve())
     .catch(() => undefined)
     .then(async () => {
