@@ -6565,7 +6565,10 @@ describe('runNonInteractive', () => {
     },
   );
 
-  describe('Mod turns', () => {
+  describe.each([false, true])('Mod turns (shared loop: %s)', (shared) => {
+    beforeEach(() => {
+      Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => shared });
+    });
     const installModTurn = () => {
       const order: string[] = [];
       let abort = () => {};
@@ -6596,7 +6599,9 @@ describe('runNonInteractive', () => {
             flushOutput: vi.fn().mockResolvedValue(undefined),
             flushLogs: vi.fn(),
             syncSession: vi.fn().mockResolvedValue(undefined),
-            hasToolHooks: false,
+            // With Mod tool hooks the shared loop runs each call through
+            // `executeToolCall`, which these tests mock.
+            hasToolHooks: shared,
             toolCall: () => undefined,
             startTurn,
           }) as unknown as ModSession,
@@ -6697,6 +6702,143 @@ describe('runNonInteractive', () => {
         }
       },
     );
+
+    it('lets a Mod end the turn from its tool.call hook', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      const mod = installModTurn();
+      // The hook calls $.turn.abort while the call waits on it.
+      mockCoreExecuteToolCall.mockImplementation(async () => {
+        mod.abort();
+        return {
+          callId: 'mod-ended-call',
+          responseParts: [{ text: 'Tool denied by Mod.' }],
+          resultDisplay: 'Tool denied by Mod.',
+          error: new Error('Tool denied by Mod.'),
+          errorType: undefined,
+        };
+      });
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'mod-ended-call',
+              name: 'run_shell_command',
+              args: { command: 'echo should-not-run' },
+              isClientInitiated: false,
+              prompt_id: 'mod-tool-abort',
+            },
+          },
+        ]),
+      );
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Fix it',
+        'mod-tool-abort',
+      );
+
+      expect(exitCode).toBe(130);
+      expect(mod.turn.complete.mock.calls[0]).toEqual(['aborted']);
+      const messages = JSON.parse(
+        processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+      );
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: true,
+        error: { message: 'A Mod ended the turn.' },
+      });
+    });
+
+    it('ends the person’s Goal turn before a Goal continuation runs', async () => {
+      setupMetricsMock();
+      await prepareGoalState('active');
+      let host: Parameters<typeof goalRuntime.bindHost>[0] | undefined;
+      vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((bound) => {
+        host = bound;
+        return goalRuntime.bindHost(bound);
+      });
+      vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+      const { order, turn } = installModTurn();
+      // update_goal ends the turn while the runtime queues a continuation.
+      mockCoreExecuteToolCall.mockImplementation(async () => {
+        const goal = goalRuntime.getSnapshot().goal!;
+        await host!.startGoalTurn({
+          permit: {
+            goalId: goal.goalId,
+            revision: goal.revision,
+            turnId: 'goal-next',
+          },
+          continuationContext: 'existing goal',
+        });
+        return {
+          callId: 'update-goal-terminal',
+          responseParts: [{ text: 'proposal recorded' }],
+          resultDisplay: 'proposal recorded',
+          error: undefined,
+          errorType: undefined,
+          terminateTurn: true,
+        };
+      });
+      mockLlmClient.sendMessageStream.mockImplementation(
+        (
+          _parts: Part[],
+          _signal: AbortSignal,
+          _promptId: string,
+          sendOptions: {
+            goalPermit?: GoalTurnPermit;
+            onPromptAdmitted?: () => void;
+          },
+        ) => {
+          sendOptions.onPromptAdmitted?.();
+          order.push(
+            `send ${order.filter((step) => step.startsWith('send')).length + 1}`,
+          );
+          return createStreamFromEvents(
+            order.includes('send 2')
+              ? [
+                  { type: LlmEventType.Content, value: 'Continued.' },
+                  {
+                    type: LlmEventType.Finished,
+                    value: { reason: undefined, usageMetadata: undefined },
+                  },
+                ]
+              : [
+                  {
+                    type: LlmEventType.ToolCallRequest,
+                    value: {
+                      callId: 'update-goal-terminal',
+                      name: 'update_goal',
+                      args: {},
+                      isClientInitiated: false,
+                      prompt_id: 'goal-user-turn',
+                      goalContext: sendOptions.goalPermit,
+                    },
+                  },
+                ],
+          );
+        },
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'A real user update',
+        'goal-user-turn',
+      );
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      // The continuation is not the person's turn: it ends first.
+      expect(order.slice(0, 4)).toEqual([
+        'start',
+        'send 1',
+        'complete',
+        'send 2',
+      ]);
+      expect(turn.complete.mock.calls[0]).toEqual([]);
+    });
 
     it('ends the turn as an error when its request fails', async () => {
       setupMetricsMock();

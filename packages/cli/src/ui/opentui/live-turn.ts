@@ -379,10 +379,13 @@ export function useOpenTuiLiveTurn(
           isCurrentTurn: () => seq === turnSeqRef.current,
           ...(mods && {
             onPromptAdmitted: () => {
+              // A retry, like ink's, has no typed prompt.
               modTurn = mods.startTurn(
-                turnOptions?.humanInput?.text ??
-                  turnOptions?.submittedPrompt ??
-                  '',
+                retry
+                  ? ''
+                  : (turnOptions?.humanInput?.text ??
+                      turnOptions?.submittedPrompt ??
+                      ''),
                 abort.signal,
                 () => {
                   // Ends the turn as Esc does; nothing returns to the composer.

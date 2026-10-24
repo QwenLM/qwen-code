@@ -1652,6 +1652,7 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.holdAfterEvents.clear();
     vi.restoreAllMocks();
   });
 
@@ -1780,6 +1781,27 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
       expect(live.turns).toHaveLength(1);
     },
   );
+
+  it('hears a retry as a turn with no typed prompt', async () => {
+    const { startTurn } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    live.errors.set(1, new Error('provider failed'));
+    act(() => {
+      result.current.submit('Fix it', undefined, {
+        humanInput: { text: 'Fix it' },
+      });
+    });
+    options(1).onPromptAdmitted?.();
+    await settle(result);
+    live.holds.add(2);
+    await act(async () => result.current.retryLastPrompt());
+    expect(options(2).retry).toBeDefined();
+    options(2).onPromptAdmitted?.();
+    expect(startTurn.mock.calls.map(([text]) => text)).toEqual(['Fix it', '']);
+    await settle(result);
+  });
 
   it('offers no turn hooks without a Mod session', () => {
     const { result } = renderHook(() =>

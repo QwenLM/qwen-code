@@ -88,7 +88,7 @@ In a headless run the turn ends with the error result "A Mod ended the turn." an
 ## Design decisions
 
 - **Admission comes from core.** UserPromptSubmit runs inside the client's send, after the host has handed over the prompt. A new `onPromptAdmitted` option of `sendMessageStream` tells all three hosts when a prompt is admitted, so a blocked prompt never starts a turn. Hosts already pass per-send callbacks the same way.
-- **The turn reads its own streams.** Each host hands the turn every event of its model streams. The answer, the failure and the usage come from those events, so every host reports them the same way.
+- **The turn reads its own streams.** Each host hands the turn every event of its model streams. The answer, the failure and the usage come from those events, so every host reports them the same way. Headless runs do so on both loops: the current one and the shared agent loop behind `experimental.unifiedAgentLoop`.
   - Usage is summed from each response's finish event, so only the turn's own requests count.
   - The model comes from the session's record of each API response.
 - **`turn.start` does not hold the request.** Claude Code does not delay the model request for these hooks. Queuing the turn's later dispatches behind the start keeps their order without adding latency.
@@ -128,9 +128,9 @@ These go into the user guide:
   - a failed hook;
   - a turn whose session has ended.
 - Host tests:
-  - headless: an answer, a blocked prompt, a Mod abort in JSON and text, and a failed request;
+  - headless, on the current and the shared agent loop: an answer, a blocked prompt, a Mod abort in JSON and text and from a `tool.call` hook, a Goal turn that a tool ends before a continuation, and a failed request;
   - Ink: a turn from admission to idle, a Mod abort compared with Esc, and no hook without Mods;
-  - OpenTUI: admission and a single end, interrupt and error, a Mod abort that lets the queue run, an Esc before or after a Mod abort, and no hooks without Mods.
+  - OpenTUI: admission and a single end, interrupt and error, a Mod abort that lets the queue run, an Esc before or after a Mod abort, a retry with no typed prompt, and no hooks without Mods.
 - The built CLI against a fixture server, in headless JSON and text and in the Ink and OpenTUI terminals:
   - the `turn.start` text;
   - the `turn.complete` answer, and usage that matches the fixture's counts;

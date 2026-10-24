@@ -2534,6 +2534,8 @@ export async function runNonInteractive(
         endsOnTerminateTurn: () => boolean;
         onRoundStart: (round: number) => void;
         onAbort?: () => void;
+        // Hears each model event once the adapter has it.
+        onEvent?: (event: ServerLlmStreamEvent) => void;
         tracksPreview: boolean;
       };
       const runOnSharedLoop = (
@@ -2665,6 +2667,7 @@ export async function runNonInteractive(
                   : undefined,
               );
               adapter.processEvent(event);
+              scope.onEvent?.(event);
               if (
                 event.type === LlmEventType.HookSystemMessage &&
                 outputFormat === OutputFormat.TEXT
@@ -2966,6 +2969,7 @@ export async function runNonInteractive(
                 isFirstTurn = false;
                 isFirstGoalSegment = false;
               },
+              onEvent: (event) => modTurn?.saw(event),
               tracksPreview: true,
             },
           );
@@ -2999,6 +3003,7 @@ export async function runNonInteractive(
             case 'tool_ended_turn': {
               shouldFinalizeTurn = true;
               if (!activeGoalTurn) break;
+              await modTurn?.complete();
               llmClient.addHistory({ role: 'user', parts: result.parts ?? [] });
               await config.getChatRecordingService?.()?.flush();
               await finishGoalTurn(activeGoalTurn);
