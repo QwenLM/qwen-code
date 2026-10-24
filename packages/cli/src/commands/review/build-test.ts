@@ -72,7 +72,7 @@ import {
 } from './lib/toolchain.js';
 import { type TestScope } from './lib/workspace-scope.js';
 import { declaredBuildHeapMb } from './lib/workspaces.js';
-import { heapBannerIn, MAX_OLD_SPACE_FLAG } from './lib/heap.js';
+import { heapBannerIn, heapFlagMb, withoutHeapFlag } from './lib/heap.js';
 
 /**
  * The root toolchains build-test can select. One today; the registry exists so
@@ -114,6 +114,18 @@ export interface CommandResult {
    * Absent otherwise.
    */
   heapExhausted?: boolean;
+  /**
+   * The signal that killed the command, when it left no exit status. Absent
+   * otherwise.
+   */
+  signal?: string;
+  /**
+   * The error code that kept the command from running or finishing (ENOENT,
+   * EACCES, ENOBUFS), other than its deadline's — that is `timedOut`. With
+   * `signal`, what tells an outside kill from the rest of the null-status
+   * deaths (see `killedFromOutside`).
+   */
+  spawnError?: string;
   /**
    * The deadline the command was actually given (ms) — the whole-call budget
    * shortens it below the per-command default, and the timeout note must
@@ -159,9 +171,11 @@ export interface BuildTestReport {
    */
   notBuilt?: string[];
   /**
-   * The local script a skipped root `build` hands off to, when the root build
-   * did not run because of it — see `rootBuildFanOutScript`. Structural so a
-   * `--resume` merge, which rewrites the note, can say it again.
+   * What a skipped root `build` runs, when the root build did not run and
+   * that left work undone: the local script it hands off to (see
+   * `rootBuildFanOutScript`), or the root build's whole text when it chains
+   * more than one command. Structural so a `--resume` merge, which rewrites
+   * the note, can say it again.
    */
   skippedRootBuild?: string;
   /** Packages the compiler asked for that the dependency graph had not predicted. */
@@ -335,9 +349,14 @@ export function trimOutput(s: string): string {
  * #6866 the install-time full build was the single largest thing left in Agent 7.
  * Harmless on any repo that does not read it.
  *
- * `heapMb` is the heap a build command gets when `NODE_OPTIONS` does not
- * already set one — see `declaredBuildHeapMb`. A Web Shell review cannot set
- * it from outside: `qwen serve` drops an inherited `NODE_OPTIONS`.
+ * `heapMb` is the heap a build or install command gets — see
+ * `declaredBuildHeapMb` — unless `NODE_OPTIONS` already sets a larger one: the
+ * larger of the two, as the root build would never have run below the
+ * declared one. A Web Shell review cannot set it from outside: `qwen serve`
+ * drops an inherited `NODE_OPTIONS`. Written to npm's channel too, because npm
+ * REPLACES a lifecycle script's `NODE_OPTIONS` with its `node-options` config
+ * (an `.npmrc`, or `npm_config_node_options`), and the environment outranks
+ * every `.npmrc`.
  */
 export function buildRunEnv(
   base: NodeJS.ProcessEnv = process.env,
@@ -350,12 +369,12 @@ export function buildRunEnv(
     QWEN_SKIP_PREPARE: '1',
   };
   const nodeOptions = base['NODE_OPTIONS'] ?? '';
-  if (
-    heapMb !== undefined &&
-    !new RegExp(MAX_OLD_SPACE_FLAG).test(nodeOptions)
-  ) {
+  if (heapMb !== undefined && heapMb > (heapFlagMb(nodeOptions) ?? 0)) {
+    // Replaced, not appended: with two heap flags the child gets whichever
+    // V8 reads last.
     env['NODE_OPTIONS'] =
-      `${nodeOptions} --max-old-space-size=${heapMb}`.trim();
+      `${withoutHeapFlag(nodeOptions)} --max-old-space-size=${heapMb}`.trim();
+    env['npm_config_node_options'] = env['NODE_OPTIONS'];
   }
   return env;
 }
@@ -461,7 +480,7 @@ function containerised(
       cwd: workdir,
       tmpDir,
       kind,
-      heapMb: kind === 'build' ? declaredBuildHeapMb(cwd) : undefined,
+      heapMb: kind === 'test' ? undefined : declaredBuildHeapMb(cwd),
       name,
       runtime: verdict.runtime,
       rootless: runtimeIsRootless(verdict.runtime),
@@ -530,9 +549,11 @@ export function run(
           maxBuffer: 64 * 1024 * 1024,
           // A build that asks a question is a build that hangs until the deadline.
           stdio: ['ignore', 'pipe', 'pipe'],
+          // An install gets it too: `npm ci` runs `prepare`, which is the
+          // whole-project build on many repos.
           env: buildRunEnv(
             process.env,
-            kind === 'build' ? declaredBuildHeapMb(cwd) : undefined,
+            kind === 'test' ? undefined : declaredBuildHeapMb(cwd),
           ),
         },
       );
@@ -555,6 +576,10 @@ export function run(
   // re-parsing `output`, exactly as it did before this field existed.
   const failingFiles = failingFilesOf(raw, cwd);
   const heapExhausted = r.status !== 0 && heapBannerIn(raw);
+  const signal = r.status === null ? r.signal : null;
+  const spawnError = timedOut
+    ? undefined
+    : (r.error as NodeJS.ErrnoException | undefined)?.code;
   return {
     command,
     exitCode: r.status,
@@ -564,6 +589,8 @@ export function run(
     deadlineMs,
     ...(failingFiles.length > 0 ? { failingFiles } : {}),
     ...(heapExhausted ? { heapExhausted } : {}),
+    ...(signal ? { signal } : {}),
+    ...(spawnError ? { spawnError } : {}),
   };
 }
 
@@ -779,6 +806,12 @@ function previousReport(out: string | undefined): BuildTestReport {
   const okOk = typeof (parsed as { ok?: unknown }).ok === 'boolean';
   const notBuiltShape = (parsed as { notBuilt?: unknown }).notBuilt;
   const notBuiltOk = notBuiltShape === undefined || strings(notBuiltShape);
+  // Quoted into the continuation's note, and read for truthiness there, so
+  // '' is refused with the rest: it would mean "absent" and "present" at once.
+  const skippedRootShape = (parsed as { skippedRootBuild?: unknown })
+    .skippedRootBuild;
+  const skippedRootOk =
+    skippedRootShape === undefined || strings([skippedRootShape]);
   const scope = shape.testScope;
   const scopeOk =
     scope === undefined ||
@@ -800,6 +833,7 @@ function previousReport(out: string | undefined): BuildTestReport {
     !endedBeforeOk ||
     !okOk ||
     !notBuiltOk ||
+    !skippedRootOk ||
     !scopeOk ||
     !runOk
   ) {

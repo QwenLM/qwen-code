@@ -136,13 +136,43 @@ describe('buildRunEnv', () => {
         'NODE_OPTIONS'
       ],
     ).toBe('--enable-source-maps --max-old-space-size=6144');
-    // An operator's own heap wins over the declared one.
-    expect(
-      buildRunEnv({ NODE_OPTIONS: '--max-old-space-size=8192' }, 6144)[
-        'NODE_OPTIONS'
-      ],
-    ).toBe('--max-old-space-size=8192');
+    // An operator's own heap wins over the declared one when it is larger.
+    const larger = buildRunEnv(
+      { NODE_OPTIONS: '--max-old-space-size=8192' },
+      6144,
+    );
+    expect(larger['NODE_OPTIONS']).toBe('--max-old-space-size=8192');
+    expect(larger['npm_config_node_options']).toBeUndefined();
     expect(buildRunEnv({})['NODE_OPTIONS']).toBeUndefined();
+  });
+
+  it('raises a smaller inherited heap to the declared one, replacing its flag in any spelling', () => {
+    // A runner that gives the CLI 2 GB is not deciding the reviewed compile's
+    // heap, and the root build would have run at the declared one regardless.
+    for (const inherited of [
+      '--max-old-space-size=1024',
+      '--max_old_space_size=1024',
+      '--max-old-space-size 1024',
+    ]) {
+      expect(
+        buildRunEnv(
+          { NODE_OPTIONS: `--enable-source-maps ${inherited}` },
+          6144,
+        )['NODE_OPTIONS'],
+      ).toBe('--enable-source-maps --max-old-space-size=6144');
+    }
+  });
+
+  it("writes the heap to npm's own channel, which replaces NODE_OPTIONS for a script", () => {
+    // npm assigns a lifecycle script's NODE_OPTIONS from its `node-options`
+    // config — an `.npmrc` or an inherited npm_config_node_options — and the
+    // environment outranks every `.npmrc`.
+    const env = buildRunEnv(
+      { npm_config_node_options: '--max-old-space-size=512' },
+      6144,
+    );
+    expect(env['npm_config_node_options']).toBe('--max-old-space-size=6144');
+    expect(env['NODE_OPTIONS']).toBe('--max-old-space-size=6144');
   });
 });
 
@@ -196,7 +226,7 @@ describe('run (capture-time failing-file measurement)', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
-    "hands a build — and only a build — the root build's declared heap",
+    "hands a build and an install — not a test — the root build's declared heap",
     () => {
       // A scoped `npm run build --workspace=…` bypasses the root script that
       // sets the heap, and `packages/cli`'s compile needs more than the
@@ -216,9 +246,13 @@ describe('run (capture-time failing-file measurement)', () => {
           }),
         );
         const probe = 'node -e "console.log(process.env.NODE_OPTIONS)"';
-        expect(run(probe, root, 30_000, 'build').output).toContain(
-          '--max-old-space-size=6144',
-        );
+        // An install too: `npm ci` runs `prepare`, the whole build on many
+        // repos.
+        for (const kind of ['build', 'install'] as const) {
+          expect(run(probe, root, 30_000, kind).output).toContain(
+            '--max-old-space-size=6144',
+          );
+        }
         expect(run(probe, root, 30_000, 'test').output).not.toContain(
           'max-old-space-size',
         );
@@ -287,10 +321,11 @@ describe.skipIf(process.platform === 'win32')(
     it('measures a heap death off the raw output, which the trimmed one can lose', () => {
       // Siblings of a parallel build go on printing after one dies: more than
       // the kept tail after the banner, and `output` no longer carries it.
+      // On stderr, where V8 writes it — `raw` is stdout, then stderr.
       const banner =
         'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory';
       const r = run(
-        `node -e "process.stdout.write('a'.repeat(3000) + '\\\\n${banner}\\\\n' + 'b'.repeat(7000)); process.exit(1)"`,
+        `node -e "process.stdout.write('a'.repeat(3000) + '\\\\n'); process.stderr.write('${banner}\\\\n' + 'b'.repeat(7000)); process.exit(1)"`,
         dir,
         30_000,
         'build',
@@ -342,6 +377,21 @@ describe.skipIf(process.platform === 'win32')(
         }
       },
     );
+
+    it('records how a command that left no exit status died', () => {
+      const killed = run('kill -KILL $$', dir, 30_000);
+      expect(killed.exitCode).toBeNull();
+      expect(killed.signal).toBe('SIGKILL');
+      expect(killed.spawnError).toBeUndefined();
+      const unstartable = run('true', join(dir, 'missing'), 30_000);
+      expect(unstartable.exitCode).toBeNull();
+      expect(unstartable.spawnError).toBe('ENOENT');
+      // The deadline's own kill is `timedOut`, not a spawn error.
+      const late = run('sleep 5', dir, 300);
+      expect(late.timedOut).toBe(true);
+      expect(late.spawnError).toBeUndefined();
+      expect(run('exit 1', dir, 30_000).signal).toBeUndefined();
+    });
 
     it("keeps the command's own exit status", () => {
       expect(run('exit 3', dir, 30_000).exitCode).toBe(3);
@@ -1980,8 +2030,8 @@ describe('runBuildTest', () => {
 
   // This repo's shape since the pnpm migration: the root depends on its
   // members, and its build is `node scripts/build.js`, which runs every
-  // workspace's build — and may do work of its own, like the generated file
-  // `rootSuite` below reads.
+  // workspace's build — and may do work of its own, like the
+  // `root-artifact.json` a root suite of its own would read.
   const handOffRoot = (scripts: { test: string }): void => {
     writeFileSync(
       join(root, 'package.json'),
@@ -2176,6 +2226,43 @@ describe('runBuildTest', () => {
     expect(runRecordingKinds().rep.note).not.toContain('did not run:');
   });
 
+  it('names every command a chained root build would have run, whatever joins them', () => {
+    // A sibling command named nowhere leaves a failure over what it writes
+    // unexplained — and the agent files that against the PR.
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+    mkdirSync(join(root, 'scripts'));
+    writeFileSync(
+      join(root, 'scripts', 'build.js'),
+      "execSync('corepack pnpm -r run build');\n",
+    );
+    for (const build of [
+      'pnpm -r run build | tee build.log',
+      'pnpm -r run build\nnode scripts/gen.js',
+      // A hand-off chained with a command of its own.
+      'node scripts/build.js && node scripts/gen.js',
+    ]) {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({
+          name: 'r',
+          workspaces: ['packages/*'],
+          scripts: { build, test: 'pnpm -r run test' },
+          devDependencies: { '@x/core': '*' },
+        }),
+      );
+      const { rep, calls } = runRecordingKinds();
+      expect(calls.map(([c]) => c)).not.toContain('npm run build');
+      expect(rep.skippedRootBuild).toBe(build);
+      expect(rep.note).toContain(
+        `The root \`build\` did not run: it runs \`${build}\``,
+      );
+    }
+  });
+
   it('reports a build that ran out of JavaScript heap as infrastructure, not a compile error', () => {
     writeFileSync(
       join(root, 'package.json'),
@@ -2207,8 +2294,98 @@ describe('runBuildTest', () => {
     expect(rep.note).not.toContain('Correlate');
     // The diff changes the package that died: what it added may be what
     // outgrew the heap, so the note does not excuse it outright.
-    expect(rep.note).toContain('The diff changes this package');
+    expect(rep.note).toContain("within the diff's reach");
     expect(rep.note).not.toContain('not a defect in the diff');
+  });
+
+  it('does not excuse a memory death in a package that depends on the one the diff changes', () => {
+    // A type too big to compile surfaces where it is instantiated — the
+    // consumer's compile, which is why the build set holds the consumers.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/app', {
+      name: '@x/app',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+    for (const death of [
+      {
+        exitCode: 134,
+        output:
+          'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
+      },
+      { exitCode: 137, output: 'Killed' },
+    ]) {
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: (command) => ({
+          command,
+          seconds: 1,
+          timedOut: false,
+          ...(command.includes('packages/app')
+            ? death
+            : { exitCode: 0, output: '' }),
+        }),
+      });
+      expect(rep.ok).toBe(false);
+      expect(rep.note).toContain('packages/app');
+      expect(rep.note).toContain("within the diff's reach");
+      expect(rep.note).not.toContain('not a defect in the diff');
+    }
+  });
+
+  it('does not excuse a memory death in the root build when the diff changes a root-level file', () => {
+    // A member depends on the root, so the root builds — but as a dependency,
+    // not as a dependent, and only a root-level change reaches it.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { build: 'tsc -b' },
+      }),
+    );
+    pkg('packages/app', {
+      name: '@x/app',
+      dependencies: { r: '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    const note = (changed: string[]): string => {
+      writePlan(changed);
+      return runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: (command) => ({
+          command,
+          seconds: 1,
+          timedOut: false,
+          exitCode: command === 'npm run build' ? 134 : 0,
+          output:
+            command === 'npm run build'
+              ? 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory'
+              : '',
+        }),
+      }).note;
+    };
+    const rootChanged = note(['packages/app/src/a.ts', 'tsconfig.base.json']);
+    expect(rootChanged).toContain('`npm run build` ran out of JavaScript heap');
+    expect(rootChanged).toContain("within the diff's reach");
+    expect(rootChanged).not.toContain('not a defect in the diff');
+    expect(note(['packages/app/src/a.ts'])).toContain(
+      'not a defect in the diff',
+    );
   });
 
   it('calls a heap death infrastructure when the package that died is one the diff does not change', () => {
@@ -2248,8 +2425,56 @@ describe('runBuildTest', () => {
     expect(rep.note).not.toContain('Correlate');
   });
 
-  it('reports a build killed from outside (exit 137, no banner) as infrastructure', () => {
-    // npm passes the script's 137 through; the OOM killer prints nothing.
+  it('reports a build killed from outside (exit 137, no banner) as infrastructure, and does not retry it', () => {
+    // npm passes the script's 137 through; the OOM killer prints nothing of
+    // its own. What the build printed before it died can still name a
+    // module, and a retry would only die the same way.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/app', {
+      name: '@x/app',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/i1', { name: '@x/i1', scripts: { build: 'exit 0' } });
+    writePlan(['packages/app/src/a.ts']);
+    const builds: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        if (command.startsWith('npm run build')) builds.push(command);
+        const core = command === 'npm run build --workspace="packages/core"';
+        return {
+          command,
+          exitCode: core ? 137 : 0,
+          seconds: 1,
+          timedOut: false,
+          output: core
+            ? "src/a.ts(1,1): error TS2307: Cannot find module '@x/i1' or its corresponding type declarations.\nKilled"
+            : '',
+        };
+      },
+    });
+    expect(builds).toEqual(['npm run build --workspace="packages/core"']);
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('was killed (SIGKILL)');
+    // `packages/core` is what `packages/app` compiles against, untouched.
+    expect(rep.note).toContain('not a defect in the diff');
+    expect(rep.note).not.toContain('Correlate');
+  });
+
+  it('does not take every death with no exit status for an outside kill', () => {
+    // A command that could not start, a crash, and the boxed spawn's own
+    // SIGKILL when the output overran its buffer all leave no status too.
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
@@ -2259,23 +2484,34 @@ describe('runBuildTest', () => {
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
     writePlan(['packages/core/src/a.ts']);
-    const rep = runBuildTest({
-      plan: planPath,
-      worktree: root,
-      timeout: 60,
-      install: false,
-      exec: (command) => ({
-        command,
-        exitCode: command.startsWith('npm run build') ? 137 : 0,
-        seconds: 1,
-        timedOut: false,
-        output: command.startsWith('npm run build') ? 'Killed' : '',
-      }),
-    });
-    expect(rep.ok).toBe(false);
-    expect(rep.note).toContain('was killed (SIGKILL)');
-    expect(rep.note).toContain('infrastructure result');
-    expect(rep.note).not.toContain('Correlate');
+    const noteFor = (death: Partial<CommandResult>): string =>
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: (command) => ({
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+          ...(command.startsWith('npm run build')
+            ? { exitCode: null, ...death }
+            : {}),
+        }),
+      }).note;
+    for (const death of [
+      {},
+      { spawnError: 'ENOENT' },
+      { signal: 'SIGSEGV' },
+      { signal: 'SIGKILL', spawnError: 'ENOBUFS' },
+    ]) {
+      const note = noteFor(death);
+      expect(note).not.toContain('was killed (SIGKILL)');
+      expect(note).toContain('Correlate');
+    }
+    expect(noteFor({ signal: 'SIGKILL' })).toContain('was killed (SIGKILL)');
   });
 
   it('does not widen and retry a build that ran out of heap, whatever module its output names', () => {
@@ -2344,8 +2580,90 @@ describe('runBuildTest', () => {
     });
     expect(rep.ok).toBe(false);
     expect(rep.note).toContain('1 command(s) ran out of JavaScript heap');
+    expect(rep.note).toContain("within the diff's reach");
     expect(rep.note).not.toContain('Correlate');
     expect(rep.note).not.toContain('ran out of time');
+  });
+
+  it('tells a suite that died of heap from one whose failure only quotes the banner', () => {
+    // Measured on vitest 3: a worker that dies of heap ends the run with
+    // status 1 and V8's banner at a line start. An assertion that fails over
+    // the same text echoes it behind a diff marker, a quote or a code frame.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+    const banner =
+      'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory';
+    const noteFor = (output: string): string =>
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: (command) => {
+          const test = command.startsWith('npm test');
+          return {
+            command,
+            exitCode: test ? 1 : 0,
+            seconds: 1,
+            timedOut: false,
+            output: test ? output : '',
+          };
+        },
+      }).note;
+    for (const echoed of [
+      `- Expected\n+ Received\n\n+ ${banner}`,
+      `AssertionError: expected 'a\\n${banner}' to contain 'b'`,
+      `    290|       '${banner}';`,
+    ]) {
+      const note = noteFor(` FAIL  src/a.test.ts > case\n${echoed}`);
+      expect(note).toContain('Correlate');
+      expect(note).not.toContain('ran out of JavaScript heap');
+    }
+    const worker = noteFor(
+      `<--- JS stacktrace --->\n\n${banner}\n----- Native stack trace -----\n` +
+        'Error: Channel closed',
+    );
+    expect(worker).toContain('ran out of JavaScript heap');
+    expect(worker).not.toContain('Correlate');
+  });
+
+  it('gives a suite killed from outside the SIGKILL sentence, not the correlate one', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        const test = command.startsWith('npm test');
+        return {
+          command,
+          exitCode: test ? 137 : 0,
+          seconds: 1,
+          timedOut: false,
+          output: test ? 'Killed' : '',
+        };
+      },
+    });
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('1 command(s) were killed (SIGKILL)');
+    expect(rep.note).toContain("within the diff's reach");
+    expect(rep.note).not.toContain('Correlate');
   });
 
   it('carries the caveat on a FAILURE note too — the note is what the brief renders first', () => {
@@ -3643,7 +3961,98 @@ describe('runBuildTest', () => {
       expect(rep.note).toContain(
         'The root `build` did not run: it runs `scripts/build.js`',
       );
+      // Once: the continuation writes a new note, it does not append to one.
+      expect(rep.note.split('did not run:')).toHaveLength(2);
       expect(rep.skippedRootBuild).toBe('scripts/build.js');
+    });
+
+    /** A report whose `packages/core` suite died as `core` says, with two left. */
+    const reportWithCoreSuite = (
+      core: CommandResult,
+      extra: object = {},
+    ): string => {
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a', 'packages/b'],
+          widenedWith: [],
+          install: okResult('npm ci --no-audit --no-fund'),
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [core],
+          ok: false,
+          timedOut: [],
+          note: 'the whole-call budget was spent with 2 suite(s) still to run',
+          testScope: {
+            workspaces: ['packages/core'],
+            notRun: ['packages/a', 'packages/b'],
+            caveat: 'the whole-call budget was spent',
+          },
+          ...extra,
+        }),
+      );
+      return outPath;
+    };
+
+    it('says again how a carried suite died of memory, though it rewrites the note', () => {
+      threePackages();
+      for (const [core, said] of [
+        [
+          {
+            ...okResult('npm test --workspace="packages/core"'),
+            exitCode: 134,
+            output: 'npm error command failed',
+            heapExhausted: true,
+          },
+          '1 command(s) ran out of JavaScript heap',
+        ],
+        [
+          {
+            ...okResult('npm test --workspace="packages/core"'),
+            exitCode: 137,
+            output: 'Killed',
+          },
+          '1 command(s) were killed (SIGKILL)',
+        ],
+      ] as const) {
+        const rep = runBuildTest({
+          plan: planPath,
+          worktree: root,
+          out: reportWithCoreSuite(core),
+          timeout: 60,
+          install: true,
+          resume: true,
+          exec: okResult,
+        });
+        expect(rep.note).toContain('Continued from a previous build-test call');
+        expect(rep.note).toContain(said);
+        expect(rep.note).toContain("within the diff's reach");
+        expect(rep.note).not.toContain('Correlate');
+      }
+    });
+
+    it('refuses a report whose skippedRootBuild is not a non-empty string', () => {
+      threePackages();
+      for (const skippedRootBuild of [{}, '', 42]) {
+        const out = reportWithCoreSuite(
+          okResult('npm test --workspace="packages/core"'),
+          { ok: true, skippedRootBuild },
+        );
+        expect(() =>
+          runBuildTest({
+            plan: planPath,
+            worktree: root,
+            out,
+            timeout: 60,
+            install: true,
+            resume: true,
+            exec: okResult,
+          }),
+        ).toThrow(/is not one/);
+      }
     });
 
     it('runs what the previous call left, and re-runs nothing it already did', () => {

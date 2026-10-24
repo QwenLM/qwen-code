@@ -700,25 +700,47 @@ describe('containerCommand', () => {
     }
   });
 
-  it('gives a build — and only a build — its declared heap, as an explicit entry', () => {
+  it('gives a build and an install — not a test — its declared heap, on both channels, ahead of the image', () => {
     // The direct spawn gets it through `buildRunEnv`; the allowlist has no
     // NODE_OPTIONS, so without this a boxed `tsc --build` dies at Node's
-    // default heap — the failure the declared heap exists to prevent.
-    const passed = (kind: 'build' | 'test' | 'install'): string[] => {
-      const { args } = containerCommand('npm run build', {
+    // default heap — the failure the declared heap exists to prevent. npm
+    // replaces NODE_OPTIONS with its own `node-options`, hence the second.
+    const argv = (kind: 'build' | 'test' | 'install'): string[] =>
+      containerCommand('npm run build', {
         ...base,
         cwd: join(tmpDir, 'review-pr-9'),
         kind,
         heapMb: 6144,
-      });
-      return args.filter((_, i) => args[i - 1] === '--env');
-    };
-    expect(passed('build')).toContain('NODE_OPTIONS=--max-old-space-size=6144');
-    for (const kind of ['test', 'install'] as const) {
-      expect(passed(kind).some((e) => e.startsWith('NODE_OPTIONS='))).toBe(
-        false,
+      }).args;
+    const passed = (args: string[]): string[] =>
+      args.filter((_, i) => args[i - 1] === '--env');
+    for (const kind of ['build', 'install'] as const) {
+      const args = argv(kind);
+      expect(passed(args)).toContain('NODE_OPTIONS=--max-old-space-size=6144');
+      expect(passed(args)).toContain(
+        'npm_config_node_options=--max-old-space-size=6144',
       );
+      // After the image they are `sh -lc`'s arguments, not the container's
+      // environment.
+      expect(args.slice(-4)).toEqual([
+        base.image,
+        'sh',
+        '-lc',
+        'npm run build',
+      ]);
     }
+    // The install still gets the registry it is the one command to need.
+    const offline = (args: string[]): boolean =>
+      args.some((a, i) => a === '--network' && args[i + 1] === 'none');
+    expect(offline(argv('install'))).toBe(false);
+    expect(offline(argv('build'))).toBe(true);
+    expect(
+      passed(argv('test')).some(
+        (e) =>
+          e.startsWith('NODE_OPTIONS=') ||
+          e.startsWith('npm_config_node_options='),
+      ),
+    ).toBe(false);
   });
 
   // Windows has no `process.getuid`, so the flag is correctly absent there —

@@ -461,9 +461,9 @@ export interface ContainerCommandOptions {
   tmpDir: string;
   kind: CommandKind;
   /**
-   * The heap a build gets — the number `declaredBuildHeapMb` read from the
-   * root build script, never an inherited `NODE_OPTIONS`. Ignored for any
-   * other kind.
+   * The heap a build or an install gets — the number `declaredBuildHeapMb`
+   * read from the root build script, never an inherited `NODE_OPTIONS`.
+   * Ignored for a test.
    */
   heapMb?: number;
   runtime: ContainerRuntime;
@@ -598,10 +598,16 @@ export function containerCommand(
   for (const entry of containerEnv(join(opts.tmpDir, '.npm-cache'))) {
     args.push('--env', entry);
   }
-  // A build's declared heap, as the direct spawn gets it (`buildRunEnv`).
-  // Pushed here, not added to `containerEnv`, which subagent workers share.
-  if (opts.kind === 'build' && opts.heapMb !== undefined) {
-    args.push('--env', `NODE_OPTIONS=--max-old-space-size=${opts.heapMb}`);
+  // The declared heap, on both channels the direct spawn writes it to
+  // (`buildRunEnv`) — npm replaces `NODE_OPTIONS` with its own `node-options`
+  // config, and a mounted `.npmrc` can set that. Nothing larger can be
+  // inherited here: `containerEnv` passes no `NODE_OPTIONS`. Pushed here, not
+  // added to `containerEnv`, which subagent workers share; and before the
+  // image, or the runtime hands it to `sh -lc` as arguments.
+  if (opts.kind !== 'test' && opts.heapMb !== undefined) {
+    const heap = `--max-old-space-size=${opts.heapMb}`;
+    args.push('--env', `NODE_OPTIONS=${heap}`);
+    args.push('--env', `npm_config_node_options=${heap}`);
   }
   args.push(opts.image, 'sh', '-lc', command);
   return { file: opts.runtime, args };

@@ -20,11 +20,13 @@ import {
   isNegationExcluded,
   affectedWorkspaces,
   buildSetFor,
+  chainsCommands,
   declaredBuildHeapMb,
   hasUnmodeledWorkspaceGlob,
   readWorkspaceGlobs,
   readRootPackage,
   readWorkspacePackages,
+  reverseDependencyClosure,
   rootBuildFanOutScript,
   scriptFansOut,
   type WorkspacePackage,
@@ -454,8 +456,28 @@ describe('scriptFansOut', () => {
       'pnpm exec mocha -r ts-node/register',
       'rm -r dist',
       "execSync('vitest run --workspaces=false')",
+      // The flag as data, not as an argument a command is given.
+      "if (process.argv.includes('--workspaces')) fanOut()",
     ]) {
       expect(scriptFansOut(script)).toBe(false);
+    }
+  });
+});
+
+describe('chainsCommands', () => {
+  it('sees every way a script runs a second command', () => {
+    for (const script of [
+      'pnpm -r run build && node scripts/gen.js',
+      'pnpm -r run build || true',
+      'pnpm -r run build; node scripts/gen.js',
+      'pnpm -r run build | tee build.log',
+      'pnpm -r run build & wait',
+      'pnpm -r run build\nnode scripts/gen.js',
+    ]) {
+      expect(chainsCommands(script)).toBe(true);
+    }
+    for (const script of ['pnpm -r run build', 'node scripts/build.js ', '']) {
+      expect(chainsCommands(script)).toBe(false);
     }
   });
 });
@@ -570,17 +592,94 @@ describe('rootBuildFanOutScript', () => {
   it('reads nothing outside the root, and treats an unreadable script as no fan-out', () => {
     const parent = mkdtempSync(join(tmpdir(), 'ws-'));
     const root = join(parent, 'repo');
-    mkdirSync(root);
-    writeFileSync(join(parent, 'outside.js'), 'pnpm -r run build');
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    writeFileSync(join(parent, 'outside.js'), "execSync('pnpm -r run build');");
     expect(rootBuildFanOutScript(root, 'node ../outside.js')).toBeUndefined();
     expect(
       rootBuildFanOutScript(root, `node ${join(parent, 'outside.js')}`),
     ).toBeUndefined();
+    // A link whose own path stays inside the root, to a file that does not.
+    symlinkSync(join(parent, 'outside.js'), join(root, 'scripts', 'link.js'));
+    expect(rootBuildFanOutScript(root, 'node scripts/link.js')).toBeUndefined();
     expect(
       rootBuildFanOutScript(root, 'node scripts/missing.js'),
     ).toBeUndefined();
     expect(rootBuildFanOutScript(root, undefined)).toBeUndefined();
     rmSync(parent, { recursive: true, force: true });
+  });
+
+  it("follows a link that stays inside the root, and reads no file of more than a script's size", () => {
+    const root = withRoot({
+      'tools/build.js': "execSync('pnpm -r run build');",
+      // The fan-out is at the start, so only the size can turn it away.
+      'scripts/big.js':
+        "execSync('pnpm -r run build');\n" + '//'.repeat(600 * 1024),
+    });
+    symlinkSync(join(root, 'tools', 'build.js'), join(root, 'build.js'));
+    expect(rootBuildFanOutScript(root, 'node build.js')).toBe('build.js');
+    expect(rootBuildFanOutScript(root, 'node scripts/big.js')).toBeUndefined();
+    // A directory is not a script.
+    mkdirSync(join(root, 'dir.js'));
+    expect(rootBuildFanOutScript(root, 'node dir.js')).toBeUndefined();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('counts only a command the script runs, not text it prints or tests for', () => {
+    const root = withRoot({
+      'scripts/log.js': [
+        "console.error('if this fails, run pnpm -r run build by hand');",
+        "execSync('tsc -b');",
+      ].join('\n'),
+      // A quote inside a regex literal throws the comment pass off, so the
+      // comment after it survives; it still runs nothing.
+      'scripts/regex.js': [
+        `const q = src.replace(/'/g, '"'); // old: pnpm -r run build`,
+        "execSync('tsc -b');",
+      ].join('\n'),
+      'scripts/flag.js':
+        "if (process.argv.includes('--workspaces')) execSync('tsc -b');",
+      // An argv split out of the command is not read: the build runs as
+      // written.
+      'scripts/argv.js': "spawnSync('pnpm', ['-r', 'run', 'build']);",
+      'scripts/spawn.js':
+        "spawnSync('npm run build --workspaces', { shell: true });",
+    });
+    for (const file of ['log', 'regex', 'flag', 'argv']) {
+      expect(
+        rootBuildFanOutScript(root, `node scripts/${file}.js`),
+      ).toBeUndefined();
+    }
+    expect(rootBuildFanOutScript(root, 'node scripts/spawn.js')).toBe(
+      'scripts/spawn.js',
+    );
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads a TypeScript hand-off, run by node or tsx, past a flag whose value is a path', () => {
+    const root = withRoot({
+      'scripts/build.ts': "execSync('pnpm -r run build');",
+      'scripts/build.js': "execSync('pnpm -r run build');",
+    });
+    expect(rootBuildFanOutScript(root, 'node scripts/build.ts')).toBe(
+      'scripts/build.ts',
+    );
+    expect(rootBuildFanOutScript(root, 'tsx scripts/build.ts')).toBe(
+      'scripts/build.ts',
+    );
+    expect(
+      rootBuildFanOutScript(
+        root,
+        'node --redirect-warnings warn.log scripts/build.js',
+      ),
+    ).toBe('scripts/build.js');
+    // A second line is a second command, with its own runner.
+    expect(
+      rootBuildFanOutScript(
+        root,
+        'node scripts/setup.js\nnode scripts/build.js',
+      ),
+    ).toBe('scripts/build.js');
+    rmSync(root, { recursive: true, force: true });
   });
 });
 
@@ -614,6 +713,21 @@ describe('declaredBuildHeapMb', () => {
       ['node scripts/x.js --max-old-space-size=1024', undefined],
       ['echo "usage: build [--max-old-space-size=1024]" && tsc -b', undefined],
       ['node --max-old-space-size=2048 scripts/build.js', undefined],
+    ] as const) {
+      const root = rootWithBuild(build);
+      expect(declaredBuildHeapMb(root)).toBe(mb);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('takes the largest of several declarations, in any spelling V8 accepts', () => {
+    for (const [build, mb] of [
+      [
+        'NODE_OPTIONS=--max-old-space-size=1024 node a.js && NODE_OPTIONS=--max-old-space-size=8192 tsc -b',
+        8192,
+      ],
+      ['NODE_OPTIONS=--max_old_space_size=3072 tsc -b', 3072],
+      ['NODE_OPTIONS="$NODE_OPTIONS --max-old-space-size=6144" tsc -b', 6144],
     ] as const) {
       const root = rootWithBuild(build);
       expect(declaredBuildHeapMb(root)).toBe(mb);
@@ -766,5 +880,38 @@ describe('buildSetFor', () => {
 
   it('ignores an affected dir that is not a workspace', () => {
     expect(buildSetFor(['docs'], PKGS)).toEqual([]);
+  });
+
+  it('reads a dependency on a name the root shares with a member as one on the member', () => {
+    // This repo's shape: the root and packages/cli are both
+    // `@qwen-code/qwen-code`, and the IDE companion depends on that name.
+    const root: WorkspacePackage = {
+      dir: '.',
+      name: '@x/cli',
+      scripts: ['build'],
+      deps: [],
+    };
+    const cli: WorkspacePackage = {
+      dir: 'packages/cli',
+      name: '@x/cli',
+      scripts: ['build'],
+      deps: [],
+    };
+    const ide: WorkspacePackage = {
+      dir: 'packages/ide',
+      name: '@x/ide',
+      scripts: ['build'],
+      deps: ['@x/cli'],
+    };
+    for (const graph of [
+      [root, cli, ide],
+      [cli, ide, root],
+    ]) {
+      expect(reverseDependencyClosure(['.'], graph)).toEqual(['.']);
+      expect(reverseDependencyClosure(['packages/cli'], graph)).toEqual([
+        'packages/cli',
+        'packages/ide',
+      ]);
+    }
   });
 });

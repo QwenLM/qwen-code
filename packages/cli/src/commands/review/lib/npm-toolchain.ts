@@ -16,6 +16,7 @@ import {
 import {
   affectedWorkspaces,
   buildSetFor,
+  chainsCommands,
   hasUnmodeledWorkspaceGlob,
   readRootPackage,
   readWorkspaceGlobs,
@@ -23,6 +24,7 @@ import {
   reverseDependencyClosure,
   rootBuildFanOutScript,
   scriptFansOut,
+  workspaceDirFor,
   type WorkspacePackage,
 } from './workspaces.js';
 import { resolveTestScope, type TestScope } from './workspace-scope.js';
@@ -161,21 +163,6 @@ const succeeded = (r: CommandResult): boolean => r.exitCode === 0;
  * judged insufficient here (that is why the fresh path prepends this on every
  * return); a continuation is not the place to start relying on it.
  */
-/**
- * What a skipped root build left undone, for the note: `work` is the script
- * it hands off to, or the fan-out root build's own text when it chains
- * commands of its own. Built from the report's own fields — the root is not
- * in `buildSet` — rather than claiming what the manifests cannot show.
- */
-function rootBuildSkipNote(work: string): string {
-  return (
-    ` The root \`build\` did not run: it runs \`${work}\`, which builds every ` +
-    'workspace, and this run built only the ones in `buildSet`. Anything else ' +
-    `\`${work}\` does did not run either — a failure over a file it writes may ` +
-    'come from that, not from the diff.'
-  );
-}
-
 function installFailureFraming(install: CommandResult | null): string {
   if (!install || install.exitCode === 0) return '';
   return (
@@ -184,6 +171,85 @@ function installFailureFraming(install: CommandResult | null): string {
     'The install failure is an environment/infrastructure result — report it as ' +
     'informational, never as a Critical, and never against this PR. '
   );
+}
+
+/**
+ * What a skipped root build left undone, for the note: `work` is the script
+ * it hands off to, or the root build's own text when it chains more than one
+ * command. Says what the skip was based on — the script was TAKEN for a
+ * whole-monorepo build, read off its text — and what that leaves unknown,
+ * rather than claiming what neither the text nor the manifests can show.
+ */
+function rootBuildSkipNote(work: string): string {
+  return (
+    ` The root \`build\` did not run: it runs \`${work}\`, taken for a build of ` +
+    'every workspace, and this run built only the ones in `buildSet`. Whatever ' +
+    `else \`${work}\` does did not run either — a failure over a file it writes ` +
+    'may come from that, not from the diff.'
+  );
+}
+
+/**
+ * How a failed command died, when it died of memory: of heap exhaustion, or
+ * SIGKILLed from outside. One precedence — heap first — so the build arm, the
+ * test arm and a continuation say the same thing about the same command.
+ */
+function memoryDeath(r: CommandResult): 'heap' | 'killed' | undefined {
+  if (r.timedOut) return undefined;
+  if (ranOutOfHeap(r)) return 'heap';
+  return killedFromOutside(r) ? 'killed' : undefined;
+}
+
+const MEMORY_DEATH = {
+  heap: 'ran out of JavaScript heap.',
+  killed:
+    "was killed (SIGKILL) — most often the kernel's OOM killer or a memory cap.",
+} as const;
+
+/**
+ * What to make of a memory death. `reached`: whether the diff can have
+ * changed what the command compiles or runs — a package it changes, one that
+ * depends on such a package, or the root when it changes a root-level file.
+ * Only a command outside that reach is called infrastructure outright: a type
+ * too big to compile surfaces in its consumers' compile, exactly as a
+ * breaking one does.
+ */
+function memoryDeathVerdict(reached: boolean): string {
+  return reached
+    ? "It is within the diff's reach: if what the diff adds can grow the compile or " +
+        'the run — a deeply recursive or very large type, a big generated file, a ' +
+        'suite that holds far more — that is a finding; otherwise it is an ' +
+        'infrastructure result — report it as informational.'
+    : 'That is an infrastructure result, not a defect in the diff — report it as ' +
+        'informational.';
+}
+
+/**
+ * The note's sentences for failed commands that did not time out, split by
+ * `memoryDeath`. Shared by the fresh run's test phase and by a continuation,
+ * whose note REPLACES the fresh one — a split only the fresh path made would
+ * be undone by the first `--resume`. Every suite ran because the diff reaches
+ * it (the test scope is the reverse-dependency closure of what it changes),
+ * and a continuation cannot recompute the reach of a carried build failure,
+ * so a memory death here gets the reached verdict: the one that cannot
+ * certify a death the diff caused away.
+ */
+function failureSentences(failures: CommandResult[]): string[] {
+  const heap = failures.filter((r) => memoryDeath(r) === 'heap').length;
+  const killed = failures.filter((r) => memoryDeath(r) === 'killed').length;
+  const defects = failures.length - heap - killed;
+  return [
+    defects > 0
+      ? `${defects} command(s) failed. Correlate each error with the diff: a failure ` +
+        'in a file the PR changed is a Critical; one in a file it did not touch is ' +
+        'pre-existing.'
+      : '',
+    heap > 0 ? `${heap} command(s) ${MEMORY_DEATH.heap}` : '',
+    killed > 0
+      ? `${killed} command(s) ${MEMORY_DEATH.killed.replace('was', 'were')}`
+      : '',
+    heap + killed > 0 ? memoryDeathVerdict(true) : '',
+  ].filter(Boolean);
 }
 
 /**
@@ -492,13 +558,9 @@ function resumedNote(
         ? rootBuildSkipNote(previous.skippedRootBuild)
         : ''),
   ];
-  if (failures.length > 0) {
-    parts.push(
-      `${failures.length} command(s) failed. Correlate each error with the ` +
-        `diff: a failure in a file the PR changed is a Critical; one in a file ` +
-        `it did not touch is pre-existing.`,
-    );
-  }
+  // Split the way the fresh note is: the heap and outside-kill readings ride
+  // on the carried results, and this note replaces the one that said them.
+  parts.push(...failureSentences(failures));
   if (timedOut.length > 0) {
     parts.push(
       `${timedOut.length} command(s) ran out of time — infrastructure, not a ` +
@@ -669,8 +731,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // cannot drift apart — and it is the same graph for a build-only probe as
   // for the full run, or the merge-base probe measures a different tree than
   // the run it is the baseline for ("same set, same commands, same verdict").
-  // The root goes FIRST: on a name collision a member must win (this repo's
-  // root and packages/cli share the name `@qwen-code/qwen-code`).
+  // On a name collision a member wins over the root (`dependencyEdges`).
   const scopeGraph = !singleRoot && rootPkg ? [rootPkg, ...packages] : packages;
 
   // With no affected workspace there is nothing to run at all. Three diffs land
@@ -963,21 +1024,29 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // the only package there is.
   const rootBuildSkipped = !singleRoot && !rootBuildRuns;
   // What a skipped root build does besides building the members: the script
-  // it hands off to, or a fan-out chained with commands of its own (`pnpm -r
-  // run build && node copy-assets.js`). Disclosed on every report that
-  // carries the root in its set — see `rootBuildSkipNote`.
+  // it hands off to, or — when it chains more than one command (`pnpm -r run
+  // build && node copy-assets.js`, `node scripts/build.js | tee log`) — its
+  // whole text, so a sibling command is named too. Only a bare fan-out does
+  // nothing else. Disclosed on every report that carries the root in its set
+  // — see `rootBuildSkipNote`.
   const skippedRootWork = !rootBuildSkipped
     ? undefined
-    : (skippedHandOff ??
-      (rootBuildFansOut && /&&|\|\||;/.test(String(rootBuildText))
-        ? String(rootBuildText)
-        : undefined));
+    : typeof rootBuildText === 'string' && chainsCommands(rootBuildText)
+      ? rootBuildText
+      : skippedHandOff;
   const discloseRootSkip = (): void => {
     if (!skippedRootWork || !set.includes('.')) return;
     results.skippedRootBuild = skippedRootWork;
     results.note += rootBuildSkipNote(skippedRootWork);
   };
   const notBuilt: string[] = [];
+  // What the diff can have changed the compile of: the packages it changes,
+  // everything that depends on them, and the root when it changes a file no
+  // workspace owns. A memory death outside this is the machine's.
+  const diffReach = new Set(reverseDependencyClosure(affected, scopeGraph));
+  if (!singleRoot && changed.some((f) => workspaceDirFor(f, globs) === null)) {
+    diffReach.add('.');
+  }
 
   // Build, and let the compiler correct the set. Three widenings is generous: each
   // one is a package the graph could not have known about, and a fourth would mean
@@ -1049,8 +1118,8 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     // a graph gap: report it and stop, the same way the install path does.
     // Nor must a heap death or an outside kill, for the same reason: their
     // partial output can name a module too, and a retry would only die again.
-    const infraKill =
-      failure.timedOut || ranOutOfHeap(failure) || killedFromOutside(failure);
+    const death = memoryDeath(failure);
+    const infraKill = failure.timedOut || death !== undefined;
     const missing = infraKill
       ? []
       : unresolvedWorkspaceDeps(failure.output, packages).filter((name) => {
@@ -1062,24 +1131,15 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       results.note = failure.timedOut
         ? `\`${failure.command}\` ran out of time (${deadlineSecs(failure)}s). That is an ` +
           'infrastructure result, not a defect in the diff — report it as informational.'
-        : ranOutOfHeap(failure)
-          ? `\`${failure.command}\` ran out of JavaScript heap. ` +
-            // A package the diff does not change compiles as it did before:
-            // its heap death is the machine's. One the diff changes may have
-            // grown by what the diff added.
-            (affected.includes(failedDir)
-              ? 'The diff changes this package: if what it adds can grow the compile — a ' +
-                'deeply recursive or very large type, a big generated file — that is a ' +
-                'finding; otherwise it is an infrastructure result — report it as informational.'
-              : 'That is an infrastructure result, not a defect in the diff — report it as ' +
-                'informational.')
-          : killedFromOutside(failure)
-            ? `\`${failure.command}\` was killed (SIGKILL) — most often the kernel's OOM ` +
-              'killer or a memory cap. That is an infrastructure result, not a defect in the ' +
-              'diff — report it as informational.'
-            : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
-              'compile error in a file the PR changed is a Critical; one in a file it did not ' +
-              'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
+        : death
+          ? // A package outside the diff's reach compiles as it did before:
+            // its memory death is the machine's. One inside it may have grown
+            // by what the diff added.
+            `\`${failure.command}\` ${MEMORY_DEATH[death]} ` +
+            memoryDeathVerdict(diffReach.has(failedDir))
+          : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
+            'compile error in a file the PR changed is a Critical; one in a file it did not ' +
+            'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
       results.buildSet = (
         rootBuildSkipped ? set.filter((d) => d !== '.') : set
       ).filter((d) => !notBuilt.includes(d));
@@ -1269,10 +1329,6 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     // framing the build-timeout path already gives, not the "a failure is a Critical"
     // message meant for a real compile/assertion failure.
     const realFailures = failed.filter((r) => !r.timedOut);
-    // A heap death is not a timeout and not, by itself, a defect either: it
-    // gets its own sentence, as the build phase gives it one.
-    const heapDeaths = realFailures.filter(ranOutOfHeap);
-    const defects = realFailures.filter((r) => !ranOutOfHeap(r));
     if (results.ok) {
       // The tests sentence names the scope, because it is the agent's report
       // that has to be able to say what was and was not run: a scoped run
@@ -1324,16 +1380,10 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
         `${failed.length} command(s) ran out of time (${deadlineSecs(failed[0])}s). A timeout is an ` +
         'infrastructure result, not a defect in the diff — report it as informational.';
     } else {
+      // A memory death is not a timeout and not, by itself, a defect either:
+      // it gets its own sentence, as the build phase gives it one.
       results.note = [
-        defects.length > 0
-          ? `${defects.length} command(s) failed. Correlate each error with the diff: a failure in a ` +
-            'file the PR changed is a Critical; one in a file it did not touch is pre-existing.'
-          : '',
-        heapDeaths.length > 0
-          ? `${heapDeaths.length} command(s) ran out of JavaScript heap. That is more often the ` +
-            'machine than the diff: report it as informational, unless what the diff adds is ' +
-            'what could hold that much memory.'
-          : '',
+        ...failureSentences(realFailures),
         failed.length > realFailures.length
           ? '(Commands that timed out are infrastructure, not findings.)'
           : '',
