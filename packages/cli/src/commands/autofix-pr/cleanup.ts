@@ -17,11 +17,14 @@ import { git, gitOpt, refExists, releaseWorktree } from '../review/lib/git.js';
 import {
   assertOwnedBySession,
   autofixPrPaths,
+  historyPrefix,
+  keepHistory,
   readState,
   repoRoot,
   type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
+import { remoteRef } from './worktree.js';
 
 /**
  * The PR head on the remote, when it is reachable and its commit is here.
@@ -29,8 +32,7 @@ import {
  * PR, although the recorded head never moved.
  */
 function livePrHead(state: AutofixPrState, prNumber: number): string | null {
-  const line = gitOpt('ls-remote', state.remote, `refs/pull/${prNumber}/head`);
-  const sha = line?.split(/\s/)[0] ?? '';
+  const sha = remoteRef(state.remote, `refs/pull/${prNumber}/head`) ?? '';
   if (!/^[0-9a-f]{40,64}$/.test(sha)) return null;
   return gitOpt('cat-file', '-e', `${sha}^{commit}`) === null ? null : sha;
 }
@@ -163,6 +165,14 @@ export function runCleanup(prNumber: number, force: boolean): void {
   if (refExists(`refs/heads/${paths.branch}`)) {
     git('branch', '-D', paths.branch);
   }
+  // What the watch posted and handled outlives it, so a later watch of the
+  // PR does not answer the same comments again.
+  const history = state ? keepHistory(paths, state) : null;
+  // A lock a killed helper left behind would otherwise outlive the watch.
+  if (force) {
+    rmSync(paths.lockPath, { force: true, recursive: true });
+    rmSync(`${paths.lockPath}.break`, { force: true, recursive: true });
+  }
   // The state file and everything else this PR's watch wrote beside it (CI
   // logs, briefs). The gate cursor belongs to the scheduled task, which
   // outlives a watch and would report everything again without it.
@@ -170,13 +180,20 @@ export function runCleanup(prNumber: number, force: boolean): void {
   const prefix = `autofix-pr-${prNumber}-`;
   for (const name of existsSync(tmp) ? readdirSync(tmp) : []) {
     const path = join(tmp, name);
-    if (name.startsWith(prefix) && path !== paths.gatePath) {
+    if (
+      name.startsWith(prefix) &&
+      path !== paths.gatePath &&
+      !name.startsWith(historyPrefix(paths))
+    ) {
       rmSync(path, { force: true });
     }
   }
   // Named, so a later watch of another repository's PR of this number
   // knows which file its gate refuses.
-  const kept = existsSync(paths.gatePath) ? { gateCursor: paths.gatePath } : {};
+  const kept = {
+    ...(existsSync(paths.gatePath) ? { gateCursor: paths.gatePath } : {}),
+    ...(history ? { history } : {}),
+  };
   writeStdoutLine(
     JSON.stringify({
       removed: true,
