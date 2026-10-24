@@ -224,6 +224,16 @@ Migration rule: arbitrary-JS workers use `getJsInterpreterCommand`; the
 explicit host-tool and worker-runtime probes above preserve their host identity.
 Sites that re-invoke the app use `QWEN_CODE_CLI` / the entry fallback.
 
+## Encrypted-file identity across runtimes
+
+Encrypted-file keys retain the existing hostname/OS-username salt, scrypt parameters and AES-256-GCM format. Node uses `os.userInfo().username`. Bun on supported POSIX targets resolves the effective OS account with absolute `/usr/bin/id -un`, without a shell, bounded to 1000 ms and 4096 output bytes. Only one final newline is removed; empty, NUL or multiline output, timeout or an unavailable command fails before file access or writes. `USER`, `LOGNAME` and home-directory names are not canonical identity sources. This covers npm handoff, standalone and direct Bun without requiring a Node parent or changing the environment; Windows classic Node is unchanged.
+
+POSIX Node and Bun first authenticate the canonical key. To read files written by Bun's environment-based username behavior, they may then try only the current `USER` value (including an explicitly empty string) and `unknown`, deduplicated against the canonical username. A legacy result is accepted only after successful GCM authentication. All failures preserve the original error and file; authenticated malformed JSON still fails normally. Reads never rewrite or create an empty store. Subsequent mutations use the canonical key and existing atomic write while preserving all other service entries.
+
+This shared authority serves `HybridTokenStorage` OAuth/file fallback, selected encrypted extension settings and extension Git credentials; both `mcp-oauth-tokens-v2.json` and `extension-secrets-v1.json` retain their schemas and permissions. Keychain behavior is unchanged. An arbitrary historical `USER` no longer present cannot be guessed; those files remain intact and fail. The existing hostname binding also remains. No new key registry, format version, provider, FFI or automatic read migration is introduced.
+
+The original real Node-write/Bun-read counterexample and crypto/identity diagnostics are retained. Regression controls use independent authenticated ciphertext for OAuth and multi-service secrets, canonical and legacy reads in both runtimes, empty `USER`, no-write failures and canonical atomic updates. These source tests do not replace fresh actual runtime, cold scoped-reader, final artifact or platform acceptance; the OS utility and its failure contract require verification on each supported POSIX platform.
+
 ## Cross-runtime test coverage
 
 `packages/core/src/utils/runtime-boundary.node-bun.test.ts` runs the same

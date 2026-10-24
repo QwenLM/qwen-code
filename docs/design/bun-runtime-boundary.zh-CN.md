@@ -160,6 +160,16 @@ S1 已接入选择器的三处是 `core/src/code-mode/host-client.ts`、`core/sr
 
 迁移规则：任意 JS worker 使用 `getJsInterpreterCommand`；上文明确列出的宿主工具和 worker-runtime 探针保留宿主身份。再唤起应用的位置使用 `QWEN_CODE_CLI` / 入口回退。
 
+## 跨运行时加密文件身份
+
+加密文件密钥保留既有 hostname/OS 用户名盐、scrypt 参数与 AES-256-GCM 格式。Node 使用 `os.userInfo().username`；Bun 在受支持 POSIX 平台通过绝对 `/usr/bin/id -un` 查询 effective OS 账户，无 shell，限制为1000ms和4096输出字节。仅删除一个末尾换行；空、NUL、多行、超时或命令不可用均在文件访问或写入前拒绝。`USER`、`LOGNAME`、home 目录名不是 canonical 身份来源。不依赖 Node parent、不改环境，即覆盖 npm handoff、standalone 和 direct Bun；Windows classic Node 不变。
+
+POSIX Node、Bun 先认证 canonical key；为读取 Bun 环境用户名行为写出的旧文件，之后只可尝试当前 `USER`（包含显式空串）与 `unknown`，并对 canonical 用户名去重。只有 GCM 认证成功才接受 legacy 结果；全部失败保留原错误及原文件，已认证但 JSON 非法仍正常失败。读取不重写、不创建空 store；后续 mutation 用 canonical key 和既有原子写，保留其他全部服务条目。
+
+该共享 authority 服务 `HybridTokenStorage` 的 OAuth/file fallback、已选 encrypted 扩展设置及扩展 Git 凭证；`mcp-oauth-tokens-v2.json`、`extension-secrets-v1.json` 的 schema/权限不变，keychain 不变。历史任意 `USER` 若当前已丢失，不能猜测；文件保持原样并失败。原 hostname 绑定限制也保留。不新增 key registry、格式版本、provider、FFI 或自动读迁移。
+
+保留真实 Node 写/Bun 读原反例与 crypto/身份诊断。回归以独立已认证密文覆盖 OAuth、多服务 secret、两运行时 canonical/legacy 读取、空 `USER`、失败不写和 canonical 原子更新。源码测试不能代替新的真实运行时、cold scoped-reader、最终产物或平台验收；每个受支持 POSIX 平台仍须验证 OS 工具及其失败合同。
+
 ## 跨运行时测试覆盖
 
 `packages/core/src/utils/runtime-boundary.node-bun.test.ts` 在 Node 和可用的

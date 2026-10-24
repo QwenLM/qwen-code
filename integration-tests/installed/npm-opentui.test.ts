@@ -129,6 +129,7 @@ async function command(
   args: string[],
   cwd: string,
   seconds: number,
+  env = setupEnv,
 ) {
   const started = Date.now();
   let timedOut = false;
@@ -150,7 +151,7 @@ async function command(
     observer = observe(pidFile);
     child = spawn(bin, args, {
       cwd,
-      env: setupEnv,
+      env,
       stdio: ['ignore', log, log],
       detached: true,
     });
@@ -1476,6 +1477,187 @@ it('actual installed npm registry subprocess retains original Node26 identity', 
     facts.cleanupErrors = errors;
     if (errors.length && !failure) failure = new Error(errors.join('\n'));
     if (failure) facts.outcome = 'FAIL';
+    save(path.join(out, 'result.json'), facts);
+  }
+  if (failure) throw failure;
+}, 120_000);
+
+it('actual installed private Bun cold-reads Node legacy secrets with correct, absent and wrong USER', async () => {
+  guard();
+  const out = path.join(base, 'legacy-secret');
+  assert.equal(fs.existsSync(out), false, 'never overwrite an attempt');
+  const home = path.join(out, 'home');
+  const workspace = path.join(out, 'workspace');
+  const tmp = path.join(out, 'tmp');
+  for (const directory of [home, workspace, tmp])
+    fs.mkdirSync(directory, { recursive: true });
+  const system = path.join(out, 'system.json');
+  const defaults = path.join(out, 'defaults.json');
+  save(system, { $version: 4 });
+  save(defaults, { $version: 4 });
+  const name = 'owned-legacy-secret';
+  const secret = 'OWNED_NODE_LEGACY_SECRET_019';
+  const writer = path.join(out, 'node-legacy-writer.mjs');
+  fs.writeFileSync(
+    writer,
+    `
+import { createCipheriv, createHash, randomBytes, scryptSync } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+const [home, name] = process.argv.slice(2);
+const secret = 'OWNED_NODE_LEGACY_SECRET_019';
+const dir = path.join(home, 'extensions', name);
+fs.mkdirSync(dir, { recursive: true });
+const envVar = 'OWNED_LEGACY_SECRET';
+const id = createHash('sha256').update(name).digest('hex');
+const bundleKey = '$qwen:extension-settings:v2:11111111-1111-4111-8111-111111111111';
+fs.writeFileSync(path.join(dir, 'qwen-extension.json'), JSON.stringify({ name, version: '1.0.0', settings: [{ name: 'Owned legacy secret', description: 'Test-only existing Node encrypted data', envVar, sensitive: true }] }));
+fs.writeFileSync(path.join(dir, '.env'), '');
+fs.writeFileSync(path.join(dir, '.qwen-extension-settings.json'), JSON.stringify({ version: 1, backend: 'encrypted_file', bundleKey }), { mode: 0o600 });
+const username = os.userInfo().username;
+const key = scryptSync('qwen-code-oauth', os.hostname() + '-' + username + '-qwen-code', 32);
+const iv = randomBytes(16);
+const cipher = createCipheriv('aes-256-gcm', key, iv);
+const plaintext = JSON.stringify({ ['Qwen Code Extensions ' + name + ' ' + id]: { [envVar]: secret, [bundleKey]: JSON.stringify({ [envVar]: secret }) } });
+const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+fs.writeFileSync(path.join(home, 'extension-secrets-v1.json'), [iv.toString('hex'), cipher.getAuthTag().toString('hex'), encrypted.toString('hex')].join(':'), { mode: 0o600 });
+console.log(JSON.stringify({ username, node: process.versions.node, id }));
+`,
+  );
+  let failure: unknown;
+  let server: Awaited<ReturnType<typeof startFakeOpenAIServer>> | undefined;
+  const facts: Record<string, unknown> = { outcome: 'RUNNING', rows: [] };
+  try {
+    const seeded = JSON.parse(
+      await command(
+        'legacy-secret-writer',
+        node,
+        [writer, home, name],
+        workspace,
+        15,
+      ),
+    ) as { username: string; node: string; id: string };
+    assert.equal(seeded.node, '26.4.0');
+    assert.equal(seeded.id, createHash('sha256').update(name).digest('hex'));
+    assert.ok(seeded.username && seeded.username !== 'unknown');
+    facts.nodeWriter = seeded;
+    const immutable = [
+      path.join(home, 'extension-secrets-v1.json'),
+      path.join(home, 'extensions', name, '.qwen-extension-settings.json'),
+      path.join(home, 'extensions', name, 'qwen-extension.json'),
+      path.join(home, 'extensions', name, '.env'),
+    ];
+    const before = immutable.map((file) => ({
+      path: file,
+      ...inventoryEntry(file),
+    }));
+    assert.equal(before[0].mode, '0o600');
+    assert.equal(before[1].mode, '0o600');
+    save(path.join(out, 'before.json'), before);
+    server = await startFakeOpenAIServer(() => ({
+      content: 'UNEXPECTED_SECRET_MODEL_HTTP',
+    }));
+    for (const mode of ['correct', 'missing', 'wrong'] as const) {
+      const env: NodeJS.ProcessEnv = {
+        ...setupEnv,
+        HOME: home,
+        USERPROFILE: home,
+        QWEN_HOME: home,
+        TMPDIR: tmp,
+        TMP: tmp,
+        TEMP: tmp,
+        QWEN_RUNTIME_DIR: path.join(out, 'runtime'),
+        QWEN_CODE_FORCE_FILE_STORAGE: 'true',
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
+        QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
+        QWEN_CODE_LANG: 'en',
+        QWEN_CODE_MODELS_DEV_REFRESH: 'off',
+        QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
+        OPENAI_API_KEY: 'owned-test-only',
+        OPENAI_BASE_URL: server.baseUrl,
+      };
+      if (mode === 'missing') delete env['USER'];
+      else
+        env['USER'] =
+          mode === 'correct'
+            ? seeded.username
+            : seeded.username + '-owned-wrong';
+      const id = 'legacy-secret-' + mode;
+      const stdout = await command(
+        id,
+        bun,
+        [
+          path.join(receipt.packageRoot, 'cli-entry.js'),
+          'extensions',
+          'settings',
+          'list',
+          name,
+        ],
+        workspace,
+        15,
+        env,
+      );
+      assert.ok(stdout.includes('Settings for "owned-legacy-secret":'));
+      assert.ok(stdout.includes('Owned legacy secret (OWNED_LEGACY_SECRET)'));
+      assert.ok(stdout.includes('Value: [value stored in keychain] (user)'));
+      assert.ok(!stdout.includes('[not set]'));
+      assert.ok(!stdout.includes(secret));
+      const completed = JSON.parse(
+        fs.readFileSync(path.join(base, id + '.json'), 'utf8'),
+      );
+      assert.equal(completed.bin, bun);
+      assert.equal(completed.code, 0);
+      assert.equal(completed.signal, null);
+      assert.equal(completed.timedOut, false);
+      assert.deepEqual(completed.liveBeforeCleanup, []);
+      assert.deepEqual(completed.cleanupErrors, []);
+      assert.ok(
+        completed.captured.some(
+          (row: { pid: number; command: string }) =>
+            row.pid === completed.rootPid &&
+            row.command.includes('cli-entry.js'),
+        ),
+      );
+      assert.deepEqual(
+        immutable.map((file) => ({ path: file, ...inventoryEntry(file) })),
+        before,
+      );
+      assert.equal(server.requests.length, 0);
+      guard();
+      (facts.rows as unknown[]).push({
+        mode,
+        USER: env['USER'] ?? null,
+        commandReceipt: id + '.json',
+      });
+    }
+    facts.outcome = 'PASS';
+  } catch (error) {
+    failure = error;
+    facts.outcome = 'FAIL';
+    facts.error = String(error);
+  } finally {
+    const errors: string[] = [];
+    try {
+      save(path.join(out, 'requests.json'), server?.requests ?? []);
+    } catch (error) {
+      errors.push(String(error));
+    }
+    try {
+      await server?.close();
+    } catch (error) {
+      errors.push(String(error));
+    }
+    try {
+      guard();
+    } catch (error) {
+      errors.push(String(error));
+    }
+    facts.cleanupErrors = errors;
+    if (errors.length) {
+      facts.outcome = 'FAIL';
+      failure ??= new Error(errors.join('\n'));
+    }
     save(path.join(out, 'result.json'), facts);
   }
   if (failure) throw failure;

@@ -752,7 +752,7 @@ describe('installed npm acceptance workflow', () => {
   });
   it('runs the full installed file without retries or ignored unhandled errors', () => {
     const step = job.steps.find(
-      (entry) => entry.name === 'Eight installed npm acceptance cases',
+      (entry) => entry.name === 'Nine installed npm acceptance cases',
     );
     expect(step.run).toContain(
       '--config integration-tests/vitest.installed.config.ts',

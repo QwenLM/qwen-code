@@ -223,7 +223,7 @@ PTY 资产。本批保留该实现并加入 92d4b193 已回收主进程 guard；
 
 一个专用安装测试套件共享当前候选的一次全新 `prepare:package`、真实 Node26.4/npm pack，以及普通 optional 依赖解析的自有目录 `install --ignore-scripts`。它核对同一 tarball 全部发布文件的内容和权限、160 MiB 解包上限，以及独立安装的私有 Bun 和 native 库；不以 checkout bundle、全局 Bun、preload 插桩或模拟包管理器结果替代。
 
-八个顺序用例覆盖 strict 安装版 native/parser 启动、一次闭合模型请求和自然退出；禁用 relaunch、缺失自有 Bun、继承 FFI 参数各自的普通 fallback 与 strict 拒绝；以及原 Node 下的真实 npm registry 子进程。身份观察器对 synthetic loopback registry 委托执行未修改的真实 npm。启动与退出记录必须关联同一个原 Node/无 Bun 进程，所需查询真实退出零后，才检查前台 Bun/native 与正常 UI。它不证明 registry 认证或实际更新安装。
+九个顺序用例覆盖 strict 安装版 native/parser 启动、一次闭合模型请求和自然退出；禁用 relaunch、缺失自有 Bun、继承 FFI 参数各自的普通 fallback 与 strict 拒绝；以及原 Node 下的真实 npm registry 子进程。身份观察器对 synthetic loopback registry 委托执行未修改的真实 npm。启动与退出记录必须关联同一个原 Node/无 Bun 进程，所需查询真实退出零后，才检查前台 Bun/native 与正常 UI。它不证明 registry 认证或实际更新安装。新增一案在同一安装产物上，由真实 Node 独立写入旧 AES-GCM 扩展密文及选择器，再直接执行安装包私有 Bun 的公共设置读取，在 USER 正确、缺失和错误三种环境下均要求真实退出零、敏感标记存在、无明文输出且原密文/权限和安装目录不变；固定 keychain 文案不证明 OS keychain。该永久回归仍需实际执行。
 
 专用配置只选择本套件，单 worker、无重试、未处理错误致命，每案 120 秒。共享 setup 上限为 1560 秒：prepare 600、pack 300、install 600，加有界核验；清理保留首个失败。现有 TUI workflow 增加独立的 60 分钟安装 job，原 45 分钟源码 parity job 不变。默认 integration collection 排除 installed 目录，避免普通测试隐式安装软件包。
 

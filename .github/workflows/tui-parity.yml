@@ -197,7 +197,7 @@ jobs:
         run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
       - name: 'Build and bundle checkout'
         run: 'npm run build && npm run bundle'
-      - name: 'Eight installed npm acceptance cases'
+      - name: 'Nine installed npm acceptance cases'
         env:
           QWEN_INSTALLED_OUT: '${{ runner.temp }}/qwen-installed-${{ github.run_id }}-${{ github.run_attempt }}'
           QWEN_E2E_RENDERER: 'opentui'
