@@ -47,6 +47,7 @@ const DISABLE_UPDATES_ENV: &str = "QWEN_DESKTOP_DISABLE_UPDATES";
 // with the persisted value.
 const ZOOM_HOTKEY_SCRIPT: &str = r#"
 (() => {
+  if (window.self !== window.top) return;
   const send = (action) => {
     window.__TAURI__?.core?.invoke('change_zoom', { action })?.catch(() => {});
   };
@@ -798,6 +799,10 @@ fn require_bootstrap_origin(webview: &WebviewWindow) -> Result<(), String> {
 
 fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
     is_bootstrap_url(url)
+        // Untrusted srcdoc previews in packages/web-shell rely on CSP and
+        // sandbox="allow-scripts" without allow-same-origin; keep their origin
+        // isolated from the daemon-served shell.
+        || url.as_str() == "about:srcdoc"
         || lock(origin)
             .as_ref()
             .is_some_and(|allowed| is_same_origin(url, allowed))
@@ -1176,6 +1181,38 @@ mod tests {
     }
 
     #[test]
+    fn allows_saved_preview_srcdoc_frames() {
+        for runtime_origin in [
+            None,
+            Some(Url::parse("http://127.0.0.1:49152/").expect("origin")),
+        ] {
+            assert!(is_allowed_navigation(
+                &Url::parse("about:srcdoc").expect("srcdoc"),
+                &Mutex::new(runtime_origin),
+            ));
+        }
+    }
+
+    #[test]
+    fn srcdoc_exception_does_not_allow_other_navigation() {
+        let origin = Mutex::new(Some(Url::parse("http://127.0.0.1:49152/").expect("origin")));
+        for url in [
+            "about:blank",
+            "about:config",
+            "about:srcdoc/other",
+            "data:text/html,<p>preview</p>",
+            "blob:http://127.0.0.1:49152/preview",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                !is_allowed_navigation(&Url::parse(url).expect("url"), &origin),
+                "unexpectedly allowed {url}",
+            );
+        }
+    }
+
+    #[test]
     fn command_origin_gate_accepts_only_bootstrap() {
         assert!(is_bootstrap_url(
             &Url::parse(BOOTSTRAP_URL).expect("bootstrap")
@@ -1185,6 +1222,9 @@ mod tests {
         ));
         assert!(!is_bootstrap_url(
             &Url::parse("https://example.com/").expect("external")
+        ));
+        assert!(!is_bootstrap_url(
+            &Url::parse("about:srcdoc").expect("srcdoc")
         ));
     }
 }
