@@ -145,7 +145,13 @@ impl Drop for DesktopRuntime {
 #[cfg(windows)]
 fn spawn_runtime_group(command: &mut Command) -> std::io::Result<GroupChild> {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    command.group().creation_flags(CREATE_NO_WINDOW).spawn()
+    command
+        .group()
+        // KILL_ON_JOB_CLOSE: a daemon orphaned by a crashed or force-killed
+        // desktop keeps node.exe locked and blocks the next update.
+        .kill_on_drop(true)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
 }
 
 #[cfg(not(windows))]
