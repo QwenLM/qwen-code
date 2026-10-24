@@ -27,6 +27,8 @@ import {
 
 const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
+  useConnection: vi.fn(),
+  useActions: vi.fn(),
   restoreEditorDraft: vi.fn<() => string>(),
   commitAccepted: vi.fn(),
   loadToolDetails: undefined as ToolDetailsLoader | undefined,
@@ -48,6 +50,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: mocks.useWorkspace,
+  // ChatContextHeader reads the connection and the rename action for its
+  // inline session-title rename.
+  useConnection: mocks.useConnection,
+  useActions: mocks.useActions,
   // The shared approval card asks whether a tool is an agent launch.
   isAgentTool: () => false,
 }));
@@ -224,6 +230,12 @@ describe('ManagedSessionsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.restoreEditorDraft.mockReturnValue('');
+    // ChatContextHeader reads the SDK hooks for its inline session-title
+    // rename; the managed page has no session of its own, so the header
+    // renders the plain title (rename UI stays disabled).
+    mocks.useConnection.mockReturnValue({ sessionId: undefined });
+    mocks.useActions.mockReturnValue({ renameSession: vi.fn() });
+    mocks.useWorkspace.mockReturnValue({ client: mocks.client });
     provider = {
       storageKey: 'http://managed-test',
       canCancel: true,

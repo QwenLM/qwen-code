@@ -6,7 +6,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
 import { ChatContextHeader } from './ChatContextHeader';
 
-// The QR entry reads the workspace connection from context.
+const renameMocks = vi.hoisted(() => ({
+  renameSession: vi.fn(async () => ({})),
+  renameStandaloneSession: vi.fn(async () => ({})),
+  catalogController: {
+    renamed: vi.fn(),
+    refreshWorkspace: vi.fn(),
+  },
+  connection: {
+    sessionId: null as string | null,
+    sessionContext: undefined as { kind: string } | undefined,
+    workspaceCwd: null as string | null,
+  },
+}));
+
+// The QR entry and the single-click rename read the workspace/session
+// connection from context.
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
     await importOriginal<
@@ -14,12 +29,21 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
     >();
   return {
     ...actual,
+    useConnection: () => renameMocks.connection,
+    useActions: () => ({
+      renameSession: renameMocks.renameSession,
+    }),
     useWorkspace: () => ({
       baseUrl: 'http://127.0.0.1:8080/',
       token: 'test-token',
+      client: { renameStandaloneSession: renameMocks.renameStandaloneSession },
     }),
   };
 });
+
+vi.mock('../session-catalog/session-catalog-hooks', () => ({
+  useSessionCatalogController: () => renameMocks.catalogController,
+}));
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -269,5 +293,195 @@ describe('ChatContextHeader', () => {
     expect(
       view.querySelector('[data-testid="chat-header-workspace"]')?.tagName,
     ).toBe('SPAN');
+  });
+});
+
+describe('ChatContextHeader session title single-click rename', () => {
+  afterEach(() => {
+    renameMocks.connection.sessionId = null;
+    renameMocks.connection.sessionContext = undefined;
+    renameMocks.connection.workspaceCwd = null;
+    renameMocks.renameSession.mockReset();
+    renameMocks.renameSession.mockResolvedValue({});
+    renameMocks.renameStandaloneSession.mockReset();
+    renameMocks.renameStandaloneSession.mockResolvedValue({});
+    renameMocks.catalogController.renamed.mockReset();
+    renameMocks.catalogController.refreshWorkspace.mockReset();
+  });
+
+  function findTitle(): HTMLElement {
+    const title = container!.querySelector<HTMLElement>(
+      '[data-web-shell-pane-title]',
+    );
+    expect(title).not.toBeNull();
+    return title as HTMLElement;
+  }
+
+  function findRenameInput(): HTMLInputElement | null {
+    return container!.querySelector<HTMLInputElement>(
+      '[data-web-shell-pane-title-input]',
+    );
+  }
+
+  async function openRename(): Promise<void> {
+    await act(async () => {
+      findTitle().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  }
+
+  function setRenameValue(value: string): void {
+    const input = findRenameInput() as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setter?.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  function pressRenameKey(key: string): void {
+    (findRenameInput() as HTMLInputElement).dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }
+
+  it('opens the inline rename input on a single title click, prefilled and focused', async () => {
+    renameMocks.connection.sessionId = 'sess-1';
+    renameMocks.connection.workspaceCwd = '/w';
+    mount({ content: 'Session title' });
+    await openRename();
+    const input = findRenameInput();
+    expect(input).not.toBeNull();
+    expect(input?.value).toBe('Session title');
+    expect(document.activeElement).toBe(input);
+    expect(renameMocks.renameSession).not.toHaveBeenCalled();
+  });
+
+  it('saves the trimmed name on Enter and reconciles the session catalog', async () => {
+    renameMocks.connection.sessionId = 'sess-1';
+    renameMocks.connection.workspaceCwd = '/w';
+    mount({ content: 'Session title' });
+    await openRename();
+    setRenameValue('  Header renamed  ');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameMocks.renameSession).toHaveBeenCalledTimes(1);
+    expect(renameMocks.renameSession).toHaveBeenCalledWith('Header renamed');
+    expect(renameMocks.catalogController.renamed).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+      'Header renamed',
+    );
+    expect(renameMocks.catalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(findRenameInput()).toBeNull();
+  });
+
+  it('bails on Enter without editing: no daemon write, form closes', async () => {
+    renameMocks.connection.sessionId = 'sess-1';
+    renameMocks.connection.workspaceCwd = '/w';
+    mount({ content: 'Session title' });
+    await openRename();
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameMocks.renameSession).not.toHaveBeenCalled();
+    expect(renameMocks.renameStandaloneSession).not.toHaveBeenCalled();
+    expect(renameMocks.catalogController.renamed).not.toHaveBeenCalled();
+    expect(findRenameInput()).toBeNull();
+  });
+
+  it('saves standalone sessions through the workspace client', async () => {
+    renameMocks.connection.sessionId = 'sess-1';
+    renameMocks.connection.sessionContext = { kind: 'standalone' };
+    renameMocks.connection.workspaceCwd = '/w';
+    mount({ content: 'Session title' });
+    await openRename();
+    setRenameValue('Standalone name');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameMocks.renameStandaloneSession).toHaveBeenCalledWith(
+      'sess-1',
+      'Standalone name',
+    );
+    expect(renameMocks.renameSession).not.toHaveBeenCalled();
+    expect(renameMocks.catalogController.renamed).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+      'Standalone name',
+    );
+  });
+
+  it('cancels on Escape without saving', async () => {
+    renameMocks.connection.sessionId = 'sess-1';
+    renameMocks.connection.workspaceCwd = '/w';
+    mount({ content: 'Session title' });
+    await openRename();
+    setRenameValue('Whatever');
+    await act(async () => {
+      pressRenameKey('Escape');
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(renameMocks.renameSession).not.toHaveBeenCalled();
+    expect(renameMocks.renameStandaloneSession).not.toHaveBeenCalled();
+  });
+
+  it('closes without saving when the name is empty', async () => {
+    renameMocks.connection.sessionId = 'sess-1';
+    renameMocks.connection.workspaceCwd = '/w';
+    mount({ content: 'Session title' });
+    await openRename();
+    setRenameValue('   ');
+    await act(async () => {
+      pressRenameKey('Enter');
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(renameMocks.renameSession).not.toHaveBeenCalled();
+  });
+
+  it('leaves the title inert without a session id', async () => {
+    mount({ content: 'Session title' });
+    expect(container!.querySelector('[data-web-shell-pane-title]')).toBeNull();
+    const title = Array.from(container!.querySelectorAll('*')).find(
+      (element) =>
+        element.textContent === 'Session title' &&
+        element.children.length === 0,
+    );
+    expect(title).toBeDefined();
+    await act(async () => {
+      (title as HTMLElement).dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(renameMocks.renameSession).not.toHaveBeenCalled();
+  });
+
+  it('leaves non-string content inert even with a session', async () => {
+    renameMocks.connection.sessionId = 'sess-1';
+    renameMocks.connection.workspaceCwd = '/w';
+    const view = mount({
+      content: <span data-testid="custom-title">Custom header</span>,
+    });
+    expect(view.querySelector('[data-web-shell-pane-title]')).toBeNull();
+    await act(async () => {
+      view
+        .querySelector<HTMLElement>('[data-testid="custom-title"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(renameMocks.renameSession).not.toHaveBeenCalled();
   });
 });
