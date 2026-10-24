@@ -4159,6 +4159,8 @@ describe('qqbot recent-inbound ring bounds', () => {
     expect(ring.size).toBeLessThanOrEqual(256);
     expect(raw['recentMemberMessage']('group-0', 'alice')).toBeUndefined();
     expect(raw['recentMemberMessage']('group-299', 'alice')).toBe('msg-299');
+  });
+});
 
 // The channel-base mock above keeps the shipped implementations rather than
 // mirrors, so the double cannot diverge from what production imports. Pin the
