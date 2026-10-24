@@ -29,6 +29,7 @@ import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
+import { selectPathsDeniedByPermissionRules } from '../core/permission-helpers.js';
 
 const debugLogger = createDebugLogger('GREP');
 
@@ -166,14 +167,38 @@ class GrepToolInvocation extends BaseToolInvocation<
         });
       }
 
+      // Drop matches from files a path-scoped deny rule claims. The
+      // input-side check only sees the search root, which can never match a
+      // rule that targets an individual result file (#15129).
+      const deniedPaths = await selectPathsDeniedByPermissionRules(
+        this.config.getPermissionManager?.(),
+        ToolNames.GREP,
+        this.config.getTargetDir(),
+        Array.from(new Set(rawMatches.map((match) => match.absoluteFilePath))),
+      );
+      const omittedFileCount = deniedPaths.size;
+      if (omittedFileCount > 0) {
+        rawMatches = rawMatches.filter(
+          (match) => !deniedPaths.has(match.absoluteFilePath),
+        );
+      }
+
       const filterDescription = this.params.glob
         ? ` (filter: "${this.params.glob}")`
         : '';
 
+      const omittedFilesNote =
+        omittedFileCount > 0
+          ? ` [${omittedFileCount} ${omittedFileCount === 1 ? 'file' : 'files'} omitted by permission rules]`
+          : '';
+
       // Check if we have any matches
       if (rawMatches.length === 0) {
         const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
-        return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
+        return {
+          llmContent: noMatchMsg + omittedFilesNote,
+          returnDisplay: `No matches found`,
+        };
       }
 
       const charLimit = this.config.getTruncateToolOutputThreshold();
@@ -263,6 +288,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         const omittedMatches = totalMatches - includedLines;
         llmContent += ` [${omittedMatches} ${omittedMatches === 1 ? 'line' : 'lines'} truncated] ...`;
       }
+      llmContent += omittedFilesNote;
 
       // Build display message
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
