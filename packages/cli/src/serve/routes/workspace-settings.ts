@@ -47,6 +47,8 @@ import {
 
 const TUI_ONLY_SETTINGS = new Set([
   'experimental.mods',
+  // Only headless reads it until ACP moves to the shared agent loop.
+  'experimental.unifiedAgentLoop',
   'general.vimMode',
   'general.terminalBell',
   'general.notificationMode',
@@ -90,6 +92,7 @@ const OUTPUT_LANGUAGE_OPTIONS = SUPPORTED_LANGUAGES.map(
 const WEB_SHELL_SETTINGS = new Set([
   'ui.allowedApprovalModes',
   'ui.compactMode',
+  'serve.maxSessions',
   'voiceModel',
   'imageModel',
   'advisorModel',
