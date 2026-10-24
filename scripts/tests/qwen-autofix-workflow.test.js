@@ -3562,6 +3562,356 @@ describe('qwen-autofix workflow', () => {
     expect(loopHead).not.toContain('INSPECTED=');
   });
 
+  it('bounds a for-N window and releases the PR when the budget is spent', () => {
+    // The budget is a CAP, not a counter: the scan reads its own marker off
+    // the window anchor and lowers EFF_MAX_ROUNDS, so every existing cap gate
+    // applies unchanged. Replay the read VERBATIM (drift fails) — window
+    // scoping is the property that keeps a spent budget from leaking into the
+    // next window, so it is worth a behavioral test rather than a substring.
+    const budgetRead = reviewScanJob.match(
+      /(ROUND_BUDGET="\$\(jq[\s\S]*?\n {12}fi)/,
+    )?.[1];
+    expect(budgetRead).toBeTruthy();
+    const budget = (comments, key) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-budget-read-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            `AUTOFIX_BOT='qwen-code-dev-bot'\nREARM_KEY='${key}'\nWORKDIR='${dir}'\nEFF_MAX_ROUNDS='100'\n${budgetRead.replace(/\n {12}/g, '\n')}\nprintf '%s' "$EFF_MAX_ROUNDS"`,
+          ],
+          { encoding: 'utf8' },
+        ).trim();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const anchor = (at, body) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: at,
+      body,
+    });
+    // The anchor's marker caps the window…
+    expect(
+      budget(
+        [
+          anchor(
+            '2026-07-18T10:00:00Z',
+            '<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->',
+          ),
+        ],
+        '2026-07-18T10:00:00Z',
+      ),
+    ).toBe('2');
+    // …an anchored window without one keeps the takeover cap…
+    expect(
+      budget(
+        [anchor('2026-07-18T10:00:00Z', '<!-- takeover-ack engaged -->')],
+        '2026-07-18T10:00:00Z',
+      ),
+    ).toBe('100');
+    // …and a PREVIOUS window's budget never applies to the current one.
+    expect(
+      budget(
+        [
+          anchor(
+            '2026-07-18T09:00:00Z',
+            '<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->',
+          ),
+          anchor('2026-07-18T10:00:00Z', '<!-- takeover-ack engaged -->'),
+        ],
+        '2026-07-18T10:00:00Z',
+      ),
+    ).toBe('100');
+    // Only a bot-authored, bounded, single/double-digit marker counts: a
+    // maintainer cannot hand-edit a cap onto the anchor.
+    expect(
+      budget(
+        [
+          {
+            user: { login: 'human-a' },
+            created_at: '2026-07-18T10:00:00Z',
+            body: '<!-- autofix-round-budget 1 -->',
+          },
+        ],
+        '2026-07-18T10:00:00Z',
+      ),
+    ).toBe('100');
+    expect(
+      budget(
+        [anchor('2026-07-18T10:00:00Z', '<!-- autofix-round-budget 100 -->')],
+        '2026-07-18T10:00:00Z',
+      ),
+    ).toBe('100');
+
+    // The boundary behavior: a spent budget RELEASES a human-authored PR
+    // (note + label DELETE, no escalation) and never promotes the PR to
+    // autofix/needs-human. Replay with a PATH-stubbed gh.
+    const release = reviewScanJob.match(
+      /(if \[\[ "\$\{BUDGET_SPENT\}" == 'true' && "\$\{IS_BOT_AUTHOR\}" != 'true' \]\]; then[\s\S]*?\n {14}fi)/,
+    )?.[1];
+    expect(release).toBeTruthy();
+    const runRelease = ({
+      labelsJson = '{"labels":[{"name":"autofix/takeover"}]}',
+      notices = [],
+      dryRun = 'false',
+      actor = 'qwen-code-dev-bot',
+    } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-budget-release-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(notices));
+        writeFileSync(join(dir, 'labels.json'), labelsJson);
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            'if [[ "$1" == "pr" && "$2" == "view" ]]; then cat ' +
+              join(dir, 'labels.json') +
+              '; exit 0; fi',
+            'if [[ "$1" == "api" && "$2" == "user" ]]; then printf "%s" "$STUB_ACTOR"; exit 0; fi',
+            'echo "WRITE $*" >> ' + join(dir, 'writes.log'),
+            'exit 0',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        writeFileSync(join(dir, 'writes.log'), '');
+        const stdout = execFileSync(
+          'bash',
+          [
+            '-c',
+            `fleet_row() { :; }\nfor _ in 1; do\n${release.replace(/\n {14}/g, '\n')}\necho FELLTHROUGH\ndone`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              WORKDIR: dir,
+              PR: '7165',
+              REPO: 'QwenLM/qwen-code',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              NEEDS_HUMAN_LABEL: 'autofix/needs-human',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              REARM_KEY: '2026-07-18T10:00:00Z',
+              ROUND_BUDGET: '2',
+              ROUND: '2',
+              BUDGET_USED: '2',
+              BUDGET_SPENT: 'true',
+              DRY_RUN: dryRun,
+              IS_BOT_AUTHOR: 'false',
+              STUB_ACTOR: actor,
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          log: stdout,
+          writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const released = runRelease();
+    expect(released.log).not.toContain('FELLTHROUGH');
+    expect(released.writes).toContain('<!-- autofix-budget-reached -->');
+    // The release is the URI-encoded REST DELETE every other site uses, and
+    // the escalation label is never part of it.
+    expect(released.writes).toContain('labels/autofix%2Ftakeover');
+    expect(released.writes).not.toContain('needs-human');
+    // The note precedes the DELETE, so a failed removal retries next tick
+    // with the note already dedup'd.
+    expect(released.writes.indexOf('autofix-budget-reached')).toBeLessThan(
+      released.writes.indexOf('labels/autofix%2Ftakeover'),
+    );
+    // Per-window dedup: a notice newer than the anchor suppresses the
+    // comment but NOT the DELETE (a failed removal must still retry).
+    const noticed = runRelease({
+      notices: [
+        {
+          user: { login: 'qwen-code-dev-bot' },
+          created_at: '2026-07-18T11:00:00Z',
+          body: '🏁 … <!-- autofix-budget-reached -->',
+        },
+      ],
+    });
+    expect(noticed.writes).not.toContain('autofix-budget-reached');
+    expect(noticed.writes).toContain('labels/autofix%2Ftakeover');
+    // Fail-closed and consent gates: none of these write anything.
+    for (const variant of [
+      { labelsJson: '' },
+      { labelsJson: '{"labels":[{"name":"autofix/skip"}]}' },
+      { labelsJson: '{"labels":[{"name":"autofix/managed"}]}' },
+      { actor: 'somebody-else' },
+      { dryRun: 'true' },
+    ]) {
+      const skipped = runRelease(variant);
+      expect(skipped.writes).toBe('');
+      expect(skipped.log).not.toContain('FELLTHROUGH');
+    }
+  });
+
+  it('counts no-op attempts for a for-N budget and keeps breaker stops escalated', () => {
+    // A no-op round writes its eval marker with the round UNCHANGED, so a
+    // budget riding on ROUND would never spend on no-ops (P1). The budget
+    // therefore counts markers. The same read fixes the breaker case: its
+    // sentinel jump to MAX_ROUNDS writes no extra marker, so five failures in
+    // a twenty-round window stay an escalation instead of a release (P2).
+    const used = reviewScanJob.match(
+      /(BUDGET_USED="\$\(jq[\s\S]*?BUDGET_SPENT=true)/,
+    )?.[1];
+    expect(used).toBeTruthy();
+    const spent = (markers, budget) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `REARM_KEY='K1'\nROUND_BUDGET='${budget}'\nMARKERS='${JSON.stringify(markers)}'\n${used.replace(/\n {12}/g, '\n')}\nprintf '%s %s' "$BUDGET_USED" "$BUDGET_SPENT"`,
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+    const mk = (win, round) => ({
+      ts: '2026-07-18T10:00:00Z',
+      round,
+      win,
+      at: '',
+    });
+    // One no-op attempt spends a one-round budget…
+    expect(spent([mk('K1', 0)], '1')).toBe('1 true');
+    // …and is only one attempt of two.
+    expect(spent([mk('K1', 0)], '2')).toBe('1 false');
+    // The breaker sentinel (round=20 after five failures) is NOT a spent
+    // twenty-round budget.
+    expect(
+      spent(
+        [mk('K1', 1), mk('K1', 2), mk('K1', 3), mk('K1', 4), mk('K1', 20)],
+        '20',
+      ),
+    ).toBe('5 false');
+    // A previous window's markers never count toward this one.
+    expect(spent([mk('OLD', 1)], '1')).toBe('0 false');
+    // A PR without a budget never spends one.
+    expect(spent([mk('K1', 1)], '0')).toBe('1 false');
+  });
+
+  it('discards a queued conflict round when the live window carries a budget', () => {
+    // Conflicts are exempt from the superseded-window discard because they
+    // stay actionable — but a NEW budgeted window must not admit work that
+    // would run on the old cap, past the new engagement limit (P2).
+    const stale = workflow.match(
+      /(if \[\[ "\$\{STALE\}" != "true" && "\$\{WINDOW:-none\}" != "\$\{LIVE_REARM_KEY\}" && \( "\$\{CONFLICT\}" != "true" \|\| "\$\{LIVE_ROUND_BUDGET\}" -gt 0 \) \]\]; then[\s\S]*?\n {10}fi)/,
+    )?.[1];
+    expect(stale).toBeTruthy();
+    const run = (conflict, budget) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `STALE=false\nWINDOW=old\nLIVE_REARM_KEY=new\nCONFLICT=${conflict}\nLIVE_ROUND_BUDGET=${budget}\n${stale.replace(/\n {10}/g, '\n')}\nprintf '%s' "$STALE"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .at(-1);
+    // Unbudgeted re-arm: the conflict exemption is preserved.
+    expect(run('true', '0')).toBe('false');
+    // Budgeted live window: the queued conflict round is discarded.
+    expect(run('true', '2')).toBe('true');
+    // The non-conflict control was already discarded.
+    expect(run('false', '0')).toBe('true');
+  });
+
+  it('keeps a bounded engagement bounded across an automatic growth-audit re-arm', () => {
+    // The audit's automatic re-arm exists to rebase the round window, but a
+    // window opened that way carries no budget marker — so rebasing a `for N`
+    // engagement would silently restore the 100-round cap (P1).
+    const script = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        '../../.github/scripts/autofix-push-and-report.sh',
+      ),
+      'utf8',
+    );
+    const fn = script.match(
+      /(emit_growth_audit_marker\(\) \{[\s\S]*?\n\})/,
+    )?.[1];
+    expect(fn).toBeTruthy();
+    const run = (ic, verdict = 'sound') => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-audit-rearm-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            `KISS_AUDIT=true\nAUDIT_VERDICT='${verdict}'\nGROWTH_BASE_WIN='W1'\nWINDOW='W1'\nWORKDIR='${dir}'\nAUTOFIX_BOT='qwen-code-dev-bot'\n${fn}\nemit_growth_audit_marker true`,
+          ],
+          { encoding: 'utf8' },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const ack = (body) => [
+      { user: { login: 'qwen-code-dev-bot' }, created_at: 'W1', body },
+    ];
+    // Unbudgeted: the audit still rebases the window.
+    expect(run(ack('<!-- takeover-ack engaged -->'))).toContain(
+      '<!-- autofix-rearm -->',
+    );
+    // Budgeted: no re-arm, so the remaining budget survives the audit.
+    const budgeted = run(
+      ack('<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->'),
+    );
+    expect(budgeted).toContain('autofix-growth-audit');
+    expect(budgeted).not.toContain('autofix-rearm');
+    // A marker on another window never suppresses the re-arm.
+    expect(
+      run([
+        {
+          user: { login: 'qwen-code-dev-bot' },
+          created_at: 'OLD',
+          body: '<!-- autofix-round-budget 2 -->',
+        },
+      ]),
+    ).toContain('<!-- autofix-rearm -->');
+    // Only a `sound` audit re-arms at all.
+    expect(run(ack('<!-- takeover-ack engaged -->'), 'drift')).not.toContain(
+      'autofix-rearm',
+    );
+  });
+
+  it('discards a same-window queued round once the attempt budget is spent', () => {
+    // A sibling's no-op spends the last attempt without advancing ROUND or
+    // changing the window key, so neither the superseded-window nor the round
+    // cap sees it; prepare must mirror the scan's attempt census (P2).
+    const block = workflow.match(
+      /(if \[\[ "\$\{STALE\}" != "true" && "\$\{LIVE_ROUND_BUDGET\}" -gt 0 && "\$\{LIVE_ATTEMPTS\}" -ge "\$\{LIVE_ROUND_BUDGET\}" \]\]; then[\s\S]*?\n {10}fi)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const run = (attempts, budget) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `STALE=false\nLIVE_ATTEMPTS='${attempts}'\nLIVE_ROUND_BUDGET='${budget}'\n${block.replace(/\n {10}/g, '\n')}\nprintf '%s' "$STALE"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .at(-1);
+    // One attempt spent of one: discard.
+    expect(run('1', '1')).toBe('true');
+    // One of two: still admitted.
+    expect(run('1', '2')).toBe('false');
+    // No budget: the ordinary paths decide.
+    expect(run('1', '0')).toBe('false');
+  });
+
   it('applies the needs-human escalation label at the cap and removes it on resume/release', () => {
     // The label contract: one env definition, one idempotent create with a
     // fixed color (a REST add of a missing label would mint a random one).
@@ -4244,6 +4594,7 @@ describe('qwen-autofix workflow', () => {
       postFails = '',
       deleteFails = '',
       cmdFrom = '',
+      cmdFor = '',
       commentFails = '',
       commentFailTimes = '',
     }) => {
@@ -4307,6 +4658,7 @@ describe('qwen-autofix workflow', () => {
               TOGGLE_COMMENT_FAILS: commentFails,
               TOGGLE_COMMENT_FAIL_TIMES: commentFailTimes,
               CMD_FROM: cmdFrom,
+              CMD_FOR: cmdFor,
               CRITICAL_ONLY_AFTER_ROUND: '5',
             },
             encoding: 'utf8',
@@ -4422,6 +4774,34 @@ describe('qwen-autofix workflow', () => {
     for (const from of ['', '0', 'abc']) {
       expect(runToggle({ cmd: 'add', cmdFrom: from }).writes).not.toContain(
         'autofix-round-start',
+      );
+    }
+    // The BUDGET marker's WRITE side: a valid 'for N' appends its own marker
+    // after the untouched engage literal on BOTH ack paths, and the copy
+    // states the release-at-N contract so the maintainer is not surprised by
+    // the label disappearing.
+    const budgetedEngage = runToggle({ cmd: 'add', cmdFor: '2' });
+    expect(budgetedEngage.writes).toContain(
+      '<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->',
+    );
+    expect(budgetedEngage.writes).toContain('Budget: 2 round(s)');
+    expect(budgetedEngage.writes).toContain('the loop removes the');
+    const budgetedRearm = runToggle({
+      cmd: 'add',
+      labels: ['autofix/takeover'],
+      cmdFor: '3',
+    });
+    expect(budgetedRearm.writes).toContain(
+      '<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 3 -->',
+    );
+    // The two parameterized forms never co-emit, and the guard values emit
+    // no marker at all — a stray marker would cap a window the maintainer
+    // never bounded.
+    expect(budgetedEngage.writes).not.toContain('autofix-round-start');
+    expect(seededEngage.writes).not.toContain('autofix-round-budget');
+    for (const n of ['', '0', 'abc']) {
+      expect(runToggle({ cmd: 'add', cmdFor: n }).writes).not.toContain(
+        'autofix-round-budget',
       );
     }
     // remove + present → label removed, through the URI-encoded path segment
@@ -6090,6 +6470,104 @@ exit 1
     );
     expect(workflow).toContain(
       "CMD_FROM: '${{ needs.route.outputs.takeover_from }}'",
+    );
+  });
+
+  it('behaviorally parses the takeover round budget and keeps every other body closed', () => {
+    // '<cmd> for N' is the SECOND parameterized form, replayed VERBATIM for
+    // the same reason the seed is: the literal prefix must still match
+    // TAKEOVER_COMMAND byte-for-byte and the tail must be a bounded integer.
+    // 'for 0' is NOT the seed's explicit-no-op spelling — a zero-round
+    // engagement is what 'stop' means — so it must fail closed with the rest.
+    const sanitize = routeStep.match(
+      /(sanitize_number\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const cmdBranch = routeStep.match(
+      /(if \[\[ "\$\{EVENT_NAME\}" == 'issue_comment' \]\]; then[\s\S]*?\n {14}fi)/,
+    )?.[1];
+    expect(sanitize).toBeTruthy();
+    expect(cmdBranch).toBeTruthy();
+    const budgetOf = (body) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-for-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash\nif [[ "$*" == *"/pulls/"* ]]; then printf '%s' 'QwenLM/qwen-code'; else printf '%s' 'write'; fi\n`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        // TAKEOVER_FOR is echoed through sanitize_number exactly as the
+        // route step's own output line does.
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${sanitize.replace(/\n {10}/g, '\n')}\nEVENT_NAME=issue_comment\nTAKEOVER_CMD=''\nTAKEOVER_FROM=''\nTAKEOVER_FOR=''\nCMD_PR=''\n${cmdBranch.replace(/\n {14}/g, '\n')}\nprintf '%s|%s' "$TAKEOVER_CMD" "$(sanitize_number "$TAKEOVER_FOR")"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              COMMENT_BODY: body,
+              SENDER_LOGIN: 'maintainer-b',
+              COMMENT_PR_AUTHOR: 'human-a',
+              HAS_PR_URL: 'url',
+              ISSUE_STATE: 'open',
+              ISSUE_NUMBER: '7165',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_COMMAND: '@qwen-code /takeover',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              REPO: 'QwenLM/qwen-code',
+              GITHUB_TOKEN: 'x',
+            },
+            encoding: 'utf8',
+          },
+        ).split('\n');
+        return out.at(-1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    expect(budgetOf('@qwen-code /takeover for 1')).toBe('add|1');
+    expect(budgetOf('  @qwen-code /takeover for 12  ')).toBe('add|12');
+    expect(budgetOf('@qwen-code /takeover for 99')).toBe('add|99');
+    // Leading zeros are decimal, not octal ('08'/'09' would error outright).
+    expect(budgetOf('@qwen-code /takeover for 02')).toBe('add|2');
+    expect(budgetOf('@qwen-code /takeover for 08')).toBe('add|8');
+    // The unparameterized forms carry no budget.
+    expect(budgetOf('@qwen-code /takeover')).toBe('add|');
+    expect(budgetOf('@qwen-code /takeover stop')).toBe('remove|');
+    // A seed is not a budget and vice versa.
+    expect(budgetOf('@qwen-code /takeover from 3')).toBe('add|');
+    for (const body of [
+      '@qwen-code /takeover for 0',
+      '@qwen-code /takeover for 00',
+      '@qwen-code /takeover for 100',
+      '@qwen-code /takeover for 3x',
+      '@qwen-code /takeover for -1',
+      '@qwen-code /takeover for',
+      '@qwen-code /takeover stop for 3',
+      '@qwen-code /takeover from 3 for 2',
+      '@qwen-code /takeover  for 3',
+      '@qwen-code /takeoverfor 3',
+      'please @qwen-code /takeover for 3',
+      '@qwen-code /takeover for 3 please',
+      '@qwen-code /takeover for 3; rm -rf /',
+      '@qwen-code /takeover for $(id)',
+      '@qwen-code /takeover for `id`',
+    ]) {
+      expect(budgetOf(body)).toBe('|');
+    }
+    // The value crosses a GITHUB_OUTPUT write and two job-boundary wires no
+    // behavioral harness exercises — pin them verbatim, or a typo silently
+    // degrades 'for N' to a bare '/takeover' with the suite still green.
+    expect(workflow).toContain(
+      'echo "takeover_for=$(sanitize_number "${TAKEOVER_FOR}")" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(workflow).toContain(
+      "takeover_for: '${{ steps.decide.outputs.takeover_for }}'",
+    );
+    expect(workflow).toContain(
+      "CMD_FOR: '${{ needs.route.outputs.takeover_for }}'",
     );
   });
 
