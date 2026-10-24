@@ -69,6 +69,7 @@ function HostDirectoryPickerHarness() {
             </label>
             <input
               id="host-directory-path"
+              autoFocus
               value={hostPath}
               onChange={(event) => setHostPath(event.target.value)}
               style={{ display: 'block', width: '100%', margin: '24px 0' }}

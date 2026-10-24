@@ -129,6 +129,7 @@ export function AddWorkspaceDialog({
   const [hostSep, setHostSep] = useState('/');
   const [browsing, setBrowsing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const browseButtonRef = useRef<HTMLButtonElement>(null);
   const listOpenRef = useRef(false);
   listOpenRef.current = listOpen && suggestions.length > 0;
   const suggestSeqRef = useRef(0);
@@ -459,6 +460,8 @@ export function AddWorkspaceDialog({
       size="md"
       dismissible={!submitting}
       modal={!(pickerUsesHostUi && browsing)}
+      modalRestoreFocusRef={browseButtonRef}
+      aria-busy={browsing || undefined}
       onClose={handleClose}
     >
       <form className="flex flex-col gap-6" onSubmit={handleSubmit}>
@@ -592,6 +595,7 @@ export function AddWorkspaceDialog({
                 )}
                 {onPick && (
                   <Button
+                    ref={browseButtonRef}
                     type="button"
                     variant="outline"
                     onMouseDown={(event) => event.preventDefault()}
@@ -599,7 +603,9 @@ export function AddWorkspaceDialog({
                     disabled={submitting || browsing}
                   >
                     <FolderOpenIcon aria-hidden="true" />
-                    {t('sidebar.addWorkspaceBrowse')}
+                    {browsing
+                      ? t('sidebar.addWorkspaceBrowsing')
+                      : t('sidebar.addWorkspaceBrowse')}
                   </Button>
                 )}
               </div>

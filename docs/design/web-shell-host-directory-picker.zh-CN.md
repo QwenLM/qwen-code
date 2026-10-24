@@ -30,6 +30,10 @@
 
 宿主可能在 Web Shell portal 之外渲染选择器。模态的 Add Workspace 对话框会阻止指针和焦点访问该 UI。仅在宿主选择器进行中，Add Workspace 临时变为非模态；完成或取消后恢复模态。宿主负责自身选择器的可访问性、焦点管理与层叠顺序。`DialogShell` 的 `modal` 默认值仍为 `true`，原生选择器路径保留模态行为。这是内部交互移交，不新增公开对话框配置。
 
+切换 Radix 模态模式仍会重新挂载对话框内容，不保留 DOM 节点身份。`DialogShell` 通过 body ref 保存并恢复正文的滚动偏移。宿主选择进行中，已接管焦点的宿主 UI 优先；否则，经兼容 shadow root 的 `isFocusUnclaimed` 检查后，将焦点停放在 Add 面板。完成或取消后，使用 `preventScroll` 将焦点返回新挂载的 Browse 按钮；按钮不可用时返回面板。选择期间面板设置 `aria-busy`，Browse 显示“正在选择目录…”。
+
+若同时打开另一个 `DialogShell`，下层对话框恢复模态时，Radix 层级及 `aria-hidden` 排序仍可能不正确，此情况尚未解决。传统滚动条引起的水平布局偏移尚未验证。
+
 Escape 保留 Add Workspace 现有的关闭行为：`DialogShell` 在 document 捕获阶段处理它，早于外部宿主选择器的普通冒泡处理器，关闭 Add 并取消选择器。宿主选择器中的显式 Cancel 操作可以返回 `undefined`，保留 Add 对话框。只取消宿主选择器的独立 Escape 归属仍待评审，本次不包含该行为。
 
 同一套迟到结果保护也覆盖原生路径，但本提案不扩展 daemon action、SDK 或后端取消契约。客户端使请求失效不保证关闭服务端的原生 OS 对话框。原生请求超时与服务端行为保持不变。
@@ -37,8 +41,8 @@ Escape 保留 Add Workspace 现有的关闭行为：`DialogShell` 在 document �
 ## 实施范围
 
 - `packages/web-shell/client/App.tsx`：公开 prop、宿主优先接线，以及传给对话框的目标/连接身份。
-- `packages/web-shell/client/components/dialogs/AddWorkspaceDialog.tsx`：使用选项对象的内部回调、取消、调用归属检查、提交保护和临时宿主 UI 交接。
-- `packages/web-shell/client/components/dialogs/DialogShell.tsx`：内部模态选项，默认值为 `true`。
+- `packages/web-shell/client/components/dialogs/AddWorkspaceDialog.tsx`：使用选项对象的内部回调、取消、调用归属检查、提交保护、忙碌提示和临时宿主 UI 交接。
+- `packages/web-shell/client/components/dialogs/DialogShell.tsx`：默认值为 `true` 的内部模态选项、正文滚动恢复，以及模态切换时的焦点交接。
 - `packages/web-shell/client/customization.tsx` 和 `index.tsx`：定义并公开导出 `WebShellWorkspaceDirectoryPicker`；两个公开组件保持现有传参路径。
 - 公开入口与对话框测试、`packages/web-shell/README.md` 和本中英文设计文档。
 
@@ -48,7 +52,9 @@ Escape 保留 Add Workspace 现有的关闭行为：`DialogShell` 在 document �
 
 实现前添加行为测试，确认它们在基线上失败。通过公开组件入口和真实对话框交互，验证 headless 与跨源连接上的宿主选择、宿主优先于原生、取消/错误不回退、回填路径但不注册，以及正常 Add 流程。保留原生能力/同源检查和注册、持久化、trust 语义的覆盖。
 
-验证用户取消、真实失败、重复选择、关闭、卸载、目标和连接变化、普通回调重渲染，以及忽略 abort 的宿主迟到 resolve/reject。断言可见的路径、错误、忙碌状态和注册副作用，而非只检查 prop 转发或回调次数。确认选择进行中时按钮提交与表单提交均被阻止，切换宿主/原生选择方式后旧结果失效。在真实浏览器中操作位于 Web Shell portal 外的宿主选择器，验证指针/焦点可用、能够返回 Add 对话框且模态行为恢复。执行受影响测试、构建、类型检查、lint、preflight 和适用的浏览器交互检查；实际结果与环境限制另行记录，不把本验收计划当作已完成验证。
+验证用户取消、真实失败、重复选择、关闭、卸载、目标和连接变化、普通回调重渲染，以及忽略 abort 的宿主迟到 resolve/reject。断言可见的路径、错误、忙碌状态和注册副作用，而非只检查 prop 转发或回调次数。确认选择进行中时按钮提交与表单提交均被阻止，切换宿主/原生选择方式后旧结果失效。
+
+在真实浏览器中操作位于 Web Shell portal 外的宿主选择器，验证键盘与指针可用、选择和取消后焦点返回 Browse，以及模态行为恢复。同时覆盖没有浏览器 UI 的 pending 宿主、可见忙碌状态和已滚动正文的偏移保持。仅宿主 UI 交互用例标记 `@smoke`，其余浏览器用例不加入该筛选。执行受影响测试、构建、类型检查、lint、preflight 和适用的浏览器交互检查；实际结果与环境限制另行记录，不把本验收计划当作已完成验证。
 
 ## 待评审决策
 

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
@@ -40,7 +40,9 @@ const submitButton = () =>
   )!;
 const browseButton = () =>
   Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
-    (button) => button.textContent === 'Browse…',
+    (button) =>
+      button.textContent === 'Browse…' ||
+      button.textContent === 'Choosing directory…',
   )!;
 
 function typeInto(target: HTMLInputElement, value: string) {
@@ -342,6 +344,164 @@ describe('AddWorkspaceDialog', () => {
       await act(async () => browseButton().click());
       expect(input().value).toBe('/daemon/second');
       expect(onAdd).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['host', 'resolve'],
+      ['host', 'cancel'],
+      ['native', 'resolve'],
+      ['native', 'cancel'],
+    ] as const)(
+      'keeps the %s picker pointer boundary correct through %s',
+      async (picker, outcome) => {
+        const pending = deferredPick();
+        mount(
+          <AddWorkspaceDialog
+            onClose={vi.fn()}
+            onAdd={vi.fn()}
+            onPick={() => pending.promise}
+            pickerUsesHostUi={picker === 'host'}
+          />,
+        );
+        expect(document.body.style.pointerEvents).toBe('none');
+
+        await act(async () => browseButton().click());
+        expect(document.body.style.pointerEvents).toBe(
+          picker === 'host' ? '' : 'none',
+        );
+        await act(async () =>
+          pending.resolve(outcome === 'resolve' ? '/daemon/picked' : undefined),
+        );
+        expect(document.body.style.pointerEvents).toBe('none');
+        expect(input().value).toBe(
+          outcome === 'resolve' ? '/daemon/picked' : '',
+        );
+      },
+    );
+
+    it('parks unclaimed host-picker focus on the busy panel and restores Browse after settling', async () => {
+      const pending = deferredPick();
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={() => pending.promise}
+          pickerUsesHostUi
+        />,
+      );
+
+      await act(async () => {
+        browseButton().focus();
+        browseButton().click();
+      });
+      const pendingPanel = document.querySelector('[data-web-shell-dialog]')!;
+      expect.soft(document.activeElement).toBe(pendingPanel);
+      expect.soft(pendingPanel.getAttribute('aria-busy')).toBe('true');
+      expect(browseButton().textContent).toBe('Choosing directory…');
+      await act(async () => pending.resolve('/daemon/picked'));
+      const settledPanel = document.querySelector('[data-web-shell-dialog]')!;
+      expect(settledPanel.getAttribute('aria-busy')).not.toBe('true');
+      expect(document.activeElement).toBe(browseButton());
+      expect(input().value).toBe('/daemon/picked');
+    });
+
+    it.each(['plain', 'service selector'] as const)(
+      'preserves the %s dialog scroll position and restores Browse instead of its first field',
+      async (configuration) => {
+        const pending = deferredPick();
+        mount(
+          <AddWorkspaceDialog
+            initialPath="/daemon/original"
+            displayNameEnabled
+            executionMode={
+              configuration === 'service selector' ? 'daemon' : undefined
+            }
+            onExecutionModeChange={
+              configuration === 'service selector' ? vi.fn() : undefined
+            }
+            onClose={vi.fn()}
+            onAdd={vi.fn()}
+            onPick={() => pending.promise}
+            pickerUsesHostUi
+          />,
+        );
+        input().form!.parentElement!.scrollTop = 120;
+        await act(async () => {
+          browseButton().focus();
+          browseButton().click();
+        });
+        expect.soft(input().form!.parentElement!.scrollTop).toBe(120);
+        await act(async () => pending.resolve('/daemon/picked'));
+        expect.soft(input().form!.parentElement!.scrollTop).toBe(120);
+        expect(document.activeElement).toBe(browseButton());
+        expect(document.activeElement).not.toBe(input());
+        expect(input().value).toBe('/daemon/picked');
+      },
+    );
+
+    it('leaves focus with a host picker that claims it during the handoff', async () => {
+      const pending = deferredPick();
+      const onClose = vi.fn();
+      function HostPicker() {
+        const [open, setOpen] = useState(false);
+        return (
+          <>
+            {open && <input id="host-picker-focus" autoFocus />}
+            <AddWorkspaceDialog
+              onClose={onClose}
+              onAdd={vi.fn()}
+              pickerUsesHostUi
+              onPick={() => {
+                setOpen(true);
+                return pending.promise;
+              }}
+            />
+          </>
+        );
+      }
+      mount(<HostPicker />);
+
+      await act(async () => browseButton().click());
+      const hostInput =
+        document.querySelector<HTMLInputElement>('#host-picker-focus')!;
+      expect(document.activeElement).toBe(hostInput);
+      expect(onClose).not.toHaveBeenCalled();
+      await act(async () => pending.resolve(undefined));
+    });
+
+    it('does not dismiss Add Workspace when the host picker receives outside pointer and focus events', async () => {
+      const pending = deferredPick();
+      const onClose = vi.fn();
+      let signal: AbortSignal | undefined;
+      mount(
+        <>
+          <input id="host-picker-outside" />
+          <AddWorkspaceDialog
+            onClose={onClose}
+            onAdd={vi.fn()}
+            pickerUsesHostUi
+            onPick={(opts) => {
+              signal = opts?.signal;
+              return pending.promise;
+            }}
+          />
+        </>,
+      );
+      await act(async () => browseButton().click());
+      const hostInput = document.querySelector<HTMLInputElement>(
+        '#host-picker-outside',
+      )!;
+      act(() => {
+        hostInput.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true }),
+        );
+        hostInput.focus();
+      });
+      expect(document.activeElement).toBe(hostInput);
+      expect(onClose).not.toHaveBeenCalled();
+      expect(signal?.aborted).toBe(false);
+      await act(async () => pending.resolve('/daemon/picked'));
+      expect(input().value).toBe('/daemon/picked');
     });
 
     it('replaces a same-frame invocation and ignores its result without releasing the new busy state', async () => {

@@ -1,15 +1,18 @@
 import {
   createContext,
+  useCallback,
   useEffect,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { ExpandIcon, ShrinkIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useTheme, WebShellThemeId } from '../../themeContext';
 import { Button } from '../ui/button';
+import { isFocusUnclaimed } from '../../utils/dom';
 import {
   Dialog,
   DialogClose,
@@ -29,6 +32,8 @@ interface DialogShellProps {
   allowFullscreen?: boolean;
   dismissible?: boolean;
   modal?: boolean;
+  modalRestoreFocusRef?: RefObject<HTMLElement | null>;
+  'aria-busy'?: boolean;
   onClose: () => void;
   children: ReactNode;
 }
@@ -84,6 +89,8 @@ export function DialogShell({
   allowFullscreen = false,
   dismissible = true,
   modal = true,
+  modalRestoreFocusRef,
+  'aria-busy': ariaBusy,
   onClose,
   children,
 }: DialogShellProps) {
@@ -91,6 +98,22 @@ export function DialogShell({
   const theme = useTheme();
   const [fullscreen, setFullscreen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const scrollPositionRef = useRef({ top: 0, left: 0 });
+  const restoreModalFocusRef = useRef(false);
+  const setBodyRef = useCallback((node: HTMLDivElement | null) => {
+    if (bodyRef.current) {
+      scrollPositionRef.current = {
+        top: bodyRef.current.scrollTop,
+        left: bodyRef.current.scrollLeft,
+      };
+    }
+    bodyRef.current = node;
+    if (node) {
+      node.scrollTop = scrollPositionRef.current.top;
+      node.scrollLeft = scrollPositionRef.current.left;
+    }
+  }, []);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const [previouslyFocused] = useState<HTMLElement | null>(() =>
@@ -199,6 +222,7 @@ export function DialogShell({
               : sizeClass[size]
           }`}
           aria-label={title}
+          aria-busy={ariaBusy}
           data-keyboard-scope
           data-web-shell-dialog
           data-fullscreen={fullscreen ? 'true' : undefined}
@@ -217,7 +241,24 @@ export function DialogShell({
           }}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
-            if (!modal) return;
+            if (!modal) {
+              restoreModalFocusRef.current = true;
+              const panel = panelRef.current;
+              if (panel && isFocusUnclaimed(panel.getRootNode())) {
+                panel.focus({ preventScroll: true });
+              }
+              return;
+            }
+            if (restoreModalFocusRef.current) {
+              restoreModalFocusRef.current = false;
+              const target = modalRestoreFocusRef?.current;
+              const focusTarget =
+                target?.isConnected && !target.hasAttribute('disabled')
+                  ? target
+                  : panelRef.current;
+              focusTarget?.focus({ preventScroll: true });
+              return;
+            }
             const preferred = getFocusable(panelRef.current).find(
               (element) => !element.hasAttribute('data-dialog-close'),
             );
@@ -267,6 +308,7 @@ export function DialogShell({
             )}
           </DialogHeader>
           <div
+            ref={setBodyRef}
             className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4"
             data-dialog-fullscreen={fullscreen ? '' : undefined}
           >

@@ -85,30 +85,40 @@ async function completePicker(
   }, result);
 }
 
-test('allows real interaction with a host-owned directory browser outside WebShell', async ({
+test('allows real interaction with a host-owned directory browser outside WebShell @smoke', async ({
   page,
 }, testInfo) => {
   await openHarness(page, testInfo, { remote: true, interactiveHost: true });
   await openDialog(page);
-  await dialog(page).getByRole('button', { name: 'Browse…' }).click();
+  const browse = dialog(page).getByRole('button', { name: 'Browse…' });
+  await page.keyboard.press('Tab');
+  await expect(browse).toBeFocused();
+  await page.keyboard.press('Enter');
   const host = page.getByRole('dialog', { name: 'Host directory browser' });
   await expect(host).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('host-browser-open.png') });
   const input = host.getByLabel('Directory on connected daemon');
+  await expect(input).toBeFocused();
   await input.click();
   await expect(input).toBeFocused();
   await input.fill(PICKED_PATH);
   await page.screenshot({
     path: testInfo.outputPath('host-browser-focused.png'),
   });
-  await host.getByRole('button', { name: 'Select host directory' }).click();
+  await page.keyboard.press('Tab');
+  await expect(
+    host.getByRole('button', { name: 'Select host directory' }),
+  ).toBeFocused();
+  await page.keyboard.press('Enter');
   await expect(host).toHaveCount(0);
   await expect(page.locator('#add-workspace-path')).toHaveValue(PICKED_PATH);
+  await expect(browse).toBeFocused();
   await dialog(page).getByRole('button', { name: 'Browse…' }).click();
   await host.getByRole('button', { name: 'Cancel host selection' }).click();
   await expect(host).toHaveCount(0);
   await expect(page.locator('#add-workspace-path')).toHaveValue(PICKED_PATH);
   await expect(dialog(page).getByRole('alert')).toHaveCount(0);
+  await expect(browse).toBeFocused();
   const workspacePath = page.locator('#add-workspace-path');
   await workspacePath.click();
   await expect(workspacePath).toBeFocused();
@@ -125,6 +135,55 @@ test('allows real interaction with a host-owned directory browser outside WebShe
   await page.screenshot({
     path: testInfo.outputPath('dialog-restored-after-cancel.png'),
   });
+});
+
+test('parks focus for a pending host without browser UI and returns to Browse', async ({
+  page,
+}, testInfo) => {
+  await openHarness(page, testInfo, { remote: true });
+  await openDialog(page);
+  const browse = dialog(page).getByRole('button', { name: 'Browse…' });
+  await page.keyboard.press('Tab');
+  await expect(browse).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByTestId('host-picker-calls')).toHaveText('1');
+  await expect.soft(dialog(page)).toBeFocused();
+  await expect.soft(dialog(page)).toHaveAttribute('aria-busy', 'true');
+  await completePicker(page, { id: 1, path: PICKED_PATH });
+  await expect(page.locator('#add-workspace-path')).toHaveValue(PICKED_PATH);
+  await expect.soft(browse).toBeFocused();
+  await expect(dialog(page)).not.toHaveAttribute('aria-busy', 'true');
+  await page.keyboard.type('stray-typing');
+  await expect(page.locator('#add-workspace-path')).toHaveValue(PICKED_PATH);
+});
+
+test('preserves the scrolled Add Workspace body across host selection', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 400 });
+  await openHarness(page, testInfo, { remote: true });
+  await openDialog(page);
+  await page.keyboard.press('Tab');
+  await expect(
+    dialog(page).getByRole('button', { name: 'Browse…' }),
+  ).toBeFocused();
+  const body = dialog(page).locator('.overflow-y-auto');
+  await body.hover();
+  await page.mouse.wheel(0, 90);
+  await expect
+    .poll(() => body.evaluate((node) => node.scrollTop))
+    .toBeGreaterThan(0);
+  const scrollTop = await body.evaluate((node) => node.scrollTop);
+  await page.keyboard.press('Enter');
+  await expect(page.getByTestId('host-picker-calls')).toHaveText('1');
+  await expect
+    .poll(() => body.evaluate((node) => node.scrollTop))
+    .toBe(scrollTop);
+  await completePicker(page, { id: 1, path: PICKED_PATH });
+  await expect(page.locator('#add-workspace-path')).toHaveValue(PICKED_PATH);
+  await expect
+    .poll(() => body.evaluate((node) => node.scrollTop))
+    .toBe(scrollTop);
 });
 
 test('fills a headless cross-origin host path and registers only on Add', async ({

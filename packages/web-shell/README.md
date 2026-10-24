@@ -600,6 +600,13 @@ headless 或跨源 daemon 无需声明 `native_directory_picker`。
 portal 外的宿主 UI；完成或取消后恢复。宿主负责自己的选择器可访问性、焦点管理和
 层叠顺序。原生选择器保留原来的模态行为；这不增加公开的模态配置选项。
 
+模态切换仍会重新挂载内容，不保证 DOM 节点身份；对话框保存并恢复正文滚动偏移。
+已获得焦点的宿主 UI 保持优先，否则经兼容 shadow root 的检查后，将焦点停放在 Add
+面板。完成或取消后，以 `preventScroll` 将焦点返回新的 Browse 按钮；按钮不可用时
+返回面板。选择期间面板设置 `aria-busy`，Browse 显示“正在选择目录…”。
+并发打开其他 `DialogShell` 后，下层恢复时的 Radix 层级与 `aria-hidden` 排序仍未
+解决；传统滚动条引起的水平布局偏移尚未验证。
+
 Escape 仍沿用 Add Workspace 的关闭行为：宿主使用普通冒泡 Escape 处理器时，
 `DialogShell` 的 document 捕获处理会先关闭 Add 并取消选择器。宿主显式 Cancel
 返回 `undefined` 则保留 Add；只取消宿主选择器的独立 Escape 归属仍待评审。

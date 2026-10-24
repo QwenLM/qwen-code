@@ -2070,6 +2070,7 @@ const EN: Messages = {
   'sidebar.addWorkspaceTitle': 'Add Workspace',
   'sidebar.addWorkspacePath': 'Directory path',
   'sidebar.addWorkspaceBrowse': 'Browse…',
+  'sidebar.addWorkspaceBrowsing': 'Choosing directory…',
   'sidebar.addWorkspaceBrowseError':
     'Unable to open the system folder picker. Enter an absolute path instead.',
   'sidebar.addWorkspaceDisplayName': 'Display name (optional)',
@@ -6443,6 +6444,7 @@ const ZH: Messages = {
   'sidebar.addWorkspaceTitle': '添加工作区',
   'sidebar.addWorkspacePath': '目录路径',
   'sidebar.addWorkspaceBrowse': '浏览…',
+  'sidebar.addWorkspaceBrowsing': '正在选择目录…',
   'sidebar.addWorkspaceBrowseError':
     '无法打开系统文件夹选择器，请改为输入绝对路径。',
   'sidebar.addWorkspaceDisplayName': '展示名称（可选）',

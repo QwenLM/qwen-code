@@ -30,6 +30,10 @@ Recreating an inline callback during an ordinary render does not represent a new
 
 A host may render its picker outside the Web Shell portal. The modal Add Workspace dialog otherwise blocks pointer and focus access to that UI. Only while a host picker is pending, Add Workspace temporarily becomes nonmodal; it restores modal behavior after completion or cancellation. The host owns its picker's accessibility, focus management, and stacking order. `DialogShell` retains a default of `modal: true`, and the native picker path retains its modal behavior. This is an internal handoff, not a new public dialog configuration.
 
+Changing Radix's modal mode still remounts the dialog content; DOM identity is not preserved. `DialogShell` saves and restores its body's scroll offsets through the body ref. While the host is pending, focus stays with any host UI that has already claimed it. Otherwise, a shadow-root-aware `isFocusUnclaimed` check allows focus to park on the Add panel. On completion or cancellation, focus returns to the newly mounted Browse button, or the panel if that button is unavailable, using `preventScroll`. While choosing, the panel exposes `aria-busy` and Browse displays “Choosing directory…”.
+
+If another `DialogShell` opens concurrently, restoring the lower dialog's modal mode can still leave Radix layer ordering and `aria-hidden` ordering incorrect; this case remains unresolved. Horizontal layout shifts with classic scrollbars have not been validated.
+
 Escape retains the existing Add Workspace close behavior: `DialogShell` handles it during document capture, before an external host picker's ordinary bubbling handler, closing Add and aborting the picker. An explicit Cancel action in the host picker can instead return `undefined` and leave Add open. Independent Escape ownership that cancels only the host picker remains a decision for review and is not included in this change.
 
 The same stale-result guard protects the native path, but this proposal does not widen the daemon action, SDK, or backend cancellation contract. Client-side invalidation does not guarantee that a server-side native OS dialog closes. Native request timeouts and server-side behavior remain unchanged.
@@ -37,8 +41,8 @@ The same stale-result guard protects the native path, but this proposal does not
 ## Implementation scope
 
 - `packages/web-shell/client/App.tsx`: public prop, host-first wiring, and target/connection identity supplied to the dialog.
-- `packages/web-shell/client/components/dialogs/AddWorkspaceDialog.tsx`: options-based internal callback, cancellation, invocation ownership, guarded submission, and temporary host-UI handoff.
-- `packages/web-shell/client/components/dialogs/DialogShell.tsx`: internal modal option, defaulting to `true`.
+- `packages/web-shell/client/components/dialogs/AddWorkspaceDialog.tsx`: options-based internal callback, cancellation, invocation ownership, guarded submission, busy presentation, and temporary host-UI handoff.
+- `packages/web-shell/client/components/dialogs/DialogShell.tsx`: internal modal option defaulting to `true`, body scroll restoration, and focus handoff across modal changes.
 - `packages/web-shell/client/customization.tsx` and `index.tsx`: define and publicly export `WebShellWorkspaceDirectoryPicker`; both public components retain their existing forwarding path.
 - Public-entry and dialog tests, `packages/web-shell/README.md`, and this bilingual design.
 
@@ -48,7 +52,9 @@ No dialog replacement API, directory creation, new backend filesystem endpoint, 
 
 Add behavioral tests before implementation and confirm they fail against the baseline. Through the public component entry and real dialog interactions, verify host selection on headless and cross-origin connections, host-over-native precedence, no fallback on cancellation/errors, path population without registration, and the normal Add flow. Retain coverage of native capability/origin checks and registration, persistence, and trust semantics.
 
-Exercise user cancellation, real failure, repeated selection, close, unmount, target and connection changes, ordinary callback rerenders, and late resolve/reject from a host that ignores abort. Assert visible path/error/busy state and registration side effects, not just prop forwarding or callback counts. Confirm that pending selection prevents both button and form submission and that switching host/native modes invalidates old results. In a real browser, operate a host picker rendered outside the Web Shell portal and verify pointer/focus access, return to the Add dialog, and restored modal behavior. Run affected tests, build, type checking, lint, preflight, and applicable browser interaction checks; record actual outcomes and environment limitations separately from this acceptance plan.
+Exercise user cancellation, real failure, repeated selection, close, unmount, target and connection changes, ordinary callback rerenders, and late resolve/reject from a host that ignores abort. Assert visible path/error/busy state and registration side effects, not just prop forwarding or callback counts. Confirm that pending selection prevents both button and form submission and that switching host/native modes invalidates old results.
+
+In a real browser, operate a host picker rendered outside the Web Shell portal and verify keyboard and pointer access, focus returning to Browse after selection and cancellation, and restored modal behavior. Also cover a pending host without browser UI, visible busy state, and preservation of a scrolled dialog body. Only the host-owned UI interaction case is tagged `@smoke`; the remaining browser cases are not added to that selection. Run affected tests, build, type checking, lint, preflight, and applicable browser interaction checks; record actual outcomes and environment limitations separately from this acceptance plan.
 
 ## Decisions for review
 
