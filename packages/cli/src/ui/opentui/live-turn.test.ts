@@ -41,7 +41,7 @@ import { helpCommand } from '../commands/helpCommand.js';
 import { aboutCommand } from '../commands/aboutCommand.js';
 import { getExtendedSystemInfo } from '../systemInfo.js';
 import { isSyntheticHistoryItem } from '../utils/historyUtils.js';
-
+import type { HistoryItem } from '../types.js';
 import { OpenTuiSlashGateway } from './slash-gateway.js';
 import { createOpenTuiCommandContext } from './commands-context.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -206,6 +206,130 @@ describe('useOpenTuiLiveTurn submit paths', () => {
   function park(turn: number, call: WaitingCallInfo) {
     (live.turns[turn - 1].options as LivePromptOptions).onWaitingCall?.(call);
   }
+
+  it('keeps the current seq while the real interrupt aborts its signal', async () => {
+    const hook = renderHook(() => useOpenTuiLiveTurn({ config: {} as Config }));
+    try {
+      await act(async () => {
+        expect(hook.result.current.scheduleTool('test_tool', {})).toBe(true);
+      });
+      expect(live.turns).toHaveLength(1);
+      const options = live.turns[0].options as LivePromptOptions;
+      expect(options.isCurrentTurn?.()).toBe(true);
+      expect(live.signals[0].aborted).toBe(false);
+      act(() => hook.result.current.interrupt());
+      expect(live.signals[0].aborted).toBe(true);
+      expect(options.isCurrentTurn?.()).toBe(true);
+      await act(async () => live.waiters.shift()?.());
+      expect(hook.result.current.streaming).toBe(false);
+    } finally {
+      await act(async () => live.waiters.shift()?.());
+      hook.unmount();
+    }
+  });
+
+  it('keeps loaded zero-render sources through the real checkpoint snapshot getter', async () => {
+    const config = {} as Config;
+    const settings = { merged: {} } as LoadedSettings;
+    const hook = renderHook(() => useOpenTuiLiveTurn({ config }));
+    const host = new OpenTuiAppHost({
+      config,
+      settings,
+      logger: null,
+      transcript: {
+        append: hook.result.current.applyEvent,
+        reset: hook.result.current.resetTranscript,
+        clear: () => hook.result.current.resetTranscript([]),
+      },
+      confirmations: {
+        presentShell: async () => ({ outcome: ToolConfirmationOutcome.Cancel }),
+        presentAction: async () => false,
+      },
+      onChange: () => {},
+      toggleVimEnabled: async () => false,
+      reloadCommands: () => {},
+      startNewSession: () => {},
+      getSessionStats: () => ({}) as SessionStatsState,
+    });
+    const context = createOpenTuiCommandContext(
+      host,
+      { config, settings, logger: null },
+      { wasIdleBeforeDispatch: true },
+    );
+    const history: HistoryItem[] = [
+      {
+        id: 2101,
+        type: 'user',
+        text: 'restored user',
+        promptId: 'saved#0',
+        sentToModel: true,
+      },
+      {
+        id: 2102,
+        type: 'gemini',
+        text: 'saved answer',
+        timestamp: 12,
+        images: [{ mimeType: 'image/png', data: 'raw-image-payload' }],
+        omittedImageCount: 2,
+      },
+      {
+        id: 2103,
+        type: 'gemini_thought',
+        text: 'saved reasoning',
+        durationMs: 42,
+      },
+      {
+        id: 2104,
+        type: 'info',
+        text: 'saved link',
+        linkUrl: 'https://example.test/source',
+        linkText: 'raw label',
+      },
+      {
+        id: 2105,
+        type: 'gemini',
+        text: '',
+        timestamp: 13,
+        images: [],
+        omittedImageCount: 0,
+      },
+      {
+        id: 2106,
+        type: 'gemini_content',
+        text: '',
+        display: { suppressOnRestore: true },
+      },
+    ];
+    try {
+      act(() => context.ui.loadHistory(history));
+      expect(host.getHistory()).toBe(history);
+      await act(async () => {
+        expect(
+          hook.result.current.scheduleTool('read_file', {
+            file_path: 'owned.txt',
+          }),
+        ).toBe(true);
+      });
+      expect(live.turns).toHaveLength(1);
+      const options = live.turns[0].options as LivePromptOptions;
+      expect(options.checkpointHistory).toBeDefined();
+      // This is the exact production callback supplied to livePromptEvents,
+      // including its pending/streaming filters, not a copied filter in this test.
+      const beforeDone = options.checkpointHistory!.snapshot();
+      expect(beforeDone).toEqual(history);
+      history.forEach((source, index) =>
+        expect(beforeDone[index]).toBe(source),
+      );
+      await act(async () => live.waiters.shift()?.());
+      expect(hook.result.current.streaming).toBe(false);
+      const afterDone = options.checkpointHistory!.snapshot();
+      expect(afterDone).toEqual(history);
+      history.forEach((source, index) => expect(afterDone[index]).toBe(source));
+    } finally {
+      await act(async () => live.waiters.shift()?.());
+      hook.unmount();
+    }
+  });
 
   it('expands restored history without resetting the live turn or its structured queue', async () => {
     const config = {} as Config;
@@ -711,11 +835,16 @@ describe('useOpenTuiLiveTurn submit paths', () => {
         });
         expect(host.getHistory().at(-1)).toBe(canonical);
         expect(hook.result.current.items).toEqual(
-          output === 'status' ? [beforeCancel[0], beforeCancel[1]] : [],
+          output === 'status'
+            ? [
+                beforeCancel[0],
+                { ...beforeCancel[1], canonicalResponseEnded: true },
+              ]
+            : [],
         );
         if (output === 'status') {
           expect(hook.result.current.items[0]).toBe(beforeCancel[0]);
-          expect(hook.result.current.items[1]).toBe(beforeCancel[1]);
+          expect(hook.result.current.items[1].id).toBe(beforeCancel[1].id);
           expect(hook.result.current.items[1].canonicalHistoryItem).toBe(
             canonical,
           );
