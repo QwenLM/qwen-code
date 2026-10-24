@@ -135,7 +135,9 @@ export {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_SKILLS_SNAPSHOT_TTL_MS = 5_000;
+// Also defines the wire-visible age at which snapshot.stale becomes true.
+const WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS = 1_000;
+const WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS = 5_000;
 
 function createSkillToggleMutation(input: {
   skills: ReadonlyArray<{ name: string; enabled: boolean }>;
@@ -294,7 +296,10 @@ export function createDaemonWorkspaceService(
   // the child channel has been reaped. See `getWorkspaceSkillsStatus`.
   let lastWorkspaceSkillsStatus: ServeWorkspaceSkillsStatus | undefined;
   let lastWorkspaceSkillsStatusAt = 0;
+  let lastWorkspaceSkillsReadStartedAt: number | undefined;
   let workspaceSkillsGeneration = 0;
+  let workspaceSkillsReadSequence = 0;
+  let publishedWorkspaceSkillsReadSequence = 0;
   let inFlightWorkspaceSkillsStatus:
     | {
         generation: number;
@@ -306,6 +311,8 @@ export function createDaemonWorkspaceService(
     workspaceSkillsGeneration += 1;
     lastWorkspaceSkillsStatus = undefined;
     lastWorkspaceSkillsStatusAt = 0;
+    lastWorkspaceSkillsReadStartedAt = undefined;
+    inFlightWorkspaceSkillsStatus = undefined;
     workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
   };
 
@@ -322,8 +329,19 @@ export function createDaemonWorkspaceService(
     return createIdleWorkspaceSkillsStatus(boundWorkspace);
   };
 
+  const unavailableWorkspaceSkillsStatus = (): ServeWorkspaceSkillsStatus => ({
+    ...createIdleWorkspaceSkillsStatus(boundWorkspace),
+    errors: [
+      {
+        kind: 'skills',
+        status: 'error',
+        error: 'Skills catalog is unavailable; retry the request',
+      },
+    ],
+  });
+
   const readWorkspaceSkillsStatus = async (
-    generation: number,
+    allowRetainedSnapshot = true,
   ): Promise<ServeWorkspaceSkillsStatus> => {
     let status: ServeWorkspaceSkillsStatus;
     try {
@@ -342,73 +360,143 @@ export function createDaemonWorkspaceService(
       );
       status = createIdleWorkspaceSkillsStatus(boundWorkspace);
     }
-    if (status.initialized && generation === workspaceSkillsGeneration) {
-      lastWorkspaceSkillsStatus = status;
-      lastWorkspaceSkillsStatusAt = Date.now();
+    if (
+      (status.initialized && !status.errors?.length) ||
+      (allowRetainedSnapshot && lastWorkspaceSkillsStatus)
+    ) {
+      if (status.errors?.length) {
+        writeStderrLine(
+          `qwen serve: workspace skills observation reported errors, keeping the retained catalog: ${status.errors
+            .map((cell) => cell.error)
+            .join('; ')}`,
+        );
+      }
       return status;
     }
-    // Live child unavailable. Prefer the last answer it produced (keeps the
-    // full, extension-aware list available across a reap)...
-    if (lastWorkspaceSkillsStatus) {
-      // Only extend the freshness window when this read still owns the current
-      // generation. A read that started before an invalidation must not push out
-      // the TTL of the snapshot some later read committed — that would let a
-      // post-mutation snapshot go unrevalidated for longer than the window.
-      if (generation === workspaceSkillsGeneration) {
-        lastWorkspaceSkillsStatusAt = Date.now();
-      }
-      return lastWorkspaceSkillsStatus;
-    }
-    // ...then fall back to daemon-local enumeration, so a child that has not
+    // Fall back to daemon-local enumeration, so a child that has not
     // answered even once (e.g. a preheat that times out under `npm run dev`)
     // still yields the on-disk skills — `/review` included. The provider
     // handles its own errors, but it is injected, so guard the call too and
-    // degrade to the idle placeholder rather than failing the request —
+    // report unavailability rather than failing the request —
     // matching getWorkspaceEnvStatus / getWorkspacePreflightStatus.
+    if (status.errors?.length) {
+      writeStderrLine(
+        `qwen serve: workspace skills observation reported errors, falling back to daemon-local enumeration: ${status.errors
+          .map((cell) => cell.error)
+          .join('; ')}`,
+      );
+    }
     if (workspaceSkillsStatusProvider) {
       try {
-        const localStatus = await workspaceSkillsStatusProvider(boundWorkspace);
-        if (
-          localStatus.initialized &&
-          generation === workspaceSkillsGeneration
-        ) {
-          lastWorkspaceSkillsStatus = localStatus;
-          lastWorkspaceSkillsStatusAt = Date.now();
+        if (!allowRetainedSnapshot) {
+          workspaceSkillsStatusProvider.invalidate?.(boundWorkspace);
         }
-        return localStatus;
+        status = await workspaceSkillsStatusProvider(boundWorkspace);
       } catch (err) {
         writeStderrLine(
           `qwen serve: getWorkspaceSkillsStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
-    return status;
+    if (status.errors?.length) return { ...status, initialized: false };
+    return status.initialized ? status : unavailableWorkspaceSkillsStatus();
   };
 
-  const getWorkspaceSkillsStatus = (): Promise<ServeWorkspaceSkillsStatus> => {
-    const cacheAgeMs = Date.now() - lastWorkspaceSkillsStatusAt;
-    if (
-      lastWorkspaceSkillsStatus &&
-      cacheAgeMs >= 0 &&
-      cacheAgeMs < WORKSPACE_SKILLS_SNAPSHOT_TTL_MS
-    ) {
-      return Promise.resolve(lastWorkspaceSkillsStatus);
-    }
-
-    const generation = workspaceSkillsGeneration;
-    if (inFlightWorkspaceSkillsStatus?.generation === generation) {
-      return inFlightWorkspaceSkillsStatus.promise;
-    }
-
-    const promise = readWorkspaceSkillsStatus(generation);
-    inFlightWorkspaceSkillsStatus = { generation, promise };
-    const clearInFlight = () => {
-      if (inFlightWorkspaceSkillsStatus?.promise === promise) {
-        inFlightWorkspaceSkillsStatus = undefined;
-      }
+  const skillsSnapshot = (): ServeWorkspaceSkillsStatus | undefined => {
+    if (!lastWorkspaceSkillsStatus) return undefined;
+    const ageMs = Math.max(0, Date.now() - lastWorkspaceSkillsStatusAt);
+    return {
+      ...lastWorkspaceSkillsStatus,
+      snapshot: {
+        observedAt: lastWorkspaceSkillsStatusAt,
+        ageMs,
+        stale: ageMs >= WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS,
+        refreshing: inFlightWorkspaceSkillsStatus !== undefined,
+      },
     };
-    void promise.then(clearInFlight, clearInFlight);
-    return promise;
+  };
+
+  const revalidateWorkspaceSkillsStatus =
+    (): Promise<ServeWorkspaceSkillsStatus> => {
+      const generation = workspaceSkillsGeneration;
+      if (inFlightWorkspaceSkillsStatus?.generation === generation) {
+        return inFlightWorkspaceSkillsStatus.promise;
+      }
+      const startedAt = Date.now();
+      const sequence = ++workspaceSkillsReadSequence;
+      lastWorkspaceSkillsReadStartedAt = startedAt;
+      // A foreground read needs an observation. Let ACP's configured timeout
+      // run before local enumeration, even when either takes more than 5s.
+      const background = lastWorkspaceSkillsStatus !== undefined;
+      const observation = Promise.resolve()
+        .then(() => readWorkspaceSkillsStatus())
+        .then((status) => {
+          assertActiveGeneration();
+          // Releasing a slow task's slot must not prevent eventual updates.
+          // Order publication by start sequence, independently of the clock.
+          if (
+            generation === workspaceSkillsGeneration &&
+            sequence > publishedWorkspaceSkillsReadSequence &&
+            status.initialized &&
+            !status.errors?.length
+          ) {
+            lastWorkspaceSkillsStatus = status;
+            lastWorkspaceSkillsStatusAt = startedAt;
+            publishedWorkspaceSkillsReadSequence = sequence;
+          }
+          return status;
+        });
+      const read: NonNullable<typeof inFlightWorkspaceSkillsStatus> = {
+        generation,
+        promise: (background
+          ? withTimeout(
+              observation,
+              WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS,
+              'workspace skills revalidation',
+            )
+          : observation
+        )
+          .catch((error: unknown) => {
+            assertActiveGeneration();
+            writeStderrLineSafe(
+              `qwen serve: workspace skills revalidation failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return unavailableWorkspaceSkillsStatus();
+          })
+          .finally(() => {
+            if (inFlightWorkspaceSkillsStatus === read) {
+              inFlightWorkspaceSkillsStatus = undefined;
+            }
+          }),
+      };
+      inFlightWorkspaceSkillsStatus = read;
+      return read.promise;
+    };
+
+  const getWorkspaceSkillsStatus = (): Promise<ServeWorkspaceSkillsStatus> => {
+    assertActiveGeneration();
+    const elapsed =
+      lastWorkspaceSkillsReadStartedAt === undefined
+        ? Infinity
+        : Date.now() - lastWorkspaceSkillsReadStartedAt;
+    const canStart =
+      elapsed < 0 || elapsed >= WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS;
+    if (!lastWorkspaceSkillsStatus) {
+      if (!inFlightWorkspaceSkillsStatus && !canStart) {
+        return Promise.resolve(unavailableWorkspaceSkillsStatus());
+      }
+      return revalidateWorkspaceSkillsStatus().then(
+        (status) => skillsSnapshot() ?? status,
+      );
+    }
+    if (!inFlightWorkspaceSkillsStatus && canStart) {
+      void revalidateWorkspaceSkillsStatus().catch((error: unknown) => {
+        writeStderrLineSafe(
+          `qwen serve: workspace skills revalidation failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
+    return Promise.resolve(skillsSnapshot()!);
   };
 
   const refreshWorkspaceSkillsAfterMutation = async (): Promise<void> => {
@@ -452,7 +540,16 @@ export function createDaemonWorkspaceService(
       );
     },
 
-    async getWorkspaceSkillsStatus(_ctx: WorkspaceRequestContext) {
+    async getWorkspaceSkillsStatus(
+      _ctx: WorkspaceRequestContext,
+      opts?: { requireFresh?: boolean },
+    ) {
+      if (opts?.requireFresh) {
+        assertActiveGeneration();
+        const status = await readWorkspaceSkillsStatus(false);
+        assertActiveGeneration();
+        return status;
+      }
       // Skills are enumerated by the ACP child, which owns the live
       // SkillManager (including extension-provided skills). `queryWorkspaceStatus`
       // returns the idle placeholder (`initialized: false`, empty `skills`)
@@ -499,10 +596,16 @@ export function createDaemonWorkspaceService(
       const channelLive = () => isChannelLive?.() ?? false;
       const finish = (
         result: Omit<WorkspaceAcpPreheatResult, 'durationMs'>,
-      ): WorkspaceAcpPreheatResult => ({
-        ...result,
-        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
-      });
+      ): WorkspaceAcpPreheatResult => {
+        if (result.ready) {
+          assertActiveGeneration();
+          invalidateWorkspaceSkillsSnapshot();
+        }
+        return {
+          ...result,
+          durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        };
+      };
 
       if (!preheatAcpChildOnBridge) {
         if (channelLive()) {
@@ -1125,11 +1228,9 @@ export function createDaemonWorkspaceService(
       const status =
         opts?.refreshRuntime === false
           ? await getWorkspaceSkillsConfigStatus()
-          : await getWorkspaceSkillsStatus();
-      if (
-        opts?.refreshRuntime === false &&
-        (!status.initialized || status.errors?.length)
-      ) {
+          : await readWorkspaceSkillsStatus(false);
+      assertActiveGeneration();
+      if (!status.initialized || status.errors?.length) {
         throw new WorkspaceSkillManagementError(
           'skills_config_unavailable',
           'Skills configuration could not be enumerated',
