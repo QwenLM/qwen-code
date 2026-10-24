@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -76,6 +77,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import {
   isItemVisible,
   isSettingVisible,
+  OUTPUT_LANGUAGE_SETTING_KEY,
   type WebShellSettingsOptions,
 } from '../../settings';
 
@@ -85,6 +87,12 @@ interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
   presentation?: WebShellSettingsOptions;
   onLanguageChange: (language: WebShellLanguage, scope: Scope) => void;
+  /**
+   * Applies a model output language through `/language output`. Resolves to
+   * whether the value was applied, so a rejected commit can restore the saved
+   * value instead of leaving an unsaved draft on screen.
+   */
+  onOutputLanguageChange: (language: string) => Promise<boolean> | boolean;
   onSubDialog: (settingKey: string, scope: Scope) => void;
   onThemeChange: (theme: WebShellTheme) => void;
   chatWidthMode: ChatWidthMode;
@@ -348,6 +356,246 @@ function SettingsRow({
   );
 }
 
+// A commit may be rejected (busy session, failed command). The saved value
+// does not change in that case, so the draft has to be restored explicitly.
+function applyCommitResult(result: unknown, restore: () => void): void {
+  if (result && typeof (result as Promise<unknown>).then === 'function') {
+    void (result as Promise<unknown>).then(
+      (applied) => {
+        if (applied === false) restore();
+      },
+      () => restore(),
+    );
+    return;
+  }
+  if (result === false) restore();
+}
+
+function OutputLanguageCombobox({
+  name,
+  label,
+  value,
+  options,
+  disabled,
+  placeholder,
+  onCommit,
+}: {
+  name: string;
+  label: string;
+  value: string;
+  options: ReadonlyArray<{ value: string | number; label: string }>;
+  disabled: boolean;
+  placeholder: string;
+  onCommit: (value: string) => unknown;
+}) {
+  const { t } = useI18n();
+  const currentValue = value;
+  const [draft, setDraft] = useState(currentValue);
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  // Enter takes the highlighted row only after the user moved through the
+  // list; otherwise it keeps the exact typed text.
+  const [navigated, setNavigated] = useState(false);
+  const [pending, setPending] = useState(false);
+  const lastCommittedRef = useRef<string | null>(null);
+  const listId = `${name}-options`;
+
+  useEffect(() => {
+    setDraft(currentValue);
+    setNavigated(false);
+    setActiveIndex(0);
+    lastCommittedRef.current = null;
+  }, [currentValue]);
+
+  const items = useMemo(() => {
+    const all = [
+      { value: '', label: placeholder },
+      ...options.map((option) => ({
+        value: String(option.value),
+        label: option.label,
+      })),
+    ];
+    const query = draft.trim().toLowerCase();
+    // Opening on the saved value shows every suggestion; only an edited draft
+    // narrows the list.
+    if (!query || query === currentValue.trim().toLowerCase()) return all;
+    const matches = all.filter(
+      (item) =>
+        item.value.toLowerCase().includes(query) ||
+        item.label.toLowerCase().includes(query),
+    );
+    if (matches.length > 0) return matches;
+    // The setting accepts any language name, so an unmatched draft stays
+    // selectable as free-form input.
+    return [
+      {
+        value: draft.trim(),
+        label: t('settings.option.general.outputLanguage.useCustom', {
+          value: draft.trim(),
+        }),
+      },
+    ];
+  }, [currentValue, draft, options, placeholder, t]);
+
+  const commit = (next: string) => {
+    if (pending) return;
+    const trimmed = next.trim();
+    setOpen(false);
+    setNavigated(false);
+    setActiveIndex(0);
+    if (
+      trimmed === currentValue.trim() ||
+      trimmed === lastCommittedRef.current
+    ) {
+      setDraft(currentValue);
+      return;
+    }
+    lastCommittedRef.current = trimmed;
+    // Show the value being saved so a later blur cannot resubmit the query.
+    setDraft(trimmed);
+    setPending(true);
+    const settle = (applied: unknown) => {
+      setPending(false);
+      if (applied === false) {
+        lastCommittedRef.current = null;
+        setDraft(currentValue);
+      }
+    };
+    const result = onCommit(trimmed);
+    if (result && typeof (result as Promise<unknown>).then === 'function') {
+      void (result as Promise<unknown>).then(settle, () => settle(false));
+    } else {
+      settle(result);
+    }
+  };
+
+  // Enter keeps the exact typed text (or the saved value) unless the user
+  // explicitly moved through the list; only an exact or unique-prefix match
+  // resolves to a suggestion.
+  const commitDraft = () => {
+    const trimmed = draft.trim();
+    if (trimmed === currentValue.trim()) {
+      setDraft(currentValue);
+      setOpen(false);
+      return;
+    }
+    const lower = trimmed.toLowerCase();
+    const all = [
+      { value: '', label: placeholder },
+      ...options.map((option) => ({
+        value: String(option.value),
+        label: option.label,
+      })),
+    ];
+    const exact = all.find(
+      (item) =>
+        item.value.toLowerCase() === lower ||
+        item.label.toLowerCase() === lower,
+    );
+    if (exact) {
+      commit(exact.value);
+      return;
+    }
+    const prefixMatches = trimmed
+      ? all.filter(
+          (item) =>
+            item.value.toLowerCase().startsWith(lower) ||
+            item.label.toLowerCase().startsWith(lower),
+        )
+      : [];
+    commit(prefixMatches.length === 1 ? prefixMatches[0].value : trimmed);
+  };
+
+  return (
+    <div className="relative">
+      <Input
+        role="combobox"
+        name={name}
+        autoComplete="off"
+        aria-label={label}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={
+          open && items[activeIndex] ? `${listId}-${activeIndex}` : undefined
+        }
+        value={draft}
+        disabled={disabled}
+        placeholder={placeholder}
+        className="w-[min(200px,50vw)] max-md:w-full"
+        onChange={(event) => {
+          setDraft(event.target.value);
+          setActiveIndex(0);
+          setNavigated(false);
+          setOpen(true);
+        }}
+        onFocus={() => {
+          // A new interaction starts un-navigated, so Enter keeps the saved
+          // value instead of reusing the previous round's highlight.
+          setNavigated(false);
+          setActiveIndex(0);
+          setOpen(true);
+        }}
+        onBlur={commitDraft}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            setOpen(true);
+            setNavigated(true);
+            setActiveIndex((index) => Math.min(index + 1, items.length - 1));
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            setNavigated(true);
+            setActiveIndex((index) => Math.max(index - 1, 0));
+          } else if (event.key === 'Enter') {
+            event.preventDefault();
+            const picked = open && navigated ? items[activeIndex] : undefined;
+            if (picked) commit(picked.value);
+            else commitDraft();
+          } else if (event.key === 'Escape') {
+            event.preventDefault();
+            setOpen(false);
+            setNavigated(false);
+            setDraft(currentValue);
+          }
+        }}
+      />
+      {open && !disabled && (
+        <div
+          role="listbox"
+          id={listId}
+          className="absolute left-0 top-full z-20 mt-1 max-h-64 w-[min(240px,80vw)] overflow-y-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
+          // Keep focus in the input so clicking an option does not commit the
+          // typed draft first.
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          {items.map((item, index) => (
+            <div
+              key={item.value || 'auto'}
+              id={`${listId}-${index}`}
+              role="option"
+              aria-selected={index === activeIndex}
+              className={`flex w-full cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-sm ${
+                index === activeIndex
+                  ? 'bg-accent text-accent-foreground'
+                  : 'hover:bg-accent/60'
+              }`}
+              onMouseEnter={() => {
+                setActiveIndex(index);
+                setNavigated(true);
+              }}
+              onClick={() => commit(item.value)}
+            >
+              <span className="truncate">{item.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingInput({
   name,
   label,
@@ -356,14 +604,18 @@ function SettingInput({
   disabled,
   onCommit,
   onInvalid,
+  placeholder,
+  className = 'w-[min(80px,50vw)] max-md:w-full',
 }: {
   name: string;
   label: string;
   type: 'number' | 'text';
   value: unknown;
   disabled: boolean;
-  onCommit: (value: unknown) => void;
+  onCommit: (value: unknown) => unknown;
   onInvalid: () => void;
+  placeholder?: string;
+  className?: string;
 }) {
   const currentValue = String(value ?? '');
   const [draft, setDraft] = useState(currentValue);
@@ -379,10 +631,14 @@ function SettingInput({
         onInvalid();
         return;
       }
-      if (parsed !== value) onCommit(parsed);
+      if (parsed !== value) {
+        applyCommitResult(onCommit(parsed), () => setDraft(currentValue));
+      }
       return;
     }
-    if (draft !== currentValue) onCommit(draft);
+    if (draft !== currentValue) {
+      applyCommitResult(onCommit(draft), () => setDraft(currentValue));
+    }
   };
 
   return (
@@ -393,7 +649,8 @@ function SettingInput({
       aria-label={label}
       value={draft}
       disabled={disabled}
-      className="w-[min(80px,50vw)] max-md:w-full"
+      placeholder={placeholder}
+      className={className}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={commit}
       onKeyDown={(event) => {
@@ -433,6 +690,7 @@ export function SettingsMessage({
   settingsState,
   presentation,
   onLanguageChange,
+  onOutputLanguageChange,
   onSubDialog,
   onThemeChange,
   chatWidthMode,
@@ -713,6 +971,25 @@ export function SettingsMessage({
         })),
         formatSettingLabel(setting, t),
         disabled,
+      );
+    }
+
+    if (setting.key === OUTPUT_LANGUAGE_SETTING_KEY) {
+      // Model output language is a user-level preference applied by the
+      // language command (which rewrites output-language.md and refreshes
+      // running sessions); an empty value means follow the user's input. The
+      // combobox offers the supported names but still accepts any language.
+      const effective = String(value ?? '').trim();
+      return (
+        <OutputLanguageCombobox
+          name={setting.key}
+          label={formatSettingLabel(setting, t)}
+          value={effective.toLowerCase() === 'auto' ? '' : effective}
+          options={setting.options ?? []}
+          placeholder={t('settings.placeholder.general.outputLanguage')}
+          disabled={disabled}
+          onCommit={(next) => onOutputLanguageChange(String(next ?? '').trim())}
+        />
       );
     }
 
@@ -1016,6 +1293,17 @@ export function SettingsMessage({
                                 <LocalControlSettingsCard />
                               </div>
                             );
+                          }
+
+                          if (
+                            item.setting.key === OUTPUT_LANGUAGE_SETTING_KEY &&
+                            scope === 'workspace'
+                          ) {
+                            // The language command persists this at user
+                            // scope only; showing it under the workspace tab
+                            // would imply a workspace override that the write
+                            // path cannot honor.
+                            return null;
                           }
 
                           const setting = item.setting;
