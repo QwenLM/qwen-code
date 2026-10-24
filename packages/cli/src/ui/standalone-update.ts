@@ -18,6 +18,7 @@ import type { ReadEntry } from 'tar';
 import semver from 'semver';
 import type { JsRuntime } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { hasStandaloneRuntimeLayout } from '../utils/installationInfo.js';
 import { loadUndici } from '../utils/load-undici.js';
 import { verifySignature } from '../utils/standalone-update-verify.js';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
@@ -41,10 +42,17 @@ const VALID_TARGETS = new Set([
 
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(-[\w.]+)?$/;
 
+// True for a concrete version this updater can route: no dist-tags, no build
+// metadata, no leading zeros. normalizeVersion throws on anything else, so
+// every comparison against an untrusted version must gate on this first.
+function isConcreteVersion(version: string): boolean {
+  return SEMVER_RE.test(version) && semver.valid(version) !== null;
+}
+
 type TarFilterEntry = Stats | ReadEntry | { type?: string; linkpath?: unknown };
 
-function normalizeVersion(version: string): string {
-  if (!SEMVER_RE.test(version)) {
+export function normalizeVersion(version: string): string {
+  if (!isConcreteVersion(version)) {
     throw new Error(`Invalid version format: ${version}`);
   }
   return version.startsWith('v') ? version : `v${version}`;
@@ -1258,7 +1266,7 @@ function downloadedStandaloneManifest(standaloneDir: string) {
   if (
     name !== '@qwen-code/qwen-code' ||
     typeof version !== 'string' ||
-    !semver.valid(version)
+    !isConcreteVersion(version)
   ) {
     throw new Error('Invalid downloaded standalone name or version');
   }
@@ -1268,10 +1276,13 @@ function downloadedStandaloneManifest(standaloneDir: string) {
     );
   }
   validateTarget(target);
-  if (runtime !== 'node' && runtime !== 'bun') {
+  // Archives published before v0.23.0 predate the runtime field; the
+  // installed-manifest reader already defaults them to the node flavor.
+  const resolvedRuntime = runtime === undefined ? 'node' : runtime;
+  if (resolvedRuntime !== 'node' && resolvedRuntime !== 'bun') {
     throw new Error('Downloaded standalone manifest requires a valid runtime');
   }
-  return { target, runtime, version };
+  return { target, runtime: resolvedRuntime, version };
 }
 
 export async function prepareStandaloneUpdate(
@@ -1446,6 +1457,14 @@ async function applyStandaloneUpdate(
     ) {
       throw new Error(
         'Downloaded archive does not match the expected target, runtime and version',
+      );
+    }
+    if (
+      !hasStandaloneRuntimeLayout(newInstallDir, target) ||
+      !fs.existsSync(path.join(newInstallDir, 'lib', 'cli-entry.js'))
+    ) {
+      throw new Error(
+        'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
       );
     }
     debugLogger.info('Running smoke test...');

@@ -447,25 +447,52 @@ function isStandaloneInstallDir(installDir: string): boolean {
       return false;
     }
 
-    const qwenBin =
-      process.platform === 'win32'
-        ? path.join(installDir, 'bin', 'qwen.cmd')
-        : path.join(installDir, 'bin', 'qwen');
-    const nodeBin =
-      process.platform === 'win32'
-        ? path.join(installDir, 'node', 'node.exe')
-        : path.join(installDir, 'node', 'bin', 'node');
-
-    return (
-      fs.existsSync(qwenBin) &&
-      fs.existsSync(nodeBin) &&
-      isStandaloneRuntimeFile(qwenBin) &&
-      isStandaloneRuntimeFile(nodeBin)
-    );
+    return hasStandaloneRuntimeLayout(installDir, manifest.target);
   } catch (err) {
     debugLogger.error('Standalone detection failed:', installDir, err);
     return false;
   }
+}
+
+/**
+ * Resolves the launcher and bundled-runtime paths a standalone archive must
+ * ship for the given target. Keyed on the archive target rather than the
+ * host platform: `applyStandaloneUpdate` validates an extracted archive whose
+ * target comes from its manifest. The layout is produced by
+ * scripts/create-standalone-package.js (writeShims and the runtime
+ * installer); keep this in sync when that layout changes. `smokeTest`
+ * resolves the flavor's own interpreter separately.
+ */
+function standaloneRuntimePaths(
+  installDir: string,
+  target: string,
+): { launcher: string; node: string } {
+  const isWindowsTarget = target.startsWith('win');
+  return {
+    launcher: isWindowsTarget
+      ? path.join(installDir, 'bin', 'qwen.cmd')
+      : path.join(installDir, 'bin', 'qwen'),
+    node: isWindowsTarget
+      ? path.join(installDir, 'node', 'node.exe')
+      : path.join(installDir, 'node', 'bin', 'node'),
+  };
+}
+
+/**
+ * Checks the executable layout every standalone archive must ship: the
+ * launcher and the bundled runtime for the given target.
+ */
+export function hasStandaloneRuntimeLayout(
+  installDir: string,
+  target: string,
+): boolean {
+  const { launcher, node } = standaloneRuntimePaths(installDir, target);
+  return (
+    fs.existsSync(launcher) &&
+    fs.existsSync(node) &&
+    isStandaloneRuntimeFile(launcher) &&
+    isStandaloneRuntimeFile(node)
+  );
 }
 
 function isStandaloneTargetForCurrentPlatform(target: string): boolean {
