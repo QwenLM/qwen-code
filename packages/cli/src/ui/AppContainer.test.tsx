@@ -398,6 +398,20 @@ describe('AppContainer State Management', () => {
       {
         applied: ['/workspace/test.ts'],
         failed: ['/workspace/blocked.ts'],
+        // A partial apply injects this turn before throwing; the UI must show
+        // exactly what entered the model's history.
+        messages: [
+          { role: 'user', parts: [{ text: suggestion }] },
+          { role: 'model', parts: [{ text: 'speculated' }] },
+          {
+            role: 'user',
+            parts: [
+              {
+                text: 'Speculation note: /workspace/blocked.ts is not on disk.',
+              },
+            ],
+          },
+        ],
       },
     );
     const spec = {
@@ -499,6 +513,16 @@ describe('AppContainer State Management', () => {
         }),
         expect.any(Number),
       ),
+    );
+    // The applied turn was injected before the rejection; render it so the
+    // transcript does not omit messages the model already has.
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      { type: 'user', text: suggestion },
+      expect.any(Number),
+    );
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      { type: 'gemini', text: 'speculated' },
+      expect.any(Number),
     );
     // The file that did not land has to be named too: its speculative content is
     // gone with the overlay, so it is the one the user has to reconcile.
@@ -1305,6 +1329,14 @@ describe('AppContainer State Management', () => {
   ] as const)(
     'accepts completed speculation only without a current workflow intent: %s',
     async (_label, text, human, optOut, reachable, acceptCached) => {
+      // The module mock above replaces acceptSpeculation with a spy so the
+      // failure-path tests can reject. The accept path needs the real
+      // implementation here, because it is what injects history through the
+      // LlmClient and applies the overlay.
+      const actualCore = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      acceptSpeculationMock.mockImplementation(actualCore.acceptSpeculation);
       vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
         undefined,
       );

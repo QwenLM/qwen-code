@@ -25,7 +25,7 @@ import {
   type UIActions,
 } from './contexts/UIActionsContext.js';
 import { ConfigContext } from './contexts/ConfigContext.js';
-import type { Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import {
   type HistoryItem,
   type HistoryItemUser,
@@ -3466,6 +3466,67 @@ export const AppContainer = (props: AppContainerProps) => {
         spec.status === 'completed' &&
         !needsWorkflowIntent
       ) {
+        // Render the messages that entered the model's history, so the
+        // transcript and the model context stay the same. Used by the accepted
+        // path and by a partial apply, where the applied turn is injected but
+        // the accept still rejects.
+        const renderSpeculatedMessages = (messages: Content[]) => {
+          const now = Date.now();
+
+          // Render each speculated message as the appropriate HistoryItem
+          for (let mi = 0; mi < messages.length; mi++) {
+            const msg = messages[mi];
+            if (msg.role === 'user' && msg.parts) {
+              // Check if this is a tool result (functionResponse) or user text
+              const hasText = msg.parts.some(
+                (p) => p.text && !p.functionResponse,
+              );
+              if (hasText) {
+                const text = msg.parts
+                  .map((p) => p.text ?? '')
+                  .filter(Boolean)
+                  .join('');
+                if (text) {
+                  historyManager.addItem({ type: 'user' as const, text }, now);
+                }
+              }
+              // functionResponse parts are rendered as part of the tool_group below
+            } else if (msg.role === 'model' && msg.parts) {
+              // Extract text and tool calls separately
+              const textParts = msg.parts
+                .filter((p) => p.text && !p.functionCall)
+                .map((p) => p.text!)
+                .join('');
+              const toolCalls = msg.parts.filter((p) => p.functionCall);
+
+              if (textParts) {
+                historyManager.addItem(
+                  { type: 'gemini' as const, text: textParts },
+                  now,
+                );
+              }
+
+              if (toolCalls.length > 0) {
+                // Find matching tool results from the next message
+                const nextMsg = messages[mi + 1];
+                const toolResults =
+                  nextMsg?.parts?.filter((p) => p.functionResponse) ?? [];
+
+                const tools = buildSpeculativeToolDisplays(
+                  toolCalls,
+                  toolResults,
+                );
+
+                const toolGroupItem: HistoryItemWithoutId = {
+                  type: 'tool_group' as const,
+                  tools,
+                };
+                historyManager.addItem(toolGroupItem, now);
+              }
+            }
+          }
+        };
+
         // Accept completed speculation: inject messages and apply files
         acceptSpeculation(spec, llmClient)
           .then((result) => {
@@ -3483,65 +3544,7 @@ export const AppContainer = (props: AppContainerProps) => {
               }),
             );
             // Speculation completed fully (no boundary) — render results in UI
-            {
-              const now = Date.now();
-
-              // Render each speculated message as the appropriate HistoryItem
-              for (let mi = 0; mi < result.messages.length; mi++) {
-                const msg = result.messages[mi];
-                if (msg.role === 'user' && msg.parts) {
-                  // Check if this is a tool result (functionResponse) or user text
-                  const hasText = msg.parts.some(
-                    (p) => p.text && !p.functionResponse,
-                  );
-                  if (hasText) {
-                    const text = msg.parts
-                      .map((p) => p.text ?? '')
-                      .filter(Boolean)
-                      .join('');
-                    if (text) {
-                      historyManager.addItem(
-                        { type: 'user' as const, text },
-                        now,
-                      );
-                    }
-                  }
-                  // functionResponse parts are rendered as part of the tool_group below
-                } else if (msg.role === 'model' && msg.parts) {
-                  // Extract text and tool calls separately
-                  const textParts = msg.parts
-                    .filter((p) => p.text && !p.functionCall)
-                    .map((p) => p.text!)
-                    .join('');
-                  const toolCalls = msg.parts.filter((p) => p.functionCall);
-
-                  if (textParts) {
-                    historyManager.addItem(
-                      { type: 'gemini' as const, text: textParts },
-                      now,
-                    );
-                  }
-
-                  if (toolCalls.length > 0) {
-                    // Find matching tool results from the next message
-                    const nextMsg = result.messages[mi + 1];
-                    const toolResults =
-                      nextMsg?.parts?.filter((p) => p.functionResponse) ?? [];
-
-                    const tools = buildSpeculativeToolDisplays(
-                      toolCalls,
-                      toolResults,
-                    );
-
-                    const toolGroupItem: HistoryItemWithoutId = {
-                      type: 'tool_group' as const,
-                      tools,
-                    };
-                    historyManager.addItem(toolGroupItem, now);
-                  }
-                }
-              }
-            }
+            renderSpeculatedMessages(result.messages);
             if (result.nextSuggestion) {
               setPromptSuggestion(result.nextSuggestion);
             }
@@ -3583,6 +3586,17 @@ export const AppContainer = (props: AppContainerProps) => {
               'Cause:',
               err instanceof Error ? err.cause : undefined,
             );
+            // A partial apply injects the turn that did land before throwing.
+            // Render exactly what entered the history first, or the user sees
+            // an error for a turn whose messages are already in the model's
+            // context and never displayed.
+            const injectedMessages = (err as { messages?: Content[] }).messages;
+            if (
+              Array.isArray(injectedMessages) &&
+              injectedMessages.length > 0
+            ) {
+              renderSpeculatedMessages(injectedMessages);
+            }
             if (appliedFiles.length > 0 || damagedFiles.length > 0) {
               // Resubmitting would either run the same tool calls over edits
               // that already landed (the second run compounds the first), or

@@ -58,9 +58,15 @@ describe('acceptSpeculation', () => {
   function makeLlmClient(): {
     client: LlmClient;
     addHistory: ReturnType<typeof vi.fn>;
+    markToolResultsInjected: ReturnType<typeof vi.fn>;
   } {
     const addHistory = vi.fn().mockResolvedValue(undefined);
-    return { client: { addHistory } as unknown as LlmClient, addHistory };
+    const markToolResultsInjected = vi.fn();
+    return {
+      client: { addHistory, markToolResultsInjected } as unknown as LlmClient,
+      addHistory,
+      markToolResultsInjected,
+    };
   }
 
   it('injects history only after the files are on disk', async () => {
@@ -85,6 +91,7 @@ describe('acceptSpeculation', () => {
 
     const result = await acceptSpeculation(state, {
       addHistory,
+      markToolResultsInjected: vi.fn(),
     } as unknown as LlmClient);
 
     expect(observed).toEqual(['edited']);
@@ -158,7 +165,7 @@ describe('acceptSpeculation', () => {
     await writeFile(await overlay.redirectWrite(blocked), 'blocked edit');
     await writeFile(await overlay.redirectWrite(writable), 'applied edit');
 
-    const { client, addHistory } = makeLlmClient();
+    const { client, addHistory, markToolResultsInjected } = makeLlmClient();
     const state = makeState(cwd, overlay, [
       { role: 'user', parts: [{ text: 'hi' }] },
     ]);
@@ -172,7 +179,17 @@ describe('acceptSpeculation', () => {
     // The writable edit is on the user's disk. Its turn must enter the
     // conversation even though the accept is rejected; otherwise the model's
     // next turn reasons from a history that omits an edit it can see.
-    expect(addHistory).toHaveBeenCalledTimes(1);
+    expect(addHistory).toHaveBeenCalledTimes(2);
+    // The turn itself still carries the fork's success result for the blocked
+    // path, so a following note has to correct it or the model reads a file
+    // that does not exist as fact.
+    const injected = (error as { messages?: Content[] }).messages;
+    expect(injected).toBeDefined();
+    const correction = injected!.at(-1);
+    expect(correction?.role).toBe('user');
+    expect(JSON.stringify(correction)).toContain(blocked);
+    expect(JSON.stringify(correction)).toContain('not on disk');
+    expect(markToolResultsInjected).toHaveBeenCalledWith(injected);
     expect(await readFile(writable, 'utf-8')).toBe('applied edit');
     expect(state.status).not.toBe('completed');
   });

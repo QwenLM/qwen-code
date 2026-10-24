@@ -216,6 +216,24 @@ describe('OverlayFs', () => {
       expect((await stat(realFile)).mtimeMs).toBe(before);
     });
 
+    it('does not overwrite a real file that changed after the snapshot', async () => {
+      // A user save or a watcher can rewrite the real file while speculation is
+      // in flight. The overlay still holds the pre-speculation snapshot, so
+      // deciding "was this written?" against the current real file would copy
+      // the stale snapshot back over the newer content and report it applied.
+      const realFile = join(testDir, 'existing.ts');
+      await writeFile(realFile, 'original content');
+      await overlay.redirectWrite(realFile);
+      await writeFile(realFile, 'newer content from the user');
+
+      const applied = await overlay.applyToReal();
+
+      expect(applied).toEqual([]);
+      expect(await readFile(realFile, 'utf-8')).toBe(
+        'newer content from the user',
+      );
+    });
+
     it('skips a registered parent path that becomes a directory', async () => {
       const parent = join(testDir, 'src');
       const parentOverlayPath = await overlay.redirectWrite(parent);
@@ -293,6 +311,31 @@ describe('OverlayFs', () => {
       // The fixture truncated the file; the point is that the caller is told it
       // is damaged instead of silently resubmitting over it.
       expect(await readFile(realFile, 'utf-8')).toBe('');
+    });
+
+    it('does not call an open-stage failure damaged when the file is unchanged', async () => {
+      // A read-only destination fails at open() before anything is truncated.
+      // The resubmit fallback is still safe there, so it must stay in `failed`
+      // rather than being reported as possibly truncated.
+      const realFile = join(testDir, 'app.ts');
+      await writeFile(realFile, 'original content');
+      await writeFile(await overlay.redirectWrite(realFile), 'edited content');
+      const before = await stat(realFile);
+
+      const mockedCopyFile = vi.mocked(copyFile);
+      mockedCopyFile.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('permission denied'), {
+          code: 'EACCES',
+        });
+      });
+
+      const error = await overlay.applyToReal().catch((err: unknown) => err);
+      expect((error as { failed?: string[] }).failed).toEqual([realFile]);
+      expect((error as { damaged?: string[] }).damaged).toEqual([]);
+      const after = await stat(realFile);
+      expect(after.size).toBe(before.size);
+      expect(after.mtimeMs).toBe(before.mtimeMs);
+      expect(await readFile(realFile, 'utf-8')).toBe('original content');
     });
 
     it('carries the underlying failure as the cause', async () => {

@@ -14,7 +14,7 @@ import { mkdir, copyFile, readFile, rm, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 /**
  * Copy-on-write overlay filesystem for speculation safety.
@@ -22,6 +22,10 @@ import { randomUUID } from 'node:crypto';
 export class OverlayFs {
   private readonly overlayDir: string;
   private readonly writtenFiles = new Map<string, string>(); // relPath -> overlayPath
+  // Content hash of the copy-on-write snapshot taken by `redirectWrite`. A
+  // preloaded overlay file that still matches it was never written by the tool,
+  // even if the real file has changed since the snapshot was taken.
+  private readonly preloadedHashes = new Map<string, string>(); // relPath -> sha256
 
   constructor(private readonly realCwd: string) {
     const id = randomUUID().slice(0, 8);
@@ -73,6 +77,11 @@ export class OverlayFs {
     if (existsSync(originalPath)) {
       try {
         await copyFile(originalPath, overlayPath);
+        const snapshot = await readFile(overlayPath);
+        this.preloadedHashes.set(
+          rel,
+          createHash('sha256').update(snapshot).digest('hex'),
+        );
       } catch {
         // Original may be a directory or unreadable — proceed without copy
       }
@@ -132,13 +141,24 @@ export class OverlayFs {
       // overlay. A redirected tool that then fails without writing leaves those
       // bytes behind, so the overlay file existing is not proof of an edit:
       // copying them back would report an unchanged file as applied. Compare the
-      // speculated content with the current file instead.
+      // overlay against the snapshot taken at redirect time, not against the
+      // current real file: the user may have saved that file while speculation
+      // was running, and comparing against the newer content would let the stale
+      // snapshot win.
       let overlayContent: Buffer;
       try {
         overlayContent = await readFile(overlayPath);
       } catch (err) {
         failed.push(realPath);
         firstError ??= err;
+        continue;
+      }
+      const preloadedHash = this.preloadedHashes.get(rel);
+      if (
+        preloadedHash &&
+        createHash('sha256').update(overlayContent).digest('hex') ===
+          preloadedHash
+      ) {
         continue;
       }
       // An unreadable real path is not a new failure: `mkdir`/`copyFile` below
@@ -153,12 +173,6 @@ export class OverlayFs {
           { code: 'EISDIR' },
         );
         continue;
-      }
-      if (realStat?.isFile() && realStat.size === overlayContent.length) {
-        const realContent = await readFile(realPath).catch(() => null);
-        if (realContent?.equals(overlayContent)) {
-          continue;
-        }
       }
 
       try {
@@ -181,9 +195,20 @@ export class OverlayFs {
         // A copy-stage failure is different from a mkdir failure: copyFile opens
         // the destination with O_TRUNC, and libuv unlinks it when the write
         // fails, so the real file can be truncated or gone. Report that
-        // separately so the caller does not resubmit over a damaged tree.
+        // separately so the caller does not resubmit over a damaged tree — but
+        // only when the destination actually changed. An EACCES on a read-only
+        // file fails at `open()` and leaves the bytes untouched; calling that
+        // damaged would suppress a resubmit that is still safe.
         failed.push(realPath);
-        damaged.push(realPath);
+        const afterStat = await stat(realPath).catch(() => null);
+        const destinationChanged = realStat
+          ? !afterStat ||
+            afterStat.size !== realStat.size ||
+            afterStat.mtimeMs !== realStat.mtimeMs
+          : afterStat !== null;
+        if (destinationChanged) {
+          damaged.push(realPath);
+        }
         firstError ??= err;
       }
     }

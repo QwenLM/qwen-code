@@ -626,9 +626,35 @@ export async function acceptSpeculation(
         // remains the one the caller sees.
         if (getErrorStringArray(err, 'applied').length > 0) {
           try {
-            for (const msg of ensureToolResultPairing(state.messages)) {
+            const injected = ensureToolResultPairing(state.messages);
+            const notLanded = [
+              ...new Set([
+                ...getErrorStringArray(err, 'failed'),
+                ...getErrorStringArray(err, 'damaged'),
+              ]),
+            ];
+            if (notLanded.length > 0) {
+              // The tool results in the turn above still claim success for these
+              // paths. Tell the model explicitly that they are not on disk;
+              // otherwise its next turn (and the next suggestion, generated from
+              // the history tail) reads a false success as fact.
+              injected.push({
+                role: 'user',
+                parts: [
+                  {
+                    text:
+                      'Speculation note: the following file(s) could not be ' +
+                      'written, so their tool results above are not on disk: ' +
+                      `${notLanded.join(', ')}. Do not treat those edits as applied.`,
+                  },
+                ],
+              });
+            }
+            for (const msg of injected) {
               await llmClient.addHistory(msg);
             }
+            llmClient.markToolResultsInjected(injected);
+            attachErrorValue(err, 'messages', injected);
           } catch {
             // Keep the apply error as the failure the caller reports.
           }
@@ -686,6 +712,18 @@ function getErrorStringArray(value: unknown, key: string): string[] {
   return Array.isArray(candidate)
     ? candidate.filter((entry): entry is string => typeof entry === 'string')
     : [];
+}
+
+function attachErrorValue(value: unknown, key: string, entry: unknown): void {
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+  try {
+    (value as Record<string, unknown>)[key] = entry;
+  } catch {
+    // Frozen or otherwise non-extensible error: the caller still gets the
+    // original failure, it just cannot see the injected messages.
+  }
 }
 
 function attachErrorStringArray(
