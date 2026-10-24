@@ -1738,7 +1738,10 @@ type SessionActionsWithCreate = {
     branch?: { name: string; baseBranch: string };
   }>;
   attachSession: () => Promise<void>;
-  clearSession: (options?: { dropSessionContext?: boolean }) => Promise<void>;
+  clearSession: (options?: {
+    dropSessionContext?: boolean;
+    requireDetachSessionId?: string;
+  }) => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
 };
 
@@ -8757,6 +8760,12 @@ export function App({
   const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
     useState(false);
   const streamingState = useStreamingState();
+  const currentSessionRunning =
+    sessionHasActivePrompt ||
+    sessionActiveWorkState === 'active' ||
+    streamingState !== 'idle';
+  const currentSessionRunningRef = useRef(currentSessionRunning);
+  currentSessionRunningRef.current = currentSessionRunning;
   const failedPromptRetryIsCurrent = Boolean(
     failedPromptRetry &&
       retryOwnerMatchesCurrent(
@@ -15031,6 +15040,7 @@ export function App({
          */
         gitIntent?: SessionGitIntent;
         carryManualTitle?: string;
+        requireDetachSessionId?: string;
       },
     ) => {
       if (
@@ -15143,7 +15153,12 @@ export function App({
             : undefined;
         }
       }
-      if (sessionOpenInvocationRef.current !== invocation) return false;
+      if (sessionOpenInvocationRef.current !== invocation) {
+        if (opts?.requireDetachSessionId) {
+          pushToast('warning', t('sidebar.standaloneDeleteCancelled'));
+        }
+        return false;
+      }
       const targetWorkspaceCwd =
         nextContext?.kind === 'workspace' ? nextContext.cwd : undefined;
       const previousPendingContext = pendingSessionContextRef.current;
@@ -15190,10 +15205,21 @@ export function App({
         const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession(
-          dropSessionContextOnClear ? { dropSessionContext: true } : undefined,
+          opts?.requireDetachSessionId
+            ? { requireDetachSessionId: opts.requireDetachSessionId }
+            : dropSessionContextOnClear
+              ? { dropSessionContext: true }
+              : undefined,
         );
         focusRequest = scheduleComposerFocus();
         await clearPromise;
+        if (
+          opts?.requireDetachSessionId &&
+          sessionOpenInvocationRef.current !== invocation
+        ) {
+          pushToast('warning', t('sidebar.standaloneDeleteCancelled'));
+          return false;
+        }
         if (
           sessionOpenInvocationRef.current === invocation &&
           !opts?.keepView &&
@@ -15217,7 +15243,14 @@ export function App({
         if (composerFocusRequestRef.current === focusRequest) {
           composerFocusRequestRef.current += 1;
         }
-        reportError(error, 'Failed to start a new chat');
+        if (opts?.requireDetachSessionId) {
+          reportError(
+            new Error(t('sidebar.standaloneLeaveFailed'), { cause: error }),
+            t('sidebar.standaloneLeaveFailed'),
+          );
+        } else {
+          reportError(error, 'Failed to start a new chat');
+        }
         return false;
       }
     },
@@ -15238,6 +15271,39 @@ export function App({
       workspace.client,
       workspace.status,
     ],
+  );
+  const leaveCurrentStandaloneForDelete = useCallback(
+    (sessionId: string) => {
+      const current = connectionRef.current;
+      // A retry can outlive a successful leave. An unsettled connection must
+      // not certify that this tab no longer holds the candidate attachment.
+      if (
+        current.sessionId !== sessionId &&
+        current.status === 'connected' &&
+        !current.error &&
+        !current.loadingTranscript &&
+        !current.catchingUp &&
+        (!current.sessionId || current.clientId)
+      ) {
+        return Promise.resolve(true);
+      }
+      if (
+        current.sessionId !== sessionId ||
+        current.sessionContext?.kind !== 'standalone'
+      ) {
+        pushToast('warning', t('sidebar.standaloneDeleteCancelled'));
+        return Promise.resolve(false);
+      }
+      if (currentSessionRunningRef.current) {
+        pushToast('warning', t('sidebar.currentDeleteDisabled'));
+        return Promise.resolve(false);
+      }
+      return createNewSession(
+        { kind: 'global' },
+        { requireDetachSessionId: sessionId },
+      );
+    },
+    [createNewSession, pushToast, t],
   );
   /**
    * Serializes workspace intent. An active session keeps its owner and is
@@ -21978,6 +22044,10 @@ export function App({
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
+                  onLeaveCurrentStandaloneForDelete={
+                    leaveCurrentStandaloneForDelete
+                  }
+                  currentSessionRunning={currentSessionRunning}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
