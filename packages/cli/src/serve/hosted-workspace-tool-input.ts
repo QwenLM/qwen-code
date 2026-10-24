@@ -24,14 +24,13 @@ export const HOSTED_TODO_CONTENT_MAX_CHARS = 1000;
 /** The most dependencies one item may name. */
 export const HOSTED_TODO_MAX_DEPENDENCIES = 32;
 /**
- * The serialized-size ceiling for the whole list. Core echoes the stored list
- * back in its success result, plus roughly 373 bytes of reminder prose, and a
- * result over the 64 KiB inline limit is replaced with a generic "output
- * omitted" — after the write already landed. The stored list can also carry
- * `blockedBy` edges preserved from the previous list, which was itself
- * admitted under this ceiling, so the echo is bounded by twice this value plus
- * the reminder, which keeps it under 64 KiB. The field limits above are for the
- * model's benefit; this total is what makes the echo provably fit.
+ * The serialized-size ceiling for one incoming list. It keeps an admitted call
+ * inside the store's encoded-input limit, so the refusal happens before
+ * acquisition. It does not bound the stored list: core re-injects the
+ * `blockedBy` edges it preserved from earlier calls, nothing re-counts them,
+ * and the success result echoes the stored list, so a long-lived list can grow
+ * past this value. Bounding the stored list needs the Worker to account for
+ * the merged result, which is follow-up work.
  */
 export const HOSTED_TODO_MAX_SERIALIZED_BYTES = 16 * 1024;
 

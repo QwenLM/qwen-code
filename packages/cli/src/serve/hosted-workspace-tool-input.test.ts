@@ -61,6 +61,15 @@ describe('checkHostedTodoWriteInput', () => {
       checkHostedTodoWriteInput({ todos: [item({ id: 'x'.repeat(500) })] })
         .error,
     ).toBeUndefined();
+    const nearCeiling = {
+      todos: Array.from({ length: 14 }, (_, index) =>
+        item({ id: `c${index}`, content: 'x'.repeat(1000) }),
+      ),
+    };
+    expect(
+      Buffer.byteLength(JSON.stringify(nearCeiling.todos), 'utf8'),
+    ).toBeLessThanOrEqual(HOSTED_TODO_MAX_SERIALIZED_BYTES);
+    expect(checkHostedTodoWriteInput(nearCeiling).error).toBeUndefined();
   });
 
   it('counts content in code points so astral characters fit the declared ceiling', () => {

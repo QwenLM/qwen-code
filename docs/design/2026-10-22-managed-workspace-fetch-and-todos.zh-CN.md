@@ -9,10 +9,11 @@
 
 ## 问题
 
-Managed Agent 的 Workspace 会话只有六个工具：`read_file`、`write_file`、
-`edit`、`glob`、`run_shell_command` 和 `monitor`。共享核心已经提供
-`todo_write`，`qwen serve` 会话也提供它。Managed 路径没有声明它，所以多步长
-任务没有自己的计划面。
+Managed Agent 的 Workspace 会话起初只有 `read_file`、`write_file`、`edit`、
+`glob`、`run_shell_command` 和 `monitor`；files profile 另外带有 `web_fetch`，
+由 `main` 连同参数与目标地址校验一并加入。共享核心已经提供 `todo_write`，
+`qwen serve` 会话也提供它。Managed 路径此前没有声明它，所以多步长任务没有
+自己的计划面。
 
 对应 issue：[#15076](https://github.com/QwenLM/qwen-code/issues/15076)。
 

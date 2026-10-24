@@ -11,10 +11,12 @@
 
 ## Problem
 
-A Managed Agent Workspace Session offers six tools: `read_file`, `write_file`,
-`edit`, `glob`, `run_shell_command` and `monitor`. The shared core already has
-`todo_write`, and a `qwen serve` session exposes it. The Managed path never
-declares it, so a long multi-step task has no plan surface of its own.
+A Managed Agent Workspace Session started with `read_file`, `write_file`,
+`edit`, `glob`, `run_shell_command` and `monitor`; the files profiles also
+carry `web_fetch`, which `main` added with its own argument and destination
+checks. The shared core already has `todo_write`, and a `qwen serve` session
+exposes it. The Managed path never declared it, so a long multi-step task had
+no plan surface of its own.
 
 Issue: [#15076](https://github.com/QwenLM/qwen-code/issues/15076).
 
