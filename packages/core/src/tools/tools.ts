@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ToolOutputSize } from './tool-output-size.js';
 import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
@@ -585,6 +586,14 @@ export interface ToolArtifact {
 }
 
 export interface ToolResult {
+  /** Numeric size before a producer reduces its semantic result. */
+  rawOutputSize?: ToolOutputSize | null;
+  /**
+   * Set when the producer bounded its own render: the returned body is
+   * shortened. `rawOutputSize` may still be `null` (the pre-reduction size is
+   * unrecoverable), but the truncation fact itself is known here.
+   */
+  truncatedByProducer?: boolean;
   /**
    * Content meant to be included in LLM history.
    * This should represent the factual outcome of the tool execution.
@@ -839,6 +848,7 @@ export interface McpAppToolResult {
 /** A completed MCP tool call with an interactive MCP Apps resource. */
 export interface McpAppResultDisplay {
   type: 'mcp_app';
+  requiredFeature?: 'generated-ui';
   serverName: string;
   resourceUri: string;
   html: string;

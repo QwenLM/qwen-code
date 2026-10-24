@@ -168,6 +168,7 @@ jobs:
           sparse-checkout: |-
             /.github/scripts
             /scripts/assert-release-version.mjs
+            /scripts/check-release-tarball-exec-bits.mjs
             /scripts/release-packages.mjs
             /scripts/workspaces.js
             /package.json
@@ -450,6 +451,16 @@ jobs:
       - *install_release_dependencies
       - *download_release_build
       - *unpack_release_build
+
+      # Same host-wide archive cache as ci.yml's test job, which runs the same
+      # standalone runtime regression; this job also runs on a persistent host.
+      - name: 'Configure persistent standalone runtime cache (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/standalone-runtimes"
+          echo "QWEN_STANDALONE_RUNTIME_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent standalone runtime cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Run Script Tests'
         env:

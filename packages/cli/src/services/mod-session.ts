@@ -17,6 +17,7 @@ import {
 import {
   resolveModOptions,
   resolveModToolDialect,
+  resolveModUnsupportedEvents,
 } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
@@ -67,7 +68,9 @@ export class ModSession implements ICommandLoader {
   > = [];
   private activeCommand?: AbortController;
   private commandSignal?: AbortSignal;
+  private toolSignal?: AbortSignal;
   private sessionId: string;
+  private toolGeneration = new AbortController();
   private unregisterCleanup: () => void;
 
   constructor(
@@ -162,6 +165,13 @@ export class ModSession implements ICommandLoader {
                   marketplace,
                 )
               : undefined,
+            unsupportedEvents: source
+              ? resolveModUnsupportedEvents(
+                  this.optionScopes,
+                  extension.name,
+                  marketplace,
+                )
+              : undefined,
             options: source
               ? resolveModOptions(
                   source.userConfig,
@@ -214,20 +224,29 @@ export class ModSession implements ICommandLoader {
       const ordered = orderModPlugins(mods);
       if (ordered.length) {
         this.runtime = await ModRuntime.createGroup(
-          ordered.map(({ extension, source, options, toolDialect }) => ({
-            id: extension.id,
-            name: extension.name,
-            source: {
-              root: source!.root,
-              entry: source!.entry,
-              source: source!.source,
-            },
-            options,
-            toolDialect,
-          })),
+          ordered.map(
+            ({
+              extension,
+              source,
+              options,
+              toolDialect,
+              unsupportedEvents,
+            }) => ({
+              id: extension.id,
+              name: extension.name,
+              source: {
+                root: source!.root,
+                entry: source!.entry,
+                source: source!.source,
+              },
+              options,
+              toolDialect,
+              unsupportedEvents,
+            }),
+          ),
           this.config.getTargetDir(),
           (entry, plugin) => {
-            if (this.commandSignal?.aborted) return;
+            if (this.commandSignal?.aborted || this.toolSignal?.aborted) return;
             this.pendingLogs.push({
               ...entry,
               plugin,
@@ -238,6 +257,7 @@ export class ModSession implements ICommandLoader {
           signal,
           (name) => this.config.getToolRegistry().ensureTool(name),
           this.terminal?.surface ?? null,
+          this.config.getCliVersion() || 'unknown',
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -327,14 +347,36 @@ export class ModSession implements ICommandLoader {
     );
   }
 
+  invalidateTools(): void {
+    this.toolGeneration.abort();
+    this.pendingLogs.length = 0;
+    this.activeCommand?.abort();
+  }
+
+  async restoreTools(): Promise<void> {
+    await this.toolQueue;
+    if (!this.closing && this.sessionId === this.config.getSessionId()) {
+      this.toolGeneration = new AbortController();
+    }
+  }
+
+  captureToolSignal(): AbortSignal {
+    return this.toolGeneration.signal;
+  }
+
   async syncSession(reason: 'clear' | 'resume'): Promise<void> {
     const current = this.config.getSessionId();
-    if (current === this.sessionId) return;
-    this.activeCommand?.abort();
+    if (current === this.sessionId) {
+      if (this.toolGeneration.signal.aborted)
+        this.toolGeneration = new AbortController();
+      return;
+    }
+    this.invalidateTools();
     const task = this.toolQueue.then(async () => {
       if (current === this.sessionId || this.closing) return;
       await this.end(reason);
       this.sessionId = current;
+      this.toolGeneration = new AbortController();
     });
     this.toolQueue = task.catch(() => {});
     await task;
@@ -347,10 +389,22 @@ export class ModSession implements ICommandLoader {
   toolCall(onRepeat: () => void): ModToolCall | undefined {
     if (!this.hasToolHooks) return undefined;
     return (input, next, signal) => {
-      const active = AbortSignal.any([signal, this.lifetime.signal]);
+      const generation = this.toolGeneration;
+      const sessionId = this.sessionId;
+      const active = AbortSignal.any([
+        signal,
+        this.lifetime.signal,
+        generation.signal,
+      ]);
       const assertAllowed = () => {
         active.throwIfAborted();
-        if (!this.allowed() || !this.active() || this.closing)
+        if (
+          generation !== this.toolGeneration ||
+          sessionId !== this.config.getSessionId() ||
+          !this.allowed() ||
+          !this.active() ||
+          this.closing
+        )
           throw new Error(
             'Mod tool middleware is disabled or its chain changed.',
           );
@@ -358,23 +412,31 @@ export class ModSession implements ICommandLoader {
       const task = this.toolQueue.then(async () => {
         assertAllowed();
         let attempts = 0;
-        return this.runtime!.runTool(
-          input,
-          async (changed, hostSignal, check) => {
-            assertAllowed();
-            if (attempts++) onRepeat();
-            active.throwIfAborted();
-            return next(
-              changed,
-              hostSignal,
-              async (question, verdict, checkSignal) => {
-                assertAllowed();
-                return check(question, verdict, checkSignal);
-              },
-            );
-          },
-          active,
-        );
+        this.toolSignal = active;
+        try {
+          return await this.runtime!.runTool(
+            input,
+            async (changed, hostSignal, check) => {
+              assertAllowed();
+              if (attempts++) onRepeat();
+              active.throwIfAborted();
+              return next(
+                changed,
+                hostSignal,
+                async (question, verdict, checkSignal) => {
+                  assertAllowed();
+                  const result = await check(question, verdict, checkSignal);
+                  assertAllowed();
+                  checkSignal.throwIfAborted();
+                  return result;
+                },
+              );
+            },
+            active,
+          );
+        } finally {
+          if (this.toolSignal === active) this.toolSignal = undefined;
+        }
       });
       this.toolQueue = task.catch(() => {});
       return task;
@@ -441,6 +503,7 @@ export class ModSession implements ICommandLoader {
     this.closing ??= (async () => {
       this.unregisterCleanup();
       this.lifetime.abort();
+      this.invalidateTools();
       await this.initialization?.catch(() => {});
       try {
         await this.toolQueue;

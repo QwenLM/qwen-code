@@ -42,6 +42,11 @@ public class TransportConsumerStore {
      */
     public record WakeFence(String sessionStatus, String workspaceId,
             String headState, long committedSequence, boolean liveWriter) {
+        /** Whether a wake may act: an ACTIVE Session with an ACTIVE or SEALED journal head. */
+        public boolean open() {
+            return "ACTIVE".equals(sessionStatus)
+                    && ("ACTIVE".equals(headState) || "SEALED".equals(headState));
+        }
     }
 
     public Optional<WakeFence> wakeFence(String tenantId, String sessionId) {

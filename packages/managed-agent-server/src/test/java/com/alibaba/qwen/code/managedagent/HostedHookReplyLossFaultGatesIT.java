@@ -2,8 +2,13 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.persistence.FaultingExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.StoreFaultGate;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,11 +24,13 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -52,6 +59,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -216,6 +225,7 @@ class HostedHookReplyLossFaultGatesIT {
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
+                .sources(StoreFaultConfiguration.class)
                 .run("--server.address=127.0.0.1", "--server.port=" + port,
                         "--spring.datasource.url=" + System.getProperty("mysql.url"),
                         "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -282,13 +292,27 @@ class HostedHookReplyLossFaultGatesIT {
                 "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202).path("turn_id").asText();
     }
 
+    private HttpResponse<String> harnessStatus(String session, HarnessSessionRef attach) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
+                        + "/session/" + session + "/status"))
+                .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
+                .header("X-Qwen-Client-Id", attach.getHarnessClientId())
+                .header("X-Qwen-Harness-Protocol-Version", "1")
+                .header("X-Qwen-Harness-Boot-Id", attach.getHarnessBootId()).GET().build();
+        return http.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
     private JsonNode hookExecution(String session) {
-        List<JsonNode> records = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
-                .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
-                .toList();
+        List<JsonNode> records = hookExecutions(session);
         assertThat(records).as("hook execution records").hasSize(1);
         assertThat(records.getFirst().path("eventName").asText()).isEqualTo("PreToolUse");
         return records.getFirst();
+    }
+
+    private List<JsonNode> hookExecutions(String session) {
+        return HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
+                .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
+                .toList();
     }
 
     private JsonNode hookResult(String session) throws Exception {
@@ -323,7 +347,7 @@ class HostedHookReplyLossFaultGatesIT {
         // A later poll of the same owner resolves the receipt the worker
         // still holds, without a second physical call.
         String executionId = hookExecution(session).path("hookExecutionId").asText();
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {
             var status = hookStatus(session, executionId, attach);
@@ -447,7 +471,7 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(events("hook.allow")).isEmpty();
         // A later read of the same operation returns the same decision.
         String executionId = hookExecution(session).path("hookExecutionId").asText();
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {
             var status = hookStatus(session, executionId, attach);
@@ -467,29 +491,327 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
-    // The Harness status route identifies the caller by the client id its
-    // attach minted and the process generation it attached to; the connector
-    // keeps both on the private attachment ref.
-    private record HarnessAttach(String clientId, String bootId) {}
-
-    private HarnessAttach attachment(HarnessConnector connector, String session) throws Exception {
-        Field field = connector.getClass().getDeclaredField("attachments");
-        field.setAccessible(true);
-        for (Object value : ((Map<?, ?>) field.get(connector)).values()) {
-            if (value instanceof HarnessSessionRef ref && session.equals(ref.getHarnessSessionId())) {
-                return new HarnessAttach(ref.getHarnessClientId(), ref.getHarnessBootId());
-            }
-        }
-        return null;
+    @Test
+    @Timeout(300)
+    void fg13fFailClosedReplyLossReplaysTheBlockedFailureOnMySql() throws Exception {
+        boot("60000", "1000", "hook-fail");
+        // The failure is settled before the reply is dropped. The wrapped
+        // decision is the harness's, so the rule matches the worker's raw
+        // settled failure rather than the reason text it has not added yet.
+        proxy.arm(HostedSessionRelayForwardingProxy.Rule.dropResponse(
+                (method, path, body) -> path.contains("/control")
+                        && body.contains("\"kind\":\"hook-status\""),
+                reply -> reply.contains("\"state\":\"settled\"")
+                        && reply.contains("\"success\":false"),
+                "hook-fail-settled-reply"));
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_FAILCLOSED_LOSS");
+        waitFor(() -> assertThat(events("hook.call")).hasSize(1));
+        // The dropped settled reply leaves the honest unknown first.
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText()).isEqualTo("recovery_blocked");
+            assertThat(execution.at("/run/execution").asText()).isEqualTo("outcome_unknown");
+        });
+        assertThat(events("hook.fail")).hasSize(1);
+        assertThat(events("hook.allow")).isEmpty();
+        // A later read of the same operation settles the wrapped failure.
+        String executionId = hookExecution(session).path("hookExecutionId").asText();
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        waitFor(() -> {
+            var status = hookStatus(session, executionId, attach);
+            assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
+        });
+        waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
+        assertThat(events("hook.call")).hasSize(1);
+        JsonNode failed = hookResult(session);
+        assertThat(failed.path("success").asBoolean()).isFalse();
+        assertThat(failed.at("/output/continue").asBoolean()).isFalse();
+        assertThat(failed.at("/output/decision").asText()).isEqualTo("block");
+        assertThat(failed.at("/output/reason").asText()).isEqualTo("Hook evaluation failed.");
+        assertThat(modelRequests.toString()).doesNotContain(PROOF);
+        assertThat(Files.readString(temporary.resolve("proxy.log")))
+                .contains("PROXY dropped hook-fail-settled-reply");
+        assertThat(modelFailure.get()).isNull();
     }
 
-    private HttpResponse<String> hookStatus(String session, String executionId, HarnessAttach attach) throws Exception {
+    @Test
+    @Timeout(300)
+    void fg13bHookIntentStoreRejectionDispatchesNothingOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_INTENT, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STORE_INTENT");
+        // The injection fires inside the real commit transaction; the rejected
+        // intent never reaches the worker and leaves no record behind.
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(3))
+                .until(() -> true);
+        assertThat(events("hook.call")).isEmpty();
+        assertThat(hookExecutions(session)).as("rejected intent commit").isEmpty();
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13bHookDispatchStoreRejectionDispatchesNothingOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_DISPATCH_STARTED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STORE_DISPATCH");
+        // The dispatch commit is refused before the worker is reached, so the
+        // command never runs and the intent stays retryable.
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(3))
+                .until(() -> true);
+        assertThat(events("hook.call")).isEmpty();
+        List<JsonNode> records = hookExecutions(session);
+        assertThat(records).as("records after the refused dispatch").hasSize(1);
+        assertThat(records.getFirst().at("/run/execution").asText()).isEqualTo("intent");
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13bHookResultStoreRejectionSettlesFromTheReceiptOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_SETTLED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STORE_SETTLE");
+        // The worker already ran the Hook. An exhausted append leaves the
+        // Turn recovery-blocked rather than failed, so quiescence is the
+        // end-of-attempt barrier: the read below then has to recover from
+        // the receipt rather than watch the original attempt land late.
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        // submit() returns 202 before the connector's background attach, so
+        // the lookup waits for the dispatch that the fired fault proves ran.
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        waitFor(() -> {
+            var probe = harnessStatus(session, attach);
+            assertThat(probe.statusCode()).as("harness status: %s", probe.body()).isEqualTo(200);
+            JsonNode body = json.readTree(probe.body());
+            assertThat(body.path("hasActivePrompt").asBoolean()).isFalse();
+            assertThat(body.path("recoveryBlocked").asBoolean()).isTrue();
+        });
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        JsonNode parked = hookExecution(session);
+        assertThat(parked.path("resultRef").isNull()).as("unsettled record").isTrue();
+        String executionId = parked.path("hookExecutionId").asText();
+        StoreFaultGate.INSTANCE.clear();
+        // A later read takes the receipt the worker still holds and commits
+        // the result without a second physical call.
+        waitFor(() -> {
+            var status = hookStatus(session, executionId, attach);
+            assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
+        });
+        waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13aHookResultStoreAckLossSettlesWithoutASecondCallOnMySql()
+            throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.armAck(
+                StoreFaultGate.Phase.HOOK_SETTLED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(),
+                "definition", 202);
+        String session = createSession(definition.path("id").asText(),
+                "initial");
+        submit(session, "FG13_ACK_SETTLE");
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts())
+                .isGreaterThanOrEqualTo(1));
+        // The commit landed; only its acknowledgement was lost.
+        waitFor(() -> assertThat(hookExecution(session).at("/run/state")
+                .asText()).isEqualTo("settled"));
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        HarnessSessionRef attach = attachment(
+                spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        String executionId = hookExecution(session)
+                .path("hookExecutionId").asText();
+        StoreFaultGate.INSTANCE.clear();
+        // A later read returns the settled record without a second call.
+        waitFor(() -> {
+            var status = hookStatus(session, executionId, attach);
+            assertThat(status.statusCode())
+                    .as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText())
+                    .isEqualTo("settled");
+        });
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        assertThat(hookResult(session).path("outcome").asText())
+                .isEqualTo("success");
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13aHookDispatchStoreAckLossLeavesTheDurableDispatchOnMySql()
+            throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.armAck(
+                StoreFaultGate.Phase.HOOK_DISPATCH_STARTED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(),
+                "definition", 202);
+        String session = createSession(definition.path("id").asText(),
+                "initial");
+        submit(session, "FG13_ACK_DISPATCH");
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts())
+                .isGreaterThanOrEqualTo(1));
+        // The store client retries the rejected commit, and the retry replays
+        // the committed command instead of re-running the record store. The
+        // fault therefore fires exactly once; a rollback would make the retry
+        // commit the dispatch again and fire it a second time. The Hook then
+        // proceeds from that durable dispatch and settles.
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText())
+                    .isEqualTo("settled");
+            assertThat(execution.path("resultRef").isNull()).isFalse();
+        });
+        assertThat(StoreFaultGate.INSTANCE.attempts())
+                .as("the replay must not re-commit the dispatch")
+                .isEqualTo(1);
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        assertThat(events("hook.allow")).as("allow decisions").hasSize(1);
+        assertThat(hookResult(session).path("outcome").asText())
+                .isEqualTo("success");
+        assertThat(modelFailure.get()).isNull();
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13aRegistrationStoreAckLossReusesThePinnedRegistrationOnMySql()
+            throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.armAck(
+                StoreFaultGate.Phase.HOOK_REGISTRATION_SETTLED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(),
+                "definition", 202);
+        String session = createSession(definition.path("id").asText(),
+                "initial");
+        submit(session, "FG13_ACK_REGISTRATION");
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts())
+                .isGreaterThanOrEqualTo(1));
+        // The store client retries the rejected commit with the same body,
+        // and the server replays the committed command instead of re-running
+        // the record store. The loss therefore never reaches admission: the
+        // turn proceeds and reuses the durable registration. The single fault
+        // is what proves the retry replayed rather than re-applied; a second
+        // apply would fire it again.
+        waitFor(() -> assertThat(events("hook.call")).hasSize(1));
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText())
+                    .isEqualTo("settled");
+            assertThat(execution.at("/run/execution").asText())
+                    .isEqualTo("settled");
+        });
+        assertThat(StoreFaultGate.INSTANCE.attempts())
+                .as("the replay must not re-apply the settle")
+                .isEqualTo(1);
+        assertThat(events("hook.allow")).hasSize(1);
+        assertThat(hookResult(session).path("outcome").asText())
+                .isEqualTo("success");
+        List<JsonNode> registrations = HostedGateTestSupport.extensionRecords(
+                jdbc, tenant, session, "hook_registration");
+        assertThat(registrations).as("hook registration records").hasSize(1);
+        JsonNode registration = registrations.getFirst();
+        assertThat(registration.path("registrationId").asText())
+                .startsWith("hook-catalog-");
+        assertThat(registration.path("catalogId").asText())
+                .isEqualTo("fg13-hooks");
+        assertThat(registration.path("catalogRevision").asInt()).isEqualTo(1);
+        assertThat(registration.at("/run/state").asText())
+                .isEqualTo("settled");
+        waitFor(() -> assertThat(modelRequests.toString()).contains(PROOF));
+        long results = 0;
+        for (JsonNode message : modelRequests.getLast().path("messages")) {
+            if ("tool".equals(message.path("role").asText())
+                    && "call_FG13_ACK_REGISTRATION".equals(
+                            message.path("tool_call_id").asText())) {
+                results++;
+            }
+        }
+        assertThat(results).as("tool results for the emitted call")
+                .isEqualTo(1);
+        assertThat(modelFailure.get()).isNull();
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13bHookPlanResultStoreRejectionRebuildsTheMarkerOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_PLAN_SETTLED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STORE_PLAN_SETTLE");
+        // The child settled; only the PreToolUse marker's own commit is
+        // refused. Quiescence is the end-of-attempt barrier, after which the
+        // marker is rebuilt from the saved receipts.
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        // submit() returns 202 before the connector's background attach, so
+        // the lookup waits for the dispatch that the fired fault proves ran.
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        waitFor(() -> {
+            var probe = harnessStatus(session, attach);
+            assertThat(probe.statusCode()).as("harness status: %s", probe.body()).isEqualTo(200);
+            JsonNode body = json.readTree(probe.body());
+            assertThat(body.path("hasActivePrompt").asBoolean()).isFalse();
+            assertThat(body.path("recoveryBlocked").asBoolean()).isTrue();
+        });
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        JsonNode marker = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
+                .filter(record -> "__plan__".equals(record.path("hookId").asText()))
+                .filter(record -> "PreToolUse".equals(record.path("eventName").asText()))
+                .findFirst()
+                .orElseThrow();
+        assertThat(marker.path("resultRef").isNull()).as("unsettled marker").isTrue();
+        // Without this the cell also passes when the child's own commit was
+        // the one refused: both leave the marker unsettled and the receipt
+        // replayable, so only a settled child proves which commit was hit.
+        // hookExecution() pins hasSize(1) and the PreToolUse event, so a
+        // second child cannot satisfy this on the wrong record.
+        assertThat(hookExecution(session).path("resultRef").isNull()).as("child settled before the marker").isFalse();
+        String occurrenceId = marker.path("hookExecutionId").asText();
+        StoreFaultGate.INSTANCE.clear();
+        waitFor(() -> {
+            var status = hookStatus(session, occurrenceId, attach);
+            assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
+        });
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    private HttpResponse<String> hookStatus(String session, String executionId, HarnessSessionRef attach) throws Exception {
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                         + "/session/" + session + "/hooks/operations/" + executionId))
                 .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
-                .header("X-Qwen-Client-Id", attach.clientId())
+                .header("X-Qwen-Client-Id", attach.getHarnessClientId())
                 .header("X-Qwen-Harness-Protocol-Version", "1")
-                .header("X-Qwen-Harness-Boot-Id", attach.bootId()).GET().build();
+                .header("X-Qwen-Harness-Boot-Id", attach.getHarnessBootId()).GET().build();
         return http.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
@@ -551,7 +873,11 @@ class HostedHookReplyLossFaultGatesIT {
             boolean call = results.isEmpty()
                     && List.of("FG13_EXECUTE_LOSS", "FG13_STATUS_LOSS",
                             "FG13_CATALOG_LOSS", "FG13_HTTP_LOSS",
-                            "FG13_DENY_LOSS").contains(prompt);
+                            "FG13_DENY_LOSS", "FG13_FAILCLOSED_LOSS",
+                            "FG13_STORE_INTENT", "FG13_STORE_DISPATCH",
+                            "FG13_STORE_SETTLE", "FG13_ACK_SETTLE",
+                            "FG13_ACK_DISPATCH", "FG13_ACK_REGISTRATION",
+                            "FG13_STORE_PLAN_SETTLE").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
@@ -635,12 +961,9 @@ class HostedHookReplyLossFaultGatesIT {
         }).untilAsserted(assertion::execute);
     }
 
-    private static String quote(String text) {
-        return "'" + text.replace("'", "'\"'\"'") + "'";
-    }
-
     @AfterEach
     void stop() {
+        StoreFaultGate.INSTANCE.clear();
         assertAll(this::saveEvidence,
                 () -> { if (model != null) {
                     model.stop(0);
@@ -713,6 +1036,21 @@ class HostedHookReplyLossFaultGatesIT {
             json.writeValue(destination.resolve("hook-executions.json").toFile(),
                     jdbc.queryForList("SELECT record_id, domain, state, runtime_state FROM ma_session_record"
                             + " WHERE tenant_id = ? AND domain = 'hook_execution'", tenant));
+        }
+    }
+
+    // Test-only: replaces the record store bean with the faulting wrapper.
+    // The store's own constructor wiring is unchanged, so every commit still
+    // runs in the real transaction.
+    @Configuration(proxyBeanMethods = false)
+    static class StoreFaultConfiguration {
+        @Bean
+        @Primary
+        ManagedExtensionRecordStore faultingExtensionRecordStore(
+                JdbcTemplate jdbc, AgentStateStore sessions,
+                ManagedTaskEventStore taskEvents) {
+            return new FaultingExtensionRecordStore(jdbc, sessions, taskEvents,
+                    StoreFaultGate.INSTANCE);
         }
     }
 }

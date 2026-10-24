@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry.WorkspaceSummary;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCreationRoots.Details;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
@@ -37,6 +38,8 @@ public class WorkspaceCreationStore {
     private final WorkspaceStorageGuard guard;
     private final ManagedWorkspaceRegistry registry;
     private final WorkspaceCreationRoots roots;
+    private final WorkspaceLocalDirectories localDirectories;
+    private final boolean localDirectoryImport;
     private final ObjectMapper json;
     private final Clock clock;
 
@@ -48,6 +51,8 @@ public class WorkspaceCreationStore {
         this.guard = guard;
         this.registry = registry;
         roots = new WorkspaceCreationRoots(jdbc, properties);
+        localDirectories = new WorkspaceLocalDirectories(properties);
+        localDirectoryImport = properties.getRuntimeBroker().isLocalDirectoryImportEnabled();
         this.json = json;
         this.clock = clock;
     }
@@ -64,8 +69,21 @@ public class WorkspaceCreationStore {
         return guard.enabled();
     }
 
+    public boolean localDirectoryImportEnabled() {
+        return localDirectoryImport && guard.enabled();
+    }
+
     public WorkspaceSummary create(String tenant, String actor, String displayName, String key,
             String sourceWorkspaceId, String cwdRelative) {
+        return create(tenant, actor, displayName, key, sourceWorkspaceId, cwdRelative, null);
+    }
+
+    public WorkspaceSummary create(String tenant, String actor, String displayName, String key,
+            String sourceWorkspaceId, String cwdRelative, String localPath) {
+        if (localPath != null && (sourceWorkspaceId != null || cwdRelative != null)) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_request",
+                    "Local path and source Workspace must not be combined.");
+        }
         if (sourceWorkspaceId == null && cwdRelative != null
                 || sourceWorkspaceId != null && cwdRelative == null) {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_request",
@@ -73,7 +91,8 @@ public class WorkspaceCreationStore {
         }
         WorkspaceSelection selected = sourceWorkspaceId == null ? null
                 : new WorkspaceSelection(sourceWorkspaceId, cwdRelative);
-        if (selected == null ? !enabled() : !directorySelectionEnabled()) {
+        if (localPath != null ? !localDirectoryImportEnabled()
+                : selected == null ? !enabled() : !directorySelectionEnabled()) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "workspace_creation_unavailable",
                     "Workspace creation is not enabled.");
         }
@@ -100,15 +119,28 @@ public class WorkspaceCreationStore {
                     ManagedReceipts.insert(jdbc, ReceiptNamespace.WORKSPACE_CREATE, tenant,
                             ReceiptScope.ACTOR, scope, key, ManagedSchemaKeys.key(name), "CREATE_WORKSPACE", actorKey,
                             null, null, "PENDING", null, null, now);
-                    var source = selected == null ? null : ownedSource(tenant, actor, selected);
-                    Details details = source == null
-                            ? new Details("workspace-" + receiptKey, "created-" + receiptKey,
-                                name, UUID.randomUUID().toString())
-                            : new Details("workspace-" + receiptKey, source.binding().getStorageId(), name,
-                                UUID.randomUUID().toString(), selected.workspaceId(),
-                                source.binding().getWorkspaceGeneration(), selected.cwdRelative());
+                    Details details;
+                    if (localPath != null) {
+                        Path project = localDirectories.project(localPath);
+                        var existing = localSource(tenant, actor, project);
+                        if (existing == null) {
+                            Path root = localDirectories.root(project);
+                            String relative = new WorkspaceSelection("workspace-" + receiptKey,
+                                    root.relativize(project).toString()).cwdRelative();
+                            details = new Details("workspace-" + receiptKey, "created-" + receiptKey, name,
+                                    UUID.randomUUID().toString(), null, null, relative,
+                                    guard.identity(root));
+                        } else {
+                            details = sourceDetails(tenant, actor, name, receiptKey, existing);
+                        }
+                    } else if (selected == null) {
+                        details = new Details("workspace-" + receiptKey, "created-" + receiptKey,
+                                name, UUID.randomUUID().toString());
+                    } else {
+                        details = sourceDetails(tenant, actor, name, receiptKey, selected);
+                    }
                     jdbc.update("UPDATE ma_request_receipt SET result_json = ?, request_digest = ? WHERE receipt_key = ?",
-                            encode(details), digest(name, selected, details.sourceGeneration()), receiptKey);
+                            encode(details), digest(name, selected, details.sourceGeneration(), localPath), receiptKey);
                     return find(tenant, scope, key, true);
                 });
             } catch (DuplicateKeyException race) {
@@ -119,7 +151,7 @@ public class WorkspaceCreationStore {
             }
         }
         Details details = WorkspaceCreationRoots.details(Objects.requireNonNull(receipt).resultJson(), receiptKey);
-        String digest = digest(name, selected, details.sourceGeneration());
+        String digest = digest(name, selected, details.sourceGeneration(), localPath);
         requireDigest(receipt, digest);
         if ("COMPLETED".equals(receipt.state())) {
             return replay(tenant, actor, details);
@@ -127,12 +159,21 @@ public class WorkspaceCreationStore {
         if (!"PENDING".equals(receipt.state())) {
             throw WorkspaceExecutionStore.unavailable();
         }
+        if (details.localRoot() != null) {
+            details = reuseImportedRoot(tenant, actor, scope, key, details, digest);
+            if ("COMPLETED".equals(find(tenant, scope, key, false).state())) {
+                return replay(tenant, actor, details);
+            }
+        }
+        final Details admitted = details;
         try {
-            if (selected == null) {
-                roots.prepare(tenant, receiptKey);
+            if (admitted.sourceWorkspaceId() == null) {
+                if (admitted.localRoot() == null) {
+                    roots.prepare(tenant, receiptKey);
+                }
                 guard.registerCreated(tenant, details.storageId(), details.registrationId());
             } else {
-                transaction.executeWithoutResult(status -> verifySource(tenant, actor, details));
+                transaction.executeWithoutResult(status -> verifySource(tenant, actor, admitted));
             }
         } catch (RuntimeException error) {
             ManagedReceipts.Receipt current = find(tenant, scope, key, false);
@@ -152,19 +193,35 @@ public class WorkspaceCreationStore {
                 throw WorkspaceExecutionStore.unavailable();
             }
             long now = clock.millis();
-            var source = selected == null ? null : verifySource(tenant, actor, details);
+            Details completed = WorkspaceCreationRoots.details(current.resultJson(), receiptKey);
+            var source = completed.sourceWorkspaceId() == null ? null : verifySource(tenant, actor, completed);
+            if (completed.localRoot() != null) {
+                Path root = Path.of(completed.localRoot().root());
+                if (!completed.localRoot().equals(guard.identity(root))) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+                localDirectories.project(root.resolve(completed.cwdRelative()).toString());
+            }
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                             + " storage_id, display_name, config_ref, policy_ref, state, gmt_create, gmt_modified)"
                             + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE', ?, ?)",
-                    tenant, details.workspaceId(), details.storageId(), details.displayName(),
+                    tenant, completed.workspaceId(), completed.storageId(), completed.displayName(),
                     source == null ? WorkspaceExecutionProfile.CONFIG_REF : source.configRef(),
                     source == null ? WorkspaceExecutionProfile.POLICY_REF : source.policyRef(), now, now);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                            + " VALUES (?, ?, ?, 'OWNER')", tenant, details.workspaceId(), actorKey);
+                            + " VALUES (?, ?, ?, 'OWNER')", tenant, completed.workspaceId(), actorKey);
             jdbc.update("UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ?"
                     + " WHERE receipt_key = ?", now, receiptKey);
         });
         return replay(tenant, actor, details);
+    }
+
+    public DirectoryPage localDirectories(String localPath) {
+        if (!localDirectoryImportEnabled()) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "workspace_creation_unavailable",
+                    "Local directory import is not enabled.");
+        }
+        return localDirectories.directories(localPath);
     }
 
     public DirectoryPage directories(String tenant, String actor, String workspace, String cwd) {
@@ -205,6 +262,62 @@ public class WorkspaceCreationStore {
         return new DirectoryPage(root.toString(), selected.cwdRelative(), children, truncated);
     }
 
+    private Details sourceDetails(String tenant, String actor, String name, String receiptKey, WorkspaceSelection selected) {
+        var source = ownedSource(tenant, actor, selected);
+        return new Details("workspace-" + receiptKey, source.binding().getStorageId(), name,
+                UUID.randomUUID().toString(), selected.workspaceId(), source.binding().getWorkspaceGeneration(),
+                selected.cwdRelative());
+    }
+
+    private WorkspaceSelection localSource(String tenant, String actor, Path project) {
+        List<String> candidates = jdbc.queryForList("SELECT w.workspace_id FROM ma_workspace w"
+                        + " JOIN ma_workspace_access a ON a.tenant_id = w.tenant_id AND a.workspace_id = w.workspace_id"
+                        + " JOIN ma_storage s ON s.tenant_id = w.tenant_id AND s.storage_id = w.storage_id"
+                        + " WHERE w.tenant_id = ? AND a.actor_id = ? AND a.role = 'OWNER'"
+                        + " AND w.state = 'ACTIVE' AND w.workspace_kind = 'ROOT' AND s.storage_kind = 'LOCAL'"
+                        + " ORDER BY w.workspace_id", String.class, tenant, ManagedWorkspaceRegistry.actorKey(tenant, actor));
+        for (String workspace : candidates) {
+            String storage = jdbc.queryForObject("SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
+                    String.class, tenant, workspace);
+            Path root;
+            try {
+                root = guard.configuredRoot(tenant, storage);
+            } catch (ManagedAgentException | RuntimeBrokerException unavailable) {
+                continue;
+            }
+            if (root != null && project.startsWith(root)) {
+                var selection = new WorkspaceSelection(workspace, root.equals(project) ? "." : root.relativize(project).toString());
+                ownedSource(tenant, actor, selection);
+                return selection;
+            }
+        }
+        return null;
+    }
+
+    private Details reuseImportedRoot(String tenant, String actor, String scope, String key, Details details, String digest) {
+        String receiptKey = details.workspaceId().substring("workspace-".length());
+        Path root = Path.of(details.localRoot().root());
+        localDirectories.requireStorageRoot(root);
+        if (!details.localRoot().equals(guard.identity(root))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return transaction.execute(status -> {
+            var receipt = find(tenant, scope, key, true);
+            requireDigest(Objects.requireNonNull(receipt), digest);
+            Details current = WorkspaceCreationRoots.details(receipt.resultJson(), receiptKey);
+            if (!"PENDING".equals(receipt.state()) || current.localRoot() == null) {
+                return current;
+            }
+            var existing = localSource(tenant, actor, root.resolve(current.cwdRelative()));
+            if (existing == null) {
+                return current;
+            }
+            Details reused = sourceDetails(tenant, actor, current.displayName(), receiptKey, existing);
+            jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?", encode(reused), receiptKey);
+            return reused;
+        });
+    }
+
     private ManagedWorkspaceRegistry.ResolvedBinding ownedSource(String tenant, String actor,
             WorkspaceSelection selected) {
         for (String segment : selected.cwdRelative().split("/")) {
@@ -235,7 +348,10 @@ public class WorkspaceCreationStore {
         return ".git".equals(name) || ".qwen-child-workspaces".equals(name);
     }
 
-    private static String digest(String name, WorkspaceSelection selected, Long generation) {
+    private static String digest(String name, WorkspaceSelection selected, Long generation, String localPath) {
+        if (localPath != null) {
+            return ManagedSchemaKeys.key("local-directory-import/1", name, localPath);
+        }
         return selected == null ? ManagedSchemaKeys.key(name)
                 : ManagedSchemaKeys.key(name, selected.workspaceId(), selected.cwdRelative(), String.valueOf(generation));
     }

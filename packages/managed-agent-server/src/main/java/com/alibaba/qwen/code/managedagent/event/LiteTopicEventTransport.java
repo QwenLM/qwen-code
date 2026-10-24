@@ -34,7 +34,6 @@ public class LiteTopicEventTransport implements JournalEventTransport {
     // The managed_session_commit_v1 marker and any non-event record carry a
     // different subtype and are not events.
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
-    private static final String WAKE_KIND = "wake.requested";
 
     // Shared with the public-event transport; the configuration closes it.
     private final Producer producer;
@@ -64,7 +63,8 @@ public class LiteTopicEventTransport implements JournalEventTransport {
         }
         for (ManagedEventEnvelope envelope : envelopes) {
             publish(envelope, envelope.sessionId());
-            if (WAKE_KIND.equals(envelope.kind())) {
+            if (ManagedEventEnvelopes.KIND_WAKE_REQUESTED.equals(
+                    envelope.kind())) {
                 publish(envelope, wakeBootstrapLiteTopic);
             }
         }

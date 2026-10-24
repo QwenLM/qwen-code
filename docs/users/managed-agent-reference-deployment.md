@@ -45,7 +45,7 @@ Keep the Harness on loopback. Record the port it reports; `--port` may advance w
 
 ## Start the Java control plane
 
-In another terminal, configure the same Harness and the database:
+In another terminal, configure the same Harness, the database and an existing Workspace directory:
 
 ```bash
 export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'
@@ -55,6 +55,7 @@ export QWEN_MANAGED_AGENT_HARNESS_ENABLED='true'
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4170'
 export QWEN_MANAGED_AGENT_HARNESS_TOKEN='<private-random-token>'
 export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST='sha256:<64-hex-digest>'
+export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/srv/qwen-workspace'
 
 bin/qwen-managed-agent-server
 ```
@@ -72,6 +73,8 @@ Both launchers load that file automatically when it exists. The launcher uses th
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
+The enabled Harness turns on the Managed Session Store. The Store's base URL defaults to this server's plaintext loopback listener. Its workspace ID defaults to the one the Runtime Broker derives from `QWEN_MANAGED_AGENT_WORKSPACE_CWD`, so the identity stays the same when the tool path below is enabled. A deployment that already set `QWEN_MANAGED_AGENT_WORKSPACE_ID` must keep it: unbound Sessions resolve their Store scope from that ID. Set `QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL` only when the Harness reaches this server through another address, or when the listener serves TLS.
+
 This base configuration supports text-only Hosted Sessions. Keep the listener on loopback unless a signed or authenticated ingress is configured. The complete authentication, API, and capability configuration is bundled as `docs/server-reference.md`.
 
 ## Bootstrap credentials
@@ -82,7 +85,7 @@ This base configuration supports text-only Hosted Sessions. Keep the listener on
 bin/qwen-managed-agent-bootstrap
 ```
 
-The generated `harness.env` and `server.env` are shell-sourceable and also valid systemd `EnvironmentFile`s. Pass `--directory /etc/qwen-managed-agent` for the systemd layout, fill in `SPRING_DATASOURCE_PASSWORD`, and adjust ownership to the service account.
+The token and digest are written only to `harness.env`: `server.env` names that file through `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`, and the control plane reads both values from it. It refuses to start when the file is set together with `QWEN_MANAGED_AGENT_HARNESS_TOKEN` or `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST`, so a rotation changes one file. The generated `harness.env` and `server.env` are shell-sourceable and also valid systemd `EnvironmentFile`s. Pass `--directory /etc/qwen-managed-agent` for the systemd layout, fill in `SPRING_DATASOURCE_PASSWORD`, and adjust ownership to the service account.
 
 ## Preflight check
 
@@ -100,7 +103,7 @@ The distribution includes `systemd/` unit and environment templates for the acce
 
 ## Enable the accepted local-process tool path
 
-Tool execution requires the existing fail-closed Runtime and Workspace setup. At minimum, configure:
+Tool execution requires the existing fail-closed Runtime and Workspace setup. On top of the base configuration, at minimum, configure:
 
 ```bash
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
@@ -110,12 +113,10 @@ export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY='<base64-encoded-32-byte-key>'
 export QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY='/var/lib/qwen-managed-agent/runtime'
 export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/usr/bin/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/opt/qwen-code/dist/cli.js'
-export QWEN_MANAGED_AGENT_WORKSPACE_ID='reference-workspace'
-export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/srv/qwen-workspace'
 export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 ```
 
-Before admitting file, Shell, or child Git work, complete the native storage registration and mount-identity verification described under “Verified physical Workspace recovery” in `docs/server-reference.md`. An unregistered or ambiguous mount must remain unavailable. Public Shell and v2 capability advertisement stay disabled until their separate qualification completes.
+Before admitting file, Shell, or child Git work, complete the native storage registration and mount-identity verification described under “Verified physical Workspace recovery” in `docs/server-reference.md`. An unregistered or ambiguous mount must remain unavailable. Public Shell execution remains disabled by default. Shell lifecycle v2 is advertised by default; an explicit lifecycle list replaces the default, and an empty list disables it. MCP lifecycle still requires explicit inclusion. Capability advertisement does not establish deployment qualification.
 
 ## Upgrade
 

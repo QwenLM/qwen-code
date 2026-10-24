@@ -120,7 +120,9 @@ const BRIDGE = `(() => {
         if (result !== undefined) {
           apply(then, apply(resolve, PromiseType, [result]), [undefined, fail]);
         }
+        return true;
       }
+      return false;
     } else {
       const result = output + ']';
       output = '[';
@@ -200,8 +202,12 @@ export class UiRuntime {
     });
   }
 
-  dispatch(event: UiEvent, inputs: InputValues): UiPatch[] {
-    return this.round(() => {
+  dispatch(
+    event: UiEvent,
+    inputs: InputValues,
+  ): { patches: UiPatch[]; handled: boolean } {
+    let handled = false;
+    const patches = this.round(() => {
       if (!this.initialized) throw new Error('UI runtime is not initialized.');
       if (
         !event ||
@@ -214,8 +220,14 @@ export class UiRuntime {
         throw new Error('Invalid UI event.');
       }
       this.call('inputs', serializeInputs(inputs)).dispose();
-      this.call('event', JSON.stringify(event)).dispose();
+      const result = this.call('event', JSON.stringify(event));
+      try {
+        handled = this.vm.eq(result, this.vm.true);
+      } finally {
+        result.dispose();
+      }
     });
+    return { patches, handled };
   }
 
   dispose(): void {

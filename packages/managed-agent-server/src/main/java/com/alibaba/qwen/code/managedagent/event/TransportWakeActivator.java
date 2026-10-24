@@ -8,13 +8,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.util.Optional;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
@@ -44,7 +39,6 @@ import java.util.function.Consumer;
 public class TransportWakeActivator implements Closeable {
     private static final Logger LOG = LoggerFactory.getLogger(
             TransportWakeActivator.class);
-    private static final String WAKE_KIND = "wake.requested";
     private static final int LOAD_THREADS = 4;
     private static final int LOAD_QUEUE = 256;
 
@@ -96,7 +90,10 @@ public class TransportWakeActivator implements Closeable {
      */
     public TransportWakeActivator(TransportConsumerStore store,
             HarnessConnector harness, Consumer<String> activated) {
-        this(store, harness, activated, loadPool());
+        this(store, harness, activated, TransportExecutors.bounded(
+                Thread.ofPlatform().daemon().name("event-transport-wake-", 1)
+                        .factory(),
+                LOAD_THREADS, LOAD_QUEUE));
     }
 
     // The executor is injectable so a test can load synchronously.
@@ -109,34 +106,16 @@ public class TransportWakeActivator implements Closeable {
         this.loads = loads;
     }
 
-    private static ExecutorService loadPool() {
-        AtomicInteger threads = new AtomicInteger();
-        return new ThreadPoolExecutor(LOAD_THREADS, LOAD_THREADS, 0,
-                TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(LOAD_QUEUE),
-                runnable -> {
-                    Thread thread = new Thread(runnable,
-                            "event-transport-wake-" + threads.incrementAndGet());
-                    thread.setDaemon(true);
-                    return thread;
-                }, new ThreadPoolExecutor.AbortPolicy());
-    }
-
     /** Stops the load pool; a load in flight finishes or times out. */
     @Override
     public void close() {
-        if (loads instanceof ExecutorService service) {
-            service.shutdown();
-            try {
-                service.awaitTermination(2, TimeUnit.SECONDS);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        TransportExecutors.close(loads);
     }
 
     public Outcome onWake(ManagedEventEnvelope envelope) {
         if (!ManagedEventEnvelopes.STREAM_AUTHORITATIVE_JOURNAL.equals(
-                envelope.stream()) || !WAKE_KIND.equals(envelope.kind())) {
+                envelope.stream()) || !ManagedEventEnvelopes.KIND_WAKE_REQUESTED
+                        .equals(envelope.kind())) {
             return Outcome.NOT_A_WAKE;
         }
         String tenantId = envelope.tenantId();
@@ -152,9 +131,7 @@ public class TransportWakeActivator implements Closeable {
         if (envelope.sequence() > fence.committedSequence()) {
             return Outcome.NOT_VISIBLE;
         }
-        if (!"ACTIVE".equals(fence.sessionStatus())
-                || !("ACTIVE".equals(fence.headState())
-                        || "SEALED".equals(fence.headState()))) {
+        if (!fence.open()) {
             return Outcome.SETTLED;
         }
         if (fence.liveWriter()) {

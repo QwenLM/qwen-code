@@ -41,22 +41,32 @@ export interface HostedApprovalSettings {
 
 // Listing what each mode pre-approves means a tool added to a profile later
 // is asked about until someone decides otherwise. `task_list` only reads the
-// Session's own team board (H4e-b1).
+// Session's own team board (H4e-b1). `todo_write` only writes the Session's
+// own task list, so it is as safe to pre-approve as a read. A tool that
+// reaches the network would not join this list: it contacts a URL nobody in
+// the Session chose.
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
-  default: ['read_file', 'task_list', 'exit_plan_mode', 'team_plan_approval'],
+  default: [
+    'read_file',
+    'task_list',
+    'todo_write',
+    'exit_plan_mode',
+    'team_plan_approval',
+  ],
   'auto-edit': [
     'read_file',
     'write_file',
     'edit',
     'task_list',
+    'todo_write',
     'exit_plan_mode',
     'team_plan_approval',
   ],
 };
 
-// `glob` ships with the `/2` search profiles and the read profile (#13753 I3),
+// `glob` ships with the search profiles and the read profile (#13753 I3),
 // so those pre-approve it and no other profile does. A name-keyed allowance
 // would also pre-approve an MCP-declared tool that happens to be called
 // `glob` — the MCP server picks its own names — and dispatch it without ever
@@ -117,7 +127,7 @@ export function hostedApprovalDefinition(
 
 /**
  * Whether a call asks the operator. `globProfile` is the Session's own
- * `/2` search or read profile, the only places `glob` is pre-approved.
+ * search or read profile, the only places `glob` is pre-approved.
  */
 export function hostedApprovalAsks(
   settings: HostedApprovalSettings,
@@ -281,12 +291,14 @@ export class HostedApprovalWaiters {
     expiresAt: number,
     signal: AbortSignal,
     isFinal: () => boolean,
+    onPoll?: () => Promise<void>,
   ): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
     let poll: NodeJS.Timeout | undefined;
     let onAbort: () => void = () => undefined;
     try {
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
+        let polling = false;
         this.waiting.set(requestId, resolve);
         onAbort = resolve;
         signal.addEventListener('abort', onAbort, { once: true });
@@ -294,6 +306,19 @@ export class HostedApprovalWaiters {
         timer.unref();
         poll = setInterval(() => {
           if (isFinal()) resolve();
+          else if (
+            onPoll &&
+            !polling &&
+            !signal.aborted &&
+            Date.now() < expiresAt
+          ) {
+            polling = true;
+            void onPoll()
+              .catch(reject)
+              .finally(() => {
+                polling = false;
+              });
+          }
         }, WAIT_POLL_MS);
         poll.unref();
         // An answer may have landed before the waiter was registered.
@@ -516,4 +541,42 @@ export async function resolveHostedAction(
   }
   waiters.notify(requestId);
   return { status: 200, body: { requestId, state: 'decided', optionId } };
+}
+
+export function hostedLiveApprovalPoll(
+  session: ManagedSession,
+  waiters: HostedApprovalWaiters,
+  options: HostedActionOptions,
+  readSettings: () => Promise<HostedApprovalSettings>,
+  signal: AbortSignal,
+  globProfile = false,
+  isBlocked: () => boolean = () => false,
+): () => Promise<void> {
+  return async () => {
+    if (isBlocked())
+      throw new Error('Hosted approval policy is recovery blocked.');
+    const settings = await readSettings();
+    if (isBlocked())
+      throw new Error('Hosted approval policy is recovery blocked.');
+    if (
+      signal.aborted ||
+      session.authority.writesStopped ||
+      session.authority.action(options.requestId)?.state !== 'requested' ||
+      hostedApprovalAsks(settings, options.toolName, globProfile)
+    )
+      return;
+    const result = await resolveHostedAction(
+      session,
+      waiters,
+      options.requestId,
+      {
+        optionId: 'allow',
+        inputRevision: options.inputRevision,
+        policyRevision: options.policyRevision,
+      },
+      () => signal.aborted || isBlocked(),
+    );
+    if (result.status !== 200 && result.status !== 409)
+      throw new Error(`Hosted live approval failed: ${result.code}`);
+  };
 }

@@ -43,6 +43,14 @@ public class ManagedSessionStoreController {
         this.store = store;
     }
 
+    @PostMapping("/approval:query")
+    public Object approvalSelection(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
+        var selected = store.approvalSelection(tenant.tenantId(), sessionId, writerToken, request);
+        return selected == null ? com.fasterxml.jackson.databind.node.NullNode.getInstance() : selected;
+    }
+
     static com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycleAuthority(HttpHeaders headers) {
         String operation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.OPERATION_HEADER);
         String generation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.GENERATION_HEADER);
@@ -104,6 +112,23 @@ public class ManagedSessionStoreController {
             @RequestHeader HttpHeaders headers) {
         return store.sealWriter(tenant.tenantId(), sessionId,
                 writerToken, request, lifecycleAuthority(headers));
+    }
+
+    @PostMapping("/writers:release-ownership")
+    public com.fasterxml.jackson.databind.JsonNode releaseOwnership(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.ReleaseOwnershipRequest request) {
+        return store.releaseOwnership(tenant.tenantId(), sessionId, writerToken, request);
+    }
+
+    @PostMapping("/writers:quiesce-ownership")
+    public java.util.Map<String, String> quiesceOwnership(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.QuiesceOwnershipRequest request) {
+        store.quiesceOwnership(tenant.tenantId(), sessionId, writerToken, request);
+        return java.util.Map.of("state", "QUIESCING");
     }
 
     @PostMapping("/recovery:block")

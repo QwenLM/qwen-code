@@ -7,7 +7,10 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
-import type { DurableCronTask } from '../services/cronTasksFile.js';
+import type {
+  CronGateStatus,
+  DurableCronTask,
+} from '../services/cronTasksFile.js';
 import {
   CRON_TASKS_DISPLAY_PATH,
   readCronTasks,
@@ -29,10 +32,29 @@ interface ListedJob {
    * skipped by the scheduler. Surfaced so the agent can tell a disabled task
    * apart from an active one. */
   enabled?: boolean;
+  /** The task's gate command and the summary of its recent runs. */
+  gate?: string;
+  gateStatus?: CronGateStatus;
 }
 
 function truncatePrompt(prompt: string): string {
   return prompt.length > 60 ? prompt.slice(0, 57) + '...' : prompt;
+}
+
+/** "quiet ×41, last delivered 2026-10-21T05:05:00.000Z, 0 failures" */
+export function describeGateStatus(status: CronGateStatus | undefined): string {
+  if (!status) return 'not run yet';
+  const parts = [
+    `last ${status.lastOutcome} at ${new Date(status.lastAt).toISOString()}`,
+    `quiet ×${status.quietSinceDelivery}`,
+    status.lastDeliveredAt !== undefined
+      ? `last delivered ${new Date(status.lastDeliveredAt).toISOString()}`
+      : 'never delivered',
+    status.consecutiveFailures > 0
+      ? `${status.consecutiveFailures} consecutive failure${status.consecutiveFailures === 1 ? '' : 's'}${status.lastError ? ` (${status.lastError})` : ''}`
+      : '0 failures',
+  ];
+  return parts.join(', ');
 }
 
 function displaySchedule(cron: string, fireAtMs?: number): string {
@@ -77,6 +99,9 @@ class CronListInvocation extends BaseToolInvocation<
         error: { message },
       };
     }
+    const live = new Map(scheduler.list().map((job) => [job.id, job]));
+    const gateStatusOf = (status: CronGateStatus | undefined) =>
+      status ? { gateStatus: status } : {};
     const jobs: ListedJob[] = [
       ...fileTasks.map((task) => ({
         id: task.id,
@@ -89,6 +114,10 @@ class CronListInvocation extends BaseToolInvocation<
         // fire — the scheduler skips it — so report it disabled here too rather
         // than as an enabled task that silently never runs.
         enabled: task.enabled !== false && !taskHasLegacyCondition(task),
+        ...(task.gate ? { gate: task.gate } : {}),
+        // The scheduler's in-memory summary is newer than the file's after a
+        // quiet fire, which is persisted only with the next slot stamp.
+        ...gateStatusOf(live.get(task.id)?.gateStatus ?? task.gateStatus),
       })),
       ...scheduler
         .list()
@@ -100,6 +129,8 @@ class CronListInvocation extends BaseToolInvocation<
           recurring: job.recurring,
           durable: false,
           fireAtMs: job.fireAtMs,
+          ...(job.gate ? { gate: job.gate } : {}),
+          ...gateStatusOf(job.gateStatus),
         })),
     ];
 
@@ -121,13 +152,16 @@ class CronListInvocation extends BaseToolInvocation<
       const prompt =
         job.cron === '@wakeup' ? truncatePrompt(job.prompt) : job.prompt;
       const label = job.name ? `${job.name}: ` : '';
-      return `${job.id} — ${schedule} (${type}) [${durability}${status}]: ${label}${prompt}`;
+      const gate = job.gate
+        ? `\n    gate: ${job.gate} — ${describeGateStatus(job.gateStatus)}`
+        : '';
+      return `${job.id} — ${schedule} (${type}) [${durability}${status}]: ${label}${prompt}${gate}`;
     });
     const llmContent = llmLines.join('\n');
 
     const displayLines = jobs.map(
       (job) =>
-        `${job.id} ${displaySchedule(job.cron, job.fireAtMs)} [${job.durable ? 'durable' : 'session-only'}${job.enabled === false ? ', disabled' : ''}]${job.name ? `: ${job.name}` : ''}`,
+        `${job.id} ${displaySchedule(job.cron, job.fireAtMs)} [${job.durable ? 'durable' : 'session-only'}${job.enabled === false ? ', disabled' : ''}${job.gate ? ', gated' : ''}]${job.name ? `: ${job.name}` : ''}`,
     );
     const returnDisplay = displayLines.join('\n');
 

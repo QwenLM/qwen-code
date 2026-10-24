@@ -81,7 +81,7 @@ public enum ManagedSchemaProjection {
                     + "last_verified_at, retention_until"),
     RESOURCE_REF(
             "session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, "
-                    + "workspace_id, session_id, journal_revision, resource_id, gmt_create"),
+                    + "workspace_id, session_id, journal_revision, resource_id, gmt_create, runtime_binding_key"),
     RUNTIME_BINDING(
             "binding_id, request_key, scope_key, tenant_id, workspace_id, workspace_generation, "
                     + "canonical_cwd, capability_digest, isolation_class, isolation_key, provisioner_kind, "
@@ -97,7 +97,8 @@ public enum ManagedSchemaProjection {
     RUNTIME_SESSION(
             "scope_key, runtime_session_id, tenant_id, workspace_id, workspace_generation, "
                     + "canonical_cwd, capability_digest, isolation_class, harness_session_id, turn_kind, "
-                    + "binding_id, runtime_generation, session_state, record_version, last_active_at"),
+                    + "binding_id, runtime_generation, session_state, record_version, last_active_at, "
+                    + "execution_storage_key, execution_exclusive"),
     RUNTIME_SLOT(
             "request_key, tenant_id, workspace_id, workspace_generation, canonical_cwd, "
                     + "capability_digest, isolation_class, isolation_key, provisioner_kind, storage_id, "
@@ -106,7 +107,9 @@ public enum ManagedSchemaProjection {
             "tenant_id, schedule_id, session_id, workspace_id, actor_id, record_revision, "
                     + "definition_revision, definition_digest, goal, cron, timezone, session_mode, "
                     + "overlap, catch_up, catch_up_limit, enabled, state, blocked_reason, armed_at, "
-                    + "watermark_slot, lease_owner, lease_until, fence, gmt_create, gmt_modified"),
+                    + "watermark_slot, lease_owner, lease_until, fence, gmt_create, gmt_modified, "
+                    + "gate, gate_last_outcome, gate_last_at, gate_quiet_since_delivery, "
+                    + "gate_failures, gate_last_error"),
     SCHEDULE_OCCURRENCE(
             "tenant_id, schedule_id, occurrence_key, run_id, session_id, slot, trigger_kind, "
                     + "outcome, reason, definition_revision, fence, attempts, next_retry_at, last_error, "
@@ -122,18 +125,18 @@ public enum ManagedSchemaProjection {
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, recovery_protected, "
                     + "resource_gc_completed, runtime_request_key, csi_guard, model_id, model_revision, "
-                    + "selected_approval_mode, approval_revision, plan_enabled"),
+                    + "selected_approval_mode, approval_revision, plan_enabled, public_child_agents_version, harness_instance_id, "
+                    + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state"),
     SESSION_HEAD(
             "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
                     + "committed_sequence, last_commit_digest, activation_epoch, "
                     + "latest_checkpoint_resource_id, compacted_through_revision, recovery_status, "
-                    + "recovery_detail_code, gmt_create, gmt_modified, o3_backfill_revision, "
-                    + "o3_backfill_through, o3_backfill_error, o3_backfill_pending, activation_id, "
+                    + "recovery_detail_code, gmt_create, gmt_modified, activation_id, "
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, wake_pending, "
-                    + "wake_head_revision, wake_retry_at, wake_scan_pending"),
+                    + "wake_head_revision, wake_retry_at, wake_scan_pending, cleanup_head_revision"),
     SESSION_JOURNAL_TX(
             "tenant_id, workspace_id, session_id, journal_revision, command_key_hash, "
                     + "transaction_id, operation, command_id, content_digest, first_sequence, "

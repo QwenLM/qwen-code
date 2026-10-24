@@ -156,6 +156,7 @@ export function useResumeCommand(
       const oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
+      let toolsInvalidated = false;
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
@@ -212,6 +213,9 @@ export function useResumeCommand(
         //    opened above covers the initialize() replay (#9833; see
         //    beginTelemetrySwap's JSDoc in core client.ts).
         resetBackgroundStateForSessionSwitch(config);
+        const modSession = getInteractiveModSession(config);
+        modSession?.invalidateTools();
+        toolsInvalidated = modSession !== undefined;
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -290,6 +294,7 @@ export function useResumeCommand(
             } catch {
               // Best-effort — see above.
             }
+            getInteractiveModSession(config)?.invalidateTools();
             config.startNewSession(oldSessionId, prevSessionData);
             // Re-hydrate the client against the restored session, mirroring
             // /branch's rollback: without it the client's chat stays on the
@@ -329,6 +334,9 @@ export function useResumeCommand(
           // replays the old session's history on top of the abandoned
           // session's replay, and restore overwrites rather than subtracts,
           // so the final state is exactly pre-swap (#9833).
+          if (toolsInvalidated && config.getSessionId() === oldSessionId) {
+            await getInteractiveModSession(config)?.restoreTools();
+          }
           config.getLlmClient()?.abortTelemetrySwap?.();
         } else if (swapOpened) {
           // Either the core swap never happened (nothing was replayed — the
@@ -338,6 +346,13 @@ export function useResumeCommand(
           // attempt did not open — the shared slot may hold a different
           // in-flight swap (#9844). See beginTelemetrySwap's JSDoc in core
           // client.ts.
+          if (
+            toolsInvalidated &&
+            !uiSwapped &&
+            config.getSessionId() === oldSessionId
+          ) {
+            await getInteractiveModSession(config)?.restoreTools();
+          }
           config.getLlmClient()?.commitTelemetrySwap?.();
         }
         addItem(
