@@ -6536,6 +6536,8 @@ describe('runQwenServe deployment profiles', () => {
   });
 
   it('does not restore channels or scheduled sessions for Hosted Harness', async () => {
+    vi.stubEnv('QWEN_HOSTED_HARNESS_BROKER_URL', 'https://broker.internal');
+    vi.stubEnv('QWEN_HOSTED_HARNESS_BROKER_TOKEN', 'file-fed-broker-secret');
     const workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-profile-')),
     );
@@ -6567,12 +6569,19 @@ describe('runQwenServe deployment profiles', () => {
         },
       );
       expect(createApp.mock.calls[0]?.[0].channelSelection).toBeUndefined();
+      expect(createApp.mock.calls[0]?.[0].managedRuntimeBrokerUrl).toBe(
+        'https://broker.internal',
+      );
+      expect(createApp.mock.calls[0]?.[0].managedRuntimeBrokerToken).toBe(
+        'file-fed-broker-secret',
+      );
       expect(createApp.mock.calls[0]?.[2]?.manageScheduledTaskSessions).toBe(
         false,
       );
     } finally {
       await handle?.close();
       createApp.mockRestore();
+      vi.unstubAllEnvs();
       fs.rmSync(workspace, { recursive: true, force: true });
     }
   });
@@ -20244,6 +20253,61 @@ describe('runQwenServe channel worker supervisor', () => {
 
     expect(order).toEqual(['registry', 'worker', 'bridge']);
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('lets the supervising application own signals while mounting Managed routes on the ordinary daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-unified-managed-')),
+    );
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+    const listeners = signals.map((signal) => process.rawListeners(signal));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: tmpDir,
+        token: 'unified-token',
+        mode: 'http-bridge',
+        requireAuth: true,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        installSignalHandlers: false,
+        managedLocalWeb: {
+          javaUrl: 'http://127.0.0.1:5011',
+          signingKey: 'private-signing-key',
+          tenantId: 'local',
+          actorId: 'owner',
+          agentId: 'qwen-code',
+          productScope: 'local:installation',
+        },
+      },
+    );
+    try {
+      for (const [index, signal] of signals.entries()) {
+        const added = process
+          .rawListeners(signal)
+          .filter((listener) => !listeners[index].includes(listener));
+        expect(added.some((listener) => listener.name === 'onSignal')).toBe(
+          false,
+        );
+      }
+      expect((await fetch(`${handle.url}/managed/boot`)).status).toBe(401);
+      const headers = { Authorization: 'Bearer unified-token' };
+      const boot = await fetch(`${handle.url}/managed/boot`, { headers });
+      expect(boot.status).toBe(200);
+      expect(await boot.json()).toMatchObject({
+        mode: 'managed',
+        productScope: 'local:installation',
+      });
+      const capabilities = await fetch(`${handle.url}/capabilities`, {
+        headers,
+      });
+      expect(await capabilities.json()).toHaveProperty('workspaces');
+    } finally {
+      await handle.close();
+    }
   });
 
   it('force-kills channel worker, bridge, and pidfile on a second shutdown signal', async () => {

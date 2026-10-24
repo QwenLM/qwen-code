@@ -23,6 +23,7 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -35,6 +36,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -44,6 +46,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 /**
@@ -74,6 +77,13 @@ public final class ManagedAgentPreflight {
      * Runs the checks and returns a process exit code: 0 unless a check fails.
      */
     public static int run(String[] args) {
+        List<Check> checks = checks(args);
+        print(checks);
+        return checks.stream().anyMatch(check ->
+                check.status() == Status.FAIL) ? 1 : 0;
+    }
+
+    static List<Check> checks(String[] args) {
         List<Check> checks = new ArrayList<>();
         ConfigurableEnvironment environment = baseEnvironment(args);
         List<String> locations = configLocations(args, environment);
@@ -85,6 +95,7 @@ public final class ManagedAgentPreflight {
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
         checks.add(harnessCheck(properties));
+        checks.add(credentialsFileCheck(properties));
         checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
@@ -98,10 +109,14 @@ public final class ManagedAgentPreflight {
                     properties.getRuntimeBroker().getHost(),
                     properties.getRuntimeBroker().getPort()));
         }
-        checks.add(databaseCheck(environment));
-        print(checks);
-        return checks.stream().anyMatch(check ->
-                check.status() == Status.FAIL) ? 1 : 0;
+        Check database = databaseCheck(environment);
+        checks.add(database);
+        checks.add(database.status() == Status.PASS
+                ? capacityCheck(environment)
+                : new Check("capacity", Status.SKIP,
+                        "database check did not pass; capacity not measured",
+                        null));
+        return checks;
     }
 
     static ConfigurableEnvironment baseEnvironment(String[] args) {
@@ -243,25 +258,38 @@ public final class ManagedAgentPreflight {
             return new Check("config", Status.FAIL,
                     path + " is not readable", "chmod 600 " + path);
         }
+        String content;
         try {
-            String content = Files.readString(file, StandardCharsets.UTF_8);
-            boolean secrets = content.contains("credential-key")
-                    || content.contains("signing-key")
-                    || content.contains("password");
+            content = Files.readString(file, StandardCharsets.UTF_8);
+        } catch (IOException error) {
+            return new Check("config", Status.WARN,
+                    path + ": cannot inspect permissions", null);
+        }
+        boolean secrets = content.contains("credential-key")
+                || content.contains("signing-key")
+                || content.contains("password");
+        return secrets ? sharedSecretFileCheck("config", file, path)
+                : new Check("config", Status.PASS, path, null);
+    }
+
+    // One policy for every file that holds a secret: WARN, not FAIL, when
+    // anyone but its owner can read it, so the operator sees the chmod.
+    private static Check sharedSecretFileCheck(String row, Path file,
+            String path) {
+        try {
             Set<PosixFilePermission> permissions =
                     Files.getPosixFilePermissions(file);
-            if (secrets && (permissions.contains(PosixFilePermission.GROUP_READ)
-                    || permissions.contains(
-                    PosixFilePermission.OTHERS_READ))) {
-                return new Check("config", Status.WARN,
+            if (permissions.contains(PosixFilePermission.GROUP_READ)
+                    || permissions.contains(PosixFilePermission.OTHERS_READ)) {
+                return new Check(row, Status.WARN,
                         path + " is group- or world-readable",
                         "chmod 600 " + path);
             }
         } catch (IOException | UnsupportedOperationException error) {
-            return new Check("config", Status.WARN,
+            return new Check(row, Status.WARN,
                     path + ": cannot inspect permissions", null);
         }
-        return new Check("config", Status.PASS, path, null);
+        return new Check(row, Status.PASS, path, null);
     }
 
     private static Check keyRingCheck(ManagedAgentProperties properties) {
@@ -340,19 +368,79 @@ public final class ManagedAgentPreflight {
                 null);
     }
 
+    static Check credentialsFileCheck(ManagedAgentProperties properties) {
+        ManagedAgentProperties.Harness harness = properties.getHarness();
+        if (!harness.isEnabled()) {
+            return new Check("credentials", Status.SKIP, "disabled", null);
+        }
+        String file = harness.getCredentialsFile();
+        if (StringUtils.isBlank(file)) {
+            return new Check("credentials", Status.SKIP,
+                    StringUtils.isBlank(harness.getToken())
+                            ? "no Harness credentials configured"
+                            : "Harness credentials configured directly",
+                    null);
+        }
+        Path path;
+        try {
+            path = Path.of(file);
+        } catch (RuntimeException error) {
+            return new Check("credentials", Status.WARN,
+                    file + ": cannot inspect permissions", null);
+        }
+        // The server reads the file as its service account at startup.
+        if (!Files.isReadable(path)) {
+            return new Check("credentials", Status.FAIL,
+                    file + " is not readable",
+                    "chown it to the service account, then chmod 600 "
+                            + file);
+        }
+        return sharedSecretFileCheck("credentials", path, file);
+    }
+
     static Check harnessCheck(ManagedAgentProperties properties) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
         if (!harness.isEnabled()) {
             return new Check("harness", Status.SKIP, "disabled", null);
         }
+        String file = harness.getCredentialsFile();
+        // Probing with whatever startup left bound would test credentials
+        // it just refused.
+        if (StringUtils.isNotBlank(file)
+                && !properties.harnessCredentialsApplied()) {
+            return new Check("harness", Status.SKIP,
+                    "credentials were not read from " + file
+                            + "; see the validation row",
+                    null);
+        }
+        String tokenSetting = StringUtils.isBlank(file)
+                ? "QWEN_MANAGED_AGENT_HARNESS_TOKEN"
+                : "QWEN_SERVER_TOKEN in " + file;
         if (StringUtils.isBlank(harness.getToken())) {
             return new Check("harness", Status.FAIL, "token is empty",
-                    "set QWEN_MANAGED_AGENT_HARNESS_TOKEN");
+                    "set " + tokenSetting);
+        }
+        // The shipped templates' placeholder works as a token, but anyone
+        // can read it in the distribution.
+        if (harness.getToken().startsWith("replace-")) {
+            return new Check("harness", Status.FAIL,
+                    "token is still the shipped template placeholder",
+                    "set " + tokenSetting);
         }
         if (!isDigest(harness.getCapabilityDigest())) {
             return new Check("harness", Status.FAIL,
                     "capability digest is not sha256:<64 lowercase hex>",
-                    "set QWEN_MANAGED_AGENT_CAPABILITY_DIGEST");
+                    "set " + (StringUtils.isBlank(file)
+                            ? "QWEN_MANAGED_AGENT_CAPABILITY_DIGEST"
+                            : "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST in "
+                                    + file));
+        }
+        if (harness.getPool().isEnabled()) {
+            if (!properties.getSessionStore().isEnabled() || StringUtils.isBlank(properties.getSessionStore().getBindingKey())) {
+                return new Check("harness", Status.FAIL, "pool Session Store or binding key is missing", "enable session-store with a binding key");
+            }
+            return new Check("harness", Status.SKIP, "pool endpoints negotiate identity and TLS through the configured discovery source",
+                    "verify individual Harness pool readiness after startup");
         }
         String baseUrl = harness.getBaseUrl();
         if (StringUtils.isBlank(baseUrl)) {
@@ -376,7 +464,7 @@ public final class ManagedAgentPreflight {
                 return new Check("harness", Status.FAIL,
                         url + " rejected the configured token ("
                                 + response.statusCode() + ")",
-                        "set QWEN_MANAGED_AGENT_HARNESS_TOKEN to the token the"
+                        "set " + tokenSetting + " to the token the"
                                 + " Harness accepts");
             }
             if (response.statusCode() != 200) {
@@ -617,22 +705,11 @@ public final class ManagedAgentPreflight {
 
     static Check databaseCheck(ConfigurableEnvironment environment) {
         String url = environment.getProperty("spring.datasource.url");
-        String user = environment.getProperty("spring.datasource.username", "");
-        String password =
-                environment.getProperty("spring.datasource.password", "");
         if (StringUtils.isBlank(url)) {
             return new Check("database", Status.FAIL,
                     "no datasource URL", "set SPRING_DATASOURCE_URL");
         }
-        Properties credentials = new Properties();
-        credentials.setProperty("user", user);
-        credentials.setProperty("password", password);
-        credentials.setProperty("connectTimeout",
-                String.valueOf(TIMEOUT_MILLIS));
-        credentials.setProperty("socketTimeout",
-                String.valueOf(TIMEOUT_MILLIS));
-        try (Connection connection =
-                DriverManager.getConnection(url, credentials)) {
+        try (Connection connection = databaseConnection(environment)) {
             try (Statement statement = connection.createStatement()) {
                 statement.execute("SELECT 1");
             }
@@ -665,6 +742,101 @@ public final class ManagedAgentPreflight {
                     "check the datasource settings, grants and that MySQL 8 "
                             + "is running");
         }
+    }
+
+    /**
+     * Reports durable counts that are useful for capacity triage. These are
+     * logical SQL records, not physical process or memory measurements. The
+     * report deliberately does not infer idle work or reclaim anything.
+     */
+    static Check capacityCheck(ConfigurableEnvironment environment) {
+        try (Connection connection = databaseConnection(environment)) {
+            return capacityCheck(connection);
+        } catch (SQLException error) {
+            return capacityUnavailable(error);
+        }
+    }
+
+    static Check capacityCheck(Connection connection) {
+        try {
+            Map<String, Long> bindings = stateCounts(connection,
+                    "ma_runtime_binding", "binding_state");
+            Map<String, Long> sessions = stateCounts(connection,
+                    "ma_runtime_session", "session_state");
+            Map<String, Long> operations = stateCounts(connection,
+                    "ma_operation", "state");
+            String detail = "runtime-bindings=" + bindings
+                    + "; runtime-sessions=" + sessions
+                    + "; operations=" + operations
+                    + "; physical-processes=unknown"
+                    + "; memory=unknown; idle-reclamation=not measured";
+            return new Check("capacity", Status.PASS, detail, null);
+        } catch (SQLException error) {
+            return capacityUnavailable(error);
+        }
+    }
+
+    private static Check capacityUnavailable(SQLException error) {
+        if (isTimeout(error)) {
+            return new Check("capacity", Status.WARN,
+                    "durable capacity facts unavailable: observation timed "
+                            + "out before all state counts were read",
+                    "retry when the database is less busy; this observation "
+                            + "reads the full state tables");
+        }
+        return new Check("capacity", Status.WARN,
+                "durable capacity facts unavailable: " + rootMessage(error),
+                "check the datasource grants and managed schema");
+    }
+
+    private static boolean isTimeout(Throwable error) {
+        for (Throwable current = error; current != null;
+                current = current.getCause()) {
+            if (current instanceof SQLTimeoutException
+                    || current instanceof SocketTimeoutException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String lower = message.toLowerCase(Locale.ROOT);
+                if (lower.contains("timeout")
+                        || lower.contains("timed out")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static Map<String, Long> stateCounts(Connection connection,
+            String table, String stateColumn) throws SQLException {
+        Map<String, Long> counts = new TreeMap<>();
+        String sql = "SELECT " + stateColumn + ", COUNT(*) FROM " + table
+                + " GROUP BY " + stateColumn;
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(sql)) {
+            while (result.next()) {
+                counts.put(result.getString(1), result.getLong(2));
+            }
+        }
+        return counts;
+    }
+
+    private static Connection databaseConnection(
+            ConfigurableEnvironment environment) throws SQLException {
+        String user = environment.getProperty("spring.datasource.username", "");
+        String password =
+                environment.getProperty("spring.datasource.password", "");
+        Properties credentials = new Properties();
+        credentials.setProperty("user", user);
+        credentials.setProperty("password", password);
+        credentials.setProperty("connectTimeout",
+                String.valueOf(TIMEOUT_MILLIS));
+        credentials.setProperty("socketTimeout",
+                String.valueOf(TIMEOUT_MILLIS));
+        return DriverManager.getConnection(
+                environment.getRequiredProperty("spring.datasource.url"),
+                credentials);
     }
 
     private static void requirePerformanceSchemaGrant(Connection connection)

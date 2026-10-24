@@ -68,7 +68,7 @@ class ToolPublicationLifecycleMySqlIT {
             var source = new ScheduledDataSource(new DriverManagerDataSource(
                     url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
             Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
-            var journal = PublicationJournalFixture.create(source, false);
+            var journal = PublicationJournalFixture.create(source);
             journal.reserve();
             var jdbc = journal.jdbc;
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));

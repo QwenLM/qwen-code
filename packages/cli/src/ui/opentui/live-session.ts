@@ -24,9 +24,13 @@ import { observeInteractiveModTool } from '../../services/interactive-mod-tool-o
 import {
   InteractiveModToolScheduler,
   type InteractiveCompletedToolCall,
+  type InteractiveToolCall,
 } from '../../services/interactive-mod-tool-scheduler.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { appendFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
+import { buildPermissionSuggestions } from '../../nonInteractive/permission-suggestions.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
   AgentResultDisplay,
@@ -80,6 +84,7 @@ export interface OpenTuiSteeringSubmission extends OpenTuiInputSubmission {
 
 /** Options the backend passes through to the live turn. */
 export interface LivePromptOptions {
+  dualOutput?: DualOutputBridge | null;
   isCurrentTurn?: () => boolean;
   /** Per-turn model override (submit_prompt's modelOverride parity). */
   modelOverride?: string;
@@ -683,6 +688,8 @@ export async function* livePromptEvents(
       `Timed out after ${STARTUP_CHAT_WAIT_MS}ms waiting for the startup chat to become ready`,
     );
   }
+  const current = () => options?.isCurrentTurn?.() !== false;
+  const dualOutput = options?.dualOutput;
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
   // Read per boundary rather than once: the vision bridge can pick a full-turn
@@ -747,6 +754,8 @@ export async function* livePromptEvents(
   if (hasUnsupportedImageFormat(nextPrompt)) {
     yield imageFormatWarningEvent();
   }
+  if (!current() || abort.aborted) return;
+  dualOutput?.emitUserMessage(normalizeParts(nextPrompt));
   // Core settles this carrier at its request-local history push. Neither a
   // stream event nor a normal empty stream proves that this input was pushed.
   let pendingSteer: SteerInput | undefined;
@@ -754,6 +763,10 @@ export async function* livePromptEvents(
   let first = true;
   const waitingSeen = new Set<string>();
   for (;;) {
+    if (!current() || abort.aborted) {
+      pendingSteer?.restore();
+      return;
+    }
     const steerInput = pendingSteer;
     pendingSteer = undefined;
     const sendOptions = first
@@ -772,6 +785,7 @@ export async function* livePromptEvents(
         };
     first = false;
     const pending: Array<{ callId: string; name: string; args?: unknown }> = [];
+    dualOutput?.startAssistantMessage();
     try {
       const stream = client.sendMessageStream(
         nextPrompt,
@@ -780,6 +794,8 @@ export async function* livePromptEvents(
         sendOptions,
       );
       for await (const ev of stream) {
+        if (!current() || abort.aborted) return;
+        dualOutput?.processEvent(ev);
         for (const event of acceptedSteerEvents.splice(0)) yield event;
         if (dbg) {
           try {
@@ -806,6 +822,7 @@ export async function* livePromptEvents(
       // Covers a synchronous call failure or an unsettled early exit. A
       // carrier already accepted/restored by core makes this a no-op.
       steerInput?.restore();
+      if (current()) dualOutput?.finalizeAssistantMessage();
     }
     for (const event of acceptedSteerEvents.splice(0)) yield event;
     if (pending.length === 0 || abort.aborted) return;
@@ -878,6 +895,49 @@ export async function* livePromptEvents(
     // Calls last seen in the scheduler's queued state, so a status only goes
     // out when it changes.
     const queuedSeen = new Set<string>();
+    const permissionRequests = new Map<string, string>();
+    const emitPermissionTransitions = (
+      calls: readonly InteractiveToolCall[],
+    ) => {
+      if (!current() || !dualOutput?.isConnected) return;
+      for (const call of calls) {
+        const { callId } = call.request;
+        const requestId = permissionRequests.get(callId);
+        // MOD hides a completed native attempt behind this placeholder until
+        // middleware settles. It carries no permission decision.
+        if (
+          call.status === 'scheduled' &&
+          call.nativeAttemptsObserved &&
+          !call.invocation
+        )
+          continue;
+        if (call.status === 'awaiting_approval') {
+          if (requestId) continue;
+          const id = randomUUID();
+          permissionRequests.set(callId, id);
+          dualOutput.emitPermissionRequest(
+            id,
+            call.request.name,
+            callId,
+            call.request.args,
+            null,
+            buildPermissionSuggestions(call.confirmationDetails),
+          );
+        } else if (
+          requestId &&
+          (!abort.aborted ||
+            call.status === 'success' ||
+            call.status === 'error' ||
+            call.status === 'cancelled')
+        ) {
+          dualOutput.emitControlResponse(
+            requestId,
+            call.status !== 'cancelled' && call.status !== 'error',
+          );
+          permissionRequests.delete(callId);
+        }
+      }
+    };
     const scheduler = new InteractiveModToolScheduler({
       config,
       onNativeAttempt: (call) =>
@@ -892,6 +952,7 @@ export async function* livePromptEvents(
         for (const ev of mapOutputChunk(callId, chunk)) live.push(ev);
       },
       onToolCallsUpdate: (calls) => {
+        emitPermissionTransitions(calls);
         // Real invocation descriptions (ink mapToDisplay): the card title is
         // the tool's own getDescription() off the tracked call's invocation,
         // not a hand-rolled args guess. Pushed once per callId, as soon as
@@ -981,6 +1042,7 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
+        emitPermissionTransitions(calls);
         completed = calls.filter(
           (call): call is InteractiveCompletedToolCall =>
             call.status === 'success' ||
@@ -1083,6 +1145,14 @@ export async function* livePromptEvents(
       }
       return;
     }
+    if (!abort.aborted && current()) {
+      for (const [index, call] of completed.entries()) {
+        dualOutput?.emitToolResult(call.request, {
+          ...call.response,
+          ...finalResponses[index],
+        });
+      }
+    }
     // Sampling boundary: drained steering rides after the tool responses as
     // genuine user content (original useGeminiStream mid-turn drain).
     if (!abort.aborted) {
@@ -1125,6 +1195,7 @@ export async function* livePromptEvents(
             acceptedSteerEvents.push(...steered.events);
             const recorder = config.getChatRecordingService?.();
             for (const recording of steered.recordings) {
+              dualOutput?.emitUserMessage(recording.parts);
               recorder?.recordMidTurnUserMessage(
                 recording.parts,
                 recording.message,
