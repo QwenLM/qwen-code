@@ -4,6 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  attachToolOutputProvenance,
+  getToolOutputProvenance,
+  measureToolOutput,
+  type ToolOutputProvenance,
+} from '../tools/tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
+import { ToolResultSizeEvent } from '../telemetry/types.js';
+import { createHash } from 'node:crypto';
+
 // DISCLAIMER: This is a copied version of https://github.com/googleapis/js-genai/blob/main/src/chats.ts with the intention of working around a key bug
 // where function responses are not treated as "valid" responses: https://b.corp.google.com/issues/420354090
 
@@ -56,6 +66,7 @@ import {
 import type { Config } from '../config/config.js';
 import type {
   ContentGenerator,
+  ContentGeneratorConfig,
   InputModalities,
   PromptCacheSharingParameters,
 } from './contentGenerator.js';
@@ -72,7 +83,12 @@ import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
-import { completedToolCallBoundary } from './turn-interruption.js';
+import { appendAutoMemoryContext } from '../memory/request-context.js';
+import {
+  completedToolCallBoundary,
+  recoveryHistoryBoundary,
+  effectiveHistoryEnd,
+} from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -82,7 +98,10 @@ import {
   logChatCompression,
 } from '../telemetry/loggers.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
-import { type ChatRecordingService } from '../services/chatRecordingService.js';
+import {
+  type ChatRecordingService,
+  type ChatCompressionRecordPayload,
+} from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
   computeThresholds,
@@ -100,6 +119,7 @@ import {
   InMemoryImagePayloadStore,
   buildReattachParts,
   countAllInlineImages,
+  hasImagePayloadReferences,
   replaceImagePayloadsInPlace,
 } from '../services/image-payload-references.js';
 import {
@@ -131,6 +151,7 @@ import {
 } from '../utils/request-payload-error.js';
 import {
   getStartupContextLength,
+  markCompressedHistory,
   isSystemReminderContent,
 } from './environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
@@ -155,8 +176,16 @@ import {
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
-import { markApiHistoryPrompt } from '../services/session-api-history.js';
+import {
+  markApiHistoryPrompt,
+  getApiHistoryPromptId,
+  cloneApiHistory,
+} from '../services/session-api-history.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
+import {
+  clearApiHistoryDirectoryContext,
+  isApiHistoryDirectoryContext,
+} from '../utils/api-history-metadata.js';
 
 export { InvalidStreamError };
 
@@ -588,7 +617,80 @@ export type StreamEvent =
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
   | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
 
+export interface LlmPreparedRequest {
+  request: {
+    model: string;
+    contents: Content[];
+    config: Omit<GenerateContentConfig, 'abortSignal' | 'httpOptions'>;
+  };
+  history: Content[];
+  contextPrefixLength?: number;
+  completedToolCallIds: string[];
+  routeSelector: string;
+  providerPin: string;
+  promptTokensForClamp: number;
+  allowPersistentRetry?: boolean;
+}
+export type LlmPreparedRequestCallback = ((
+  prepared: LlmPreparedRequest,
+  captureUnsupported?: boolean,
+) => Promise<void>) & {
+  /** Over-budget requests are borrowed views and must not be retained. */
+  maxSnapshotBytes?: number;
+};
+export class LlmRequestPreparationError extends Error {
+  constructor(cause: unknown) {
+    super('Model request durability preparation failed.', { cause });
+  }
+}
+export function llmPreparedProviderPin(
+  config: ContentGeneratorConfig | undefined,
+): string {
+  const fields = [
+    'model',
+    'baseUrl',
+    'customHeaders',
+    'proxy',
+    'vertexai',
+    'authType',
+    'samplingParams',
+    'reasoning',
+    'reasoningSnapshot',
+    'reasoningRouteBaseUrl',
+    'thinkingMandatory',
+    'extra_body',
+    'modalities',
+    'schemaCompliance',
+    'contextWindowSize',
+    'splitToolMedia',
+    'toolResultContentFormat',
+    'enableCacheControl',
+    'enableRequestMetadata',
+    'forceGlobalCacheScope',
+    'cacheRetention',
+    'cacheRetentionByBlock',
+  ] satisfies Array<keyof ContentGeneratorConfig>;
+  const pin = Object.fromEntries(fields.map((key) => [key, config?.[key]]));
+  const stable = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(stable)
+      : value && typeof value === 'object'
+        ? Object.fromEntries(
+            Object.entries(value)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([key, child]) => [key, stable(child)]),
+          )
+        : value;
+  return createHash('sha256')
+    .update(
+      JSON.stringify(stable({ adapter: 'qwen-code-generator/1', ...pin })),
+    )
+    .digest('hex');
+}
+
 export interface LlmChatSendOptions {
+  onPreparedRequest?: LlmPreparedRequestCallback;
+  preparedRequest?: LlmPreparedRequest;
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
   /** Internal identity for the user prompt added to model history. */
@@ -602,6 +704,13 @@ export interface LlmChatSendOptions {
    * public transcript (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+}
+
+export type ChatCompressionObserver = (
+  payload: ChatCompressionRecordPayload,
+) => Promise<void>;
+export interface ChatCompressionObserverOptions {
+  restoreRecentFiles?: boolean;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -652,6 +761,23 @@ interface TryCompressOptions {
    * counts from double-counting the previous model output.
    */
   precomputedEffectiveTokens?: number;
+  /**
+   * Context ceiling the server itself reported when it rejected the request
+   * with a context-overflow error (#13432). Forwarded to the compression
+   * service so reactive sizing runs against that ceiling instead of the
+   * window inferred from the model id, which the error just contradicted.
+   * Deliberately not read back through `getObservedServerInputLimit`: that
+   * map is informational and is only recorded on the omni-media degrade path,
+   * so a plain text session never populates it.
+   */
+  observedServerCeiling?: number;
+  /**
+   * Whether `observedServerCeiling` bounds the window (`'total'`) or only the
+   * prompt/input allowance (`'input'`), from the wording that reported it.
+   * Forwarded so the service can refuse to size an output budget against a
+   * bound the server never stated on the window (#13876).
+   */
+  observedServerCeilingKind?: 'input' | 'total';
   /** Per-request overrides needed to preserve the main request cache prefix. */
   requestGenerationConfig?: GenerateContentConfig;
   /**
@@ -659,7 +785,9 @@ interface TryCompressOptions {
    * this instead of the active route, so an in-send compression never
    * re-adopts counts the active route retained while the request targets
    * another one (#9506). Omitted by between-sends callers (manual
-   * `/compress`), which compress the active route's state.
+   * `/compress`), which compress the active route's state. Forwarded to the
+   * compression service with `observedServerCeiling` so the ceiling only
+   * bounds a side-query that resolves to the route that reported it (#13876).
    */
   requestRouteKey?: string;
   /**
@@ -1657,6 +1785,13 @@ function appendCuratedContent(
       ...lastContent,
       parts: [...(lastContent.parts ?? []), ...(content.parts ?? [])],
     };
+    if (
+      isApiHistoryDirectoryContext(lastContent) &&
+      !isApiHistoryDirectoryContext(content)
+    ) {
+      // Object spread copies the Symbol; real input must not inherit it.
+      clearApiHistoryDirectoryContext(curatedHistory[lastIndex]!);
+    }
     return;
   }
 
@@ -2196,6 +2331,8 @@ export class LlmChat {
    */
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountIsEstimated = false;
+  /** Provenances already reported at dispatch, so a retry is not recounted. */
+  private readonly injectedToolResults = new WeakSet<ToolOutputProvenance>();
 
   /**
    * Per-chat output-token count from the previous model response. The
@@ -2310,6 +2447,36 @@ export class LlmChat {
   private userContentPushCount = 0;
   private manualPlanExitNoticesEnabled = false;
   private completedToolCallIds: string[] = [];
+  private compressionObserver?: ChatCompressionObserver;
+  private compressionObserverOptions?: ChatCompressionObserverOptions;
+
+  setCompressionObserver(
+    observer?: ChatCompressionObserver,
+    options?: ChatCompressionObserverOptions,
+  ): void {
+    this.compressionObserver = observer;
+    this.compressionObserverOptions = options;
+  }
+
+  private async recordCompression(
+    payload: ChatCompressionRecordPayload,
+  ): Promise<void> {
+    if (this.compressionObserver) {
+      const compressedHistory = [...payload.compressedHistory];
+      const promptIds = compressedHistory.map(
+        (content) => getApiHistoryPromptId(content) ?? null,
+      );
+      await this.compressionObserver({
+        ...payload,
+        compressedHistory,
+        contextPrefixLength: getStartupContextLength(compressedHistory, {
+          includeCompressed: true,
+        }),
+        ...(promptIds.some(Boolean) ? { promptIds } : {}),
+      });
+    }
+    this.chatRecordingService?.recordChatCompression(payload);
+  }
 
   setCompletedToolCallIds(toolCallIds: readonly string[] | undefined): void {
     this.completedToolCallIds = [...new Set(toolCallIds)].filter(
@@ -2321,12 +2488,22 @@ export class LlmChat {
     return [...this.completedToolCallIds];
   }
 
-  getHistoryForRecovery(): Content[] {
-    const boundary = completedToolCallBoundary(
+  getHistoryForRecovery(count?: number): Content[] {
+    const boundary = recoveryHistoryBoundary(
       this.history,
       this.completedToolCallIds,
     );
-    return this.history.slice(boundary).map(copyContentContainer);
+    const countAnchor =
+      count === undefined
+        ? this.history.length
+        : effectiveHistoryEnd(this.history);
+    const start =
+      count === undefined
+        ? boundary
+        : Math.max(boundary, countAnchor - Math.max(0, count));
+    // count limits meaningful history, not the notification/agent suffix.
+    // Keep the full suffix: retry may pop it, so truncation would lose replay.
+    return this.history.slice(start).map(copyContentContainer);
   }
 
   /**
@@ -2377,13 +2554,31 @@ export class LlmChat {
    */
   constructor(
     private readonly config: Config,
-    private readonly generationConfig: GenerateContentConfig = {},
+    private generationConfig: GenerateContentConfig = {},
     private history: Content[] = [],
     private readonly chatRecordingService?: ChatRecordingService,
     private readonly telemetryService?: UiTelemetryService,
   ) {
     validateHistory(history);
+    markCompressedHistory(history);
     this.redactApprovedPlansFromLoadedHistory();
+    this.markToolResultsInjected(this.history);
+  }
+
+  /**
+   * Marks every provenance in `contents` as already reported, so the next
+   * dispatch does not re-emit its `tool_result_injected` event. Callers hand
+   * this only parts another chat already reported — loaded/restored history
+   * and the speculation-accept replay. Results parked through `addHistory`
+   * for a later turn have NOT been submitted yet and must stay unmarked, or
+   * their one owed injection event is suppressed permanently.
+   */
+  markToolResultsInjected(contents: readonly Content[]): void {
+    for (const content of contents)
+      for (const part of content.parts ?? []) {
+        const provenance = getToolOutputProvenance(part);
+        if (provenance) this.injectedToolResults.add(provenance);
+      }
   }
 
   enableManualPlanExitNotices(): void {
@@ -2589,7 +2784,10 @@ export class LlmChat {
         requestHistory.push({ role: 'user', parts: reattachParts });
       }
     }
-    return requestHistory;
+    return appendAutoMemoryContext(
+      requestHistory,
+      this.config.getAutoMemoryContext?.() ?? '',
+    );
   }
 
   private getRequestHistoryForRoute(
@@ -2732,11 +2930,15 @@ export class LlmChat {
       originalTokenCount,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
+      observedServerCeiling: options?.observedServerCeiling,
+      observedServerCeilingKind: options?.observedServerCeilingKind,
+      requestRouteKey: options?.requestRouteKey,
       requestGenerationConfig: options?.requestGenerationConfig,
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
       requestPayloadTooLarge: options?.requestPayloadTooLarge,
       signal,
+      restoreRecentFiles: this.compressionObserverOptions?.restoreRecentFiles,
     });
     // The service owns the compression outcome; LlmChat owns the input
     // provenance. Expose it so UIs can mark estimated banner numbers
@@ -2760,11 +2962,12 @@ export class LlmChat {
       if (!options?.deferChatCompressionRecord) {
         // Resume replaces history with this snapshot, so include the pending
         // question and do not share the live array mutated later in the turn.
-        this.chatRecordingService?.recordChatCompression({
+        await this.recordCompression({
           info,
           compressedHistory: options?.pendingUserMessage
             ? [...newHistory, options.pendingUserMessage]
             : newHistory,
+          summaryPrefixLength: newHistory.length,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -2988,6 +3191,34 @@ export class LlmChat {
    * }
    * ```
    */
+  async sendPreparedMessageStream(
+    prepared: LlmPreparedRequest,
+    promptId: string,
+    signal: AbortSignal,
+    onPreparedRequest?: LlmPreparedRequestCallback,
+  ): Promise<AsyncGenerator<StreamEvent>> {
+    signal.throwIfAborted();
+    if (hasImagePayloadReferences(prepared.history))
+      throw new LlmRequestPreparationError(
+        'Saved image payloads are unavailable.',
+      );
+    return this.sendMessageStream(
+      `${prepared.routeSelector}\0`,
+      {
+        message: [],
+        config: { ...prepared.request.config, abortSignal: signal },
+      },
+      promptId,
+      undefined,
+      {
+        preparedRequest: prepared,
+        onPreparedRequest,
+        retractDeliveredOutputOnRetry: true,
+        disableModelFallbacks: true,
+      },
+    );
+  }
+
   async sendMessageStream(
     model: string,
     params: SendMessageParameters,
@@ -3085,382 +3316,428 @@ export class LlmChat {
       cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
     let promptTokensForClamp = 0;
 
+    const previousGenerationConfig = options?.preparedRequest
+      ? this.generationConfig
+      : undefined;
     let currentUserContent: Content | undefined;
     try {
-      // The send-lock above is held but the generator's `finally` (which
-      // resolves it) has not run yet. Any setup error before returning the
-      // generator must release the lock or subsequent sends will block forever
-      // at `await this.sendPromise`.
-      // Build the user content BEFORE compression so the cheap-gate can size
-      // the upcoming prompt — closes the "first send after inherited history"
-      // gap where `lastPromptTokenCount === 0` and the gate would otherwise
-      // see only the stale prior-turn count (0).
-      let userContent = createUserContent(params.message);
-      const toolOutputBudget = this.config.getToolOutputBatchBudget?.();
-      if (
-        toolOutputBudget !== undefined &&
-        Number.isFinite(toolOutputBudget) &&
-        userContent.parts
-      ) {
-        const [guarded] = enforceFunctionResponseBudget(
-          [
-            {
-              callId: 'send-boundary',
-              toolName: 'tool-response-batch',
-              responseParts: userContent.parts,
-            },
-          ],
-          toolOutputBudget,
-        );
-        if (guarded.responseParts !== userContent.parts) {
-          debugLogger.warn(
-            `Tool response send guard reduced an unfinalized batch to ${toolOutputBudget} characters.`,
-          );
-          userContent = { ...userContent, parts: guarded.responseParts };
-        }
-      }
-
-      // Hard-tier rescue: when the estimated prompt size is at or above the
-      // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
-      // this send instead of waiting for the API to reject the request as too
-      // large.
-      //
-      // We compute `effectiveTokens` ONCE here and pass it through to
-      // tryCompress → service.compress so the cheap-gate doesn't redo the
-      // estimation (which involves another `getHistory(true)` clone). This
-      // reuse also fixes a per-config-knob inconsistency: previously the
-      // hard-tier rescue used the default imageTokenEstimate while the
-      // cheap-gate inside tryCompress used the user's resolved value.
-      // (review #4168 R1.3 + R1.4)
-      //
-      // The cheap-gate consecutive-failure counter is NOT pre-reset here.
-      // force=true already bypasses that breaker, while hard-rescue itself is
-      // bounded by hardRescueFailureCount so persistent pre-send rescue
-      // failures fall through to reactive overflow after a few strikes.
-      // Thresholds gate on the full window: the output clamp guarantees the
-      // response fits, so nothing needs to be pre-reserved for it.
-      const { hard } = computeThresholds(
-        contextWindowForClamp,
-        this.config.getAutoCompactThreshold(),
-      );
-      const imageTokenEstimate = resolveSlimmingConfig(
-        this.config.getChatCompression(),
-      ).imageTokenEstimate;
-      // When lastPromptTokenCount > 0, estimatePromptTokens uses the
-      // API-authoritative previous prompt count + the previous response's
-      // output token count + a tiny estimate of just the new user message.
-      // It does NOT touch the history at all in that branch, so skip the
-      // costly `getHistory(true)` clone on the steady-state path.
-      // The lastPromptTokenCount=0 branch (first send after --continue
-      // restore / subagent inheritance) walks history with a char/4
-      // heuristic that can under-count by ~15-20K tokens; the reactive
-      // overflow recovery path inside the async iterator below (the
-      // `getContextLengthExceededInfo` → `tryCompress` → RETRY branch)
-      // is the documented safety net when this under-count causes
-      // hard-rescue to miss.
-      const effectiveTokens = estimatePromptTokens(
-        this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
-        userContent,
-        this.lastPromptTokenCount,
-        this.lastOutputTokenCount,
-        imageTokenEstimate,
-      );
-      const isHardTier = effectiveTokens >= hard;
-      const shouldForceFromHard =
-        !exactRoute &&
-        isHardTier &&
-        this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
-      const historyBeforeHardRescue = shouldForceFromHard
-        ? this.getHistoryShallow()
-        : undefined;
-      const completedToolCallIdsBeforeHardRescue = this.completedToolCallIds;
-      const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
-      const lastPromptTokenCountWasEstimatedBeforeHardRescue =
-        this.lastPromptTokenCountIsEstimated;
-      // The rescue's COMPRESSED stamp clears response metadata (via
-      // setLastPromptTokenCount), so rollback must restore both counts.
-      const lastOutputTokenCountBeforeHardRescue = this.lastOutputTokenCount;
-      const lastCachedContentTokenCountBeforeHardRescue =
-        this.lastCachedContentTokenCount;
-      // tryCompress re-stamps tokenCountsRouteKey to the ACTIVE route (via
-      // setLastPromptTokenCount on the success path) even though this send
-      // targets the REQUEST route — and hard-rescue only fires for
-      // non-exact sends, whose request key can differ from the active one.
-      // Capture the key so the rollback below restores the resurrected
-      // count's original route attribution along with the count itself.
-      const tokenCountsRouteKeyBeforeHardRescue = this.tokenCountsRouteKey;
-      // Snapshot the retention map too: the rescue's compression consumes
-      // retained entries mid-flight (ChatCompressionService's keyless getter
-      // reads adopt the active route, deleting-and-consuming its entry) and
-      // a successful compression clears the map outright. Without the
-      // snapshot the rollback would restore the slots but not the map,
-      // leaving the resurrected route's count nowhere (#9506).
-      const retainedTokenCountsBeforeHardRescue = new Map(
-        this.tokenCountsByRouteKey,
-      );
-      const hardRescueFailureCountBeforeHardRescue =
-        this.hardRescueFailureCount;
-      if (shouldForceFromHard) {
-        debugLogger.warn(
-          `[compaction] hard-tier rescue triggered: prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}, hardRescueAttempt=${this.hardRescueFailureCount + 1}, consecutiveFailures=${this.consecutiveFailures}.`,
-        );
-      } else if (isHardTier && !exactRoute) {
-        debugLogger.warn(
-          `[compaction] hard-tier rescue skipped after ${this.hardRescueFailureCount} failed attempts; relying on reactive overflow recovery. prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}.`,
-        );
-      }
-
-      // Compression derives prompt ids before the user content is pushed.
-      markApiHistoryPrompt(userContent, options?.promptId);
-      if (exactRoute || (isHardTier && !shouldForceFromHard)) {
+      if (options?.preparedRequest) {
+        const saved = options.preparedRequest;
+        if (
+          saved.request.model !== model ||
+          saved.providerPin !==
+            llmPreparedProviderPin(
+              exactRoute?.contentGeneratorConfig ??
+                this.config.getContentGeneratorConfig(),
+            )
+        )
+          throw new LlmRequestPreparationError('Saved model route changed.');
+        const history = cloneApiHistory(saved.history);
+        markCompressedHistory(history, saved.contextPrefixLength);
+        this.setHistory(history, saved.completedToolCallIds);
+        this.generationConfig = structuredClone(saved.request.config);
+        requestContents = structuredClone(saved.request.contents);
+        currentUserContent = this.history.at(-1);
+        promptTokensForClamp = saved.promptTokensForClamp;
         compressionInfo = {
-          originalTokenCount: effectiveTokens,
-          newTokenCount: effectiveTokens,
+          originalTokenCount: promptTokensForClamp,
+          newTokenCount: promptTokensForClamp,
           compressionStatus: CompressionStatus.NOOP,
         };
       } else {
-        compressionInfo = await this.tryCompress(
-          prompt_id,
-          shouldForceFromHard,
-          params.config?.abortSignal,
-          {
-            pendingUserMessage: userContent,
-            precomputedEffectiveTokens: effectiveTokens,
-            requestGenerationConfig: params.config,
-            requestRouteKey,
-            deferChatCompressionRecord: shouldForceFromHard,
-            // Hard-rescue is force=true to bypass the cheap-gate breaker
-            // but it remains a semantically AUTOMATIC trigger. Tag the
-            // compactTrigger explicitly as 'auto' so PostCompact hooks are
-            // classified correctly while the pending user message preserves
-            // any active tool-call / response pairing.
-            trigger: shouldForceFromHard ? 'auto' : undefined,
-          },
-        );
-      }
-      const localPromptTokensAfterCompression = shouldForceFromHard
-        ? estimatePromptTokens(
-            this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
-            userContent,
-            this.lastPromptTokenCount,
-            this.lastOutputTokenCount,
-            imageTokenEstimate,
-          )
-        : 0;
-      if (
-        shouldStopAfterHardRescue(
-          shouldForceFromHard,
-          hard,
-          localPromptTokensAfterCompression,
-        )
-      ) {
-        const message = getHardRescueFailureMessage(
-          effectiveTokens,
-          hard,
-          compressionInfo,
-          localPromptTokensAfterCompression,
-        );
-        if (shouldForceFromHard) {
-          this.hardRescueFailureCount =
-            hardRescueFailureCountBeforeHardRescue + 1;
-        }
+        // The send-lock above is held but the generator's `finally` (which
+        // resolves it) has not run yet. Any setup error before returning the
+        // generator must release the lock or subsequent sends will block forever
+        // at `await this.sendPromise`.
+        // Build the user content BEFORE compression so the cheap-gate can size
+        // the upcoming prompt — closes the "first send after inherited history"
+        // gap where `lastPromptTokenCount === 0` and the gate would otherwise
+        // see only the stale prior-turn count (0).
+        let userContent = createUserContent(params.message);
+        // Restored responses have no original-size provenance. Never infer it from a preview.
+        userContent = {
+          ...userContent,
+          parts: userContent.parts?.map((part) =>
+            part.functionResponse && !getToolOutputProvenance(part)
+              ? attachToolOutputProvenance([part], {
+                  callId: part.functionResponse.id ?? '',
+                  toolName: part.functionResponse.name ?? '',
+                  promptId: prompt_id,
+                  toolType: part.functionResponse.name?.startsWith('mcp__')
+                    ? 'mcp'
+                    : 'native',
+                })[0]
+              : part,
+          ),
+        };
+        const toolOutputBudget = this.config.getToolOutputBatchBudget?.();
         if (
-          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
-          historyBeforeHardRescue
+          toolOutputBudget !== undefined &&
+          Number.isFinite(toolOutputBudget) &&
+          userContent.parts
         ) {
-          // Hard-rescue compression mutates in-memory history before this
-          // guard can compare the compressed prompt size. If the compressed
-          // prompt is still too large to send, restore the pre-compression
-          // state. The JSONL compression checkpoint is intentionally not
-          // written because the send is about to be rejected.
-          this.setHistory(
-            historyBeforeHardRescue,
-            completedToolCallIdsBeforeHardRescue,
-          );
-          // setHistory conservatively cleared loaded-skill tracking; the
-          // restored bodies re-arm it on their next invoke.
-          this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
-          this.lastPromptTokenCountIsEstimated =
-            lastPromptTokenCountWasEstimatedBeforeHardRescue;
-          this.lastOutputTokenCount = lastOutputTokenCountBeforeHardRescue;
-          this.lastCachedContentTokenCount =
-            lastCachedContentTokenCountBeforeHardRescue;
-          this.tokenCountsRouteKey = tokenCountsRouteKeyBeforeHardRescue;
-          // Restore the retention map alongside the slots: the rescue's
-          // compression consumed/cleared entries mid-flight, and without
-          // the restore the resurrected route's count would survive
-          // nowhere — its next gate read would pass with 0 (#9506). The
-          // snapshot predates the rescue, so it already satisfies the
-          // invariant (no entry for the resurrected slot key).
-          this.tokenCountsByRouteKey.clear();
-          for (const [
-            retainedRouteKey,
-            retainedCounts,
-          ] of retainedTokenCountsBeforeHardRescue) {
-            this.tokenCountsByRouteKey.set(retainedRouteKey, retainedCounts);
-          }
-          this.telemetryService?.setLastPromptTokenCount(
-            lastPromptTokenCountBeforeHardRescue,
-          );
-          this.telemetryService?.setLastCachedContentTokenCount(
-            lastCachedContentTokenCountBeforeHardRescue,
-          );
-        }
-        const compressionStatus =
-          CompressionStatus[compressionInfo.compressionStatus] ??
-          String(compressionInfo.compressionStatus);
-        debugLogger.warn(
-          `[compaction] hard-tier rescue stopped oversized prompt: ` +
-            `prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, ` +
-            `hard=${hard}, localPromptTokensAfterCompression=` +
-            `${localPromptTokensAfterCompression}, compressionStatus=` +
-            `${compressionStatus}, newTokenCount=` +
-            `${compressionInfo.newTokenCount}, hardRescueFailureCount=` +
-            `${this.hardRescueFailureCount}, consecutiveFailures=` +
-            `${this.consecutiveFailures}. ${message}`,
-        );
-        throw new Error(message);
-      }
-      if (
-        shouldForceFromHard &&
-        compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
-      ) {
-        // Keep the pending question with the compressed answer on resume.
-        this.chatRecordingService?.recordChatCompression({
-          info: compressionInfo,
-          compressedHistory: [...this.getHistoryShallow(), userContent],
-          completedToolCallIds: this.completedToolCallIds,
-        });
-      }
-
-      if (this.manualPlanExitNoticesEnabled) {
-        const notice = this.config.takePendingManualPlanExitNotice();
-        if (notice) {
-          manualPlanExitNoticeVersion = notice.version;
-          manualPlanExitNoticeText = getManualPlanExitSystemReminder(
-            notice.currentMode,
-          );
-          userContent = {
-            ...userContent,
-            parts: [
-              ...(userContent.parts ?? []),
+          const [guarded] = enforceFunctionResponseBudget(
+            [
               {
-                text: manualPlanExitNoticeText,
+                callId: 'send-boundary',
+                toolName: 'tool-response-batch',
+                responseParts: userContent.parts,
               },
             ],
-          };
+            toolOutputBudget,
+          );
+          if (guarded.responseParts !== userContent.parts) {
+            debugLogger.warn(
+              `Tool response send guard reduced an unfinalized batch to ${toolOutputBudget} characters.`,
+            );
+            userContent = { ...userContent, parts: guarded.responseParts };
+          }
         }
-      }
 
-      // Publish the acceptance snapshot for a caller-side settlement
-      // carrier (see `userContentPushSnapshotKey`) immediately before the
-      // push — no await between the snapshot and this push, so no
-      // concurrent send can supply the counter growth it observes.
-      // `params.message` is the caller's own request array (Turn passes
-      // it through unchanged), so the publication reaches the caller even
-      // though this method never returns on the pre-push error paths.
-      if (Array.isArray(params.message)) {
-        (params.message as unknown as Record<PropertyKey, unknown>)[
-          userContentPushSnapshotKey
-        ] = this.userContentPushCount;
-      }
-      // Add user content to history ONCE before any attempts. Later object
-      // spreads preserve the identity marked before compression.
-      this.history.push(userContent);
-      this.syncReviewedSchemasForContent(userContent);
-      currentUserContent = userContent;
-      userContentAdded = true;
-      // Record that the user content landed (see `userContentPushCount`). The
-      // setup-error path below decrements this if it rolls the push back.
-      this.userContentPushCount++;
-      // Per-send orphan repair (belt-and-suspenders alongside the
-      // startChat load-time pass). Runs AFTER user content lands so a
-      // user-supplied tool_result closes the pair before we synthesize
-      // anything. An ordinary prompt that races a restore re-hang must
-      // still close the pair — `model[functionCall] → user[text]` is
-      // rejected by Anthropic-compatible providers. Restore itself sends
-      // the real functionResponse, so this pass is a no-op on that path.
-      const inlineRepair = repairOrphanedToolUseTurns(
-        this.history,
-        ORPHAN_TOOL_USE_REPAIR_REASON,
-      );
-      if (inlineRepair.injected.length > 0) {
-        debugLogger.warn(
-          `[REPAIR] sendMessageStream inline pass synthesized ` +
-            `${inlineRepair.injected.length} functionResponse(s): ` +
-            inlineRepair.injected
-              .map((entry) => `${entry.name}(${entry.callId})`)
-              .join(', '),
+        // Hard-tier rescue: when the estimated prompt size is at or above the
+        // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
+        // this send instead of waiting for the API to reject the request as too
+        // large.
+        //
+        // We compute `effectiveTokens` ONCE here and pass it through to
+        // tryCompress → service.compress so the cheap-gate doesn't redo the
+        // estimation (which involves another `getHistory(true)` clone). This
+        // reuse also fixes a per-config-knob inconsistency: previously the
+        // hard-tier rescue used the default imageTokenEstimate while the
+        // cheap-gate inside tryCompress used the user's resolved value.
+        // (review #4168 R1.3 + R1.4)
+        //
+        // The cheap-gate consecutive-failure counter is NOT pre-reset here.
+        // force=true already bypasses that breaker, while hard-rescue itself is
+        // bounded by hardRescueFailureCount so persistent pre-send rescue
+        // failures fall through to reactive overflow after a few strikes.
+        // Thresholds gate on the full window: the output clamp guarantees the
+        // response fits, so nothing needs to be pre-reserved for it.
+        const { hard } = computeThresholds(
+          contextWindowForClamp,
+          this.config.getAutoCompactThreshold(),
         );
-      }
-      if (inlineRepair.droppedDuplicates.length > 0) {
-        debugLogger.warn(
-          `[REPAIR] sendMessageStream inline pass dropped ` +
-            `${inlineRepair.droppedDuplicates.length} duplicate ` +
-            `functionResponse(s): ` +
-            inlineRepair.droppedDuplicates
-              .map((entry) => `${entry.name}(${entry.callId})`)
-              .join(', '),
+        const imageTokenEstimate = resolveSlimmingConfig(
+          this.config.getChatCompression(),
+        ).imageTokenEstimate;
+        // When lastPromptTokenCount > 0, estimatePromptTokens uses the
+        // API-authoritative previous prompt count + the previous response's
+        // output token count + a tiny estimate of just the new user message.
+        // It does NOT touch the history at all in that branch, so skip the
+        // costly `getHistory(true)` clone on the steady-state path.
+        // The lastPromptTokenCount=0 branch (first send after --continue
+        // restore / subagent inheritance) walks history with a char/4
+        // heuristic that can under-count by ~15-20K tokens; the reactive
+        // overflow recovery path inside the async iterator below (the
+        // `getContextLengthExceededInfo` → `tryCompress` → RETRY branch)
+        // is the documented safety net when this under-count causes
+        // hard-rescue to miss.
+        const effectiveTokens = estimatePromptTokens(
+          this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
+          userContent,
+          this.lastPromptTokenCount,
+          this.lastOutputTokenCount,
+          imageTokenEstimate,
         );
-      }
-      requestContents = this.getRequestHistoryForRoute(
-        currentUserContent,
-        requestModalities,
-      );
+        const isHardTier = effectiveTokens >= hard;
+        const shouldForceFromHard =
+          !exactRoute &&
+          isHardTier &&
+          this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
+        const historyBeforeHardRescue = shouldForceFromHard
+          ? this.getHistoryShallow()
+          : undefined;
+        const completedToolCallIdsBeforeHardRescue = this.completedToolCallIds;
+        const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
+        const lastPromptTokenCountWasEstimatedBeforeHardRescue =
+          this.lastPromptTokenCountIsEstimated;
+        // The rescue's COMPRESSED stamp clears response metadata (via
+        // setLastPromptTokenCount), so rollback must restore both counts.
+        const lastOutputTokenCountBeforeHardRescue = this.lastOutputTokenCount;
+        const lastCachedContentTokenCountBeforeHardRescue =
+          this.lastCachedContentTokenCount;
+        // tryCompress re-stamps tokenCountsRouteKey to the ACTIVE route (via
+        // setLastPromptTokenCount on the success path) even though this send
+        // targets the REQUEST route — and hard-rescue only fires for
+        // non-exact sends, whose request key can differ from the active one.
+        // Capture the key so the rollback below restores the resurrected
+        // count's original route attribution along with the count itself.
+        const tokenCountsRouteKeyBeforeHardRescue = this.tokenCountsRouteKey;
+        // Snapshot the retention map too: the rescue's compression consumes
+        // retained entries mid-flight (ChatCompressionService's keyless getter
+        // reads adopt the active route, deleting-and-consuming its entry) and
+        // a successful compression clears the map outright. Without the
+        // snapshot the rollback would restore the slots but not the map,
+        // leaving the resurrected route's count nowhere (#9506).
+        const retainedTokenCountsBeforeHardRescue = new Map(
+          this.tokenCountsByRouteKey,
+        );
+        const hardRescueFailureCountBeforeHardRescue =
+          this.hardRescueFailureCount;
+        if (shouldForceFromHard) {
+          debugLogger.warn(
+            `[compaction] hard-tier rescue triggered: prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}, hardRescueAttempt=${this.hardRescueFailureCount + 1}, consecutiveFailures=${this.consecutiveFailures}.`,
+          );
+        } else if (isHardTier && !exactRoute) {
+          debugLogger.warn(
+            `[compaction] hard-tier rescue skipped after ${this.hardRescueFailureCount} failed attempts; relying on reactive overflow recovery. prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}.`,
+          );
+        }
 
-      // Window-clamp the output request AFTER compression has settled the
-      // history: max_tokens = min(ceiling, window − prompt − margin), floored
-      // at MIN_CLAMPED_OUTPUT_TOKENS. Computed here in the send path — not in
-      // the shared provider code — so the API-authoritative
-      // lastPromptTokenCount is in scope and side queries (which set their
-      // own maxOutputTokens via getBaseLlmClient()) stay exempt by
-      // construction. This makes `prompt + max_tokens ≤ window` an invariant
-      // on every main-turn request (issue #5950).
-      //
-      // When lastPromptTokenCount > 0 (steady state, or refreshed to
-      // newTokenCount by compression/resume), re-estimate from the counts —
-      // cheap, no history walk. When it is still 0, reuse the pre-push gate
-      // estimate: userContent is already in history here, so a fresh history
-      // walk would double-count it. Estimate-derived counts can omit the
-      // system prompt, tool definitions, and skill content (see
-      // estimatePromptTokens — "typically ~15-20K of under-estimate"). Some
-      // counts based on prior API usage already preserve part of that
-      // overhead, but conservatively double-counting it is safe and
-      // self-corrects when provider usage arrives. An under-count is the ONE
-      // way `prompt + max_tokens` can still overflow the window, so keep the
-      // pad until provider usage replaces the estimate.
-      promptTokensForClamp =
-        this.lastPromptTokenCount > 0
+        // Compression derives prompt ids before the user content is pushed.
+        markApiHistoryPrompt(userContent, options?.promptId);
+        if (exactRoute || (isHardTier && !shouldForceFromHard)) {
+          compressionInfo = {
+            originalTokenCount: effectiveTokens,
+            newTokenCount: effectiveTokens,
+            compressionStatus: CompressionStatus.NOOP,
+          };
+        } else {
+          compressionInfo = await this.tryCompress(
+            prompt_id,
+            shouldForceFromHard,
+            params.config?.abortSignal,
+            {
+              pendingUserMessage: userContent,
+              precomputedEffectiveTokens: effectiveTokens,
+              requestGenerationConfig: params.config,
+              requestRouteKey,
+              deferChatCompressionRecord: shouldForceFromHard,
+              // Hard-rescue is force=true to bypass the cheap-gate breaker
+              // but it remains a semantically AUTOMATIC trigger. Tag the
+              // compactTrigger explicitly as 'auto' so PostCompact hooks are
+              // classified correctly while the pending user message preserves
+              // any active tool-call / response pairing.
+              trigger: shouldForceFromHard ? 'auto' : undefined,
+            },
+          );
+        }
+        const localPromptTokensAfterCompression = shouldForceFromHard
           ? estimatePromptTokens(
-              [],
+              this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
               userContent,
               this.lastPromptTokenCount,
               this.lastOutputTokenCount,
               imageTokenEstimate,
-              /* conservative= */ true,
             )
-          : effectiveTokens;
-      if (this.promptCountIsEstimateDerived()) {
-        promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
-        debugLogger.debug(
-          `[clamp] estimate-derived prompt count; padded by ` +
-            `${ESTIMATE_CLAMP_OVERHEAD_PAD}: ` +
-            `promptTokensForClamp=${promptTokensForClamp}, ` +
-            `count=${this.lastPromptTokenCount}`,
+          : 0;
+        if (
+          shouldStopAfterHardRescue(
+            shouldForceFromHard,
+            hard,
+            localPromptTokensAfterCompression,
+          )
+        ) {
+          const message = getHardRescueFailureMessage(
+            effectiveTokens,
+            hard,
+            compressionInfo,
+            localPromptTokensAfterCompression,
+          );
+          if (shouldForceFromHard) {
+            this.hardRescueFailureCount =
+              hardRescueFailureCountBeforeHardRescue + 1;
+          }
+          if (
+            compressionInfo.compressionStatus ===
+              CompressionStatus.COMPRESSED &&
+            historyBeforeHardRescue
+          ) {
+            // Hard-rescue compression mutates in-memory history before this
+            // guard can compare the compressed prompt size. If the compressed
+            // prompt is still too large to send, restore the pre-compression
+            // state. The JSONL compression checkpoint is intentionally not
+            // written because the send is about to be rejected.
+            this.setHistory(
+              historyBeforeHardRescue,
+              completedToolCallIdsBeforeHardRescue,
+            );
+            // setHistory conservatively cleared loaded-skill tracking; the
+            // restored bodies re-arm it on their next invoke.
+            this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
+            this.lastPromptTokenCountIsEstimated =
+              lastPromptTokenCountWasEstimatedBeforeHardRescue;
+            this.lastOutputTokenCount = lastOutputTokenCountBeforeHardRescue;
+            this.lastCachedContentTokenCount =
+              lastCachedContentTokenCountBeforeHardRescue;
+            this.tokenCountsRouteKey = tokenCountsRouteKeyBeforeHardRescue;
+            // Restore the retention map alongside the slots: the rescue's
+            // compression consumed/cleared entries mid-flight, and without
+            // the restore the resurrected route's count would survive
+            // nowhere — its next gate read would pass with 0 (#9506). The
+            // snapshot predates the rescue, so it already satisfies the
+            // invariant (no entry for the resurrected slot key).
+            this.tokenCountsByRouteKey.clear();
+            for (const [
+              retainedRouteKey,
+              retainedCounts,
+            ] of retainedTokenCountsBeforeHardRescue) {
+              this.tokenCountsByRouteKey.set(retainedRouteKey, retainedCounts);
+            }
+            this.telemetryService?.setLastPromptTokenCount(
+              lastPromptTokenCountBeforeHardRescue,
+            );
+            this.telemetryService?.setLastCachedContentTokenCount(
+              lastCachedContentTokenCountBeforeHardRescue,
+            );
+          }
+          const compressionStatus =
+            CompressionStatus[compressionInfo.compressionStatus] ??
+            String(compressionInfo.compressionStatus);
+          debugLogger.warn(
+            `[compaction] hard-tier rescue stopped oversized prompt: ` +
+              `prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, ` +
+              `hard=${hard}, localPromptTokensAfterCompression=` +
+              `${localPromptTokensAfterCompression}, compressionStatus=` +
+              `${compressionStatus}, newTokenCount=` +
+              `${compressionInfo.newTokenCount}, hardRescueFailureCount=` +
+              `${this.hardRescueFailureCount}, consecutiveFailures=` +
+              `${this.consecutiveFailures}. ${message}`,
+          );
+          throw new Error(message);
+        }
+        if (
+          shouldForceFromHard &&
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+        ) {
+          // Keep the pending question with the compressed answer on resume.
+          await this.recordCompression({
+            info: compressionInfo,
+            compressedHistory: [...this.getHistoryShallow(), userContent],
+            summaryPrefixLength: this.getHistoryShallow().length,
+            completedToolCallIds: this.completedToolCallIds,
+          });
+        }
+
+        if (this.manualPlanExitNoticesEnabled) {
+          const notice = this.config.takePendingManualPlanExitNotice();
+          if (notice) {
+            manualPlanExitNoticeVersion = notice.version;
+            manualPlanExitNoticeText = getManualPlanExitSystemReminder(
+              notice.currentMode,
+            );
+            userContent = {
+              ...userContent,
+              parts: [
+                ...(userContent.parts ?? []),
+                {
+                  text: manualPlanExitNoticeText,
+                },
+              ],
+            };
+          }
+        }
+
+        // Publish the acceptance snapshot for a caller-side settlement
+        // carrier (see `userContentPushSnapshotKey`) immediately before the
+        // push — no await between the snapshot and this push, so no
+        // concurrent send can supply the counter growth it observes.
+        // `params.message` is the caller's own request array (Turn passes
+        // it through unchanged), so the publication reaches the caller even
+        // though this method never returns on the pre-push error paths.
+        if (Array.isArray(params.message)) {
+          (params.message as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ] = this.userContentPushCount;
+        }
+        // Add user content to history ONCE before any attempts. Later object
+        // spreads preserve the identity marked before compression.
+        this.history.push(userContent);
+        this.syncReviewedSchemasForContent(userContent);
+        currentUserContent = userContent;
+        userContentAdded = true;
+        // Record that the user content landed (see `userContentPushCount`). The
+        // setup-error path below decrements this if it rolls the push back.
+        this.userContentPushCount++;
+        // Per-send orphan repair (belt-and-suspenders alongside the
+        // startChat load-time pass). Runs AFTER user content lands so a
+        // user-supplied tool_result closes the pair before we synthesize
+        // anything. An ordinary prompt that races a restore re-hang must
+        // still close the pair — `model[functionCall] → user[text]` is
+        // rejected by Anthropic-compatible providers. Restore itself sends
+        // the real functionResponse, so this pass is a no-op on that path.
+        const inlineRepair = repairOrphanedToolUseTurns(
+          this.history,
+          ORPHAN_TOOL_USE_REPAIR_REASON,
         );
+        if (inlineRepair.injected.length > 0) {
+          debugLogger.warn(
+            `[REPAIR] sendMessageStream inline pass synthesized ` +
+              `${inlineRepair.injected.length} functionResponse(s): ` +
+              inlineRepair.injected
+                .map((entry) => `${entry.name}(${entry.callId})`)
+                .join(', '),
+          );
+        }
+        if (inlineRepair.droppedDuplicates.length > 0) {
+          debugLogger.warn(
+            `[REPAIR] sendMessageStream inline pass dropped ` +
+              `${inlineRepair.droppedDuplicates.length} duplicate ` +
+              `functionResponse(s): ` +
+              inlineRepair.droppedDuplicates
+                .map((entry) => `${entry.name}(${entry.callId})`)
+                .join(', '),
+          );
+        }
+        requestContents = this.getRequestHistoryForRoute(
+          currentUserContent,
+          requestModalities,
+        );
+
+        // Window-clamp the output request AFTER compression has settled the
+        // history: max_tokens = min(ceiling, window − prompt − margin), floored
+        // at MIN_CLAMPED_OUTPUT_TOKENS. Computed here in the send path — not in
+        // the shared provider code — so the API-authoritative
+        // lastPromptTokenCount is in scope and side queries (which set their
+        // own maxOutputTokens via getBaseLlmClient()) stay exempt by
+        // construction. This makes `prompt + max_tokens ≤ window` an invariant
+        // on every main-turn request (issue #5950).
+        //
+        // When lastPromptTokenCount > 0 (steady state, or refreshed to
+        // newTokenCount by compression/resume), re-estimate from the counts —
+        // cheap, no history walk. When it is still 0, reuse the pre-push gate
+        // estimate: userContent is already in history here, so a fresh history
+        // walk would double-count it. Estimate-derived counts can omit the
+        // system prompt, tool definitions, and skill content (see
+        // estimatePromptTokens — "typically ~15-20K of under-estimate"). Some
+        // counts based on prior API usage already preserve part of that
+        // overhead, but conservatively double-counting it is safe and
+        // self-corrects when provider usage arrives. An under-count is the ONE
+        // way `prompt + max_tokens` can still overflow the window, so keep the
+        // pad until provider usage replaces the estimate.
+        promptTokensForClamp =
+          this.lastPromptTokenCount > 0
+            ? estimatePromptTokens(
+                [],
+                userContent,
+                this.lastPromptTokenCount,
+                this.lastOutputTokenCount,
+                imageTokenEstimate,
+                /* conservative= */ true,
+              )
+            : effectiveTokens;
+        if (this.promptCountIsEstimateDerived()) {
+          promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
+          debugLogger.debug(
+            `[clamp] estimate-derived prompt count; padded by ` +
+              `${ESTIMATE_CLAMP_OVERHEAD_PAD}: ` +
+              `promptTokensForClamp=${promptTokensForClamp}, ` +
+              `count=${this.lastPromptTokenCount}`,
+          );
+        }
+        const clampedMaxOutputTokens = clampOutputTokensToWindow(
+          outputCeiling,
+          contextWindowForClamp,
+          promptTokensForClamp,
+        );
+        params = {
+          ...params,
+          config: {
+            ...params.config,
+            maxOutputTokens: clampedMaxOutputTokens,
+          },
+        };
       }
-      const clampedMaxOutputTokens = clampOutputTokensToWindow(
-        outputCeiling,
-        contextWindowForClamp,
-        promptTokensForClamp,
-      );
-      params = {
-        ...params,
-        config: {
-          ...params.config,
-          maxOutputTokens: clampedMaxOutputTokens,
-        },
-      };
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
@@ -3475,6 +3752,8 @@ export class LlmChat {
           manualPlanExitNoticeVersion,
         );
       }
+      if (previousGenerationConfig)
+        this.generationConfig = previousGenerationConfig;
       streamDoneResolver!();
       throw error;
     }
@@ -3563,8 +3842,11 @@ export class LlmChat {
         const requestOverrides = exactRoute
           ? {
               contentGenerator: exactRoute.contentGenerator,
+              contentGeneratorConfig: exactRoute.contentGeneratorConfig,
               retryAuthType: exactRoute.retryAuthType,
               retryErrorCodes: exactRoute.retryErrorCodes,
+              allowPersistentRetry:
+                options?.preparedRequest?.allowPersistentRetry === true,
             }
           : undefined;
         const maxRateLimitRetries =
@@ -3716,6 +3998,8 @@ export class LlmChat {
                 ? transportContinuationPrefix
                 : undefined,
               acceptQuietToolResultCompletion,
+              options?.onPreparedRequest,
+              promptTokensForClamp,
             );
             streamEstablished = true;
 
@@ -3788,6 +4072,7 @@ export class LlmChat {
             transportContinuationPrefix = [];
             break;
           } catch (error) {
+            if (error instanceof LlmRequestPreparationError) throw error;
             lastError = error;
             if (params.config?.abortSignal?.aborted) throw error;
             // This attempt is over; fold what it delivered into the running
@@ -4271,6 +4556,14 @@ export class LlmChat {
                         isEstimated: reactiveOriginalTokenCountIsEstimated,
                       },
                       precomputedEffectiveTokens: reactiveOriginalTokenCount,
+                      // The ceiling this very error reported. Sizing the
+                      // retry against the inferred window instead re-posts the
+                      // oversize history to the server that just rejected it
+                      // (#13432). `limitKind` says whether that number bounds
+                      // the window or only the prompt: an input bound cannot
+                      // size the output budget (#13876).
+                      observedServerCeiling: contextOverflow.limitTokens,
+                      observedServerCeilingKind: contextOverflow.limitKind,
                       requestGenerationConfig: params.config,
                       requestRouteKey,
                       trigger: 'auto',
@@ -4591,6 +4884,9 @@ export class LlmChat {
                 turnGoalContext,
                 undefined,
                 acceptQuietToolResultCompletion,
+                options?.onPreparedRequest,
+                promptTokensForClamp,
+                retryEvent.isContinuation === true,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -4847,6 +5143,8 @@ export class LlmChat {
               successfulRecoveries++;
               activeRecoveryUser = undefined;
             } catch (recoveryError) {
+              if (recoveryError instanceof LlmRequestPreparationError)
+                throw recoveryError;
               if (params.config?.abortSignal?.aborted) throw recoveryError;
               rollbackRecoveryAttempt();
               debugLogger.warn(
@@ -4935,6 +5233,7 @@ export class LlmChat {
 
                 // Resolve the fallback model's content generator
                 let fallbackGenerator: ContentGenerator;
+                let fallbackConfig: ContentGeneratorConfig | undefined;
                 let fallbackRetryAuthType: string | undefined;
                 let fallbackRetryErrorCodes: readonly number[] | undefined;
                 let resolvedFallbackModel: string;
@@ -4944,6 +5243,7 @@ export class LlmChat {
                     .getBaseLlmClient()
                     .resolveForModel(fallbackModelId, { failClosed: true });
                   fallbackGenerator = resolved.contentGenerator;
+                  fallbackConfig = resolved.contentGeneratorConfig;
                   fallbackRetryAuthType = resolved.retryAuthType;
                   fallbackRetryErrorCodes = resolved.retryErrorCodes;
                   resolvedFallbackModel = resolved.model;
@@ -5023,6 +5323,9 @@ export class LlmChat {
                     fallbackRetryErrorCodes,
                     requestRouteKey,
                     turnGoalContext,
+                    options?.onPreparedRequest,
+                    promptTokensForClamp,
+                    fallbackConfig,
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
@@ -5043,6 +5346,8 @@ export class LlmChat {
                   );
                   return;
                 } catch (fallbackError) {
+                  if (fallbackError instanceof LlmRequestPreparationError)
+                    throw fallbackError;
                   if (
                     params.config?.abortSignal?.aborted ||
                     isAbortError(fallbackError)
@@ -5167,6 +5472,8 @@ export class LlmChat {
         if (successfulRecoveries > 0) {
           self.coalesceRecoveryPairs(successfulRecoveries);
         }
+        if (previousGenerationConfig)
+          self.generationConfig = previousGenerationConfig;
         sleepInhibitorHandle.release();
         streamDoneResolver!();
         // Flush any deferred partial-tool_use record. Covers both the
@@ -5211,28 +5518,106 @@ export class LlmChat {
     prompt_id: string,
     overrides?: {
       contentGenerator: ContentGenerator;
+      contentGeneratorConfig?: ContentGeneratorConfig;
       retryAuthType?: string;
       retryErrorCodes?: readonly number[];
+      allowPersistentRetry?: boolean;
     },
     routeKey = this.currentRouteKey(),
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
+    onPreparedRequest?: LlmPreparedRequestCallback,
+    promptTokensForClamp = 0,
+    continuationInFlight = false,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
+    const request: PromptCacheSharingParameters = {
+      model,
+      contents: requestContents,
+      config: { ...this.generationConfig, ...params.config },
+      ...(transportContinuationPrefix !== undefined && {
+        continuationInFlight: true,
+      }),
+    };
+    const actualConfig =
+      overrides?.contentGeneratorConfig ??
+      this.config.getContentGeneratorConfig();
+    if (onPreparedRequest) {
+      const {
+        abortSignal: _signal,
+        httpOptions: _http,
+        ...config
+      } = request.config ?? {};
+      try {
+        const prepared: LlmPreparedRequest = {
+          request: { model, contents: requestContents, config },
+          history: this.history,
+          contextPrefixLength: getStartupContextLength(this.history, {
+            includeCompressed: true,
+          }),
+          completedToolCallIds: [...this.completedToolCallIds],
+          routeSelector: `${actualConfig?.authType ?? ''}:${model}`,
+          providerPin: llmPreparedProviderPin(actualConfig),
+          promptTokensForClamp,
+          allowPersistentRetry: overrides?.allowPersistentRetry ?? !overrides,
+        };
+        const overBudget =
+          onPreparedRequest.maxSnapshotBytes !== undefined &&
+          Buffer.byteLength(JSON.stringify(prepared)) >
+            onPreparedRequest.maxSnapshotBytes;
+        await onPreparedRequest(
+          overBudget ? prepared : structuredClone(prepared),
+          continuationInFlight ||
+            transportContinuationPrefix !== undefined ||
+            hasImagePayloadReferences(this.history),
+        );
+      } catch (cause) {
+        throw new LlmRequestPreparationError(cause);
+      }
+    }
+    params.config?.abortSignal?.throwIfAborted();
     const apiCall = () => {
-      // A continuation attempt's replay gate is already shut by the
-      // accumulated prefix, so the pipeline must release a parked tool-call
-      // finish rather than withhold it for a replay that cannot happen.
-      const request: PromptCacheSharingParameters = {
-        model,
-        contents: requestContents,
-        config: { ...this.generationConfig, ...params.config },
-        ...(transportContinuationPrefix !== undefined && {
-          continuationInFlight: true,
-        }),
-      };
+      params.config?.abortSignal?.throwIfAborted();
+      const groups = new Map<ToolOutputProvenance, Part[]>();
+      for (const content of requestContents)
+        for (const part of content.parts ?? []) {
+          const provenance = getToolOutputProvenance(part);
+          if (!provenance || this.injectedToolResults.has(provenance)) continue;
+          const parts = groups.get(provenance) ?? [];
+          parts.push(part);
+          groups.set(provenance, parts);
+        }
+      for (const [provenance, parts] of groups) {
+        // Observation only: mark first so a measurement or logging throw
+        // neither fails the model request nor re-emits on the retry.
+        this.injectedToolResults.add(provenance);
+        try {
+          const injected = measureToolOutput(parts, this.config);
+          logToolResultSize(
+            this.config,
+            new ToolResultSizeEvent(
+              provenance.toolName,
+              provenance.toolType,
+              'injection',
+              provenance.rawSize?.chars,
+              injected.chars,
+              provenance.rawSize?.estimatedTokens,
+              injected.estimatedTokens,
+              provenance.truncated,
+              Number.isFinite(provenance.budget)
+                ? provenance.budget
+                : undefined,
+              provenance.budgetSource,
+              provenance.callId,
+              provenance.promptId || prompt_id,
+            ),
+          );
+        } catch {
+          /* Telemetry is observational. */
+        }
+      }
       return generator.generateContentStream(request, prompt_id);
     };
     const cgConfig = this.config.getContentGeneratorConfig();
@@ -5241,7 +5626,8 @@ export class LlmChat {
       overrides?.retryErrorCodes ?? cgConfig?.retryErrorCodes;
     // Fallback models never enter persistent retry mode — persistent mode
     // is the caller's explicit opt-in for the primary model only.
-    const persistentMode = overrides ? false : isUnattendedMode();
+    const persistentMode =
+      (overrides?.allowPersistentRetry ?? !overrides) && isUnattendedMode();
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof ResponsesHttpError) {
@@ -5324,15 +5710,27 @@ export class LlmChat {
     retryErrorCodes?: readonly number[],
     routeKey?: string,
     goalContext?: GoalTurnPermit,
+    onPreparedRequest?: LlmPreparedRequestCallback,
+    promptTokensForClamp = 0,
+    contentGeneratorConfig?: ContentGeneratorConfig,
   ): AsyncGenerator<StreamEvent> {
     const stream = await this.makeApiCallAndProcessStream(
       model,
       requestContents,
       params,
       prompt_id,
-      { contentGenerator, retryAuthType, retryErrorCodes },
+      {
+        contentGenerator,
+        contentGeneratorConfig,
+        retryAuthType,
+        retryErrorCodes,
+      },
       routeKey,
       goalContext,
+      undefined,
+      false,
+      onPreparedRequest,
+      promptTokensForClamp,
     );
 
     for await (const chunk of stream) {
@@ -5369,7 +5767,7 @@ export class LlmChat {
       : this.history;
     // Deep copy the history to avoid mutating the history outside of the
     // chat session.
-    return structuredClone(history);
+    return cloneApiHistory(history);
   }
 
   /**
@@ -5381,7 +5779,7 @@ export class LlmChat {
     const history = curated
       ? extractCuratedHistory(this.history)
       : this.history;
-    return structuredClone(history.slice(-count));
+    return cloneApiHistory(history.slice(-count));
   }
 
   /**
@@ -5397,8 +5795,14 @@ export class LlmChat {
   }
 
   getHistoryForForkWindow(): Content[] {
-    const history = this.history.slice(getStartupContextLength(this.history));
-    return extractCuratedHistory(history).map(copyContentContainer);
+    const startup = getStartupContextLength(this.history);
+    const prefix = getStartupContextLength(this.history, {
+      includeCompressed: true,
+    });
+    return [
+      ...this.history.slice(startup, prefix),
+      ...extractCuratedHistory(this.history.slice(prefix)),
+    ].map(copyContentContainer);
   }
 
   /**
@@ -5720,7 +6124,9 @@ export class LlmChat {
     history: Content[],
     completedToolCallIds?: readonly string[],
   ): void {
+    markCompressedHistory(history);
     this.history = history;
+    this.markToolResultsInjected(this.history);
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
@@ -5747,6 +6153,7 @@ export class LlmChat {
   truncateHistory(keepCount: number): void {
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
+    markCompressedHistory(this.history);
     this.setCompletedToolCallIds(this.completedToolCallIds);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
@@ -5788,7 +6195,7 @@ export class LlmChat {
    */
   stripOrphanedUserEntriesFromHistory(): Content[] {
     const strippedEntries: Content[] = [];
-    const boundary = completedToolCallBoundary(
+    const boundary = recoveryHistoryBoundary(
       this.history,
       this.completedToolCallIds,
     );
@@ -5823,6 +6230,7 @@ export class LlmChat {
       if (lastEntry && isAgentEnvelopeContent(lastEntry)) {
         break;
       }
+      // Keeping directory context here would duplicate it on Retry.
       strippedEntries.unshift(this.history.pop()!);
     }
     // Today this is safe even without the reset — only trailing user

@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import type { RetainedFileHistoryStorage } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import { promises as fs } from 'node:fs';
 import { lstat, readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -25,14 +26,16 @@ import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
+import { WebFetchTool } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
+import {
+  ManagedAutomationGateTool,
+  type ManagedAutomationGateExecution,
+} from './managed-automation-gate-tool.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import type {
-  LocalShellCaptureRequest,
-  LocalShellReceipt,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
+import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import { MANAGED_TOOL_RESULT_PROTOCOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -187,6 +190,8 @@ export class ManagedToolConflictError extends Error {
     readonly code:
       | 'managed_runtime_identity_conflict'
       | 'managed_runtime_provider_operation_failed'
+      | 'managed_runtime_owner_hold_pending'
+      | 'managed_runtime_release_timeout'
       | 'managed_tool_result_conflict' = 'managed_runtime_identity_conflict',
   ) {
     super(message);
@@ -202,6 +207,8 @@ export class ManagedToolUnavailableError extends Error {
 
 /** The admitted tools, keyed by name, over one configuration. */
 export interface ManagedToolSet {
+  readonly retainedFileHistory?: RetainedFileHistoryStorage;
+  readonly fileHistory?: ManagedRuntimeFileHistory;
   /**
    * The session the tools run as. A shell they start sees it as
    * QWEN_CODE_SESSION_ID, with that session's project directory.
@@ -237,6 +244,10 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
+  WebFetchTool.Name,
+  // The managed automation gate probe: the Harness's own execution, never
+  // a model's (docs/design/2026-10-22-managed-automation-gate.md).
+  ManagedAutomationGateTool.Name,
 ]);
 
 /** Live background Shells one Session may hold, by the H3 design contract. */
@@ -298,7 +309,14 @@ export interface ManagedWorkerDrainObservation {
 export type ManagedShellCaptureSink = Pick<
   LocalShellResultCapture,
   keyof LocalShellResultCapture
->;
+> & {
+  /**
+   * Marks the capture's end as a platform-requested stop (#13856 A8): the
+   * finalize then carries `stopRequested`, and the record projects
+   * `cancelled`/`stop_requested` instead of a bare exit.
+   */
+  setStopRequested(): void;
+};
 
 export interface ManagedShellCapturePublisher {
   readonly hasInstalledPublication?: boolean;
@@ -310,7 +328,7 @@ export interface ManagedShellCapturePublisher {
   accept?(
     identity: ToolResultExpectedIdentity,
     envelope: ToolResultEnvelope,
-  ): Promise<LocalShellReceipt>;
+  ): Promise<ToolResultAcknowledgement>;
   finish?(
     identity: ToolResultExpectedIdentity,
     result: ToolResultEnvelope,
@@ -347,11 +365,14 @@ export class ManagedToolExecutor {
     close(): Promise<void>;
   };
   private closing = false;
+  private csiClosing: Promise<void> | undefined;
   private retirementId?: string;
   private providerWasUsed = false;
   private capturePreparationStarted = false;
   private historyControlOutcomeUnknown = false;
+  private ledgerIntegrityFailed = false;
   private readonly pendingStarts = new Set<Promise<unknown>>();
+  private startFailureObserved = false;
   private readonly fileHistories = new Map<string, ManagedRuntimeFileHistory>();
   private readonly historyControls = new Set<string>();
 
@@ -442,6 +463,144 @@ export class ManagedToolExecutor {
     };
   }
 
+  async csiRetirementInventory(retirementId: string, sessionId: string) {
+    this.sealAdmission(retirementId);
+    const joined = await Promise.allSettled([
+      ...this.pendingStarts,
+      ...[...this.entries.values()].flatMap((entry) =>
+        entry.promise ? [entry.promise] : [],
+      ),
+      ...[...this.fileHistories.values()].map((history) =>
+        history.history.drain(),
+      ),
+    ]);
+    const drain = this.getDrainObservation(retirementId);
+    const blockers = new Set(drain.blockers);
+    if (
+      this.startFailureObserved ||
+      joined.some((result) => result.status === 'rejected')
+    )
+      blockers.add('executor_join_failed');
+    if (
+      this.capturePublisher ||
+      this.mcp ||
+      this.hooks ||
+      this.backgroundSupervisor ||
+      this.options.ledger
+    )
+      blockers.add('configured_secondary_activity');
+    if (
+      this.backgroundRegistry.hasActivity ||
+      this.monitorRegistry.hasActivity ||
+      this.mcpCalls.size ||
+      this.providerSessions.size ||
+      this.closedSessions.size
+    )
+      blockers.add('secondary_activity_present');
+    if (this.historyControls.size) blockers.add('history_control_pending');
+    const entries = [...this.entries.values()]
+      .sort((a, b) => a.reference.callId.localeCompare(b.reference.callId))
+      .map((entry) => {
+        if (
+          entry.reference.sessionId !== sessionId ||
+          entry.version !== 2 ||
+          !['read_file', 'write_file', 'edit'].includes(entry.toolName) ||
+          entry.state !== 'settled' ||
+          !entry.result ||
+          entry.input === undefined ||
+          entry.inputJson === undefined
+        )
+          blockers.add('unsupported_file_entry');
+        return {
+          version: entry.version,
+          reference: structuredClone(entry.reference),
+          toolName: entry.toolName,
+          input: structuredClone(entry.input ?? null),
+          inputJson: entry.inputJson ?? null,
+          state: entry.state,
+          lastSequence: entry.lastSequence,
+          result: structuredClone(entry.result ?? null),
+          v3Result: structuredClone(entry.v3Result ?? null),
+          v3Capture: structuredClone(entry.v3Capture ?? null),
+          acknowledgement: structuredClone(entry.acknowledgement ?? null),
+          aborted: entry.controller.signal.aborted,
+        };
+      });
+    const histories = [...this.fileHistories.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([id, history]) => ({
+        sessionId: id,
+        directory: history.directory,
+        state: history.state(),
+      }));
+    if (histories.some((history) => history.sessionId !== sessionId))
+      blockers.add('unrelated_file_history');
+    const result = {
+      ...drain,
+      workState: blockers.size ? ('BLOCKED' as const) : drain.workState,
+      blockers: [...blockers].sort(),
+      entries,
+      histories,
+      historyControls: [...this.historyControls].sort(),
+      secondary: {
+        captureConfigured: this.capturePublisher !== undefined,
+        mcpConfigured: this.mcp !== undefined,
+        hooksConfigured: this.hooks !== undefined,
+        supervisorConfigured: this.backgroundSupervisor !== undefined,
+        ledgerConfigured: this.options.ledger !== undefined,
+        providerUsed: this.providerWasUsed,
+        providerSessions: [...this.providerSessions].sort(),
+        closedSessions: [...this.closedSessions].sort(),
+        mcpCalls: this.mcpCalls.size,
+        backgroundActivity: this.backgroundRegistry.hasActivity,
+        monitorActivity: this.monitorRegistry.hasActivity,
+      },
+    };
+    if (
+      entries.length > 4096 ||
+      Buffer.byteLength(JSON.stringify(result)) > 32 * 1024 * 1024
+    )
+      throw new ManagedToolUnavailableError(
+        'CSI executor inventory exceeds its bound.',
+      );
+    return result;
+  }
+
+  closeCsiFiles(retirementId: string, sessionId: string): Promise<void> {
+    this.sealAdmission(retirementId);
+    this.csiClosing ??= (async () => {
+      const inventory = await this.csiRetirementInventory(
+        retirementId,
+        sessionId,
+      );
+      if (inventory.workState !== 'QUIESCENT')
+        throw new ManagedToolUnavailableError(
+          'Original CSI executor is blocked.',
+        );
+      this.closing = true;
+      await Promise.all([
+        ...this.pendingStarts,
+        ...[...this.entries.values()].flatMap((entry) =>
+          entry.promise ? [entry.promise] : [],
+        ),
+        ...[...this.fileHistories.values()].map((history) =>
+          history.history.drain(),
+        ),
+        this.backgroundRegistry.stopAll(5_000),
+        this.monitorRegistry.stopAll(5_000),
+      ]);
+      if (
+        this.pendingStarts.size ||
+        this.historyControls.size ||
+        this.startFailureObserved
+      )
+        throw new ManagedToolUnavailableError(
+          'Original CSI executor did not close.',
+        );
+    })();
+    return this.csiClosing;
+  }
+
   controlFileHistory(
     ownerSessionId: string,
     sessionId: string,
@@ -482,7 +641,7 @@ export class ManagedToolExecutor {
     this.assertLegacySession(sessionId);
     if (
       this.closing ||
-      this.hasActiveToolSession(sessionId) ||
+      this.hasActiveToolSession(sessionId, true) ||
       (operation.action === 'rewind' &&
         this.hooks?.hasHolds(sessionId) === true) ||
       [...this.entries.values()].some(
@@ -494,6 +653,7 @@ export class ManagedToolExecutor {
         'File history requires an idle Runtime Session.',
       );
     this.historyControls.add(sessionId);
+    this.mcp?.setFileHistoryActive(sessionId, true);
     let mutationStarted = false;
     try {
       const tools = await this.toolsFor({
@@ -510,13 +670,26 @@ export class ManagedToolExecutor {
         throw new ManagedToolUnavailableError(
           'File history Workspace is unavailable.',
         );
-      let history = this.fileHistories.get(sessionId);
+      const existingHistory = this.fileHistories.get(sessionId);
+      let history = tools.fileHistory ?? existingHistory;
+      if (tools.retainedFileHistory && !tools.fileHistory)
+        throw new ManagedToolConflictError(
+          'Retained file history requires its original composition.',
+        );
+      if (
+        tools.fileHistory &&
+        (tools.fileHistory.ownerSessionId !== ownerSessionId ||
+          tools.fileHistory.directory !== tools.directory ||
+          (existingHistory && existingHistory !== tools.fileHistory))
+      )
+        throw new ManagedToolConflictError('File history binding conflicts.');
       if (operation.action === 'bind') {
         if (!history) {
           history = new ManagedRuntimeFileHistory(
             ownerSessionId,
             tools.directory,
             operation.state,
+            tools.retainedFileHistory,
           );
           await history.ready();
           if (!this.isAdmissionOpen)
@@ -543,6 +716,7 @@ export class ManagedToolExecutor {
         throw new ManagedToolConflictError(
           'File history is not bound to this Workspace.',
         );
+      this.fileHistories.set(sessionId, history);
       if (operation.action === 'prepare') {
         mutationStarted = true;
         await history.prepare(operation.promptId, operation.paths);
@@ -561,6 +735,7 @@ export class ManagedToolExecutor {
       throw error;
     } finally {
       this.historyControls.delete(sessionId);
+      this.mcp?.setFileHistoryActive(sessionId, false);
     }
   }
 
@@ -697,12 +872,10 @@ export class ManagedToolExecutor {
     backgroundRegistry?: ManagedBackgroundShellRegistry,
     monitorRegistry?: ManagedMonitorRegistry,
     private readonly options: {
-      /**
-       * The worker's ledger of its Shell process groups. Present only in a
-       * Managed session's Runtime worker (boot v1), never in a Hosted one.
-       */
+      /** The worker's own ledger, when its launcher requires physical stop proof. */
       readonly ledger?: ManagedRuntimeLedger;
       readonly groupEvidenceTimeoutMs?: number;
+      readonly sshForegroundOnly?: boolean;
     } = {},
   ) {
     this.backgroundRegistry =
@@ -772,8 +945,12 @@ export class ManagedToolExecutor {
 
   closeSessionAdmission(sessionId: string): void {
     if (this.hasActiveSession(sessionId)) {
+      // The dedicated code names the one condition a Hook release may absorb
+      // as a fence — this Session still owns unfinished work of any kind;
+      // both class defaults stay catch-alls other refusals share.
       throw new ManagedToolConflictError(
         'Managed Runtime Session still owns unfinished work.',
+        'managed_runtime_owner_hold_pending',
       );
     }
     this.closedSessions.add(sessionId);
@@ -805,6 +982,15 @@ export class ManagedToolExecutor {
     toolName: string,
     input: Record<string, unknown>,
   ): Promise<ManagedToolResultPayload> {
+    if (
+      this.options.sshForegroundOnly &&
+      toolName === ShellTool.Name &&
+      (input['is_background'] === true || input['is_monitor'] === true)
+    ) {
+      throw new ManagedToolConflictError(
+        'SSH Runtime admits foreground Shell only.',
+      );
+    }
     this.assertLegacySession(reference.sessionId);
     if (this.closing) {
       throw new ManagedToolUnavailableError(
@@ -969,6 +1155,18 @@ export class ManagedToolExecutor {
       );
     }
     const { reference, capture, toolName, input } = request;
+    if (
+      this.options.sshForegroundOnly &&
+      (toolName !== ShellTool.Name ||
+        input['is_background'] === true ||
+        input['is_monitor'] === true ||
+        capture.background === true ||
+        capture.monitoring === true)
+    ) {
+      throw new ManagedToolConflictError(
+        'SSH Runtime admits foreground Shell capture only.',
+      );
+    }
     this.assertLegacySession(reference.sessionId);
     let inputJson: string;
     let inputDigest: string;
@@ -1713,10 +1911,15 @@ export class ManagedToolExecutor {
     );
   }
 
-  private hasActiveToolSession(sessionId: string): boolean {
+  private hasActiveToolSession(
+    sessionId: string,
+    fileHistory = false,
+  ): boolean {
     if (this.historyControls.has(sessionId)) return true;
     return (
-      this.mcp?.hasHolds(sessionId) === true ||
+      (fileHistory
+        ? this.mcp?.hasPendingWork(sessionId)
+        : this.mcp?.hasHolds(sessionId)) === true ||
       this.provider?.hasActiveSession(sessionId) === true ||
       this.backgroundRegistry.hasHolds(sessionId) ||
       this.monitorRegistry.hasHolds(sessionId) ||
@@ -1861,6 +2064,56 @@ export class ManagedToolExecutor {
     }
   }
 
+  async retireSsh(retirementId: string): Promise<void> {
+    this.sealAdmission(retirementId);
+    const ledger = this.options.ledger;
+    if (
+      !ledger ||
+      ledger.hasIntegrityFailure ||
+      this.ledgerIntegrityFailed ||
+      this.historyControlOutcomeUnknown
+    )
+      throw new ManagedToolUnavailableError(
+        'Runtime ledger integrity is unverified.',
+      );
+    if (
+      this.pendingStarts.size > 0 ||
+      this.historyControls.size > 0 ||
+      this.providerWasUsed ||
+      this.mcpCalls.size > 0 ||
+      this.mcp?.getDrainInspection().hasActivity ||
+      this.hooks?.getDrainInspection().hasActivity ||
+      [...this.entries.values()].some((entry) =>
+        entry.version === 3
+          ? entry.state !== 'settled' ||
+            entry.acknowledgement?.deliveryStatus !== 'committed'
+          : entry.state !== 'acknowledged',
+      )
+    ) {
+      throw new ManagedToolUnavailableError(
+        'Original Runtime work is not settled and acknowledged.',
+      );
+    }
+    await Promise.all([
+      this.mcp?.close(),
+      this.hooks?.close(),
+      this.provider?.close(),
+      this.backgroundRegistry.stopAll(5_000),
+      this.monitorRegistry.stopAll(5_000),
+    ]);
+    const remaining = await ledger.killOutstanding();
+    if (
+      ledger.hasIntegrityFailure ||
+      this.ledgerIntegrityFailed ||
+      remaining.length > 0 ||
+      !ledger.complete()
+    )
+      throw new ManagedToolUnavailableError(
+        'Original Shell process groups are not proven stopped.',
+      );
+    this.closing = true;
+  }
+
   /**
    * Ordered close of one Session's background Shells and Monitor watches,
    * bounded per drain. The activation release gate calls this before
@@ -1884,7 +2137,10 @@ export class ManagedToolExecutor {
     this.pendingStarts.add(pending);
     void pending.then(
       () => this.pendingStarts.delete(pending),
-      () => this.pendingStarts.delete(pending),
+      () => {
+        this.startFailureObserved = true;
+        this.pendingStarts.delete(pending);
+      },
     );
     return pending;
   }
@@ -1958,10 +2214,14 @@ export class ManagedToolExecutor {
         // does not exist yet, so resolve the deepest ancestor that does —
         // a genuinely absent path stays lexical and keeps the tool's own
         // not-found answer rather than a traversal accusation.
-        const realTarget = await realpathDeepestExisting(
-          params['file_path'] as string,
-        );
-        const realDirectory = await realpathDeepestExisting(directory);
+        // Retained storage owns no-follow admission through the original
+        // root descriptor; ambient realpaths cannot authenticate that root.
+        const realTarget = tools.retainedFileHistory
+          ? (params['file_path'] as string)
+          : await realpathDeepestExisting(params['file_path'] as string);
+        const realDirectory = tools.retainedFileHistory
+          ? directory
+          : await realpathDeepestExisting(directory);
         const relative = path.relative(realDirectory, realTarget);
         let outOfBoundary = false;
         if (
@@ -1975,6 +2235,7 @@ export class ManagedToolExecutor {
           // reachable, the behavior /1 Sessions had before containment.
           const workspaceRoot = tools.workspaceRoot;
           outOfBoundary =
+            tools.retainedFileHistory !== undefined ||
             workspaceRoot === undefined ||
             escapesSession(
               path.relative(
@@ -2084,54 +2345,76 @@ export class ManagedToolExecutor {
         return sessionIdContext.run(sessionId, () => {
           const invocation = fileInvocation ?? tool.build(params);
           invocationStarted = true;
-          if (entry.version === 3 && entry.captureSink) {
+          const ledger = this.options.ledger;
+          const trackGroup = (pid: number) => {
+            if (!ledger) return;
+            // Before any settle step of this call can run, the group is
+            // durable for the host's sweeps: the pid leads the group.
+            shellPgid = pid;
+            try {
+              ledger.addGroup({
+                pgid: pid,
+                callId: entry.reference.callId,
+                startedAt: Date.now(),
+              });
+            } catch (error) {
+              this.ledgerIntegrityFailed = true;
+              // A group that could not get into the ledger must not
+              // outlive the failure: stop it first, then let the call
+              // fail loudly instead of settling an outcome nothing
+              // recorded.
+              signalProcessGroup(pid, 'SIGKILL');
+              void ledger.waitForGroupExit(pid, CLOSE_SWEEP_TIMEOUT_MS);
+              throw error;
+            }
+          };
+          if (
+            entry.toolName === ShellTool.Name &&
+            (ledger || entry.captureSink)
+          ) {
             return (invocation as ShellToolInvocation).execute(
               entry.controller.signal,
               undefined,
               undefined,
-              undefined,
+              trackGroup,
               undefined,
               undefined,
               entry.captureSink,
             );
           }
-          if (entry.toolName === ShellTool.Name && this.options.ledger) {
-            const ledger = this.options.ledger;
-            return (invocation as ShellToolInvocation).execute(
+          // A gate probe's command is a Shell's too: the same group
+          // tracking stops what it leaves behind.
+          if (entry.toolName === ManagedAutomationGateTool.Name && ledger) {
+            return (
+              invocation as unknown as ManagedAutomationGateExecution
+            ).execute(
               entry.controller.signal,
               undefined,
               undefined,
-              (pid) => {
-                // Before any settle step of this call can run, the group is
-                // durable for the host's sweeps: the pid leads the group.
-                shellPgid = pid;
-                try {
-                  ledger.addGroup({
-                    pgid: pid,
-                    callId: entry.reference.callId,
-                    startedAt: Date.now(),
-                  });
-                } catch (error) {
-                  // A group that could not get into the ledger must not
-                  // outlive the failure: stop it first, then let the call
-                  // fail loudly instead of settling an outcome nothing
-                  // recorded.
-                  signalProcessGroup(pid, 'SIGKILL');
-                  void ledger.waitForGroupExit(pid, CLOSE_SWEEP_TIMEOUT_MS);
-                  throw error;
-                }
-              },
+              trackGroup,
             );
           }
           return invocation.execute(entry.controller.signal);
         });
       };
-      const history = this.fileHistories.get(entry.reference.sessionId);
-      let result: ToolResult;
+      const registeredHistory = this.fileHistories.get(
+        entry.reference.sessionId,
+      );
+      const history = tools.fileHistory ?? registeredHistory;
+      const mutating = [WriteFileTool.Name, EditTool.Name].includes(
+        entry.toolName,
+      );
       if (
-        history &&
-        [WriteFileTool.Name, EditTool.Name].includes(entry.toolName)
-      ) {
+        (history &&
+          (history.directory !== tools.directory ||
+            (tools.fileHistory &&
+              history.ownerSessionId !== entry.reference.sessionId) ||
+            (registeredHistory && registeredHistory !== history))) ||
+        (mutating && tools.retainedFileHistory && !tools.fileHistory)
+      )
+        throw new ManagedToolConflictError('File history binding conflicts.');
+      let result: ToolResult;
+      if (history && mutating) {
         let outcome: { result: ToolResult } | { error: unknown };
         let invoked = false;
         try {
@@ -2229,23 +2512,20 @@ export class ManagedToolExecutor {
       };
     }
     if (
-      entry.version === 2 &&
       shellPgid !== undefined &&
-      entry.controller.signal.aborted &&
+      (entry.controller.signal.aborted || this.options.sshForegroundOnly) &&
       this.options.ledger
     ) {
-      // A settled cancel carries the group's exit evidence: the call is
-      // journaled settled only once no member of the Shell's process group
-      // answers. A group that outlives the budget makes the outcome unknown:
-      // the session blocks and the ledger entry keeps naming the group. The
-      // ledger's own filesystem failure can never un-prove the stop either:
-      // unknown is the only honest next state.
+      // SSH foreground completion also owns children left in this group by
+      // an exited leader. Prove this call's group gone before settlement can
+      // release Workspace ownership; failure keeps the outcome unknown.
       let state: ProcessLiveness = 'denied';
       try {
-        state = await this.options.ledger.waitForGroupExit(
-          shellPgid,
-          this.options.groupEvidenceTimeoutMs ?? GROUP_EXIT_EVIDENCE_TIMEOUT_MS,
-        );
+        const budget =
+          this.options.groupEvidenceTimeoutMs ?? GROUP_EXIT_EVIDENCE_TIMEOUT_MS;
+        state = this.options.sshForegroundOnly
+          ? await this.options.ledger.stopGroup(shellPgid, budget)
+          : await this.options.ledger.waitForGroupExit(shellPgid, budget);
       } catch (error) {
         debugLogger.warn(
           `Managed Runtime group-exit evidence failed: ${
@@ -2253,7 +2533,13 @@ export class ManagedToolExecutor {
           }`,
         );
       }
-      if (state !== 'gone') {
+      if (
+        state !== 'gone' ||
+        (this.options.sshForegroundOnly &&
+          (this.options.ledger.hasIntegrityFailure ||
+            this.ledgerIntegrityFailed))
+      ) {
+        if (this.options.sshForegroundOnly) this.ledgerIntegrityFailed = true;
         entry.state = 'unknown';
         entry.lastSequence++;
         return;
@@ -2435,12 +2721,14 @@ export function createManagedToolSet(
         new ReadFileTool(config),
         new WriteFileTool(config),
         new EditTool(config),
+        new WebFetchTool(config, 'managed'),
         // The walk never leaves the Session, whatever the pattern spells.
         new GlobTool(config, {
           containmentRoot: directory,
           executionTimeoutMs: 5_000,
         }),
         new ShellTool(config),
+        new ManagedAutomationGateTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
   };

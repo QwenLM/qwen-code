@@ -4,6 +4,8 @@
 
 Status: implemented; under review. Part of #12952 and #12380.
 
+This document records the original files-only G0 slice. [Public foreground Shell admission](public-hosted-shell-admission.md) supersedes its files-only profile/tool boundary when the separate deployment Shell opt-in is enabled. Public callers still cannot select a profile; the Workspace files opt-in still gates creation input, and existing Sessions keep their persisted profile and approval mode.
+
 ## Problem and scope
 
 Hosted Read/Write/Edit already runs through the production Broker and worker,
@@ -19,24 +21,32 @@ Workspace binding, not complete Workspace execution support. G0 requires no UI
 changes; the follow-up's only UI changes are enabling the creator's composer and
 its Cancel control.
 
-A follow-up admits later Turns for the Session's creator under the same opt-in,
-and lets the creator cancel a running Turn, which the Hosted Harness aborts and
-settles through the original Runtime identities. Execution authorizes every
-Turn against the creator's Workspace grants, so any other actor, and every
-deployment without the opt-in, keeps the existing refusal:
-`workspace_unavailable` when the actor can read the Workspace,
-`session_not_found` when they cannot. The creator may also rename the Session.
-Admitting new work requires the creator's create grant on an `ACTIVE`
-Workspace at the generation and storage the Session was bound to, so a
-re-registration refuses submit and rename before any command is written.
+A follow-up (the actor-roles enforcement of
+`2026-10-07-managed-agent-actor-roles.md`, contract v1.37) admits later Turns
+for any caller holding OPERATOR on the bound Workspace under the same opt-in,
+while the Session's creator-keyed execution facts hold (the registry still
+backs the binding, state is ACTIVE, and the actor recorded by the Workspace
+create command keeps OPERATOR or above), and lets such a caller cancel a
+running Turn — cancelling aborts work that is already running and needs the
+caller's role and shape alone, since the delivery re-checks no grants. The
+Hosted Harness aborts the Turn and settles through the original Runtime
+identities. Execution authorizes every Turn against the creator's recorded
+Workspace create command, so the refusal contract is `session_not_found`
+without a Workspace read grant, `403 session_operation_forbidden` for a
+readable actor below OPERATOR, and `409 workspace_unavailable` for an
+admitted OPERATOR whose shape or creator-keyed facts fail — or for a
+deployment without the opt-in. Such a caller may also rename the Session.
+Admitting new work requires the facts conjunct as well, so a demotion of
+the recorded creator or a re-registration refuses submit and rename before
+any command is written.
 Cancelling only aborts work already running: while the deployment still enables
-Workspace files, the creator who can still read the Workspace may cancel even
-after the create grant is revoked, the Workspace starts draining or it is
-re-registered. A live cancel reuses the running Turn's resident attachment.
+Workspace files, a caller holding OPERATOR may cancel even when the Workspace
+starts draining or it is re-registered, since cancellation admits on the
+caller's role and the Session's executable shape alone. A live cancel reuses the running Turn's resident attachment.
 A cold connector cache re-attaches for the persisted cancellation, validating
 its frozen Session binding and exact tenant/Session identity without requiring
-mutable creation grants, registry state or mount readiness. New API requests
-still require the creator's read grant; a cancellation already accepted keeps
+mutable creation grants, registry state or mount readiness. New cancellation
+requests still require the OPERATOR role; a cancellation already accepted keeps
 retrying if that grant is later revoked. New work always rechecks execution
 authority, including when physical recovery is disabled. Passive load of a
 resident Harness Session returns the original client identity after validating
@@ -95,7 +105,7 @@ reliable Workspace close. Cwd operations remain gated for bound Sessions.
 | Existing Broker/worker              | Reuse production routing and fencing                                                 | Selected Runtime and persisted Workspace |
 | Contract and README                 | Document the narrow creation capability and remaining gates                          | Public REST and WebShell adapter         |
 
-Production behavior changes under `packages/sdk-java/managed-agent-server`, in
+Production behavior changes under `packages/managed-agent-server`, in
 the private Hosted DTOs in `packages/sdk-java/qwencode`, in the CLI Hosted Session routes (`packages/cli`), and in the WebShell
 managed Sessions page and its providers (`packages/web-shell`); it covers the
 initial Workspace Read/Write/Edit Turn and the creator's later-Turn submit,

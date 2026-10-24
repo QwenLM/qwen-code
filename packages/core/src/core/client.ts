@@ -4,9 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { LlmPreparedRequestCallback } from './llm-chat.js';
+import {
+  resolveWorkflowIntent,
+  type HumanPromptInput,
+  type WorkflowIntentTrigger,
+} from './workflow-intent.js';
+import { isTopLevelSession } from '../agents/runtime/agent-context.js';
+import { logWorkflowKeyword } from '../telemetry/loggers.js';
+import { WorkflowKeywordEvent } from '../telemetry/types.js';
+
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
+  type HookExecutionOwner,
 } from '../hooks/hook-execution-context.js';
 
 // External dependencies
@@ -38,6 +49,7 @@ import {
 } from '../services/microcompaction/microcompact.js';
 import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
+import { appendAutoMemoryContext } from '../memory/request-context.js';
 import {
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
@@ -65,6 +77,8 @@ const debugLogger = createDebugLogger('CLIENT');
 // Core modules
 import {
   LlmChat,
+  type ChatCompressionObserver,
+  type ChatCompressionObserverOptions,
   type RepairOrphanedToolUseOptions,
   userContentPushSnapshotKey,
 } from './llm-chat.js';
@@ -90,13 +104,20 @@ import {
 } from './turn.js';
 
 // Services
-import { LoopDetectionService } from '../services/loopDetectionService.js';
+import {
+  isAttemptRestartEvent,
+  LoopDetectionService,
+} from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import {
+  getToolExplorationKind,
+  ToolExplorationBudget,
+} from '../services/tool-exploration-budget.js';
 import {
   renderAutoMemoryFocusedSubtree,
   toAutoMemoryRef,
@@ -167,6 +188,7 @@ import {
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import { replayUiTelemetryFromConversation } from '../services/sessionService.js';
 import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
+import { markApiHistoryDirectoryContext } from '../utils/api-history-metadata.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
   getErrorMessage,
@@ -245,9 +267,18 @@ interface StopHookChain {
 }
 
 export interface SendMessageOptions {
+  onPreparedRequest?: LlmPreparedRequestCallback;
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
+  humanInput?: HumanPromptInput;
+  onWorkflowIntentApplied?: (trigger: WorkflowIntentTrigger) => void;
+  /**
+   * {@link LlmClient.admitUserPrompt}'s verdict on this prompt, applied in
+   * place of running UserPromptSubmit again. It is spent by the UserQuery with
+   * the prompt id it was issued for; any other use throws.
+   */
+  promptAdmission?: UserPromptAdmission;
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
@@ -287,6 +318,24 @@ export interface SendMessageOptions {
    * (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+}
+
+/** UserPromptSubmit's verdict on a prompt, taken before the prompt expands. */
+export interface UserPromptAdmission {
+  readonly blocked: boolean;
+}
+
+interface UserPromptSubmitDecision {
+  /** Set when a hook blocked the prompt or stopped execution. */
+  blockReason?: string;
+  additionalContext?: string;
+}
+
+interface IssuedUserPromptAdmission extends UserPromptSubmitDecision {
+  prompt: string;
+  promptId: string;
+  sessionId: string;
+  owner: HookExecutionOwner | undefined;
 }
 
 export interface SteerInput {
@@ -494,8 +543,18 @@ export class LlmClient {
   private shutdownRequested = false;
   private readonly settledSteerInputs = new WeakSet<SteerInput>();
   private readonly interactionStartTypes = new Map<string, SendMessageType>();
+  private readonly userPromptAdmissions = new WeakMap<
+    UserPromptAdmission,
+    IssuedUserPromptAdmission
+  >();
 
   private readonly loopDetector: LoopDetectionService;
+  private readonly toolExplorationBudget = new ToolExplorationBudget();
+  // The prompt/turn that owns the exploration phase. A concurrent `/btw`
+  // side query reaches this same client with the full tool set, so the phase
+  // is bound to its owning interaction: every budget entrypoint below is a
+  // no-op for an invocation that does not own it.
+  private toolExplorationBudgetPromptId: string | undefined;
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -597,6 +656,18 @@ export class LlmClient {
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
+  }
+
+  private compressionObserver?: ChatCompressionObserver;
+  private compressionObserverOptions?: ChatCompressionObserverOptions;
+
+  setCompressionObserver(
+    observer?: ChatCompressionObserver,
+    options?: ChatCompressionObserverOptions,
+  ): void {
+    this.compressionObserver = observer;
+    this.compressionObserverOptions = options;
+    this.chat?.setCompressionObserver(observer, options);
   }
 
   async initialize(
@@ -730,6 +801,14 @@ export class LlmClient {
 
   async addHistory(content: Content) {
     this.getChat().addHistory(content);
+  }
+
+  /**
+   * Marks replayed content as already injected. Only for parts another chat
+   * already reported (speculation accept); see `LlmChat.markToolResultsInjected`.
+   */
+  markToolResultsInjected(contents: readonly Content[]): void {
+    this.getChat().markToolResultsInjected(contents);
   }
 
   getChat(): LlmChat {
@@ -1941,10 +2020,12 @@ export class LlmClient {
       return;
     }
 
-    this.getChat().addHistory({
+    const chat = this.getChat();
+    const context: Content = {
       role: 'user',
       parts: [{ text: await getDirectoryContextString(this.config) }],
-    });
+    };
+    chat.addHistory(markApiHistoryDirectoryContext(context));
   }
 
   async addWorkingDirectoryChangedContext(
@@ -1961,7 +2042,8 @@ export class LlmClient {
     this.config.getMemoryManager().resetMemoryBodyStateForSession();
     this.cachedGitStatus = undefined;
     await this.refreshSystemInstruction();
-    this.getChat().addHistory({
+    const gitStatus = this.getCachedGitStatus();
+    const context: Content = {
       role: 'user',
       parts: [
         {
@@ -1969,8 +2051,10 @@ export class LlmClient {
             `The session's working directory has changed from ${oldDir} to ${newDir} via /cd. ` +
             `The startup directory context above is stale. All tool calls and relative paths now resolve from ${newDir}.`,
         },
+        ...(gitStatus ? [{ text: wrapSystemReminder(gitStatus) }] : []),
       ],
-    });
+    };
+    this.getChat().addHistory(markApiHistoryDirectoryContext(context));
     await this.addDirectoryContext();
   }
 
@@ -1983,9 +2067,9 @@ export class LlmClient {
       return null;
     }
     if (this.cachedGitStatus === undefined) {
-      // Mirror claude-code: append git status (branch + recent commits) to the
-      // system prompt so the main agent treats version history as authoritative
-      // context, not background noise. Only injected when cwd is a git repo.
+      // Git status (branch + recent commits) for the main agent's startup
+      // prelude, so it treats version history as authoritative context.
+      // Only injected when cwd is a git repo.
       this.cachedGitStatus = getRecentGitStatus(this.config.getCwd());
     }
     return this.cachedGitStatus;
@@ -2003,18 +2087,20 @@ export class LlmClient {
       contextFiles: this.config.getUserMemory(),
       appendPrompt: this.config.getAppendSystemPrompt(),
     };
-    // Record the stable → context layers (everything before the volatile
-    // gitStatus/autoMemory tail) as the cross-session-stable system prefix.
-    // The Anthropic converter splits the outgoing system prompt at this
-    // boundary and puts an early cache breakpoint on the stable part, so
-    // new sessions (different git status) and in-session memory saves
-    // don't re-bill it. Recorded on every rebuild so it tracks
-    // memory/model/mode changes; consumers match via `startsWith` and fail
-    // open when it goes stale.
+    // Record the stable → context layers (everything before the autoMemory
+    // tail) as the cross-session-stable system prefix. The Anthropic
+    // converter splits the outgoing system prompt at this boundary and puts
+    // an early cache breakpoint on the stable part. Recorded on every
+    // rebuild so it tracks memory/model/mode changes; consumers match via
+    // `startsWith` and fail open when it goes stale.
+    //
+    // The git snapshot is deliberately not a layer here: it changes whenever
+    // the repository does, and providers that only cache at the end of the
+    // system message (DashScope) would lose the whole system prompt across
+    // sessions. It is announced in the startup prelude instead.
     this.config.setStaticSystemPrefix(assembleSystemPrompt(stableLayers));
     return assembleSystemPrompt({
       ...stableLayers,
-      gitStatus: this.getCachedGitStatus(),
       autoMemory: this.config.getAutoMemoryPrompt(),
     });
   }
@@ -2039,6 +2125,8 @@ export class LlmClient {
     const remaining = currentHistory.slice(startupLength);
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
+      undefined,
+      { gitStatus: this.getCachedGitStatus() },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2077,6 +2165,8 @@ export class LlmClient {
 
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
+      undefined,
+      { gitStatus: this.getCachedGitStatus() },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2759,7 +2849,10 @@ export class LlmClient {
       );
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
-        () => getInitialChatHistory(this.config, extraHistory),
+        () =>
+          getInitialChatHistory(this.config, extraHistory, {
+            gitStatus: this.getCachedGitStatus(),
+          }),
       );
       this.config
         .getMemoryManager()
@@ -2790,6 +2883,10 @@ export class LlmClient {
           ),
       );
       chat.enableManualPlanExitNotices();
+      chat.setCompressionObserver(
+        this.compressionObserver,
+        this.compressionObserverOptions,
+      );
       this.chat = chat;
 
       // Repair any dangling `model[functionCall]` whose `functionResponse`
@@ -3459,6 +3556,97 @@ export class LlmClient {
     });
   }
 
+  /**
+   * Runs UserPromptSubmit on a prompt before the caller expands it, so a block
+   * also stops the expansion. The prompt's first UserQuery send takes the
+   * result as `promptAdmission` and applies it instead of running the hook on
+   * the expanded text, so hooks registered during the expansion do not check
+   * this prompt, even when none was configured here.
+   */
+  async admitUserPrompt(
+    prompt: string,
+    promptId: string,
+  ): Promise<UserPromptAdmission> {
+    const owner = captureHookExecutionOwner(this.config);
+    const messageBus = this.config.getMessageBus();
+    const decision =
+      !this.config.getDisableAllHooks() &&
+      messageBus &&
+      this.config.hasHooksForEvent('UserPromptSubmit')
+        ? await this.requestUserPromptSubmit(
+            messageBus,
+            owner,
+            prompt,
+            prompt.trim().length > 0 ? prompt : undefined,
+          )
+        : {};
+    const admission: UserPromptAdmission = Object.freeze({
+      blocked: decision.blockReason !== undefined,
+    });
+    this.userPromptAdmissions.set(admission, {
+      ...decision,
+      prompt,
+      promptId,
+      sessionId: this.config.getSessionId(),
+      owner,
+    });
+    return admission;
+  }
+
+  private takeUserPromptAdmission(
+    admission: UserPromptAdmission,
+    messageType: SendMessageType,
+    promptId: string,
+  ): IssuedUserPromptAdmission {
+    const issued = this.userPromptAdmissions.get(admission);
+    this.userPromptAdmissions.delete(admission);
+    const owner = captureHookExecutionOwner(this.config);
+    if (
+      !issued ||
+      messageType !== SendMessageType.UserQuery ||
+      issued.promptId !== promptId ||
+      issued.sessionId !== this.config.getSessionId() ||
+      issued.owner?.runtimeId !== owner?.runtimeId ||
+      issued.owner?.sessionId !== owner?.sessionId ||
+      issued.owner?.agentId !== owner?.agentId
+    ) {
+      throw new Error('UserPromptSubmit admission does not match this prompt');
+    }
+    return issued;
+  }
+
+  private async requestUserPromptSubmit(
+    messageBus: NonNullable<ReturnType<Config['getMessageBus']>>,
+    owner: HookExecutionOwner | undefined,
+    prompt: string,
+    submittedPrompt: string | undefined,
+  ): Promise<UserPromptSubmitDecision> {
+    const response = await messageBus.request<
+      HookExecutionRequest,
+      HookExecutionResponse
+    >(
+      {
+        type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
+        eventName: 'UserPromptSubmit',
+        input: {
+          prompt,
+          ...(submittedPrompt !== undefined
+            ? { submitted_prompt: submittedPrompt }
+            : {}),
+        },
+      },
+      MessageBusType.HOOK_EXECUTION_RESPONSE,
+    );
+    const hookOutput = response.output
+      ? createHookOutput('UserPromptSubmit', response.output)
+      : undefined;
+    if (hookOutput?.isBlockingDecision() || hookOutput?.shouldStopExecution()) {
+      return { blockReason: hookOutput.getEffectiveReason() };
+    }
+    return { additionalContext: hookOutput?.getAdditionalContext() };
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     callerSignal: AbortSignal,
@@ -3469,6 +3657,21 @@ export class LlmClient {
       SendMessageType.UserQuery,
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    const humanInput =
+      messageType === SendMessageType.UserQuery &&
+      !options?.isConcurrentSideQuery &&
+      isTopLevelSession() &&
+      options?.humanInput
+        ? { text: options.humanInput.text }
+        : undefined;
+    const onWorkflowIntentApplied = options?.onWorkflowIntentApplied;
+    if (options && (options.humanInput || onWorkflowIntentApplied)) {
+      options = {
+        ...options,
+        humanInput: undefined,
+        onWorkflowIntentApplied: undefined,
+      };
+    }
     const startsInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Retry ||
@@ -3803,11 +4006,18 @@ export class LlmClient {
         ? partToString(request)
         : undefined;
     if (startsInteraction) {
-      this.loopDetector.reset(prompt_id);
+      this.loopDetector.reset(prompt_id, {
+        keepReminders: options?.isConcurrentSideQuery,
+      });
       this.lastPromptId = prompt_id;
       // A side question asked while a turn is running is not a new turn: it
-      // must not move the running turn's starting point or drop its target.
+      // must not move the running turn's starting point or drop its target —
+      // nor take over (or clear) the running turn's exploration phase, which
+      // the ownership check below every budget entrypoint enforces for the
+      // side turn's tool results too.
       if (!options?.isConcurrentSideQuery) {
+        this.toolExplorationBudget.reset();
+        this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
       }
       // New input starts this interaction, so its first Stop is not
@@ -3844,7 +4054,23 @@ export class LlmClient {
     try {
       hooksEnabled = !this.config.getDisableAllHooks();
       messageBus = this.config.getMessageBus();
-      if (
+      const submittedPrompt =
+        messageType === SendMessageType.UserQuery &&
+        typeof options?.submittedPrompt === 'string' &&
+        options.submittedPrompt.trim().length > 0
+          ? options.submittedPrompt
+          : undefined;
+      let verdict: (UserPromptSubmitDecision & { prompt: string }) | undefined;
+      if (options?.promptAdmission) {
+        const { promptAdmission } = options;
+        // Spent here: the continuation sends below re-spread `options`.
+        options = { ...options, promptAdmission: undefined };
+        verdict = this.takeUserPromptAdmission(
+          promptAdmission,
+          messageType,
+          prompt_id,
+        );
+      } else if (
         messageType !== SendMessageType.Retry &&
         messageType !== SendMessageType.Steer &&
         messageType !== SendMessageType.Cron &&
@@ -3860,37 +4086,19 @@ export class LlmClient {
         this.config.hasHooksForEvent('UserPromptSubmit')
       ) {
         const promptText = preHookUserPromptText ?? partToString(request);
-        const submittedPrompt =
-          messageType === SendMessageType.UserQuery &&
-          typeof options?.submittedPrompt === 'string' &&
-          options.submittedPrompt.trim().length > 0
-            ? options.submittedPrompt
-            : undefined;
-        const response = await messageBus.request<
-          HookExecutionRequest,
-          HookExecutionResponse
-        >(
-          {
-            type: MessageBusType.HOOK_EXECUTION_REQUEST,
-            owner: captureHookExecutionOwner(this.config),
-            eventName: 'UserPromptSubmit',
-            input: {
-              prompt: promptText,
-              ...(submittedPrompt !== undefined
-                ? { submitted_prompt: submittedPrompt }
-                : {}),
-            },
-          },
-          MessageBusType.HOOK_EXECUTION_RESPONSE,
-        );
-        const hookOutput = response.output
-          ? createHookOutput('UserPromptSubmit', response.output)
-          : undefined;
+        verdict = {
+          prompt: promptText,
+          ...(await this.requestUserPromptSubmit(
+            messageBus,
+            captureHookExecutionOwner(this.config),
+            promptText,
+            submittedPrompt,
+          )),
+        };
+      }
 
-        if (
-          hookOutput?.isBlockingDecision() ||
-          hookOutput?.shouldStopExecution()
-        ) {
+      if (verdict) {
+        if (verdict.blockReason !== undefined) {
           if (goalPermit) {
             userPromptSubmitFailureMessage = 'Goal turn finalization failed';
             const runtime = await loadGoalRuntime(true);
@@ -3930,8 +4138,8 @@ export class LlmClient {
           yield {
             type: LlmEventType.UserPromptSubmitBlocked,
             value: {
-              reason: hookOutput.getEffectiveReason(),
-              originalPrompt: promptText,
+              reason: verdict.blockReason,
+              originalPrompt: verdict.prompt,
             },
           };
           // A blocked send never reaches the history push: settle the
@@ -3947,9 +4155,7 @@ export class LlmClient {
         // distinguishable from user-authored text in model history, resume,
         // and offline transcript analysis. `getAdditionalContext()` escapes
         // `<`/`>`, so hook output cannot forge the closing tag.
-        // `promptText` is declared above this block so assignment here cannot
-        // hit a TDZ if the surrounding Goal try/catch is later reshuffled.
-        const additionalContext = hookOutput?.getAdditionalContext();
+        const additionalContext = verdict.additionalContext;
         if (additionalContext) {
           const requestArray = Array.isArray(request) ? request : [request];
           request = [
@@ -3958,7 +4164,7 @@ export class LlmClient {
           ];
           if (messageType === SendMessageType.UserQuery) {
             userPromptRecordPayload = {
-              displayText: submittedPrompt ?? promptText,
+              displayText: submittedPrompt ?? verdict.prompt,
               hookContext: additionalContext,
             };
           }
@@ -4174,6 +4380,14 @@ export class LlmClient {
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
     let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
+    // A concurrent `/btw` side query runs through this same client and its
+    // tool-result continuation is submitted without the flag, so ownership is
+    // carried by the prompt id the interaction claimed at its start: a
+    // non-owner invocation leaves the running turn's phase untouched (it
+    // neither records into it nor drains its pending reminder).
+    const ownsExplorationBudget =
+      !options?.isConcurrentSideQuery &&
+      prompt_id === this.toolExplorationBudgetPromptId;
     // The delivery was prepared before the request went out, so commit vs
     // discard rides on whether the model accepted the request (any streamed
     // event). A loop-detection halt after acceptance must commit: the memory
@@ -4501,6 +4715,7 @@ export class LlmClient {
         // stays unmarked, so a replaced identified turn fails closed.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
         options?.retractDeliveredOutputOnRetry,
+        options?.onPreparedRequest,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -4645,6 +4860,15 @@ export class LlmClient {
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
+      if (!signal.aborted) {
+        const workflowIntent = resolveWorkflowIntent(this.config, humanInput);
+        if (workflowIntent) {
+          requestToSend.unshift({ text: workflowIntent.reminder });
+          logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
+          onWorkflowIntentApplied?.(workflowIntent.trigger);
+        }
+      }
+
       if (
         messageType === SendMessageType.Retry ||
         messageType === SendMessageType.Cron ||
@@ -4696,9 +4920,11 @@ export class LlmClient {
           const functionResponseId = (part as Part).functionResponse?.id;
           if (!functionResponseId) continue;
           if (
-            this.loopDetector.recordToolResultByCallId(functionResponseId, [
-              part as Part,
-            ])
+            this.loopDetector.recordToolResultByCallId(
+              functionResponseId,
+              [part as Part],
+              { queueReminders: ownsExplorationBudget },
+            )
           ) {
             for (const goalEvent of await finalizeInterruptedGoalTurn(
               undefined,
@@ -4709,7 +4935,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             await arenaAgentClient?.reportError('Loop detected');
             this.lastApiCompletionTimestamp = Date.now();
@@ -4796,6 +5024,21 @@ export class LlmClient {
         const activeTodoReminder = carriesAgentToolResult
           ? this.config.takeActiveTodoReminder(prompt_id, true)
           : this.config.takeActiveTodoReminder(prompt_id);
+        const explorationReminder =
+          this.loopDetector.isDisabledForSession() || !ownsExplorationBudget
+            ? undefined
+            : this.toolExplorationBudget.takeReminder(
+                this.config.getMaxToolCallsPerTurn(),
+              );
+        if (explorationReminder)
+          requestToSend.push({ text: explorationReminder });
+        // Ownership-gated like the exploration reminder, so a concurrent side
+        // query neither queues nor drains the running turn's loop-protection
+        // reminders.
+        const loopReminder = ownsExplorationBudget
+          ? this.loopDetector.takeLoopReminder()
+          : undefined;
+        if (loopReminder) requestToSend.push({ text: loopReminder });
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -4914,10 +5157,7 @@ export class LlmClient {
           }
           if (event.type === LlmEventType.ToolCallRequest) {
             hasToolCalls = true;
-          } else if (
-            event.type === LlmEventType.Retry ||
-            event.type === LlmEventType.ModelFallback
-          ) {
+          } else if (isAttemptRestartEvent(event)) {
             modelRequestAccepted = false;
             hasToolCalls = false;
             loopGuardFedCallIds.clear();
@@ -4956,12 +5196,46 @@ export class LlmClient {
           }
 
           // Always-on safety checks (consecutive-identical tool-call guard,
-          // shell inspection stagnation, and per-turn tool-call cap). These fire
-          // before the skipLoopDetection gate so they cannot be bypassed by
-          // configuration.
+          // shell inspection stagnation, and per-turn tool-call cap). These run
+          // before the skipLoopDetection gate; model.loopProtection decides
+          // whether they remind or stop.
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
-            this.loopDetector.checkAlwaysOnSafeties(event);
+            this.loopDetector.checkAlwaysOnSafeties(event, {
+              queueReminders: ownsExplorationBudget,
+            });
+          // Exploration-budget lifecycle, recorded before the halt handling
+          // below takes effect: a halted batch's over-count is harmless only
+          // because every core halt is terminal (the halt branch returns the
+          // turn, and the next interaction resets the budget). Keep any
+          // future non-terminal core halt from silently counting calls that
+          // never executed. Ownership-gated like every other entrypoint: a
+          // concurrent side turn's stream neither feeds this turn's phase nor
+          // rolls it back.
+          if (ownsExplorationBudget) {
+            if (
+              event.type === LlmEventType.ToolCallRequest &&
+              !duplicateLoopGuardRequest
+            ) {
+              this.toolExplorationBudget.record(
+                getToolExplorationKind(
+                  this.config.getToolRegistry(),
+                  event.value.name,
+                  event.value.args,
+                ),
+              );
+            } else if (event.type === LlmEventType.Finished) {
+              this.toolExplorationBudget.commit();
+            } else if (isAttemptRestartEvent(event)) {
+              // A retry re-streams the failed attempt's calls, so its reads
+              // must not stay counted. A fallback attempt cannot have
+              // streamed calls (the chain only runs when the failed attempt
+              // yielded no candidate output), so its rollback is a no-op kept
+              // for symmetry — and harmless, because a rollback never goes
+              // below the committed floor.
+              this.toolExplorationBudget.rollback();
+            }
+          }
           if (alwaysOnLoop) {
             // Drop every tool call collected before the guard fired so the run
             // halts here instead of spawning a continuation that re-trips it.
@@ -4979,7 +5253,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');
@@ -5005,7 +5281,9 @@ export class LlmClient {
           const heuristicLoop =
             !duplicateLoopGuardRequest &&
             !skipLoopDetection &&
-            this.loopDetector.addAndCheckHeuristicLoops(event);
+            this.loopDetector.addAndCheckHeuristicLoops(event, {
+              queueReminders: ownsExplorationBudget,
+            });
           if (heuristicLoop) {
             for (const goalEvent of await finalizeInterruptedGoalTurn(
               undefined,
@@ -5016,7 +5294,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');
@@ -5287,6 +5567,7 @@ export class LlmClient {
             };
 
             this.loopDetector.reset(prompt_id);
+            if (ownsExplorationBudget) this.toolExplorationBudget.reset();
             const hookTurnBudget = boundedTurns - 1;
             const pendingSteer = await takeSteerInput(hookTurnBudget);
             for (const goalEvent of takePendingGoalEvents()) {
@@ -5395,6 +5676,7 @@ export class LlmClient {
           // protection is preserved: the cap still bounds each iteration, and
           // the chain itself is bounded by stopHookBlockingCap.
           this.loopDetector.reset(prompt_id);
+          if (ownsExplorationBudget) this.toolExplorationBudget.reset();
 
           const hookTurnBudget = boundedTurns - 1;
           const pendingSteer = await takeSteerInput(hookTurnBudget);
@@ -5724,10 +6006,11 @@ export class LlmClient {
         retryErrorCodes,
         model: requestModel,
       } = await this.config.getBaseLlmClient().resolveForModel(model);
-      const requestContents = slimCompactionInput(
-        contents,
-        contentGeneratorConfig?.modalities ?? {},
-      ).slimmedHistory;
+      const requestContents = appendAutoMemoryContext(
+        slimCompactionInput(contents, contentGeneratorConfig?.modalities ?? {})
+          .slimmedHistory,
+        this.config.getAutoMemoryContext?.() ?? '',
+      );
 
       const apiCall = () => {
         currentAttemptModel = requestModel;

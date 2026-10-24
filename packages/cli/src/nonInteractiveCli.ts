@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
   BackgroundTaskStatus,
@@ -20,6 +23,7 @@ import type {
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
   ServerLlmStreamEvent,
+  UserPromptAdmission,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './ui/utils/formatters.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
@@ -92,6 +96,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
+import { ModSession } from './services/mod-session.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -172,60 +177,9 @@ import {
   buildInitialSystemReminders,
   insertAfterFunctionResponses,
 } from './nonInteractive/nonInteractiveHelpers.js';
-
-// Human-readable labels for the detectors that can fire mid-stream.
-// Surfaced to stderr in TEXT mode so a headless run that halts on a loop
-// doesn't exit with empty stdout and no explanation — see PR #3236 review.
-const LOOP_TYPE_LABELS: Record<LoopType, string> = {
-  [LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS]:
-    'the model repeated the same tool call with identical arguments',
-  // Reasoning-stream chants fire this type too (checkReasoningContentLoop),
-  // and getResponseText filters reasoning out of visible output — the label
-  // must name both channels so a headless halt on an empty stdout is not
-  // mistaken for a detector misfire.
-  [LoopType.CHANTING_IDENTICAL_SENTENCES]:
-    'the model repeated the same sentence in its output or reasoning',
-  [LoopType.REPETITIVE_THOUGHTS]:
-    'the model repeated the same reasoning thought',
-  [LoopType.READ_FILE_LOOP]:
-    'the model spent too many consecutive calls reading files without making progress',
-  [LoopType.ACTION_STAGNATION]:
-    'the model kept calling the same tool without making progress',
-  [LoopType.SHELL_COMMAND_STAGNATION]:
-    'the model repeated similar shell inspection commands without making progress',
-  [LoopType.GLOBAL_TOOL_CALL_DUPLICATE]:
-    'the model repeated the same tool call across the turn, even when not back-to-back',
-  [LoopType.ALTERNATING_TOOL_CALL_PATTERN]:
-    'the model alternated between the same two tool calls in a repeating pattern',
-  [LoopType.TURN_TOOL_CALL_CAP]:
-    'the turn reached the per-turn tool-call limit',
-  [LoopType.INVALID_TOOL_PARAMS_STAGNATION]:
-    'the model repeatedly sent invalid tool parameters without correcting them',
-  [LoopType.REPEATED_TOOL_EXECUTION_FAILURE]:
-    'the same tool execution failure continued after a corrective reminder',
-};
-
-function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
-  const reason = loopType ? LOOP_TYPE_LABELS[loopType] : undefined;
-  const detail = reason ? ` (${loopType}: ${reason})` : '';
-  // The always-on guards run before the skipLoopDetection gate, so that
-  // setting can't disable them — don't suggest it for those loop types. The
-  // per-turn cap is also always-on but has its own knob, so it gets a
-  // dedicated hint instead of membership in this list.
-  const isAlwaysOn =
-    loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
-    loopType === LoopType.SHELL_COMMAND_STAGNATION ||
-    loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE ||
-    loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION ||
-    loopType === LoopType.REPEATED_TOOL_EXECUTION_FAILURE;
-  const hint =
-    loopType === LoopType.TURN_TOOL_CALL_CAP
-      ? ' A per-turn tool-call cap was reached. The default is adaptive (allows up to 1000 diverse calls, halting only on repeated calls); an explicitly set `model.maxToolCallsPerTurn` is a hard cap. If the model was repeating the same call, investigate the repetition; otherwise unset the value to use the adaptive default, or raise it (set 0 to disable).'
-      : isAlwaysOn
-        ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
-        : ' Set the `model.skipLoopDetection` setting to true to disable.';
-  return `Loop detection halted the run${detail}.${hint}`;
-}
+import { LoopReason } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import { formatLoopDetectedMessage } from './utils/loop-detected-message.js';
+import type { LoopStop } from './utils/loop-detected-message.js';
 
 interface HeadlessGoalTurn extends GoalContinuationTurn {
   permit: GoalTurnPermit;
@@ -385,11 +339,16 @@ export function skipHeadlessLoopSentinel(
   return true;
 }
 
+const PROVIDER_DUPLICATE_ID_LOOP_STOP: LoopStop = {
+  loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+  loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
+};
+
 function emitLoopDetectedMessage(
   config: Config,
-  loopType: LoopType | undefined,
+  stop: LoopStop | undefined,
 ): string {
-  const message = formatLoopDetectedMessage(loopType);
+  const message = formatLoopDetectedMessage(stop);
   // In TEXT mode the adapter swallows LoopDetected, so we print here. In
   // JSON modes the adapter emits a structured result, which is enough.
   if (config.getOutputFormat() !== OutputFormat.TEXT) {
@@ -452,6 +411,8 @@ async function emitNonInteractiveFinalMessage(params: {
  * @param controlService - Optional control service for future permission handling.
  */
 export interface RunNonInteractiveOptions {
+  humanInput?: HumanPromptInput;
+  modSession?: ModSession;
   abortController?: AbortController;
   adapter?: JsonOutputAdapterInterface;
   userMessage?: CLIUserMessage;
@@ -592,14 +553,19 @@ export async function runNonInteractive(
       adapter = new JsonOutputAdapter(config);
     }
     const ownsAdapter = options.adapter === undefined;
+    const modSession =
+      options.modSession ?? ModSession.create(config, settings, adapter);
+    const ownsModSession = options.modSession === undefined;
     const unsubscribeRecordingFailure = ownsAdapter
       ? subscribeToHeadlessChatRecordingFailures(config, adapter)
       : undefined;
     let chatRecordingSettlement: Promise<void> | undefined;
     const settleBeforeTerminalOutput = (): Promise<void> => {
-      chatRecordingSettlement ??= settleChatRecording(config, {
-        finalize: ownsAdapter,
-      }).then(() => undefined);
+      chatRecordingSettlement ??= (async () => {
+        if (ownsModSession) await modSession?.close();
+        modSession?.flushLogs();
+        await settleChatRecording(config, { finalize: ownsAdapter });
+      })();
       return chatRecordingSettlement;
     };
     const emitResult = async (
@@ -612,6 +578,7 @@ export async function runNonInteractive(
       // the error still surfaces instead of losing both result and error.
       adapter.emitResult(result);
       options.onResultEmitted?.();
+      await modSession?.flushOutput();
     };
 
     // Get readonly values once at the start
@@ -1119,6 +1086,16 @@ export async function runNonInteractive(
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
 
+      try {
+        await modSession?.initialize(abortController.signal);
+      } catch (error) {
+        adapter.emitMessage(
+          await buildSystemMessage(config, sessionId, permissionMode, settings),
+        );
+        modSession?.flushLogs();
+        throw error;
+      }
+
       if (options.controlService) {
         config
           .getWorkflowRunRegistry()
@@ -1149,8 +1126,10 @@ export async function runNonInteractive(
         sessionId,
         permissionMode,
         settings,
+        modSession,
       );
       adapter.emitMessage(systemMessage);
+      modSession?.flushLogs();
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
@@ -1180,15 +1159,21 @@ export async function runNonInteractive(
       // slash command; seeds the loop-scoped `modelOverride` below so the
       // submitted prompt runs on the chosen model without a session switch.
       let inlineModelOverride: string | undefined;
+      let promptAdmission: UserPromptAdmission | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
         // client.ts strips the ENTIRE trailing user run, so detection must
         // re-submit exactly that run or the oldest orphans get dropped. This
         // runs once per (rare) continue request, so the full clone is fine.
+        const history = llmClient.getChat().getHistory();
+        const cancellation = getLastApiPromptCancellation(
+          llmClient.getChat().getHistoryShallow(),
+          await config.getChatRecordingService()!.readActiveTranscriptChain(),
+        );
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: llmClient.getChat().getHistory(),
+          apiHistory: cancellation ? [] : history,
           completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
@@ -1238,6 +1223,27 @@ export async function runNonInteractive(
             abortController,
             config,
             settings,
+            undefined,
+            undefined,
+            modSession,
+            // Core runs no UserPromptSubmit for a notification batch.
+            (options.sendMessageType ?? SendMessageType.UserQuery) ===
+              SendMessageType.UserQuery
+              ? async () => {
+                  if (abortController.signal.aborted) await routeAbort();
+                  promptAdmission = await llmClient.admitUserPrompt(
+                    input,
+                    prompt_id,
+                  );
+                  if (abortController.signal.aborted) await routeAbort();
+                  return !promptAdmission.blocked;
+                }
+              : undefined,
+          );
+          await modSession?.syncSession(
+            slashCommandResult.resolvedCommand?.name === 'clear'
+              ? 'clear'
+              : 'resume',
           );
           switch (slashCommandResult.type) {
             case 'submit_prompt':
@@ -1319,7 +1325,10 @@ export async function runNonInteractive(
                 );
               }
               markGoalTurnDelivered(activeGoalTurn);
-              initialPartList = buildGoalContinuationParts(activeGoalTurn);
+              initialPartList = buildGoalContinuationParts(
+                activeGoalTurn,
+                config.getToolRegistry?.(),
+              );
               slashHandled = true;
               break;
             }
@@ -2045,10 +2054,12 @@ export async function runNonInteractive(
         // finalised (emitted, recorded, appended to `toolResponseParts`)
         // strictly in original request order, so the model and the event
         // log always see a deterministic sequence.
-        const toolBatches = partitionHeadlessToolCalls(
-          requestsToExecute,
-          config,
-        );
+        const toolBatches = modSession?.hasToolHooks
+          ? requestsToExecute.map((request) => ({
+              concurrent: false,
+              calls: [request],
+            }))
+          : partitionHeadlessToolCalls(requestsToExecute, config);
 
         // Tick BEFORE the call so that --max-tool-calls=N caps the run
         // at exactly N executions: the (N+1)th tick aborts before the
@@ -2131,6 +2142,9 @@ export async function runNonInteractive(
               : abortController.signal,
             {
               recordToolResult: false,
+              modToolCall: modSession?.toolCall(() =>
+                budgetEnforcer.tickToolCall(),
+              ),
               onToolResultFullTurnModel: (model) => {
                 if (inlineModelOverrideActive) return false;
                 return setModelOverride(model);
@@ -2559,8 +2573,18 @@ export async function runNonInteractive(
             modelOverride,
             ...(isFirstTurn &&
               sendType === SendMessageType.UserQuery &&
+              !goalTurn &&
+              !options.continueInterrupted &&
+              !isSlashCommand(input) &&
+              options.humanInput &&
+              !isSlashCommand(options.humanInput.text) && {
+                humanInput: options.humanInput,
+              }),
+            ...(isFirstTurn &&
+              sendType === SendMessageType.UserQuery &&
               !options.continueInterrupted &&
               submittedPrompt.trim().length > 0 && { submittedPrompt }),
+            ...(isFirstTurn && promptAdmission && { promptAdmission }),
             ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
@@ -2639,7 +2663,7 @@ export async function runNonInteractive(
             if (!loopDetected) {
               loopDetectedMessage = emitLoopDetectedMessage(
                 config,
-                event.value?.loopType,
+                event.value,
               );
             }
             loopDetected = true;
@@ -2715,7 +2739,7 @@ export async function runNonInteractive(
           ) {
             loopDetectedMessage = emitLoopDetectedMessage(
               config,
-              LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+              PROVIDER_DUPLICATE_ID_LOOP_STOP,
             );
             return emitLoopDetectedResult();
           }
@@ -2737,7 +2761,10 @@ export async function runNonInteractive(
               currentMessages = [
                 {
                   role: 'user',
-                  parts: buildGoalContinuationParts(nextGoalTurn),
+                  parts: buildGoalContinuationParts(
+                    nextGoalTurn,
+                    config.getToolRegistry?.(),
+                  ),
                 },
               ];
               hasUnsentToolResponse = false;
@@ -2768,7 +2795,10 @@ export async function runNonInteractive(
               currentMessages = [
                 {
                   role: 'user',
-                  parts: buildGoalContinuationParts(nextGoalTurn),
+                  parts: buildGoalContinuationParts(
+                    nextGoalTurn,
+                    config.getToolRegistry?.(),
+                  ),
                 },
               ];
               hasUnsentToolResponse = false;
@@ -2962,7 +2992,7 @@ export async function runNonInteractive(
                   if (!loopDetected) {
                     loopDetectedMessage = emitLoopDetectedMessage(
                       config,
-                      event.value?.loopType,
+                      event.value,
                     );
                   }
                   loopDetected = true;
@@ -3023,7 +3053,7 @@ export async function runNonInteractive(
                 ) {
                   loopDetectedMessage = emitLoopDetectedMessage(
                     config,
-                    LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+                    PROVIDER_DUPLICATE_ID_LOOP_STOP,
                   );
                   loopDetected = true;
                   return;
@@ -3067,10 +3097,10 @@ export async function runNonInteractive(
           // is acquired or probed, and missed one-shots are detected —
           // start() below flushes them onto the queue so they execute
           // during this run. The hold-open stays keyed on session-only
-          // jobs alone, so durable jobs never pin the process: once
-          // session jobs and the drain are done, stop() releases the
-          // lock and the run exits; durable jobs persist for a future
-          // owning session.
+          // jobs (plus gates already running), so durable jobs never pin
+          // the process: once session jobs, running gates and the drain
+          // are done, stop() releases the lock and the run exits;
+          // durable jobs persist for a future owning session.
           const scheduler = !config.isCronEnabled()
             ? null
             : config.getCronScheduler();
@@ -3127,7 +3157,16 @@ export async function runNonInteractive(
                   resolve();
                   return;
                 }
-                if (scheduler.sessionSize === 0 && !drainPromise) {
+                // A gate still running is a fire already consumed — durable
+                // ones too (a flushed catch-up is stamped before its gate
+                // decides) — so stopping here would abort it and lose the
+                // slot. Its settlement re-checks through onFire or the
+                // gate-skipped listener.
+                if (
+                  scheduler.sessionSize === 0 &&
+                  !scheduler.hasGatesInFlight() &&
+                  !drainPromise
+                ) {
                   abortController.signal.removeEventListener('abort', onAbort);
                   scheduler.stop();
                   resolve();
@@ -3144,6 +3183,10 @@ export async function runNonInteractive(
                 reject(err);
               };
 
+              // A gate that settles quietly reaches no consumer, so nothing
+              // above would re-check after the final fire of a one-shot or
+              // an expiring recurring job; the scheduler reports it here.
+              scheduler.setGateSkippedListener(checkCronDone);
               scheduler.start((job: CronJob) => {
                 // A bare loop sentinel can't expand in a headless run, so the
                 // tick is skipped. skipHeadlessLoopSentinel also deletes a
@@ -3399,6 +3442,8 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      if (ownsModSession) await modSession?.close();
+      await modSession?.flushOutput();
       await failClosedActiveGoalTurn(
         'Headless Goal host stopped before its permit was released',
       );

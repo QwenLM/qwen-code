@@ -3051,6 +3051,23 @@ describe('ui_telemetry timing frames', () => {
     expect(withTiming).toEqual(withoutTiming);
   });
 
+  it('preserves request execution identity without creating a visible message', () => {
+    const [frame] = timings(
+      timingMachine(),
+      telemetry('execution-record', {
+        ...API_RESPONSE_EVENT,
+        execution_id: 'execution-1',
+      }),
+    );
+    expect(frame).toMatchObject({
+      executionId: 'execution-1',
+      kind: 'request',
+    });
+    expect(
+      timings(timingMachine(), telemetry('legacy', API_RESPONSE_EVENT))[0],
+    ).not.toHaveProperty('executionId');
+  });
+
   it('keeps timing frames out of the replay state when it is off', () => {
     const conversation = [
       telemetry('tel-1', API_RESPONSE_EVENT),

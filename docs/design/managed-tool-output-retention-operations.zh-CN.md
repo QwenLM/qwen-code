@@ -12,6 +12,10 @@
 
 只有下面的真实数据库、真实 OSS 及完整 Hosted 前台 Shell 门禁在目标部署 revision 上全部通过后，才能启用物理回收。不可用或跳过的门禁不算通过。本文不授权开启生产 GC。
 
+## 流式捕获回收覆盖
+
+流式捕获回收把同一个 `gc-enabled` 开关与删除宽限扩展到 Shell 流式捕获家族（后台 Shell 与前台遗留输出，#13534 P1）：对永久退役的 Session，合格的 `PUBLISHED` `MYSQL_INLINE` 行（`managed-tool-result-{content,page,manifest}` 三个 kind、不携带 journal 引用）会在一个按 Session 的 claim 账本（`qwen_managed_session_resource_collection`，V65）下被丢弃字节。Session 的读写面与发布物一样，继续以 `tool_output_session_retired` 拦截；工作区恢复读取在物理触达已回收字节副本时，以命名检查 `resource_collected` 失败。第一台升级的 broker 在 `gc-enabled` 已为 true 时立刻开始本通道；低于 V65 的 broker 会把合法回收的行误报为 `resource_layout_unsupported` 或 `resource_corrupt`，因此升级期间仍可能回滚工作负载的集群应保持该开关关闭，直到全部 broker 跑上 V65。账本创建扫描按每实例 60 秒的节律遍历退役历史，因此一个新退役的 Session 在其宽限结束后约一分钟内进入可回收状态。该扫描每次至多接纳 32 个候选（`retired_at` 最老优先）：在批量退役之后，或在退役历史很深的集群上首次开启时，积压以每实例约每分钟 32 个 Session 的速度进入回收。该通道依赖 tool-publication 子系统：`qwen.managed-agent.tool-publication.enabled=true`（连同其 OSS 配置与内嵌 Runtime Broker）必须先就位；只存后台 Shell 输出但未启用 tool publication 的部署无法回收这些字节。释放的字节成为 InnoDB 表空间内的可复用空间，而非归还磁盘；回收文件空间需要显式执行 `OPTIMIZE TABLE` 或重建表。在 MySQL 默认的行格式二进制日志（`binlog_row_image=FULL`）下，每次回收 UPDATE 还会把每个被释放的 BLOB 复制进 binlog —— 约为回收字节的 1 倍，并按 `binlog_expire_logs_seconds`（默认 30 天）保留；`NOBLOB` 或 `MINIMAL` 行镜像不产生这份拷贝。启用回收仍只能由上述门禁与决策授权；本段不单独构成启用依据。
+
 ## 可复现门禁入口
 
 SDK Java workflow 对以 main 为目标的 PR 执行，并提供按分支手动触发入口。Linux MySQL 8.4 job 先保留完整 Hosted 报告，再单独运行 clean O4 文件系统 profile 与源码导出的完整性检查。O4 fixture 不能替代失败或跳过的 Hosted 家族、真实 OSS 或下面的完整前台 Shell 验收。测试 workflow 不开启部署 GC。
@@ -21,11 +25,11 @@ SDK Java workflow 对以 main 为目标的 PR 执行，并提供按分支手动�
 通过测试环境设置 `QWEN_O4_MYSQL_PASSWORD`，不要放入命令参数。JDBC URL 和日志中不得包含凭据。支持 IPv6 literal host，以及 allowPublicKeyRetrieval、useSSL、sslMode、characterEncoding、connectTimeout、socketTimeout 这些非敏感选项，原样保留到生成库和子进程。拒绝 user/password、插件、userinfo 及其他选项。从干净报告目录运行完整 profile，不使用集成测试选择器；显式 Gate 类不属于普通 CI 的 IT 家族。仅 Maven 成功不足以作为证据，下面的源码导出报告检查也必须通过，且不得有跳过/失败用例或选择器属性。插件的 failIfNoSpecifiedTests 不能覆盖所有方法选择器的零测试情况，因此必须保留以 && 连接的两阶段入口，任一失败都不算门禁通过：
 
 ```sh
-mvn -f packages/sdk-java/managed-agent-server/pom.xml \
+mvn -f packages/managed-agent-server/pom.xml \
   -P o4-mysql-gates \
   -Dqwen.o4.mysql.url=jdbc:mysql://127.0.0.1:3306/qwen_o4_gate \
   -Dqwen.o4.mysql.user=o4_test clean verify checkstyle:check && \
-  node scripts/check-failsafe-reports.js o4-mysql packages/sdk-java/managed-agent-server
+  node scripts/check-failsafe-reports.js o4-mysql packages/managed-agent-server
 ```
 
 MySQL 门禁在真实 SQL 上执行保留与回收回归，证明 writer 等待退役锁，在物理 PUT/DELETE 完成而 SQL 确认之前杀死子 JVM，以 SIGSTOP 将读取暂停至真实两分钟租约过期，并在重试成功后释放延迟的未知 PUT。进程故障使用受控文件系统适配器。SIGSTOP/SIGCONT 需要 macOS 或 Linux；Windows 不能建立这项证据。子进程只写就绪/结果标记，不写原始输出或凭据。正常返回的 runner 在删库前杀死自己创建的子进程。活跃子进程暂停至多五分钟，或父进程退出时结束；必跑回归证明没有 resume 的子进程会退出。SIGSTOP 会阻止此 watchdog 执行：取消后先用确切子进程命令及用例目录核对 child.pid，再只终止自己创建的进程（包括 stopped 子进程），最后删除生成库。失败用例保留临时目录，断言输出 child.log。记录测试 revision、新鲜用例总数及保留的失败路径。
@@ -35,13 +39,13 @@ MySQL 门禁在真实 SQL 上执行保留与回收回归，证明 writer 等待�
 OSS profile 重跑数据库/进程用例，将容量用例替换为真实 OSS，并检查实际删除、不存在对象成功、丢弃删除应答及 DeleteObject 被拒绝的身份。必须使用从未启用版本控制的**专用私有桶**，桶名含 `o4-test`；每个存储用例创建全新 `o4-tests/<UUID>/` 前缀。清理只删除该用例拥有的确定 key，不修改桶 IAM，也不扫描前缀。
 
 ```sh
-mvn -f packages/sdk-java/managed-agent-server/pom.xml \
+mvn -f packages/managed-agent-server/pom.xml \
   -P o4-oss-gates \
   -Dqwen.o4.mysql.url=jdbc:mysql://127.0.0.1:3306/qwen_o4_gate \
   -Dqwen.o4.mysql.user=o4_test \
   -Dqwen.o4.oss.region=cn-hangzhou \
   -Dqwen.o4.oss.test-bucket=my-o4-test-bucket clean verify checkstyle:check && \
-  node scripts/check-failsafe-reports.js o4-oss packages/sdk-java/managed-agent-server
+  node scripts/check-failsafe-reports.js o4-oss packages/managed-agent-server
 ```
 
 通过 `OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` 及可选 `OSS_SESSION_TOKEN` 提供正常测试身份。通过 `OSS_DELETE_DENIED_ACCESS_KEY_ID`、`OSS_DELETE_DENIED_ACCESS_KEY_SECRET` 及可选 `OSS_DELETE_DENIED_SESSION_TOKEN` 提供负面测试身份。负面身份必须允许 GetBucketVersioning 和 GetBucketAcl，但拒绝新测试前缀的 DeleteObject；缺少身份会使门禁失败。两个身份均经同一个生产工厂执行固定地域 HTTPS endpoint 校验、V4 签名和零隐式重试。非零 SDK 上限仅将失败 GET 状态交给始终拒绝原生重放的策略，有界显式 GET 重试在每次请求前检查原守卫；PUT 和 DELETE 仍各只有一次 SDK 尝试。teardown 只重试尚未确认删除的 key，失败 PUT 的 key 仍被跟踪。OSS fork 总预算为 5400 秒，与每个容量方法的 1800 秒超时分开，为两个容量及继承的进程/数据库用例留出时间。保留完整分段读回证据；这些预算不保证慢速或限流链路能通过。fork 被杀后不能假定 cleanup 已执行：核对生成库、子进程 PID 及记录的全新 o4-tests/<UUID>/ 前缀，只删除本用例拥有的精确 key。应答丢失 fixture 在真实 OSS 删除成功后抛异常，不宣称网络自身丢掉了应答。

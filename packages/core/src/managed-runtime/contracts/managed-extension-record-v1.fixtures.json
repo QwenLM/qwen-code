@@ -31,9 +31,11 @@
     "team_message",
     "team_plan",
     "session_message",
+    "session_command",
     "session_metadata",
     "file_history",
-    "session_source"
+    "session_source",
+    "hosted_harness_release"
   ],
   "limits": {
     "maxIdBytes": 512,
@@ -8168,9 +8170,47 @@
     },
     {
       "id": "failed-with-unknown-outcome",
-      "valid": false,
+      "valid": true,
       "run": {
         "state": "failed",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "outcome_unknown",
+        "runtime": {
+          "runtimeBindingId": "binding-1",
+          "generation": "1"
+        },
+        "delivery": null
+      }
+    },
+    {
+      "id": "settled-with-unknown-outcome",
+      "valid": false,
+      "run": {
+        "state": "settled",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "outcome_unknown",
+        "runtime": {
+          "runtimeBindingId": "binding-1",
+          "generation": "1"
+        },
+        "delivery": null
+      }
+    },
+    {
+      "id": "cancelled-with-unknown-outcome",
+      "valid": false,
+      "run": {
+        "state": "cancelled",
         "reason": null,
         "definition": null,
         "executionCallId": "call-1",

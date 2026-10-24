@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { truncateToolOutput } from './truncation.js';
+import { measureToolOutput, type ToolOutputSize } from './tool-output-size.js';
 import { LRUCache } from 'mnemonist';
 import type { Config } from '../config/config.js';
 import {
@@ -63,6 +65,7 @@ export function sideQueryTimeoutMs(): number {
 // Truncation applies to converted/decoded text, never to raw HTML — cutting
 // markup before conversion silently destroys content deep in large pages.
 const MAX_CONTENT_CHARS = 100_000;
+const MANAGED_MAX_CONTENT_BYTES = 16 * 1024;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const MAX_REDIRECTS = 10;
 
@@ -88,6 +91,15 @@ interface CacheEntry {
    * binary content.
    */
   content: string;
+  persistedTextPath?: string;
+  /**
+   * Whether the producer-level truncation below actually reduced `content`.
+   * Tracked by content identity, not by the spill path: a failed spill write
+   * returns a bounded preview with no `persistedTextPath`.
+   */
+  reduced?: boolean;
+  /** Size of `content` before the producer-level truncation below. */
+  rawOutputSize?: ToolOutputSize | null;
   persistedPath?: string;
   persistedSize?: number;
   /** Sniffed mime for the persisted-file note (Content-Type may lie). */
@@ -193,16 +205,6 @@ function readHintForPath(persistedPath: string): string {
   return '';
 }
 
-function truncateText(text: string): string {
-  if (text.length <= MAX_CONTENT_CHARS) {
-    return text;
-  }
-  return (
-    text.slice(0, MAX_CONTENT_CHARS) +
-    `\n\n[Content truncated: showing first ${MAX_CONTENT_CHARS.toLocaleString('en-US')} of ${text.length.toLocaleString('en-US')} characters]`
-  );
-}
-
 /**
  * Parameters for the WebFetch tool
  */
@@ -226,6 +228,26 @@ export interface WebFetchToolParams {
   format?: 'auto' | 'markdown' | 'html' | 'text';
 }
 
+function managedContentPreview(content: string): string {
+  if (Buffer.byteLength(JSON.stringify(content)) <= MANAGED_MAX_CONTENT_BYTES)
+    return content;
+  const notice =
+    '\n\n[Content truncated to fit the Managed Session result limit.]';
+  let low = 0;
+  let high = content.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (
+      Buffer.byteLength(JSON.stringify(content.slice(0, mid) + notice)) <=
+      MANAGED_MAX_CONTENT_BYTES
+    )
+      low = mid;
+    else high = mid - 1;
+  }
+  if (low > 0 && /[\uD800-\uDBFF]/u.test(content[low - 1])) low--;
+  return content.slice(0, low) + notice;
+}
+
 /**
  * Implementation of the WebFetch tool invocation logic
  */
@@ -238,6 +260,7 @@ class WebFetchToolInvocation extends BaseToolInvocation<
   constructor(
     private readonly config: Config,
     params: WebFetchToolParams,
+    private readonly mode: 'local' | 'managed',
   ) {
     super(params);
     this.debugLogger = createDebugLogger('WEB_FETCH');
@@ -305,7 +328,10 @@ class WebFetchToolInvocation extends BaseToolInvocation<
 
   private buildRedirectResult(redirect: FetchPolicyRedirect): ToolResult {
     const redirectHost = hostnameOf(redirect.redirectUrl);
-    const message = `REDIRECT DETECTED: The URL redirects to a different host (or scheme/port), which was not followed automatically.
+    const message =
+      this.mode === 'managed'
+        ? `Redirect (${redirect.status}) was not followed. Make a new web_fetch call for this destination, subject to the same network policy and approval:\n${redirect.redirectUrl}`
+        : `REDIRECT DETECTED: The URL redirects to a different host (or scheme/port), which was not followed automatically.
 
 Original URL: ${redirect.originalUrl}
 Redirect URL: ${redirect.redirectUrl}
@@ -334,7 +360,8 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
   ): Promise<CacheEntry | FetchPolicyRedirect> {
     const fetchUrl = this.getFetchUrl();
     const acceptHeader = this.getAcceptHeader();
-    const urlCache = getUrlCacheFor(this.config.storage);
+    const urlCache =
+      this.mode === 'managed' ? undefined : getUrlCacheFor(this.config.storage);
 
     // The format param changes the Accept header, which can change what the
     // server returns — a URL-only key would serve format:'html' content to a
@@ -342,7 +369,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     // that share one Config/Storage (/clear and /new call startNewSession
     // with a fresh ID); old-session entries age out of the LRU.
     const cacheKey = `${this.config.getSessionId?.() ?? ''}|${acceptHeader} ${fetchUrl}`;
-    const cached = urlCache.get(cacheKey);
+    const cached = urlCache?.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
       this.debugLogger.debug(`[WebFetchTool] Cache hit for ${fetchUrl}`);
       return cached;
@@ -352,6 +379,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     );
 
     const policyOptions = {
+      ...(this.mode === 'managed' ? { networkPolicy: 'public' as const } : {}),
       timeoutMs: FETCH_TIMEOUT_MS,
       maxBytes: MAX_RESPONSE_BYTES,
       maxRedirects: MAX_REDIRECTS,
@@ -374,7 +402,11 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       // caller actually asked for — the user approved the http URL they
       // supplied, and fallback responses are never cached (see below).
       const { upgradedFrom } = this.getFetchPlan();
-      if (upgradedFrom && isConnectionLevelError(error)) {
+      if (
+        this.mode !== 'managed' &&
+        upgradedFrom &&
+        isConnectionLevelError(error)
+      ) {
         this.debugLogger.debug(
           `[WebFetchTool] https upgrade failed (${(error as Error).message}); retrying original ${upgradedFrom}`,
         );
@@ -440,6 +472,10 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     let content: string;
 
     if (isBinary) {
+      if (this.mode === 'managed')
+        throw new Error(
+          'Managed web_fetch supports text content only; binary downloads are unavailable.',
+        );
       // Keep the raw bytes on disk so the model (or shell tools) can inspect
       // them. Binary bytes are never UTF-8 decoded for the side-query —
       // mojibake wastes tokens and misleads the model. PDFs get real text
@@ -482,7 +518,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       if (sniff.extension === 'pdf' && persistedPath) {
         const pdfText = await extractPDFText(persistedPath, { signal });
         if (pdfText.success && pdfText.text.trim()) {
-          content = truncateText(pdfText.text);
+          content = pdfText.text;
         } else if (!pdfText.success) {
           this.debugLogger.debug(
             `[WebFetchTool] PDF text extraction failed: ${pdfText.error}`,
@@ -494,23 +530,48 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       const decoded = response.body.toString('utf-8');
       try {
         const turndown = await getTurndownService();
-        content = truncateText(turndown.turndown(decoded));
+        content = turndown.turndown(decoded);
       } catch (error) {
         this.debugLogger.error(
           `[WebFetchTool] HTML conversion failed, using raw text`,
           error,
         );
-        content = truncateText(decoded);
+        content = decoded;
       }
     } else {
-      content = truncateText(response.body.toString('utf-8'));
+      content = response.body.toString('utf-8');
     }
 
     this.debugLogger.debug(
       `[WebFetchTool] network_ms=${networkMs} extract_ms=${Date.now() - extractStart}`,
     );
 
+    let persistedTextPath: string | undefined;
+    let rawOutputSize: ToolOutputSize | undefined;
+    let reduced = false;
+    if (this.mode !== 'managed' && content.length > MAX_CONTENT_CHARS) {
+      rawOutputSize = measureToolOutput(content);
+      const shortened = await truncateToolOutput(
+        this.config,
+        'web_fetch',
+        content,
+        {
+          threshold: MAX_CONTENT_CHARS,
+          lines: Number.POSITIVE_INFINITY,
+          previewChars: MAX_CONTENT_CHARS - 2000,
+          keep: 'head',
+          layer: 'producer',
+        },
+      );
+      reduced = content !== shortened.content;
+      content = shortened.content;
+      persistedTextPath = shortened.outputFile;
+    }
+
     const entry: CacheEntry = {
+      persistedTextPath,
+      reduced,
+      rawOutputSize,
       fetchedAt: Date.now(),
       status: response.status,
       statusText: response.statusText,
@@ -529,7 +590,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     // endpoint — a silent downgrade of exactly the no-downgrade guarantee the
     // fallback is scoped to preserve.
     if (!usedHttpFallback && content.length <= MAX_CACHEABLE_CHARS) {
-      urlCache.set(cacheKey, entry);
+      urlCache?.set(cacheKey, entry);
     }
     return entry;
   }
@@ -549,12 +610,24 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
         };
       }
 
-      const header = this.buildMetadataHeader(entry);
+      const header =
+        this.buildMetadataHeader(entry) +
+        (entry.persistedTextPath
+          ? `\nFull extracted text saved to: ${entry.persistedTextPath}. Page in with read_file using file_path, offset and limit.`
+          : '');
       const binaryNote = entry.persistedPath
         ? `\n\n[Binary content (${entry.persistedMime || entry.contentType || 'unknown'}, ${formatByteSize(entry.persistedSize ?? entry.byteLength)}) saved to ${entry.persistedPath}.${readHintForPath(entry.persistedPath)}]`
         : '';
 
       const displaySummary = `Received ${formatByteSize(entry.byteLength)} (${entry.status} ${entry.statusText || 'OK'}) from ${hostnameOf(this.params.url)}${entry.persistedPath ? ` — binary saved to ${entry.persistedPath}` : ''}`;
+
+      if (this.mode === 'managed') {
+        signal.throwIfAborted();
+        return {
+          llmContent: `${header}\n\n${entry.content}`,
+          returnDisplay: `${displaySummary}${elapsedSuffix()}`,
+        };
+      }
 
       // Binary with no extractable text: nothing useful to summarize —
       // return the metadata and file location without a side-query call.
@@ -579,11 +652,18 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       if (
         preapproved &&
         entry.contentType.includes('text/markdown') &&
-        entry.content.length <= MAX_CONTENT_CHARS
+        entry.content.length <= MAX_CONTENT_CHARS &&
+        // Length alone is not "nothing was reduced": the producer's stub lands
+        // just under the cap, and a reduced page means this content WAS cut —
+        // so hand it to the side query that answers the prompt instead. Keyed
+        // on the reduction, not the spill path: a failed spill write still
+        // returns a bounded preview, with no path to test.
+        !entry.reduced
       ) {
         return {
           llmContent: `${header}\n\n${entry.content}${binaryNote}`,
           returnDisplay: `${displaySummary}${elapsedSuffix()}`,
+          rawOutputSize: entry.rawOutputSize,
           ...(entry.persistedPath
             ? { resultFilePaths: [entry.persistedPath] }
             : {}),
@@ -648,6 +728,7 @@ ${entry.content}
         return {
           llmContent: `${header}\n\n[Content processing failed (${getErrorMessage(error)}). The raw fetched content follows.]\n\n${entry.content}${binaryNote}`,
           returnDisplay: `${displaySummary}${elapsedSuffix()} — processing failed, raw content returned`,
+          rawOutputSize: entry.rawOutputSize,
           ...(entry.persistedPath
             ? { resultFilePaths: [entry.persistedPath] }
             : {}),
@@ -661,6 +742,7 @@ ${entry.content}
       return {
         llmContent: `${header}\n\n${resultText}${binaryNote}`,
         returnDisplay: `${displaySummary}${elapsedSuffix()}`,
+        rawOutputSize: entry.rawOutputSize,
         ...(entry.persistedPath
           ? { resultFilePaths: [entry.persistedPath] }
           : {}),
@@ -731,7 +813,27 @@ ${entry.content}
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
-    return this.executeDirectFetch(signal);
+    const result = await this.executeDirectFetch(signal);
+    if (this.mode !== 'managed') return result;
+    return {
+      ...result,
+      llmContent:
+        typeof result.llmContent === 'string'
+          ? managedContentPreview(result.llmContent)
+          : result.llmContent,
+      returnDisplay:
+        typeof result.returnDisplay === 'string'
+          ? managedContentPreview(result.returnDisplay)
+          : result.returnDisplay,
+      ...(result.error
+        ? {
+            error: {
+              ...result.error,
+              message: managedContentPreview(result.error.message),
+            },
+          }
+        : {}),
+    };
   }
 }
 
@@ -744,7 +846,10 @@ export class WebFetchTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.WEB_FETCH;
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    private readonly mode: 'local' | 'managed' = 'local',
+  ) {
     super(
       WebFetchTool.Name,
       ToolDisplayNames.WEB_FETCH,
@@ -793,6 +898,8 @@ export class WebFetchTool extends BaseDeclarativeTool<
       if (parsedUrl.username || parsedUrl.password) {
         return "The 'url' must not include credentials.";
       }
+      if (this.mode === 'managed' && parsedUrl.protocol !== 'https:')
+        return 'Managed web_fetch requires an HTTPS URL.';
     } catch {
       return "The 'url' is malformed and could not be parsed.";
     }
@@ -808,10 +915,14 @@ export class WebFetchTool extends BaseDeclarativeTool<
     // Normalize before the invocation exists: the scheduler feeds
     // invocation.params into evaluatePermissionFlow, so this is what makes
     // domain rules match the host actually contacted.
-    return new WebFetchToolInvocation(this.config, {
-      ...params,
-      url: rewriteGitHubBlobUrl(params.url),
-    });
+    return new WebFetchToolInvocation(
+      this.config,
+      {
+        ...params,
+        url: rewriteGitHubBlobUrl(params.url),
+      },
+      this.mode,
+    );
   }
 
   override toAutoClassifierInput(

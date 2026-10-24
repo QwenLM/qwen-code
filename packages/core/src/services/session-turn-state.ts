@@ -5,6 +5,7 @@
  */
 
 import type { ChatRecord } from './chatRecordingService.js';
+import { readFileHistorySnapshotPayload } from './session-file-history-state.js';
 
 export interface SessionTurnState {
   initialTurn: number;
@@ -119,6 +120,14 @@ function getRecordPromptIds(record: ChatRecord): string[] {
   if (typeof recordPromptId === 'string') promptIds.push(recordPromptId);
   const telemetryPromptId = readTelemetryPromptId(record.systemPayload);
   if (telemetryPromptId) promptIds.push(telemetryPromptId);
+  const snapshotPayload = readFileHistorySnapshotPayload(record);
+  if (snapshotPayload) {
+    for (const snapshot of snapshotPayload.snapshots) {
+      if (typeof snapshot?.promptId === 'string') {
+        promptIds.push(snapshot.promptId);
+      }
+    }
+  }
   return promptIds;
 }
 
@@ -141,7 +150,9 @@ function parseSessionPromptTurn(
   const promptIdPrefix = `${sessionId}########`;
   if (!promptId.startsWith(promptIdPrefix)) return undefined;
   const suffix = promptId.slice(promptIdPrefix.length);
-  return /^\d+$/.test(suffix) ? Number(suffix) : undefined;
+  if (!/^\d+$/.test(suffix)) return undefined;
+  const turn = Number(suffix);
+  return Number.isSafeInteger(turn + 1) ? turn : undefined;
 }
 
 function isUserPromptRecord(record: ChatRecord): boolean {

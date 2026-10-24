@@ -1612,6 +1612,7 @@ export function EmbeddedApp() {
           }}
           composerRef={composerRef}
           prepareSubmit={async (submission) => {
+            if (submission.source === 'mcp-app') return undefined;
             if (editingMessage) {
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {

@@ -182,6 +182,7 @@ export type {
   RunConformanceOptions,
 } from './ui/index.js';
 export type {
+  DaemonLoopStop,
   DaemonShellTranscriptBlock,
   DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
@@ -295,6 +296,8 @@ export type {
   DaemonSettingsReloadedEvent,
   DaemonSettingsChangedData,
   DaemonSettingsChangedEvent,
+  DaemonSessionMessagesDeletedData,
+  DaemonSessionMessagesDeletedEvent,
   DaemonSessionRewoundData,
   DaemonSessionRewoundEvent,
   DaemonSessionBranchedData,
@@ -465,6 +468,8 @@ export type {
   DaemonChannelManagementOptions,
   DaemonChannelWorkerGroupSnapshot,
   DaemonChannelWorkerSnapshot,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
@@ -473,6 +478,7 @@ export type {
   DaemonMidTurnMessageSummary,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -490,6 +496,7 @@ export type {
   DaemonSkillToggleMutation,
   DaemonSkillToggleMutationSkill,
   DaemonSkillToggleResult,
+  DaemonSkillRefreshResult,
   DaemonSkillScope,
   DaemonSkillInstallSource,
   DaemonSkillInstallRequest,
@@ -609,6 +616,7 @@ export type {
   SideTaskSessionRequest,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonGeneratedUiStatus,
   DaemonSessionArchiveState,
   DaemonWorktreeInfo,
   DaemonBranchInfo,
@@ -689,9 +697,11 @@ export type {
   DaemonPendingUserQuestionInteraction,
   DaemonSessionState,
   DaemonSessionSummary,
+  DaemonSessionShellTaskRuntime,
   DaemonSessionShellTaskStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskLifecycleStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
@@ -782,6 +792,7 @@ export type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceSkillsSnapshot,
   DaemonWorkspaceToolStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
@@ -918,3 +929,25 @@ export type {
   SessionSquadOutcome,
   SessionSquadView,
 } from './session-agents.js';
+
+export {
+  createExecutionLifecycleState,
+  extractExecutionLifecycle,
+  reduceExecutionLifecycle,
+} from './ui/execution-lifecycle.js';
+export type {
+  DaemonExecutionLifecycle,
+  ExecutionLifecycleEntry,
+  ExecutionLifecycleState,
+} from './ui/execution-lifecycle.js';
+
+export {
+  createToolLifecycleState,
+  extractToolLifecycle,
+  reduceToolLifecycle,
+} from './ui/tool-lifecycle.js';
+export type {
+  DaemonToolLifecycle,
+  ToolLifecycleEntry,
+  ToolLifecycleState,
+} from './ui/tool-lifecycle.js';

@@ -1,4 +1,5 @@
 import type { components } from './generated/managed-agent-api';
+import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
   ManagedArtifact,
   ManagedArtifactPage,
@@ -7,8 +8,6 @@ import type {
 } from './managed-tool-result-types';
 
 type Schemas = components['schemas'];
-
-export type JavaAgentDate = number | string;
 
 export type JavaAgentTurn = Schemas['WebShellTurn'];
 
@@ -72,6 +71,7 @@ export type JavaAgentContentPart = Schemas['WebShellContentPart'];
 export type JavaAgentItem = Schemas['WebShellItem'];
 
 export type JavaAgentCommandAdmission = Schemas['WebShellAdmission'];
+export type JavaAgentTurnAdmission = Schemas['WebShellTurnAdmission'];
 
 export type JavaAgentTranscript = Schemas['WebShellTranscript'];
 export type JavaAgentAction = Schemas['WebShellAction'];
@@ -127,6 +127,42 @@ export class JavaManagedAgentClient {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
   }
 
+  getRecovery(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['SessionRecovery']>(
+      '/session-recovery/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  recheckRecovery(sessionId: string, turnId: string, signal?: AbortSignal) {
+    return this.post<Schemas['SessionRecovery']>(
+      '/session-recovery/recheck',
+      { sessionId, turnId },
+      signal,
+    );
+  }
+
+  async renameSession(
+    request: Schemas['WebShellRenameRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellRenameResult']> {
+    const response = await this.request(
+      '/sessions/rename',
+      request,
+      signal,
+      false,
+    );
+    if (response.status !== 200) {
+      throw new JavaManagedAgentHttpError(
+        response.status,
+        'session_rename_unconfirmed',
+        'Managed Agent rename was not confirmed',
+      );
+    }
+    return (await response.json()) as Schemas['WebShellRenameResult'];
+  }
+
   listWorkspaces(
     request: Schemas['WebShellWorkspaceQueryRequest'],
     signal?: AbortSignal,
@@ -138,6 +174,123 @@ export class JavaManagedAgentClient {
     return this.post<JavaAgentWorkspace>(
       '/workspaces/get',
       { workspaceId },
+      signal,
+    );
+  }
+
+  listRuntimeNodes(signal?: AbortSignal) {
+    return this.post<Schemas['WebShellRuntimeNodePage']>(
+      '/runtime-nodes/query',
+      {},
+      signal,
+    );
+  }
+
+  checkWorkspaceDirectory(
+    request: Schemas['WebShellWorkspaceDirectoryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellWorkspaceDirectory']>(
+      '/workspaces/check-directory',
+      request,
+      signal,
+    );
+  }
+
+  registerWorkspace(
+    request: Schemas['WebShellWorkspaceRegisterRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
+      '/workspaces/register',
+      request,
+      signal,
+    );
+  }
+
+  getWorkspaceOperation(operationId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
+      '/workspaces/operations/get',
+      { operationId },
+      signal,
+    );
+  }
+
+  createWorkspace(
+    request: Schemas['WebShellWorkspaceCreateRequest'],
+    signal?: AbortSignal,
+  ): Promise<JavaAgentWorkspace> {
+    return this.post('/workspaces/create', request, signal);
+  }
+
+  queryWorkspaceFiles(
+    request: Schemas['WebShellWorkspaceFileQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFilePage']> {
+    return this.post('/workspaces/files/query', request, signal);
+  }
+
+  readWorkspaceFile(
+    request: Schemas['WebShellWorkspaceFileReadRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileSnapshot']> {
+    return this.post('/workspaces/files/read', request, signal);
+  }
+
+  workspaceDirectories(
+    request: Schemas['WebShellWorkspaceDirectoryQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceDirectoryPage']> {
+    return this.post('/workspaces/directories/query', request, signal);
+  }
+
+  getSessionApproval(
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionApproval']> {
+    return this.post('/session-approval/query', { sessionId }, signal);
+  }
+
+  changeApproval(
+    request: Schemas['WebShellChangeApprovalRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellApprovalChangeResult']> {
+    return this.post('/session-approval/change', request, signal);
+  }
+
+  getSessionOptions(
+    agentId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionOptions']> {
+    return this.post('/session-options/query', { agentId }, signal);
+  }
+
+  lifecycleCommand(
+    kind: 'close' | 'archive' | 'delete',
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellCommandOperation']>(
+      `/sessions/${kind}`,
+      request,
+      signal,
+    );
+  }
+
+  unarchiveSession(
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<JavaAgentSession>('/sessions/unarchive', request, signal);
+  }
+
+  exportSnapshot(
+    request: Schemas['WebShellExportRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellExportPage']>(
+      '/sessions/export/query',
+      request,
       signal,
     );
   }
@@ -159,14 +312,14 @@ export class JavaManagedAgentClient {
   submitTurn(
     request: Schemas['WebShellSubmitRequest'],
     signal?: AbortSignal,
-  ): Promise<JavaAgentCommandAdmission> {
+  ): Promise<JavaAgentTurnAdmission> {
     return this.post('/turns/submit', request, signal);
   }
 
   cancelTurn(
     request: Schemas['WebShellCancelRequest'],
     signal?: AbortSignal,
-  ): Promise<JavaAgentCommandAdmission> {
+  ): Promise<JavaAgentTurnAdmission> {
     return this.post('/turns/cancel', request, signal);
   }
 
@@ -175,6 +328,43 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<JavaAgentActionPage> {
     return this.post('/actions/query', request, signal);
+  }
+
+  listTasks(
+    request: Schemas['WebShellTaskQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellTaskPage']>(
+      '/tasks/query',
+      request,
+      signal,
+    );
+  }
+
+  getTask(request: Schemas['WebShellTaskGetRequest'], signal?: AbortSignal) {
+    return this.post<Schemas['WebShellTask']>('/tasks/get', request, signal);
+  }
+
+  listTaskEvents(
+    request: Schemas['WebShellTaskEventQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellTaskEventPage']>(
+      '/tasks/events/query',
+      request,
+      signal,
+    );
+  }
+
+  cancelTask(
+    request: Schemas['WebShellTaskCancelRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellCommandOperation']>(
+      '/tasks/cancel',
+      request,
+      signal,
+    );
   }
 
   respondAction(
@@ -190,6 +380,96 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellOperation']> {
     return this.post('/operations/query', request, signal);
+  }
+
+  changeCwd(
+    request: Schemas['WebShellChangeCwdRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellCwdOperation']> {
+    return this.post('/sessions/cwd/change', request, signal);
+  }
+
+  compressContext(
+    request: Schemas['WebShellContextCompressionRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellContextCompressionOperation']> {
+    return this.post('/sessions/compress', request, signal);
+  }
+
+  getSessionModels(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellSessionModels']>(
+      '/session-models/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getSessionSkills(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellSessionSkills']>(
+      '/session-skills/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getSessionMcp(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['PublicMcpCatalog']>(
+      '/session-mcp/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  queryMcpManagement(
+    request: Schemas['WebShellMcpManagementQuery'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/query',
+      request,
+      signal,
+    );
+  }
+
+  submitMcpManagement(
+    request: Schemas['WebShellMcpManagementSubmit'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/submit',
+      request,
+      signal,
+    );
+  }
+
+  getMcpManagementOperation(
+    request: Schemas['WebShellMcpManagementOperationQuery'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/operations/query',
+      request,
+      signal,
+    );
+  }
+
+  changeModel(
+    request: Schemas['WebShellChangeModelRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellModelChangeResult']>(
+      '/session-models/change',
+      request,
+      signal,
+    );
+  }
+
+  getToolDetails(sessionId: string, itemId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellToolDetails']>(
+      '/tool-details/get',
+      { sessionId, itemId },
+      signal,
+    );
   }
 
   getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {
@@ -371,6 +651,7 @@ export class JavaManagedAgentClient {
     request: Schemas['WebShellStreamRequest'],
     signal?: AbortSignal,
     onOpen?: () => void,
+    onAlive?: () => void,
   ): AsyncGenerator<JavaAgentEvent | JavaAgentResyncRequired> {
     const response = await this.request(
       '/events/stream',
@@ -423,7 +704,14 @@ export class JavaManagedAgentClient {
         const hasContent = frame
           .split(/\r?\n/)
           .some((line) => line && !line.startsWith(':'));
-        if (!hasContent) return undefined; // heartbeat or comment
+        if (!hasContent) {
+          // A complete heartbeat or comment frame is the server answering:
+          // on an idle Session it is the only sign of life the stream
+          // gives. A trailing fragment is a mid-frame disconnect, never a
+          // complete frame, so it does not count.
+          if (!trailing) onAlive?.();
+          return undefined;
+        }
         if (!trailing) {
           // A mid-stream frame with id/event lines but no data line is
           // malformed server output, not a heartbeat: count it as corrupt

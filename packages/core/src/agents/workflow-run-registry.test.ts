@@ -251,6 +251,36 @@ describe('WorkflowRunRegistry', () => {
     expect(r.setLineage('wf_missing', 'wf_source', 'rerun')).toBe(false);
   });
 
+  it('publishes a dispatch agent at start without requiring an approval', () => {
+    const { r, queue, onStatusChange } = watched('wf_agent');
+    queue('dispatch-1', 'Inspect');
+    queue('dispatch-cached', 'Cached', 2, { cached: true });
+    const emitter = new AgentEventEmitter();
+    const cleanup = r.bridgeApprovalEvents('wf_agent', emitter, 'dispatch-1');
+    onStatusChange.mockClear();
+    const start = (subagentId: string) =>
+      emitter.emit(AgentEventType.START, {
+        subagentId,
+        name: 'Inspector',
+        tools: [],
+        timestamp: 3,
+      });
+    start('workflow-agent-1');
+    expect(r.get('wf_agent')?.dispatches[0].subagentId).toBe(
+      'workflow-agent-1',
+    );
+    expect(r.get('wf_agent')?.dispatches[1].subagentId).toBeUndefined();
+    expect(onStatusChange).toHaveBeenCalledTimes(1);
+    start('workflow-agent-1');
+    start('nested-agent');
+    expect(r.get('wf_agent')?.dispatches[0].subagentId).toBe(
+      'workflow-agent-1',
+    );
+    expect(onStatusChange).toHaveBeenCalledTimes(1);
+    cleanup();
+    expect(emitter.rawListeners(AgentEventType.START)).toHaveLength(0);
+  });
+
   it('binds a pending approval to the dispatch that owns its event channel', () => {
     const { r, queue } = registered('wf_dispatch_approval');
     r.setApprovalChangeCallback(() => {});
@@ -2559,9 +2589,11 @@ describe('workflow completion result projection', () => {
       )?.[1];
       expect(notice?.includes(snapshotPath)).toBe(true);
       expect(notice).toContain('if persistence succeeds');
-      expect(notice).toContain('plain JSON');
       expect(notice).toContain(
-        'Error, Map, and Set contents are not preserved',
+        'Its result field is plain JSON, so Error, Map, and Set contents are not preserved there',
+      );
+      expect(notice).toContain(
+        'its resultPreview field keeps the result as bounded display text, shown by /workflows wf_reporting',
       );
       expect(notice).toContain(
         'reported-failure previews may also be truncated',

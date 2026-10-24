@@ -4,7 +4,7 @@
 
 ## Status and scope
 
-- **Status:** implemented in PR #13467, behind `experimental.agentCollaboration` (default off).
+- **Status:** implemented in PR #13467, with the thread removal and A2A on sessions in PR #13583; behind `experimental.agentCollaboration` (default off).
 - **Section numbers:** code comments cite sections of this document as `session-multi-agent design §N`.
 - **Decisions:** the product decisions are dated 2026-10-05 and listed in §8.
 - **Squads:** the squad decisions are dated 2026-10-06 and listed in §11.
@@ -17,11 +17,10 @@
 - In-session approvals.
 - Joining a coordinator without a restart.
 - Squads.
+- Removing the earlier thread-based collaboration backend, and moving A2A onto sessions (§6). This lands in a second PR on top of the first.
 
 **Out of scope:**
 
-- **Removing the earlier thread-based collaboration backend.** It is kept, with no UI. Its removal is a follow-up PR (§6).
-- **Moving A2A onto sessions.** Also in that follow-up PR (§6).
 - **Attachments on mentions.** Refused for now (§8-6).
 - **Managed (hosted) sessions.**
 
@@ -178,9 +177,12 @@ Typed `qwenAgentMessage` metadata and the session-agent views.
 
 ## 6. Rollout
 
-- **This PR:** the session-native collaboration. The thread backend is kept with no UI, and A2A stays on threads.
-- **Transitional limit:** a thread run assigned to a remote agent cannot run until A2A moves to sessions, because Host v1 is replaced by v2. A2A refuses such a request as `unsupported`.
-- **Follow-up PR:** remove the thread backend and move A2A onto sessions. One A2A task becomes one agent turn in a session, with `contextId` set to that session.
+- **First PR:** the session-native collaboration. The thread backend is kept with no UI, and A2A stays on threads.
+  - Transitional limit: a thread run assigned to a remote agent cannot run, because Host v1 is replaced by v2. A2A refuses such a request as `unsupported`.
+- **Second PR:** remove the thread backend and move A2A onto sessions.
+  - One A2A task becomes one agent turn in a session, with `contextId` set to that session.
+  - A2A reaches remote agents again, through Host v2 like any other mention, so the `unsupported` refusal goes away.
+  - Thread tools, thread routes, the dispatcher and Host v1 leases are removed. Records already written by the thread backend stay on disk; they are not migrated, shown or run.
 
 ## 7. Acceptance
 
@@ -251,7 +253,7 @@ See §5.
   - the squad leader briefing;
   - the `session_send` description.
 - **Hidden agent sessions skip managed-memory extraction.** An agent turn is not the person's conversation.
-- **Removing the thread backend and moving A2A onto sessions.** This is the follow-up PR (§6).
+- **Thread-era data is not migrated.** Existing threads stay on disk and are no longer shown or run (§6).
 
 ## 11. Squads (2026-10-06)
 

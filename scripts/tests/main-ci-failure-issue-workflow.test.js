@@ -4,9 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { renderFailureComment } from '../../.github/scripts/ci/main-failure-signature.mjs';
 
 describe('main CI failure issue workflow', () => {
   const workflow = readFileSync(
@@ -20,24 +32,39 @@ describe('main CI failure issue workflow', () => {
   const oneLine = (script) =>
     script.replace(/\\\n/g, '\n').replace(/\s+/g, ' ');
 
-  it('opens an autofix-ready issue only for failed main CI runs', () => {
+  it('watches main failures and Managed Agent PR failures', () => {
     expect(workflow).toContain('workflow_run:');
-    // 'SDK Java' joined for its post-merge push run: its path filter watches
-    // the SDK's embedding surfaces too, so it fires on roughly half of recent
-    // merges to main — and a red push run is the only signal for a merge
-    // result neither PR could fail: the duplicate-V16 Flyway collision of
-    // #12940 sat unnoticed for two hours without it.
-    expect(workflow).toContain(
-      "workflows: ['E2E Tests', 'SDK Java', 'SDK Python', 'Qwen Code CI']",
+    // 'SDK Java' and 'Desktop Checks' joined when #14205 moved both suites
+    // off pull_request/push onto a daily schedule: a red scheduled run is now
+    // their only failure signal, so both ride the same workflow issue as the nightly CLI checks.
+    const watchedFiles = {
+      'E2E Tests': 'e2e',
+      'Managed Agent gate': 'managed-agent-gate',
+      'SDK Java': 'sdk-java',
+      'SDK Python': 'sdk-python',
+      'Qwen Code CI': 'ci',
+      'Desktop Checks': 'desktop-packaging-check',
+    };
+    // workflow_run matches the list as a set, so its order is not pinned.
+    expect([...yml.on.workflow_run.workflows].sort()).toEqual(
+      Object.keys(watchedFiles).sort(),
     );
+    // workflow_run.workflows matches the watched workflow's name: key, so a
+    // watch entry is live only while its file still carries that name —
+    // renaming one silently unhooks the suite's failure issues, and nothing
+    // else here reads the coupling for all of them.
+    for (const [watchedName, watchedFile] of Object.entries(watchedFiles)) {
+      const definition = parse(
+        readFileSync(`.github/workflows/${watchedFile}.yml`, 'utf8'),
+      );
+      expect(definition.name, watchedFile).toBe(watchedName);
+    }
     expect(workflow).toContain("types: ['completed']");
-    // 'Qwen Code CI' joined the list when the macOS and Windows lanes got a
-    // nightly run on main: that run is their only trigger outside a
-    // pull request, and a red lane nobody is told about is the same silence
-    // the merge-queue-only gate produced. It completes on every pull request
-    // too, so the branch filter keeps those events out entirely rather than
-    // raising one per run just to skip it.
-    expect(workflow).toContain("branches: ['main']");
+    // Approval runs use the PR branch, including when they finish after merge.
+    expect(Object.keys(yml.on.workflow_run).sort()).toEqual([
+      'types',
+      'workflows',
+    ]);
     expect(workflow).toContain("github.repository == 'QwenLM/qwen-code'");
     expect(workflow).toContain(
       "github.event.workflow_run.conclusion == 'failure'",
@@ -45,23 +72,333 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       "github.event.workflow_run.head_branch == 'main'",
     );
-    // Push covers the other two watched workflows AND 'Qwen Code CI''s own
-    // post-merge lane on `main` — ci.yml restored that trigger, so main's
-    // squash commits now carry Test check-runs and a red one files an issue
-    // here. Schedule is scoped to
-    // 'Qwen Code CI' — that nightly is the platform lanes' only trigger
-    // outside a pull request, and the other watched workflows' own
-    // nightlies must not dispatch the autofix agent through this watcher.
-    // A pull-request run of any of them must never open an issue — that is
-    // contributor-triggered, and the branch filter plus this clause are
-    // what keep it out. Pin the whole event clause so a connective or
-    // scope mutation fails here.
-    expect(workflow).toContain(
-      "(github.event.workflow_run.event == 'push' || (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.name == 'Qwen Code CI'))",
+    // Pin the whole expression; substring checks miss an appended `|| true`
+    // that would admit unrelated contributor-triggered runs.
+    expect(jobs.analyze.if).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && " +
+        "github.event.workflow_run.conclusion == 'failure' && " +
+        "((github.event.workflow_run.head_branch == 'main' && " +
+        "(github.event.workflow_run.event == 'push' || " +
+        "(github.event.workflow_run.event == 'schedule' && " +
+        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks"]\'), github.event.workflow.name)))) || ' +
+        "(github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
+        "(github.event.workflow.name == 'Managed Agent gate' && " +
+        'contains(fromJSON(\'["pull_request","pull_request_review"]\'), github.event.workflow_run.event))) }}',
     );
-    expect(workflow).not.toContain(
-      "github.event.workflow_run.event == 'pull_request'",
+    // Only a watched workflow ever raises the event, so a schedule-arm name
+    // missing from the watch list is dead — and the pin above, updated in
+    // the same edit, would not notice.
+    const scheduledNames = JSON.parse(
+      /fromJSON\('(\[[^']*\])'\)/.exec(jobs.analyze.if)[1],
     );
+    for (const name of scheduledNames) {
+      expect(Object.keys(watchedFiles), name).toContain(name);
+    }
+  });
+
+  it.each([
+    ['SDK Java', 'workflow_dispatch', 'main', 'failure', true],
+    ['SDK Java', 'workflow_dispatch', 'feature', 'failure', true],
+    ['SDK Python', 'workflow_dispatch', 'main', 'failure', false],
+    ['SDK Java', 'schedule', 'main', 'failure', true],
+    ['Managed Agent gate', 'push', 'main', 'failure', true],
+    ['Managed Agent gate', 'pull_request_review', 'feature', 'failure', true],
+    ['Managed Agent gate', 'pull_request', 'feature', 'failure', true],
+    ['Qwen Code CI', 'pull_request', 'feature', 'failure', false],
+    ['Managed Agent gate', 'pull_request_review', 'feature', 'success', false],
+  ])(
+    'routes %s / %s / %s / %s to reporting: %s',
+    (name, event, branch, conclusion, expected) => {
+      const evaluate = new Function(
+        'github',
+        'contains',
+        'fromJSON',
+        `return (${jobs.analyze.if.slice(3, -2)});`,
+      );
+      expect(
+        evaluate(
+          {
+            repository: 'QwenLM/qwen-code',
+            event: {
+              workflow: { name },
+              workflow_run: { event, head_branch: branch, conclusion },
+            },
+          },
+          (list, value) => list.includes(value),
+          JSON.parse,
+        ),
+      ).toBe(expected);
+    },
+  );
+
+  describe('failure destination', () => {
+    const destination = jobs.analyze.steps.find(
+      (step) => step.id === 'destination',
+    );
+    const resolve = (prs, overrides = {}, ghScript) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'java-ci-destination-'));
+      try {
+        writeFileSync(join(tmp, 'pulls.json'), JSON.stringify(prs));
+        writeFileSync(
+          join(tmp, 'gh'),
+          ghScript ??
+            `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
+cat "\${RUNNER_TEMP}/pulls.json"
+`,
+        );
+        chmodSync(join(tmp, 'gh'), 0o755);
+        const output = join(tmp, 'output');
+        const result = spawnSync(
+          'bash',
+          ['-eo', 'pipefail', '-c', destination.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${tmp}:${process.env.PATH}`,
+              RUNNER_TEMP: tmp,
+              GITHUB_OUTPUT: output,
+              REPO: 'QwenLM/qwen-code',
+              EVENT_NAME: 'pull_request_review',
+              HEAD_BRANCH: 'ci/java',
+              // An approval run records the BASE repository here even when
+              // the PR head lives in a fork; the step no longer consults it,
+              // and the fork cases below keep passing it to document that.
+              HEAD_REPO: 'QwenLM/qwen-code',
+              HEAD_SHA: 'tested-head',
+              ...overrides,
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        return {
+          output: existsSync(output) ? readFileSync(output, 'utf8') : '',
+          stdout: result.stdout,
+          args: existsSync(join(tmp, 'lookup-args'))
+            ? readFileSync(join(tmp, 'lookup-args'), 'utf8')
+            : '',
+        };
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+    const pr = (extra = {}) => ({
+      number: 14472,
+      head: { sha: 'tested-head', repo: { full_name: 'QwenLM/qwen-code' } },
+      base: { ref: 'main', repo: { full_name: 'QwenLM/qwen-code' } },
+      merged_at: null,
+      ...extra,
+    });
+
+    it('reports an approval failure with no workflow_run pull_requests association', () => {
+      const resolved = resolve([pr()]);
+      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+      expect(resolved.stdout).not.toContain('::warning::');
+      expect(resolved.args).toContain('state=all');
+      expect(resolved.args).toContain('--paginate');
+    });
+    it('resolves a fork approval run, which records the base repository as its head repository', () => {
+      // On a pull_request_review run head_repository is the BASE repository
+      // even when the PR head lives in a fork, so a listing filter derived
+      // from it finds nothing; the exact head SHA qualifies the PR instead.
+      // Measured against the live API on 2026-10-17: 21 of the 60 most
+      // recent Managed Agent gate approval runs are fork PRs.
+      const resolved = resolve([
+        pr({
+          head: {
+            sha: 'tested-head',
+            repo: { full_name: 'CanReader/qwen-code' },
+          },
+        }),
+      ]);
+      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+    });
+    it('also files an issue when the failed PR already merged', () => {
+      expect(resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })]).output).toBe(
+        'pr_number=14472\nfile_issue=true\n',
+      );
+    });
+    it('does not report a superseded head, wherever the same-named branch lives', () => {
+      // The exact head SHA qualifies the PR: a branch whose head is another
+      // commit must not attract the comment meant for this run's commit —
+      // including a same-named branch on an unrelated fork.
+      for (const repo of ['QwenLM/qwen-code', 'someone/qwen-code']) {
+        const resolved = resolve([
+          pr({ head: { sha: 'new-head', repo: { full_name: repo } } }),
+        ]);
+        expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+        expect(resolved.stdout).toContain('::warning::');
+      }
+    });
+    it('does not report a PR closed without merging', () => {
+      // The listing widened to state=all so a merged PR resolves; a
+      // closed-unmerged PR satisfies every other term but must not be handed
+      // a permanent bot comment.
+      const closed = resolve([pr({ state: 'closed' })]);
+      expect(closed.output).toBe('pr_number=\nfile_issue=false\n');
+      expect(closed.stdout).toContain('::warning::');
+      expect(
+        resolve([pr({ state: 'closed', merged_at: '2026-10-17T16:15:57Z' })])
+          .output,
+      ).toBe('pr_number=14472\nfile_issue=true\n');
+    });
+    it('never files an issue for a contributor-triggered run, even on a main-named branch', () => {
+      // A fork PR can be opened from the contributor's own main branch
+      // (managed-agent-gate.yml accepts it); the event allow-list in the
+      // first arm is the only thing routing such a run to the PR instead of
+      // to a main-regression issue for unmerged code.
+      const resolved = resolve(
+        [
+          pr({
+            head: {
+              sha: 'tested-head',
+              repo: { full_name: 'someone/qwen-code' },
+            },
+          }),
+        ],
+        {
+          EVENT_NAME: 'pull_request',
+          HEAD_BRANCH: 'main',
+          HEAD_REPO: 'someone/qwen-code',
+        },
+      );
+      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+    });
+    it('files a main dispatch failure without a PR', () => {
+      const resolved = resolve([], {
+        EVENT_NAME: 'workflow_dispatch',
+        HEAD_BRANCH: 'main',
+      });
+      expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
+      expect(resolved.args).toBe('');
+      expect(resolved.stdout).not.toContain('::warning::');
+    });
+    it('warns and reports nothing when the run resolves to no destination', () => {
+      // A manual dispatch on a branch with no open PR is admitted and then
+      // dropped; the warning keeps the miss distinguishable from "correctly
+      // nothing to report".
+      const resolved = resolve([], {
+        EVENT_NAME: 'workflow_dispatch',
+        HEAD_BRANCH: 'ci/java-experiment',
+      });
+      expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+      expect(resolved.stdout).toContain('::warning::');
+    });
+    it('degrades to no destination when the PR listing fails', () => {
+      // The lookup must fail soft like its neighbouring reads: a transient
+      // API error aborting this step would fail the analyze job and lose
+      // BOTH the PR comment and the issue for a real failure.
+      for (const body of ['{"message": "Bad credentials"}', '']) {
+        const gh = `#!/usr/bin/env bash\nprintf '%s' '${body}'\nexit 1\n`;
+        const resolved = resolve([], {}, gh);
+        expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+        expect(resolved.stdout).toContain('::warning::');
+      }
+    });
+  });
+
+  describe('superseded attempts', () => {
+    const live = jobs.analyze.steps.find((step) => step.id === 'live');
+    const destination = jobs.analyze.steps.find(
+      (step) => step.id === 'destination',
+    );
+    const detect = (liveAttempt, overrides = {}, ghScript) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'java-ci-live-'));
+      try {
+        writeFileSync(
+          join(tmp, 'gh'),
+          ghScript ??
+            `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
+printf '%s\\n' '${liveAttempt}'
+`,
+        );
+        chmodSync(join(tmp, 'gh'), 0o755);
+        const output = join(tmp, 'output');
+        const result = spawnSync('bash', ['-eo', 'pipefail', '-c', live.run], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${tmp}:${process.env.PATH}`,
+            RUNNER_TEMP: tmp,
+            GITHUB_OUTPUT: output,
+            REPO: 'QwenLM/qwen-code',
+            WORKFLOW_RUN_ID: '39237270547',
+            RUN_ATTEMPT: '1',
+            ...overrides,
+          },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        return {
+          output: existsSync(output) ? readFileSync(output, 'utf8') : '',
+          stdout: result.stdout,
+          args: existsSync(join(tmp, 'lookup-args'))
+            ? readFileSync(join(tmp, 'lookup-args'), 'utf8')
+            : '',
+        };
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    it('skips reporting when the run has moved on to a later attempt', () => {
+      // Measured on run 39237270547: attempt 1 failed on the host lock,
+      // attempt 2 went green, and this job started hours later, read the green
+      // attempt's empty failure list, and filed #14768 for the green head.
+      const resolved = detect('2');
+      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.stdout).toContain('::warning::');
+      expect(resolved.args).toBe(
+        'api\nrepos/QwenLM/qwen-code/actions/runs/39237270547\n--jq\n.run_attempt\n',
+      );
+      // The own-run spellings would query this workflow's run, whose attempt
+      // is always 1, and the guard could never see a re-run.
+      expect(live.env.WORKFLOW_RUN_ID).toBe(
+        '${{ github.event.workflow_run.id }}',
+      );
+      expect(live.env.RUN_ATTEMPT).toBe(
+        '${{ github.event.workflow_run.run_attempt }}',
+      );
+    });
+    it('reports the attempt that is still the latest', () => {
+      expect(detect('1').output).toBe('superseded=false\n');
+      expect(detect('2', { RUN_ATTEMPT: '2' }).output).toBe(
+        'superseded=false\n',
+      );
+    });
+    it('fails open when the live run cannot be read', () => {
+      // Reporting on a transient read error is the safe direction: an issue
+      // for a real failure beats silently dropping it.
+      const gh = `#!/usr/bin/env bash\nprintf '%s' '{"message":"Bad credentials"}'\nexit 1\n`;
+      const resolved = detect('', {}, gh);
+      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.stdout).toContain('::warning::');
+      expect(resolved.stdout).toContain('Could not read run 39237270547');
+    });
+    it('fails open when the event carries no run attempt', () => {
+      // -gt coerces an empty operand to 0, so a field-less event would read
+      // as superseded and suppress every report.
+      expect(detect('2', { RUN_ATTEMPT: '' }).output).toBe(
+        'superseded=false\n',
+      );
+    });
+    it('gates every failure reader on the supersession check', () => {
+      // Without this wiring the check would run and still file the issue; the
+      // order matters too, because a gate reading an empty output is a no-op.
+      const download = jobs.analyze.steps.find(
+        (step) => step.name === 'Download failed job logs',
+      );
+      const infra = jobs.analyze.steps.find((step) => step.id === 'infra');
+      for (const step of [destination, download, infra]) {
+        expect(String(step.if), step.name).toBe(
+          "${{ steps.live.outputs.superseded != 'true' }}",
+        );
+      }
+      expect(jobs.analyze.steps.indexOf(live)).toBeLessThan(
+        jobs.analyze.steps.indexOf(destination),
+      );
+    });
   });
 
   it('pins the watched name to the name key of sdk-java.yml', () => {
@@ -75,46 +412,363 @@ describe('main CI failure issue workflow', () => {
     expect(yml.on.workflow_run.workflows).toContain(sdkJava.name);
   });
 
-  it('creates an issue that the existing autofix worker can pick up', () => {
-    expect(workflow).toContain("issues: 'write'");
-    expect(workflow).toContain('CI_DEV_BOT_PAT');
-    expect(workflow).toContain(
-      'AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || \'qwen-code-dev-bot\' }}"',
+  it('uses the workflow name rather than the rendered Desktop run title', () => {
+    const desktop = parse(
+      readFileSync('.github/workflows/desktop-packaging-check.yml', 'utf8'),
     );
-    expect(workflow).toContain("BUG_LABEL: 'type/bug'");
-    expect(workflow).toContain(
-      "READY_FOR_AGENT_LABEL: 'status/ready-for-agent'",
-    );
-    expect(workflow).toContain("AUTOFIX_APPROVED_LABEL: 'autofix/approved'");
-    expect(workflow).toContain('gh issue edit "$1"');
-    expect(workflow).toContain(
-      '--add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
-    );
-    expect(workflow).toContain('--add-assignee "${AUTOFIX_BOT}"');
-    expect(workflow).toContain('apply_autofix_route "${issue_url}"');
+    expect(desktop['run-name']).toBeDefined();
+    expect(jobs.analyze.if).toContain('github.event.workflow.name');
+    expect(jobs.analyze.if).not.toContain('github.event.workflow_run.name');
+    const writer = jobs.file_issue.steps.find((step) => step.id === 'issue');
+    expect(writer.env.WORKFLOW_NAME).toBe('${{ github.event.workflow.name }}');
   });
 
-  it('deduplicates by failing test and includes run context', () => {
-    // The dedupe key is the failing test, not the commit: a standing red used to
-    // open one issue per merge. The markers themselves live in the helper.
-    expect(workflow).toContain('main-failure-signature.mjs');
-    expect(workflow).toContain('searchMarkers');
-    // The failing tests are read from the triggering run's failed-job logs, so
-    // the dedupe key is recovered even when the run reported no test result.
-    expect(workflow).toContain('actions/runs/${WORKFLOW_RUN_ID}/jobs');
-    expect(workflow).toContain('actions/jobs/${job_id}/logs');
-    expect(workflow).toContain('gh issue list');
-    expect(workflow).toContain('gh issue create');
-    expect(workflow).toContain('apply_autofix_route "${EXISTING_ISSUE}"');
-    expect(workflow).toContain('${WORKFLOW_RUN_URL}');
-    expect(workflow).toContain('${HEAD_SHA}');
+  describe('workflow issue reuse', () => {
+    const writer = jobs.file_issue.steps.find((step) => step.id === 'issue');
+    const botIssue = (number, suffix = '') => ({
+      number,
+      title: `Main CI failed: SDK Java${suffix}`,
+      author: { login: 'qwen-code-dev-bot' },
+    });
+    const run = (issues, opts = {}) => {
+      const {
+        lookupFailures = 0,
+        failMarkerLookup = false,
+        failClosedLookup = false,
+        failEdit = false,
+        failBodyRead = false,
+        issueBody = '<!-- main-ci-failure-aggregate:1234 -->',
+        markerIssues = [],
+        closedIssues = [],
+      } = opts;
+      const tmp = mkdtempSync(join(tmpdir(), 'ci-issue-reuse-'));
+      try {
+        writeFileSync(join(tmp, 'issues.json'), JSON.stringify(issues));
+        writeFileSync(join(tmp, 'closed.json'), JSON.stringify(closedIssues));
+        writeFileSync(join(tmp, 'current-body.md'), issueBody + '\n');
+        writeFileSync(
+          join(tmp, 'marker-issues.json'),
+          typeof markerIssues === 'string'
+            ? markerIssues
+            : JSON.stringify(markerIssues),
+        );
+        writeFileSync(join(tmp, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
+        chmodSync(join(tmp, 'sleep'), 0o755);
+        writeFileSync(
+          join(tmp, 'gh'),
+          `#!/usr/bin/env bash
+set -eu
+printf '%s\\n' "$*" >> "${tmp}/calls"
+if [[ "$1 $2" == 'issue list' ]]; then
+  [[ "$*" == *'--json number,title,author'* && "$*" != *'--search'* ]] || exit 2
+  if [[ "$*" == *'--state open'* ]]; then
+    [[ "$*" == *'--limit 3000'* ]] || exit 2
+    count=0
+    [[ ! -f '${tmp}/lookup-count' ]] || read -r count < '${tmp}/lookup-count'
+    count=$((count + 1))
+    echo "$count" > '${tmp}/lookup-count'
+    [[ "$count" -gt "$LOOKUP_FAILURES" ]] || exit 1
+    cat '${tmp}/issues.json'
+  elif [[ "$*" == *'--state closed'* ]]; then
+    [[ "$*" == *'--limit 1000'* ]] || exit 2
+    ${failClosedLookup ? 'exit 1' : `cat '${tmp}/closed.json'`}
+  else
+    exit 2
+  fi
+elif [[ "$1" == api ]]; then
+  [[ "$*" == *'state=open&per_page=100'* && "$*" == *'--paginate'* ]] || exit 2
+  ${failMarkerLookup ? 'exit 1' : `cat '${tmp}/marker-issues.json'`}
+elif [[ "$1 $2" == 'issue create' ]]; then
+  # Label churn must not prevent creation of the failure record.
+  [[ "$*" != *'--label'* ]] || exit 1
+  echo 'https://github.com/QwenLM/qwen-code/issues/999'
+elif [[ "$1 $2" == 'issue view' ]]; then
+  [[ "$*" == *'--json body'* ]] || exit 2
+  ${failBodyRead ? 'exit 1' : `cat '${tmp}/current-body.md'`}
+elif [[ "$1 $2" == 'issue edit' ]]; then
+  ${failEdit ? 'exit 1' : ':'}
+  if [[ "$*" == *'--body-file'* ]]; then
+    cp "\${@: -1}" '${tmp}/migrated-body.md'
+  fi
+fi
+`,
+        );
+        chmodSync(join(tmp, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          ['-eo', 'pipefail', '-c', writer.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${tmp}:${process.env.PATH}`,
+              RUNNER_TEMP: tmp,
+              GITHUB_OUTPUT: join(tmp, 'output'),
+              REPO: 'QwenLM/qwen-code',
+              WORKFLOW_NAME: 'SDK Java',
+              WORKFLOW_ID: '1234',
+              BOT_LOGIN: 'qwen-code-dev-bot',
+              ISSUE_BODY: 'Run 123 failed at commit abcdef123456',
+              RUN_ATTEMPT: '2',
+              LOOKUP_FAILURES: String(lookupFailures),
+            },
+          },
+        );
+        return {
+          status: result.status,
+          stdout: result.stdout,
+          migratedBody: existsSync(join(tmp, 'migrated-body.md'))
+            ? readFileSync(join(tmp, 'migrated-body.md'), 'utf8')
+            : null,
+          calls: readFileSync(join(tmp, 'calls'), 'utf8'),
+          output: existsSync(join(tmp, 'output'))
+            ? readFileSync(join(tmp, 'output'), 'utf8')
+            : '',
+          body: existsSync(join(tmp, 'issue-body.md'))
+            ? readFileSync(join(tmp, 'issue-body.md'), 'utf8')
+            : '',
+        };
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    it.each(['', ' on abcdef123456', ' — Foo.test'])(
+      'comments on an open workflow issue with suffix %s',
+      (suffix) => {
+        const result = run([botIssue(42, suffix)]);
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 42');
+        expect(result.output).toContain(
+          'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+        );
+        expect(result.calls).not.toContain('issue create');
+        if (suffix) {
+          expect(result.calls).toContain(
+            'issue edit 42 --repo QwenLM/qwen-code --remove-label status/ready-for-agent --remove-label autofix/approved',
+          );
+        } else {
+          expect(result.calls).not.toContain('issue edit');
+          expect(result.calls).not.toContain('--remove-label');
+        }
+        expect(result.calls).not.toMatch(
+          /--add-label|--add-assignee|--remove-assignee|autofix\/in-progress/,
+        );
+        expect(result.body).toContain('Run 123 failed at commit abcdef123456');
+        expect(result.body).toContain('Run attempt: 2');
+      },
+    );
+
+    it('creates a fixed-title triage issue when only other workflow issues exist', () => {
+      const result = run([
+        botIssue(10, ' extra'),
+        { ...botIssue(11), title: 'Main CI failed: SDK Python on abc123' },
+      ]);
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain(
+        'issue create --repo QwenLM/qwen-code --title Main CI failed: SDK Java --body-file',
+      );
+      expect(result.calls).toContain(
+        'issue edit 999 --repo QwenLM/qwen-code --add-label scope/ci-cd --add-label status/needs-triage',
+      );
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/999',
+      );
+      expect(result.body).toContain('<!-- main-ci-failure-aggregate:1234 -->');
+      expect(result.calls).not.toMatch(
+        /autofix|ready-for-agent|assignee|issue comment/,
+      );
+    });
+
+    it('does not adopt a matching title owned by someone other than the reporting bot', () => {
+      const result = run([
+        { ...botIssue(7), author: { login: 'not-the-bot' } },
+      ]);
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue create');
+      expect(result.calls).not.toContain('issue comment 7');
+    });
+
+    it('adopts a retitled bot aggregate by marker and excludes other authors and PRs', () => {
+      const marked = {
+        number: 42,
+        title: 'Investigating Java CI',
+        user: { login: 'qwen-code-dev-bot' },
+        body: '<!-- main-ci-failure-aggregate:1234 -->',
+      };
+      const result = run([], {
+        markerIssues: [
+          { ...marked, number: 1, user: { login: 'someone-else' } },
+          { ...marked, number: 2, pull_request: {} },
+          { ...marked, number: 3, body: null },
+          marked,
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toMatch(/issue (create|edit|reopen)/);
+    });
+
+    it('migrates an adopted legacy body and reuses it after a maintainer retitles the issue', () => {
+      const originalBody =
+        'Main CI failed at commit abc123.\n\n<!-- qwen-main-ci-failure:abc123 -->\n\nMaintainer notes: investigate the runner lock.';
+      const adopted = run([botIssue(42, ' on abc123')], {
+        issueBody: originalBody,
+      });
+      expect(adopted.status).toBe(0);
+      expect(adopted.migratedBody).toBe(
+        `${originalBody}\n\n<!-- main-ci-failure-aggregate:1234 -->\n`,
+      );
+      expect(adopted.calls.indexOf('issue comment 42')).toBeLessThan(
+        adopted.calls.indexOf('issue view 42'),
+      );
+      expect(adopted.calls).toMatch(/issue edit 42 .*--body-file/);
+
+      const retitled = run([], {
+        issueBody: adopted.migratedBody,
+        markerIssues: [
+          {
+            number: 42,
+            title: 'Investigating Java runner locks',
+            user: { login: 'qwen-code-dev-bot' },
+            body: adopted.migratedBody,
+          },
+        ],
+      });
+      expect(retitled.status).toBe(0);
+      expect(retitled.calls).toContain('issue comment 42');
+      expect(retitled.calls).not.toMatch(/issue (create|edit)/);
+      expect(retitled.migratedBody).toBeNull();
+    });
+
+    it.each([{ failBodyRead: true }, { failEdit: true }])(
+      'keeps the recorded occurrence when marker migration fails: %j',
+      (failure) => {
+        const result = run([botIssue(42)], {
+          issueBody: 'Original unmarked body',
+          ...failure,
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 42');
+        expect(result.output).toContain(
+          'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+        );
+        expect(result.stdout).toContain('::warning::');
+      },
+    );
+
+    it('chooses the oldest matching issue consistently', () => {
+      const result = run([botIssue(50), botIssue(42, ' on abc123')]);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+      );
+    });
+
+    it('retries a transient light lookup failure and still records the failure', () => {
+      const result = run([botIssue(42)], { lookupFailures: 1 });
+      expect(result.status).toBe(0);
+      expect(result.calls.match(/issue list .*--state open/g)).toHaveLength(2);
+      expect(result.calls).toContain('issue comment 42');
+    });
+
+    it.each([{ lookupFailures: 3 }, { failMarkerLookup: true }])(
+      'does not write when an open lookup fails after retries: %j',
+      (opts) => {
+        const result = run([], opts);
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toMatch(/issue (create|comment|reopen|edit)/);
+        expect(result.calls).not.toContain('--state closed');
+      },
+    );
+
+    it('publishes the issue url and recurrence comment before a failed legacy label retirement', () => {
+      const result = run([botIssue(42, ' on abc123')], { failEdit: true });
+      expect(result.status).not.toBe(0);
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+      );
+      expect(result.calls.indexOf('issue comment 42')).toBeLessThan(
+        result.calls.indexOf('issue edit 42'),
+      );
+    });
+
+    it('keeps a newly created failure record when adding triage labels fails', () => {
+      const result = run([], { failEdit: true });
+      expect(result.status).toBe(0);
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/999',
+      );
+      expect(result.calls).toContain('issue create');
+      expect(result.calls).toContain('issue edit 999');
+    });
+
+    it('merges every marker lookup page before choosing the oldest match', () => {
+      const marked = {
+        user: { login: 'qwen-code-dev-bot' },
+        body: '<!-- main-ci-failure-aggregate:1234 -->',
+      };
+      const result = run([], {
+        markerIssues:
+          JSON.stringify([{ ...marked, number: 50 }]) +
+          JSON.stringify([{ ...marked, number: 42 }]),
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toContain('issue create');
+    });
+
+    it.each(['', ' — Foo.test'])(
+      'reopens a closed bot issue before commenting, with suffix %s',
+      (suffix) => {
+        const result = run([], {
+          closedIssues: [
+            { ...botIssue(7), author: { login: 'not-the-bot' } },
+            botIssue(42, suffix),
+          ],
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue reopen 42');
+        expect(result.calls).toContain('issue comment 42');
+        expect(result.calls.indexOf('issue reopen 42')).toBeLessThan(
+          result.calls.indexOf('issue comment 42'),
+        );
+        expect(result.calls).not.toContain('issue create');
+        expect(result.calls.includes('--remove-label')).toBe(Boolean(suffix));
+      },
+    );
+
+    it('creates a fresh aggregate when the bounded closed lookup fails', () => {
+      const result = run([], { failClosedLookup: true });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('--state closed');
+      expect(result.calls).toContain('issue create');
+      expect(result.calls).not.toContain('issue reopen');
+    });
+
+    it('serializes lookup and write per workflow and reuses the failure renderer', () => {
+      expect(jobs.file_issue.concurrency).toEqual({
+        group: 'main-ci-failure-issue-${{ github.event.workflow.id }}',
+        'cancel-in-progress': false,
+        queue: 'max',
+      });
+      expect(writer.env.ISSUE_BODY).toBe(
+        '${{ needs.analyze.outputs.comment_body }}',
+      );
+      expect(writer.env.WORKFLOW_ID).toBe('${{ github.event.workflow.id }}');
+      expect(writer.env.BOT_LOGIN).toBe(
+        "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}",
+      );
+      expect(jobs.analyze.outputs.comment_body).toBe(
+        '${{ steps.summary.outputs.body }}',
+      );
+      expect(workflow).not.toContain('apply_autofix_route');
+    });
   });
 
   it('hands the helper the failed job and step of a run with no test result', () => {
-    // A lane that dies before printing any test result leaves no failing test to
-    // dedupe on, so the issue falls back to one per commit — and without the job
-    // list the fallback body named nothing but the commit, which is what made a
-    // standing red lane undiagnosable from its own issue.
+    // A lane can die before printing test results. Its job/step details must
+    // still reach the failure summary so the report remains diagnosable.
     //
     // Each pin below is scoped to the step that owns it and spans a producer
     // together with its consumer. Isolated substrings cannot express this
@@ -123,51 +777,219 @@ describe('main CI failure issue workflow', () => {
     // them is cut. Collapsing the line continuations first keeps the pins
     // reading like the shell they pin rather than like this file's indentation.
     const steps = jobs.analyze.steps;
-    const download = oneLine(
-      steps.find((step) => step.name === 'Download failed job logs').run,
+    const downloadStep = steps.find(
+      (step) => step.name === 'Download failed job logs',
     );
-    const plan = oneLine(steps.find((step) => step.id === 'plan').run);
+    const download = oneLine(downloadStep.run);
+    const summary = oneLine(steps.find((step) => step.id === 'summary').run);
 
     // `gh api` writes a non-2xx body to stdout before exiting non-zero, so the
-    // fetch has to stay non-fatal AND say so — with the warning inside the
-    // `then` block, since outside it a successful fetch raises an annotation
-    // claiming the opposite. `--paginate` rides the same span because this one
-    // fetch feeds both projections, so dropping it caps a wide run at page 1.
+    // fetch has to stay non-fatal AND say so. `--paginate` rides the same span
+    // because this one fetch feeds both projections, so dropping it caps a
+    // wide run at page 1. The slurp merge rides it too: `--paginate` prints
+    // one document per page while the comment helper reads the file with a
+    // single JSON.parse, so a run wider than one page would silently render a
+    // comment naming no job without it.
+    // The merge alone is not enough: it merges whichever pages arrived, and
+    // that partial list is what every consumer — the infra classifier included
+    // — reads as the whole run. The receipt therefore gates the promotion:
+    // `total_count` has to match the jobs merged before the staged file
+    // replaces `run-jobs.json` — and a response carrying no `total_count` at
+    // all cannot certify itself either, so `$total != null` is part of the
+    // pass condition rather than a skip.
     expect(download).toContain(
-      'if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" --paginate > "${jobs_json}"; then echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}" fi',
+      'gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" --paginate | jq -s \'{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total != null and ($doc.jobs | length) == $total then $doc else error("incomplete job list: merged \\($doc.jobs | length) of \\($total)") end\' > "${jobs_tmp}"; then mv "${jobs_tmp}" "${jobs_json}"',
+    );
+    // A run whose pages cannot be read at all degrades the way a missing log
+    // does: no stale staging file, an empty list, and a warning.
+    expect(download).toContain(
+      'else rm -f "${jobs_tmp}" printf \'{"jobs":[]}\\n\' > "${jobs_json}" echo "::warning::Could not read the whole job list of run ${WORKFLOW_RUN_ID}; reporting without it" fi',
+    );
+    // Producer and consumer are separate spellings: a renamed step id or a
+    // retyped binding resolves the expression to '', which the summary reads
+    // as "the list was short".
+    const jobsCompleteRef = '${{ steps.download.outputs.jobs_complete }}';
+    expect(steps.find((step) => step.id === 'download')).toBeTruthy();
+    expect(steps.find((step) => step.id === 'summary').env.JOBS_COMPLETE).toBe(
+      jobsCompleteRef,
+    );
+    expect(downloadStep.env.RUN_ATTEMPT).toBe(
+      '${{ github.event.workflow_run.run_attempt }}',
     );
     // Counted over the whole workflow: both projections read the file this one
     // fetch wrote, so the payload must be fetched exactly once.
     expect(
-      (workflow.match(/actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/jobs/g) ?? [])
-        .length,
+      (
+        workflow.match(
+          /actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/attempts\/\$\{RUN_ATTEMPT\}\/jobs/g,
+        ) ?? []
+      ).length,
     ).toBe(1);
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
     // hands `mapfile` whole TSV lines so every log download 404s; renaming the
-    // array on one side only returns every run to the per-commit fallback while
-    // the failed-jobs section still renders.
+    // array on one side only loses the failing-test details while the job/step
+    // summary still renders.
     expect(download).toContain(
       'mapfile -t job_ids < <( jq -r \'.jobs[] | select(.conclusion == "failure") | .id\' "${jobs_json}" 2>/dev/null )',
     );
     expect(download).toContain('for job_id in "${job_ids[@]}"; do');
     // The same bindings for the projection this PR adds, plus the `|| true` that
     // keeps an errored jobs response from aborting the step under `bash -e`
-    // before the issue is planned at all, and the `2>/dev/null` that keeps the
+    // before a failure summary is rendered, and the `2>/dev/null` that keeps the
     // resulting jq parse error out of the log.
     expect(download).toContain(
       'jq -r \'.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs.tsv" || true',
     );
-    // `--jobs` has to ride the `analyze` invocation: `plan` never reads
-    // `options.jobs`, so moving the flag there drops the section silently. The
-    // span ends at the first `> "${analysis}"`, so no later helper call in the
-    // step can satisfy it.
-    const analyzeInvocation = plan.match(
-      /node "\$\{helper\}" analyze .*?> "\$\{analysis\}"/,
+    // Keep the TSV job details in the analysis payload. The span ends at the
+    // first analysis redirect, so the later comment invocation cannot satisfy it.
+    const analyzeInvocation = summary.match(
+      /node "\$\{helper\}" analyze .*?> "\$\{RUNNER_TEMP\}\/analysis\.json"/,
     )?.[0];
     expect(analyzeInvocation, 'the analyze invocation').toContain(
       '--jobs "${RUNNER_TEMP}/failed-jobs.tsv"',
     );
+  });
+
+  it('reads the jobs of the event attempt, not the latest attempt', () => {
+    // Measured on run 39237270547: attempt 1's jobs carry the host-lock
+    // annotation while attempt 2's are green. The supersession guard clears
+    // the event when it starts, but the run can move on while this step
+    // paginates, so the read itself must name the event's attempt.
+    const step = jobs.analyze.steps.find(
+      (candidate) => candidate.name === 'Download failed job logs',
+    );
+    const tmp = mkdtempSync(join(tmpdir(), 'java-ci-download-'));
+    try {
+      writeFileSync(
+        join(tmp, 'gh'),
+        `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${RUNNER_TEMP}/jobs-args"
+printf '%s\\n' '{"jobs":[]}'
+`,
+      );
+      chmodSync(join(tmp, 'gh'), 0o755);
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${tmp}:${process.env.PATH}`,
+          RUNNER_TEMP: tmp,
+          REPO: 'QwenLM/qwen-code',
+          WORKFLOW_RUN_ID: '39237270547',
+          RUN_ATTEMPT: '1',
+          GITHUB_OUTPUT: join(tmp, 'output'),
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(join(tmp, 'jobs-args'), 'utf8')).toContain(
+        'attempts/1/jobs',
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a job list it cannot certify complete', () => {
+    // Page 1 arrives and page 2 fails, so `gh api` exits non-zero — but jq has
+    // already merged the page it got, and that truncated list reads exactly
+    // like a whole run to the projections below and to the infra classifier
+    // built on the same file. Spawned without pipefail on purpose: the
+    // receipt, not the pipeline status, is what has to reject it.
+    const step = jobs.analyze.steps.find(
+      (candidate) => candidate.name === 'Download failed job logs',
+    );
+    const page = (ids) => ({
+      total_count: 2,
+      jobs: ids.map((id) => ({
+        id,
+        name: `java-${id}`,
+        conclusion: 'failure',
+        steps: [],
+      })),
+    });
+    const runPages = (pages) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'java-ci-pages-'));
+      try {
+        writeFileSync(
+          join(tmp, 'gh'),
+          `${[
+            '#!/usr/bin/env bash',
+            // The log downloads that follow this fetch are a separate call;
+            // only the jobs listing is under test here.
+            '[[ "$*" == *"/logs"* ]] && exit 0',
+            ...pages.flatMap((entry) => [
+              `printf '%s\\n' '${JSON.stringify(entry.body)}'`,
+              ...(entry.fail
+                ? [`printf '%s\\n' '{"message":"rate limited"}'`, 'exit 1']
+                : []),
+            ]),
+          ].join('\n')}\n`,
+        );
+        chmodSync(join(tmp, 'gh'), 0o755);
+        const result = spawnSync('bash', ['-e', '-c', step.run], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${tmp}:${process.env.PATH}`,
+            RUNNER_TEMP: tmp,
+            REPO: 'QwenLM/qwen-code',
+            WORKFLOW_RUN_ID: '39045740099',
+            RUN_ATTEMPT: '1',
+            GH_TOKEN: 'fake',
+            GITHUB_OUTPUT: join(tmp, 'output'),
+          },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        return {
+          stdout: result.stdout,
+          jobs: JSON.parse(readFileSync(join(tmp, 'run-jobs.json'), 'utf8'))
+            .jobs,
+          staged: existsSync(join(tmp, 'run-jobs.json.tmp')),
+          complete: /jobs_complete=(\w+)/.exec(
+            readFileSync(join(tmp, 'output'), 'utf8'),
+          )?.[1],
+        };
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    const truncated = runPages([
+      { body: page([9001]) },
+      { body: page([]), fail: true },
+    ]);
+    expect(truncated.jobs).toEqual([]);
+    expect(truncated.staged).toBe(false);
+    expect(truncated.complete).toBe('false');
+    expect(truncated.stdout).toContain(
+      '::warning::Could not read the whole job list of run',
+    );
+
+    // A response carrying no `total_count` at all cannot be certified
+    // complete either — this is the input on which a pass condition written
+    // `$total == null or …` would publish page 1 as the whole run.
+    const noReceipt = runPages([
+      { body: { jobs: page([9001]).jobs } },
+      { body: { jobs: [] }, fail: true },
+    ]);
+    expect(noReceipt.jobs).toEqual([]);
+    expect(noReceipt.staged).toBe(false);
+    expect(noReceipt.complete).toBe('false');
+
+    // gh can also exit 0 with fewer jobs than it declares; the pipeline status
+    // cannot see that, so the receipt is the only guard that does.
+    const shortButClean = runPages([{ body: page([9001]) }]);
+    expect(shortButClean.jobs).toEqual([]);
+    expect(shortButClean.complete).toBe('false');
+
+    // Positive control: every page arrives, and the merged list — including
+    // the failure that only page 2 carries — is promoted as a whole.
+    const complete = runPages([{ body: page([9001]) }, { body: page([9101]) }]);
+    expect(complete.jobs.map((job) => job.id)).toEqual([9001, 9101]);
+    expect(complete.staged).toBe(false);
+    expect(complete.complete).toBe('true');
+    expect(complete.stdout).not.toContain('::warning::');
   });
 
   it('passes --allow-escape-sequences so gh does not refuse the colourised logs', () => {
@@ -175,8 +997,8 @@ describe('main CI failure issue workflow', () => {
     // carrying terminal escape sequences unless the flag opts out, and the
     // colourised vitest/pytest logs always carry them: without the flag
     // every download fails deterministically — a retry would hit the
-    // identical refusal — and the plan falls back to a per-commit issue
-    // naming no failing test. The analyzer strips ANSI before matching, so
+    // identical refusal — so analyze finds no tests for the comment renderer
+    // and the summary degrades to job/step names. The analyzer strips ANSI, so
     // the escapes never reach an issue body.
     const download = oneLine(
       jobs.analyze.steps.find(
@@ -193,14 +1015,9 @@ describe('main CI failure issue workflow', () => {
     );
   });
 
-  it('re-reads an existing issue so recorded recurrences survive the update', () => {
-    expect(workflow).toContain('gh issue view "${existing_issue}"');
-    expect(workflow).toContain('--existing "${existing_body}"');
-  });
-
   it('uses a random heredoc delimiter for the multiline body output', () => {
-    // A constant delimiter lets issue-body prose (which the autofix agent
-    // writes into) end the heredoc early and inject fresh GITHUB_OUTPUT keys.
+    // A constant delimiter lets failure-summary text end the heredoc early
+    // and inject fresh GITHUB_OUTPUT keys.
     expect(workflow).toContain('openssl rand -hex 16');
     expect(workflow).toContain('echo "body<<${delim}"');
     expect(workflow).toContain('echo "${delim}"');
@@ -232,6 +1049,15 @@ describe('main CI failure issue workflow', () => {
       expect(String(rerunJob.if)).toContain(
         "needs.analyze.outputs.infra_only == 'true'",
       );
+      // The rerun holds actions: write while infra_only is classified from
+      // check-run annotation text — text a fork's own steps print — so it is
+      // gated to the destinations that file (main runs and merged PRs). An
+      // open PR's infra death is left for its author to retrigger, and the
+      // classifier's output never reaches the write token on an untrusted
+      // run.
+      expect(String(rerunJob.if)).toContain(
+        "needs.analyze.outputs.file_issue == 'true'",
+      );
     });
 
     it('uses the same signature list as the PR-scan rerun of qwen-autofix.yml', () => {
@@ -248,13 +1074,18 @@ describe('main CI failure issue workflow', () => {
       expect(infraStep.env.INFRA_FAILURE_SIGNATURES).toContain(
         'lost communication with the server',
       );
+      // A per-host lock starvation (#14550) is the same class: the annotation
+      // names a lock budget, not an assertion.
+      expect(infraStep.env.INFRA_FAILURE_SIGNATURES).toContain(
+        'lock not acquired within',
+      );
     });
 
     it('classifies per failed job and only when EVERY one is infrastructure', () => {
       // The annotation read is per check-run id taken from the jobs payload's
       // own check_run_url, and the match is the same grep the PR scan uses.
       expect(infraScript).toContain(
-        'jq -r \'.jobs[] | select(.conclusion == "failure") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
+        'jq -r \'.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | index("Report the tier result")) | not) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
       );
       expect(infraScript).toContain(
         'gh api --paginate "repos/${REPO}/check-runs/${check_run_id}/annotations"',
@@ -287,6 +1118,125 @@ describe('main CI failure issue workflow', () => {
       );
     });
 
+    // The gate workflow's reporter job is always() and fails with only the
+    // tier-result error — no infrastructure signature — so without the
+    // exclusion pinned above every Managed Agent gate lane failure counted
+    // as an unclassified job and an infra-killed lane filed an issue instead
+    // of rerunning. These cases run the step body against fixture job lists.
+    const failedJob = (id, checkId, steps) => ({
+      id,
+      conclusion: 'failure',
+      check_run_url: `https://api.github.com/repos/QwenLM/qwen-code/check-runs/${checkId}`,
+      steps,
+    });
+    const REPORTER_STEP = 'Report the tier result';
+    const reporterJob = (id, checkId) =>
+      failedJob(id, checkId, [
+        { name: 'Set up job', conclusion: 'success' },
+        { name: REPORTER_STEP, conclusion: 'failure' },
+        { name: 'Complete job', conclusion: 'success' },
+      ]);
+    const classify = (jobs, annotations) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'infra-classify-'));
+      try {
+        const bin = join(tmp, 'bin');
+        mkdirSync(bin);
+        writeFileSync(
+          join(bin, 'gh'),
+          [
+            '#!/usr/bin/env bash',
+            'id="$(printf \'%s \' "$@" | grep -oE \'check-runs/[0-9]+\' | cut -d/ -f2)"',
+            'cat "${ANN_DIR}/${id}.txt" 2>/dev/null || true',
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const annDir = join(tmp, 'annotations');
+        mkdirSync(annDir);
+        for (const [id, message] of Object.entries(annotations)) {
+          writeFileSync(join(annDir, `${id}.txt`), message);
+        }
+        writeFileSync(join(tmp, 'run-jobs.json'), JSON.stringify({ jobs }));
+        const output = join(tmp, 'output');
+        writeFileSync(output, '');
+        // Bash 3.2 misparses apostrophes in process-substitution comments.
+        const result = spawnSync(
+          'bash',
+          ['-c', infraStep.run.replace(/^\s*#.*$/gm, '')],
+          {
+            env: {
+              PATH: `${bin}:${process.env.PATH}`,
+              RUNNER_TEMP: tmp,
+              RUN_ATTEMPT: '1',
+              REPO: 'QwenLM/qwen-code',
+              GH_TOKEN: 'fake',
+              INFRA_FAILURE_SIGNATURES: infraStep.env.INFRA_FAILURE_SIGNATURES,
+              ANN_DIR: annDir,
+              GITHUB_OUTPUT: output,
+            },
+            encoding: 'utf8',
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        return readFileSync(output, 'utf8');
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    it('reruns when the only unannotated failure is the gate reporter', () => {
+      // This PR's run 38936748280: the lane died with its runner while the
+      // reporter failed with the tier-result error — infra, once the
+      // derivative reporter is out of the tally.
+      const out = classify(
+        [
+          failedJob(1001, 9001, [
+            { name: 'Run Managed Agent tests', conclusion: 'failure' },
+          ]),
+          reporterJob(1002, 9002),
+        ],
+        {
+          9001: 'lost communication with the server',
+          9002: 'Process completed with exit code 1.\nThe fast tier cancelled.',
+        },
+      );
+      expect(out).toContain('infra_only=true');
+    });
+
+    it('still reruns when every failed job carries an infra annotation', () => {
+      const out = classify(
+        [
+          failedJob(1001, 9001, [
+            { name: 'Run Managed Agent tests', conclusion: 'failure' },
+          ]),
+        ],
+        { 9001: 'No space left on device' },
+      );
+      expect(out).toContain('infra_only=true');
+    });
+
+    it('keeps counting the reporter when its own runner died before any step', () => {
+      // Filtering by the failing STEP name is what keeps this rerun: no step
+      // failed, so the job still counts and its infra annotation matches.
+      const out = classify([failedJob(1002, 9002, [])], {
+        9002: 'The runner has received a shutdown signal',
+      });
+      expect(out).toContain('infra_only=true');
+    });
+
+    it('files when a lane failure carries no infra annotation', () => {
+      const out = classify(
+        [
+          failedJob(1001, 9001, [{ name: 'Run tests', conclusion: 'failure' }]),
+          reporterJob(1002, 9002),
+        ],
+        {
+          9001: 'AssertionError: expected the daemon to answer',
+          9002: 'Process completed with exit code 1.',
+        },
+      );
+      expect(out).toContain('infra_only=false');
+    });
+
     it('reruns the failed jobs once, with actions:write and no PAT or checkout', () => {
       expect(rerunJob.needs).toBe('analyze');
       expect(rerunJob.permissions).toEqual({ actions: 'write' });
@@ -306,16 +1256,215 @@ describe('main CI failure issue workflow', () => {
       const condition = String(jobs.file_issue.if);
       expect(condition).toContain('always()');
       expect(condition).toContain("needs.analyze.result == 'success'");
+      expect(condition).toContain("needs.analyze.outputs.file_issue == 'true'");
       expect(condition).toContain("needs.analyze.outputs.infra_only != 'true'");
       // A rerun that could not be dispatched must not swallow the report:
       // the issue is then the only record of a red main.
       expect(condition).toContain("needs.rerun_infra.result != 'success'");
     });
+
+    it.each([
+      ['false', 'skipped', 'success', 'body', true],
+      ['true', 'success', 'success', 'body', false],
+      ['true', 'failure', 'success', 'body', true],
+      ['true', 'skipped', 'success', 'body', true],
+      ['false', 'skipped', 'failure', 'body', true],
+      ['false', 'skipped', 'failure', '', false],
+    ])(
+      'reports infra=%s rerun=%s analyze=%s body=%s: %s',
+      (infra, rerun, result, body, expected) => {
+        const evaluate = new Function(
+          'needs',
+          'always',
+          `return (${jobs.report_pr.if.slice(3, -2)});`,
+        );
+        expect(
+          evaluate(
+            {
+              analyze: {
+                result,
+                outputs: {
+                  infra_only: infra,
+                  comment_body: body,
+                  pr_number: '14472',
+                },
+              },
+              rerun_infra: { result: rerun },
+            },
+            () => true,
+          ),
+        ).toBe(expected);
+      },
+    );
+  });
+
+  it('prepares the failure summary without looking up an issue', () => {
+    const summary = jobs.analyze.steps.find((step) => step.id === 'summary');
+    expect(jobs.analyze.outputs.comment_body).toBe(
+      '${{ steps.summary.outputs.body }}',
+    );
+    expect(jobs.report_pr.steps[0].env.COMMENT_BODY).toBe(
+      '${{ needs.analyze.outputs.comment_body }}',
+    );
+    const tmp = mkdtempSync(join(tmpdir(), 'java-ci-summary-'));
+    try {
+      writeFileSync(join(tmp, 'gh'), '#!/bin/sh\nexit 1\n');
+      chmodSync(join(tmp, 'gh'), 0o755);
+      writeFileSync(
+        join(tmp, 'failed-jobs.tsv'),
+        'Hosted processes\tRun tests\n',
+      );
+      writeFileSync(join(tmp, 'run-jobs.json'), JSON.stringify({ jobs: [] }));
+      const output = join(tmp, 'output');
+      const env = {
+        ...process.env,
+        PATH: `${tmp}:${process.env.PATH}`,
+        RUNNER_TEMP: tmp,
+        GITHUB_OUTPUT: output,
+        REPO: 'QwenLM/qwen-code',
+        INFRA_ONLY: 'true',
+        JOBS_COMPLETE: 'true',
+        WORKFLOW_NAME: 'Managed Agent gate',
+        WORKFLOW_RUN_ID: '39045740099',
+        WORKFLOW_RUN_URL:
+          'https://github.com/QwenLM/qwen-code/actions/runs/39045740099',
+        WORKFLOW_RUN_AT: '2026-10-18T00:00:00Z',
+        HEAD_SHA: 'abc123456789',
+      };
+      const prepared = spawnSync(
+        'bash',
+        ['-eo', 'pipefail', '-c', summary.run],
+        { env, encoding: 'utf8' },
+      );
+      expect(prepared.status, prepared.stderr).toBe(0);
+      const body = readFileSync(output, 'utf8');
+      const delimiter = body.split('\n')[0].slice('body<<'.length);
+      expect(body.endsWith(`${delimiter}\n`)).toBe(true);
+      expect(body).toContain('### `Managed Agent gate` failed');
+      expect(body).toContain('GitHub runner infrastructure failed');
+      // A certified job list must not carry the degradation sentence.
+      expect(body).not.toContain('could not be read in full');
+
+      // An unread list leaves the same body looking like a run with no
+      // identifiable failure, so the reader has to be told. This body is also
+      // what the issue record publishes, so one flag covers both surfaces.
+      const degradedOut = join(tmp, 'output-degraded');
+      const degraded = spawnSync(
+        'bash',
+        ['-eo', 'pipefail', '-c', summary.run],
+        {
+          env: {
+            ...env,
+            GITHUB_OUTPUT: degradedOut,
+            JOBS_COMPLETE: 'false',
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(degraded.status, degraded.stderr).toBe(0);
+      expect(readFileSync(degradedOut, 'utf8')).toContain(
+        'The job list could not be read in full',
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   const privilegedJobs = Object.entries(jobs).filter(([, job]) =>
     JSON.stringify(job).includes('CI_DEV_BOT_PAT'),
   );
+
+  it.each([
+    [
+      'github-actions[bot]',
+      'PATCH',
+      'issues/comments/456',
+      'https://github.com/QwenLM/qwen-code/issues/14500',
+      0,
+    ],
+    ['contributor', 'POST', 'issues/14472/comments', '', 0],
+    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 1],
+    ['github-actions[bot]', null, null, '', 3],
+  ])(
+    'upserts a %s comment via %s with %s and issue=%s after %s lookup errors',
+    (login, method, endpoint, issueUrl, failures) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'java-ci-comment-'));
+      try {
+        const step = jobs.report_pr.steps[0];
+        const comment = renderFailureComment({
+          analysis: { workflow: 'Managed Agent gate', tests: [] },
+          occurrence: {
+            sha: 'abc123456789',
+            runId: '39045740099',
+            runUrl:
+              'https://github.com/QwenLM/qwen-code/actions/runs/39045740099',
+          },
+        });
+        writeFileSync(
+          join(tmp, 'comments.json'),
+          JSON.stringify(
+            [123, 456].map((id) => ({ id, user: { login }, body: comment })),
+          ),
+        );
+        writeFileSync(
+          join(tmp, 'gh'),
+          `#!/usr/bin/env bash
+if [[ "$*" == *--paginate* ]]; then
+  count=$(cat "\${RUNNER_TEMP}/lookups" 2>/dev/null || echo 0)
+  count=$((count + 1))
+  echo "$count" > "\${RUNNER_TEMP}/lookups"
+  if [[ "$count" -le "\${LOOKUP_FAILURES}" ]]; then exit 1; fi
+  cat "\${RUNNER_TEMP}/comments.json"
+else
+  printf '%s\n' "$@" > "\${RUNNER_TEMP}/published-args"
+fi
+`,
+        );
+        writeFileSync(join(tmp, 'sleep'), '#!/bin/sh\nexit 0\n');
+        chmodSync(join(tmp, 'gh'), 0o755);
+        chmodSync(join(tmp, 'sleep'), 0o755);
+        const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${tmp}:${process.env.PATH}`,
+            RUNNER_TEMP: tmp,
+            REPO: 'QwenLM/qwen-code',
+            PR_NUMBER: '14472',
+            WORKFLOW_RUN_ID: '39045740099',
+            COMMENT_BODY: comment,
+            ISSUE_URL: issueUrl,
+            LOOKUP_FAILURES: String(failures),
+          },
+        });
+        expect(result.status, result.stderr).toBe(method ? 0 : 1);
+        const published = join(tmp, 'published-args');
+        if (method)
+          expect(readFileSync(published, 'utf8')).toContain(
+            `${method}\nrepos/QwenLM/qwen-code/${endpoint}\n`,
+          );
+        else expect(existsSync(published)).toBe(false);
+        expect(
+          readFileSync(join(tmp, 'pr-comment.md'), 'utf8').includes(
+            '[Tracking issue]',
+          ),
+        ).toBe(Boolean(issueUrl));
+        expect(JSON.stringify(jobs.report_pr)).not.toContain(
+          'actions/checkout',
+        );
+        expect(JSON.stringify(jobs.report_pr)).not.toContain('CI_DEV_BOT_PAT');
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('grants the PR comment writer access to pull requests', () => {
+    expect(jobs.report_pr.permissions).toEqual({
+      issues: 'write',
+      'pull-requests': 'write',
+    });
+  });
 
   it('keeps the bot PAT in a job that runs no repository code', () => {
     // The job that can write as the bot must not check out or execute anything
@@ -351,7 +1500,7 @@ describe('main CI failure issue workflow', () => {
       actions: 'read',
       checks: 'read',
       contents: 'read',
-      issues: 'read',
+      'pull-requests': 'read',
     });
     expect(privilegedJobs[0][1].needs).toEqual(['analyze', 'rerun_infra']);
   });

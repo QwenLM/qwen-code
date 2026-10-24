@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  attachToolOutputProvenance,
+  measureToolOutput,
+} from '../tools/tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type OpenAI from 'openai';
 import type {
@@ -12,11 +17,16 @@ import type {
   GenerateContentResponse,
   Part,
   SendMessageParameters,
+  Tool,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
 import {
   LlmChat,
+  LlmRequestPreparationError,
+  llmPreparedProviderPin,
+  type LlmPreparedRequest,
+  type LlmPreparedRequestCallback,
   InvalidStreamError,
   approvedPlanRedactionText,
   redactApprovedPlansInHistory,
@@ -50,7 +60,11 @@ import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGe
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
 import { APIConnectionTimeoutError } from 'openai';
 import type { OpenAICompatibleProvider } from './openaiContentGenerator/provider/index.js';
-import type { Config } from '../config/config.js';
+import {
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  type Config,
+} from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
@@ -63,6 +77,13 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
+import { selectForkHistory } from '../tools/agent/fork-subagent.js';
+import { composePostCompactHistory } from '../services/postCompactAttachments.js';
+import { detectTurnInterruption } from './turn-interruption.js';
+import {
+  markApiHistoryDirectoryContext,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
 import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
@@ -138,6 +159,7 @@ const {
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
+  logToolResultSize: vi.fn(),
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
   logProtocolTagSanitized: mockLogProtocolTagSanitized,
@@ -271,6 +293,9 @@ describe('LlmChat', async () => {
     // Pass-through for tests that don't care about retry logic.
     mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
     mockConfig = {
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getSessionId: () => 'test-session-id',
       getTelemetryLogPromptsEnabled: () => true,
       getUsageStatisticsEnabled: () => true,
@@ -711,7 +736,10 @@ describe('LlmChat', async () => {
     expect(syncReviewedDeclarations).toHaveBeenCalledOnce();
     expect(syncReviewedDeclarations).toHaveBeenCalledWith(
       expect.arrayContaining([
-        expect.objectContaining({ role: 'user', parts: [searchResponse] }),
+        expect.objectContaining({
+          role: 'user',
+          parts: [expect.objectContaining(searchResponse)],
+        }),
       ]),
       chat,
     );
@@ -727,7 +755,15 @@ describe('LlmChat', async () => {
       syncedShapes.push({
         length: history.length,
         hasSearchResponse: history.some((entry) =>
-          (entry.parts ?? []).some((part) => part === searchResponse),
+          (entry.parts ?? []).some(
+            (part) =>
+              part.functionResponse?.id ===
+                searchResponse.functionResponse?.id &&
+              part.functionResponse?.name ===
+                searchResponse.functionResponse?.name &&
+              part.functionResponse?.response?.['output'] ===
+                searchResponse.functionResponse?.response?.['output'],
+          ),
         ),
       });
     });
@@ -837,6 +873,498 @@ describe('LlmChat', async () => {
       );
       expect(instruction).toContain('Legitimate content');
       expect(instruction).toContain(block('Ctx1'));
+    });
+  });
+
+  describe('setTools', () => {
+    const toolNamed = (name: string): Tool => ({
+      functionDeclarations: [{ name, description: `${name} description` }],
+    });
+
+    // `setTools` is the only writer of `generationConfig.tools`, and nothing
+    // else in this suite reaches it — the ACP-level suites only assert that a
+    // *mocked* `setTools` was called. Without this pin, dropping the write
+    // left all 592 tests green while every request went out tool-less.
+    it('writes the declarations into the config sent to the model', () => {
+      const isolatedChat = newChat({ chatConfig: {} });
+
+      isolatedChat.setTools([toolNamed('read_file')]);
+
+      expect(isolatedChat['generationConfig'].tools).toEqual([
+        toolNamed('read_file'),
+      ]);
+    });
+
+    it('replaces the previous declarations instead of appending to them', () => {
+      const isolatedChat = newChat({
+        chatConfig: { tools: [toolNamed('stale_tool')] },
+      });
+
+      isolatedChat.setTools([toolNamed('read_file'), toolNamed('shell')]);
+
+      expect(isolatedChat['generationConfig'].tools).toEqual([
+        toolNamed('read_file'),
+        toolNamed('shell'),
+      ]);
+    });
+
+    // A tool-restricted registry refresh hands `setTools` an empty list, so
+    // the clear has to land rather than keep advertising stale declarations.
+    it('clears previously-set declarations when given an empty list', () => {
+      const isolatedChat = newChat({
+        chatConfig: { tools: [toolNamed('stale_tool')] },
+      });
+
+      isolatedChat.setTools([]);
+
+      expect(isolatedChat['generationConfig'].tools).toEqual([]);
+    });
+  });
+
+  describe('prepared model request recovery', () => {
+    it('awaits durability after normalization and before the first provider call', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const preparedReady = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let saved: LlmPreparedRequest | undefined;
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'done' }])),
+      );
+      const response = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: 'original',
+          config: {
+            abortSignal: new AbortController().signal,
+            httpOptions: { headers: { Authorization: 'secret-test' } },
+          },
+        },
+        'prompt',
+        undefined,
+        {
+          onPreparedRequest: async (prepared) => {
+            saved = prepared;
+            entered();
+            await gate;
+          },
+        },
+      );
+      const done = drain(response);
+      await preparedReady;
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(saved!.history.at(-1)?.parts).toEqual([{ text: 'original' }]);
+      expect(saved!.request.config.maxOutputTokens).toBeGreaterThan(0);
+      expect(saved!.request.config).not.toHaveProperty('abortSignal');
+      expect(saved!.request.config).not.toHaveProperty('httpOptions');
+      expect(JSON.stringify(saved)).not.toContain('secret-test');
+      release();
+      await done;
+      expect(streamMock()).toHaveBeenCalledOnce();
+    });
+
+    it('avoids snapshot copies above the capture budget while sending live', async () => {
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'done' }])),
+      );
+      let copiedDuringCapture = -1;
+      const clone = vi.spyOn(globalThis, 'structuredClone');
+      const callback: LlmPreparedRequestCallback = async (prepared) => {
+        copiedDuringCapture = clone.mock.calls.length;
+        expect(JSON.stringify(prepared).length).toBeGreaterThan(64 * 1024);
+      };
+      callback.maxSnapshotBytes = 64 * 1024;
+      const response = await chat.sendMessageStream(
+        'test-model',
+        { message: 'x'.repeat(100_000) },
+        'large-prompt',
+        undefined,
+        { onPreparedRequest: callback },
+      );
+      clone.mockClear();
+      await drain(response);
+      expect(copiedDuringCapture).toBe(0);
+      expect(streamMock()).toHaveBeenCalledOnce();
+    });
+
+    it('does not send, retry or fall back after a failed durability barrier', async () => {
+      const callback = vi
+        .fn()
+        .mockRejectedValue(new Error('Store unavailable'));
+      const response = await chat.sendMessageStream(
+        'test-model',
+        { message: 'original' },
+        'prompt',
+        undefined,
+        { onPreparedRequest: callback },
+      );
+      await expect(drain(response)).rejects.toBeInstanceOf(
+        LlmRequestPreparationError,
+      );
+      expect(callback).toHaveBeenCalledOnce();
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+    });
+
+    it('reissues saved normalized history without another push, compaction or clamp', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+        samplingParams: { temperature: 0.3 },
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [userText('normalized request')],
+          config: {
+            maxOutputTokens: 77,
+            systemInstruction: 'original context',
+          },
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      const originalConfig = chat['generationConfig'];
+      const compression = vi.spyOn(chat, 'tryCompress');
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'recovered' }])),
+      );
+      const prepared = vi.fn();
+      await drain(
+        await chat.sendPreparedMessageStream(
+          saved,
+          'original-prompt',
+          new AbortController().signal,
+          prepared,
+        ),
+      );
+      expect(chat['generationConfig']).toBe(originalConfig);
+      expect(compression).not.toHaveBeenCalled();
+      expect(streamMock().mock.calls[0][0]).toMatchObject(saved.request);
+      expect(prepared.mock.calls[0][0]).toMatchObject(saved);
+      expect(
+        chat.getHistory().filter((item) => item.role === 'user'),
+      ).toHaveLength(1);
+      expect(chat.getHistory().at(-1)?.parts).toContainEqual({
+        text: 'recovered',
+      });
+    });
+
+    it('refuses a saved request whose model no longer matches the route', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'other-model',
+          contents: [userText('normalized request')],
+          config: { maxOutputTokens: 77 },
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      const failure = await chat
+        .sendPreparedMessageStream(
+          saved,
+          'route-drift',
+          new AbortController().signal,
+        )
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(LlmRequestPreparationError);
+      expect((failure as LlmRequestPreparationError).cause).toBe(
+        'Saved model route changed.',
+      );
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+    });
+
+    it('refuses a saved request whose provider pin changed', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [userText('normalized request')],
+          config: { maxOutputTokens: 77 },
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: 'stale-provider-pin',
+        promptTokensForClamp: 15,
+      };
+      const failure = await chat
+        .sendPreparedMessageStream(
+          saved,
+          'pin-drift',
+          new AbortController().signal,
+        )
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(LlmRequestPreparationError);
+      expect((failure as LlmRequestPreparationError).cause).toBe(
+        'Saved model route changed.',
+      );
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+    });
+
+    it('preserves primary persistent retry intent through prepared replay', async () => {
+      vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'true');
+      try {
+        const routeConfig = {
+          model: 'test-model',
+          authType: AuthType.USE_GEMINI,
+        };
+        mockGeneratorConfig();
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          resolveForModel: vi.fn().mockResolvedValue({
+            model: 'test-model',
+            contentGenerator: mockContentGenerator,
+            contentGeneratorConfig: routeConfig,
+          }),
+        } as unknown as ReturnType<Config['getBaseLlmClient']>);
+        let saved: LlmPreparedRequest | undefined;
+        streamMock().mockImplementation(async () => textStream('answer'));
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'original' },
+            'primary-replay',
+            undefined,
+            {
+              onPreparedRequest: async (prepared) => {
+                saved = prepared;
+              },
+            },
+          ),
+        );
+        expect(saved!.allowPersistentRetry).toBe(true);
+        expect(mockRetryWithBackoff.mock.calls.at(-1)?.[1]).toMatchObject({
+          persistentMode: true,
+          heartbeatFn: expect.any(Function),
+        });
+        mockRetryWithBackoff.mockClear();
+        await drain(
+          await newChat().sendPreparedMessageStream(
+            saved!,
+            'primary-replay',
+            new AbortController().signal,
+          ),
+        );
+        expect(mockRetryWithBackoff).toHaveBeenCalledOnce();
+        expect(mockRetryWithBackoff.mock.calls[0]?.[1]).toMatchObject({
+          persistentMode: true,
+          heartbeatFn: expect.any(Function),
+        });
+        vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'false');
+        await drain(
+          await newChat().sendPreparedMessageStream(
+            saved!,
+            'primary-replay-without-opt-in',
+            new AbortController().signal,
+          ),
+        );
+        expect(mockRetryWithBackoff.mock.calls.at(-1)?.[1].persistentMode).toBe(
+          false,
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('keeps anonymous input outside context after a saved request JSON round trip', async () => {
+      const compacted = await composePostCompactHistory([], 'Summary.');
+      const input = userText(
+        'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+      );
+      const route = { model: 'test-model', authType: AuthType.USE_GEMINI };
+      mockGeneratorConfig();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: route,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [...compacted, input],
+          config: {},
+        },
+        history: [...compacted, input],
+        contextPrefixLength: 2,
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(route),
+        promptTokensForClamp: 15,
+      };
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'done' }])),
+      );
+      await drain(
+        await chat.sendPreparedMessageStream(
+          JSON.parse(JSON.stringify(saved)),
+          'prompt',
+          new AbortController().signal,
+          async (prepared) => {
+            expect(prepared.contextPrefixLength).toBe(2);
+            expect(detectTurnInterruption(chat.getHistory())).toEqual({
+              kind: 'interrupted_prompt',
+              parts: input.parts,
+            });
+          },
+        ),
+      );
+      expect(streamMock().mock.calls[0][0]).toMatchObject(saved.request);
+    });
+
+    it('keeps externalized images live while refusing lossy prepared replay', async () => {
+      mockGeneratorConfig();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: mockConfig.getContentGeneratorConfig(),
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        imagePayloadThreshold: 1,
+        maxRecentImagesToRetain: 1,
+      });
+      chat.setHistory([
+        content('user', {
+          inlineData: { mimeType: 'image/png', data: 'earlier-image' },
+        }),
+        modelText('I saw the image'),
+      ]);
+      streamMock().mockImplementation(async () => textStream('answer'));
+      const prepared = vi.fn();
+      for (const message of ['first question', 'next question']) {
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message },
+            message,
+            undefined,
+            { onPreparedRequest: prepared },
+          ),
+        );
+      }
+      expect(prepared).toHaveBeenCalledTimes(2);
+      for (const [saved, captureUnsupported] of prepared.mock.calls) {
+        expect(captureUnsupported).toBe(true);
+        expect(JSON.stringify(saved.history)).toContain('[Image #');
+        expect(JSON.stringify(saved.history)).not.toContain('"inlineData"');
+      }
+      for (const [request] of streamMock().mock.calls) {
+        expect(
+          (request.contents as Content[])
+            .flatMap((entry) => entry.parts ?? [])
+            .filter((part) => part.inlineData),
+        ).toEqual([
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'earlier-image',
+              displayName: undefined,
+            },
+          },
+        ]);
+      }
+      streamMock().mockClear();
+      mockRetryWithBackoff.mockClear();
+      const fresh = newChat();
+      await expect(
+        fresh.sendPreparedMessageStream(
+          prepared.mock.calls[0]![0],
+          'old-image-snapshot',
+          new AbortController().signal,
+        ),
+      ).rejects.toBeInstanceOf(LlmRequestPreparationError);
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+      expect(fresh.getHistory()).toEqual([]);
+      await drain(
+        await fresh.sendPreparedMessageStream(
+          {
+            ...prepared.mock.calls[0]![0],
+            history: [content('user', { text: 'original' })],
+          },
+          'safe-image-control',
+          new AbortController().signal,
+        ),
+      );
+      expect(streamMock()).toHaveBeenCalledOnce();
+    });
+
+    it('pins provider semantics while excluding credential rotation', () => {
+      const base = {
+        model: 'test',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://example.test',
+        samplingParams: { temperature: 0.3 },
+      };
+      expect(llmPreparedProviderPin({ ...base, apiKey: 'first' })).toBe(
+        llmPreparedProviderPin({ ...base, apiKey: 'second' }),
+      );
+      for (const changed of [
+        { customHeaders: { 'X-Route': 'other' } },
+        { proxy: 'http://other-proxy.test' },
+      ]) {
+        expect(llmPreparedProviderPin({ ...base, ...changed })).not.toBe(
+          llmPreparedProviderPin(base),
+        );
+      }
+      expect(llmPreparedProviderPin(base)).not.toBe(
+        llmPreparedProviderPin({
+          ...base,
+          samplingParams: { temperature: 0.4 },
+        }),
+      );
     });
   });
 
@@ -2404,6 +2932,36 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('sends the latest memory catalog without persisting it to history', async () => {
+      // The catalog part carries the volatile-boundary marker so the provider
+      // cache passes anchor their per-turn breakpoint before it.
+      const catalogPart = (text: string) => ({
+        text,
+        partMetadata: { 'qwen-code:reattach-boundary': true },
+      });
+      let catalog = 'first catalog';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      mockStream(textStream('response'));
+      await sendDrain('first question', 'memory-tail-1');
+      expect(
+        (requestAt(0).contents as Content[]).at(-1)?.parts?.at(-1),
+      ).toEqual(catalogPart('first catalog'));
+      expect(JSON.stringify(chat.getHistory())).not.toContain('first catalog');
+      const firstHistory = chat.getHistory();
+      catalog = 'updated catalog';
+      mockStream(textStream('done'));
+      await sendDrain('second question', 'memory-tail-2');
+      const second = requestAt(1).contents as Content[];
+      expect(second.slice(0, firstHistory.length)).toEqual(firstHistory);
+      expect(second.at(-1)?.parts?.at(-1)).toEqual(
+        catalogPart('updated catalog'),
+      );
+      expect(JSON.stringify(second)).not.toContain('first catalog');
+      expect(JSON.stringify(chat.getHistory())).not.toContain(
+        'updated catalog',
+      );
+    });
+
     it('caps function responses at the provider send boundary without changing user text', async () => {
       (
         mockConfig as Config & {
@@ -2426,7 +2984,9 @@ describe('LlmChat', async () => {
       const output = sentParts[1].functionResponse?.response?.['output'];
       expect(typeof output).toBe('string');
       expect((output as string).length).toBeLessThanOrEqual(100);
-      expect(chat.getHistory()[0].parts).toEqual(sentParts);
+      expect(chat.getHistory()[0].parts).toEqual(
+        JSON.parse(JSON.stringify(sentParts)),
+      );
     });
 
     const retainOneImage = () =>
@@ -3477,6 +4037,21 @@ describe('LlmChat', async () => {
       expect(reactiveOpts.trigger).toBe('auto');
       expect(reactiveOpts.originalTokenCount).toBe(135_000);
       expect(reactiveOpts.precomputedEffectiveTokens).toBe(135_000);
+      // The ceiling is the error's FIRST number (`limitTokens`), not the
+      // actual count: this is the only assertion covering the
+      // producer→`tryCompress`→`compress()` hops, so dropping either forward
+      // or swapping in `actualTokens` must turn it red (#13432).
+      expect(reactiveOpts.observedServerCeiling).toBe(128_000);
+      // The kind travels on the same producer→`tryCompress`→`compress()`
+      // hops: an input-bound ceiling must not size an output budget
+      // downstream (#13876).
+      expect(reactiveOpts.observedServerCeilingKind).toBe('total');
+      // The route that reported the ceiling must travel with it, or the
+      // service cannot tell a retry on that route from a side-query on another
+      // one (#13876). Same producer→tryCompress→compress() hop.
+      expect(reactiveOpts.requestRouteKey).toBe(
+        mockConfig.getModelRouteIdentity(mockConfig.getModel()),
+      );
       expectStreamCalls(2);
       expect(requestAt(1).contents).toEqual(expectedRequestContents);
       expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
@@ -3486,6 +4061,46 @@ describe('LlmChat', async () => {
       expect(events[1]?.type).toBe(StreamEventType.RETRY);
       expect(events[1]).not.toHaveProperty('retryInfo');
       expect(hasChunkText(events, 'answer after compact')).toBe(true);
+    });
+
+    it('re-issues the durability snapshot after reactive compaction', async () => {
+      const compressedHistory = [
+        userText('summary'),
+        modelText('ack'),
+        userText('latest'),
+      ];
+      // The fixture appends the answer to the same array, so freeze what the
+      // retry must have captured before the send runs.
+      const expectedContents = structuredClone(compressedHistory);
+      reactiveCompaction(135_000, compressedHistory);
+      mockRequests(
+        new Error(
+          "This model's maximum context length is 128000 tokens. However, your messages resulted in 135000 tokens.",
+        ),
+        textStream('answer after compact'),
+      );
+      const snapshots: Content[][] = [];
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-recompress-resnapshot',
+        undefined,
+        {
+          onPreparedRequest: async (prepared) => {
+            snapshots.push(prepared.request.contents);
+          },
+        },
+      );
+      await drain(stream);
+
+      // One capture per attempt. The retry must capture the compacted history:
+      // its snapshot is what recovery re-sends, so replaying the captured
+      // pre-compaction contents would durably persist the oversized request
+      // that the provider just rejected.
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[1]).not.toEqual(snapshots[0]);
+      expect(snapshots[1]).toEqual(expectedContents);
     });
 
     /** Reactive overflow without an actual count: the baseline is a `~` projection. */
@@ -3908,6 +4523,7 @@ describe('LlmChat', async () => {
       // The snapshot carries the pending turn the compression belongs to:
       // resume replaces history wholesale at the compression record, so a
       // snapshot without it would resurrect the answer with no question.
+      expect(recordPayload.summaryPrefixLength).toBe(summaryAck().length);
       expect(recordPayload.compressedHistory).toEqual([
         ...summaryAck(),
         { role: 'user', parts: [{ text: userMessage }] },
@@ -4525,9 +5141,200 @@ describe('LlmChat', async () => {
       throw new Error('unexpected deep clone');
     });
 
+  describe('directory context recovery', () => {
+    it.each([false, true])(
+      'only replays context after a structural reminder when real input is pending (%s)',
+      (realInput) => {
+        const input = realInput ? [userText('Unanswered real input')] : [];
+        const contexts = [
+          markApiHistoryDirectoryContext(userText('Directory changed.')),
+          markApiHistoryDirectoryContext(userText('Directory structure.')),
+        ];
+        const history = [
+          userText('review'),
+          modelText('done'),
+          userText('<system-reminder>\nNew MCP tools.\n</system-reminder>'),
+          ...input,
+          ...contexts,
+        ];
+        const serialized = JSON.stringify(history);
+        chat.setHistory(history);
+        expect(detectTurnInterruption(chat.getHistory())).toEqual(
+          realInput
+            ? {
+                kind: 'interrupted_prompt',
+                parts: [...input, ...contexts].flatMap(
+                  (entry) => entry.parts ?? [],
+                ),
+              }
+            : { kind: 'none' },
+        );
+        expect(JSON.stringify(chat.getHistory())).toBe(serialized);
+      },
+    );
+
+    it.each(['before', 'after'])(
+      'replays exactly the entries strip removes when real input is %s directory context',
+      (position) => {
+        const contexts = [
+          markApiHistoryDirectoryContext(userText('Directory changed.')),
+          markApiHistoryDirectoryContext(userText('Directory structure.')),
+        ];
+        const input = userText('Unanswered real input');
+        const entries =
+          position === 'before' ? [input, ...contexts] : [...contexts, input];
+        const kept = [
+          userText('review'),
+          modelText('done'),
+          userText('<system-reminder>\nNew MCP tools.\n</system-reminder>'),
+        ];
+        chat.setHistory([...kept, ...entries]);
+        const interruption = detectTurnInterruption(chat.getHistory());
+        expect(interruption.kind).toBe('interrupted_prompt');
+        const stripped = chat.stripOrphanedUserEntriesFromHistory();
+        expect(stripped).toEqual(entries);
+        if (interruption.kind === 'interrupted_prompt') {
+          expect(interruption.parts).toEqual(
+            stripped.flatMap((entry) => entry.parts ?? []),
+          );
+        }
+        expect(chat.getHistory()).toEqual(kept);
+      },
+    );
+
+    it('recovers tool results repaired into a directory entry without duplicating them', () => {
+      chat.setHistory([
+        userText('review'),
+        content('model', fnCall('read_file', {}, 'pending')),
+        markApiHistoryDirectoryContext(userText('Directory changed.')),
+        markApiHistoryDirectoryContext(userText('Directory structure.')),
+      ]);
+      expect(chat.repairOrphanedToolUseTurns().injected).toHaveLength(1);
+      const interruption = detectTurnInterruption(chat.getHistory());
+      expect(interruption.kind).toBe('interrupted_prompt');
+      if (interruption.kind === 'interrupted_prompt') {
+        expect(
+          interruption.parts.filter((part) => part.functionResponse),
+        ).toEqual([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ id: 'pending' }),
+          }),
+        ]);
+      }
+      expect(chat.repairOrphanedToolUseTurns().injected).toEqual([]);
+    });
+
+    it.each([false, true])(
+      'only keeps a merged context marker when all entries are internal (%s)',
+      (realInput) => {
+        const following = userText('Following text');
+        if (!realInput) markApiHistoryDirectoryContext(following);
+        chat.setHistory([
+          userText('review'),
+          modelText('done'),
+          markApiHistoryDirectoryContext(userText('Directory context')),
+          following,
+        ]);
+        expect(detectTurnInterruption(chat.getHistory(true)).kind).toBe(
+          realInput ? 'interrupted_prompt' : 'none',
+        );
+      },
+    );
+
+    it.each(['clean', 'prompt-before', 'prompt-after', 'tool'] as const)(
+      'preserves the %s verdict through recovery copies without changing history',
+      (scenario) => {
+        const directories = Array.from({ length: 60 }, (_, index) =>
+          markApiHistoryDirectoryContext(
+            userText(`Directory context ${index}`),
+          ),
+        );
+        const input = userText('Unanswered real input');
+        const history = [userText('review'), modelText('done')];
+        if (scenario === 'prompt-before') history.push(input);
+        if (scenario === 'tool') {
+          history.push(content('model', fnCall('read_file', {}, 'pending')));
+        }
+        history.push(...directories);
+        if (scenario === 'prompt-after') history.push(input);
+        const serialized = JSON.stringify(history);
+        chat.setHistory(history);
+
+        for (const [index, copy] of [
+          chat.getHistory(),
+          chat.getHistoryShallow(),
+          chat.getHistoryForRecovery(50),
+        ].entries()) {
+          const boundedPrompt = index === 2 && scenario === 'prompt-after';
+          expect(JSON.stringify(copy)).toBe(
+            boundedPrompt ? JSON.stringify(history.slice(-50)) : serialized,
+          );
+          const result = detectTurnInterruption(copy);
+          if (scenario === 'clean') {
+            expect(result.kind).toBe('none');
+          } else if (scenario === 'tool') {
+            expect(result).toEqual({
+              kind: 'interrupted_turn',
+              danglingCalls: [{ callId: 'pending', name: 'read_file' }],
+            });
+          } else {
+            expect(result).toEqual({
+              kind: 'interrupted_prompt',
+              parts: history
+                .slice(boundedPrompt ? -50 : 2)
+                .flatMap((entry) => entry.parts ?? []),
+            });
+          }
+        }
+      },
+    );
+
+    it('keeps real input recoverable even if it reuses a marked entry', () => {
+      const input = markApiHistoryDirectoryContext(
+        userText('Directory context'),
+      );
+      markApiHistoryPrompt(input, 'real-prompt');
+      chat.setHistory([userText('review'), modelText('done'), input]);
+      expect(detectTurnInterruption(chat.getHistory())).toEqual({
+        kind: 'interrupted_prompt',
+        parts: input.parts,
+      });
+    });
+  });
+
   describe('completed tool boundary', () => {
     const result = content('user', fnResponse('update_goal', {}, 'ended'));
     const fresh = () => structuredClone(result);
+
+    it.each([
+      [0, 0, undefined],
+      [1, 1, 69],
+      [49, 49, 21],
+      [50, 50, 20],
+      [100, 70, 0],
+    ] as const)(
+      'windows meaningful history with count %s without crossing the completed boundary',
+      (count, length, first) => {
+        const history = [
+          userText('Completed goal.'),
+          content('model', fnCall('update_goal', {}, 'ended')),
+          fresh(),
+          ...Array.from({ length: 70 }, (_, i) =>
+            i % 2 ? modelText(`Entry ${i}`) : userText(`Entry ${i}`),
+          ),
+        ];
+        chat.setHistory(history, ['ended']);
+        const window = chat.getHistoryForRecovery(count);
+        expect(window).toHaveLength(length);
+        expect(window[0]?.parts).toEqual(
+          first === undefined ? undefined : [{ text: `Entry ${first}` }],
+        );
+        expect(window.at(-1)?.parts).toEqual(
+          length ? [{ text: 'Entry 69' }] : undefined,
+        );
+        expect(chat.getHistory()).toEqual(history);
+      },
+    );
 
     it.each(['summary', 'fast'] as const)(
       'preserves and records completed boundaries through %s compression',
@@ -5412,6 +6219,66 @@ describe('LlmChat', async () => {
         'prompt-rollback-transient',
         5_000,
       );
+    });
+
+    it('keeps a captured fallback request outside persistent retry on replay', async () => {
+      const fallbackGenerate = vi
+        .fn()
+        .mockImplementation(async () => textStream('fallback answer'));
+      const fallbackConfig = {
+        model: 'fallback-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      const resolver = wireFallbacks(
+        ['fallback-model'],
+        vi
+          .fn()
+          .mockResolvedValue(
+            fallbackRoute('fallback-model', fallbackGenerate, fallbackConfig),
+          ),
+      );
+      streamMock().mockRejectedValue(tpmCapacityError());
+      const saved: LlmPreparedRequest[] = [];
+      vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'false');
+      try {
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'original' },
+            'fallback-replay',
+            undefined,
+            {
+              onPreparedRequest: async (prepared) => {
+                saved.push(prepared);
+              },
+            },
+          ),
+        );
+        const fallback = saved.find(
+          (prepared) => prepared.request.model === 'fallback-model',
+        );
+        expect(fallback).toBeDefined();
+        expect(fallback!.allowPersistentRetry).toBe(false);
+        vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'true');
+        mockRetryWithBackoff.mockClear();
+        resolver.mockClear();
+        await drain(
+          await newChat().sendPreparedMessageStream(
+            fallback!,
+            'fallback-replay',
+            new AbortController().signal,
+          ),
+        );
+        expect(mockRetryWithBackoff).toHaveBeenCalledOnce();
+        expect(mockRetryWithBackoff.mock.calls[0]?.[1].persistentMode).toBe(
+          false,
+        );
+        expect(mockRetryWithBackoff.mock.calls[0]?.[1]).not.toHaveProperty(
+          'heartbeatFn',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
 
     it('does not enter the fallback chain in unattended retry mode', async () => {
@@ -9757,6 +10624,122 @@ describe('LlmChat', async () => {
   });
 
   describe('stripOrphanedUserEntriesFromHistory', () => {
+    const compressedWithImage = () =>
+      composePostCompactHistory(
+        [
+          {
+            role: 'user',
+            parts: [{ inlineData: { mimeType: 'image/png', data: 'AA==' } }],
+          },
+        ],
+        'Summary.',
+        { maxFiles: 0 },
+      );
+    it('keeps real turns in numeric forks before attachment curation merges them', async () => {
+      const compacted = await composePostCompactHistory([], 'Summary.', {
+        maxFiles: 0,
+        planModeActive: true,
+      });
+      const pending = userText('A real follow-up.');
+      const done = modelText('Done.');
+      chat.setHistory([...compacted, pending, done]);
+      expect(selectForkHistory(chat.getHistoryForForkWindow(), 1)).toEqual([
+        pending,
+        done,
+      ]);
+      expect(JSON.stringify(chat.getHistory())).toBe(
+        JSON.stringify([...compacted, pending, done]),
+      );
+      chat.setHistory(compacted);
+      expect(JSON.stringify(chat.getHistoryForForkWindow())).toBe(
+        JSON.stringify(compacted),
+      );
+    });
+
+    it('preserves the original compressed layout in constructors and history replacement', async () => {
+      const compacted = await compressedWithImage();
+      const wire = JSON.stringify(compacted);
+      const restored = new LlmChat(mockConfig, {}, compacted);
+      for (const target of [restored, chat]) {
+        target.setHistory(compacted);
+        expect(detectTurnInterruption(target.getHistory())).toEqual({
+          kind: 'none',
+        });
+        expect(target.stripOrphanedUserEntriesFromHistory()).toEqual([]);
+        expect(JSON.stringify(target.getHistory())).toBe(wire);
+      }
+      expect(compacted).toHaveLength(3);
+      restored.truncateHistory(2);
+      const input = userText('Real failed input after truncation.');
+      restored.addHistory(input);
+      expect(restored.stripOrphanedUserEntriesFromHistory()).toEqual([input]);
+    });
+
+    it.each([
+      '<background-tasks>\nExplain this tag.',
+      'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+    ])(
+      'preserves context while replaying real heading-shaped input: %s',
+      async (text) => {
+        const compacted = await compressedWithImage();
+        const pending = userText(text);
+        chat.setHistory([...compacted, pending]);
+        expect(detectTurnInterruption(chat.getHistory())).toEqual({
+          kind: 'interrupted_prompt',
+          parts: pending.parts,
+        });
+        expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([pending]);
+        expect(chat.getHistory()).toEqual(compacted);
+        expect(detectTurnInterruption(chat.getHistory())).toEqual({
+          kind: 'none',
+        });
+      },
+    );
+
+    it.each([0, 48, 49, 60, 200])(
+      'keeps recovery consistent with full history and retains all %s notifications and agent replies',
+      async (count) => {
+        const compacted = await compressedWithImage();
+        const notifications = Array.from({ length: count }, () =>
+          userText('<task-notification>Done.</task-notification>'),
+        );
+        const agent = userText(
+          formatAgentMessageModelText({
+            displayText: 'done',
+            author: { agentId: 'agent-1', name: 'worker' },
+            runId: 'run-1',
+            status: 'completed',
+          }),
+        );
+        const pending = userText('Real failed input.');
+        const call = content('model', fnCall('read_file', {}, 'pending-call'));
+        const tails = [
+          notifications,
+          [pending, ...notifications],
+          [pending, ...notifications, agent],
+          [pending, ...notifications, agent, ...notifications],
+          [call, ...notifications, agent],
+        ];
+        const expectedKinds = [
+          'none',
+          'interrupted_prompt',
+          'none',
+          count ? 'interrupted_prompt' : 'none',
+          'interrupted_turn',
+        ];
+        for (const [index, tail] of tails.entries()) {
+          chat.setHistory([...compacted, ...tail]);
+          const full = detectTurnInterruption(chat.getHistory());
+          const window = chat.getHistoryForRecovery(50);
+          expect(window).toHaveLength(tail.length);
+          const bounded = detectTurnInterruption(window);
+          expect(full.kind).toBe(expectedKinds[index]);
+          expect(bounded.kind).toBe(full.kind);
+          expect(bounded).toEqual(full);
+        }
+      },
+    );
+
     const earlier = () => [
       userText('earlier prompt'),
       modelText('earlier response'),
@@ -10333,6 +11316,38 @@ describe('LlmChat', async () => {
       streamMock().mockImplementation(async () => streams[served.calls++]!);
       return served;
     }
+
+    it.each([false, true])(
+      'marks prefix continuations and propagates a durability refusal (%s)',
+      async (refuse) => {
+        const served = serveStreams(
+          truncated('discarded'),
+          truncated('kept prefix'),
+          streamOf(stopResponse([{ text: 'suffix' }])),
+        );
+        const flags: boolean[] = [];
+        const response = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'original' },
+          'prepared-continuation',
+          undefined,
+          {
+            onPreparedRequest: async (_request, continuing) => {
+              flags.push(continuing === true);
+              if (refuse && continuing)
+                throw new Error('Store unavailable during continuation');
+            },
+          },
+        );
+        if (refuse)
+          await expect(drain(response)).rejects.toBeInstanceOf(
+            LlmRequestPreparationError,
+          );
+        else await drain(response);
+        expect(flags).toEqual([false, false, true]);
+        expect(served.calls).toBe(refuse ? 2 : 3);
+      },
+    );
 
     const sendOn = (
       model: string,
@@ -11632,6 +12647,65 @@ describe('LlmChat', async () => {
       expect(chat.getLastPromptTokenCount()).toBe(200);
     });
 
+    it('awaits the Managed checkpoint including pending input before applying compressed history', async () => {
+      const compress = mockCompressionService('compressed');
+      const before = [userText('old question'), modelText('old answer')];
+      chat.setHistory(before);
+      let release: () => void = () => {};
+      let observed: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        observed = resolve;
+      });
+      const observer = vi.fn(async () => {
+        observed();
+        await gate;
+      });
+      chat.setCompressionObserver(observer, { restoreRecentFiles: false });
+      const pending = userText('new question');
+      markApiHistoryPrompt(pending, 'hosted');
+      const running = chat.tryCompress('hosted', false, undefined, {
+        pendingUserMessage: pending,
+      });
+      await ready;
+      expect(chat.getHistory()).toEqual(before);
+      expect(observer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          compressedHistory: [
+            userText('summary'),
+            modelText('ok'),
+            userText('latest'),
+            pending,
+          ],
+          summaryPrefixLength: 3,
+          promptIds: [null, null, null, 'hosted'],
+        }),
+      );
+      expect(compress.mock.calls[0][1].restoreRecentFiles).toBe(false);
+      release();
+      await running;
+      expect(chat.getHistory()).toEqual([
+        userText('summary'),
+        modelText('ok'),
+        userText('latest'),
+      ]);
+    });
+
+    it('keeps live history unchanged when the Managed compression checkpoint is refused', async () => {
+      mockCompressionService('compressed');
+      const before = [userText('old question'), modelText('old answer')];
+      chat.setHistory(before);
+      chat.setCompressionObserver(async () => {
+        throw new Error('checkpoint refused');
+      });
+      await expect(chat.tryCompress('hosted', true)).rejects.toThrow(
+        'checkpoint refused',
+      );
+      expect(chat.getHistory()).toEqual(before);
+    });
+
     it('mirrors lastPromptTokenCount to the global telemetry only when wired', async () => {
       mockCompressionService('compressed');
       // `chat` was constructed with telemetryService=uiTelemetryService.
@@ -11745,6 +12819,9 @@ describe('LlmChat', async () => {
       expect(info.newTokenCount).toBeLessThan(1000);
       expect(fastChat.isLastPromptTokenCountEstimated()).toBe(true);
       expect(recordChatCompression).toHaveBeenCalledWith(checkpointWith(true));
+      expect(
+        recordChatCompression.mock.calls[0][0].summaryPrefixLength,
+      ).toBeUndefined();
     });
 
     // Issue #9309: /compress-fast then /compress banners use two scales (API
@@ -11852,6 +12929,201 @@ describe('LlmChat', async () => {
   // #9454: API counts describe the serialization of the route (model + auth
   // + endpoint) that produced them. /model keeps this LlmChat, so the old
   // route's counts must not anchor admission, clamp or compression.
+  describe('tool result injection accounting', () => {
+    beforeEach(() => {
+      mockConfig.getToolOutputBatchBudget = () => 200000;
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'test-model',
+        contextWindowSize: 1000000,
+      });
+      vi.spyOn(chat, 'tryCompress').mockResolvedValue({
+        compressionStatus: CompressionStatus.NOOP,
+        originalTokenCount: 0,
+        newTokenCount: 0,
+      });
+    });
+    const result = () =>
+      attachToolOutputProvenance(
+        [
+          fnResponse(
+            'shell',
+            { output: 'x'.repeat(20000) },
+            'anonymous-result',
+          ),
+        ],
+        {
+          callId: 'anonymous-result',
+          toolName: 'shell',
+          toolType: 'native',
+          promptId: 'p',
+          rawSize: { chars: 20000, estimatedTokens: 5000 },
+          truncated: false,
+        },
+      );
+    const injected = (index: number) => requestAt(index).contents as Content[];
+    const resultChars = (index: number) =>
+      measureToolOutput(
+        injected(index)
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.functionResponse),
+      ).chars;
+
+    it('records the submitted result once per tool call', async () => {
+      mockStreamsOnce(textStream('done'), textStream('again'));
+      await sendDrain(result(), 'first');
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(1);
+      const event = vi
+        .mocked(logToolResultSize)
+        .mock.calls.find(([, entry]) => entry.layer === 'injection')![1];
+      expect(event.raw_content_length).toBe(20000);
+      expect(event.injected_content_length).toBe(resultChars(0));
+      await sendDrain('next', 'second');
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, entry]) => entry.layer === 'injection'),
+      ).toHaveLength(1);
+    });
+
+    it.each(['constructor', 'setHistory'] as const)(
+      'does not recount %s history while counting new fork results',
+      async (load) => {
+        const inherited = result();
+        const history = [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'shell',
+                  args: {},
+                  id: 'anonymous-result',
+                },
+              },
+            ],
+          },
+          { role: 'user', parts: inherited },
+          modelText('parent complete'),
+        ];
+        if (load === 'constructor') chat = new LlmChat(mockConfig, {}, history);
+        else chat.setHistory(history);
+        vi.spyOn(chat, 'tryCompress').mockResolvedValue({
+          compressionStatus: CompressionStatus.NOOP,
+          originalTokenCount: 0,
+          newTokenCount: 0,
+        });
+        const fresh = attachToolOutputProvenance(
+          [fnResponse('shell', { output: 'fresh' }, 'fork-result')],
+          {
+            callId: 'fork-result',
+            toolName: 'shell',
+            toolType: 'native',
+            promptId: 'fork',
+            truncated: false,
+          },
+        );
+        mockStreamsOnce(textStream('done'), textStream('again'));
+        await sendDrain(fresh, 'fork');
+        await sendDrain('next', 'replay');
+        const events = vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection')
+          .map(([, event]) => event);
+        expect(events).toHaveLength(1);
+        expect(events[0].call_id).toBe('fork-result');
+        expect(events[0].prompt_id).toBe('fork');
+      },
+    );
+
+    // A result parked through addHistory has not been submitted to the
+    // generator yet, so its one owed injection event must survive until the
+    // turn that actually carries it.
+    it('counts a parked result once on the turn that submits it', async () => {
+      chat.addHistory({ role: 'user', parts: result() });
+      mockStreamsOnce(textStream('done'), textStream('again'));
+      await sendDrain('next', 'parked');
+      await sendDrain('next', 'again');
+      const events = vi
+        .mocked(logToolResultSize)
+        .mock.calls.filter(([, event]) => event.layer === 'injection')
+        .map(([, event]) => event);
+      expect(events).toHaveLength(1);
+      expect(events[0].call_id).toBe('anonymous-result');
+      expect(events[0].prompt_id).toBe('p');
+    });
+
+    it('records each parallel result and preserves user steering', async () => {
+      const second = attachToolOutputProvenance(
+        [fnResponse('read_file', { output: 'y'.repeat(20000) }, 'second')],
+        {
+          callId: 'second',
+          toolName: 'read_file',
+          toolType: 'native',
+          promptId: 'p',
+          rawSize: { chars: 20000, estimatedTokens: 5000 },
+          truncated: false,
+        },
+      );
+      mockStreamsOnce(textStream('done'));
+      await sendDrain(
+        [...result(), ...second, { text: 'Preserve this user instruction.' }],
+        'first',
+      );
+      expect(
+        injected(0)
+          .flatMap((entry) => entry.parts ?? [])
+          .some((part) => part.text === 'Preserve this user instruction.'),
+      ).toBe(true);
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(2);
+    });
+
+    it('counts a retried generator request once', async () => {
+      mockRetryWithBackoff.mockImplementation(async (apiCall) => {
+        try {
+          return await apiCall();
+        } catch {
+          return apiCall();
+        }
+      });
+      streamMock()
+        .mockRejectedValueOnce(new Error('temporary transport failure'))
+        .mockResolvedValueOnce(textStream('done'));
+      await sendDrain(result(), 'retry');
+      expect(streamMock()).toHaveBeenCalledTimes(2);
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(1);
+    });
+
+    it('does not count a request cancelled before generator dispatch', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: result(), config: { abortSignal: controller.signal } },
+        'cancelled',
+      );
+      await expect(drain(stream)).rejects.toThrow();
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(0);
+    });
+  });
+
   describe('route-scoped token counts (#9454)', () => {
     const switchRoute = (routeKey: string) => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(routeKey);
@@ -12999,4 +14271,22 @@ describe('LlmChat', async () => {
       });
     });
   });
+});
+
+it('pins the reasoning registry route independently of credentials', () => {
+  const config = {
+    model: 'fixture',
+    authType: AuthType.USE_OPENAI,
+    baseUrl: 'https://fixture.invalid',
+    reasoningRouteBaseUrl: 'https://route-a.invalid',
+  };
+  expect(llmPreparedProviderPin(config)).not.toBe(
+    llmPreparedProviderPin({
+      ...config,
+      reasoningRouteBaseUrl: 'https://route-b.invalid',
+    }),
+  );
+  expect(llmPreparedProviderPin(config)).toBe(
+    llmPreparedProviderPin({ ...config, apiKey: 'rotated' }),
+  );
 });

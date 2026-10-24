@@ -7,9 +7,8 @@
  */
 
 /**
- * Compact native OpenTUI Memory and StatusLine dialogs (M3 long-tail, #8677).
- * Faithful-enough display ports: Memory lists the user/project memory sources
- * + toggles from settings; StatusLine lists the preset items. Esc closes.
+ * Native OpenTUI Memory dialog: user/project sources and settings toggles.
+ * Esc closes.
  */
 
 import { useLayoutEffect } from 'react';
@@ -20,7 +19,6 @@ import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { getAllGeminiMdFilenames } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { STATUS_LINE_PRESET_ITEMS } from '../statusLinePresets.js';
 import { C } from './theme.js';
 
 /**
@@ -69,7 +67,13 @@ const Shell = ({
     paddingRight={2}
     paddingTop={1}
     paddingBottom={1}
-    marginTop={1}
+    // A shrinkable frame lets a short region squeeze its text rows to zero
+    // and paint them over each other; staying natural height keeps the rows
+    // contiguous for the region's clip to cut at the tail, as ink does for
+    // /stats. The clip cuts child text but not the frame's own border
+    // strokes, so a frame taller than the region still paints its border
+    // past it, and a body with an explicit height windows itself from the
+    // region budget instead of relying on the clip (Decision 71).
     flexShrink={0}
   >
     <box flexDirection="row" justifyContent="space-between">
@@ -109,6 +113,8 @@ export function OpenTuiMemoryDialog(props: {
   config?: Config;
   settings: LoadedSettings;
   onClose: () => void;
+  /** The popup region's row budget; the memory body does not window, so it is ignored. */
+  availableTerminalHeight?: number;
 }) {
   const { config, settings, onClose } = props;
   useEsc(onClose);
@@ -149,27 +155,6 @@ export function OpenTuiMemoryDialog(props: {
           label="Auto-skill:"
           value={toggle('enableAutoSkill') ? 'on' : 'off'}
         />
-      </box>
-    </Shell>
-  );
-}
-
-export function OpenTuiStatusLineDialog(props: {
-  settings: LoadedSettings;
-  onClose: () => void;
-}) {
-  const { onClose } = props;
-  useEsc(onClose);
-  return (
-    <Shell title="Status Line">
-      <box flexDirection="column" marginTop={1}>
-        <text fg={C.dim}>{'Preset items:'}</text>
-        {STATUS_LINE_PRESET_ITEMS.map((it) => (
-          <box key={it.id} flexDirection="row">
-            <text fg={C.green}>{'• '}</text>
-            <text fg={C.text}>{it.label}</text>
-          </box>
-        ))}
       </box>
     </Shell>
   );
