@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-mysql
+  labels:
+    {{- include "managed-agent.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-mysql
+  labels:
+    {{- include "managed-agent.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ .Release.Name }}-mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: mysql
+  template:
+    metadata:
+      labels:
+        {{- include "managed-agent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: mysql
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mysql
+          image: {{ .Values.mysql.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - name: mysql
+              containerPort: 3306
+          env:
+            - name: MYSQL_DATABASE
+              value: qwen_managed_agent
+            - name: MYSQL_USER
+              value: qwen
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "managed-agent.secret" . }}
+                  key: mysql-password
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "managed-agent.secret" . }}
+                  key: mysql-root-password
+          startupProbe:
+            tcpSocket:
+              port: mysql
+            periodSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            tcpSocket:
+              port: mysql
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'MYSQL_PWD="$MYSQL_PASSWORD" mysql --host=127.0.0.1 --user=qwen --database=qwen_managed_agent --execute="SELECT 1; SELECT 1 FROM performance_schema.user_variables_by_thread LIMIT 0"'
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.mysql.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+              subPath: mysql
+            - name: config
+              mountPath: /docker-entrypoint-initdb.d/qwen.sql
+              subPath: mysql-init.sql
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.mysql.storage.className }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.mysql.storage.size | quote }}
