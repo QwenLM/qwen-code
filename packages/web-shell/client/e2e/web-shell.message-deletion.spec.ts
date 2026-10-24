@@ -922,9 +922,20 @@ test('message actions use a hoverable menu that also supports click and keyboard
   await page.mouse.move(triggerBox!.x + triggerBox!.width / 2, gapY);
   await page.waitForTimeout(60);
   await expect(menu).toBeVisible();
-  await menu
-    .getByRole('menuitem', { name: 'Edit message', exact: true })
-    .hover();
+  // The hover-close timer is 120ms; on contended CI hosts a full hover()'s
+  // actionability checks can exceed the remaining window and the menu
+  // unmounts before the pointer cancels the timer. A stepped raw move fires
+  // pointer events (and thus pointerenter on the menu) without that overhead.
+  const editItem = menu.getByRole('menuitem', {
+    name: 'Edit message',
+    exact: true,
+  });
+  const editItemBox = (await editItem.boundingBox())!;
+  await page.mouse.move(
+    editItemBox.x + editItemBox.width / 2,
+    editItemBox.y + editItemBox.height / 2,
+    { steps: 3 },
+  );
   await page.waitForTimeout(180);
   await expect(menu).toBeVisible();
   const hoveredItem = menu.getByRole('menuitem', {

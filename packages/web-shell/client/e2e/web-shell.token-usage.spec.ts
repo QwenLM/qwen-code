@@ -536,17 +536,23 @@ for (const { width, language, theme } of [
               .evaluate((button) => {
                 const meta = button.parentElement!.getBoundingClientRect();
                 const header = button.parentElement!.parentElement!;
+                const headerBox = header.getBoundingClientRect();
                 const value = header.firstElementChild!.getBoundingClientRect();
+                // Whether the meta row wraps at the panel's min width depends on
+                // glyph advance widths, which differ across runner images (host
+                // font sets). Derive the expected outcome from the measured
+                // single-line width instead of hardcoding x64 metrics.
+                const gap = parseFloat(getComputedStyle(header).columnGap) || 0;
+                const singleLineWidth = value.width + gap + meta.width;
                 return {
-                  right: Math.abs(
-                    meta.right - header.getBoundingClientRect().right,
-                  ),
+                  right: Math.abs(meta.right - headerBox.right),
                   wrapped: meta.top >= value.bottom,
+                  overflows: singleLineWidth > header.clientWidth + 2,
                   fits: header.scrollWidth <= header.clientWidth + 1,
                 };
               });
             expect(alignment.right).toBeLessThanOrEqual(1);
-            expect(alignment.wrapped).toBe(true);
+            expect(alignment.wrapped).toBe(alignment.overflows);
             expect(alignment.fits).toBe(true);
           }
         }
