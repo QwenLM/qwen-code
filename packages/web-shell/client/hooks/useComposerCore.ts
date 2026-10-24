@@ -1457,15 +1457,16 @@ function shallowEqualSlashMenu(
 
 type MultilineHistoryBoundary = 'editor' | 'handled' | 'history';
 
+// Arrow paging needs both the browse flag (cleared on edits) and an armed index.
 function handleMultilineHistoryBoundary(
   view: EditorView,
   direction: 'up' | 'down',
-  isNavigatingHistory: boolean,
+  isPagingHistory: boolean,
 ): MultilineHistoryBoundary {
   const doc = view.state.doc;
   const selection = view.state.selection.main;
   if (!selection.empty) return 'editor';
-  if (isNavigatingHistory && doc.lines === 1) return 'history';
+  if (isPagingHistory && doc.lines === 1) return 'history';
 
   const head = selection.head;
   const caret = view.coordsAtPos(head, selection.assoc < 0 ? -1 : 1);
@@ -2663,6 +2664,11 @@ export function useComposerCore(
       // flag and re-arms persistence (handleMobileChange or a programmatic
       // write on touch, the CodeMirror update listener on desktop).
       historyBrowseActiveRef.current = true;
+      (shellModeRef.current
+        ? shellHistoryActionsRef.current
+        : historyActionsRef.current
+      ).reset();
+      if (!shellModeRef.current) clearPromptHistoryDraftTags();
       if (!view) {
         if (isTouchComposer) {
           // Plain-text restore: inline tag chips are not recreated on the
@@ -2673,7 +2679,12 @@ export function useComposerCore(
       }
       restoreHistoryEntry(view, text);
     },
-    [isTouchComposer, restoreHistoryEntry, setMobileText],
+    [
+      clearPromptHistoryDraftTags,
+      isTouchComposer,
+      restoreHistoryEntry,
+      setMobileText,
+    ],
   );
   const composerInputRef = useRef(composerInput);
   composerInputRef.current = composerInput;

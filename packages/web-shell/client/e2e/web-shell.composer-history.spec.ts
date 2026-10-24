@@ -214,13 +214,22 @@ test('active selections preserve both drafts and recalled history @smoke', async
   await expectText(editor, history[1]!);
 });
 
-for (const recall of ['search', 'panel']) {
-  test(`a ${recall} recall keeps wrapped text while arrows move inside it @smoke`, async ({
+for (const [recall, paged] of [
+  ['search', false],
+  ['panel', false],
+  ['search', true],
+  ['panel', true],
+] as const) {
+  test(`a ${recall} recall keeps wrapped text while arrows move inside it (paged: ${paged}) @smoke`, async ({
     page,
     baseURL,
   }) => {
     const editor = await openSession(page, baseURL!);
     await editor.fill('unsent draft');
+    if (paged) {
+      await editor.press('ArrowUp');
+      await expectText(editor, history[1]!);
+    }
     await editor.press('Control+r');
     const search = page.locator('[data-web-shell-composer-history-search]');
     await search.fill('Older prompt:');
@@ -243,5 +252,11 @@ for (const recall of ['search', 'panel']) {
     await expectText(editor, history[0]!);
     expect(await caretOffset(editor)).toBeLessThan(middle);
     await expect(editor).toBeFocused();
+
+    await editor.press('ControlOrMeta+Home');
+    await editor.press('ArrowUp');
+    await expectText(editor, history[1]!);
+    await editor.press('ArrowDown');
+    await expectText(editor, history[0]!);
   });
 }

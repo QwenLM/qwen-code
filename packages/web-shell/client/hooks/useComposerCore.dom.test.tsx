@@ -343,21 +343,29 @@ describe('useComposerCore tooltip portal', () => {
 
 describe('useComposerCore history and drafts', () => {
   it.each([
-    ['panel', 'ArrowUp'],
-    ['panel', 'ArrowDown'],
-    ['search', 'ArrowUp'],
-    ['search', 'ArrowDown'],
+    ['panel', 'ArrowUp', false],
+    ['panel', 'ArrowDown', false],
+    ['search', 'ArrowUp', false],
+    ['search', 'ArrowDown', false],
+    ['panel', 'ArrowUp', true],
+    ['panel', 'ArrowDown', true],
+    ['search', 'ArrowUp', true],
+    ['search', 'ArrowDown', true],
   ] as const)(
-    'keeps caret control after a %s recall followed by %s',
-    async (recall, key) => {
-      const entry = 'line one\nline two\nline three';
+    'keeps caret control after a wrapped %s recall followed by %s (paged: %s)',
+    async (recall, key, paged) => {
+      const entry = 'line one line two line three';
       localStorage.setItem(
-        'qwen-web-shell-history',
-        JSON.stringify([entry, 'newest prompt']),
+        getPromptHistoryStorageKey(),
+        JSON.stringify([entry, 'middle prompt', 'newest prompt']),
       );
       const onFocusFooter = vi.fn(() => true);
       await mount({ onFocusFooter });
       act(() => latest!.setText('unsent draft'));
+      if (paged) {
+        act(() => pressHistoryKey('ArrowUp'));
+        expect(latest!.getText()).toBe('newest prompt');
+      }
       act(() => latest!.searchState.openHistorySearch());
       if (recall === 'panel') {
         act(() => latest!.searchState.restoreSearchMatch!(entry));
@@ -379,6 +387,11 @@ describe('useComposerCore history and drafts', () => {
       }
       expect(latest!.getText()).toBe(entry);
       const view = latest!.viewRef.current!;
+      vi.spyOn(view, 'coordsAtPos').mockImplementation((position) => {
+        const top =
+          position === 0 ? 0 : position === view.state.doc.length ? 44 : 22;
+        return { left: 0, right: 1, top, bottom: top + 22 };
+      });
       act(() => view.dispatch({ selection: { anchor: 12 } }));
       act(() => pressHistoryKey(key));
       expect(latest!.getText()).toBe(entry);
@@ -391,7 +404,7 @@ describe('useComposerCore history and drafts', () => {
     async (key) => {
       const entry = 'recalled entry';
       localStorage.setItem(
-        'qwen-web-shell-history',
+        getPromptHistoryStorageKey(),
         JSON.stringify(['older prompt', entry]),
       );
       await mount();
@@ -409,7 +422,7 @@ describe('useComposerCore history and drafts', () => {
     async (key) => {
       const entry = 'line one\nline two\nline three';
       localStorage.setItem(
-        'qwen-web-shell-history',
+        getPromptHistoryStorageKey(),
         JSON.stringify(['older prompt', entry]),
       );
       await mount();
@@ -3180,6 +3193,24 @@ describe('useComposerCore tags', () => {
 
     expect(latest!.getText()).toBe(draftText);
     expect(latest!.composerTags).toEqual([draftTag]);
+  });
+
+  it('does not restore old draft tags after paging from a panel recall', async () => {
+    await mount();
+    act(() => {
+      latest!.setText('previous prompt');
+      latest!.submitText();
+      latest!.setText('draft prompt');
+      latest!.addTags([
+        { id: 'file:draft.txt', value: 'draft.txt', serialized: '@draft.txt' },
+      ]);
+    });
+    act(() => pressHistoryKey('ArrowUp'));
+    act(() => latest!.searchState.restoreSearchMatch!('selected prompt'));
+    act(() => pressHistoryKey('ArrowUp'));
+    act(() => pressHistoryKey('ArrowDown'));
+    expect(latest!.getText()).toBe('selected prompt');
+    expect(latest!.composerTags).toEqual([]);
   });
 
   it('restores tags when Tab or a search-result selection recalls history', async () => {
