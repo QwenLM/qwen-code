@@ -31,4 +31,22 @@ describe('managed auto-memory entries', () => {
     expect(rendered).toContain('Why: This reduces back-and-forth.');
     expect(rendered).toContain('How to apply: Prefer concise summaries first.');
   });
+
+  it('parses CRLF bodies without stray carriage returns', () => {
+    const body = [
+      '# User Memory',
+      '',
+      '- User prefers terse responses.',
+      '  - Why: This reduces back-and-forth.',
+      '- Always use strict mode.',
+    ].join('\r\n');
+
+    expect(parseAutoMemoryEntries(body)).toEqual([
+      {
+        summary: 'User prefers terse responses.',
+        why: 'This reduces back-and-forth.',
+      },
+      { summary: 'Always use strict mode.' },
+    ]);
+  });
 });

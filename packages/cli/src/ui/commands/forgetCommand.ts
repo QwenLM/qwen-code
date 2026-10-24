@@ -46,11 +46,17 @@ export const forgetCommand: SlashCommand = {
         .forgetMatches(config.getProjectRoot(), selection.matches, undefined, {
           config,
         });
+      const skippedNote = result.skippedFiles?.length
+        ? t(
+            'Skipped files with unparseable frontmatter; matching entries were kept: {{files}}',
+            { files: result.skippedFiles.join(', ') },
+          )
+        : undefined;
       return {
         type: 'message',
         messageType: 'info',
         content:
-          result.systemMessage ??
+          [result.systemMessage, skippedNote].filter(Boolean).join('\n') ||
           t('No managed auto-memory entries matched: {{query}}', { query }),
       };
     } catch (error) {

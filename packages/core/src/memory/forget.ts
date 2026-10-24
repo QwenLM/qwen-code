@@ -32,6 +32,7 @@ import {
   scanAllAutoMemoryTopicDocuments,
   scanAllUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
+  validateStructuredAutoMemoryDocument,
 } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
@@ -85,6 +86,8 @@ export interface AutoMemoryForgetResult {
   touchedTopics: AutoMemoryType[];
   touchedScopes: AutoMemoryStorageScope[];
   systemMessage?: string;
+  /** Files whose matches were kept because their frontmatter is malformed. */
+  skippedFiles?: string[];
 }
 
 export interface AutoMemoryForgetSelectionResult {
@@ -506,6 +509,7 @@ export async function forgetManagedAutoMemoryMatches(
   options.abortSignal?.throwIfAborted();
 
   const removedEntries: AutoMemoryForgetMatch[] = [];
+  const skippedFiles: string[] = [];
   const touchedTopics = new Set<AutoMemoryType>();
   const touchedScopes = new Set<AutoMemoryStorageScope>();
 
@@ -524,10 +528,30 @@ export async function forgetManagedAutoMemoryMatches(
       options.abortSignal?.throwIfAborted();
       const rawContent = await fs.readFile(filePath, 'utf-8');
       options.abortSignal?.throwIfAborted();
-      const fmMatch = rawContent.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+      // Parse on LF like the scanner. A rewrite keeps the line ending of the
+      // frontmatter opener, as metadata-migration's splitFrontmatter does.
+      const lineEnding =
+        rawContent.match(/^---(\r?\n)/)?.[1] === '\r\n' ? '\r\n' : '\n';
+      const content = rawContent.replace(/\r\n/g, '\n');
+      const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
 
       if (!fmMatch) {
+        // Frontmatter that is present but unparseable (BOM, leading
+        // whitespace, unclosed) must not cost the file all its entries.
+        if (
+          !validateStructuredAutoMemoryDocument(
+            content,
+          ).missingOrInvalidFields.includes('frontmatter-missing')
+        ) {
+          debugLogger.warn(
+            'Managed auto-memory forget skipped file with malformed frontmatter:',
+            { filePath },
+          );
+          skippedFiles.push(filePath);
+          continue;
+        }
         // No frontmatter — delete the whole file.
+        // Contract: /forget passes only structured files; no per-entry removal.
         options.abortSignal?.throwIfAborted();
         await fs.unlink(filePath);
         removedEntries.push(...fileMatches);
@@ -588,7 +612,10 @@ export async function forgetManagedAutoMemoryMatches(
         options.abortSignal?.throwIfAborted();
         await atomicWriteFile(
           filePath,
-          `---\n${frontmatter}\n---\n\n${newBody}\n`,
+          `---\n${frontmatter}\n---\n\n${newBody}\n`.replaceAll(
+            '\n',
+            lineEnding,
+          ),
           { encoding: 'utf-8' },
         );
       }
@@ -648,6 +675,7 @@ export async function forgetManagedAutoMemoryMatches(
       removedEntries.length > 0
         ? `Managed auto-memory forgot ${removedEntries.length} entr${removedEntries.length === 1 ? 'y' : 'ies'} from: ${[...touchedTopics].map((topic) => `${topic}/`).join(', ')}`
         : undefined,
+    ...(skippedFiles.length > 0 ? { skippedFiles } : {}),
   };
 }
 
