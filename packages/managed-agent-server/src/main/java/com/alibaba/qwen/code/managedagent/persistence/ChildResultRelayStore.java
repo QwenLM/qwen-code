@@ -702,16 +702,35 @@ public class ChildResultRelayStore {
             if (!parts.isArray()) {
                 throw new IllegalStateException("Message parts are not an ordered array");
             }
-            List<JsonNode> text = new ArrayList<>();
+            List<JsonNode> runs = new ArrayList<>();
             parts.forEach(part -> {
-                if ("output_text".equals(part.path("type").asText())) {
-                    text.add(part);
+                String type = part.path("type").asText();
+                if ("output_text".equals(type) || "reasoning".equals(type)) {
+                    runs.add(part);
                 }
             });
-            text.sort(java.util.Comparator.comparingLong((JsonNode part) -> part.path("lastSequence").asLong())
+            runs.sort(java.util.Comparator.comparingLong((JsonNode part) -> part.path("lastSequence").asLong())
                     .thenComparing(part -> part.path("partId").asText()));
-            return text.isEmpty() ? null : String.join("\n", text.stream()
-                    .map(part -> part.path("text").asText()).toList());
+            // The projection starts a new output_text Part whenever another
+            // event lands between two deltas of one run, so adjacent Parts
+            // still join as sent; only a reasoning Part starts a line, which
+            // is the rule journalTurnText applies.
+            StringBuilder text = new StringBuilder();
+            boolean separated = false;
+            boolean answered = false;
+            for (JsonNode part : runs) {
+                if ("reasoning".equals(part.path("type").asText())) {
+                    separated = !text.isEmpty();
+                } else {
+                    if (separated) {
+                        text.append('\n');
+                        separated = false;
+                    }
+                    text.append(part.path("text").asText());
+                    answered = true;
+                }
+            }
+            return answered ? text.toString() : null;
         } catch (java.io.IOException error) {
             throw new IllegalStateException("Message parts are invalid", error);
         }
