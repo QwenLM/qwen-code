@@ -89,6 +89,11 @@ describe('extractShellOperations', () => {
       [read('/etc/hosts')],
     ],
     [
+      'grep: -n is line numbers and does not consume the pattern',
+      'grep -n pattern /etc/hosts',
+      [read('/etc/hosts')],
+    ],
+    [
       'grep: -A value not treated as path',
       'grep -A 3 error /var/log/app.log',
       [read('/var/log/app.log')],
