@@ -1,5 +1,215 @@
 import { describe, expect, it } from 'vitest';
-import { buildUnifiedDiff, parseUnifiedDiff } from './unifiedDiff';
+import {
+  buildContextBoundedDiff,
+  buildUnifiedDiff,
+  DIFF_CRLF_MIXED_MARKER,
+  DIFF_CRLF_UNIFORM_MARKER,
+  DIFF_OMITTED_MARKER,
+  DIFF_TRAILING_NEWLINE_ADDED_MARKER,
+  DIFF_TRAILING_NEWLINE_REMOVED_MARKER,
+  localizeDiffNotice,
+  parseUnifiedDiff,
+} from './unifiedDiff';
+
+// The builder must emit an ASCII-safe marker, not a user-facing sentence: this
+// module is import-free, so the `t()` catalog can only reach the notice at the
+// render boundary. Asserting through a stub translator means re-hardcoding an
+// English literal into the builder turns these cases red.
+const stubT = (key: string) => `[${key}]`;
+
+describe('buildContextBoundedDiff', () => {
+  it('reports distant edits that exceed the trimmed LCS budget without a coarse hunk', () => {
+    const oldLines = Array.from({ length: 2_000 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[1] = 'first change';
+    newLines[1_998] = 'last change';
+    const diff = buildContextBoundedDiff(
+      oldLines.join('\n'),
+      newLines.join('\n'),
+    );
+    expect(diff).toBe(DIFF_OMITTED_MARKER);
+    expect(localizeDiffNotice(diff, stubT)).toBe('[approval.diffOmitted]');
+    expect(diff).not.toContain('@@');
+    expect(parseUnifiedDiff(diff)).toMatchObject({
+      additions: 0,
+      deletions: 0,
+    });
+    expect(diff.split('\n')).toHaveLength(1);
+  });
+
+  it('limits rendered rows for a large insertion with no LCS product', () => {
+    const diff = buildContextBoundedDiff('', 'line\n'.repeat(2_000));
+    expect(localizeDiffNotice(diff, stubT)).toBe('[approval.diffOmitted]');
+    expect(diff).not.toContain('@@');
+    expect(parseUnifiedDiff(diff).lines).toMatchObject([{ type: 'header' }]);
+  });
+
+  it('omits raw payloads over the character budget before trimming', () => {
+    const oldLines = Array.from(
+      { length: 40_000 },
+      (_, i) => `payload_line_${i}`,
+    );
+    const newLines = [...oldLines];
+    newLines[20_000] = 'changed';
+    const oldText = oldLines.join('\n');
+    const newText = newLines.join('\n');
+    expect(oldText.length + newText.length).toBeGreaterThan(100_000);
+
+    const diff = buildContextBoundedDiff(oldText, newText);
+    expect(localizeDiffNotice(diff, stubT)).toBe('[approval.diffOmitted]');
+    expect(parseUnifiedDiff(diff).lines).toMatchObject([{ type: 'header' }]);
+  });
+
+  it('omits rendered output over the character budget with few rows', () => {
+    const oldText = 'a'.repeat(49_997);
+    const newText = 'b'.repeat(49_997);
+    expect(oldText.length + newText.length).toBeLessThanOrEqual(100_000);
+
+    const diff = buildContextBoundedDiff(oldText, newText);
+    expect(localizeDiffNotice(diff, stubT)).toBe('[approval.diffOmitted]');
+    expect(parseUnifiedDiff(diff).lines).toMatchObject([{ type: 'header' }]);
+  });
+
+  it.each([
+    ['#!/bin/sh\nexit 0\n', '#!/bin/sh\nexit 0', 'trailingNewlineRemoved'],
+    ['#!/bin/sh\nexit 0', '#!/bin/sh\nexit 0\n', 'trailingNewlineAdded'],
+    [
+      '#!/bin/sh\r\nexit 0\r\n',
+      '#!/bin/sh\r\nexit 0',
+      'trailingNewlineRemoved',
+    ],
+    ['#!/bin/sh\r\nexit 0', '#!/bin/sh\r\nexit 0\r\n', 'trailingNewlineAdded'],
+  ])('shows a trailing-newline-only change', (oldText, newText, key) => {
+    const diff = buildContextBoundedDiff(oldText, newText);
+    expect(localizeDiffNotice(diff, stubT)).toBe(`[approval.${key}]`);
+    expect(parseUnifiedDiff(diff)).toMatchObject({
+      additions: 0,
+      deletions: 0,
+      lines: [{ type: 'header' }],
+    });
+  });
+
+  it('shows a CRLF-to-CR terminator change instead of reporting no changes', () => {
+    // `'a\r\n'` vs `'a\r'` is what a step that drops a single trailing LF from
+    // CRLF content produces (`content.replace(/\n$/,'')`). The old strip only
+    // matched `\r?\n`, so one side kept a dangling `\r`, the sides compared
+    // unequal, and the prefix scan below found identical line arrays and
+    // returned `''` — "no changes" for a pending edit that does change the
+    // file, while the same edit rendered rows once completed.
+    const diff = buildContextBoundedDiff('a\r\n', 'a\r');
+    expect(diff).toBe(DIFF_TRAILING_NEWLINE_REMOVED_MARKER);
+    expect(localizeDiffNotice(diff, stubT)).toBe(
+      '[approval.trailingNewlineRemoved]',
+    );
+    expect(buildContextBoundedDiff('a\r\nb\r\n', 'a\r\nb\r')).toBe(
+      DIFF_TRAILING_NEWLINE_REMOVED_MARKER,
+    );
+    // Contrast: a real content change on the last line still renders rows.
+    expect(buildContextBoundedDiff('a\r\n', 'b\r')).toContain('-a');
+  });
+
+  it('shows a middle edit with three context lines and original line numbers', () => {
+    const oldLines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[99] = 'updated line 100';
+    const parsed = parseUnifiedDiff(
+      buildContextBoundedDiff(oldLines.join('\n'), newLines.join('\n')),
+    );
+    expect(parsed).toMatchObject({ additions: 1, deletions: 1 });
+    expect(parsed.lines).toHaveLength(9);
+    expect(parsed.lines[0].content).toBe('@@ -97,7 +97,7 @@');
+    expect(parsed.lines[1]).toMatchObject({ content: 'line 97', oldLine: 97 });
+    expect(parsed.lines[4]).toMatchObject({
+      type: 'del',
+      content: 'line 100',
+      oldLine: 100,
+    });
+    expect(parsed.lines[5]).toMatchObject({
+      type: 'add',
+      content: 'updated line 100',
+      newLine: 100,
+    });
+    expect(parsed.lines.at(-1)).toMatchObject({ content: 'line 103' });
+  });
+
+  it('separates distant changes and preserves shifted line numbers', () => {
+    const oldLines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines.splice(24, 1);
+    newLines.splice(4, 0, 'inserted');
+    const parsed = parseUnifiedDiff(
+      buildContextBoundedDiff(oldLines.join('\n'), newLines.join('\n')),
+    );
+    expect(parsed).toMatchObject({ additions: 1, deletions: 1 });
+    expect(parsed.lines.filter((line) => line.type === 'header')).toHaveLength(
+      2,
+    );
+    expect(parsed.lines.find((line) => line.type === 'add')).toMatchObject({
+      content: 'inserted',
+      newLine: 5,
+    });
+    expect(parsed.lines.find((line) => line.type === 'del')).toMatchObject({
+      content: 'line 25',
+      oldLine: 25,
+    });
+    expect(parsed.lines.map((line) => line.content)).not.toContain('line 15');
+    expect(parsed.lines.at(-1)).toMatchObject({
+      content: 'line 28',
+      oldLine: 28,
+      newLine: 28,
+    });
+  });
+
+  it('merges overlapping context windows without duplicating changes', () => {
+    const oldLines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[5] = 'first change';
+    newLines[9] = 'second change';
+    const parsed = parseUnifiedDiff(
+      buildContextBoundedDiff(oldLines.join('\n'), newLines.join('\n')),
+    );
+    expect(parsed).toMatchObject({ additions: 2, deletions: 2 });
+    expect(parsed.lines.filter((line) => line.type === 'header')).toHaveLength(
+      1,
+    );
+    expect(
+      parsed.lines.filter((line) => line.content === 'line 8'),
+    ).toHaveLength(1);
+  });
+
+  it('trims common ends before applying the LCS memory cap', () => {
+    const oldLines = Array.from({ length: 600 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[299] = 'updated';
+    const parsed = parseUnifiedDiff(
+      buildContextBoundedDiff(oldLines.join('\n'), newLines.join('\n')),
+    );
+    expect(parsed).toMatchObject({ additions: 1, deletions: 1 });
+    expect(parsed.lines).toHaveLength(9);
+    expect(parsed.lines[0].content).toBe('@@ -297,7 +297,7 @@');
+  });
+
+  it('preserves blank content and zero-length hunk coordinates', () => {
+    expect(buildContextBoundedDiff('', 'created\n')).toBe(
+      '@@ -0,0 +1,1 @@\n+created',
+    );
+    expect(buildContextBoundedDiff('removed\n', '')).toBe(
+      '@@ -1,1 +0,0 @@\n-removed',
+    );
+    expect(
+      parseUnifiedDiff(buildContextBoundedDiff('a\n\n', 'a\n')),
+    ).toMatchObject({
+      additions: 0,
+      deletions: 1,
+      lines: [
+        { type: 'header' },
+        { type: 'context', content: 'a', oldLine: 1, newLine: 1 },
+        { type: 'del', content: '', oldLine: 2 },
+      ],
+    });
+    expect(buildContextBoundedDiff('a\n', 'a\n')).toBe('');
+  });
+});
 
 describe('parseUnifiedDiff', () => {
   it('tracks hunks without confusing file-like content for headers', () => {
@@ -101,5 +311,249 @@ describe('parseUnifiedDiff', () => {
         { type: 'context', content: 'same', oldLine: 1, newLine: 1 },
       ],
     });
+  });
+});
+
+describe('CRLF uniformity is decided at the source layer', () => {
+  it('stamps the marker when both sides are uniform CRLF, and the parser reports it', () => {
+    const diff = buildUnifiedDiff('a\r\nb\r\n', 'a\r\nc\r\n');
+    expect(diff.split('\n')[0]).toBe(DIFF_CRLF_UNIFORM_MARKER);
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(true);
+  });
+
+  it('allows one unterminated final line per side', () => {
+    const diff = buildUnifiedDiff('a\r\nb', 'a\r\nc');
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(true);
+  });
+
+  it('refuses the marker when a bare-LF line hides inside a CRLF file', () => {
+    // The render boundary cannot distinguish "unterminated final line" from
+    // "an LF-terminated line in a mixed-ending file" — the source text can,
+    // which is exactly why the decision lives here.
+    const diff = buildUnifiedDiff('a\r\nb\nc\r\n', 'a\r\nb\nd\r\n');
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(false);
+    expect(diff).not.toContain(DIFF_CRLF_UNIFORM_MARKER);
+  });
+
+  it('refuses the marker when a final line is terminated by a bare LF', () => {
+    const diff = buildUnifiedDiff('a\r\nb\n', 'a\r\nc\n');
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(false);
+  });
+
+  it('refuses the marker when the last blank line is terminated by a bare LF', () => {
+    // `'a\r\n\n'` is a CRLF line followed by an empty line closed with a bare
+    // `\n`. The interior loop skips that terminator — it is the trailing
+    // newline itself — so certifying it stamped uniform-CRLF over a file whose
+    // last line-ending is LF, and the renderer then stripped a `\r` that was
+    // content.
+    expect(
+      parseUnifiedDiff(buildUnifiedDiff('a\r\n\n', 'a\r\n\r\n')).crlfUniform,
+    ).toBe(false);
+    expect(parseUnifiedDiff(buildUnifiedDiff('\n', '\r\n')).crlfUniform).toBe(
+      false,
+    );
+  });
+
+  it('does not stamp the marker for LF files', () => {
+    expect(
+      parseUnifiedDiff(buildUnifiedDiff('a\n', 'a\nb\n')).crlfUniform,
+    ).toBe(false);
+  });
+
+  it('reports a terminator-only edit as the trailing-newline notice', () => {
+    // Both sides satisfy `isUniformCrlf`'s one-unterminated-final-line
+    // allowance, so this pair certified uniform and the strip then deleted the
+    // `\r` from both rows: `-y` and `+y` rendered byte-identical under a
+    // `+1/-1` badge — a view asserting a change it could not show, and
+    // disagreeing with the bounded builder, which answers this exact shape
+    // with the notice.
+    expect(buildUnifiedDiff('x\r\ny', 'x\r\ny\r\n')).toBe(
+      DIFF_TRAILING_NEWLINE_ADDED_MARKER,
+    );
+    expect(buildUnifiedDiff('x\r\ny\r\n', 'x\r\ny')).toBe(
+      DIFF_TRAILING_NEWLINE_REMOVED_MARKER,
+    );
+  });
+
+  it('keeps an insertion preview of a sole blank line as a content row', () => {
+    // The terminator gate needs both sides non-empty. `extractDiff` builds
+    // insertion previews from `('', newText)`, and
+    // `''.replace(/\r?\n$/, '')` equals `'\n'.replace(/\r?\n$/, '')`, so a
+    // guard-less gate would answer the whole edit with a notice about a
+    // newline instead of showing the line it adds.
+    expect(buildUnifiedDiff('', '\n')).toBe('+');
+    expect(parseUnifiedDiff(buildUnifiedDiff('', '\r\n'))).toMatchObject({
+      additions: 1,
+      deletions: 0,
+    });
+  });
+
+  it('stamps a negative verdict instead of leaving the renderer to guess', () => {
+    // A builder that refused to certify uniformity used to say nothing, and
+    // silence was indistinguishable from "no builder ran" — so the renderer
+    // voted on the rows the patch happened to show. Here the source layer says
+    // "mixed" and the renderer must not overturn it.
+    const diff = buildContextBoundedDiff('a\r\n', 'a\n');
+    expect(diff.split('\n')[0]).toBe(DIFF_CRLF_MIXED_MARKER);
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(false);
+  });
+
+  it('does not let a context window certify a whole file', () => {
+    // A partial `core.autocrlf` conversion: the only bare-LF line sits outside
+    // the ±3 row window around the change, so every row the patch shows is
+    // `\r`-terminated. The rows are honest and the conclusion is not — the
+    // window cannot speak for line 1. The verdict can.
+    const oldText = 'bare\nc1\r\nc2\r\nc3\r\nz\r';
+    const diff = buildContextBoundedDiff(
+      oldText,
+      'bare\nc1\r\nc2\r\nc3\r\nw\r',
+    );
+    expect(diff).not.toContain('bare');
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(false);
+  });
+
+  it('keeps the marker out of the bounded hunk arithmetic', () => {
+    const oldText = Array.from({ length: 10 }, (_, i) => `L${i}\r`).join('\n');
+    const newSegments = oldText.split('\n');
+    newSegments[5] = 'X5\r';
+    const newText = newSegments.join('\n');
+    const diff = buildContextBoundedDiff(oldText, newText);
+    const parsed = parseUnifiedDiff(diff);
+    expect(parsed.crlfUniform).toBe(true);
+    // One changed row in a 10-line CRLF file: the @@ header counts the hunk
+    // rows only (3 context + 1 changed + 3 context per side = 7). Had the
+    // marker row leaked into the arithmetic, the counts would read 8/8
+    // instead of 7/7.
+    const header = parsed.lines.find(
+      (line) => line.type === 'header' && line.content.startsWith('@@'),
+    );
+    expect(header?.content).toBe('@@ -3,7 +3,7 @@');
+    expect(
+      parsed.lines.filter(
+        (line) => line.type === 'header' && line.content.startsWith('\\diff'),
+      ),
+    ).toHaveLength(1);
+  });
+});
+
+describe('localizeDiffNotice', () => {
+  it('passes real diff content and git notices through untouched', () => {
+    // Only the markers `buildContextBoundedDiff` owns are translated; git's own
+    // backslash notice, hunk headers and ordinary rows must survive verbatim or
+    // the diff would be rewritten on the way to the screen.
+    for (const line of [
+      '@@ -1,1 +1,1 @@',
+      '\\ No newline at end of file',
+      '\\diff-something-else',
+      'const answer = 42;',
+      '',
+    ]) {
+      expect(localizeDiffNotice(line, stubT)).toBe(line);
+    }
+  });
+});
+
+it.each([
+  ['a\n', 'a\r\n'],
+  ['a\r\n', 'a\n'],
+])(
+  'keeps a single-line ending conversion as content rows',
+  (oldText, newText) => {
+    const diff = buildContextBoundedDiff(oldText, newText);
+    expect(parseUnifiedDiff(diff)).toMatchObject({
+      additions: 1,
+      deletions: 1,
+    });
+    expect(localizeDiffNotice(diff, stubT)).toBe(diff);
+  },
+);
+
+it.each([
+  ['', '\n', 1, 0],
+  ['\n', '', 0, 1],
+  ['', '\r\n', 1, 0],
+  ['\r\n', '', 0, 1],
+])(
+  'keeps a sole blank line as a real added or removed row',
+  (oldText, newText, additions, deletions) => {
+    const diff = buildContextBoundedDiff(oldText, newText);
+    expect(parseUnifiedDiff(diff)).toMatchObject({ additions, deletions });
+    expect(localizeDiffNotice(diff, stubT)).toBe(diff);
+  },
+);
+
+// Raw patches reach the renderer through `getRawFileDiff` and never pass
+// through `buildUnifiedDiff` / `buildContextBoundedDiff`, so they carry no
+// `DIFF_CRLF_UNIFORM_MARKER`. The rows themselves still record the terminator,
+// and leaving them unmasked painted a visible `\r` escape chip on every row of
+// a CRLF file's completed diff.
+describe('raw patches infer CRLF uniformity from their own rows', () => {
+  const rawPatch = (rows: string[], terminator = '\n') =>
+    [
+      'Index: notes.txt',
+      '===================================================================',
+      '--- notes.txt',
+      '+++ notes.txt',
+      '@@ -1,2 +1,2 @@',
+      ...rows,
+      '',
+    ].join(terminator);
+
+  it('reports uniform CRLF when every content row keeps its \\r', () => {
+    const patch = rawPatch([' a\r', '-b\r', '+c\r']);
+    expect(patch).not.toContain(DIFF_CRLF_UNIFORM_MARKER);
+    expect(parseUnifiedDiff(patch).crlfUniform).toBe(true);
+  });
+
+  it('reports a mixed directory line-ending as non-uniform', () => {
+    const patch = rawPatch([' a\r', '-b', '+c\r']);
+    expect(parseUnifiedDiff(patch).crlfUniform).toBe(false);
+  });
+
+  it('reports a bare-LF patch as non-uniform', () => {
+    expect(parseUnifiedDiff(rawPatch([' a', '-b', '+c'])).crlfUniform).toBe(
+      false,
+    );
+  });
+
+  it('honours the unterminated-final-line notice rather than voting it down', () => {
+    // `isUniformCrlf` allows one unterminated final line, and jsdiff's real
+    // output marks exactly that row with git's notice. Counting it as a
+    // dissenting vote painted three `\r` chips over a file the builder renders
+    // clean — same bytes, two producers, two renderings. Only the notice lets
+    // a patch claim the allowance; an unmarked unterminated row is still an LF
+    // line in a mixed file.
+    const patch = rawPatch([
+      ' a\r',
+      '-b\r',
+      '-c',
+      '\\ No newline at end of file',
+      '+c\r',
+    ]);
+    expect(parseUnifiedDiff(patch).crlfUniform).toBe(true);
+  });
+
+  it('does not withhold the vote of a single row that kept its terminator', () => {
+    // The trailing-row exclusion protects a row cut mid-way by `maxLength`,
+    // and it fired on every patch that did not end with `\n` — including one
+    // whose last row is intact and `\r`-terminated, which has no other row to
+    // be judged by.
+    expect(parseUnifiedDiff('@@ -0,0 +1,1 @@\n+a\r').crlfUniform).toBe(true);
+    expect(parseUnifiedDiff('@@ -0,0 +1,1 @@\n+a\r\n').crlfUniform).toBe(true);
+  });
+
+  it('ignores a row truncated by maxLength slicing', () => {
+    // `DiffView` cuts the patch at `maxLength`, which can leave the final row
+    // without its terminator. That partial row must not demote the whole file,
+    // or previews of long CRLF diffs would put the `\r` chips back.
+    const patch = rawPatch([' a\r', '-b\r', '+c\r', ' d\r']);
+    const truncated = patch.slice(0, patch.indexOf('+c\r') + 2);
+    expect(truncated.endsWith('\n')).toBe(false);
+    expect(parseUnifiedDiff(truncated).crlfUniform).toBe(true);
+  });
+
+  it('still honours the marker when a builder supplied one', () => {
+    const patch = `${DIFF_CRLF_UNIFORM_MARKER}\n@@ -1,1 +1,1 @@\n-a\n+b\n`;
+    expect(parseUnifiedDiff(patch).crlfUniform).toBe(true);
   });
 });

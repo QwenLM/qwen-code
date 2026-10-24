@@ -90,3 +90,9 @@
   white-space: pre;
   overflow-x: auto;
 }
+
+.escaped {
+  background: var(--agent-blue-100);
+  color: var(--muted-foreground);
+  outline: 1px dotted currentColor;
+}
