@@ -48,9 +48,11 @@ or when its Broker token is set together with
 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`.
 Keep each credential, and the Broker URL, in `harness.env` as `KEY=value` on
 one line, with LF line endings, no whitespace around the `=`, and only letters,
-digits and `._:/+=-` in the value, and start comments with `#`. The control
-plane refuses anything else, such as a continuation, a `;` comment or text
-after a closing quote, since systemd or a shell would read it differently.
+digits and `._:/+=-` in the value (the Broker URL may also use `[` and `]` to
+bracket an IPv6 literal, as in `http://[::1]:4182`), and start comments with
+`#`. The control plane refuses anything else, such as a continuation, a `;`
+comment or text after a closing quote, since systemd or a shell would read it
+differently.
 For the tool path, uncomment `QWEN_MANAGED_RUNTIME_BROKER_URL` and
 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` in `harness.env`. The control plane reads
 the same token from it, so `server.env` carries no Broker token. On an upgraded

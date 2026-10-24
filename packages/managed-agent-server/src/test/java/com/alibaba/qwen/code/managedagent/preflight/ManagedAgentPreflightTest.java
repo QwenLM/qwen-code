@@ -663,6 +663,49 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
+    void readsTheBrokerUrlTheWayTheHarnessDoes() {
+        ManagedAgentProperties.RuntimeBroker broker =
+                new ManagedAgentProperties().getRuntimeBroker();
+        broker.setHost("127.0.0.1");
+        broker.setPort(4182);
+        // Node's URL parser folds each of these into the Broker's origin.
+        for (String url : List.of("http://127.1:4182", "http://2130706433:4182",
+                "http:/127.0.0.1:4182", "http:///127.0.0.1:4182",
+                "http://127.0.0.1:4182/./", "http://127.0.0.1:4182/proxy/..")) {
+            assertEquals(ManagedAgentPreflight.Status.PASS,
+                    urlCheck(url, broker).status(), url);
+        }
+        // And refuses these, so the Harness never starts.
+        for (String url : List.of("http://127.0.0.08:4182",
+                "http://127.0.0.1:65536", "http://127.0.0.1:99999")) {
+            ManagedAgentPreflight.Check check = urlCheck(url, broker);
+            assertEquals(ManagedAgentPreflight.Status.FAIL, check.status(), url);
+            assertEquals("the Hosted Harness refuses " + url
+                    + ", which is not a valid URL", check.detail());
+        }
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                urlCheck("https://xn--bcher-kva.example:4182", broker).status());
+        broker.setHost("::1");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                urlCheck("http://::1:4182", broker).status());
+        // A leading zero makes an octet octal: 010 is 8, not the bound 10.
+        broker.setHost("127.0.0.10");
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                urlCheck("http://127.0.0.010:4182", broker).status());
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlCheck("http://127.0.0.10:4182", broker).status());
+        // The fix names the bound address, which the Harness accepts
+        // whatever the configured spelling.
+        broker.setHost("::ffff:127.0.0.1");
+        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
+                + " http://127.0.0.1:4182, unless a proxy forwards"
+                + " http://127.0.0.1:4200 there",
+                urlCheck("http://127.0.0.1:4200", broker).fix());
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlCheck("http://127.0.0.1:4182", broker).status());
+    }
+
+    @Test
     void refusesANonLoopbackBrokerListenerWithoutTheOptIn() {
         ManagedAgentProperties.RuntimeBroker broker =
                 new ManagedAgentProperties().getRuntimeBroker();

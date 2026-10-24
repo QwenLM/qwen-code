@@ -29,7 +29,6 @@ import java.net.ServerSocket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -661,10 +660,10 @@ public final class ManagedAgentPreflight {
 
     // The Harness takes its Broker URL from its own environment file, which
     // nothing else reconciles with the address the Broker binds. The URL is
-    // first held to the rules the Harness applies when it starts
-    // (managed-runtime-broker-url.ts); then only a URL that names the
-    // Broker's own plain-HTTP listener can be checked, and one that names
-    // another address may reach it through a proxy.
+    // first read the way the Harness reads it when it starts
+    // (HarnessBrokerUrl); then only a URL that names the Broker's own
+    // plain-HTTP listener can be checked, and one that names another address
+    // may reach it through a proxy.
     static Check harnessBrokerUrlCheck(String url,
             ManagedAgentProperties.RuntimeBroker broker, String file) {
         String address = broker.getHost() + ":" + broker.getPort();
@@ -673,58 +672,38 @@ public final class ManagedAgentPreflight {
                     file + " gives the Hosted Harness no Broker URL",
                     "set QWEN_MANAGED_RUNTIME_BROKER_URL and"
                             + " QWEN_MANAGED_RUNTIME_BROKER_TOKEN in " + file
-                            + ", unless the Harness command line sets them");
+                            + ", unless the Harness environment or command"
+                            + " line sets them");
         }
         String direct = directBrokerUrl(broker);
         String fix = "point QWEN_MANAGED_RUNTIME_BROKER_URL in " + file
                 + " at " + (direct != null ? direct
                         : "the https URL of the TLS-terminating proxy in front"
                                 + " of " + address);
-        URI uri;
-        try {
-            uri = new URI(url);
-        } catch (URISyntaxException error) {
+        HarnessBrokerUrl.Result read = HarnessBrokerUrl.read(url);
+        String refusal = switch (read.verdict()) {
+            case INVALID -> ", which is not a valid URL";
+            case NOT_ORIGIN -> ", which is not an http or https origin";
+            case PLAIN_OUTSIDE_LOOPBACK -> ", because it uses plain http"
+                    + " outside the loopback interface";
+            case ACCEPTED, UNCLASSIFIED -> null;
+        };
+        if (refusal != null) {
             return new Check("broker-url", Status.FAIL,
-                    "the Hosted Harness Broker URL is not a URL", fix);
+                    "the Hosted Harness refuses " + url + refusal, fix);
         }
-        String scheme = uri.getScheme() == null ? ""
-                : uri.getScheme().toLowerCase(Locale.ROOT);
-        String host = uri.getHost();
-        int port = uri.getPort();
-        // An authority that is not a valid server name, such as one with an
-        // underscore, leaves both unset; the Harness still accepts it.
-        String authority = uri.getRawAuthority();
-        if (host == null && authority != null && authority.indexOf('@') < 0) {
-            int colon = authority.lastIndexOf(':');
-            String digits = colon < 0 ? "" : authority.substring(colon + 1);
-            host = colon < 0 ? authority : authority.substring(0, colon);
-            port = digits.matches("[0-9]{1,5}") ? Integer.parseInt(digits) : -1;
-            if ((colon >= 0 && port < 0) || host.isEmpty()) {
-                host = null;
-            }
+        if (read.verdict() == HarnessBrokerUrl.Verdict.UNCLASSIFIED) {
+            // Only FAIL sets the exit code, so a spelling preflight cannot
+            // read never blocks a start.
+            return new Check("broker-url", Status.WARN, "preflight cannot read "
+                    + url + " the way the Hosted Harness does",
+                    "check that the Hosted Harness starts and reaches "
+                            + address);
         }
-        // The file's character set already keeps out user information, a
-        // query and a fragment.
-        String path = uri.getRawPath();
-        if (host == null
-                || (!"http".equals(scheme) && !"https".equals(scheme))
-                || (path != null && !path.isEmpty() && !"/".equals(path))) {
-            return new Check("broker-url", Status.FAIL,
-                    "the Hosted Harness refuses " + url
-                            + ", which is not an http or https origin", fix);
-        }
-        if ("http".equals(scheme) && !isLoopbackHost(host)) {
-            return new Check("broker-url", Status.FAIL,
-                    "the Hosted Harness refuses " + url + ", because it uses"
-                            + " plain http outside the loopback interface",
-                    fix);
-        }
-        if (port < 0) {
-            port = "https".equals(scheme) ? 443 : 80;
-        }
-        if (port == broker.getPort() && served(host, broker.getHost())) {
+        if (read.port() == broker.getPort()
+                && served(read.hostname(), broker.getHost())) {
             // The URL names the Broker's own socket, which speaks plain HTTP.
-            return "https".equals(scheme)
+            return read.https()
                     ? new Check("broker-url", Status.FAIL, "the Hosted Harness"
                             + " dials " + url + ", but the Broker serves plain"
                             + " HTTP there, so TLS cannot connect", fix)
@@ -741,7 +720,9 @@ public final class ManagedAgentPreflight {
 
     // The URL that reaches the Broker's listener directly, which the Harness
     // accepts only on the loopback interface; null for a non-loopback bind,
-    // which the Harness reaches through a TLS-terminating proxy.
+    // which the Harness reaches through a TLS-terminating proxy. It is built
+    // from the bound address, which the Harness reads the same way whatever
+    // the configured spelling.
     private static String directBrokerUrl(
             ManagedAgentProperties.RuntimeBroker broker) {
         InetAddress bind = new InetSocketAddress(broker.getHost(), 0)
@@ -750,32 +731,15 @@ public final class ManagedAgentPreflight {
                 || (!bind.isAnyLocalAddress() && !bind.isLoopbackAddress())) {
             return null;
         }
-        String host = broker.getHost();
-        if (bind.isAnyLocalAddress()) {
-            host = bind instanceof Inet6Address ? "[::1]" : "127.0.0.1";
-        } else if (host.indexOf(':') >= 0 && !host.startsWith("[")) {
-            host = "[" + host + "]";
+        String host;
+        if (bind instanceof Inet6Address) {
+            // ::1 is the only IPv6 loopback address.
+            host = "[::1]";
+        } else {
+            host = bind.isAnyLocalAddress() ? "127.0.0.1"
+                    : bind.getHostAddress();
         }
         return "http://" + host + ":" + broker.getPort();
-    }
-
-    // The hosts the Harness counts as loopback (loopback-binds.ts).
-    private static boolean isLoopbackHost(String host) {
-        String name = host.toLowerCase(Locale.ROOT);
-        if (name.equals("localhost") || name.equals("::1")
-                || name.equals("[::1]")) {
-            return true;
-        }
-        String[] octets = name.split("\\.", -1);
-        if (octets.length != 4 || !octets[0].equals("127")) {
-            return false;
-        }
-        for (String octet : octets) {
-            if (!octet.matches("[0-9]{1,3}") || Integer.parseInt(octet) > 255) {
-                return false;
-            }
-        }
-        return true;
     }
 
     // The Broker refuses a non-loopback listen address unless told it sits
