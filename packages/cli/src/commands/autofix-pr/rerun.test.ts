@@ -191,6 +191,22 @@ describe('runRerun', () => {
     expect(mocks.ghWithInput).toHaveBeenCalledTimes(2);
   });
 
+  it("re-runs a run of the repository's current name, under whatever name the watch was prepared", () => {
+    // The repository was renamed: the watch knows it as o/r, GitHub as
+    // o/r2, and the job's URL carries the new name.
+    contexts = [
+      {
+        ...failedRun(9, 'Test', 90),
+        detailsUrl: 'https://github.com/o/r2/actions/runs/90/job/9',
+      },
+    ];
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: { ...prData(), url: 'https://github.com/o/r2/pull/7' },
+      viewer: 'me',
+    }));
+    expect(runRerun(7, 90)).toMatchObject({ rerun: true });
+  });
+
   it('re-runs only GitHub Actions runs of this repository', () => {
     contexts = [
       // A commit status whose link happens to look like an Actions run.

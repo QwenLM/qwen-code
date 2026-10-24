@@ -318,8 +318,9 @@ Event rules:
   snapshots and `reply` share. A comment deleted meanwhile is no request.
   Each answer is kept as it comes. The gate asks about 20 at most a fire,
   within the gate's read budget, and stops at the first failure, leaving the rest — neither requests nor seen — for its next fire; a
-  round asks about every one and fails when GitHub does not answer, so it
-  never drops a request the gate reported; after eight minutes it stops,
+  round's snapshot asks about every one and fails when GitHub does not answer,
+  so it never drops a request the gate reported (`reply` asks the way the gate
+  does: its plan names only threads the snapshot asked about); after eight minutes it stops,
   the answers kept, and asks to be run again. The gate keeps bot replies
   as seen.
   Otherwise a review bot that answers every reply would keep a
@@ -368,7 +369,11 @@ files. It prints the same
 JSON, but only the transitions since the previous run, and prints nothing
 when there are none, so the session is woken only for them:
 
-- A failed check is reported once per (check, head, attempt): the cursor key
+- A failed check is reported once per (check, head, attempt), where the
+  attempt of a workflow a review or a comment starts is the workflow and its
+  trigger (`#on:<workflow id>:<event>`): it runs again for every review
+  anyone submits, and a new run of a handled failure says nothing new of
+  the code. The cursor key
   carries the run's id (a commit status: its creation time), so a re-run
   that fails again is reported again even when no poll saw it in progress.
   The cursor keeps only the failures still present, and a new head starts
@@ -408,7 +413,11 @@ when there are none, so the session is woken only for them:
   names the cut in its report.
 - A gate run reads GitHub for 15 seconds at most, inside a Managed
   automation's 20-second gate (a scheduled task allows 60): past it, paging
-  stops and what was not read stays cut.
+  stops and what was not read stays cut. The budget is checked before each
+  call, so a call started just before it that GitHub answers slowly (or
+  that `gh` retries after a 5xx) can still run a fire past the gate's
+  limit; that fire fails before its cursor is written, and the next one
+  reads again.
 - The output stays within 12 KiB — counted as a gate hands it on, with each
   `<` written as `&lt;` — under the 16 KiB the gate hands the
   session (and cuts beyond). Events go in order — head move, conflict,
@@ -435,7 +444,7 @@ preview. `--lines` must be a positive integer. A job whose log cannot be
 read gets a `log unavailable: <reason>` line in place of its log, and the
 other jobs are still written. A run with no finished job that failed or
 timed out — its failed jobs still running, or a startup failure before any
-job — is an error, not an empty file. Jobs are listed 30 to a page (GitHub answers a page of 100 jobs of a large re-run run with a 502), and after eight minutes of downloading, inside the shell tool's ten, the jobs left are written as `log unavailable` instead of read.
+job — is an error, not an empty file. Jobs are listed 30 to a page (GitHub answers a page of 100 jobs of a large re-run run with a 502), and after eight minutes from the start, inside the shell tool's ten, the jobs left are written as `log unavailable` instead of read. Each log is cut to the lines kept as soon as it arrives, so a run's many large logs are never held at once.
 
 Each job's log comes from the REST jobs endpoint, not `gh run view
 --log-failed`: `gh run view` (with or without `--job`) refuses a run that is
@@ -723,7 +732,7 @@ merged.
 ### 6.9 `rerun <pr> <run-id>`
 
 Re-runs the failed jobs of a run the fix agent judged an infrastructure
-failure, with `gh run rerun <run-id> --failed`. Only a GitHub Actions job of
+failure, with `gh run rerun <run-id> --failed`, on an open PR only. Only a GitHub Actions job of
 the PR's repository counts: a commit status or another app may link any URL,
 and a run id read from it would re-run some unrelated run. Each failed check
 of that run on the head spends its one re-run (`rerunChecks`, keyed by the

@@ -371,6 +371,46 @@ describe('buildSnapshot', () => {
     });
   });
 
+  it('reports a failure of a workflow a review starts once per head, however many reviews start it', () => {
+    const run = (databaseId: number, event: string): Contexts[number] => ({
+      __typename: 'CheckRun',
+      databaseId,
+      name: 'Gate',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl: `https://github.com/o/r/actions/runs/${databaseId}/job/1`,
+      checkSuite: {
+        status: 'COMPLETED',
+        app: { databaseId: 15368 },
+        workflowRun: { event, workflow: { databaseId: 9 } },
+      },
+    });
+    const key = `Gate@${HEAD}@#on:9:pull_request_review`;
+    expect(
+      buildSnapshot(pr({}, [run(100, 'pull_request_review')]), state()),
+    ).toMatchObject({
+      events: [{ type: 'ci_failed', key }],
+    });
+    // Handled; a stranger's review then starts it again.
+    const handled = state({ handledChecks: [key] });
+    expect(
+      buildSnapshot(
+        pr({}, [
+          run(100, 'pull_request_review'),
+          run(101, 'pull_request_review'),
+        ]),
+        handled,
+      ).action,
+    ).toBe('wait');
+    // A run the code started is still a new attempt each time.
+    expect(
+      buildSnapshot(
+        pr({}, [run(200, 'pull_request')]),
+        state({ handledChecks: [`Gate@${HEAD}@#199`] }),
+      ).events,
+    ).toMatchObject([{ type: 'ci_failed', key: `Gate@${HEAD}@#200` }]);
+  });
+
   it("gives a run id only to a GitHub Actions job of the PR's repository", () => {
     const check = (
       detailsUrl: string,

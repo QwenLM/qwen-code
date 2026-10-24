@@ -454,6 +454,23 @@ function checkIdentity(ctx: CheckContext): string {
   ].join(':');
 }
 
+/**
+ * The attempt a failure is keyed by: the check run, or — for a workflow a
+ * review or a comment starts — the workflow and its trigger, once per head.
+ * Such a workflow runs again for every review anyone submits, a stranger's
+ * included, and a new run of a failure already handled says nothing new of
+ * the code; reported per run, each would start another round.
+ */
+function checkRunAttempt(
+  ctx: Extract<CheckContext, { __typename: 'CheckRun' }>,
+): string {
+  const run = ctx.checkSuite?.workflowRun;
+  if (run && !CODE_EVENTS.has(run.event)) {
+    return `#on:${run.workflow?.databaseId ?? ''}:${run.event}`;
+  }
+  return `#${ctx.databaseId}`;
+}
+
 function attemptOrder(ctx: CheckContext): number {
   return ctx.__typename === 'CheckRun'
     ? ctx.databaseId
@@ -509,7 +526,7 @@ export function checkEvents(pr: PrData): {
               Boolean(ctx.checkSuite?.workflowRun),
             ),
           },
-          attempt: `#${ctx.databaseId}`,
+          attempt: checkRunAttempt(ctx),
           identity: checkIdentity(ctx),
           actions: Boolean(ctx.checkSuite?.workflowRun),
           runDone:

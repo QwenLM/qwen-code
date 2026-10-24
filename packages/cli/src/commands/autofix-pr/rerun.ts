@@ -72,14 +72,11 @@ function rerunLocked(
     };
   }
   // Only a job of this repository's Actions can be re-run with `gh run
-  // rerun`: a commit status or another app may link any URL, and a run id
-  // read from it would re-run some unrelated run here.
-  const runUrl = `https://${state.host}/${state.owner}/${state.repo}/actions/runs/${runId}/`;
+  // rerun`: a commit status or another app may link any URL. `checkEvents`
+  // gives a run id to such a job only, read against the PR's own URL — the
+  // repository's current name, whatever name the watch was prepared under.
   const failed = checkEvents(pr).failed.filter(
-    ({ event, actions }) =>
-      actions &&
-      event.runId === runId &&
-      (event.url ?? '').toLowerCase().startsWith(runUrl.toLowerCase()),
+    ({ event, actions }) => actions && event.runId === runId,
   );
   if (failed.length === 0) {
     throw new Error(

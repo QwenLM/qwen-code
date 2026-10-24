@@ -352,15 +352,25 @@ export function runPrepare(args: PrepareArgs): void {
   mkdirSync(dirname(paths.worktreePath), { recursive: true });
   // Submodules stay unpopulated whatever `submodule.recurse` says: a fix
   // that needs one checks it out itself.
-  git(
-    '-c',
-    'submodule.recurse=false',
-    'worktree',
-    'add',
-    '--quiet',
-    paths.worktreePath,
-    paths.branch,
-  );
+  try {
+    git(
+      '-c',
+      'submodule.recurse=false',
+      'worktree',
+      'add',
+      '--quiet',
+      paths.worktreePath,
+      paths.branch,
+    );
+  } catch (err) {
+    // A post-checkout hook that fails leaves the worktree made: with no
+    // state file to account for it, neither a new `prepare` nor `cleanup`
+    // could take it away. Nothing was done in it yet.
+    gitOpt('worktree', 'remove', '--force', paths.worktreePath);
+    gitOpt('worktree', 'prune');
+    gitOpt('branch', '-D', paths.branch);
+    throw err;
+  }
 
   let history: AutofixPrHistory | null = null;
   try {

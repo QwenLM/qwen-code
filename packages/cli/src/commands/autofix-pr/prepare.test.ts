@@ -258,6 +258,25 @@ describe('runPrepare (real git)', () => {
     expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
   });
 
+  it('takes the worktree and branch back when a hook fails the worktree add', () => {
+    // A post-checkout hook that fails leaves the worktree made.
+    const hooks = join(dir, 'hooks');
+    mkdirSync(hooks);
+    writeFileSync(join(hooks, 'post-checkout'), '#!/bin/sh\nexit 1\n', {
+      mode: 0o755,
+    });
+    run(clone, 'config', 'core.hooksPath', hooks);
+    const paths = autofixPrPaths(clone, 7);
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow();
+    expect(existsSync(paths.worktreePath)).toBe(false);
+    expect(existsSync(paths.statePath)).toBe(false);
+    expect(run(clone, 'branch', '--list', paths.branch)).toBe('');
+    // With the hook fixed, the next prepare works.
+    run(clone, 'config', '--unset', 'core.hooksPath');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(run(paths.worktreePath, 'rev-parse', 'HEAD')).toBe(headSha);
+  });
+
   it('creates a worktree at the PR head and records the state', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const paths = autofixPrPaths(clone, 7);

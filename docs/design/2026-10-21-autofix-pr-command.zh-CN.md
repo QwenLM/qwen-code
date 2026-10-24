@@ -180,7 +180,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - head SHA 和 `lastKnownHeadSha` 不同时，如果分支本身（对推送目标执行 `git ls-remote`）也已离开已知 head——包括回退到本监视早先推送过的 head——记为 `head_moved_externally`；分支仍在已知 head 上时，是 API 滞后（上文的 `lagging`）。读不到分支时，`pushedShas` 里的 head 视为本监视自己的。
 - `title` 是 PR 的标题，这一轮的总结使用它的语言。
 - GitHub 没能启动的 workflow（`STARTUP_FAILURE`，常见原因是 workflow 文件无效）在 rollup 里没有任何 check run——它是唯一的 workflow 时根本没有 rollup——只留下它的 check suite。在读到的 suite 里（如上所述向前翻页），每个 workflow 和触发事件只看最近一次运行，而且只看由 PR 代码触发的（`pull_request`、`pull_request_target`、`push`）：为每条 review 评论触发的运行在 GitHub 出问题时也会启动失败，与代码无关。它被报告为带 `startupFailure: true` 和 run id 的 `ci_failed`，每个 head 只报一次（`<workflow>@<head>@#startup:<workflow id>:<event>`），没有日志也没有可重跑的 job，所以 skill 把它答复为需要人工处理。
-- 尚未提交的 review 里的评论（`PENDING`）是只有作者能看到的草稿，会被跳过。bot 在开启 thread 的评论（以及 review）里提要求；它在 thread 里的回复是在回答某人，不算请求。被回复的评论删除后，GraphQL 会丢掉回复的 `replyTo`，并把它列为 thread 的第一条，所以看起来像是开启了 thread、又尚未见过的 bot 评论，会通过 REST 逐条查询（`in_reply_to_id` 仍保留在这条评论上），只针对打开的 PR 上未解决的 thread，而且每条只问一次：答案保存在 `.qwen/tmp/autofix-pr-<n>-replies.json`，闸门、已准备快照和 `reply` 共用。期间被删除的评论不算请求。每条答案一拿到就保存。闸门每次触发最多问 20 条、不超出闸门的读取时限，遇到第一次失败就停，剩下的留到下一次触发，这次既不算请求也不记为已看过；一轮则问完所有条目，GitHub 没有回应时直接失败，绝不丢掉闸门已经报告过的请求；问了八分钟仍未问完时就停下，保留已有答案，并提示再运行一次。闸门也把 bot 的回复记为已看过。否则，会回复每条回复的评审 bot 会让每次都多跑一轮，不受信任的评论者也能借 bot 之口提要求，删掉自己的评论之后也一样。
+- 尚未提交的 review 里的评论（`PENDING`）是只有作者能看到的草稿，会被跳过。bot 在开启 thread 的评论（以及 review）里提要求；它在 thread 里的回复是在回答某人，不算请求。被回复的评论删除后，GraphQL 会丢掉回复的 `replyTo`，并把它列为 thread 的第一条，所以看起来像是开启了 thread、又尚未见过的 bot 评论，会通过 REST 逐条查询（`in_reply_to_id` 仍保留在这条评论上），只针对打开的 PR 上未解决的 thread，而且每条只问一次：答案保存在 `.qwen/tmp/autofix-pr-<n>-replies.json`，闸门、已准备快照和 `reply` 共用。期间被删除的评论不算请求。每条答案一拿到就保存。闸门每次触发最多问 20 条、不超出闸门的读取时限，遇到第一次失败就停，剩下的留到下一次触发，这次既不算请求也不记为已看过；一轮的快照则问完所有条目，GitHub 没有回应时直接失败，绝不丢掉闸门已经报告过的请求（`reply` 按闸门的方式询问：它的计划只会点名快照问过的 thread）；问了八分钟仍未问完时就停下，保留已有答案，并提示再运行一次。闸门也把 bot 的回复记为已看过。否则，会回复每条回复的评审 bot 会让每次都多跑一轮，不受信任的评论者也能借 bot 之口提要求，删掉自己的评论之后也一样。
 - 失败的检查只有在它是 PR 所在仓库的 GitHub Actions job 时才带 `runId`（它的 suite 有 workflow run，URL 位于 `https://<host>/<owner>/<repo>/actions/runs/` 之下）：commit status 或其他应用的检查可以链接任意 run，`ci-log` 会去读它。
 - 已合并或已关闭的 PR 只读第一次调用：它的结果就是停止，不需要再翻检查、suite 或 thread 的后续页。
 - check 和 suite 属于提交而不属于 PR：同一个 head 提交的另一个 PR 会共用它们。这是已知的局限。
@@ -193,14 +193,14 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 `snapshot <n> --gate` 是定时任务闸门背后的那条命令。它不需要 worktree，也不需要状态文件：首次运行用 `--repo` 指定 PR 所在的仓库（或由已准备好的状态提供），它自己的游标 `.qwen/tmp/autofix-pr-<n>-gate.json` 记录已经报告过的内容。没有 `--host`（或 `GH_HOST`）时，先用该 PR 已在监视的 host——游标里的，或已准备状态里的——最后才回落到 github.com；空白的 `--host` 会被拒绝。游标属于另一个仓库的同号 PR 时直接拒绝，比较方式与 `prepare` 比较状态文件相同。它输出同样的 JSON，但只包含自上次运行以来的迁移，没有迁移时什么都不输出，因此会话只会为迁移被唤醒：
 
-- 失败的检查按（检查，head，attempt）报告一次：游标键带上运行 id（commit status 则是它的创建时间），所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。同一 PR 的已准备监视不靠推送处理掉的失败（`handledChecks`）视为已报告。因为 run 仍在进行而延后重跑的失败（`deferredRuns`，第 6.9 节）会在该 run 结束时再报告一次，以便监视那时重跑它。
+- 失败的检查按（检查，head，attempt）报告一次；由 review 或评论启动的 workflow，其 attempt 是 workflow 加触发事件（`#on:<workflow id>:<event>`）：任何人每提交一次 review 它都会再跑一次，而已处理过的失败再跑一次，对代码没有新信息：游标键带上运行 id（commit status 则是它的创建时间），所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。同一 PR 的已准备监视不靠推送处理掉的失败（`handledChecks`）视为已报告。因为 run 仍在进行而延后重跑的失败（`deferredRuns`，第 6.9 节）会在该 run 结束时再报告一次，以便监视那时重跑它。
 - 进行中的检查从不报告；不会出现 `ci_pending`。
 - 冲突按 head 报告一次；`mergeable` 清除标记，`UNKNOWN` 保留标记。已准备监视在该 head 上留给人处理的冲突（`handledConflictSha`）不报告。
 - 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。工具自己的回复（当前用户发的、以回复标记结尾的评论）永远不是事件，同一 PR 的已准备监视处理过的评论（`handledCommentIds`、`postedCommentIds`）也不是；其中查询结果里还在的会被并入游标，所以 `cleanup` 删掉状态文件之后它们仍然保持安静。只有不可信评论时作为提醒报告（`wait`）。查询结果里仍然出现的已报告 id 全部保留在游标里，不论多少；只有已经离开页面的 id 才有上限，所以内容相同的轮询是安静的。正文截到前 1,000 个字符（`bodyTruncated: true`）；完整内容见事件的 `url`。
 - head 与上次运行不同时记为 `head_moved_externally`（`resync`），除非同一 PR 的已准备监视记录过或推送过它（`lastKnownHeadSha`、`pushedShas`）；首次运行只记录 head，不报告。
 - 合并或关闭报告一次（`stop`）；之后探针保持安静，重新打开的 PR 会再次被监视。
 - 从头读取的连接（`checks`、`reviewThreads`）开始被截断时报告一次，没有其他事件时动作为 `wait`：超出最后一页的新 thread 不会留下别的痕迹。持续的截断保持安静。评论、review 和 thread 评论从最新的读起，那里的截断只会藏住更早的内容：它列在 `truncated` 里，但不唤醒会话。例外是刷屏：两次检查之间到达超过 100 条时，会把一条还没被任何检查读到的挤出去。这是已知的局限；该轮在报告里会写明截断。
-- 一次闸门运行读取 GitHub 最多 15 秒，在 Managed 自动化 20 秒的闸门之内（定时任务允许 60 秒）：超时后停止翻页，没读到的部分保持截断。
+- 一次闸门运行读取 GitHub 最多 15 秒，在 Managed 自动化 20 秒的闸门之内（定时任务允许 60 秒）：超时后停止翻页，没读到的部分保持截断。时限在每次调用之前检查，所以临近时限才发出、而 GitHub 回答得慢（或 `gh` 在 5xx 后重试）的那次调用，仍可能让这次触发超出闸门的限制；这次触发会在写游标之前失败，下一次重新读取。
 - 输出不超过 12 KiB——按闸门转交时的形式计算，每个 `<` 写成 `&lt;`——低于闸门交给会话的 16 KiB（超出部分会被闸门截掉）。事件按顺序排列——head 移动、冲突、失败、评论——放不下的事件，或放不下整体的 thread 里靠后的评论，会被留下，计入 `deferred`，且不记为已报告，所以下一次运行会报告它们。每次至少输出一个事件或一条评论，所以每次运行都有进展。
 - 首次运行报告所有尚未处理的事项：失败的检查、冲突，以及没人处理过的评论。
 
@@ -208,7 +208,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 ### 6.3 `ci-log <pr> <run-id> [--lines 200]`
 
-把该 run 中已结束且失败或超时的每个 job 的日志在该 job 最后一行 `##[error]` 之后截断（之后是 post-job 清理步骤），再按 job 截取最后 `--lines` 行，并注明省略了多少行，写到 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`，然后输出路径和 job 名称。修复 agent 读这个文件，而不是把日志通过 shell 预览输出。`--lines` 必须是正整数。某个 job 的日志读不到时，用一行 `log unavailable: <reason>` 代替它的日志，其他 job 照常写入。run 里没有已结束且失败或超时的 job（失败的 job 还在跑，或在任何 job 开始前就启动失败）时报错，而不是写一个空文件。job 列表每页 30 个（大型重跑 run 的 100 个一页，GitHub 会回 502）；下载满八分钟（在 shell 工具的十分钟之内）后，剩下的 job 写成 `log unavailable`，不再读取。
+把该 run 中已结束且失败或超时的每个 job 的日志在该 job 最后一行 `##[error]` 之后截断（之后是 post-job 清理步骤），再按 job 截取最后 `--lines` 行，并注明省略了多少行，写到 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`，然后输出路径和 job 名称。修复 agent 读这个文件，而不是把日志通过 shell 预览输出。`--lines` 必须是正整数。某个 job 的日志读不到时，用一行 `log unavailable: <reason>` 代替它的日志，其他 job 照常写入。run 里没有已结束且失败或超时的 job（失败的 job 还在跑，或在任何 job 开始前就启动失败）时报错，而不是写一个空文件。job 列表每页 30 个（大型重跑 run 的 100 个一页，GitHub 会回 502）；从开始算起满八分钟（在 shell 工具的十分钟之内）后，剩下的 job 写成 `log unavailable`，不再读取。每份日志一到就截成要保留的行，所以一个 run 的大量大日志不会同时留在内存里。
 
 每个 job 的日志通过 REST jobs 接口读取，而不是 `gh run view --log-failed`：`gh run view`（加不加 `--job` 都一样）会拒绝仍在运行的 run，而 `snapshot` 在一个 job 失败时就会报告它，这时同一 run 的其他 job 可能还在跑。
 
@@ -289,7 +289,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 ### 6.9 `rerun <pr> <run-id>`
 
-对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job。只认 PR 所在仓库的 GitHub Actions job：commit status 或其他 app 可以链接任意 URL，从中读出的 run id 会重跑某个无关的 run。该 run 在当前 head 上的每个失败检查都用掉自己唯一的一次重跑（`rerunChecks`，按检查身份——app、workflow、触发事件和 job 名，与第 6.2 节区分检查的方式相同——和 head 记，所以两个 workflow 里同名的 job 各有各的一次）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。重跑在询问 GitHub 之前就计数，调用本身也不重试，所以响应丢失的重跑不会被再请求一次：最多一次，绝不两次。只有 GitHub 接受了重跑，其失败才记为已处理：被拒绝（gh 的 `run <id> cannot be rerun`，即 403——token 没有 `actions: write`、run 太旧——或其他 HTTP 4xx）会退还这次重跑，而任何错误都会让这一轮把这些失败作为需要人工处理来回答，所以检查不会一直红着却无人报告。
+对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job，只针对打开的 PR。只认 PR 所在仓库的 GitHub Actions job：commit status 或其他 app 可以链接任意 URL，从中读出的 run id 会重跑某个无关的 run。该 run 在当前 head 上的每个失败检查都用掉自己唯一的一次重跑（`rerunChecks`，按检查身份——app、workflow、触发事件和 job 名，与第 6.2 节区分检查的方式相同——和 head 记，所以两个 workflow 里同名的 job 各有各的一次）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。重跑在询问 GitHub 之前就计数，调用本身也不重试，所以响应丢失的重跑不会被再请求一次：最多一次，绝不两次。只有 GitHub 接受了重跑，其失败才记为已处理：被拒绝（gh 的 `run <id> cannot be rerun`，即 403——token 没有 `actions: write`、run 太旧——或其他 HTTP 4xx）会退还这次重跑，而任何错误都会让这一轮把这些失败作为需要人工处理来回答，所以检查不会一直红着却无人报告。
 
 GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就报告。因此仍在进行的 run 不询问 GitHub，直接回答 `{"rerun": false, "deferred": true}`，并记入 `deferredRuns`：该 run 结束时闸门会再报告一次它的失败（第 6.2 节），届时那一轮再重跑。在那之前 prepared snapshot 也不列出它们，这样别的事件不会把同一个失败再交给这一轮延后一次。
 

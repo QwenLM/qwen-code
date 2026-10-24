@@ -194,6 +194,30 @@ describe('runCiLog', () => {
     );
   });
 
+  it('counts the listing of the jobs in its time', () => {
+    const now = vi.spyOn(Date, 'now');
+    let clock = 1_000_000;
+    now.mockImplementation(() => clock);
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args.includes('--paginate')) {
+        clock += 9 * 60_000;
+        return '{"id":2,"name":"Test","conclusion":"failure"}';
+      }
+      return 'boom';
+    });
+    try {
+      runCiLog(7, 456, 200);
+    } finally {
+      now.mockRestore();
+    }
+    const { path } = JSON.parse(mocks.stdout.mock.calls[0][0]);
+    expect(readFileSync(path, 'utf8')).toBe(
+      'Test\tlog unavailable: ci-log ran out of time; the jobs above were read\n',
+    );
+    // The listing is all that was asked.
+    expect(mocks.gh).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the other logs when one cannot be read', () => {
     mocks.gh.mockImplementation((...args: string[]) => {
       if (args.includes('--paginate')) {
