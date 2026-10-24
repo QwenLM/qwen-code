@@ -28,10 +28,18 @@ describe('TUI product evidence', () => {
       paginate: vi.fn().mockResolvedValue(files),
       rest: { pulls: { listFiles: vi.fn() } },
     };
+    // A real dispatch payload carries no `pull_request` key. Handing the
+    // dispatch case a populated one would keep this suite green if the
+    // `context.payload.pull_request` read were ever hoisted above the
+    // eventName guard, while every real dispatch then throws.
+    const payload =
+      eventName === 'pull_request'
+        ? { pull_request: { number: 15261, changed_files: count } }
+        : {};
     const result = await classify(github, {
       eventName,
       repo: { owner: 'QwenLM', repo: 'qwen-code' },
-      payload: { pull_request: { number: 15261, changed_files: count } },
+      payload,
     });
     if (eventName === 'pull_request') {
       expect(github.paginate).toHaveBeenCalledWith(
@@ -97,6 +105,21 @@ describe('TUI product evidence', () => {
     ).toBe(true);
   });
 
+  it('still skips a rename contained within the unrelated subtrees', async () => {
+    // Pins the negative arm: `previous_filename` present, but itself
+    // unrelated. Without it, weakening that arm to a presence check keeps the
+    // suite green while re-running both gates on any server-side restructure.
+    expect(
+      await required([
+        {
+          filename: serverFile,
+          previous_filename:
+            'packages/managed-agent-server/src/main/java/Old.java',
+        },
+      ]),
+    ).toBe(false);
+  });
+
   it('uses files beyond the first API page and runs on incomplete diffs', async () => {
     const files = Array.from({ length: 101 }, () => ({ filename: serverFile }));
     expect(
@@ -138,21 +161,28 @@ describe('TUI product evidence', () => {
   });
 
   it('watches shared build inputs and retains all package dependencies', () => {
-    expect(workflow.on.pull_request.paths).toEqual(
-      expect.arrayContaining([
-        'packages/**',
-        'scripts/**',
+    // Exact set, not arrayContaining: a floor still passes when a later PR
+    // drops a trigger, and the three entries it hides are load-bearing —
+    // esbuild.config.js drives the bundle step, package.json drives the
+    // --cli-only filter, tui-parity.yml is this workflow's own self-trigger.
+    expect([...workflow.on.pull_request.paths].sort()).toEqual(
+      [
+        '.github/actions/**',
+        '.github/scripts/**',
+        '.github/workflows/tui-parity.yml',
+        '.npmrc',
+        '.nvmrc',
+        'esbuild.config.js',
         'integration-tests/**',
         'integrations/**',
+        'package.json',
+        'packages/**',
         'patches/**',
         'pnpm-lock.yaml',
         'pnpm-workspace.yaml',
+        'scripts/**',
         'tsconfig.json',
-        '.npmrc',
-        '.nvmrc',
-        '.github/actions/**',
-        '.github/scripts/**',
-      ]),
+      ].sort(),
     );
     expect(
       workflow.on.pull_request.paths.some((path) => path.startsWith('!')),
