@@ -573,6 +573,50 @@ describe('runNonInteractiveStreamJson', () => {
     ]);
   });
 
+  it('mints the first direct-mode promptId after initialization resolves', async () => {
+    // Resumed data only becomes authoritative once initialize() re-reads the
+    // session file, so a promptId minted before that await restarts the
+    // counter at 1 and re-mints ids the previous run already persisted.
+    let releaseInit: () => void = () => {};
+    let initResolved = false;
+    config = createConfig({
+      initialize: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseInit = () => {
+              initResolved = true;
+              resolve();
+            };
+          }),
+      ),
+      getResumedSessionData: () =>
+        initResolved
+          ? {
+              conversation: {
+                sessionId: 'test-session',
+                messages: [
+                  createResumedUserRecord('first turn'),
+                  createResumedTelemetryRecord('test-session########5'),
+                ],
+              },
+            }
+          : undefined,
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('resumed turn');
+      // The frame reaches the read loop while initialize() is still pending.
+      releaseInit();
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########6',
+    );
+  });
+
   it('reports one error result when direct-mode config initialization fails', async () => {
     // The first user message is enqueued before config initialization is
     // awaited, so a rejected initialize() reaches the queued message and
