@@ -25,6 +25,10 @@ import { getEffectiveReasoning } from '../../reasoning-overrides.js';
 import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import {
+  QWENCLOUD_MAAS_HOSTS,
+  withDashScopeSourceConfig,
+} from '../../dashscope-source-config.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
@@ -185,15 +189,7 @@ export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
   'dashscope-us.aliyuncs.com',
 ];
 
-/**
- * 千问AI平台 (China) / QwenCloud (International) MaaS hosts. Both the
- * pay-as-you-go endpoints and the `token-plan.`-prefixed subscription
- * endpoints are subdomains of these, so one suffix match covers all four.
- */
-export const QWENCLOUD_MAAS_HOSTS: readonly string[] = [
-  'maas.qianwenaiapi.com',
-  'maas.qwencloudapi.com',
-];
+export { QWENCLOUD_MAAS_HOSTS };
 
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
@@ -337,9 +333,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       defaultHeaders['X-DashScope-OssResourceResolve'] = 'enable';
     }
 
-    return customHeaders
-      ? { ...defaultHeaders, ...customHeaders }
-      : defaultHeaders;
+    return withDashScopeSourceConfig(
+      customHeaders ? { ...defaultHeaders, ...customHeaders } : defaultHeaders,
+      this.contentGeneratorConfig.baseUrl,
+      this.cliConfig.getChannel?.(),
+    );
   }
 
   override buildClient(): OpenAI {

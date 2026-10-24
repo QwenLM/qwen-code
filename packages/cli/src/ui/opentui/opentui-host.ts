@@ -117,7 +117,9 @@ type HistoryItemUpdater = (
 export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
   readonly config: Config;
   readonly settings: LoadedSettings;
-  readonly logger: Logger | null;
+  get logger(): Logger | null {
+    return this.deps.logger;
+  }
 
   private readonly deps: OpenTuiAppHostDeps;
   private readonly transcript: OpenTuiTranscriptController;
@@ -145,7 +147,6 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
     this.deps = deps;
     this.config = deps.config;
     this.settings = deps.settings;
-    this.logger = deps.logger;
     this.transcript = deps.transcript;
   }
 
