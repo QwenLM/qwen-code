@@ -141,7 +141,6 @@ export async function generateToolUseSummary(
       systemInstruction: TOOL_USE_SUMMARY_SYSTEM_PROMPT,
       config: {
         maxOutputTokens: 60,
-        temperature: 0.3,
       },
       abortSignal: signal,
       model,

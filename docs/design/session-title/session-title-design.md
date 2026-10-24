@@ -159,13 +159,13 @@ service returns `{ok: false, reason: 'empty_result'}`.
 
 ### Call Parameters
 
-| Parameter         | Value                          | Reason                                                                                          |
-| ----------------- | ------------------------------ | ----------------------------------------------------------------------------------------------- |
-| `model`           | `getFastModel()` — no fallback | Auto-titling on main-model tokens is too expensive to be silent.                                |
-| `schema`          | `TITLE_SCHEMA`                 | Forces `{title: string}`; filters shape drift at the transport layer.                           |
-| `maxOutputTokens` | `100`                          | More than enough for 7 words plus schema overhead.                                              |
-| `temperature`     | `0.2`                          | Mostly deterministic — session titles benefit from stability across regeneration.               |
-| `maxAttempts`     | `1`                            | Titles are best-effort cosmetic metadata; retries would queue behind user-visible main traffic. |
+| Parameter         | Value                          | Reason                                                                                                                                        |
+| ----------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`           | `getFastModel()` — no fallback | Auto-titling on main-model tokens is too expensive to be silent.                                                                              |
+| `schema`          | `TITLE_SCHEMA`                 | Forces `{title: string}`; filters shape drift at the transport layer.                                                                         |
+| `maxOutputTokens` | `100`                          | More than enough for 7 words plus schema overhead.                                                                                            |
+| `temperature`     | _(omitted)_                    | Removed per #12928 — providers increasingly reject or deprecate the parameter; the provider default is used unless the caller configures one. |
+| `maxAttempts`     | `1`                            | Titles are best-effort cosmetic metadata; retries would queue behind user-visible main traffic.                                               |
 
 Contrast with session-recap, which falls back to the main model. Title
 generation is triggered automatically and often; silently spending

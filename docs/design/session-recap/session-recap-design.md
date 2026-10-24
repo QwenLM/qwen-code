@@ -150,13 +150,13 @@ the model's reasoning preamble is worse than showing no recap at all.
 
 ### Call Parameters
 
-| Parameter           | Value                          | Reason                                                |
-| ------------------- | ------------------------------ | ----------------------------------------------------- |
-| `model`             | `getFastModel() ?? getModel()` | Recap doesn't need a frontier model                   |
-| `tools`             | `[]`                           | One-shot query, no tool use                           |
-| `maxOutputTokens`   | `300`                          | Headroom for 1-2 short sentences + tags               |
-| `temperature`       | `0.3`                          | Mostly deterministic, with a bit of natural variation |
-| `systemInstruction` | The recap-only prompt above    | Replaces the main agent's role definition             |
+| Parameter           | Value                          | Reason                                                                                                                                        |
+| ------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`             | `getFastModel() ?? getModel()` | Recap doesn't need a frontier model                                                                                                           |
+| `tools`             | `[]`                           | One-shot query, no tool use                                                                                                                   |
+| `maxOutputTokens`   | `300`                          | Headroom for 1-2 short sentences + tags                                                                                                       |
+| `temperature`       | _(omitted)_                    | Removed per #12928 — providers increasingly reject or deprecate the parameter; the provider default is used unless the caller configures one. |
+| `systemInstruction` | The recap-only prompt above    | Replaces the main agent's role definition                                                                                                     |
 
 ## History Filtering
 

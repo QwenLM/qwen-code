@@ -143,6 +143,8 @@ describe('createGoalVerifier', () => {
       promptId: 'side-query:goal-verifier',
       maxAttempts: 1,
       config: {
+        // temperature: 0 preserved for the goal-verifier deterministic
+        // verdict; see Risk & Scope in PR #12958.
         temperature: 0,
         responseMimeType: 'application/json',
         thinkingConfig: { thinkingBudget: 0, includeThoughts: false },

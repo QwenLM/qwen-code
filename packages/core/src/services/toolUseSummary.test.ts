@@ -250,6 +250,8 @@ describe('generateToolUseSummary', () => {
     expect(options.model).toBe('qwen-fast');
     expect(options.promptId).toBe('side-query:tool-use-summary');
     expect(options.systemInstruction).toBe(TOOL_USE_SUMMARY_SYSTEM_PROMPT);
+    // #12928: no hard-coded temperature reaches the tool-use-summary wire.
+    expect(options.config).not.toHaveProperty('temperature');
 
     const userText = promptOf(generateContentFn);
     expect(userText).toContain('Tool: Grep');
