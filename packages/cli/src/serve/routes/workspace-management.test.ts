@@ -4020,6 +4020,60 @@ describe('git clone target reservations', () => {
     expect(res.body.code).toBe('invalid_workspace_request');
   });
 
+  it('rejects a clone target inside the managed scratch root', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qwen-clone-scratch-'));
+    const scratchRoot = prepareManagedScratchRoot(join(parent, 'root'), []);
+    await mkdir(scratchRoot.canonicalRoot, { recursive: true });
+    const target = join(scratchRoot.canonicalRoot, 'scratch-foreign');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        managedScratchRoot: scratchRoot,
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('scratch_root_conflict');
+      await expect(stat(target)).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a clone target equal to a registered workspace', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-equal-'));
+    const target = join(root, 'workspace');
+    await mkdir(target);
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+          makeRuntime(target),
+        ]),
+        workspaceGitCloner: cloner,
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_nested');
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects persisting an existing workspace under an active clone target', async () => {
     const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-promotion-'));
     const outer = join(root, 'outer');

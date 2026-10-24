@@ -20,7 +20,23 @@ const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_RETENTION_MS = 10 * 60 * 1000;
 const SCP_LIKE_URL = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^\s]+$/;
 const ANSI_ESCAPE_PATTERN = new RegExp(
-  `${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`,
+  `${String.fromCharCode(27)}\\[[0-9;?]*[ -/]*[@-~]`,
+  'g',
+);
+const OSC_ESCAPE_PATTERN = new RegExp(
+  `${String.fromCharCode(27)}\\][^${String.fromCharCode(7)}]*(?:${String.fromCharCode(7)}|${String.fromCharCode(27)}\\\\)`,
+  'g',
+);
+const C1_CSI_PATTERN = new RegExp(
+  `${String.fromCharCode(155)}[0-9;?]*[ -/]*[@-~]`,
+  'g',
+);
+const SINGLE_ESCAPE_PATTERN = new RegExp(
+  `${String.fromCharCode(27)}[@-_]`,
+  'g',
+);
+const CONTROL_CHARACTER_PATTERN = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(8)}${String.fromCharCode(11)}${String.fromCharCode(12)}${String.fromCharCode(14)}-${String.fromCharCode(31)}${String.fromCharCode(127)}-${String.fromCharCode(159)}]`,
   'g',
 );
 const ALLOWED_PROTOCOLS = new Set([
@@ -80,6 +96,11 @@ export class GitCloneRequestError extends Error {
   }
 }
 
+export interface GitCloneCredentials {
+  username: string;
+  password: string;
+}
+
 export interface GitCloneProcess {
   /**
    * Must settle after `signal` aborts. The cloner removes the target only
@@ -88,6 +109,7 @@ export interface GitCloneProcess {
    */
   run(input: {
     url: string;
+    credentials?: GitCloneCredentials;
     target: string;
     signal: AbortSignal;
     onProgress: (line: string) => void;
@@ -199,8 +221,13 @@ export function redactGitUrl(raw: string): string {
 }
 
 export function sanitizeGitCloneMessage(line: string, url: string): string {
-  const withoutAnsi = line.replace(ANSI_ESCAPE_PATTERN, '');
-  const withoutUrl = withoutAnsi.split(url).join(redactGitUrl(url));
+  const withoutControl = line
+    .replace(OSC_ESCAPE_PATTERN, '')
+    .replace(ANSI_ESCAPE_PATTERN, '')
+    .replace(C1_CSI_PATTERN, '')
+    .replace(SINGLE_ESCAPE_PATTERN, '')
+    .replace(CONTROL_CHARACTER_PATTERN, '');
+  const withoutUrl = withoutControl.split(url).join(redactGitUrl(url));
   const withoutUserinfo = withoutUrl.replace(
     /([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+@/g,
     '$1***@',
@@ -209,11 +236,36 @@ export function sanitizeGitCloneMessage(line: string, url: string): string {
 }
 
 function parsePercent(line: string): number | undefined {
-  const matches = [...line.matchAll(/(\d{1,3})%/g)];
+  const matches = [
+    ...line.matchAll(/(?:Receiving objects|Resolving deltas):\s*(\d{1,3})%/gi),
+  ];
   const last = matches.at(-1);
   if (!last) return undefined;
   const value = Number(last[1]);
   return Number.isFinite(value) && value <= 100 ? value : undefined;
+}
+
+/** Removes credential userinfo before the URL becomes a git argv entry. */
+export function extractGitCredentials(raw: string): {
+  url: string;
+  credentials?: GitCloneCredentials;
+} {
+  try {
+    const parsed = new URL(raw);
+    const isHttp = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    if (!parsed.password && !(isHttp && parsed.username)) {
+      return { url: raw };
+    }
+    const credentials = {
+      username: decodeURIComponent(parsed.username),
+      password: decodeURIComponent(parsed.password),
+    };
+    parsed.username = '';
+    parsed.password = '';
+    return { url: parsed.toString(), credentials };
+  } catch {
+    return { url: raw };
+  }
 }
 
 function killProcessTree(pid: number | undefined): void {
@@ -221,10 +273,14 @@ function killProcessTree(pid: number | undefined): void {
   try {
     if (process.platform === 'win32') {
       const taskkill = `${process.env['SystemRoot'] ?? 'C:\\Windows'}\\System32\\taskkill.exe`;
-      spawn(taskkill, ['/pid', String(pid), '/T', '/F'], {
+      const child = spawn(taskkill, ['/pid', String(pid), '/T', '/F'], {
         stdio: 'ignore',
         windowsHide: true,
       });
+      // A failed launch emits 'error' asynchronously; without a listener it
+      // becomes an uncaught exception and takes the daemon down.
+      child.on('error', () => undefined);
+      child.unref();
       return;
     }
     process.kill(-pid, 'SIGKILL');
@@ -241,11 +297,16 @@ function killProcessTree(pid: number | undefined): void {
  * The daemon may be started from inside a Git command (a hook, a rebase
  * shell); repository-locating variables would redirect the clone or make it
  * fail with a confusing error, so they are removed for this child only.
+ * Global/system config is disabled as well: a cloned repository's
+ * `.gitattributes` must not be able to run filter commands configured on the
+ * daemon host during the clone's own checkout.
  */
 function cloneEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
   };
   for (const key of [
     'GIT_DIR',
@@ -262,16 +323,29 @@ function cloneEnvironment(): NodeJS.ProcessEnv {
 }
 
 export const spawnGitClone: GitCloneProcess = {
-  run({ url, target, signal, onProgress }) {
+  run({ url, credentials, target, signal, onProgress }) {
     return new Promise<void>((resolveRun, rejectRun) => {
-      const child = spawn('git', ['clone', '--progress', '--', url, target], {
+      const env = cloneEnvironment();
+      const args = ['clone', '--progress', '--', url, target];
+      if (credentials) {
+        // The URL itself is credential-free; the helper reads the secret from
+        // the child's environment, so it never appears in /proc/<pid>/cmdline.
+        args.unshift(
+          '-c',
+          'credential.helper=!f() { echo username="$QWEN_GIT_USERNAME"; echo password="$QWEN_GIT_PASSWORD"; }; f',
+        );
+        env.QWEN_GIT_USERNAME = credentials.username;
+        env.QWEN_GIT_PASSWORD = credentials.password;
+      }
+      const child = spawn('git', args, {
         stdio: ['ignore', 'ignore', 'pipe'],
-        env: cloneEnvironment(),
+        env,
         detached: process.platform !== 'win32',
         windowsHide: true,
       });
       let settled = false;
       let lastLine = '';
+      let fatalLine = '';
       let buffered = '';
       let abortFallback: ReturnType<typeof setTimeout> | undefined;
       const settle = (failure?: Error): void => {
@@ -304,8 +378,12 @@ export const spawnGitClone: GitCloneProcess = {
         buffered = parts.pop() ?? '';
         for (const part of parts) {
           if (part.trim().length === 0) continue;
-          lastLine = part.length > 4096 ? part.slice(0, 4096) : part;
-          onProgress(lastLine);
+          const line = part.length > 4096 ? part.slice(0, 4096) : part;
+          if (!fatalLine && /^(?:fatal|error):/i.test(line.trim())) {
+            fatalLine = line;
+          }
+          lastLine = line;
+          onProgress(line);
         }
       });
       child.on('error', (error) => settle(error));
@@ -317,7 +395,10 @@ export const spawnGitClone: GitCloneProcess = {
         settle(
           code === 0
             ? undefined
-            : new Error(lastLine.trim() || `git clone exited with ${code}`),
+            : new Error(
+                (fatalLine || lastLine).trim() ||
+                  `git clone exited with ${code}`,
+              ),
         );
       });
     });
@@ -504,7 +585,8 @@ export function createWorkspaceGitCloner(
         'Too many workspace clones are running',
       );
     }
-    const url = normalizeGitCloneUrl(request.url);
+    const normalizedUrl = normalizeGitCloneUrl(request.url);
+    const { url, credentials } = extractGitCredentials(normalizedUrl);
     const target = expandCloneTarget(request.target);
     const claimed = await claimCloneTarget(
       target,
@@ -574,6 +656,7 @@ export function createWorkspaceGitCloner(
       try {
         await runner.run({
           url,
+          credentials,
           target: claimed,
           signal: controller.signal,
           onProgress: (line) => {

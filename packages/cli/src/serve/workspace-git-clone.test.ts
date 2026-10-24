@@ -14,6 +14,7 @@ import {
   GitCloneRequestError,
   claimCloneTarget,
   createWorkspaceGitCloner,
+  extractGitCredentials,
   normalizeGitCloneUrl,
   redactGitUrl,
   sanitizeGitCloneMessage,
@@ -34,6 +35,11 @@ function supportsGit(): boolean {
 }
 
 const GIT_AVAILABLE = supportsGit();
+const GIT_ENV: NodeJS.ProcessEnv = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
+};
 
 async function tempRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'qwen-git-clone-'));
@@ -138,6 +144,29 @@ describe('redactGitUrl', () => {
   });
 });
 
+describe('extractGitCredentials', () => {
+  it('moves HTTPS credentials out of the URL', () => {
+    expect(
+      extractGitCredentials('https://user:secret@example.com/repo.git'),
+    ).toEqual({
+      url: 'https://example.com/repo.git',
+      credentials: { username: 'user', password: 'secret' },
+    });
+  });
+
+  it('leaves credential-free and scp-like URLs unchanged', () => {
+    expect(extractGitCredentials('https://example.com/repo.git')).toEqual({
+      url: 'https://example.com/repo.git',
+    });
+    expect(extractGitCredentials('git@example.com:repo.git')).toEqual({
+      url: 'git@example.com:repo.git',
+    });
+    expect(extractGitCredentials('ssh://git@example.com/repo.git')).toEqual({
+      url: 'ssh://git@example.com/repo.git',
+    });
+  });
+});
+
 describe('sanitizeGitCloneMessage', () => {
   it('strips ANSI escapes, credential-bearing URLs, and bounds the length', () => {
     const url = 'https://user:secret@example.com/repo.git';
@@ -148,6 +177,15 @@ describe('sanitizeGitCloneMessage', () => {
     expect(message).not.toContain('secret');
     expect(message).not.toContain('\u001b');
     expect(message.length).toBeLessThanOrEqual(240);
+  });
+
+  it('strips OSC, C1, and other control characters', () => {
+    expect(
+      sanitizeGitCloneMessage(
+        'remote: \u001b]52;c;ZXZpbA==\u0007done\u009b31m!',
+        'https://example.com/repo.git',
+      ),
+    ).toBe('remote: done!');
   });
 });
 
@@ -235,23 +273,30 @@ describe('createWorkspaceGitCloner', () => {
     async () => {
       const root = await tempRoot();
       const source = join(root, 'source');
-      execFileSync('git', ['init', source], { stdio: 'ignore' });
-      execFileSync('git', [
-        '-C',
-        source,
-        'config',
-        'user.email',
-        'test@example.com',
-      ]);
-      execFileSync('git', ['-C', source, 'config', 'user.name', 'Test']);
+      execFileSync('git', ['init', source], {
+        stdio: 'ignore',
+        env: GIT_ENV,
+      });
+      execFileSync(
+        'git',
+        ['-C', source, 'config', 'user.email', 'test@example.com'],
+        { env: GIT_ENV },
+      );
+      execFileSync('git', ['-C', source, 'config', 'user.name', 'Test'], {
+        env: GIT_ENV,
+      });
       await writeFile(join(source, 'README.md'), 'hello\n');
-      execFileSync('git', ['-C', source, 'add', 'README.md']);
+      execFileSync('git', ['-C', source, 'add', 'README.md'], {
+        env: GIT_ENV,
+      });
       execFileSync('git', ['-C', source, 'commit', '-m', 'init'], {
         stdio: 'ignore',
+        env: GIT_ENV,
       });
       const bare = join(root, 'origin.git');
       execFileSync('git', ['clone', '--bare', source, bare], {
         stdio: 'ignore',
+        env: GIT_ENV,
       });
 
       const cloner = createWorkspaceGitCloner();
@@ -500,6 +545,41 @@ describe('createWorkspaceGitCloner', () => {
     const cloner = createWorkspaceGitCloner({
       runner: {
         async run({ onProgress }) {
+          onProgress('Receiving objects: 100% (100/100)');
+          onProgress('Resolving deltas: 3% (3/100)');
+          reached();
+          await finishPromise;
+        },
+      },
+    });
+    const { jobId } = await cloner.start({
+      url: 'https://example.com/org/repo.git',
+      target: join(root, 'repo'),
+    });
+    await reachedPromise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(cloner.get(jobId)?.percent).toBe(100);
+    expect(cloner.get(jobId)?.message).toContain('Resolving deltas');
+
+    finish();
+    const job = await waitForJob(cloner, jobId);
+    expect(job.status).toBe('succeeded');
+  });
+
+  it('ignores remote counting percentages for the progress bar', async () => {
+    const root = await tempRoot();
+    let reached!: () => void;
+    const reachedPromise = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let finish!: () => void;
+    const finishPromise = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const cloner = createWorkspaceGitCloner({
+      runner: {
+        async run({ onProgress }) {
           onProgress('remote: Counting objects: 100% (100/100)');
           onProgress('Receiving objects: 3% (3/100)');
           reached();
@@ -514,12 +594,11 @@ describe('createWorkspaceGitCloner', () => {
     await reachedPromise;
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(cloner.get(jobId)?.percent).toBe(100);
+    expect(cloner.get(jobId)?.percent).toBe(3);
     expect(cloner.get(jobId)?.message).toContain('Receiving objects');
 
     finish();
-    const job = await waitForJob(cloner, jobId);
-    expect(job.status).toBe('succeeded');
+    await waitForJob(cloner, jobId);
   });
 
   it('ignores a percentage above 100', async () => {

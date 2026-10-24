@@ -326,8 +326,10 @@ export function registerWorkspaceManagementRoutes(
       const resolvedRoot = resolve(configuredRoot);
       const canonicalRoot = canonicalizeIfPresent(configuredRoot);
       return (
-        isWithinOrEqual(resolvedCandidate, resolvedRoot) ||
-        isWithinOrEqual(canonicalCandidate, canonicalRoot)
+        resolvedCandidate === resolvedRoot ||
+        isWithinRoot(resolvedCandidate, resolvedRoot) ||
+        canonicalCandidate === canonicalRoot ||
+        isWithinRoot(canonicalCandidate, canonicalRoot)
       );
     });
   };
@@ -1132,14 +1134,27 @@ export function registerWorkspaceManagementRoutes(
         message: 'Workspace path overlaps a reserved Conversations root.',
       };
     }
+    if (managedScratchRoot) {
+      const scratchRoot = managedScratchRoot.canonicalRoot;
+      if (
+        isWithinRoot(candidate, scratchRoot) ||
+        isWithinRoot(scratchRoot, candidate)
+      ) {
+        return {
+          status: 409,
+          code: 'scratch_root_conflict',
+          message: 'Workspace path conflicts with the managed scratch root',
+        };
+      }
+    }
     if (
-      managedScratchRoot &&
-      !isScratchRootCompatible(candidate, managedScratchRoot.canonicalRoot)
+      workspaceRegistry.getManagedByWorkspaceCwd(candidate) ||
+      inFlight.has(candidate)
     ) {
       return {
         status: 409,
-        code: 'scratch_root_conflict',
-        message: 'Workspace path conflicts with the managed scratch root',
+        code: 'target_nested',
+        message: 'Workspace path is already registered',
       };
     }
     if (conflictsWithRegisteredWorkspace(candidate)) {
@@ -1245,7 +1260,7 @@ export function registerWorkspaceManagementRoutes(
 
   app.delete(
     '/workspace-git-clone-jobs/:jobId',
-    mutate(),
+    mutate({ strict: true }),
     async (req: Request, res: Response) => {
       if (!workspaceGitCloner) {
         res.status(501).json({
