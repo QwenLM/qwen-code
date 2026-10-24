@@ -515,8 +515,8 @@ jobs:
               if [[ -n "${ISSUE_URL}" ]]; then
                 tracking="[Tracking issue](${ISSUE_URL})"
               elif [[ -n "${comment_id}" ]]; then
-                # A suppressed rerun must keep the link to the still-open
-                # issue an earlier attempt filed.
+                # A suppressed rerun recovers the link from the earlier
+                # attempt's comment; a missing or deleted comment loses it.
                 tracking="$(jq -r '.body' <<< "${existing}" | grep -m1 -E '^\[Tracking issue\]\([^)]*\)$' || true)"
               fi
               printf '%s\n' "${COMMENT_BODY}" > "${body_file}"

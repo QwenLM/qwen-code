@@ -223,6 +223,16 @@ cat "\${RUNNER_TEMP}/pulls.json"
         '${{ github.event.workflow_run.run_attempt }}',
       );
     });
+    it('wires the filed issue URL into the PR commenter', () => {
+      // A renamed output renders ISSUE_URL empty, which now selects the
+      // recovery branch instead of linking a first comment to its issue.
+      expect(jobs.report_pr.steps[0].env.ISSUE_URL).toBe(
+        '${{ needs.file_issue.outputs.issue_url }}',
+      );
+      expect(jobs.file_issue.outputs.issue_url).toBe(
+        '${{ steps.issue.outputs.issue_url }}',
+      );
+    });
     it('also files an issue when the failed PR already merged', () => {
       expect(resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })]).output).toBe(
         'pr_number=14472\nfile_issue=true\n',
@@ -242,13 +252,11 @@ cat "\${RUNNER_TEMP}/pulls.json"
     });
     it('files a fresh dispatch on a merged PR branch', () => {
       // A maintainer's manual run is attempt 1 even when it starts long
-      // after the merge; only reruns are stale. The old clock proxy would
-      // have suppressed this.
+      // after the merge; only reruns are stale.
       expect(
         resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
           EVENT_NAME: 'workflow_dispatch',
           HEAD_BRANCH: 'ci/java',
-          RUN_STARTED_AT: '2026-10-18T09:00:00Z',
         }).output,
       ).toBe('pr_number=14472\nfile_issue=true\n');
     });
@@ -1467,6 +1475,16 @@ printf '%s\\n' '{"jobs":[]}'
       false,
     ],
     ['contributor', 'POST', 'issues/14472/comments', '', 0, false],
+    // The first report on a fresh issue is a POST carrying the link; a
+    // regrouping that emits it only on PATCH would drop it from that comment.
+    [
+      'contributor',
+      'POST',
+      'issues/14472/comments',
+      'https://github.com/QwenLM/qwen-code/issues/14500',
+      0,
+      false,
+    ],
     ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 1, false],
     // A suppressed rerun finds the comment an earlier attempt linked to a
     // still-open issue; the whole-body PATCH must not drop that link.
