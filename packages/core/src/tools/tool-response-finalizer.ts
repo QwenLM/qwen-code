@@ -25,10 +25,13 @@ import {
 import {
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
+  persistedOutputPointerRange,
 } from './truncation.js';
+import { transcriptMarkerRange } from './agent/transcript-marker.js';
 import { canonicalToolName, ToolNames } from './tool-names.js';
 
 const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
+const TOOL_OUTPUT_TRUNCATED_NOTICE = 'Tool output truncated.';
 
 export interface ToolResponseBudgetEntry {
   callId: string;
@@ -105,7 +108,57 @@ type TextSlot = {
   field: 'text' | 'output' | 'error';
   text: string;
   protectedPrefix?: string;
+  /**
+   * The character range of an inline recovery handle: a spill envelope's
+   * `Full output saved to:` line, or a subagent transcript marker. Slicing
+   * through either orphans the artifact for the rest of the session, and
+   * `fitText` otherwise slices 1/5 head : 4/5 tail without looking. `fitText`
+   * keeps the range whole and budgets the preview around it; the artifact path
+   * in its header still comes from `persistedOutputFiles` — data this module
+   * owns — never from the text.
+   */
+  recoveryRange?: { start: number; end: number };
 };
+
+/**
+ * The inline recovery handle a producer rendered into this text, if any. Both
+ * ranges are producer-owned inverses (see `truncation.ts` and
+ * `agent/transcript-marker.ts`), so neither can drift from the renderer.
+ */
+function recoveryRangeOf(
+  text: string,
+): { start: number; end: number } | undefined {
+  return persistedOutputPointerRange(text) ?? transcriptMarkerRange(text);
+}
+
+function isBudgetExemptOutputName(name: string | undefined): boolean {
+  const canonical = canonicalToolName(name ?? '');
+  return (
+    canonical === ToolNames.SEARCH_MEMORY || canonical === ToolNames.TOOL_SEARCH
+  );
+}
+
+/**
+ * Whether `enforceFunctionResponseBudget` shortens text in this part. Derived
+ * from `collectTextSlots` itself, so a caller that charges a batch of results
+ * against a token headroom holds out exactly the text the budget will not
+ * shorten — exempt output, empty output, output the plan-mode lifecycle prefix
+ * covers entirely, and nested media (which is not text) are counted as input
+ * instead. A hand-written mirror of those rules drifts from them silently.
+ *
+ * The synthetic entry is the send boundary's own: `enforceFunctionResponseBudget`
+ * collects with `includeTopLevelText = false` and one entry named
+ * `tool-response-batch`, so the entry-level exemption never applies and the
+ * skip is decided by each part's own tool name.
+ */
+export function isBudgetShrinkablePart(part: Part): boolean {
+  return (
+    collectTextSlots(
+      [{ callId: '', toolName: '', responseParts: [part] }],
+      false,
+    ).length > 0
+  );
+}
 
 function collectTextSlots(
   entries: ToolResponseBudgetEntry[],
@@ -125,11 +178,13 @@ function collectTextSlots(
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
       const part = parts[partIndex];
       if (includeTopLevelText && typeof part.text === 'string') {
+        const recoveryRange = recoveryRangeOf(part.text);
         slots.push({
           entryIndex,
           partIndex,
           field: 'text',
           text: part.text,
+          ...(recoveryRange ? { recoveryRange } : {}),
         });
       }
       const response = part.functionResponse?.response;
@@ -139,9 +194,7 @@ function collectTextSlots(
         part.functionResponse?.name ?? entry.toolName,
       );
       const budgetExemptOutput =
-        excludeBudgetExemptOutput &&
-        (responseName === ToolNames.SEARCH_MEMORY ||
-          responseName === ToolNames.TOOL_SEARCH);
+        excludeBudgetExemptOutput && isBudgetExemptOutputName(responseName);
       if (typeof output === 'string' && !budgetExemptOutput) {
         const protectedPrefix = excludeBudgetExemptOutput
           ? getPlanModeLifecyclePrefix(
@@ -153,21 +206,25 @@ function collectTextSlots(
           ? output.slice(protectedPrefix.length)
           : output;
         if (budgetedOutput.length > 0) {
+          const recoveryRange = recoveryRangeOf(budgetedOutput);
           slots.push({
             entryIndex,
             partIndex,
             field: 'output',
             text: budgetedOutput,
             ...(protectedPrefix ? { protectedPrefix } : {}),
+            ...(recoveryRange ? { recoveryRange } : {}),
           });
         }
       }
       if (typeof error === 'string') {
+        const recoveryRange = recoveryRangeOf(error);
         slots.push({
           entryIndex,
           partIndex,
           field: 'error',
           text: error,
+          ...(recoveryRange ? { recoveryRange } : {}),
         });
       }
     }
@@ -232,31 +289,54 @@ function fitText(
   text: string,
   maxChars: number,
   persistedOutputFiles: string[] | undefined,
+  recoveryRange?: { start: number; end: number },
 ): string {
   if (text.length <= maxChars) return text;
   if (maxChars <= 0) return '';
 
-  const header =
+  const pointer =
     persistedOutputFiles && persistedOutputFiles.length > 0
       ? persistedOutputFiles.length === 1
         ? `Tool output truncated. Persisted tool-output artifact: ${persistedOutputFiles[0]}`
         : `Tool output truncated. Persisted tool-output artifacts:\n${persistedOutputFiles
             .map((file) => `- ${file}`)
             .join('\n')}`
-      : 'Tool output truncated.';
-  if (header.length >= maxChars) {
-    return sliceStartWithoutBrokenSurrogate(header, maxChars);
+      : TOOL_OUTPUT_TRUNCATED_NOTICE;
+  // A pointer too long to deliver in full is dropped rather than sent as a
+  // partial path, so the preview is budgeted against the notice that is sent.
+  const header =
+    pointer.length <= maxChars ? pointer : TOOL_OUTPUT_TRUNCATED_NOTICE;
+  if (header.length > maxChars) {
+    return sliceStartWithoutBrokenSurrogate(
+      TOOL_OUTPUT_TRUNCATED_NOTICE,
+      maxChars,
+    );
   }
 
   const separator = '\n\n';
   const marker = '\n...\n';
-  const previewBudget = maxChars - header.length - separator.length;
+  // An inline handle is the artifact's only way back wherever the entry has no
+  // persisted path of its own, so it is delivered whole above the preview and
+  // the body is sliced without it. Below the room that needs, the bare notice
+  // is the fail-closed branch: no path fragment, complete or not.
+  const preserved = recoveryRange
+    ? text.slice(recoveryRange.start, recoveryRange.end)
+    : '';
+  const body = recoveryRange
+    ? text.slice(0, recoveryRange.start) + text.slice(recoveryRange.end)
+    : text;
+  const preservedBlock = preserved ? `${separator}${preserved}` : '';
+  const previewBudget =
+    maxChars - header.length - preservedBlock.length - separator.length;
   if (previewBudget <= 0) {
-    return sliceStartWithoutBrokenSurrogate(header, maxChars);
+    return header;
+  }
+  if (body.length <= previewBudget) {
+    return `${header}${preservedBlock}${separator}${body}`;
   }
   if (previewBudget <= marker.length) {
-    return `${header}${separator}${sliceStartWithoutBrokenSurrogate(
-      text,
+    return `${header}${preservedBlock}${separator}${sliceStartWithoutBrokenSurrogate(
+      body,
       previewBudget,
     )}`;
   }
@@ -264,10 +344,10 @@ function fitText(
   const contentBudget = previewBudget - marker.length;
   const headBudget = Math.floor(contentBudget / 5);
   const tailBudget = contentBudget - headBudget;
-  return `${header}${separator}${sliceStartWithoutBrokenSurrogate(
-    text,
+  return `${header}${preservedBlock}${separator}${sliceStartWithoutBrokenSurrogate(
+    body,
     headBudget,
-  )}${marker}${sliceEndWithoutBrokenSurrogate(text, tailBudget)}`;
+  )}${marker}${sliceEndWithoutBrokenSurrogate(body, tailBudget)}`;
 }
 
 function replaceTextSlots(
@@ -285,10 +365,13 @@ function replaceTextSlots(
     if (slot.text.length <= allocations[index]) continue;
     const entry = result[slot.entryIndex];
     const part = entry.responseParts[slot.partIndex];
+    // The header path is the entry's persisted artifact — data this module
+    // wrote, never a string recovered from model-visible text.
     const replacement = fitText(
       slot.text,
       allocations[index],
       entry.persistedOutputFiles,
+      slot.recoveryRange,
     );
 
     if (slot.field === 'text') {
@@ -326,8 +409,15 @@ export function toolResponseTextLength(parts: Part[]): number {
 export function enforceFunctionResponseBudget(
   entries: ToolResponseBudgetEntry[],
   budget: number,
+  allowZeroBudget = false,
+  stampProvenance = true,
 ): ToolResponseBudgetEntry[] {
-  if (!Number.isFinite(budget) || budget <= 0) return entries;
+  if (
+    !Number.isFinite(budget) ||
+    budget < 0 ||
+    (budget === 0 && !allowZeroBudget)
+  )
+    return entries;
   const slots = collectTextSlots(entries, false);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) return entries;
@@ -349,7 +439,7 @@ export function enforceFunctionResponseBudget(
       const part = reduced[index].responseParts[partIndex];
       // Attribute this fallback to the model send policy, including when a
       // Hosted Skill applies it before saving its model-facing result.
-      if (part !== entries[index].responseParts[partIndex])
+      if (stampProvenance && part !== entries[index].responseParts[partIndex])
         updateToolOutputBudget([part], budget, 'send_guard');
     }
   return reduced;
@@ -361,6 +451,8 @@ export async function finalizeToolResponses(
   promptIds?: ReadonlyMap<string, string>,
   observeBoundary = true,
   associateBoundary = false,
+  budgetOverride?: number,
+  includeTopLevelText = true,
 ): Promise<ToolResponseBudgetEntry[]> {
   const shouldAssociateBoundary = observeBoundary && associateBoundary;
   const associatedEntryIndexes = observeBoundary
@@ -396,15 +488,21 @@ export async function finalizeToolResponses(
     );
   };
   const budget =
-    config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
-  if (!Number.isFinite(budget) || budget <= 0) {
+    budgetOverride ??
+    config.getToolOutputBatchBudget?.() ??
+    Number.POSITIVE_INFINITY;
+  if (
+    !Number.isFinite(budget) ||
+    budget < 0 ||
+    (budget === 0 && budgetOverride === undefined)
+  ) {
     observeUnchangedEntries();
     if (shouldAssociateBoundary)
       associateFinalizerEntries(entries, new Set(entries.keys()));
     return entries;
   }
 
-  const slots = collectTextSlots(entries);
+  const slots = collectTextSlots(entries, includeTopLevelText);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) {
     observeUnchangedEntries();
@@ -417,6 +515,23 @@ export async function finalizeToolResponses(
     slots.map((slot) => slot.text.length),
     budget,
   );
+  if (
+    budgetOverride !== undefined &&
+    slots.some(
+      (slot, index) =>
+        slot.text.length > allocations[index] &&
+        // `fitText` spends the allocation on the notice and its separator
+        // first, so anything below notice + '\n\n' + one character would
+        // persist an artifact and then send a contentless notice.
+        allocations[index] < TOOL_OUTPUT_TRUNCATED_NOTICE.length + 3,
+    )
+  ) {
+    // Compaction owns headroom too small for a meaningful tool result.
+    observeUnchangedEntries();
+    if (shouldAssociateBoundary)
+      associateFinalizerEntries(entries, new Set(entries.keys()));
+    return entries;
+  }
   const entriesToPersist = new Set<number>();
   for (let index = 0; index < slots.length; index++) {
     if (slots[index].text.length > allocations[index]) {
@@ -554,10 +669,10 @@ export async function finalizeToolResponses(
   if (shouldAssociateBoundary) {
     associateFinalizerEntries(finalized, new Set(finalized.keys()));
   }
-  const finalizedTotal = collectTextSlots(finalized).reduce(
-    (sum, slot) => sum + slot.text.length,
-    0,
-  );
+  const finalizedTotal = collectTextSlots(
+    finalized,
+    includeTopLevelText,
+  ).reduce((sum, slot) => sum + slot.text.length, 0);
   debugLogger.info(
     `Tool response budget (${budget} chars): reduced ${entriesToPersist.size} result(s) from ${total} to ${finalizedTotal} chars.`,
   );

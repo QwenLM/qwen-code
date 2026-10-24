@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+import { buildTranscriptMarker } from './transcript-marker.js';
 import {
   buildInheritedForkExecutionToolNames,
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
@@ -1443,8 +1444,6 @@ The background-agent rules above apply to background forks unchanged.${delegatio
  */
 type SubagentOutcomeSink = (metadata: SubagentSpanMetadata) => void;
 
-const EARLIER_OUTPUT_OMITTED = '[earlier output omitted]\n';
-
 /**
  * Compose `reason` + `header` + `text` + `suffix` inside the tool's own budget.
  * `truncateKeep: 'tail'` deletes the head of an oversized result outright, and
@@ -1469,7 +1468,7 @@ function composeIncompleteResult(
   transcriptPath: string,
 ): string {
   const prefix = `${reason}\n\n${header}\n\n`;
-  const marker = `${EARLIER_OUTPUT_OMITTED}The full output is in ${transcriptPath}. Read it with the ${ToolNames.READ_FILE} tool.\n`;
+  const marker = buildTranscriptMarker(transcriptPath);
   // `suffix` is producer-sized, not bounded: `formatExecutionCleanupFailure`
   // interpolates the child-process message verbatim. Left unbounded it pushes
   // the composition past the tool budget while the `outputBudgetApplied` mark

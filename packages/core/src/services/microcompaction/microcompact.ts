@@ -10,6 +10,7 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
+import { unescapePath } from '../../utils/paths.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -157,7 +158,7 @@ export function collectResidentMemoryBodies(
  * fast-path (issue #4239) instead of wiping the whole cache. All three
  * take the target as a `file_path` arg.
  */
-const FILE_PATH_TOOLS = new Set<string>([
+export const FILE_PATH_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
@@ -191,7 +192,7 @@ function resolveTrackedToolName(name: string): string {
   return match;
 }
 
-function getFunctionCallIdentity(
+export function getFunctionCallIdentity(
   call: NonNullable<Part['functionCall']>,
 ): ToolCallIdentity | undefined {
   if (!call.name) return undefined;
@@ -280,9 +281,13 @@ function buildCallIdToFilePath(
       if (!FILE_PATH_TOOLS.has(identity.name)) continue;
       const filePath = identity.args['file_path'];
       if (typeof filePath === 'string' && filePath.length > 0) {
+        // The same normalisation the three tools apply before executing and
+        // recording: the cache is keyed by it, so a raw @-completion-escaped
+        // argument names no entry here.
+        const normalised = unescapePath(filePath.trim());
         const existing = map.get(callId);
-        if (existing) existing.push(filePath);
-        else map.set(callId, [filePath]);
+        if (existing) existing.push(normalised);
+        else map.set(callId, [normalised]);
       }
     }
   }

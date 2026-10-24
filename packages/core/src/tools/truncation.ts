@@ -819,3 +819,30 @@ Total characters: ${content.length}; total lines: ${countLines(content)}.
 Preview (up to ${PREVIEW_SIZE_CHARS} chars):
 ${preview}`;
 }
+
+/**
+ * The character range of the line that renders a persisted artifact's path
+ * (`buildStub`'s envelope, or `truncateAndSaveToFile`'s wrapped notice).
+ *
+ * The line is the artifact's only in-band handle wherever a caller did not
+ * carry the path as data, so a consumer that shortens this text must not slice
+ * through it: a path cut mid-string is not a followable handle. Lives beside
+ * `buildStub` so the template and its inverse cannot drift.
+ */
+export function persistedOutputPointerRange(
+  text: string,
+): { start: number; end: number } | undefined {
+  if (
+    !text.startsWith('<persisted-output>') &&
+    !text.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)
+  ) {
+    return undefined;
+  }
+  const line =
+    /(?:Full output saved to|The full output has been saved to): [^\n]+$/m.exec(
+      text,
+    );
+  return line
+    ? { start: line.index, end: line.index + line[0].length }
+    : undefined;
+}
