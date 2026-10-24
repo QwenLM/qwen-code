@@ -6026,6 +6026,11 @@ exit 1
     expect(seedOf('@qwen-code /takeover from 3')).toBe('add|3');
     expect(seedOf('  @qwen-code /takeover from 12  ')).toBe('add|12');
     expect(seedOf('@qwen-code /takeover from 99')).toBe('add|99');
+    // A trailing NEWLINE engages through a different mechanism than the
+    // trailing-space body above, so one fixture cannot cover both: sed is
+    // line-oriented (af-083), the newline is a record terminator, and it is
+    // the surrounding $(...) that strips it.
+    expect(seedOf('@qwen-code /takeover from 4\n')).toBe('add|4');
     // 'from 0' is the explicit no-seed spelling: it must engage exactly like
     // the bare command rather than being rejected, so a maintainer who types
     // it gets management, not silence.
@@ -6056,6 +6061,18 @@ exit 1
       '@qwen-code /takeover from 3; rm -rf /',
       '@qwen-code /takeover from $(id)',
       '@qwen-code /takeover from `id`',
+      // A leading NEWLINE fails closed for a different reason than the
+      // prefixed bodies above: $(...) strips only TRAILING newlines, so
+      // BODY_TRIMMED keeps the '\n'; the end-anchored `from N` regex (af-007)
+      // still matches, but BASH_REMATCH[1] then fails the TAKEOVER_COMMAND
+      // comparison. Production stops it earlier at the router prefilter
+      // (af-004); this pins the in-job trim itself.
+      '\n@qwen-code /takeover from 4',
+      // An INTERIOR newline fails closed too, and is the only body here that
+      // pins it: the `from N` regex (af-007) is end-anchored, so trailing
+      // prose blocks the match. Without this a first-line-only trim would
+      // silently engage a comment that merely quotes the command.
+      '@qwen-code /takeover from 4\nthanks',
     ]) {
       expect(seedOf(body)).toBe('|');
     }

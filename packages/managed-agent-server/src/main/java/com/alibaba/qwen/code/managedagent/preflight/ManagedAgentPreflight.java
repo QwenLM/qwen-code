@@ -435,6 +435,13 @@ public final class ManagedAgentPreflight {
                             : "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST in "
                                     + file));
         }
+        if (harness.getPool().isEnabled()) {
+            if (!properties.getSessionStore().isEnabled() || StringUtils.isBlank(properties.getSessionStore().getBindingKey())) {
+                return new Check("harness", Status.FAIL, "pool Session Store or binding key is missing", "enable session-store with a binding key");
+            }
+            return new Check("harness", Status.SKIP, "pool endpoints negotiate identity and TLS through the configured discovery source",
+                    "verify individual Harness pool readiness after startup");
+        }
         String baseUrl = harness.getBaseUrl();
         if (StringUtils.isBlank(baseUrl)) {
             return new Check("harness", Status.FAIL, "base URL is empty",

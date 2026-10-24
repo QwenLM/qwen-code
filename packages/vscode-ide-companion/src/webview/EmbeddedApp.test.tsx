@@ -1990,3 +1990,33 @@ describe('EmbeddedApp rewind preflight localization', () => {
     ).rejects.toThrow('Failed to edit the message. Please try again.');
   });
 });
+
+describe('EmbeddedApp selection copy keep-focus', () => {
+  it('focuses the app root on pointerdown outside controls so a transcript selection survives VS Code copy', async () => {
+    await renderApp();
+    const appRoot = document.querySelector<HTMLElement>(
+      '[data-vscode-context]',
+    );
+    expect(appRoot).not.toBeNull();
+    expect(appRoot!.getAttribute('tabindex')).toBe('-1');
+
+    const transcriptRow = document.createElement('p');
+    appRoot!.appendChild(transcriptRow);
+    transcriptRow.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true }),
+    );
+    expect(document.activeElement).toBe(appRoot);
+  });
+
+  it('does not move focus away from a control the pointer pressed', async () => {
+    await renderApp();
+    const appRoot = document.querySelector<HTMLElement>(
+      '[data-vscode-context]',
+    );
+    const button = document.createElement('button');
+    appRoot!.appendChild(button);
+    button.focus();
+    button.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    expect(document.activeElement).toBe(button);
+  });
+});
