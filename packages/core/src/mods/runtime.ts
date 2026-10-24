@@ -32,6 +32,7 @@ import {
   type ModLog,
   type ModReply,
   type ModRequest,
+  type ModSessionFacts,
   type ModWorkerReply,
   type ModSource,
   type ModOptions,
@@ -88,6 +89,7 @@ export class ModRuntime {
 
   private constructor(
     private readonly log: (entry: ModLog, plugin: string) => void,
+    private readonly facts: () => ModSessionFacts,
     private readonly resolveTool?: ModToolResolver,
     private readonly surface: 'terminal' | null = null,
   ) {
@@ -156,14 +158,29 @@ export class ModRuntime {
     resolveTool?: ModToolResolver,
     surface: 'terminal' | null = null,
     version = 'unknown',
+    facts?: () => ModSessionFacts,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
       new Set(plugins.map((p) => p.id)).size !== plugins.length
     )
       throw new Error('Invalid Mod plugin group.');
+    const startedAt = Date.now();
     const runtime = new ModRuntime(
       log,
+      facts ??
+        (() => ({
+          id: '',
+          cwd,
+          root: cwd,
+          model: '',
+          turns: 0,
+          usage: {
+            startedAt,
+            context: { tokens: 0, window: 0 },
+            rateLimits: [],
+          },
+        })),
       plugins.some((plugin) => plugin.toolDialect === 'claude')
         ? resolveTool
         : undefined,
@@ -450,7 +467,8 @@ export class ModRuntime {
     signal.throwIfAborted();
     if (this.failure) throw this.failure;
     if (this.pending) throw new Error('A Mod dispatch is already running.');
-    const json = JSON.stringify(request);
+    const message = { ...request, facts: this.facts() };
+    const json = JSON.stringify(message);
     if (
       Buffer.byteLength(json) >
       (request.type === 'load' ? 32 : 1) * MOD_MAX_BYTES + 8192
@@ -517,7 +535,7 @@ export class ModRuntime {
         signal.addEventListener('abort', onAbort, { once: true });
         root.refresh();
         this.worker.postMessage({
-          ...request,
+          ...message,
           root: root.id,
           phase: root.phase,
         });
