@@ -440,6 +440,7 @@ printf '%s\\n' '${liveAttempt}'
         failClosedLookup = false,
         failEdit = false,
         failBodyRead = false,
+        failBodyReadFor = '',
         issueBody = '<!-- main-ci-failure-aggregate:1234 -->',
         issueBodies = {},
         signatureTitle = '',
@@ -498,6 +499,7 @@ elif [[ "$1 $2" == 'issue create' ]]; then
 elif [[ "$1 $2" == 'issue view' ]]; then
   [[ "$*" == *'--json body'* ]] || exit 2
   ${failBodyRead ? 'exit 1' : ':'}
+  ${failBodyReadFor ? `[[ "$3" != "${failBodyReadFor}" ]] || exit 1` : ':'}
   if [[ -f "${tmp}/body-$3.md" ]]; then cat "${tmp}/body-$3.md"; else cat '${tmp}/current-body.md'; fi
 elif [[ "$1 $2" == 'issue edit' ]]; then
   ${failEdit ? 'exit 1' : ':'}
@@ -716,6 +718,34 @@ fi
       expect(result.stdout).toContain('::warning::');
     });
 
+    it('leaves adoption to the body-marker fallback when a candidate cannot be read', () => {
+      // A transient read failure on the true aggregate must not hand the
+      // occurrence to the next admissible filing — per-commit bodies pass the
+      // marker screen, so skipping ahead can mint a zombie aggregate.
+      const result = run(
+        [botIssue(7, ' — Old.test'), botIssue(9, ' on abc123456789')],
+        {
+          failBodyReadFor: '7',
+          issueBodies: { 9: 'per-commit body with no marker classes' },
+          markerIssues: [
+            {
+              number: 42,
+              title: 'Anything human-shaped',
+              user: { login: 'qwen-code-dev-bot' },
+              body: '<!-- main-ci-failure-aggregate:1234 -->',
+            },
+          ],
+        },
+      );
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toContain('issue comment 9');
+      expect(result.calls).not.toMatch(/issue (edit|reopen) 9/);
+      expect(result.stdout).toContain(
+        'leaving adoption to the marker fallback',
+      );
+    });
+
     it('creates a fixed-title triage issue when only other workflow issues exist', () => {
       const result = run([
         botIssue(10, ' extra'),
@@ -776,8 +806,8 @@ fi
       expect(adopted.migratedBody).toBe(
         `${originalBody}\n\n<!-- main-ci-failure-aggregate:1234 -->\n`,
       );
-      // The occurrence is published before any edit touches the issue; the
-      // body reads that route the record may legitimately precede the comment.
+      // The record is pinned as comment-before-edits rather than
+      // comment-before-reads because adoption must read the body to route.
       expect(adopted.calls.indexOf('issue comment 42')).toBeLessThan(
         adopted.calls.indexOf('issue edit 42'),
       );
@@ -1072,16 +1102,6 @@ fi
         expect(result.calls).not.toContain('issue create');
       });
 
-      it('keeps the aggregate route when the marker list is empty', () => {
-        const result = run([botIssue(42)], {
-          signatureTitle,
-          testMarkers: '',
-        });
-        expect(result.status).toBe(0);
-        expect(result.calls).toContain('issue comment 42');
-        expect(result.calls).not.toContain('issue create');
-      });
-
       it('never scans issues owned by someone other than the reporting bot', () => {
         const result = run(
           [{ ...botIssue(7), author: { login: 'not-the-bot' } }],
@@ -1118,6 +1138,8 @@ fi
             signatureTitle,
             testMarkers: `${markerA}\n${markerB}`,
             markerIssues: [retitled],
+            // The accretion re-read sees the same live body the listing had.
+            issueBodies: { 9: retitled.body },
           },
         );
         expect(result.status).toBe(0);
@@ -1161,6 +1183,60 @@ fi
         expect(result.status).toBe(0);
         expect(result.calls).toContain('issue create');
         expect(result.calls).not.toContain('issue comment 9');
+      });
+
+      it('reopens a resolved per-signature issue when its test fails again', () => {
+        // Regression reopens the tracker instead of filing beside it — the
+        // same lifecycle the aggregate route has always had.
+        const tracked = `<!-- ${markerA} -->\n`;
+        const result = run([], {
+          signatureTitle,
+          testMarkers: `${markerA}\n${markerB}`,
+          issueBodies: { 7: tracked },
+          closedIssues: [{ ...botIssue(7, ' — Foo.test'), body: tracked }],
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls.indexOf('issue reopen 7')).toBeLessThan(
+          result.calls.indexOf('issue comment 7'),
+        );
+        expect(result.calls).not.toContain('issue create');
+        expect(result.migratedBody).toContain(`<!-- ${markerB} -->`);
+        expect(result.migratedBody).toContain(
+          '<!-- main-ci-failure-scope:1234 -->',
+        );
+        expect(result.output).toContain(
+          'issue_url=https://github.com/QwenLM/qwen-code/issues/7',
+        );
+      });
+
+      it('reopens nothing when a closed issue carries a different workflow scope', () => {
+        const tracked = `<!-- ${markerA} -->\n<!-- main-ci-failure-scope:9999 -->\n`;
+        const result = run([], {
+          signatureTitle,
+          testMarkers: markerA,
+          closedIssues: [
+            {
+              number: 7,
+              title: 'retitled away',
+              author: { login: 'qwen-code-dev-bot' },
+              body: tracked,
+            },
+          ],
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).not.toContain('issue reopen 7');
+        expect(result.calls).toContain('issue create');
+      });
+
+      it('falls back to the aggregate when the closed-issue scan fails', () => {
+        const result = run([botIssue(42)], {
+          signatureTitle,
+          testMarkers: markerA,
+          failClosedLookup: true,
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 42');
+        expect(result.calls).not.toContain('issue create');
       });
     });
   });

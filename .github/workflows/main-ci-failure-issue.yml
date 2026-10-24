@@ -457,26 +457,24 @@ jobs:
             existing_issue=''
             matched_body=''
             signature_unresolved=false
-            if [[ "${#family[@]}" -gt 0 ]]; then
-              for family_line in "${family[@]}"; do
-                candidate="${family_line%%$'\t'*}"
-                candidate_body="${RUNNER_TEMP}/candidate-${candidate}.md"
-                if ! gh issue view "${candidate}" --repo "${REPO}" \
-                  --json body --jq '.body // ""' > "${candidate_body}"; then
-                  echo "::warning::Could not read issue #${candidate}; the signature route cannot certify a miss."
-                  signature_unresolved=true
-                  continue
+            for family_line in "${family[@]}"; do
+              candidate="${family_line%%$'\t'*}"
+              candidate_body="${RUNNER_TEMP}/candidate-${candidate}.md"
+              if ! gh issue view "${candidate}" --repo "${REPO}" \
+                --json body --jq '.body // ""' > "${candidate_body}"; then
+                echo "::warning::Could not read issue #${candidate}; the signature route cannot certify a miss."
+                signature_unresolved=true
+                continue
+              fi
+              for test_marker in "${markers[@]}"; do
+                if grep -qF -- "${test_marker}" "${candidate_body}"; then
+                  existing_issue="${candidate}"
+                  matched_body="${candidate_body}"
+                  break
                 fi
-                for test_marker in "${markers[@]}"; do
-                  if grep -qF -- "${test_marker}" "${candidate_body}"; then
-                    existing_issue="${candidate}"
-                    matched_body="${candidate_body}"
-                    break
-                  fi
-                done
-                [[ -z "${existing_issue}" ]] || break
               done
-            fi
+              [[ -z "${existing_issue}" ]] || break
+            done
 
             if [[ -z "${existing_issue}" ]]; then
               # A human retitle drops a per-signature issue out of the title
@@ -517,6 +515,43 @@ jobs:
               fi
             fi
 
+            if [[ -z "${existing_issue}" ]]; then
+              # A resolved per-signature issue regresses into a reopen, not a
+              # fresh filing — the same lifecycle the aggregate has below.
+              # Closed titles still name the workflow family, and scoped
+              # bodies survive human retitles.
+              closed_pages="${RUNNER_TEMP}/closed-signature.json"
+              lookup_ok=false
+              for attempt in 1 2 3; do
+                if gh issue list --repo "${REPO}" --state closed \
+                  --json number,title,author,body --limit 1000 > "${closed_pages}"; then
+                  lookup_ok=true
+                  break
+                fi
+                sleep "${attempt}"
+              done
+              if [[ "${lookup_ok}" != true ]]; then
+                echo '::warning::Could not scan closed issues for the test markers; the signature route cannot certify a miss.'
+                signature_unresolved=true
+              elif ! existing_issue="$(jq -r --arg bot "${BOT_LOGIN}" --arg title "${title}" --arg scope "${scope_key}" --argjson ms "${markers_json}" '
+                map(select(.author.login == $bot)
+                  | select(.title == $title or (.title | startswith($title + " — ")) or ((.body // "") | contains($scope)))
+                  | select((.body // "") as $b | any($ms[]; . as $m | $b | contains($m))))
+                | sort_by(.number) | .[0].number // empty' "${closed_pages}")"; then
+                echo '::error::Could not parse the closed-issues listing; not writing.'
+                exit 1
+              elif [[ -n "${existing_issue}" ]]; then
+                matched_body="${RUNNER_TEMP}/candidate-${existing_issue}.md"
+                if ! jq -r --argjson n "${existing_issue}" \
+                  'map(select(.number == $n)) | .[0].body // ""' \
+                  "${closed_pages}" > "${matched_body}"; then
+                  echo '::error::Could not re-read the closed issue body; not writing.'
+                  exit 1
+                fi
+                gh issue reopen "${existing_issue}" --repo "${REPO}"
+              fi
+            fi
+
             if [[ -n "${existing_issue}" ]]; then
               comment_file="${RUNNER_TEMP}/issue-comment.md"
               printf '%s\n\nRun attempt: %s\n' "${ISSUE_BODY}" "${RUN_ATTEMPT}" \
@@ -526,18 +561,26 @@ jobs:
               # Tests that join a standing failure set later must still find
               # this issue, so accrete their markers into its body; the scope
               # key rides along, so a human retitle later never drops the
-              # issue out of the retitled scan. Best-effort: the occurrence
-              # above is already recorded.
-              missing=()
-              for test_marker in "${markers[@]}"; do
-                grep -qF -- "${test_marker}" "${matched_body}" || missing+=("${test_marker}")
-              done
-              grep -qF -- "${scope_key}" "${matched_body}" || missing+=("${scope_key}")
-              if [[ "${#missing[@]}" -gt 0 ]]; then
-                if ! { printf '<!-- %s -->\n' "${missing[@]}" >> "${matched_body}" &&
-                  gh issue edit "${existing_issue}" --repo "${REPO}" --body-file "${matched_body}"; }; then
-                  echo '::warning::Could not accrete the new test markers onto the tracking issue.'
+              # issue out of the retitled scan. The matched body can predate
+              # the comment (the retitled and closed scans read listings), so
+              # re-read it before the full-body replacement — appending beats
+              # silently overwriting a human's concurrent edit. Best-effort
+              # either way: the occurrence above is already recorded.
+              if gh issue view "${existing_issue}" --repo "${REPO}" \
+                --json body --jq '.body // ""' > "${matched_body}"; then
+                missing=()
+                for test_marker in "${markers[@]}"; do
+                  grep -qF -- "${test_marker}" "${matched_body}" || missing+=("${test_marker}")
+                done
+                grep -qF -- "${scope_key}" "${matched_body}" || missing+=("${scope_key}")
+                if [[ "${#missing[@]}" -gt 0 ]]; then
+                  if ! { printf '<!-- %s -->\n' "${missing[@]}" >> "${matched_body}" &&
+                    gh issue edit "${existing_issue}" --repo "${REPO}" --body-file "${matched_body}"; }; then
+                    echo '::warning::Could not accrete the new test markers onto the tracking issue.'
+                  fi
                 fi
+              else
+                echo '::warning::Could not re-read the tracking issue body for accretion; its markers lag until the next recurrence.'
               fi
               exit 0
             fi
@@ -573,30 +616,32 @@ jobs:
           existing_issue=''
           match_kind=''
           via_title_lookup=false
-          if [[ "${#family[@]}" -gt 0 ]]; then
-            for family_line in "${family[@]}"; do
-              candidate="${family_line%%$'\t'*}"
-              candidate_kind="${family_line#*$'\t'}"
-              if [[ "${candidate_kind}" == legacy ]]; then
-                candidate_body="${RUNNER_TEMP}/family-${candidate}.md"
-                if ! gh issue view "${candidate}" --repo "${REPO}" \
-                  --json body --jq '.body // ""' > "${candidate_body}"; then
-                  echo "::warning::Could not read issue #${candidate}; leaving it to the marker fallback."
-                  continue
-                fi
-                # Both marker classes mean an already-adopted aggregate; test
-                # markers alone mean a per-signature issue.
-                if grep -qF 'qwen-main-ci-failure-test:' "${candidate_body}" &&
-                  ! grep -qF -- "${marker}" "${candidate_body}"; then
-                  continue
-                fi
+          for family_line in "${family[@]}"; do
+            candidate="${family_line%%$'\t'*}"
+            candidate_kind="${family_line#*$'\t'}"
+            if [[ "${candidate_kind}" == legacy ]]; then
+              candidate_body="${RUNNER_TEMP}/family-${candidate}.md"
+              if ! gh issue view "${candidate}" --repo "${REPO}" \
+                --json body --jq '.body // ""' > "${candidate_body}"; then
+                # An unreadable candidate cannot be certified, and adopting
+                # the NEXT admissible one on sight could hand the occurrence
+                # to a per-commit filing; the body-marker fallback finds the
+                # real aggregate without per-issue reads.
+                echo "::warning::Could not read issue #${candidate}; leaving adoption to the marker fallback."
+                break
               fi
-              existing_issue="${candidate}"
-              match_kind="${candidate_kind}"
-              via_title_lookup=true
-              break
-            done
-          fi
+              # Both marker classes mean an already-adopted aggregate; test
+              # markers alone mean a per-signature issue.
+              if grep -qF 'qwen-main-ci-failure-test:' "${candidate_body}" &&
+                ! grep -qF -- "${marker}" "${candidate_body}"; then
+                continue
+              fi
+            fi
+            existing_issue="${candidate}"
+            match_kind="${candidate_kind}"
+            via_title_lookup=true
+            break
+          done
 
           if [[ -z "${existing_issue}" ]]; then
             # A bot-owned aggregate remains recognizable after a human retitles it.
@@ -639,7 +684,9 @@ jobs:
                 )) | sort_by(.number) | .[] |
                 [.number, (if .title == $title then "exact" else "legacy" end)] | @tsv')" || issue_match=''
             if [[ -n "${issue_match}" ]]; then
-              IFS=$'\t' read -r existing_issue match_kind <<< "${issue_match%%$'\n'*}"
+              # The jq emits one TSV candidate per line, oldest first; read
+              # stops at the first line, which is the only one wanted.
+              IFS=$'\t' read -r existing_issue match_kind <<< "${issue_match}"
               via_title_lookup=true
               gh issue reopen "${existing_issue}" --repo "${REPO}"
             fi
