@@ -6,7 +6,10 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { canUseRipgrep } from '@qwen-code/qwen-code-core/utils/ripgrepUtils.js';
+
+const debugLogger = createDebugLogger('STARTUP_WARNINGS');
 
 type WarningCheckOptions = {
   workspaceRoot: string;
@@ -40,6 +43,23 @@ const rootDirectoryCheck: WarningCheck = {
   },
 };
 
+/**
+ * The startup notice shown when ripgrep cannot be used.
+ *
+ * Deliberately a single actionable line, with none of the probe's own output: a
+ * bundled binary that cannot run on the host prints its loader/allocator
+ * diagnostics (`<jemalloc>: Unsupported system page size`, `memory allocation of
+ * 160 bytes failed`, …), which in a terminal reads like Qwen Code itself ran out
+ * of memory right before the user starts debugging (#13704). Nothing is lost by
+ * keeping the banner to one line: `/doctor` reports the ripgrep state together
+ * with the reason and the install hint, and `ripgrepAvailabilityCheck` also
+ * writes the reason to the debug log — the latter only when
+ * `QWEN_DEBUG_LOG_FILE` is enabled, which `--debug` sets and a default run does
+ * not.
+ */
+const RIPGREP_UNAVAILABLE_WARNING =
+  'Ripgrep not available: falling back to built-in grep, which is slower on large codebases. Install ripgrep for faster file content search.';
+
 const ripgrepAvailabilityCheck: WarningCheck = {
   id: 'ripgrep-availability',
   check: async (options: WarningCheckOptions) => {
@@ -49,12 +69,17 @@ const ripgrepAvailabilityCheck: WarningCheck = {
 
     try {
       const isAvailable = await canUseRipgrep(options.useBuiltinRipgrep);
-      if (!isAvailable) {
-        return 'Ripgrep not available: Please install ripgrep globally to enable faster file content search. Falling back to built-in grep.';
-      }
-      return null;
+      return isAvailable ? null : RIPGREP_UNAVAILABLE_WARNING;
     } catch (error) {
-      return `Ripgrep not available: ${error instanceof Error ? error.message : 'Unknown error'}. Falling back to built-in grep.`;
+      // A probe that threw and a probe that answered "no" leave the user in the
+      // same place — built-in grep — so both get the same quiet notice. The
+      // banner stays one line, but the reason has to survive somewhere, and on
+      // this path nothing else records it: `resolveHealthyRipgrep` re-throws a
+      // *system* rg failure before reaching its own `debugLogger.warn`, so an
+      // empty `catch` would drop the only copy. (`/doctor` re-probes and reports
+      // the reason on its own, but it does not run here.)
+      debugLogger.warn(`Ripgrep probe failed: ${error}`);
+      return RIPGREP_UNAVAILABLE_WARNING;
     }
   },
 };
