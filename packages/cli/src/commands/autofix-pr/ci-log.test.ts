@@ -134,7 +134,7 @@ describe('runCiLog', () => {
     });
     runCiLog(7, 456, 200);
     expect(mocks.gh.mock.calls[0]).toContain(
-      'repos/o/r/actions/runs/456/jobs?per_page=100',
+      'repos/o/r/actions/runs/456/jobs?per_page=30',
     );
     expect(mocks.gh.mock.calls.slice(1).map((call) => call.at(-1))).toEqual([
       'repos/o/r/actions/jobs/2/logs',
@@ -166,6 +166,32 @@ describe('runCiLog', () => {
     ]);
     const { path } = JSON.parse(mocks.stdout.mock.calls[0][0]);
     expect(readFileSync(path, 'utf8')).toBe('Test\tboom\n');
+  });
+
+  it('lists the jobs left once its time is spent, so the shell never kills it unwritten', () => {
+    const now = vi.spyOn(Date, 'now');
+    let clock = 1_000_000;
+    now.mockImplementation(() => clock);
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args.includes('--paginate')) {
+        return [
+          '{"id":2,"name":"Test","conclusion":"failure"}',
+          '{"id":3,"name":"E2E","conclusion":"failure"}',
+        ].join('\n');
+      }
+      clock += 9 * 60_000;
+      return 'boom';
+    });
+    try {
+      runCiLog(7, 456, 200);
+    } finally {
+      now.mockRestore();
+    }
+    const { path, jobs } = JSON.parse(mocks.stdout.mock.calls[0][0]);
+    expect(jobs).toEqual(['Test', 'E2E']);
+    expect(readFileSync(path, 'utf8')).toBe(
+      'Test\tboom\nE2E\tlog unavailable: ci-log ran out of time; the jobs above were read\n',
+    );
   });
 
   it('keeps the other logs when one cannot be read', () => {

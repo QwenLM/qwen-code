@@ -77,6 +77,10 @@ function jobLog(repo: string, jobId: number): string {
   return stripVTControlCharacters(log);
 }
 
+/** How long `ci-log` spends downloading, inside the shell tool's ten
+ * minutes: the jobs left after it are listed, their logs not read. */
+const CI_LOG_BUDGET_MS = 8 * 60_000;
+
 export function runCiLog(prNumber: number, runId: number, limit: number): void {
   // `slice(-0)` and `slice(NaN)` both keep the whole log.
   assertPositiveInteger(limit, '--lines');
@@ -93,7 +97,9 @@ export function runCiLog(prNumber: number, runId: number, limit: number): void {
   const failed = gh(
     'api',
     '--paginate',
-    `repos/${repo}/actions/runs/${runId}/jobs?per_page=100`,
+    // Pages of 30, gh's own: GitHub answers a page of 100 jobs of a large
+    // re-run run with a 502 after ten seconds, every time.
+    `repos/${repo}/actions/runs/${runId}/jobs?per_page=30`,
     '--jq',
     '.jobs[] | select(.status == "completed") | {id, name, conclusion}',
   )
@@ -110,8 +116,15 @@ export function runCiLog(prNumber: number, runId: number, limit: number): void {
       `run ${runId} has no finished job that failed or timed out: its failed jobs are still running, or it failed before any job started.`,
     );
   }
+  const deadline = Date.now() + CI_LOG_BUDGET_MS;
   const { text, jobs } = tailPerJob(
     failed.map((job) => {
+      if (Date.now() > deadline) {
+        return {
+          name: job.name,
+          log: 'log unavailable: ci-log ran out of time; the jobs above were read',
+        };
+      }
       // One log that cannot be read must not cost the others.
       try {
         return { name: job.name, log: jobLog(repo, job.id) };

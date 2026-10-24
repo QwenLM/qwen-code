@@ -431,7 +431,7 @@ preview. `--lines` must be a positive integer. A job whose log cannot be
 read gets a `log unavailable: <reason>` line in place of its log, and the
 other jobs are still written. A run with no finished job that failed or
 timed out — its failed jobs still running, or a startup failure before any
-job — is an error, not an empty file.
+job — is an error, not an empty file. Jobs are listed 30 to a page (GitHub answers a page of 100 jobs of a large re-run run with a 502), and after eight minutes of downloading, inside the shell tool's ten, the jobs left are written as `log unavailable` instead of read.
 
 Each job's log comes from the REST jobs endpoint, not `gh run view
 --log-failed`: `gh run view` (with or without `--job`) refuses a run that is
