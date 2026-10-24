@@ -1343,7 +1343,22 @@ export class MemoryManager {
     } finally {
       this.extractCurrentTaskId.delete(params.projectRoot);
       this.extractRunning.delete(params.projectRoot);
-      void this.startQueuedExtract(params.projectRoot);
+      // `startQueuedExtract` awaits the queued run, so a queued extract that
+      // fails rejects this promise — and `void` leaves that rejection with no
+      // sink. `runExtract` has already recorded the failure on the task and
+      // logged the extract event, so nothing consumes the rejection; it only
+      // escapes as an unhandled rejection that fails a vitest lane whose tests
+      // all passed, which is exactly how a drain timeout followed by the test's
+      // teardown surfaced in CI (#15269).
+      void this.startQueuedExtract(params.projectRoot).catch(
+        (error: unknown) => {
+          debugLogger.warn(
+            `Queued auto-memory extraction failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        },
+      );
     }
   }
 
