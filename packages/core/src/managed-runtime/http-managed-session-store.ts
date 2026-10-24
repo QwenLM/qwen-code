@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  parseManagedPermissionRules,
+  nonEmptyManagedPermissionRules,
+  type ManagedPermissionRules,
+} from './managed-permission-rules.js';
+
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isIPv4 } from 'node:net';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
@@ -169,7 +175,8 @@ export interface HttpManagedSessionStores {
 }
 
 export interface ManagedSessionApprovalSelection {
-  readonly mode: 'default' | 'auto-edit' | 'yolo';
+  readonly mode: 'default' | 'auto-edit' | 'yolo' | 'auto';
+  readonly permissionRules?: ManagedPermissionRules;
   readonly revision: number;
 }
 
@@ -811,17 +818,37 @@ class ManagedSessionStoreHttpClient {
     if (value === null) return undefined;
     const selection = asRecord(value, 'approval selection');
     if (
-      Object.keys(selection).length !== 2 ||
-      !['default', 'auto-edit', 'yolo'].includes(String(selection['mode'])) ||
+      Object.keys(selection).length !==
+        (selection['permissionRules'] === undefined ? 2 : 3) ||
+      !['default', 'auto-edit', 'yolo', 'auto'].includes(
+        String(selection['mode']),
+      ) ||
       typeof selection['mode'] !== 'string' ||
       typeof selection['revision'] !== 'number' ||
       !Number.isSafeInteger(selection['revision']) ||
       selection['revision'] < 0
     )
       throw corrupt('approval selection is invalid.');
+    let permissionRules: ManagedPermissionRules | undefined;
+    try {
+      permissionRules =
+        selection['permissionRules'] === undefined
+          ? undefined
+          : nonEmptyManagedPermissionRules(
+              parseManagedPermissionRules(selection['permissionRules']),
+            );
+    } catch {
+      throw corrupt('approval selection rules are invalid.');
+    }
+    if (
+      selection['revision'] === 0 &&
+      (selection['mode'] === 'auto' || permissionRules)
+    )
+      throw corrupt('approval selection revision is invalid.');
     return {
       mode: selection['mode'] as ManagedSessionApprovalSelection['mode'],
       revision: selection['revision'],
+      ...(permissionRules ? { permissionRules } : {}),
     };
   }
 
