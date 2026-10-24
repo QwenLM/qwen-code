@@ -7462,11 +7462,13 @@ class QwenAgent implements Agent {
           extension.config,
           extension.id,
           ExtensionSettingScope.USER,
+          cwd,
         );
         const workspaceEnv = await getScopedEnvContents(
           extension.config,
           extension.id,
           ExtensionSettingScope.WORKSPACE,
+          cwd,
         );
         const settingDefs = extension.settings ?? [];
         return {
@@ -15145,6 +15147,7 @@ class QwenAgent implements Agent {
           settingKey,
           async () => value,
           extScope,
+          settingsCwd,
         );
         // Unlike the sibling core-setting handlers, this persists through
         // `updateSetting` (extension settings store), not `settings.setValue`,

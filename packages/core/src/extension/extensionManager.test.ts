@@ -44,9 +44,30 @@ import {
   resolveStoredGitCredential,
 } from './extension-git-credentials.js';
 import { resetLocalGitVersionCacheForTesting } from './github.js';
+import { HybridTokenStorage } from '../mcp/token-storage/hybrid-token-storage.js';
 import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
+import {
+  maybePromptForSettings,
+  updateSetting,
+  ExtensionSettingScope,
+} from './extensionSettings.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { getGlobalDispatcher } from 'undici';
+
+const mockSettingsWarning = vi.hoisted(() => vi.fn());
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag: string) => {
+      const logger = actual.createDebugLogger(tag);
+      return tag === 'EXTENSIONS'
+        ? { ...logger, warn: mockSettingsWarning }
+        : logger;
+    },
+  };
+});
 
 const mockGit = {
   clone: vi.fn(),
@@ -304,6 +325,7 @@ describe('extension tests', () => {
   let userExtensionsDir: string;
 
   beforeEach(() => {
+    mockSettingsWarning.mockClear();
     vi.stubEnv('QWEN_HOME', undefined);
     tempHomeDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'qwen-code-test-home-'),
@@ -3818,6 +3840,389 @@ describe('extension tests', () => {
         'postgresql://localhost:5432/testdb',
       );
       expect(serverConfig?.env?.['STATIC_VALUE']).toBe('no-substitution');
+    });
+
+    it('loads each extension secret into MCP config without exporting or persisting it', async () => {
+      vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+      vi.stubEnv('EXTENSION_RUNTIME_KEY', 'shell-key');
+      const name = 'secret-runtime';
+      const config: ExtensionConfig = {
+        name,
+        version: '1.0.0',
+        description: '$EXTENSION_RUNTIME_KEY',
+        settings: [
+          {
+            name: 'API Token',
+            description: 'Test credential',
+            envVar: 'EXTENSION_RUNTIME_KEY',
+            sensitive: true,
+          },
+        ],
+        mcpServers: {
+          remote: {
+            httpUrl: 'https://example.com/mcp',
+            headers: { Authorization: 'Bearer $EXTENSION_RUNTIME_KEY' },
+          },
+          local: {
+            command: 'node',
+            env: { API_TOKEN: '${EXTENSION_RUNTIME_KEY}' },
+          },
+        },
+      };
+      const extensionDir = path.join(userExtensionsDir, name);
+      writeManifest(extensionDir, config);
+      const manifestPath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
+      const original = fs.readFileSync(manifestPath, 'utf8');
+      await maybePromptForSettings(
+        config,
+        getExtensionId(config),
+        async () => 'stored-key',
+      );
+
+      const { extension } = await ready();
+      expect(extension.config.mcpServers?.['remote'].headers).toEqual({
+        Authorization: 'Bearer stored-key',
+      });
+      expect(extension.config.mcpServers?.['local'].env).toEqual({
+        API_TOKEN: 'stored-key',
+      });
+      expect(extension.config.mcpServers?.['remote']).not.toHaveProperty('env');
+      expect(extension.config.mcpServers?.['local']).not.toHaveProperty(
+        'headers',
+      );
+      expect(extension.mcpServers?.['remote']).not.toHaveProperty('env');
+      expect(extension.mcpServers?.['local']).not.toHaveProperty('headers');
+      expect(extension.config.description).toBe('shell-key');
+      expect(extension.id).toBe(getExtensionId(config));
+      expect(process.env['EXTENSION_RUNTIME_KEY']).toBe('shell-key');
+      expect(fs.readFileSync(manifestPath, 'utf8')).toBe(original);
+      expect(
+        fs.readFileSync(path.join(extensionDir, '.env'), 'utf8'),
+      ).not.toContain('stored-key');
+    });
+
+    it('keeps different extensions isolated when their setting names match', async () => {
+      vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+      vi.stubEnv('ISOLATED_EXTENSION_KEY', undefined);
+      for (const name of ['first-secret', 'second-secret']) {
+        const config: ExtensionConfig = {
+          name,
+          version: '1.0.0',
+          settings: [
+            {
+              name: 'Token',
+              description: 'Test',
+              envVar: 'ISOLATED_EXTENSION_KEY',
+              sensitive: true,
+            },
+          ],
+          mcpServers: {
+            remote: {
+              httpUrl: 'https://example.com/mcp',
+              headers: { Authorization: '$ISOLATED_EXTENSION_KEY' },
+              url: 'https://example.com/$ISOLATED_EXTENSION_KEY',
+            },
+            local: {
+              command: '$ISOLATED_EXTENSION_KEY',
+              args: ['--token=$ISOLATED_EXTENSION_KEY'],
+            },
+          },
+        };
+        writeManifest(path.join(userExtensionsDir, name), config);
+        await maybePromptForSettings(
+          config,
+          getExtensionId(config),
+          async () => name + '-value',
+        );
+      }
+      const { extensions } = await ready();
+      expect(extensions).toHaveLength(2);
+      for (const extension of extensions) {
+        expect(
+          extension.config.mcpServers?.['remote'].headers?.['Authorization'],
+        ).toBe(extension.name + '-value');
+        expect(extension.config.mcpServers?.['remote'].url).toBe(
+          'https://example.com/$ISOLATED_EXTENSION_KEY',
+        );
+        expect(extension.config.mcpServers?.['local'].command).toBe(
+          '$ISOLATED_EXTENSION_KEY',
+        );
+        expect(extension.config.mcpServers?.['local'].args).toEqual([
+          '--token=$ISOLATED_EXTENSION_KEY',
+        ]);
+      }
+      expect(process.env['ISOLATED_EXTENSION_KEY']).toBeUndefined();
+    });
+
+    it('uses workspace extension settings before user settings', async () => {
+      vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+      vi.stubEnv('SCOPED_EXTENSION_KEY', undefined);
+      const config: ExtensionConfig = {
+        name: 'scoped-secret',
+        version: '1.0.0',
+        settings: [
+          {
+            name: 'Token',
+            description: 'Test',
+            envVar: 'SCOPED_EXTENSION_KEY',
+            sensitive: true,
+          },
+          { name: 'Label', description: 'Test', envVar: 'SCOPED_LABEL' },
+        ],
+        mcpServers: {
+          remote: {
+            httpUrl: 'https://example.com/mcp',
+            headers: { Authorization: '$SCOPED_EXTENSION_KEY' },
+            env: { LABEL: '$SCOPED_LABEL' },
+          },
+        },
+      };
+      writeManifest(path.join(userExtensionsDir, config.name), config);
+      const id = getExtensionId(config);
+      await maybePromptForSettings(config, id, async () => 'user-value');
+      const daemonWorkspace = path.join(tempHomeDir, 'daemon-workspace');
+      fs.mkdirSync(daemonWorkspace);
+      vi.mocked(process.cwd).mockReturnValue(daemonWorkspace);
+      await updateSetting(
+        config,
+        id,
+        'Token',
+        async () => 'workspace-value',
+        ExtensionSettingScope.WORKSPACE,
+        tempWorkspaceDir,
+      );
+      await updateSetting(
+        config,
+        id,
+        'Label',
+        async () => 'workspace-label',
+        ExtensionSettingScope.WORKSPACE,
+        tempWorkspaceDir,
+      );
+      const otherWorkspace = path.join(tempHomeDir, 'other-workspace');
+      fs.mkdirSync(otherWorkspace);
+      vi.mocked(process.cwd).mockReturnValue(otherWorkspace);
+      const { extension, manager } = await ready();
+      expect(
+        extension.config.mcpServers?.['remote'].headers?.['Authorization'],
+      ).toBe('workspace-value');
+      expect(extension.config.mcpServers?.['remote'].env?.['LABEL']).toBe(
+        'workspace-label',
+      );
+      const reloaded = await manager.loadExtension({
+        extensionDir: path.join(userExtensionsDir, config.name),
+      });
+      expect(reloaded?.mcpServers?.['remote'].headers?.['Authorization']).toBe(
+        'workspace-value',
+      );
+      vi.mocked(process.cwd).mockReturnValue(tempWorkspaceDir);
+      const other = await ready({ workspaceDir: otherWorkspace });
+      expect(
+        other.extension.config.mcpServers?.['remote'].headers?.[
+          'Authorization'
+        ],
+      ).toBe('user-value');
+      expect(other.extension.config.mcpServers?.['remote'].env?.['LABEL']).toBe(
+        'user-value',
+      );
+      const daemon = await ready({ workspaceDir: daemonWorkspace });
+      expect(
+        daemon.extension.mcpServers?.['remote'].headers?.['Authorization'],
+      ).toBe('user-value');
+      expect(daemon.extension.mcpServers?.['remote'].env?.['LABEL']).toBe(
+        'user-value',
+      );
+      expect(fs.existsSync(path.join(daemonWorkspace, '.env'))).toBe(false);
+      const untrusted = await ready({ isWorkspaceTrusted: false });
+      expect(
+        untrusted.extension.mcpServers?.['remote'].headers?.['Authorization'],
+      ).toBe('user-value');
+      expect(untrusted.extension.mcpServers?.['remote'].env?.['LABEL']).toBe(
+        'user-value',
+      );
+      expect(extension.id).toBe(id);
+      expect(process.env['SCOPED_EXTENSION_KEY']).toBeUndefined();
+    });
+
+    it.each([
+      'missing bundle',
+      'invalid selector',
+      'invalid bundle',
+      'credential failure',
+    ])(
+      'keeps management metadata but disables MCP after %s',
+      async (failure) => {
+        vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+        const config: ExtensionConfig = {
+          name: 'unreadable-settings',
+          version: '1.0.0',
+          settings: [
+            {
+              name: 'Token',
+              description: 'Test',
+              envVar: 'UNREADABLE_KEY',
+              sensitive: true,
+            },
+          ],
+          mcpServers: {
+            remote: {
+              httpUrl: 'https://example.com/mcp',
+              headers: { Authorization: '$UNREADABLE_KEY' },
+            },
+          },
+        };
+        const dir = path.join(userExtensionsDir, config.name);
+        writeManifest(dir, config);
+        const id = getExtensionId(config);
+        await maybePromptForSettings(
+          config,
+          id,
+          async () => 'stored-unreadable-key',
+        );
+        const selectorPath = path.join(dir, '.qwen-extension-settings.json');
+        if (failure === 'missing bundle') {
+          const selector = JSON.parse(
+            fs.readFileSync(selectorPath, 'utf8'),
+          ) as { bundleKey: string };
+          await new FileTokenStorage(
+            `Qwen Code Extensions ${config.name} ${id}`,
+          ).deleteSecret(selector.bundleKey);
+        } else if (failure === 'invalid selector') {
+          fs.writeFileSync(
+            selectorPath,
+            'not valid JSON stored-unreadable-key',
+          );
+        } else if (failure === 'invalid bundle') {
+          const selector = JSON.parse(
+            fs.readFileSync(selectorPath, 'utf8'),
+          ) as { bundleKey: string };
+          await new FileTokenStorage(
+            `Qwen Code Extensions ${config.name} ${id}`,
+          ).setSecret(selector.bundleKey, 'invalid JSON stored-unreadable-key');
+        } else {
+          vi.spyOn(FileTokenStorage.prototype, 'getSecret').mockRejectedValue(
+            new Error('native error stored-unreadable-key'),
+          );
+        }
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        const { extensions, extension } = await ready();
+        expect(extensions).toHaveLength(1);
+        expect(extension.id).toBe(id);
+        expect(extension.settings).toEqual(config.settings);
+        expect(extension.mcpServers).toBeUndefined();
+        expect(extension.config.mcpServers).toBeUndefined();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('Check credential storage availability'),
+        );
+        const code = {
+          'missing bundle': 'bundle-missing',
+          'invalid selector': 'selector-read',
+          'invalid bundle': 'bundle-parse',
+          'credential failure': 'credential-read',
+        }[failure];
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(`settings:${code}`),
+        );
+        expect(mockSettingsWarning).toHaveBeenCalledWith(
+          expect.stringContaining(`settings:${code}`),
+        );
+        const logs = [...stderr.mock.calls, ...mockSettingsWarning.mock.calls]
+          .flat()
+          .join('');
+        expect(logs).not.toContain('stored-unreadable-key');
+        expect(logs).not.toContain('native error');
+      },
+    );
+
+    it('substitutes declared dotenv settings and preserves shell fallback without reading unrelated project variables', async () => {
+      vi.stubEnv('PROJECT_ONLY', undefined);
+      vi.stubEnv('SHELL_FALLBACK', 'shell-value');
+      fs.writeFileSync(
+        path.join(tempWorkspaceDir, '.env'),
+        'DECLARED_LABEL=declared-value\nPROJECT_ONLY=project-value\nSHELL_FALLBACK=project-shell-value\n',
+      );
+      const config: ExtensionConfig = {
+        name: 'declared-dotenv',
+        version: '1.0.0',
+        settings: [
+          { name: 'Label', description: 'Test', envVar: 'DECLARED_LABEL' },
+        ],
+        mcpServers: {
+          remote: {
+            command: 'node',
+            headers: {
+              Label: '$DECLARED_LABEL',
+              Project: '$PROJECT_ONLY',
+              Shell: '$SHELL_FALLBACK',
+            },
+            env: {
+              LABEL: '$DECLARED_LABEL',
+              PROJECT: '$PROJECT_ONLY',
+              SHELL: '$SHELL_FALLBACK',
+            },
+          },
+        },
+      };
+      writeManifest(path.join(userExtensionsDir, config.name), config);
+      const { extension } = await ready();
+      expect(extension.mcpServers?.['remote'].headers).toEqual({
+        Label: 'declared-value',
+        Project: '$PROJECT_ONLY',
+        Shell: 'shell-value',
+      });
+      expect(extension.mcpServers?.['remote'].env).toEqual({
+        LABEL: 'declared-value',
+        PROJECT: '$PROJECT_ONLY',
+        SHELL: 'shell-value',
+      });
+      expect(process.env['PROJECT_ONLY']).toBeUndefined();
+    });
+
+    it('identifies alias read failures without logging backend secrets', async () => {
+      const alias = path.join(tempHomeDir, 'workspace-alias');
+      fs.symlinkSync(tempWorkspaceDir, alias, 'junction');
+      const config: ExtensionConfig = {
+        name: 'alias-failure',
+        version: '1.0.0',
+        settings: [
+          {
+            name: 'Token',
+            description: 'Test',
+            envVar: 'ALIAS_TOKEN',
+            sensitive: true,
+          },
+        ],
+        mcpServers: {
+          remote: { command: 'node', env: { TOKEN: '$ALIAS_TOKEN' } },
+        },
+      };
+      writeManifest(path.join(userExtensionsDir, config.name), config);
+      vi.spyOn(HybridTokenStorage.prototype, 'getSecret').mockImplementation(
+        async function (this: HybridTokenStorage) {
+          if (
+            (this as unknown as { serviceName: string }).serviceName.endsWith(
+              alias,
+            )
+          ) {
+            throw new Error('native error alias-secret');
+          }
+          return null;
+        },
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const { extension } = await ready({ workspaceDir: alias });
+      expect(extension.mcpServers).toBeUndefined();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('settings:workspace-alias-read'),
+      );
+      expect(mockSettingsWarning).toHaveBeenCalledWith(
+        expect.stringContaining('settings:workspace-alias-read'),
+      );
+      expect(
+        [...stderr.mock.calls, ...mockSettingsWarning.mock.calls]
+          .flat()
+          .join(''),
+      ).not.toContain('alias-secret');
     });
 
     it('should handle missing environment variables gracefully', async () => {
