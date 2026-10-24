@@ -281,7 +281,9 @@ describe('OpenTuiExtensionSourcesTab', () => {
     const props = { ...f.props, install };
     const ui = await mount(props);
     await submitSource('./permission-owned');
+    expect(mocks.state.keyboard).toHaveLength(1);
     ui.rerender(<OpenTuiExtensionSourcesTab {...props} isActive={false} />);
+    expect(mocks.state.keyboard).toHaveLength(0);
     await press('escape');
     await paste('not-owned');
     await act(async () => {
@@ -297,6 +299,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
       text: 'Installed after consent',
     });
     ui.rerender(<OpenTuiExtensionSourcesTab {...props} />);
+    expect(mocks.state.keyboard).toHaveLength(2);
     expect(screen.getByText('+ Install a new extension')).toBeTruthy();
   });
 

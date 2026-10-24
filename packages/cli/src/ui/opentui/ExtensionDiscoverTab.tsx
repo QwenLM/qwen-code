@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { decodePasteBytes, type ScrollBoxRenderable } from '@opentui/core';
-import { useKeyboard, usePaste, useTerminalDimensions } from '@opentui/react';
+import { usePaste, useTerminalDimensions } from '@opentui/react';
 import open from 'open';
 import type { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 import type { DiscoveredPlugin } from '@qwen-code/qwen-code-core/extension/sourceRegistry.js';
@@ -32,6 +32,7 @@ import { clampDialogHeight } from '../utils/layoutUtils.js';
 import {
   DialogSelect,
   useDialogSelect,
+  useFocusedKeyboard,
   dialogContentWidth,
   type DialogListItem,
 } from './dialogs-shared.js';
@@ -579,7 +580,7 @@ export function OpenTuiExtensionDiscoverTab(
     },
   });
 
-  useKeyboard((event) => {
+  useFocusedKeyboard(props.isActive, (event) => {
     if (
       !latest.current.isActive ||
       !alive(owner.current) ||

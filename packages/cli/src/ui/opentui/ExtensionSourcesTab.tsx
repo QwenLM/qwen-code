@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { decodePasteBytes } from '@opentui/core';
-import { useKeyboard, usePaste, useTerminalDimensions } from '@opentui/react';
+import { usePaste, useTerminalDimensions } from '@opentui/react';
 import type { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
@@ -22,6 +22,7 @@ import {
   DialogSelect,
   dialogContentWidth,
   useDialogSelect,
+  useFocusedKeyboard,
   type DialogListItem,
   type UseDialogSelectResult,
 } from './dialogs-shared.js';
@@ -482,7 +483,7 @@ export function OpenTuiExtensionSourcesTab({
     !busyRef.current &&
     inputVisible &&
     (view === 'add' || view === 'install-extension');
-  useKeyboard((event) => {
+  useFocusedKeyboard(isActive, (event) => {
     if (!isActive || !current() || event.eventType === 'release') return;
     const key = toOriginalKey(event);
     const activeView = viewRef.current;
@@ -596,20 +597,14 @@ export function OpenTuiExtensionSourcesTab({
   });
 
   if (view === 'add' || view === 'install-extension') {
-    const examples =
+    const examples = [
+      ' · owner/repo (GitHub)',
+      ' · git@github.com:owner/repo.git (SSH)',
       view === 'add'
-        ? [
-            ' · owner/repo (GitHub)',
-            ' · git@github.com:owner/repo.git (SSH)',
-            ' · https://example.com/marketplace.json',
-            ' · ./path/to/marketplace',
-          ]
-        : [
-            ' · owner/repo (GitHub)',
-            ' · git@github.com:owner/repo.git (SSH)',
-            ' · @scope/name (npm)',
-            ' · ./path/to/extension',
-          ];
+        ? ' · https://example.com/marketplace.json'
+        : ' · @scope/name (npm)',
+      ` · ./path/to/${view === 'add' ? 'marketplace' : 'extension'}`,
+    ];
     const shownExamples = examples.slice(
       0,
       Math.max(0, Math.min(4, bodyRows - 4)),

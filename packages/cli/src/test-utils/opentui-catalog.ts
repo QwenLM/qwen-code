@@ -80,7 +80,6 @@ export function catalogHooks(
     useKeyboard: (handler: Listener) => useListener(keyboard, handler),
     usePaste: (handler: Listener) => useListener(paste, handler),
     useTerminalDimensions: dimensions,
-    useRenderer: () => ({ addInputHandler() {}, removeInputHandler() {} }),
   };
 }
 

@@ -225,6 +225,25 @@ export interface UseDialogSelectResult<TItem extends DialogListItem<unknown>> {
   items: readonly TItem[];
 }
 
+export function useFocusedKeyboard(
+  focused: boolean,
+  handler: (key: KeyEvent) => void,
+): void {
+  const { keyHandler } = useAppContext();
+  const currentHandler = useRef(handler);
+  useLayoutEffect(() => {
+    currentHandler.current = handler;
+  });
+  useEffect(() => {
+    if (!focused) return;
+    const listener = (key: KeyEvent) => currentHandler.current(key);
+    keyHandler?.on('keypress', listener);
+    return () => {
+      keyHandler?.off('keypress', listener);
+    };
+  }, [keyHandler, focused]);
+}
+
 /**
  * Keyboard + selection + scroll-window state for DialogSelect. Mirrors
  * useSelectionList: SELECTION_UP/SELECTION_DOWN wrap around and skip
@@ -530,20 +549,10 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       if (item && !item.disabled) onSelect?.(item.value);
     }
   };
-  const { keyHandler } = useAppContext();
-  const currentHandler = useRef(handleKey);
   useLayoutEffect(() => {
-    currentHandler.current = handleKey;
     if (!focused) clearNumberBuffer();
   });
-  useEffect(() => {
-    if (!focused) return;
-    const listener = (key: KeyEvent) => currentHandler.current(key);
-    keyHandler?.on('keypress', listener);
-    return () => {
-      keyHandler?.off('keypress', listener);
-    };
-  }, [keyHandler, focused]);
+  useFocusedKeyboard(focused, handleKey);
 
   return {
     activeIndex,

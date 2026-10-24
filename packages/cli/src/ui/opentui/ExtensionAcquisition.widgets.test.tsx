@@ -16,18 +16,14 @@ const native = vi.hoisted(() => ({
   pastes: [] as Array<(e: unknown) => void>,
   scroll: vi.fn(),
 }));
-vi.mock('@opentui/react/jsx-runtime', async () =>
-  (await import('../../test-utils/opentui-catalog.js')).catalogRuntime(
+async function jsxRuntime() {
+  return (await import('../../test-utils/opentui-catalog.js')).catalogRuntime(
     true,
     native.scroll,
-  ),
-);
-vi.mock('@opentui/react/jsx-dev-runtime', async () =>
-  (await import('../../test-utils/opentui-catalog.js')).catalogRuntime(
-    true,
-    native.scroll,
-  ),
-);
+  );
+}
+vi.mock('@opentui/react/jsx-runtime', jsxRuntime);
+vi.mock('@opentui/react/jsx-dev-runtime', jsxRuntime);
 vi.mock(
   '@opentui/core',
   async () =>

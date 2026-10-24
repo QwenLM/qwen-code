@@ -86,13 +86,10 @@ function renderTab(overrides: Partial<OpenTuiExtensionDiscoverTabProps> = {}) {
     onStatus: vi.fn(),
     onInstalled: vi.fn(),
     onFooter: vi.fn(),
-    install: vi.fn(
-      async () =>
-        ({
-          type: 'success',
-          text: 'Committed alpha.',
-        }) as ExtensionsStatusMessage,
-    ),
+    install: vi.fn(async () => ({
+      type: 'success' as const,
+      text: 'Committed alpha.',
+    })),
     ...overrides,
   };
   const rendered = render(<OpenTuiExtensionDiscoverTab {...props} />);
@@ -250,6 +247,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
     await press('return');
     expect(screen.getByText('jk-tool')).toBeTruthy();
     tab.update({ isActive: false });
+    expect(mocks.state.keyboardHandlers).toHaveLength(0);
     await press('escape');
     await press('return');
     await press('x', 'x');
@@ -259,6 +257,7 @@ describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
     await press('escape');
     expect(screen.getByText(row('jk-tool', 'market-a'))).toBeTruthy();
     expect(screen.queryByText(row('other', 'market-a'))).toBeNull();
+    expect(mocks.state.keyboardHandlers).toHaveLength(1);
     expect(service.discoverPlugins).toHaveBeenCalledTimes(1);
   });
 
