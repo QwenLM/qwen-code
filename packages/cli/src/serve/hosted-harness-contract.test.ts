@@ -57,6 +57,8 @@ describe('Hosted Harness private contract', () => {
         'context-compression/1',
         'public-child-agents/1',
         'approval-selection/1',
+        'auto-approval/1',
+        'permission-rules/1',
         'live-approval-selection/1',
         'agent-definition-approval-selection/1',
         'plan-mode/1',
