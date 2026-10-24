@@ -509,6 +509,34 @@ describe('post-merge push lane', () => {
     expect(lintNames.indexOf('Use trusted CI profile')).toBeLessThan(
       lintNames.indexOf('Install dependencies'),
     );
+    // The incremental opt-in is two pieces — the job-level LINT_BASE_SHA
+    // binding and the history fetch — and neither was pinned: dropping the
+    // env, deleting the step or reordering it left every suite green while
+    // each PR quietly paid for the whole-repository scan this feature exists
+    // to remove (full scanning IS the designed fallback).
+    expect(String(ci.jobs.lint_and_static.env?.LINT_BASE_SHA)).toContain(
+      'github.event.pull_request.base.sha',
+    );
+    const lintStep = (name) => {
+      const index = lintNames.indexOf(name);
+      expect(index, `step "${name}" is missing`).toBeGreaterThan(-1);
+      return index;
+    };
+    // Both steps above refetch shallow history, and a depth-1 fetch of the
+    // base ref grafts the very commit LINT_BASE_SHA names: `merge-base` then
+    // has no ancestry to walk and lint-scope falls back to a full scan.
+    for (const refetch of [
+      'Check the API contract version advances',
+      'Report test growth',
+    ]) {
+      expect(
+        lintStep('Fetch incremental lint history'),
+        `"Fetch incremental lint history" must stay below "${refetch}"`,
+      ).toBeGreaterThan(lintStep(refetch));
+    }
+    expect(lintStep('Fetch incremental lint history')).toBeLessThan(
+      lintStep('Install linters'),
+    );
   });
 
   it('keeps the moved lint/static payload present, gated, and out of test', () => {

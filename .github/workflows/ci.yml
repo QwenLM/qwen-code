@@ -1134,17 +1134,6 @@ jobs:
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
 
-      - name: 'Fetch incremental lint history'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
-        timeout-minutes: 2
-        continue-on-error: true
-        env:
-          LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
-        run: |-
-          # Bound transfer on the shared runners. lint-scope falls back to full
-          # checks when this history cannot prove the PR's merge base.
-          git fetch --no-tags --depth=100 origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
-
       # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
       # touches nothing but .github/ classifies as `github_ci_only`, and that
       # is exactly the PR most likely to push a workflow file past GitHub's
@@ -1218,6 +1207,26 @@ jobs:
           BASE_SHA: '${{ github.event.pull_request.base.sha }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: 'node .github/scripts/check-test-growth.mjs'
+
+      # Deliberately BELOW the two steps above that refetch shallow history:
+      # `Report test growth` fetches the merge base at depth 1, and
+      # `Check the API contract version advances` fetches refs/heads/<base> at
+      # depth 1 — the very commit LINT_BASE_SHA names whenever the base has not
+      # moved since the event. Depth 1 grafts that commit, `merge-base` then has
+      # no ancestry to walk, and lint-scope silently falls back to the full scan
+      # this job exists to avoid. Nothing above here needs this history.
+      # `github_ci_only` still gets it: the gate below is the profile check, and
+      # the helper-checks step that uses lint.js comes after this point.
+      - name: 'Fetch incremental lint history'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
+        timeout-minutes: 2
+        continue-on-error: true
+        env:
+          LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: |-
+          # Bound transfer on the shared runners. lint-scope falls back to full
+          # checks when this history cannot prove the PR's merge base.
+          git fetch --no-tags --depth=100 origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.

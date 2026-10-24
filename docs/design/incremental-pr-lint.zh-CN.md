@@ -10,7 +10,7 @@
 
 ## 设计
 
-只有 PR 设置 `LINT_BASE_SHA`。有界 fetch 获取 base/head 各 100 个提交的历史。lint 范围辅助脚本使用可证明的共同祖先与 NUL 分隔的 Git 文件列表。历史不可用或有歧义时回退全量。删除路径参与配置失效判断，但不传给文件检查器。重命名文件按新路径检查。
+只有 PR 设置 `LINT_BASE_SHA`。有界 fetch 获取 base/head 各 100 个提交的历史。lint 范围辅助脚本使用可证明的共同祖先与 NUL 分隔的 Git 文件列表。历史不可用或有歧义时回退全量。删除路径参与配置失效判断，但不传给文件检查器。重命名文件按新路径检查。选择是按文件进行的，这只有在每条启用的 import 规则都只评估单个文件时才成立（`import/no-internal-modules`、`import/no-relative-packages`、`import/no-extraneous-dependencies`、`no-restricted-imports`）；若启用 `import/no-cycle` 这类跨文件图规则，需要重新审视此处的选择范围。
 
 ESLint、Prettier 和 YAML 检查选择变更的完整文件。Shell 相关变更调用现有全量 ShellCheck，以保留被 source 脚本的覆盖；无关变更跳过。旧输出管道会吞掉检查器失败状态，因此严格执行 ShellCheck 失败需单独清理历史基线。workflow/action 变更保留全量 actionlint，因为可复用工作流存在跨文件契约。lint 规则、配置、忽略文件、依赖或 lint 实现变化时恢复全量检查。非 PR 事件继续全量。没有相关变更文件时明确记录跳过；diff 失败绝不能当作空列表成功通过。
 
