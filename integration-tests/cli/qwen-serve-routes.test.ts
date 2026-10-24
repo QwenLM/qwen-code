@@ -514,6 +514,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_runtime_removal',
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
       'workspace_runtime',
+      'workspace_directories',
       ...(localPathOpenAtBoot ? ['workspace_local_open'] : []),
       ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',

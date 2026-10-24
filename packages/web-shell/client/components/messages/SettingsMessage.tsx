@@ -553,7 +553,7 @@ export function SettingsMessage({
     if (workspaceDirectoriesSection && scope === 'workspace') {
       groups.push({
         id: 'Workspace',
-        label: formatSettingCategory('Workspace', t),
+        label: t('workspaceDirectories.title'),
         items: [{ type: 'workspace-directories' }],
       });
     }

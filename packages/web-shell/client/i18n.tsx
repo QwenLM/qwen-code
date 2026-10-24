@@ -2130,7 +2130,6 @@ const EN: Messages = {
   'workspaceHost.loadingFolders': 'Loading folders from this computer…',
   'workspaceHost.connectionError':
     'Could not load workspace capabilities from this computer.',
-  'settings.category.Workspace': 'Workspace directories',
   'workspaceDirectories.title': 'Workspace directories',
   'workspaceDirectories.description':
     'Tools can read and edit these directories in addition to the workspace root. New sessions inherit this list.',
@@ -6530,7 +6529,6 @@ const ZH: Messages = {
   'workspaceHost.unsupported': '这台计算机不支持添加工作区。',
   'workspaceHost.loadingFolders': '正在从这台计算机加载目录…',
   'workspaceHost.connectionError': '无法从这台计算机加载工作区能力。',
-  'settings.category.Workspace': '工作区目录',
   'workspaceDirectories.title': '工作区目录',
   'workspaceDirectories.description':
     '除工作区根目录外，工具还可以读写这些目录。新建会话会继承该列表。',
