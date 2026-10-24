@@ -6,7 +6,7 @@
 
 On 2026-10-24, the operator accepted removing complete CSI auditing from the first-release prerequisites for [#13395](https://github.com/QwenLM/qwen-code/issues/13395). This document replaces the earlier P1 evidence-source proposal at the same path. The [published original proposal](https://github.com/QwenLM/qwen-code/issues/13395#issuecomment-6363776281) is historical; its P1 → P2 → P3 → P4 dependency chain is superseded by the delivery plan below. The first release no longer waits for a plugin audit hook.
 
-The reviewed implementation baseline is `7ab5a95c61d5785ac66e50144e41ce29a7cf4cd5`. This adjustment withdraws the uncommitted evidence-source slice; it does not introduce a new reclamation service. Platform-managed reclamation, automatic physical-owner release and cross-Workspace volume handoff remain future work. Scope adjustment does not establish full issue acceptance.
+The audit withdrawal restored the unpublished slice to its historical baseline `7ab5a95c61d5785ac66e50144e41ce29a7cf4cd5`. Subsequent S1 qualification is pinned separately to main `2c0c9fa8dc4a8ea5ec688060549e0ff0aed717b4`; the documentation branch adds no production changes to that revision. This scope adjustment introduces no new reclamation service. Platform-managed reclamation, automatic physical-owner release and cross-Workspace volume handoff remain future work. Scope adjustment does not establish full issue acceptance.
 
 ## Current implementation
 
@@ -33,7 +33,7 @@ Normal Session handoff remains available only before retirement. Removing the au
 
 Remove this task's uncommitted `CsiEvidenceProtocol`, `CsiEvidenceStore` and their fixtures/tests, along with `CSI_EVIDENCE`/`CSI_EVIDENCE_PAGE` schema and operation kinds, evidence-specific retention and inventory changes. Restore those tracked Java/SQL/test files exactly to the reviewed baseline. Keep the withdrawn files and test history in a task-local ignored snapshot; prior tests describe that withdrawn source, not this release or platform qualification.
 
-Preserve existing `WORKSPACE_RETIREMENT`, `POD_DELETE_ATTEMPT`, private CSI retirement, runtime recovery, retention and diagnostic readers. Do not add an unused feature flag, source configuration or ingress. The resulting deliverable changes documentation and planning while runtime and schema remain at the reviewed baseline.
+Preserve existing `WORKSPACE_RETIREMENT`, `POD_DELETE_ATTEMPT`, private CSI retirement, runtime recovery, retention and diagnostic readers. Do not add an unused feature flag, source configuration or ingress. The resulting deliverable changes documentation and planning; runtime and schema equal the separately pinned S1 main revision. The archived withdrawal comparison refers to the earlier baseline, not to current-main acceptance.
 
 ## Follow-up platform-managed reclamation
 
@@ -56,7 +56,7 @@ These are design requirements, not implemented predicates or permission to relea
 | S3: reclamation implementation | Implement only the approved S2 contract, then qualify atomic release and repeated reuse. No S3 release permission exists before those checks pass.                                                                                   |
 | Independent recovery           | Define CSI LOST recovery and operator procedures without reopening unknown writes or bypassing the original owner.                                                                                                                   |
 
-For this adjustment, verify that the server's tracked Java/SQL/tests equal the baseline, withdrawn source files and evidence kinds have no remaining production references, both language versions match, and Markdown formatting/relative references pass. No runtime behavior is added, so a new CLI, Maven or MySQL run is not evidence needed for this documentation change. Earlier evidence-source test snapshots remain historical.
+For this adjustment, verify that the server's Java/SQL/tests equal the pinned S1 main revision, while the archived withdrawal records retain their historical baseline comparison, withdrawn source files and evidence kinds have no remaining production references, both language versions match, and Markdown formatting/relative references pass. No runtime behavior is added, so a new CLI, Maven or MySQL run is not evidence needed for this documentation change. Earlier evidence-source test snapshots remain historical.
 
 Later S1/S2/S3 acceptance must separate source implementation, focused tests, CI, native ACK qualification and production readiness. The earlier ACK run at `c61044fae46cfeed70b882140730c0caaa944524` covered same-Pod/PVC file handoff and bounded retirement; it does not validate a new source revision or physical reclamation. The next delivery decision is the S2 completion/isolation contract, rather than a plugin-audit availability decision.
 

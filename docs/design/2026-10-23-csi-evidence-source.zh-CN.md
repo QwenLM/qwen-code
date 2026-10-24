@@ -6,7 +6,7 @@
 
 2026-10-24，运维方同意将完整 CSI 审计移出 [#13395](https://github.com/QwenLM/qwen-code/issues/13395) 首版前置条件。本文件沿用原路径并替代此前 P1 证据来源提案。[已发布的原提案](https://github.com/QwenLM/qwen-code/issues/13395#issuecomment-6363776281) 转为历史记录；原 P1 → P2 → P3 → P4 依赖链由下述交付计划替代。首版不再等待插件提供审计 hook。
 
-已核对的实现基准为 `7ab5a95c61d5785ac66e50144e41ce29a7cf4cd5`。本次撤出尚未提交的证据来源切片，不新增回收服务。平台托管回收、自动释放物理归属和跨 Workspace 卷交接仍是后续工作。范围调整不代表整个 issue 已通过验收。
+审计撤出时，未发布切片已恢复到其历史基准 `7ab5a95c61d5785ac66e50144e41ce29a7cf4cd5`。后续 S1 验收单独固定为 main `2c0c9fa8dc4a8ea5ec688060549e0ff0aed717b4`，文档分支在该版本上没有生产改动。本次范围调整不新增回收服务。平台托管回收、自动释放物理归属和跨 Workspace 卷交接仍是后续工作。范围调整不代表整个 issue 已通过验收。
 
 ## 现有实现
 
@@ -33,7 +33,7 @@
 
 撤出本任务尚未提交的 `CsiEvidenceProtocol`、`CsiEvidenceStore` 及其 fixtures/tests，同时撤出 `CSI_EVIDENCE`/`CSI_EVIDENCE_PAGE` schema 和 operation kind、证据专属 retention 与 inventory 改动。对应 tracked Java/SQL/测试文件精确恢复到已核对基准。撤出文件和测试历史保存在本任务忽略目录快照中；此前测试描述被撤出的源码，不代表本版或平台资格验收。
 
-保留已有 `WORKSPACE_RETIREMENT`、`POD_DELETE_ATTEMPT`、私有 CSI 退役、runtime recovery、retention 和诊断 reader。不增加无消费者的 feature flag、来源配置或 ingress。最终交付只改变文档与计划，运行时代码和 schema 保持已核对基准。
+保留已有 `WORKSPACE_RETIREMENT`、`POD_DELETE_ATTEMPT`、私有 CSI 退役、runtime recovery、retention 和诊断 reader。不增加无消费者的 feature flag、来源配置或 ingress。最终交付只改变文档与计划，运行时代码和 schema 等于单独固定的 S1 main 版本。归档的撤出比较指向此前历史基准，不代表当前主干验收。
 
 ## 后续平台托管回收
 
@@ -56,7 +56,7 @@
 | S3：回收实现 | 只实现通过评审的 S2 契约，再验收原子释放和重复复用；通过这些检查前不存在 S3 释放许可。                                    |
 | 独立恢复     | 定义 CSI LOST 恢复和运维流程，不重新开放未知写入或绕过原 owner。                                                          |
 
-本次调整验证 Server 的 tracked Java/SQL/测试与基准一致、撤出源码和 evidence kind 不再有生产引用、双语内容一致，以及 Markdown 格式和相对引用。没有新增运行时行为，本次文档变更不需要新的 CLI、Maven 或 MySQL 测试作为证据。此前证据来源测试快照保留为历史。
+本次调整验证 Server 的 Java/SQL/测试与固定的 S1 main 版本一致，同时归档的撤出记录保留其历史基准比较；撤出源码和 evidence kind 不再有生产引用、双语内容一致，以及 Markdown 格式和相对引用。没有新增运行时行为，本次文档变更不需要新的 CLI、Maven 或 MySQL 测试作为证据。此前证据来源测试快照保留为历史。
 
 后续 S1/S2/S3 验收继续区分源码实现、定向测试、CI、原生 ACK 资格与生产就绪。此前在 `c61044fae46cfeed70b882140730c0caaa944524` 上的 ACK 测试覆盖同 Pod/PVC 文件交接和有界退役，不能验证新的源码版本或物理回收。下一项交付决定是 S2 的完成/隔离契约，不再是插件审计能力是否可用。
 
