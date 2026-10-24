@@ -118,6 +118,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // hierarchical QWEN.md state and accepts append/replace writes scoped
   // to either the bound workspace or the global ~/.qwen directory.
   workspace_memory: { since: 'v1' },
+  memory_import_v1: { since: 'v1' },
   workspace_memory_remember: {
     since: 'v1',
     modes: ['workspace', 'clean'],
@@ -159,6 +160,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_agents: { since: 'v1' },
   session_agent_trace: { since: 'v1' },
   scheduled_task_session_reuse: { since: 'v1' },
+  // Scheduled tasks accept a `gate`: a command run at each fire outside the
+  // model, so a quiet watch costs no turn. Clients that send `gate` to an
+  // older daemon would have it silently dropped on POST.
+  scheduled_task_gate: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },

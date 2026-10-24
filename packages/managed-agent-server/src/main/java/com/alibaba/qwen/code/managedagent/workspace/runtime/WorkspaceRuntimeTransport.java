@@ -77,6 +77,22 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
+        RuntimeBindingRecord current = bindings.findById(runtime.getBindingId());
+        if (current == null || current.getGeneration() != runtime.getGeneration()
+                || !current.getRequest().equals(runtime.getRequest())
+                || !java.util.Objects.equals(current.getProvisionSeed(), runtime.getProvisionSeed())
+                || current.getState() != RuntimeBindingRecord.State.READY
+                || current.isDrainRequested() || current.getLease() == null
+                || !sameLease(current.getLease(), runtime.getLease())
+                || !LocalProcessRuntimeProvisioner.KIND.equals(current.getRequest().getProvisionerKind())
+                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(current.getRequest().getScope().getCapabilityDigest())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return delegate.mcpDefinitions(current);
+    }
+
+    @Override
     public CompletionStage<Void> acquire(RuntimeLease lease, RuntimeSession session) {
         if (!managed(session)) {
             return delegate.acquire(lease, session);

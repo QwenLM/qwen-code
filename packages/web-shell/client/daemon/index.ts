@@ -116,6 +116,7 @@ export type {
   DaemonGoal,
   DaemonGoalList,
   DaemonScheduledTask,
+  DaemonScheduledTaskGateStatus,
   DaemonScheduledTaskRun,
   DaemonCreateScheduledTaskRequest,
   DaemonUpdateScheduledTaskRequest,

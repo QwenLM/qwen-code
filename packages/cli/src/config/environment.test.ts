@@ -21,7 +21,10 @@ import {
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
 } from './shared-env-keys.js';
-import { RELAUNCH_SUPERVISED_ENV } from '../utils/env-provenance.js';
+import {
+  NPM_RUNTIME_CONTEXT,
+  RELAUNCH_SUPERVISED_ENV,
+} from '../utils/env-provenance.js';
 import type { Settings } from './settingsSchema.js';
 import { TrustLevel, resetTrustedFoldersForTesting } from './trustedFolders.js';
 import {
@@ -31,6 +34,8 @@ import {
 
 const TRACKED_ENV = [
   AGENT_EXECUTION_BACKEND_ENV,
+  'QWEN_VERIFY_ASSETS_REPO',
+  'QWEN_VERIFY_ASSETS_BRANCH',
   'CLOUD_SHELL',
   'GOOGLE_CLOUD_PROJECT',
   'RUNTIME_DOTENV',
@@ -102,6 +107,8 @@ const TRACKED_ENV = [
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
   RELAUNCH_SUPERVISED_ENV,
+  NPM_RUNTIME_CONTEXT,
+  NPM_RUNTIME_CONTEXT.toLowerCase(),
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
@@ -224,6 +231,38 @@ describe('operator container requirement across environment reload', () => {
         expect(stderr).toHaveBeenCalledWith(
           expect.stringContaining(
             'cannot set QWEN_AGENT_EXECUTION_BACKEND; ignored. Export it in the launch environment instead.',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    },
+  );
+
+  it.each(['QWEN_VERIFY_ASSETS_BRANCH', 'qwen_verify_assets_branch'])(
+    'warns when settings.env tries to set a publishing coordinate as %s',
+    (spelling) => {
+      // The exclusion folds case, so the diagnostic has to as well. The
+      // lowercase spelling is what reddens this before the fix: the gate
+      // dropped it while the exact-spelling lookup reported nothing.
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const settingsFile = path.join(os.homedir(), '.qwen', 'settings.json');
+      fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({ env: { [spelling]: 'assets/wenshao' } }),
+      );
+      const settings = testSettings(
+        JSON.parse(fs.readFileSync(settingsFile, 'utf8')),
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        loadEnvironment(settings, workspace);
+        expect(process.env['QWEN_VERIFY_ASSETS_BRANCH']).toBeUndefined();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `cannot set ${spelling}; ignored. Set verifyPr.assetsBranch at user scope in settings.json, or export it in the launch environment.`,
           ),
         );
       } finally {
@@ -1460,6 +1499,50 @@ describe('loadEnvironment', () => {
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 
+  it.each(['project .env', 'home .env', 'settings.env'])(
+    'preserves launcher npm identity against %s, including reload and child snapshots',
+    (source) => {
+      const workspace = makeWorkspace();
+      const original = JSON.stringify({
+        node: '/trusted/node',
+        bun: '/private/bun',
+        cli: '/installed/cli.js',
+      });
+      const forged = JSON.stringify({
+        node: '/workspace/attacker',
+        bun: '/private/bun',
+        cli: '/installed/cli.js',
+      });
+      process.env[NPM_RUNTIME_CONTEXT] = original;
+      const keys = [NPM_RUNTIME_CONTEXT, NPM_RUNTIME_CONTEXT.toLowerCase()];
+      const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      if (source === 'settings.env') {
+        settings.env = Object.fromEntries(keys.map((key) => [key, forged]));
+      } else {
+        fs.writeFileSync(
+          path.join(source === 'home .env' ? os.homedir() : workspace, '.env'),
+          keys.map((key) => `${key}=${forged}`).join('\n'),
+        );
+      }
+      loadEnvironment(settings, workspace);
+      reloadEnvironment(settings, workspace);
+      expect(process.env[NPM_RUNTIME_CONTEXT]).toBe(original);
+      expect(process.env[NPM_RUNTIME_CONTEXT.toLowerCase()]).toBeUndefined();
+      const child = buildRuntimeEnvironment(
+        settings,
+        workspace,
+        process.env,
+      ).effectiveEnv;
+      expect(child[NPM_RUNTIME_CONTEXT]).toBe(original);
+      expect(child[NPM_RUNTIME_CONTEXT.toLowerCase()]).toBeUndefined();
+      expect(
+        buildRuntimeEnvironment(settings, workspace, {}).effectiveEnv[
+          NPM_RUNTIME_CONTEXT
+        ],
+      ).toBeUndefined();
+    },
+  );
+
   // The private Conversations provenance marker is a fixed constant rather
   // than a per-spawn nonce, so the home-scoped exemption from
   // PROJECT_ENV_HARDCODED_EXCLUSIONS must not apply to it: a home `.env`
@@ -1725,6 +1808,32 @@ describe('loadEnvironment', () => {
     }
   });
 
+  // The serve daemon bearer token is the same operator-only class as the
+  // keys above: `qwen serve` takes it from --token, an exported env var, or
+  // a home-scoped .env, and generates a one-time random bearer otherwise.
+  // Repository content must never preset that credential, on the initial
+  // load included — under either case spelling.
+  it('never applies the serve daemon token from a project .env, including case variants', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'QWEN_SERVER_TOKEN=project-env-token',
+        'qwen_server_token=project-env-token-lower',
+        // Positive control: proves the initial .env load ran and rejected
+        // only the token keys, not the whole file.
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['qwen_server_token']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
   // Windows env lookup is case-insensitive, so exact-case membership would
   // let case variants through every application gate on that platform.
   it('rejects entrypoint and trust-anchor keys regardless of case', () => {
@@ -1757,11 +1866,11 @@ describe('loadEnvironment', () => {
     expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
   });
 
-  // The reload-only tier (QWEN_SERVER_TOKEN, PATH, HOME, LD_LIBRARY_PATH, …)
-  // must match case-folded for the same reason: on Windows a lowercase twin
-  // names the same OS variable, so an exact-case gate would let a
-  // mid-session settings.env/.env edit rotate the daemon token or rewrite
-  // PATH.
+  // The daemon token lives in the hardcoded tier now, but the reload-only
+  // tier (PATH, HOME, LD_LIBRARY_PATH, …) and the settings.env rejection must
+  // match case-folded for the same reason: on Windows a lowercase twin names
+  // the same OS variable, so an exact-case gate would let a mid-session
+  // settings.env/.env edit rotate the daemon token or rewrite PATH.
   it('rejects case variants of reload-only excluded keys', () => {
     const workspace = makeWorkspace();
     const envPath = path.join(workspace, '.env');

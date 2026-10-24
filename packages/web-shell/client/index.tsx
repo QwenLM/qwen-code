@@ -23,6 +23,7 @@ export {
   JavaManagedAgentClient,
   JavaManagedAgentHttpError,
   type JavaAgentCommandAdmission,
+  type JavaAgentTurnAdmission,
   type JavaAgentEnvironment,
   type JavaAgentEvent,
   type JavaAgentSession,
