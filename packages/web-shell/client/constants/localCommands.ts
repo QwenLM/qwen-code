@@ -24,8 +24,8 @@ export function getLocalCommands(
     {
       name: 'language',
       description: t('local.language'),
-      argumentHint: 'ui [en|zh-CN]',
-      subcommands: ['ui'],
+      argumentHint: 'ui [en|zh-CN] | output <language>',
+      subcommands: ['ui', 'output'],
     },
     {
       name: 'plan',
