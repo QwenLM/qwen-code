@@ -104,6 +104,9 @@ export async function handleUpdate(args: UpdateArgs) {
       if (warnings) writeStderrLine(warnings);
     } catch (error) {
       writeStderrLine(getErrorMessage(error));
+      // Match install/link/uninstall: a failed update must not exit 0, or a
+      // caller cannot tell it from a successful one.
+      process.exit(1);
     }
   }
   if (args.all) {
@@ -136,6 +139,7 @@ export async function handleUpdate(args: UpdateArgs) {
       if (warnings) writeStderrLine(warnings);
     } catch (error) {
       writeStderrLine(getErrorMessage(error));
+      process.exit(1);
     }
   }
 }
