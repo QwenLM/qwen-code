@@ -45,6 +45,12 @@ describe('isSlowTestHost', () => {
     expect(isSlowTestHost()).toBe(true);
   });
 
+  it('treats a contended shared host as slow without RUNNER_NAME', () => {
+    delete process.env['RUNNER_NAME'];
+    vi.mocked(os.loadavg).mockReturnValue([40, 0, 0]);
+    expect(isSlowTestHost()).toBe(true);
+  });
+
   it('keeps an unsaturated host fast without RUNNER_NAME', () => {
     delete process.env['RUNNER_NAME'];
     vi.mocked(os.loadavg).mockReturnValue([2, 0, 0]);

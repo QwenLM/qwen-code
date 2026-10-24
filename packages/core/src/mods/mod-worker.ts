@@ -22,6 +22,7 @@ import {
   type ModCommand,
   type ModPlugin,
   type ModReply,
+  type ModSessionFacts,
   type ModWorkerRequest,
 } from './types.js';
 import {
@@ -29,7 +30,9 @@ import {
   MOD_METHODS,
   ModBudget,
   ModTimeoutError,
+  assertModDepth,
   engineOrigin,
+  isModMethod,
   record,
   validateInput,
   validateResult,
@@ -78,6 +81,7 @@ let pumping = false;
 let builtinTool: string | undefined;
 let surface: 'terminal' | null = null;
 let version = 'unknown';
+let facts: ModSessionFacts | undefined;
 const send = (reply: ModReply, root = rootId) =>
   port.postMessage({ ...reply, root, phase });
 const abandoned = () =>
@@ -149,6 +153,7 @@ class Realm {
       const json = this.vm.getString(data);
       if (Buffer.byteLength(json) > MOD_MAX_BYTES)
         throw new Error('Mod API input is too large.');
+      assertModDepth(json, 'Mod API input');
       const deferred = this.vm.newPromise();
       const task = Promise.resolve().then(() =>
         hostCall(callId, method, JSON.parse(json)),
@@ -188,7 +193,9 @@ class Realm {
       if (name === 'validate' || name === 'validateResult') {
         if (!call?.live || callAbandoned(call))
           throw new Error('Mod continuation is no longer active.');
-        const value = JSON.parse(this.vm.getString(input));
+        const json = this.vm.getString(input);
+        assertModDepth(json, 'Mod value');
+        const value = JSON.parse(json);
         if (name === 'validateResult') validateResult(call.event, value);
         else validateInput(call.event, value, call.input);
         return this.vm.undefined;
@@ -204,12 +211,22 @@ class Realm {
     const factory = this.vm.unwrapResult(
       this.vm.evalCode(MOD_GUEST_FACTORY, 'mod-host.js'),
     );
+    const identity = this.vm.newString(
+      JSON.stringify({ name: plugin.name, root: plugin.source.root }),
+    );
     this.guest = this.vm.unwrapResult(
-      this.vm.callFunction(factory, this.vm.undefined, bridge, status),
+      this.vm.callFunction(
+        factory,
+        this.vm.undefined,
+        bridge,
+        status,
+        identity,
+      ),
     );
     factory.dispose();
     bridge.dispose();
     status.dispose();
+    identity.dispose();
   }
   execute<T>(action: () => T): T {
     executing++;
@@ -238,6 +255,7 @@ class Realm {
       const json = this.vm.getString(value);
       if (Buffer.byteLength(json) > MOD_MAX_BYTES)
         throw new Error('Mod result is too large.');
+      assertModDepth(json, 'Mod result');
       return JSON.parse(json);
     } finally {
       value.dispose();
@@ -572,12 +590,7 @@ async function hostCall(
       updateActivity();
     }
   }
-  if (
-    method !== 'command.register' &&
-    method !== 'session.version' &&
-    method !== 'ui.log'
-  )
-    throw new Error('Mod API not supported: ' + method);
+  if (!isModMethod(method)) throw new Error('Mod API not supported: ' + method);
   validateInput(method, value, {});
   const plugin = realms[call.plugin].plugin;
   const invoke = async () => {
@@ -613,6 +626,19 @@ async function hostCall(
               },
             },
           };
+        const fact = SESSION_FACTS[method];
+        if (fact) {
+          if (!facts) throw new Error('Mod session facts are unavailable.');
+          return { value: facts[fact] };
+        }
+        if (method === 'session.surfaces')
+          return { value: surface ? [surface] : [] };
+        if (method === 'session.surface') return { value: surface };
+        if (method === 'clock.now') return { value: Date.now() };
+        if (method === 'clock.sleep') {
+          await sleep(call, Number(e['ms']));
+          return { value: undefined };
+        }
         logChars += String(e['text']).length + 1;
         if (logChars > 100_000) throw new Error('Mod log budget exceeded.');
         send({
@@ -630,8 +656,38 @@ async function hostCall(
     if ('deny' in result) throw new Error(String(result['deny']));
     return result['value'];
   };
-  // Void log notifications do not suspend their caller's execution.
-  return method === 'ui.log' ? invoke() : call.budget.lend(invoke);
+  // Void log notifications do not suspend their caller's execution, and a
+  // sleep is the caller's own time; other calls lend the caller's budget.
+  return method === 'ui.log' || method === 'clock.sleep'
+    ? invoke()
+    : call.budget.lend(invoke);
+}
+
+const SESSION_FACTS: Partial<Record<ModEvent, keyof ModSessionFacts>> = {
+  'session.cwd': 'cwd',
+  'session.id': 'id',
+  'session.model': 'model',
+  'session.root': 'root',
+  'session.turns': 'turns',
+  'session.usage': 'usage',
+};
+
+// Work cannot outlive its dispatch yet, so a sleep ends with its hook.
+function sleep(call: ModInvocation, ms: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const settle = (error?: Error) => {
+      clearTimeout(timer);
+      clearInterval(watch);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => settle(), Math.min(ms, 2 ** 31 - 1));
+    const watch = setInterval(() => {
+      // A hook that timed out is no longer live while its catch recovers.
+      if (!call.live || callAbandoned(call))
+        settle(new Error('Mod sleep ended with its hook.'));
+    }, 5);
+  });
 }
 
 function cancelAbandonedOperations(): void {
@@ -751,6 +807,7 @@ port.on('message', async (request: ModWorkerRequest) => {
   checks = 0;
   lastCheck = 0;
   builtinTool = request.type === 'tool' ? request.builtinTool : undefined;
+  facts = request.facts;
   epoch++;
   logChars = 0;
   operations = 0;

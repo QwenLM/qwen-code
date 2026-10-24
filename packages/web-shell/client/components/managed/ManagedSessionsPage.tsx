@@ -63,6 +63,7 @@ import { useManagedCwdChange } from './use-managed-cwd-change';
 import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
+import { ManagedPermissionRulesDialog } from './ManagedPermissionRulesDialog';
 import { useManagedSkills } from './use-managed-skills';
 import { useManagedMcp } from './use-managed-mcp';
 import { ManagedMcpManagerPage } from './ManagedMcpManagerPage';
@@ -73,6 +74,11 @@ import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import type { ManagedCreationSkillsSource } from './managed-creation-skills';
 import { ManagedWorkspaceNavigation } from './ManagedWorkspaceNavigation';
+import { ManagedSessionNavigationRow } from './ManagedSessionNavigationRow';
+import {
+  ManagedArchivedSessions,
+  type ManagedArchivedSessionsStatus,
+} from './ManagedArchivedSessions';
 import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
@@ -177,6 +183,8 @@ export function ManagedSessionsPage({
   onSessionWorkspaceChange,
   managedAgentProvider,
   navigationTarget,
+  archivedNavigationTarget,
+  onArchivedSessionsStatusChange,
   interactive = true,
   creationSkills,
   onManageSkills,
@@ -202,6 +210,10 @@ export function ManagedSessionsPage({
   managedAgentProvider?: ManagedAgentProvider;
   /** Null keeps home layout while its sidebar slot is temporarily unmounted. */
   navigationTarget?: HTMLElement | null;
+  archivedNavigationTarget?: HTMLElement | null;
+  onArchivedSessionsStatusChange?: (
+    status: ManagedArchivedSessionsStatus,
+  ) => void;
   interactive?: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   onManageSkills?: () => void;
@@ -229,6 +241,8 @@ export function ManagedSessionsPage({
         provider={managedAgentProvider}
         cancellationEnabled={managedAgentProvider.canCancel}
         navigationTarget={navigationTarget}
+        archivedNavigationTarget={archivedNavigationTarget}
+        onArchivedSessionsStatusChange={onArchivedSessionsStatusChange}
         interactive={interactive}
         creationSkills={creationSkills}
         onManageSkills={onManageSkills}
@@ -296,6 +310,8 @@ function ManagedSessionsContent({
   provider,
   cancellationEnabled,
   navigationTarget,
+  archivedNavigationTarget,
+  onArchivedSessionsStatusChange,
   interactive,
   creationSkills,
   onManageSkills,
@@ -321,6 +337,10 @@ function ManagedSessionsContent({
   provider: ManagedAgentProvider;
   cancellationEnabled: boolean;
   navigationTarget?: HTMLElement | null;
+  archivedNavigationTarget?: HTMLElement | null;
+  onArchivedSessionsStatusChange?: (
+    status: ManagedArchivedSessionsStatus,
+  ) => void;
   interactive: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   onManageSkills?: () => void;
@@ -445,9 +465,13 @@ function ManagedSessionsContent({
   }, []);
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
-  const [archiveState, setArchiveState] = useState<'unarchived' | 'archived'>(
-    'unarchived',
-  );
+  const [archivedSummaries, setArchivedSummaries] = useState<
+    ManagedAgentSessionSummary[]
+  >([]);
+  const [standaloneArchiveState, setArchiveState] = useState<
+    'unarchived' | 'archived'
+  >('unarchived');
+  const archiveState = home ? 'unarchived' : standaloneArchiveState;
   const [titleQuery, setTitleQuery] = useState('');
   const [confirmation, setConfirmation] = useState<{
     session: ManagedAgentSessionSummary;
@@ -542,7 +566,7 @@ function ManagedSessionsContent({
   const listBusy = useRef(false);
   const selection = useRef(sessionId);
   selection.current = sessionId;
-  const lifecycleSummaries = useMemo(
+  const navigationSummaries = useMemo(
     () => [
       ...new Map(
         [...sessions, ...(detail.summary ? [detail.summary] : [])].map(
@@ -551,6 +575,17 @@ function ManagedSessionsContent({
       ).values(),
     ],
     [sessions, detail.summary],
+  );
+  const lifecycleSummaries = useMemo(
+    () => [
+      ...new Map(
+        [...archivedSummaries, ...navigationSummaries].map((session) => [
+          session.sessionId,
+          session,
+        ]),
+      ).values(),
+    ],
+    [archivedSummaries, navigationSummaries],
   );
   const lifecycle = useManagedSessionLifecycle(
     provider,
@@ -618,9 +653,13 @@ function ManagedSessionsContent({
       }
     }
   }
-  const sessionActions = (session: ManagedAgentSessionSummary) => (
+  const sessionActions = (
+    session: ManagedAgentSessionSummary,
+    sidebar = false,
+  ) => (
     <ManagedSessionActions
       session={session}
+      sidebar={sidebar}
       lifecycle={Boolean(provider.lifecycle)}
       state={lifecycle.states[session.sessionId]}
       exporting={exporting[session.sessionId]}
@@ -784,8 +823,12 @@ function ManagedSessionsContent({
     // disablement by delivering a new summary without touching the record.
   }, [pending, sessionId, detail.summary, interactive]);
 
-  const listTitleQuery = provider.titleSearch ? titleQuery : '';
-  const navigationSessions = listTitleQuery ? sessions : lifecycleSummaries;
+  const listTitleQuery = provider.titleSearch
+    ? home
+      ? navigationSearch
+      : titleQuery
+    : '';
+  const navigationSessions = listTitleQuery ? sessions : navigationSummaries;
   useEffect(() => {
     const abort = new AbortController();
     listLifetime.current = abort;
@@ -1242,16 +1285,8 @@ function ManagedSessionsContent({
       ref={sessionsNavRef}
       tabIndex={-1}
       aria-label={t('managed.sessions')}
-      className={`flex min-h-0 flex-col gap-1 overflow-y-auto ${home ? 'p-2' : 'max-h-48 md:max-h-none'}`}
+      className={`flex min-h-0 flex-col gap-1 overflow-y-auto ${home ? '' : 'max-h-48 md:max-h-none'}`}
     >
-      {home && (
-        <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs text-muted-foreground">
-          <span>{t('managed.sessions')}</span>
-          <Button variant="ghost" size="sm" onClick={refresh}>
-            {t('managed.refresh')}
-          </Button>
-        </div>
-      )}
       {!interactive && error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
@@ -1329,7 +1364,7 @@ function ManagedSessionsContent({
             )}
         </div>
       ))}
-      {provider.lifecycle && (
+      {!home && provider.lifecycle && (
         <div className="flex gap-1" aria-label={t('managed.historyFilter')}>
           {(['unarchived', 'archived'] as const).map((state) => (
             <Button
@@ -1344,7 +1379,7 @@ function ManagedSessionsContent({
           ))}
         </div>
       )}
-      {provider.titleSearch && (
+      {!home && provider.titleSearch && (
         <label className="px-2 py-1">
           <span className="sr-only">{t('managed.titleSearch')}</span>
           <Input
@@ -1368,7 +1403,7 @@ function ManagedSessionsContent({
                 ? session.lifecycleStatus === 'archived'
                 : session.lifecycleStatus !== 'archived'),
           )}
-          renderSessionActions={sessionActions}
+          renderSessionActions={(session) => sessionActions(session, true)}
           sessionId={sessionId}
           workspaceId={workspaceId}
           active={navigationActive}
@@ -1388,6 +1423,22 @@ function ManagedSessionsContent({
           .map((session) => {
             const current =
               summary?.sessionId === session.sessionId ? summary : session;
+            if (home) {
+              return (
+                <ManagedSessionNavigationRow
+                  key={session.sessionId}
+                  session={current}
+                  active={navigationActive && sessionId === session.sessionId}
+                  onSelect={() =>
+                    openSession(
+                      session.sessionId,
+                      session.workspace?.workspaceId,
+                    )
+                  }
+                  actions={sessionActions(current, true)}
+                />
+              );
+            }
             return (
               <div
                 key={session.sessionId}
@@ -1484,6 +1535,23 @@ function ManagedSessionsContent({
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
       </p>
+      {home &&
+        provider.lifecycle &&
+        archivedNavigationTarget &&
+        createPortal(
+          <ManagedArchivedSessions
+            key={listRevision}
+            provider={provider}
+            clientId={clientId}
+            sessionId={sessionId}
+            active={navigationActive}
+            onSelectSession={openSession}
+            renderSessionActions={sessionActions}
+            onSessionsChange={setArchivedSummaries}
+            onStatusChange={onArchivedSessionsStatusChange}
+          />,
+          archivedNavigationTarget,
+        )}
       {confirmation && (
         <ManagedLifecycleConfirmation
           {...confirmation}
@@ -2261,6 +2329,7 @@ function ManagedSessionsContent({
                         if (
                           mode === 'default' ||
                           mode === 'auto-edit' ||
+                          mode === 'auto' ||
                           mode === 'yolo'
                         )
                           void approvalChange.submit(mode);
@@ -2409,6 +2478,39 @@ function ManagedSessionsContent({
                             : 'managed.model.failed',
                     )}
                   </p>
+                )}
+              {interactive &&
+                approvalChange.options?.permissionRulesSupported && (
+                  <ManagedPermissionRulesDialog
+                    key={`${provider.storageKey}:${sessionId}`}
+                    rules={approvalChange.options.permissionRules}
+                    revision={approvalChange.options.approvalRevision}
+                    busy={approvalChange.busy}
+                    errorCode={approvalChange.errorCode}
+                    disabled={
+                      !approvalChange.options.supported ||
+                      approvalChange.optionsLoading ||
+                      approvalChange.isBlocked() ||
+                      compression.isBlocked() ||
+                      modelChange.isBlocked() ||
+                      cwd.isBlocked() ||
+                      busy ||
+                      Boolean(active) ||
+                      Boolean(pendingApproval) ||
+                      Boolean(pending) ||
+                      approvalChange.options.approvalRevision !==
+                        (summary?.approvalRevision ?? 0)
+                    }
+                    onSave={(rules) =>
+                      summary?.approvalMode
+                        ? approvalChange.submit(
+                            summary.approvalMode,
+                            undefined,
+                            rules,
+                          )
+                        : Promise.resolve(undefined)
+                    }
+                  />
                 )}
               {interactive &&
                 (approvalChange.busy ||
