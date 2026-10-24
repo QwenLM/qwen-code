@@ -95,7 +95,8 @@ const PR_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
                 ${CHECK_CONTEXT_FIELDS}
               }
             }
-            checkSuites(first: 50) {
+            checkSuites(last: 100) {
+              pageInfo { hasPreviousPage }
               nodes {
                 databaseId
                 conclusion
@@ -250,7 +251,10 @@ export interface PrData {
       commit: {
         oid: string;
         statusCheckRollup: CheckRollup | null;
-        checkSuites?: { nodes: CheckSuite[] };
+        checkSuites?: {
+          pageInfo?: { hasPreviousPage: boolean };
+          nodes: CheckSuite[];
+        };
       };
     }>;
   };
@@ -436,10 +440,15 @@ export function checkEvents(pr: PrData): {
 } {
   const commit = pr.commits.nodes[0]?.commit;
   // A rollup for any other commit describes a head that is already gone.
-  if (!commit || commit.oid !== pr.headRefOid || !commit.statusCheckRollup) {
+  if (!commit || commit.oid !== pr.headRefOid) {
     return { failed: [], pending: [], truncated: false };
   }
-  const { contexts } = commit.statusCheckRollup;
+  // No rollup at all is a head with no check run and no status — which is
+  // what a workflow GitHub could not start leaves behind.
+  const contexts = commit.statusCheckRollup?.contexts ?? {
+    pageInfo: { hasNextPage: false },
+    nodes: [],
+  };
   const failed: FailedCheck[] = [];
   const pending: string[] = [];
   for (const ctx of latestContexts(contexts.nodes)) {
@@ -478,11 +487,42 @@ export function checkEvents(pr: PrData): {
       });
     }
   }
-  // A workflow GitHub could not start — an invalid workflow file, say —
-  // leaves no check run in the rollup, only its suite.
-  for (const suite of commit.checkSuites?.nodes ?? []) {
+  failed.push(...startupFailures(commit.checkSuites?.nodes ?? []));
+  return { failed, pending, truncated: contexts.pageInfo.hasNextPage };
+}
+
+/** Events that run a workflow on the PR's code, rather than on a comment. */
+const CODE_EVENTS = new Set(['pull_request', 'pull_request_target', 'push']);
+
+/**
+ * Workflows GitHub could not start — an invalid workflow file, say — which
+ * leave no check run in the rollup, only their suite. Only the latest run
+ * of each workflow and trigger counts (a later one that started supersedes
+ * it), only one the PR's code triggered (a workflow run for each review
+ * comment fails to start as often as GitHub has trouble, and says nothing
+ * of the code), and it is one failure per head, however often it recurs.
+ */
+function startupFailures(suites: CheckSuite[]): FailedCheck[] {
+  const latest = new Map<string, CheckSuite>();
+  for (const suite of suites) {
     const run = suite.workflowRun;
-    if (suite.conclusion !== 'STARTUP_FAILURE' || !run) continue;
+    if (!run || !CODE_EVENTS.has(run.event)) continue;
+    const identity = [
+      'run',
+      suite.app?.databaseId ?? '',
+      run.workflow.databaseId,
+      run.event,
+      '',
+    ].join(':');
+    const known = latest.get(identity);
+    if (!known || known.databaseId < suite.databaseId) {
+      latest.set(identity, suite);
+    }
+  }
+  const failed: FailedCheck[] = [];
+  for (const [identity, suite] of latest) {
+    const run = suite.workflowRun!;
+    if (suite.conclusion !== 'STARTUP_FAILURE') continue;
     failed.push({
       event: {
         type: 'ci_failed',
@@ -491,19 +531,13 @@ export function checkEvents(pr: PrData): {
         runId: run.databaseId,
         startupFailure: true,
       },
-      attempt: `#suite${suite.databaseId}`,
-      identity: [
-        'run',
-        suite.app?.databaseId ?? '',
-        run.workflow.databaseId,
-        run.event,
-        '',
-      ].join(':'),
+      attempt: `#startup:${run.workflow.databaseId}:${run.event}`,
+      identity,
       actions: false,
       runDone: true,
     });
   }
-  return { failed, pending, truncated: contexts.pageInfo.hasNextPage };
+  return failed;
 }
 
 /**
@@ -514,7 +548,6 @@ export function checkEvents(pr: PrData): {
 function commentEvents(
   pr: PrData,
   prAuthor: string,
-  viewer: string,
   isNew: (node: CommentNode) => boolean,
 ): { events: SnapshotEvent[]; ids: string[]; truncated: string[] } {
   const ref = (node: CommentNode, trust: Trust): CommentRef => ({
@@ -543,23 +576,19 @@ function commentEvents(
       truncated.push('reviewThreadComments');
     }
     const comments: CommentRef[] = [];
-    const nodes = thread.comments.nodes;
-    for (const [index, node] of nodes.entries()) {
+    for (const node of thread.comments.nodes) {
       // A comment of a review not submitted yet is a draft only its author
       // sees.
       if (!isNew(node) || node.state === 'PENDING') continue;
       const trust = classify(node, 'thread', prAuthor);
       if (trust === 'ignore') continue;
-      // A bot answering the tool's reply, or an untrusted comment, asks
-      // for nothing new: a review bot that answers every reply would keep
-      // a round going for each, and an untrusted commenter could have a
-      // bot speak for them.
-      const before = nodes[index - 1];
+      // A bot asks in the comment that opens a thread; a reply of one
+      // answers someone — the tool, which a bot answering every reply
+      // would keep a round going for, or an untrusted commenter, who could
+      // have a bot speak for them, even once their own comment is gone.
       if (
         trust === 'bot' &&
-        before &&
-        (isOwnReply(before, viewer) ||
-          classify(before, 'thread', prAuthor) === 'untrusted')
+        node.databaseId !== thread.root.nodes[0]?.databaseId
       ) {
         continue;
       }
@@ -727,12 +756,7 @@ export function buildSnapshot(
 
   // The author GitHub names now, as the gate asks: a login can change
   // hands after a rename.
-  const comments = commentEvents(
-    pr,
-    pr.author?.login ?? state.prAuthor,
-    state.viewer,
-    isNew,
-  );
+  const comments = commentEvents(pr, pr.author?.login ?? state.prAuthor, isNew);
   events.push(...comments.events);
   truncated.push(...comments.truncated);
 
@@ -874,7 +898,7 @@ export function buildGateSnapshot(
   // or asking for more; only the tool's own replies are left out.
   const isNew = (node: CommentNode) =>
     !reportedComments.has(node.id) && !isOwnReply(node, cursor.viewer);
-  const comments = commentEvents(pr, cursor.prAuthor, cursor.viewer, isNew);
+  const comments = commentEvents(pr, cursor.prAuthor, isNew);
   candidates.push(...comments.events.map(withShortBodies));
   truncated.push(...comments.truncated);
 
@@ -1230,6 +1254,23 @@ function runGate(args: SnapshotArgs): void {
     prAuthor: pr.author?.login ?? existing?.prAuthor ?? '',
   };
   const result = buildGateSnapshot(pr, cursor, watch);
+  // A take-over while GitHub was asked: what this gate saw is the new
+  // owner's to report.
+  const owner = readState(paths.statePath);
+  if (
+    owner &&
+    sameRepository(owner, target) &&
+    session !== '' &&
+    owner.sessionId !== session
+  ) {
+    writeStdoutLine(
+      JSON.stringify({
+        action: 'stop',
+        events: [{ type: 'watched_elsewhere', session: owner.sessionId }],
+      }),
+    );
+    return;
+  }
   // The cursor lands before the output: a probe that prints and then dies
   // would otherwise report the same transitions on the next fire.
   if (JSON.stringify(result.cursor) !== JSON.stringify(existing)) {

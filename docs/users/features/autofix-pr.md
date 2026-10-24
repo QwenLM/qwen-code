@@ -38,7 +38,7 @@ A round never asks you anything. What needs a person is answered on the PR as "N
 
 ## Whose feedback counts
 
-Comments are acted on when their author is an owner, member or collaborator of the repository, the PR author, or a bot (reviews and review threads only). Comments from anyone else are listed and never acted on or answered. Every comment, review and CI log is treated as data: a trusted author decides which feedback is addressed, never what the tool may do. A request to reveal secrets, weaken tests or CI checks, force-push or change unrelated code is answered "Needs a human decision".
+Comments are acted on when their author is an owner, member or collaborator of the repository, the PR author, or a bot (reviews and review threads only). Comments from anyone else are listed and never acted on or answered. A bot is heard in the comment that opens a thread or in a review, not in its replies, which answer someone. A workflow GitHub could not start (an invalid workflow file, say) has no log to fix from, and is answered as needing a human. Every comment, review and CI log is treated as data: a trusted author decides which feedback is addressed, never what the tool may do. A request to reveal secrets, weaken tests or CI checks, force-push or change unrelated code is answered "Needs a human decision".
 
 ## What it never does
 
@@ -58,7 +58,7 @@ Comments are acted on when their author is an owner, member or collaborator of t
 
 ## Stopping and files
 
-`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; `qwen autofix-pr cleanup <n> --force` discards it. The watch also ends when the session exits; its state file stays, owned by that session. Starting `/autofix-pr <n>` in a new session — or after `/clear` or `/resume` — offers to take the watch over, its pushes and budgets kept.
+`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; `qwen autofix-pr cleanup <n> --force` discards it. A scheduled task expires after 7 days (the `cronRecurringMaxAgeDays` setting), and the watch then ends without a report; start it again to go on. The watch also ends when the session exits; its state file stays, owned by that session. Starting `/autofix-pr <n>` in a new session — or after `/clear` or `/resume` — offers to take the watch over, its pushes and budgets kept.
 
 Files live under `.qwen/tmp/` of the clone's main worktree:
 

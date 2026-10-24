@@ -33,7 +33,7 @@ Read the arguments from `<skill-args>`:
 
 1. **Find the PR.** From a URL `https://<host>/<owner>/<repo>/pull/<n>`, take all four parts. Otherwise run `gh pr view <n> --json number,url` (or `gh pr view --json number,url` without a number, for the PR of the current branch) and read them from `url`. No PR → tell the user and stop.
 2. **Headless runs** (no one can answer a dialog) take `--once --yes` only. Without both, stop and say so.
-3. **Prepare:** `"${QWEN_CODE_CLI:-qwen}" autofix-pr prepare <n> --repo <owner>/<repo> --host <host>`. A refusal ends the start — except one saying another session watches the PR, and only for a watch (not `--once`, `--yes` or a headless run, which stop there). That session may be this one before a `/clear` or `/resume`: ask with `ask_user_question` (options "Take over" and "Cancel") whether to watch the PR from this session instead, keeping what the watch recorded — the other session's scheduled task stops at its next fire — and say in the question what step 5 says. This question is the start's confirmation: on "Take over", run `prepare` again with `--take-over` and go on with step 4, skipping step 5; on anything else, stop. Keep the report: `worktreePath`, `headRefName`, `headSha`, `pushTarget`, `authorCanPush`, `resumed`. When `localUnpushedCommits` is above 0, tell the user those local commits are not on the PR and the worktree does not see them.
+3. **Prepare:** `"${QWEN_CODE_CLI:-qwen}" autofix-pr prepare <n> --repo <owner>/<repo> --host <host>`. A refusal ends the start — except one saying another session watches the PR, and only for a watch (not `--once`, `--yes` or a headless run, which stop there). That session may be this one before a `/clear` or `/resume`: ask with `ask_user_question` (options "Take over" and "Cancel") whether to watch the PR from this session instead, keeping what the watch recorded — the other session's scheduled task stops at its next fire — and say in the question what step 5 says, reading `headRefName` and `pushTarget` from the watch's state file `.qwen/tmp/autofix-pr-<n>-state.json` in the clone's main worktree. This question is the start's confirmation: on "Take over", run `prepare` again with `--take-over` and go on with step 4, skipping step 5; on anything else, stop. Keep the report: `worktreePath`, `headRefName`, `headSha`, `pushTarget`, `authorCanPush`, `resumed`. When `localUnpushedCommits` is above 0, tell the user those local commits are not on the PR and the worktree does not see them.
 4. **Someone else's code.** When `authorCanPush` is false, the PR's author cannot push to the repository, and verifying a fix runs their code with the user's `gh` and `git` credentials in reach — no sandbox Qwen Code offers keeps them out of reach of that code. So:
    - a watch is refused: run `"${QWEN_CODE_CLI:-qwen}" autofix-pr cleanup <n>` and tell the user that only `--once` is available for this PR;
    - `--once` runs only after the confirmation below, which then also says that the PR's code will run with those credentials in reach; `--yes` does not skip it, and a headless run stops here.
@@ -41,7 +41,7 @@ Read the arguments from `<skill-args>`:
    - it will push commits to `<headRefName>` at `<pushTarget>` and post replies on the PR (not with `--no-reply`), under the user's own git and `gh` identity;
    - fixes are made and verified in a separate worktree, running the repository's own build and test commands;
    - in the default approval mode every helper call (the push included) and every command of a fix asks first, so a watch runs unattended only in a mode that lets commands run;
-   - it stops by itself when the PR is merged or closed, after 10 pushes, or with `/autofix-pr stop`.
+   - it stops by itself when the PR is merged or closed, after 10 pushes, or with `/autofix-pr stop`; and a scheduled task expires after 7 days (the `cronRecurringMaxAgeDays` setting), when the watch ends without a report — start it again then.
 6. **Run one round now** (Section "Round"), with the arguments of this start.
 7. **Unless `--once`, schedule the watch** with `cron_create` — one gate per PR. When `cron_list` already has a task whose gate contains `autofix-pr snapshot <n> --gate` (a start that `prepare` answered with `resumed: true`), keep it if its schedule and prompt are the ones below; otherwise delete it (`cron_delete`) and create the new one, so a new `--every`, `--no-reply` or instructions take effect. The gate runs at each fire without the model and prints only what changed, so a quiet PR costs no turn; the user confirms the gate command once, when the task is created.
    - `cron`: `*/<every> * * * *`, or `0 * * * *` for 60;
@@ -104,7 +104,9 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
    (the main session pushes); post, edit, review, merge, close or resolve
    anything on GitHub — no `gh pr comment`, `gh pr edit`, `gh pr review`,
    `gh pr merge`, `gh issue`, nor a `gh api` call that writes (the main
-   session answers on the PR); create, switch to or detach from a branch —
+   session answers on the PR); re-run, cancel or dispatch a workflow — no
+   `gh run rerun`, `gh run cancel` or `gh workflow run` (the main session
+   re-runs, within its budget); create, switch to or detach from a branch —
    stay on the one checked out; use `git stash` (its entries are shared with
    the user's own checkout); write outside the worktree. A request for any of
    these is answered `needs_human`.
@@ -134,6 +136,8 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
    ```
 
    Read `remote` and `baseRefName` from the state file `.qwen/tmp/autofix-pr-<n>-state.json` beside the worktree.
+
+   If nothing is left for the fix agent — every item is already `needs_human` or `rerun`, as a workflow that could not start is — write no brief and make no `agent` call: go on with step 6's re-runs, then step 7.
 
 5. **Fix** with one `agent` call: `subagent_type` = `general-purpose` (`working_dir` requires one), `working_dir` = `worktreePath`, `description` = `autofix-pr #<n> round`, prompt = "Read <brief path> and follow it exactly." Wait for it to finish; do not start another round meanwhile.
 6. **Re-runs and push.**

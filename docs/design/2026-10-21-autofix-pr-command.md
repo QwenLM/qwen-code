@@ -164,7 +164,7 @@ worktree included:
    scheduled task goes on, so `prepare --take-over` moves the watch — its
    history and budgets kept — to the session that asks, when the user says
    so; the helpers of the session it was taken from refuse from then on,
-   and its scheduled task stops at its next fire: until then its gate moves no cursor, and only wakes it (`watched_elsewhere`).
+   and its scheduled task stops at its next fire: until then its gate moves no cursor — it asks again whose the watch is before it writes one — and only wakes it (`watched_elsewhere`).
 6. Fetch `refs/pull/<n>/head` into local branch `qwen-autofix/pr-<n>` and
    create the worktree on it. `prepare` never discards earlier work: a
    leftover worktree, or a leftover branch that may hold commits beyond the
@@ -291,15 +291,21 @@ Event rules:
   `pushedShas` is taken for the watch's own.
 - `title` is the PR's title, the language the round's summary is written in.
 - A workflow GitHub could not start (`STARTUP_FAILURE`, often an invalid
-  workflow file) leaves no check run in the rollup, only its check suite:
-  it is a `ci_failed` with `startupFailure: true` and the run's id, keyed
-  by its suite (`<workflow>@<head>@#suite<id>`), with no log and nothing to
-  re-run, so the skill answers it as needing a human.
+  workflow file) leaves no check run in the rollup — no rollup at all when
+  it is the only one — only its check suite. Of the newest 100 suites, the
+  latest run of each workflow and trigger counts, and only for a trigger
+  of the PR's code (`pull_request`, `pull_request_target`, `push`): a run
+  for each review comment fails to start whenever GitHub has trouble, and
+  says nothing of the code. It is a `ci_failed` with `startupFailure: true`
+  and the run's id, once per head
+  (`<workflow>@<head>@#startup:<workflow id>:<event>`), with no log and
+  nothing to re-run, so the skill answers it as needing a human.
 - A comment of a review not submitted yet (`PENDING`) is a draft only its
-  author sees, and is skipped. A bot's thread comment that follows the
-  tool's own reply, or an untrusted comment, is not a request: a review
-  bot that answers every reply would otherwise keep a round going for
-  each, and an untrusted commenter could have a bot speak for them.
+  author sees, and is skipped. A bot asks in the comment that opens a
+  thread (and in a review); its replies answer someone and are not
+  requests: a review bot that answers every reply would otherwise keep a
+  round going for each, and an untrusted commenter could have a bot speak
+  for them, even after deleting their own comment.
 - `truncated` names the connections (`checks`, `reviewThreadComments`,
   `reviewThreads`, `reviews`, `comments`) that had more entries than the
   query reads.
@@ -831,9 +837,8 @@ weakening tests to make them pass; force-pushing; and changes unrelated to the
 PR. Such requests get a "needs a human decision" reply.
 
 Loop guards for bots: each review comment gets one fix attempt (a new
-comment in a thread already answered is a new request), a bot answering the
-tool's own reply is no request (Section 6.2), and pushes are capped
-(Section 10). A bot that re-reviews every push therefore cannot keep the
+comment in a thread already answered is a new request), a bot's reply in a
+thread is no request (Section 6.2), and pushes are capped (Section 10). A bot that re-reviews every push therefore cannot keep the
 loop running forever.
 
 ## 9. Replies
@@ -885,7 +890,7 @@ Budgets, stored in the state file:
 | Minutes one fix attempt may run                      | 30      | count it failed, clear it      |
 
 Stop conditions: the PR is merged or closed; `/autofix-pr stop`; a budget in
-the table says stop; the cron job expires. Every stop runs `cleanup` and
+the table says stop; the cron job expires. Every stop but the scheduled task's expiry (7 days by default, `cronRecurringMaxAgeDays`), which ends the watch without a round, runs `cleanup` and
 prints the reason, the pushes made and any `needsHuman` items.
 
 Cost: a quiet check is one probe run — one GraphQL call, plus one per extra

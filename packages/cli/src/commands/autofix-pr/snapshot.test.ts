@@ -158,7 +158,7 @@ describe('buildSnapshot', () => {
           check: 'Qwen Code CI',
           runId: 32985578813,
           startupFailure: true,
-          key: `Qwen Code CI@${HEAD}@#suite89354937468`,
+          key: `Qwen Code CI@${HEAD}@#startup:176254679:pull_request`,
         },
       ],
     });
@@ -166,12 +166,61 @@ describe('buildSnapshot', () => {
     expect(
       buildSnapshot(
         data,
-        state({ handledChecks: [`Qwen Code CI@${HEAD}@#suite89354937468`] }),
+        state({
+          handledChecks: [
+            `Qwen Code CI@${HEAD}@#startup:176254679:pull_request`,
+          ],
+        }),
       ).action,
     ).toBe('wait');
   });
 
-  it('leaves out draft review comments, and a bot answering the tool or an untrusted comment', () => {
+  it('counts only the latest run of each workflow the code triggered, once, with no rollup at all', () => {
+    const suite = (
+      databaseId: number,
+      conclusion: string,
+      event: string,
+      workflow = 176254679,
+    ) => ({
+      databaseId,
+      conclusion,
+      app: { databaseId: 15368 },
+      workflowRun: {
+        databaseId: databaseId * 10,
+        url: `https://github.com/o/r/actions/runs/${databaseId * 10}`,
+        event,
+        workflow: { databaseId: workflow, name: `wf-${workflow}` },
+      },
+    });
+    const data = pr();
+    // The only workflow cannot start: no check run, no status, no rollup.
+    data.commits.nodes[0]!.commit.statusCheckRollup = null;
+    data.commits.nodes[0]!.commit.checkSuites = {
+      nodes: [
+        suite(1, 'STARTUP_FAILURE', 'pull_request'),
+        suite(2, 'STARTUP_FAILURE', 'pull_request'),
+        // Superseded by a later run of the same workflow that started.
+        suite(3, 'STARTUP_FAILURE', 'push', 7),
+        suite(4, 'SUCCESS', 'push', 7),
+        // A run for a review comment says nothing of the code.
+        suite(5, 'STARTUP_FAILURE', 'pull_request_review_comment', 8),
+      ],
+    };
+    const snap = buildSnapshot(data, state());
+    expect(snap.action).toBe('fix');
+    expect(snap.events).toEqual([
+      {
+        type: 'ci_failed',
+        check: 'wf-176254679',
+        url: 'https://github.com/o/r/actions/runs/20',
+        runId: 20,
+        startupFailure: true,
+        key: `wf-176254679@${HEAD}@#startup:176254679:pull_request`,
+      },
+    ]);
+  });
+
+  it('leaves out draft review comments, and every reply of a bot in a thread', () => {
     const own = {
       ...comment('PRRC_2', 'me', 'OWNER', { databaseId: 2 }),
       body: `Not changed: kept on purpose.\n\n${REPLY_MARKER}`,
@@ -218,7 +267,8 @@ describe('buildSnapshot', () => {
           : [],
     );
     expect(ids).toEqual(['PRRC_5']);
-    // A bot following a person is still a request.
+    // A bot's reply answers someone, even a person; only the comment that
+    // opens a thread asks.
     const followUp = buildSnapshot(
       pr(
         threads(
@@ -234,8 +284,11 @@ describe('buildSnapshot', () => {
       state(),
     );
     expect(followUp.events).toMatchObject([
-      { type: 'review_thread', comments: [{ id: 'PRRC_7' }, { id: 'PRRC_8' }] },
+      { type: 'review_thread', comments: [{ id: 'PRRC_7' }] },
     ]);
+    expect(
+      (followUp.events[0] as { comments: unknown[] }).comments,
+    ).toHaveLength(1);
   });
 
   it("carries the PR's title, the language the summary is written in", () => {
@@ -637,7 +690,9 @@ describe('buildSnapshot', () => {
           thread('T1', [comment('C1', 'a', 'OWNER')]),
           thread('T2', [comment('C2', 'b', 'MEMBER')]),
           thread('T3', [comment('C3', 'c', 'COLLABORATOR')]),
-          thread('T4', [comment('C4', 'review-bot', 'NONE', { bot: true })]),
+          thread('T4', [
+            comment('C4', 'review-bot', 'NONE', { bot: true, databaseId: 4 }),
+          ]),
         ),
       ),
       state(),

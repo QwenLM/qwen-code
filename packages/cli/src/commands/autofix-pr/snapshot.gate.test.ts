@@ -1033,6 +1033,53 @@ describe('runSnapshot --gate', () => {
     expect(existsSync(gatePath())).toBe(false);
   });
 
+  it('writes no cursor when the watch is taken over while GitHub is asked', () => {
+    const statePath = autofixPrPaths(mocks.root, 7).statePath;
+    mkdirSync(dirname(statePath), { recursive: true });
+    const owned = {
+      version: 1 as const,
+      sessionId: 'session-a',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: 'qwen-autofix/pr-7',
+      worktreePath: join(dirname(statePath), 'autofix-pr-7'),
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+    };
+    writeState(statePath, owned);
+    mockGh.mockImplementationOnce(() => {
+      writeState(statePath, { ...owned, sessionId: 'session-b' });
+      return JSON.stringify({
+        data: {
+          viewer: { login: 'me' },
+          repository: { pullRequest: withComments('I1') },
+        },
+      });
+    });
+    const saved = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    try {
+      runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    } finally {
+      if (saved === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = saved;
+    }
+    expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toMatchObject({
+      events: [{ type: 'watched_elsewhere', session: 'session-b' }],
+    });
+    expect(existsSync(gatePath())).toBe(false);
+  });
+
   it('leaves out what a prepared watch handled: failures, a conflict, and a deferred run until it ends', () => {
     const statePath = autofixPrPaths(mocks.root, 7).statePath;
     mkdirSync(dirname(statePath), { recursive: true });

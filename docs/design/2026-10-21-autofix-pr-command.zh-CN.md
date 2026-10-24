@@ -106,7 +106,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 2. 动手之前先检查推送权限。同仓库 PR 要求仓库的 `viewerPermission` 为 `WRITE`、`MAINTAIN` 或 `ADMIN`。fork PR 要求当前用户就是 fork 的所有者，或者既有写权限又有 `maintainerCanModify`。否则拒绝并说明原因。
 3. 要求本地恰好有一个 remote 和 base 仓库匹配（使用 `review match-remote` 背后的匹配逻辑）。
 4. 确定推送目标。优先使用唯一一个和 head 仓库匹配、并且只推送到它的本地 remote：匹配器只读 fetch URL，所以该 remote 推送到的每一个 URL——它的 `pushurl`，或者多条 `url` 里的每一条——都用同一个匹配器再核对一遍，任何一个目的地在别处的 remote 都不算。没有的话，按 `gh config get git_protocol` 给出的协议使用 head 仓库的 URL。把结果记到状态文件里。
-5. 状态文件就是锁。它记录会话 id（`QWEN_CODE_SESSION_ID`）；由另一个会话写下的状态文件直接导致拒绝。`/clear` 和 `/resume` 会给会话换一个新 id，而它的定时任务继续运行，所以在用户同意时，`prepare --take-over` 把监视（连同历史和预算）移交给发起请求的会话；被移交的那个会话的辅助命令从此拒绝执行，它的定时任务在下一次触发时停止：在那之前它的闸门不推进游标，只把它唤醒（`watched_elsewhere`）。
+5. 状态文件就是锁。它记录会话 id（`QWEN_CODE_SESSION_ID`）；由另一个会话写下的状态文件直接导致拒绝。`/clear` 和 `/resume` 会给会话换一个新 id，而它的定时任务继续运行，所以在用户同意时，`prepare --take-over` 把监视（连同历史和预算）移交给发起请求的会话；被移交的那个会话的辅助命令从此拒绝执行，它的定时任务在下一次触发时停止：在那之前它的闸门不推进游标——写游标之前会再确认一次监视归谁——只把它唤醒（`watched_elsewhere`）。
 6. 把 `refs/pull/<n>/head` fetch 到本地分支 `qwen-autofix/pr-<n>`，并在它上面创建 worktree。`prepare` 从不丢弃之前的工作：残留的 worktree，或可能含有超出记录 head 的提交的残留分支，都会导致拒绝，并提示先运行 `cleanup`。
 7. 在拥有这次监视的会话里重新运行 `prepare`，且 worktree 还在时，直接报告现有状态并带上 `resumed: true`，不再调用其他任何东西。如果 worktree 已被删除（包括用 `rm -rf` 删除，`git worktree prune` 会清掉它的登记），就重新创建它，并保留已记录的 `pushedShas`、`handledCommentIds` 和 `postedCommentIds`。状态文件属于另一个仓库的同号 PR 时直接拒绝。仓库按 GitHub 的方式比较：owner 和仓库名不区分大小写；host 不区分大小写、忽略默认端口，但保留其他端口，因为不同端口可能是不同的实例。
 8. 输出 JSON 报告：worktree 路径、分支、head SHA、base/head ref、推送目标、当前用户和 PR 作者的 login、draft 和 fork 标志，以及 `localUnpushedCommits`，即用户自己那份 head 分支上 PR 还没有的提交数。worktree 看不到这些提交。只有 upstream 是推送 remote 上 head 分支的本地分支才算这份副本，因此 fork 的 `main` 永远不会和用户自己的 `main` 比较。
@@ -176,8 +176,8 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - 评论 id 既不在 `handledCommentIds` 也不在 `postedCommentIds` 里、且不是工具自己的回复——即当前用户发的、正文以回复标记（第 9 节）结尾的评论——时，才算新评论。标记出现在别处（有人引用了一条回复）不会让评论被忽略。已 resolve 的 thread、空的或 pending 的 review、批准（它的正文表示接受这个 PR；其中的行内评论仍以 thread 的形式到达），以及被 dismiss 的 review（它已被撤回）会被跳过；outdated 的 thread 会保留，并带上 `outdated: true`。
 - head SHA 和 `lastKnownHeadSha` 不同时，如果分支本身（对推送目标执行 `git ls-remote`）也已离开已知 head——包括回退到本监视早先推送过的 head——记为 `head_moved_externally`；分支仍在已知 head 上时，是 API 滞后（上文的 `lagging`）。读不到分支时，`pushedShas` 里的 head 视为本监视自己的。
 - `title` 是 PR 的标题，这一轮的总结使用它的语言。
-- GitHub 没能启动的 workflow（`STARTUP_FAILURE`，常见原因是 workflow 文件无效）在 rollup 里没有任何 check run，只留下它的 check suite：它被报告为带 `startupFailure: true` 和 run id 的 `ci_failed`，按 suite 生成键（`<workflow>@<head>@#suite<id>`），没有日志也没有可重跑的 job，所以 skill 把它答复为需要人工处理。
-- 尚未提交的 review 里的评论（`PENDING`）是只有作者能看到的草稿，会被跳过。bot 在工具自己的回复或不受信任的评论之后发的 thread 评论不算请求：否则会回复每条回复的评审 bot 会让每次都多跑一轮，不受信任的评论者也能借 bot 之口提要求。
+- GitHub 没能启动的 workflow（`STARTUP_FAILURE`，常见原因是 workflow 文件无效）在 rollup 里没有任何 check run——它是唯一的 workflow 时根本没有 rollup——只留下它的 check suite。在最新的 100 个 suite 里，每个 workflow 和触发事件只看最近一次运行，而且只看由 PR 代码触发的（`pull_request`、`pull_request_target`、`push`）：为每条 review 评论触发的运行在 GitHub 出问题时也会启动失败，与代码无关。它被报告为带 `startupFailure: true` 和 run id 的 `ci_failed`，每个 head 只报一次（`<workflow>@<head>@#startup:<workflow id>:<event>`），没有日志也没有可重跑的 job，所以 skill 把它答复为需要人工处理。
+- 尚未提交的 review 里的评论（`PENDING`）是只有作者能看到的草稿，会被跳过。bot 在开启 thread 的评论（以及 review）里提要求；它在 thread 里的回复是在回答某人，不算请求：否则会回复每条回复的评审 bot 会让每次都多跑一轮，不受信任的评论者也能借 bot 之口提要求，删掉自己的评论之后也一样。
 - `truncated` 列出条目数超过查询读取范围的连接（`checks`、`reviewThreadComments`、`reviewThreads`、`reviews`、`comments`）。
 
 动作优先级：`stop`（已合并或已关闭）→ `resync`（head 被别人移动）→ `fix`（冲突、失败的检查或可信评论）→ `wait`。循环会再加两个输入：预算用完时为 `stop`，修复进行中（状态文件里有 `inFlight`）时为 `wait`，直到这次尝试结束（第 7 节）。
@@ -344,7 +344,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 
 即使是可处理的评论，修复说明也禁止：泄露密钥或 token；修改 CI 配置来跳过、禁用或削弱检查；删除或削弱测试来让它们通过；强推；与 PR 无关的改动。这类请求会收到"需要人工决定"的回复。
 
-针对 bot 的循环防护：每条 review 评论只尝试修复一次（已回答过的 thread 里的新评论是新的请求），bot 回应工具自己的回复不算请求（第 6.2 节），推送次数有上限（第 10 节）。因此每次推送都重新 review 的 bot 不能让循环无限进行下去。
+针对 bot 的循环防护：每条 review 评论只尝试修复一次（已回答过的 thread 里的新评论是新的请求），bot 在 thread 里的回复不算请求（第 6.2 节），推送次数有上限（第 10 节）。因此每次推送都重新 review 的 bot 不能让循环无限进行下去。
 
 ## 9. 回复
 
@@ -374,7 +374,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 | 连续被别人移动 head 的次数           | 2      | 停止循环                 |
 | 一次修复尝试可运行的分钟数           | 30     | 记为失败并清除           |
 
-停止条件：PR 已合并或关闭；执行 `/autofix-pr stop`；上表中某项预算要求停止；cron 任务过期。每次停止都会执行 `cleanup`，并输出原因、已做的推送和所有 `needsHuman` 项。
+停止条件：PR 已合并或关闭；执行 `/autofix-pr stop`；上表中某项预算要求停止；cron 任务过期。除了定时任务过期（默认 7 天，`cronRecurringMaxAgeDays`）会不经过任何一轮就结束监视之外，每次停止都会执行 `cleanup`，并输出原因、已做的推送和所有 `needsHuman` 项。
 
 开销：一轮无事发生的检查只是一次探针运行——一次 GraphQL 调用，检查或 review thread 每多一页再加一次——没有模型回合。只有带事件的检查才到达模型，所以两分钟的节奏在 PR 安静时不花任何开销。
 
