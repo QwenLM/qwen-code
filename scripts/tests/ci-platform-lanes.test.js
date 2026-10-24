@@ -181,7 +181,7 @@ const gateRunsOn = (cond, event) => {
     // evaluates here at the pin and may mis-report its reachability —
     // re-derive this helper's verdict before adding such a gate.
     [/needs\.classify_pr\.outputs\.skip_ci/g, '"false"'],
-    [/needs\.test\.outputs\.ci_profile/g, '"full"'],
+    [/needs\.classify_pr\.outputs\.ci_profile/g, '"full"'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name/g,
       event === 'pull_request' ? '"QwenLM/qwen-code"' : '""',
@@ -450,6 +450,17 @@ describe('post-merge push lane', () => {
       new Map(
         (ci.jobs[job].steps ?? []).map((s) => {
           const { name: _artifactName, ...restWith } = s.with ?? {};
+          if (job === 'lint_and_static' && s.name === 'Install dependencies') {
+            expect(s.env).toEqual({
+              QWEN_SKIP_PREPARE: '1',
+              QWEN_SKIP_NOTICE_GENERATION: '1',
+            });
+            const { env: _installEnv, ...install } = s;
+            return [
+              s.name,
+              JSON.stringify(canon({ ...install, with: restWith })),
+            ];
+          }
           return [s.name, JSON.stringify(canon({ ...s, with: restWith }))];
         }),
       );
@@ -488,8 +499,43 @@ describe('post-merge push lane', () => {
       'shared prelude reordered between the two jobs',
     ).toEqual(namesIn('test').filter((n) => sharedSet.has(n)));
     const lintNames = namesIn('lint_and_static');
+    expect(ci.jobs.lint_and_static.env?.QWEN_SKIP_PREPARE).toBeUndefined();
+    expect(
+      ci.jobs.lint_and_static.env?.QWEN_SKIP_NOTICE_GENERATION,
+    ).toBeUndefined();
+    expect(
+      lintNames.indexOf('Check serve fast-path bundle closure'),
+    ).toBeLessThan(lintNames.indexOf('Run i18n check'));
     expect(lintNames.indexOf('Use trusted CI profile')).toBeLessThan(
       lintNames.indexOf('Install dependencies'),
+    );
+    // The incremental opt-in is two pieces — the job-level LINT_BASE_SHA
+    // binding and the history fetch — and neither was pinned: dropping the
+    // env, deleting the step or reordering it left every suite green while
+    // each PR quietly paid for the whole-repository scan this feature exists
+    // to remove (full scanning IS the designed fallback).
+    expect(String(ci.jobs.lint_and_static.env?.LINT_BASE_SHA)).toContain(
+      'github.event.pull_request.base.sha',
+    );
+    const lintStep = (name) => {
+      const index = lintNames.indexOf(name);
+      expect(index, `step "${name}" is missing`).toBeGreaterThan(-1);
+      return index;
+    };
+    // Both steps above refetch shallow history, and a depth-1 fetch of the
+    // base ref grafts the very commit LINT_BASE_SHA names: `merge-base` then
+    // has no ancestry to walk and lint-scope falls back to a full scan.
+    for (const refetch of [
+      'Check the API contract version advances',
+      'Report test growth',
+    ]) {
+      expect(
+        lintStep('Fetch incremental lint history'),
+        `"Fetch incremental lint history" must stay below "${refetch}"`,
+      ).toBeGreaterThan(lintStep(refetch));
+    }
+    expect(lintStep('Fetch incremental lint history')).toBeLessThan(
+      lintStep('Install linters'),
     );
   });
 
@@ -517,13 +563,13 @@ describe('post-merge push lane', () => {
       'Run yamllint',
       'Run Prettier',
       'Run sensitive keyword linter',
+      'Check serve fast-path bundle closure',
+      'Check core subpath exports resolve',
       'Run i18n check',
       'Generate settings schema',
       'Check settings schema is up-to-date',
       'Generate Web Shell and VS Code companion notices',
       'Check Web Shell and VS Code companion notices are up-to-date',
-      'Check serve fast-path bundle closure',
-      'Check core subpath exports resolve',
       'Run .github/scripts helper tests',
     ];
     const steps = ci.jobs.lint_and_static.steps ?? [];

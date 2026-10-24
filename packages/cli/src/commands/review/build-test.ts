@@ -333,8 +333,9 @@ export function buildRunEnv(
 /**
  * The shell a POSIX command runs under: it runs the command, and when the
  * deadline's SIGTERM (or an interrupt) arrives it kills the command's whole
- * process tree before dying of that same signal. Exported for its tests;
- * `$1` is the command.
+ * process tree before dying of that same signal. (On an interrupt, bash
+ * before 5.0, which is macOS's `/bin/sh`, exits 130 instead.) Exported for
+ * its tests; `$1` is the command.
  *
  * `spawnSync` signals only its own child. A test runner's workers are that
  * child's grandchildren, so a suite the deadline killed left them reparented
@@ -344,8 +345,13 @@ export function buildRunEnv(
  * kernel's OOM killer started taking processes.
  *
  * The tree is read while it is still a tree: the walk runs before anything in
- * it dies, so nothing has been reparented yet. Same process group as before,
- * so a signal to the caller's group still reaches every process directly.
+ * it dies, so nothing has been reparented yet. The `stat` files go through
+ * `cat`, which skips one whose process exited after the glob. Handed the files
+ * itself, awk stops at the first it cannot open (mawk, gawk and busybox awk
+ * all do) and never reads the rest, so on a busy machine, where something
+ * exits during almost every walk, the command's tree went unkilled. Same
+ * process group as before, so a signal to the caller's group still reaches
+ * every process directly.
  * The command runs as a background job, which a POSIX shell starts with
  * SIGINT ignored — hence the INT trap, without which a Ctrl+C would leave the
  * suite running. Its exit status is the command's, as under `sh -c`.
@@ -362,7 +368,8 @@ shift
 reap() {
   [ -n "$1" ] || return 0
   { if [ -r /proc/self/stat ]; then
-      awk '{ s = $0; sub(/^.*\\) /, "", s); split(s, f, " "); print $1, f[2] }' /proc/[0-9]*/stat 2>/dev/null
+      cat /proc/[0-9]*/stat 2>/dev/null |
+        awk '{ s = $0; sub(/^.*\\) /, "", s); split(s, f, " "); print $1, f[2] }'
     else
       ps -A -o pid= -o ppid=
     fi; } |
