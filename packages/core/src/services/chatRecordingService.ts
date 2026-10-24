@@ -3289,10 +3289,9 @@ export class ChatRecordingService {
       throw new SessionWriterUnavailableError();
     if (this.topologyFence)
       throw new Error('Transcript topology transaction already active');
-    const key = (name: string, args: unknown) =>
-      getToolCallFingerprint(canonicalToolName(name), args);
-    const expected = key(input.name, input.args);
-    if (key(input.execution.name, input.execution.args) !== expected)
+    if (
+      canonicalToolName(input.execution.name) !== canonicalToolName(input.name)
+    )
       throw new Error('Restore completion does not match the checkpoint tool');
     const responseParts = structuredClone([...input.responseParts]);
     const responses = responseParts.filter((part) => part.functionResponse);
