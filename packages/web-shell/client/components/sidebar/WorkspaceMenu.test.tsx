@@ -175,6 +175,18 @@ describe('WorkspaceMenu', () => {
     expect(openTerminal).toHaveBeenCalledTimes(1);
   });
 
+  it('opens group creation and closes the menu', async () => {
+    const createGroup = vi.fn();
+    await render(
+      <WorkspaceMenu workspace={workspace} actions={{ createGroup }} />,
+    );
+    const items = await open();
+    expect(labels(items)).toEqual(['Create group']);
+    await act(async () => click(items[0]!));
+    expect(createGroup).toHaveBeenCalledTimes(1);
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
+  });
+
   it('shows the management group with live counts and dispatches its target', async () => {
     const openManagement = vi.fn();
     await render(
@@ -277,6 +289,7 @@ describe('WorkspaceMenu', () => {
           openTerminal: vi.fn(),
           newSession: vi.fn(),
           newWorktreeSession: vi.fn(),
+          createGroup: vi.fn(),
           openManagement: vi.fn(),
           reload: vi.fn(),
           remove: vi.fn(),
@@ -291,6 +304,7 @@ describe('WorkspaceMenu', () => {
       'Open terminal',
       'New task',
       'New worktree task',
+      'Create group',
       'MCP',
       'Skills',
       'Extensions',

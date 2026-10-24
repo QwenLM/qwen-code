@@ -740,6 +740,10 @@ export function rewindBoundaryHistory(
           type: 'user',
           text: item.text,
           promptId: item.promptId,
+          ...(item.canonicalHistoryItem?.type === 'user' &&
+          item.canonicalHistoryItem.rewindId
+            ? { rewindId: item.canonicalHistoryItem.rewindId }
+            : {}),
           sentToModel: item.sentToModel,
           display: item.display,
         },

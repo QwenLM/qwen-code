@@ -154,6 +154,7 @@ import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { getInteractiveModSession } from '../services/interactive-mod-session.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import { rewindSession } from './utils/session-rewind.js';
+import { isRewindableUserTurn } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
 import { sanitizeTerminalLine } from './utils/textUtils.js';
 import {
@@ -4495,10 +4496,9 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         return;
       }
-      const hasUserTurns = historyManager.history.some(
-        (h) => h.type === 'user',
-      );
-      if (!hasUserTurns) return;
+      const hasRewindableTurns =
+        historyManager.history.some(isRewindableUserTurn);
+      if (!hasRewindableTurns) return;
       setIsRewindSelectorOpen(true);
     },
     [streamingState, config, historyManager],
