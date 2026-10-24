@@ -22,6 +22,7 @@ import {
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import * as gitUtils from '../utils/gitUtils.js';
 import { ManagedSessionMessageProjection } from './managed-session-message-projection.js';
+import { resetManagedRuntimeDispatchGatesForTest } from './managed-runtime-dispatch-gate.js';
 
 vi.mock('../utils/gitUtils.js', async (importOriginal) => {
   const original =
@@ -43,9 +44,17 @@ const sessionKeyOf = (id: string) => ({
 
 const roots = new Set<string>();
 afterEach(async () => {
+  // The module-level dispatch gates survive a timed-out attempt; without a
+  // reset, every vitest retry of a once-run test would collide on its first
+  // claim with 'runtime invocation already dispatched.'
+  resetManagedRuntimeDispatchGatesForTest();
   for (const root of roots) await fs.rm(root, { recursive: true, force: true });
   roots.clear();
 });
+
+// Vitest retries rerun the test body in the same worker, so this counter
+// survives across attempts of the paged-Turn test.
+let pagedOutcomesAttempt = 0;
 
 async function resource(value: string) {
   const { createHash } = await import('node:crypto');
@@ -128,6 +137,59 @@ async function checkpointOf(session: ManagedSession) {
 }
 
 describe('LocalManagedRuntimeOutcomes', () => {
+  // 65 paged admits and a cold reopen: ~9.5 s on a warm laptop, but the ECS
+  // pool runs several suites at once and the flat 60 s budget timed out there —
+  // #15366, #15261 and #15308 each lost their Test gate to this one test.
+  // Only the budget moves; every assertion stays identical.
+  it('continues and cold-opens a paged Turn without losing the earliest receipt', async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-paged-outcomes-'),
+    );
+    roots.add(root);
+    // Each attempt gets its own session id: vitest does not cancel the
+    // timed-out attempt, and while it keeps running under the same session
+    // key it can claim into — or settle() against — the retry's gate.
+    const sessionId = `session-paged-outcomes-${pagedOutcomesAttempt++}`;
+    const opened = await openSession(root, sessionId);
+    let session = opened.session;
+    try {
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      for (let index = 0; index < 65; index++) {
+        await outcomes.admit(admission(`paged-call-${index}`));
+        await outcomes.settle({
+          functionCallId: `paged-call-${index}`,
+          executionStatus: 'success',
+          payload: { executionStatus: 'success', responseParts: [] },
+        });
+        await outcomes.finalizeBatch();
+      }
+      const physical = JSON.parse(
+        (await session.authority.readCheckpointState())!.toString(),
+      );
+      expect(physical.storageProfile).toBe('managed-checkpoint-paged/1');
+      expect(physical.history.toolCount).toBe(32);
+      await opened.seal();
+      session = (await openSession(root, sessionId)).session;
+      const restored = new LocalManagedRuntimeOutcomes(session);
+      await restored.recoverCommittedReceipts();
+      expect(
+        await unresolvedRuntimeWorkReason(session.authority),
+      ).toBeUndefined();
+      const authorization = await session.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
+      if (authorization.status !== 'runnable')
+        throw new Error('Missing paged checkpoint');
+      expect(authorization.checkpoint.tools?.items).toHaveLength(65);
+      expect(restored.hasCommittedReceipt('paged-call-0')).toBe(true);
+      await expect(restored.admit(admission('paged-call-0'))).rejects.toThrow(
+        /already/,
+      );
+      expect(events(session, 'tool.receipt')).toHaveLength(65);
+    } finally {
+      await session.close();
+    }
+  }, 180_000);
+
   it('admits a call with its intent and an await_runtime checkpoint', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
     roots.add(root);

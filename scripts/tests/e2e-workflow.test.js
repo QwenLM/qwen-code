@@ -5,7 +5,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
 describe('TUI product evidence', () => {
@@ -13,6 +13,185 @@ describe('TUI product evidence', () => {
     readFileSync('.github/workflows/tui-parity.yml', 'utf8'),
   );
   const steps = workflow.jobs.parity.steps;
+  const classify = new (Object.getPrototypeOf(async () => {}).constructor)(
+    'github',
+    'context',
+    workflow.jobs.changes.steps[0].with.script,
+  );
+  const serverFile = 'packages/managed-agent-server/src/main/java/Service.java';
+  async function required(
+    files,
+    count = files.length,
+    eventName = 'pull_request',
+  ) {
+    const github = {
+      paginate: vi.fn().mockResolvedValue(files),
+      rest: { pulls: { listFiles: vi.fn() } },
+    };
+    // A real dispatch payload carries no `pull_request` key. Handing the
+    // dispatch case a populated one would keep this suite green if the
+    // `context.payload.pull_request` read were ever hoisted above the
+    // eventName guard, while every real dispatch then throws.
+    const payload =
+      eventName === 'pull_request'
+        ? { pull_request: { number: 15261, changed_files: count } }
+        : {};
+    const result = await classify(github, {
+      eventName,
+      repo: { owner: 'QwenLM', repo: 'qwen-code' },
+      payload,
+    });
+    if (eventName === 'pull_request') {
+      expect(github.paginate).toHaveBeenCalledWith(
+        github.rest.pulls.listFiles,
+        {
+          owner: 'QwenLM',
+          repo: 'qwen-code',
+          pull_number: 15261,
+          per_page: 100,
+        },
+      );
+    } else {
+      expect(github.paginate).not.toHaveBeenCalled();
+    }
+    return result;
+  }
+
+  it('cancels superseded PRs while keeping dispatches independent', () => {
+    expect(workflow.concurrency).toEqual({
+      group:
+        '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}',
+      'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
+    });
+  });
+
+  it('skips Java service changes with accompanying design documentation', async () => {
+    expect(
+      await required([
+        { filename: serverFile },
+        { filename: 'docs/design/runtime.md' },
+      ]),
+    ).toBe(false);
+  });
+
+  it.each([
+    'packages/cli/src/ui/App.tsx',
+    'packages/core/src/core/client.ts',
+    'packages/channels/base/index.ts',
+    'packages/web-templates/package.json',
+    'packages/new-cli-dependency/index.ts',
+    'packages/managed-agent-server-extra/index.ts',
+    'integration-tests/interactive/tui-migration.test.ts',
+    'scripts/copy_bundle_assets.js',
+    'integrations/generated-ui/package.json',
+    'patches/ink+7.0.3.patch',
+    'pnpm-lock.yaml',
+    'pnpm-workspace.yaml',
+    'tsconfig.json',
+    '.nvmrc',
+    '.github/workflows/tui-parity.yml',
+  ])('runs mixed PRs touching %s', async (filename) => {
+    expect(await required([{ filename: serverFile }, { filename }])).toBe(true);
+  });
+
+  it('checks the source of a rename into an unrelated directory', async () => {
+    expect(
+      await required([
+        {
+          filename: serverFile,
+          previous_filename: 'packages/cli/src/index.ts',
+        },
+      ]),
+    ).toBe(true);
+  });
+
+  it('still skips a rename contained within the unrelated subtrees', async () => {
+    // Pins the negative arm: `previous_filename` present, but itself
+    // unrelated. Without it, weakening that arm to a presence check keeps the
+    // suite green while re-running both gates on any server-side restructure.
+    expect(
+      await required([
+        {
+          filename: serverFile,
+          previous_filename:
+            'packages/managed-agent-server/src/main/java/Old.java',
+        },
+      ]),
+    ).toBe(false);
+  });
+
+  it('uses files beyond the first API page and runs on incomplete diffs', async () => {
+    const files = Array.from({ length: 101 }, () => ({ filename: serverFile }));
+    expect(
+      await required([...files, { filename: 'packages/cli/src/index.ts' }]),
+    ).toBe(true);
+    expect(await required(files, 102)).toBe(true);
+    expect(await required(files, null)).toBe(true);
+    expect(
+      await required(
+        Array.from({ length: 3000 }, () => ({ filename: serverFile })),
+      ),
+    ).toBe(true);
+  });
+
+  it('always runs manual dispatches without querying PR files', async () => {
+    expect(await required([], 0, 'workflow_dispatch')).toBe(true);
+  });
+
+  it('retains named checks and runs them when impact detection fails', () => {
+    expect(workflow.jobs.changes.permissions).toEqual({
+      'pull-requests': 'read',
+    });
+    expect(workflow.jobs.changes.outputs.required).toBe(
+      '${{ steps.changes.outputs.result }}',
+    );
+    for (const job of [workflow.jobs.parity, workflow.jobs.noflicker]) {
+      expect(job.needs).toBe('changes');
+      expect(job.if).toBe(
+        "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}",
+      );
+      expect(job.steps.find((step) => step.name === 'Build cli').run).toBe(
+        'npm run build -- --cli-only',
+      );
+    }
+    expect(workflow.jobs.parity.name).toBe(
+      'TUI parity snapshots (ink vs opentui)',
+    );
+    expect(workflow.jobs.noflicker.name).toBe('OpenTUI no-flicker gate');
+  });
+
+  it('watches shared build inputs and retains all package dependencies', () => {
+    // Exact set, not arrayContaining: a floor still passes when a later PR
+    // drops a trigger, and the three entries it hides are load-bearing —
+    // esbuild.config.js drives the bundle step, package.json drives the
+    // --cli-only filter, tui-parity.yml is this workflow's own self-trigger.
+    expect([...workflow.on.pull_request.paths].sort()).toEqual(
+      [
+        '.github/actions/**',
+        '.github/scripts/**',
+        '.github/workflows/tui-parity.yml',
+        '.npmrc',
+        '.nvmrc',
+        'esbuild.config.js',
+        'integration-tests/**',
+        'integrations/**',
+        'package.json',
+        'packages/**',
+        'patches/**',
+        'pnpm-lock.yaml',
+        'pnpm-workspace.yaml',
+        'scripts/**',
+        'tsconfig.json',
+      ].sort(),
+    );
+    expect(
+      workflow.on.pull_request.paths.some((path) => path.startsWith('!')),
+    ).toBe(false);
+  });
+
+  it('budgets cold setup and all three serial product acceptance legs', () => {
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+  });
 
   it('treats unhandled errors as acceptance failures on every runner', () => {
     const product = steps.find((step) =>

@@ -12,6 +12,7 @@ import type {
 } from './tool-events.js';
 
 export const MOD_MAX_BYTES = 262_144;
+export const MOD_MAX_DEPTH = 512;
 export const MOD_TIMEOUT_MS = 10_000;
 export const MOD_END_TIMEOUT_MS = 1_500;
 
@@ -24,9 +25,14 @@ export interface ModSource {
 export type ModOption = string | number | boolean | string[];
 export type ModOptions = Record<string, ModOption>;
 export type ModToolDialect = 'native' | 'claude';
+export type ModUnsupportedEvents = 'skip' | 'reject';
 export type ModPluginConfigs = Record<
   string,
-  { options?: ModOptions; toolDialect?: ModToolDialect }
+  {
+    options?: ModOptions;
+    toolDialect?: ModToolDialect;
+    unsupportedEvents?: ModUnsupportedEvents;
+  }
 >;
 
 export interface ModDependency {
@@ -57,11 +63,29 @@ export interface ModPlugin {
   source: ModSource;
   options: ModOptions;
   toolDialect?: ModToolDialect;
+  unsupportedEvents?: ModUnsupportedEvents;
 }
 
 export interface ModLog {
   text: string;
   to: 'debug' | 'transcript';
+}
+
+export interface ModSessionUsage {
+  startedAt: number;
+  // Claude Code declares `tokens` optional; Qwen Code always reports it.
+  context: { tokens?: number; window: number; percent?: number };
+  rateLimits: Array<{ kind: string; percentUsed: number; resetsAt?: string }>;
+}
+
+/** Read on the main thread when a dispatch starts; `$.session` answers from it. */
+export interface ModSessionFacts {
+  id: string;
+  cwd: string;
+  root: string;
+  model: string;
+  turns: number;
+  usage: ModSessionUsage;
 }
 
 export type ModRequest =
@@ -70,6 +94,7 @@ export type ModRequest =
       plugins: ModPlugin[];
       cwd: string;
       surface: 'terminal' | null;
+      version: string;
     }
   | {
       type: 'command';
@@ -78,6 +103,7 @@ export type ModRequest =
       presentation?: ModCommandPresentation;
     }
   | { type: 'tool'; input: ModToolCallInput; builtinTool?: string }
+  | { type: 'native'; id: number }
   | { type: 'host-result'; id: number; result?: ModToolResult; error?: string }
   | {
       type: 'tool-check';
@@ -93,6 +119,7 @@ export type ModReply =
   | { type: 'error'; message: string }
   | { type: 'host-call'; id: number; input: ModToolCallInput }
   | { type: 'host-cancel'; ids: number[] }
+  | { type: 'activity'; revision: number; operation?: number }
   | {
       type: 'check-result';
       id: number;
@@ -100,3 +127,10 @@ export type ModReply =
       error?: string;
     }
   | ({ type: 'log'; plugin: string } & ModLog);
+
+export type ModWorkerRequest = ModRequest & {
+  root: number;
+  phase: number;
+  facts?: ModSessionFacts;
+};
+export type ModWorkerReply = ModReply & { root: number; phase: number };

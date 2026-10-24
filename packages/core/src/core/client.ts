@@ -77,6 +77,8 @@ const debugLogger = createDebugLogger('CLIENT');
 // Core modules
 import {
   LlmChat,
+  type ChatCompressionObserver,
+  type ChatCompressionObserverOptions,
   type RepairOrphanedToolUseOptions,
   userContentPushSnapshotKey,
 } from './llm-chat.js';
@@ -186,6 +188,7 @@ import {
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import { replayUiTelemetryFromConversation } from '../services/sessionService.js';
 import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
+import { markApiHistoryDirectoryContext } from '../utils/api-history-metadata.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
   getErrorMessage,
@@ -653,6 +656,18 @@ export class LlmClient {
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
+  }
+
+  private compressionObserver?: ChatCompressionObserver;
+  private compressionObserverOptions?: ChatCompressionObserverOptions;
+
+  setCompressionObserver(
+    observer?: ChatCompressionObserver,
+    options?: ChatCompressionObserverOptions,
+  ): void {
+    this.compressionObserver = observer;
+    this.compressionObserverOptions = options;
+    this.chat?.setCompressionObserver(observer, options);
   }
 
   async initialize(
@@ -1128,6 +1143,23 @@ export class LlmClient {
   }
 
   /**
+   * Ids answered by a synthesized orphan-repair placeholder. See
+   * `LlmChat.getSynthesizedRepairCallIds`; called per tool-completion
+   * batch alongside {@link getHistoryFunctionResponseIds}.
+   */
+  getSynthesizedRepairCallIds(): Set<string> {
+    return this.getChat().getSynthesizedRepairCallIds();
+  }
+
+  /**
+   * Swap a synthesized orphan-repair placeholder for the tool's real
+   * response parts. See `LlmChat.replaceSynthesizedToolResponse`.
+   */
+  replaceSynthesizedToolResponse(callId: string, realParts: Part[]): boolean {
+    return this.getChat().replaceSynthesizedToolResponse(callId, realParts);
+  }
+
+  /**
    * Walk-only accessor for the handled tool-call id → (name, args)
    * fingerprint map used by duplicate provider-id replay detection. Same
    * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
@@ -1211,6 +1243,9 @@ export class LlmClient {
    * the live history before submitting its own `tool_result` — otherwise a
    * late real result lands as a second `user[tool_result]` block (orphan
    * because the synthetic already consumed the matching `tool_use`).
+   * When the late result's placeholder is one of these synthesized
+   * responses the scheduler instead replaces it in place
+   * (`replaceSynthesizedToolResponse`) so the model sees the real output.
    */
   repairOrphanedToolUseTurnsInHistory(
     reason?: string,
@@ -2005,10 +2040,12 @@ export class LlmClient {
       return;
     }
 
-    this.getChat().addHistory({
+    const chat = this.getChat();
+    const context: Content = {
       role: 'user',
       parts: [{ text: await getDirectoryContextString(this.config) }],
-    });
+    };
+    chat.addHistory(markApiHistoryDirectoryContext(context));
   }
 
   async addWorkingDirectoryChangedContext(
@@ -2026,7 +2063,7 @@ export class LlmClient {
     this.cachedGitStatus = undefined;
     await this.refreshSystemInstruction();
     const gitStatus = this.getCachedGitStatus();
-    this.getChat().addHistory({
+    const context: Content = {
       role: 'user',
       parts: [
         {
@@ -2036,7 +2073,8 @@ export class LlmClient {
         },
         ...(gitStatus ? [{ text: wrapSystemReminder(gitStatus) }] : []),
       ],
-    });
+    };
+    this.getChat().addHistory(markApiHistoryDirectoryContext(context));
     await this.addDirectoryContext();
   }
 
@@ -2865,6 +2903,10 @@ export class LlmClient {
           ),
       );
       chat.enableManualPlanExitNotices();
+      chat.setCompressionObserver(
+        this.compressionObserver,
+        this.compressionObserverOptions,
+      );
       this.chat = chat;
 
       // Repair any dangling `model[functionCall]` whose `functionResponse`

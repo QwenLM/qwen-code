@@ -62,6 +62,8 @@ import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDispatchOutcome } from './commands-dispatch.js';
 import { createOpenTuiCommandContext } from './commands-context.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
+import type { StatusLineState } from '../hooks/useStatusLine.js';
+import { StreamingState } from '../types.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
 
 const mocks = vi.hoisted(() => {
@@ -88,6 +90,16 @@ const mocks = vi.hoisted(() => {
     handleMcpApprovalSelect: vi.fn(),
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
+    statusLineState: null as StatusLineState | null,
+    statusVimMode: undefined as string | undefined,
+    worktree: null as null | {
+      slug: string;
+      worktreePath: string;
+      worktreeBranch: string;
+      originalCwd: string;
+      originalBranch: string;
+      originalHeadCommit: string;
+    },
     loadingProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     exitInProgress: false,
@@ -287,16 +299,45 @@ vi.mock('./exit-lifecycle.js', () => ({
 vi.mock('../hooks/useAutoAcceptIndicator.js', () => ({
   emitAutoModeEntryNotices: mocks.state.emitAutoModeEntryNotices,
 }));
+vi.mock('../hooks/useWorktreeSession.js', () => ({
+  useWorktreeSession: () => mocks.state.worktree,
+}));
+vi.mock('../hooks/useGitBranchName.js', () => ({
+  useGitBranchName: () => 'current-branch',
+}));
+vi.mock('../hooks/useStatusLine.js', () => ({
+  useStatusLineState: ({
+    state,
+    vimMode,
+  }: {
+    state: StatusLineState;
+    vimMode?: string;
+  }) => {
+    mocks.state.statusLineState = state;
+    mocks.state.statusVimMode = vimMode;
+    return {
+      lines: [],
+      useThemeColors: true,
+      respectUserColors: false,
+      hideContextIndicator: false,
+    };
+  },
+}));
 
 const CONFIG = {
+  getSessionId: () => 'test-session',
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),
+  getTargetDir: () => '/repo',
+  getModel: () => 'session-model',
+  onModelChange: () => () => {},
 } as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
 
-function renderApp(overrides: Partial<Parameters<typeof OpenTuiApp>[0]> = {}) {
-  const props: Parameters<typeof OpenTuiApp>[0] = {
+type AppProps = Parameters<typeof OpenTuiApp>[0];
+function renderApp(overrides: Partial<AppProps> = {}) {
+  const props: AppProps = {
     config: CONFIG,
     settings: SETTINGS,
     logger: null,
@@ -379,6 +420,25 @@ describe('OpenTuiApp shell wiring', () => {
     expect(screen.getByText('input-prompt')).toBeTruthy();
   });
 
+  it('updates and clears the composer title from the same session host', async () => {
+    renderApp();
+    await settle();
+    const host = mocks.state.host as OpenTuiAppHost;
+    expect(host.sessionName).toBeNull();
+    expect(mocks.state.inputProps?.['topRightLabel']).toBeUndefined();
+
+    act(() => host.setSessionName('owned session'));
+    expect(mocks.state.inputProps?.['topRightLabel']).toBe('owned session');
+
+    act(() => host.setSessionName('renamed session'));
+    expect(mocks.state.inputProps?.['topRightLabel']).toBe('renamed session');
+
+    act(() => host.setSessionName(null));
+    expect(mocks.state.inputProps?.['topRightLabel']).toBeUndefined();
+    expect(mocks.state.host).toBe(host);
+    expect(mocks.state.dispatcherConstructions).toBe(1);
+  });
+
   it('routes composer cancellation to the running command without interrupting the model', async () => {
     const onInterrupt = vi.fn();
     renderApp({ onInterrupt });
@@ -408,11 +468,110 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.loadingProps?.['streaming']).toBe(true);
   });
 
+  it.each(['NORMAL', 'INSERT', undefined] as const)(
+    'passes current Vim mode %s to the status command and footer',
+    async (vimMode) => {
+      renderApp({ vimMode });
+      await settle();
+      expect(mocks.state.statusVimMode).toBe(vimMode);
+      expect(mocks.state.footerProps?.['vimMode']).toBe(vimMode);
+    },
+  );
+
+  it('uses the current render statistics for status output and dialog preview', async () => {
+    const stale = {
+      sessionId: 'old',
+      lastPromptTokenCount: 10,
+    } as SessionStatsState;
+    const current = {
+      sessionId: 'new',
+      lastPromptTokenCount: 500,
+    } as SessionStatsState;
+    renderApp({
+      getSessionStats: () => stale,
+      sessionStats: current,
+      streaming: true,
+    });
+    await settle();
+    expect(mocks.state.statusLineState?.sessionStats).toBe(current);
+    expect(mocks.state.statusLineState?.streamingState).toBe(
+      StreamingState.Responding,
+    );
+    expect(mocks.state.footerProps?.['sessionStats']).toBe(current);
+
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'statusline' },
+    };
+    await submit('/statusline');
+    expect(mocks.state.dialogProps?.['statusLineState']).toMatchObject({
+      sessionStats: current,
+      branchName: 'current-branch',
+    });
+  });
+
+  it('keeps the session model across a scoped override and adopts model-change events', async () => {
+    let model = 'session-model';
+    let notify: (model: string) => void = () => {};
+    const unsubscribe = vi.fn();
+    const config = {
+      ...CONFIG,
+      getModel: () => model,
+      onModelChange: (listener: typeof notify) => {
+        notify = listener;
+        return unsubscribe;
+      },
+    } as unknown as Config;
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    model = 'fast-subagent';
+    view.rerender(<OpenTuiApp {...props} streaming />);
+    expect(mocks.state.statusLineState?.currentModel).toBe('session-model');
+    act(() => notify('selected-model'));
+    expect(mocks.state.statusLineState?.currentModel).toBe('selected-model');
+    view.unmount();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('projects active worktree details and confirmation state into the status command input', async () => {
+    mocks.state.worktree = {
+      slug: 'feature',
+      worktreePath: '/repo/.worktrees/feature',
+      worktreeBranch: 'feature/one',
+      originalCwd: '/repo',
+      originalBranch: 'main',
+      originalHeadCommit: 'a'.repeat(40),
+    };
+    try {
+      renderApp({ streaming: true, waitingToolCalls: [parkedCall] });
+      await settle();
+      expect(mocks.state.statusLineState).toMatchObject({
+        streamingState: StreamingState.WaitingForConfirmation,
+        activeWorktree: {
+          slug: 'feature',
+          path: '/repo/.worktrees/feature',
+          branch: 'feature/one',
+          originalCwd: '/repo',
+        },
+      });
+    } finally {
+      mocks.state.worktree = null;
+    }
+  });
+
   // ink's Composer drops the phrase, not the row, when this setting is off, so
   // the gate has to reach both mounts of the indicator: the composer's and the
   // waiting row under a parked confirmation.
   function phraseConfig(enableLoadingPhrases: boolean): Config {
     return {
+      ...CONFIG,
       getContextFilePaths: () => [],
       getAccessibility: () => ({ enableLoadingPhrases }),
     } as unknown as Config;
@@ -636,8 +795,127 @@ describe('OpenTuiApp shell wiring', () => {
     expect(setText).toHaveBeenCalledWith('/arena start --models a,b ');
   });
 
+  async function admit(
+    text: string,
+    images?: readonly string[],
+    options?: { submittedPrompt?: string; deferUntilIdle?: boolean },
+  ) {
+    const callback = mocks.state.inputProps?.['onSubmit'] as (
+      text: string,
+      images?: readonly string[],
+      options?: { submittedPrompt?: string; deferUntilIdle?: boolean },
+    ) => Promise<boolean>;
+    let accepted = false;
+    await act(async () => {
+      accepted = await callback(text, images, options);
+    });
+    return accepted;
+  }
+
+  it('acknowledges only an owner that accepts the complete prompt', async () => {
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onSubmitPrompt = vi
+      .fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+    renderApp({ onSubmitPrompt });
+    await settle();
+    expect(await admit('retry', ['/tmp/a.png'])).toBe(false);
+    expect(await admit('retry', ['/tmp/a.png'])).toBe(true);
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a missing live owner and failed gateway admission', async () => {
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const view = renderApp();
+    await settle();
+    expect(await admit('keep draft')).toBe(false);
+    expect(
+      screen.getByText('The live prompt turn is not wired in this shell.'),
+    ).toBeTruthy();
+    view.unmount();
+    mocks.state.loadRejects = true;
+    renderApp({ commands: undefined });
+    await settle();
+    expect(await admit('/help')).toBe(false);
+  });
+
+  it('routes an attached slash prompt to the model with defer and raw provenance', async () => {
+    const onSubmitPrompt = vi.fn(() => true);
+    renderApp({ onSubmitPrompt, streaming: true });
+    await settle();
+    expect(
+      await admit('/help', ['/tmp/a.png'], {
+        submittedPrompt: '/help',
+        deferUntilIdle: true,
+      }),
+    ).toBe(true);
+    expect(mocks.state.handledTexts).toEqual([]);
+    expect(onSubmitPrompt).toHaveBeenCalledExactlyOnceWith(
+      '/help',
+      ['/tmp/a.png'],
+      { submittedPrompt: '/help', deferUntilIdle: true },
+    );
+  });
+
+  it('rejects image-bearing shell input without executing or admitting any part', async () => {
+    const onSubmitPrompt = vi.fn(() => true);
+    renderApp({ onSubmitPrompt });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    expect(await admit('echo unsafe', ['/tmp/a.png'])).toBe(false);
+    expect(mocks.state.handledTexts).toEqual([]);
+    expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+    expect(onSubmitPrompt).not.toHaveBeenCalled();
+    expect(screen.getByText(/Exit shell mode and try again/)).toBeTruthy();
+  });
+
+  it('retains a previously accepted shell-blocked prompt when later live admission fails', async () => {
+    let release!: () => void;
+    const shellDone = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocks.state.executeUserShell.mockReturnValue(shellDone);
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onSubmitPrompt = vi.fn(() => false);
+    renderApp({ onSubmitPrompt, onTranscriptEvent: vi.fn() });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    expect(await admit('sleep 1')).toBe(true);
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    expect(
+      await admit('queued', ['/tmp/a.png'], {
+        submittedPrompt: 'raw queued',
+        deferUntilIdle: true,
+      }),
+    ).toBe(true);
+    await act(async () => {
+      release();
+      await shellDone;
+    });
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+    expect(mocks.state.inputProps?.['queueLength']).toBe(1);
+    let popped: unknown;
+    await act(async () => {
+      popped = (mocks.state.inputProps?.['onPopQueue'] as () => unknown)();
+    });
+    expect(popped).toMatchObject({
+      text: 'queued',
+      imagePaths: ['/tmp/a.png'],
+      submittedPrompt: 'raw queued',
+    });
+    expect(mocks.state.inputProps?.['queueLength']).toBe(0);
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it('sends a submit_prompt outcome to the live-turn seam', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = {
@@ -661,7 +939,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it("forwards a submit_prompt outcome's per-turn options to the seam", async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     const onComplete = async () => {};
     renderApp({ onSubmitPrompt });
     await settle();
@@ -750,7 +1028,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('sends a non-slash input (dispatcher returns false) as a plain prompt', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
@@ -825,7 +1103,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('passes pasted image paths through structured, not folded into the text', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
@@ -845,7 +1123,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('forwards an @-mention raw, leaving expansion to the stream layer', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
@@ -916,7 +1194,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('rejects submissions after a failed dispatcher init', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     mocks.state.loadRejects = true;
     renderApp({ commands: undefined, onSubmitPrompt });
     await settle();
@@ -939,6 +1217,59 @@ describe('OpenTuiApp shell wiring', () => {
     });
     const userMessages = mocks.state.inputProps?.['userMessages'] as string[];
     expect(userMessages).toContain('earlier question');
+  });
+
+  it('merges newest real prompts and refreshes persisted history only when history changes', async () => {
+    let past = ['X', 'A', 'Y'];
+    const getPreviousUserMessages = vi.fn(async () => past);
+    renderApp({
+      userMessages: ['B', 'A', 'B'],
+      logger: { getPreviousUserMessages } as unknown as AppProps['logger'],
+    });
+    await settle();
+    expect(mocks.state.inputProps?.['userMessages']).toEqual([
+      'Y',
+      'X',
+      'A',
+      'B',
+    ]);
+    const host = mocks.state.host as OpenTuiAppHost;
+    await act(async () => host.setStreaming(true));
+    expect(getPreviousUserMessages).toHaveBeenCalledTimes(1);
+    past = ['X'];
+    await act(async () => {
+      host.addItem({ type: 'info', text: 'History changed' }, 1);
+    });
+    expect(getPreviousUserMessages).toHaveBeenCalledTimes(2);
+    expect(mocks.state.inputProps?.['userMessages']).toEqual(['X', 'A', 'B']);
+  });
+
+  it('ignores a late persisted-history result after session replacement', async () => {
+    let finishOld!: (texts: string[]) => void;
+    let sessionId = 'old';
+    const getPreviousUserMessages = vi
+      .fn()
+      .mockReturnValueOnce(
+        new Promise<string[]>((resolve) => {
+          finishOld = resolve;
+        }),
+      )
+      .mockResolvedValue(['fresh']);
+    const props: AppProps = {
+      config: { ...CONFIG, getSessionId: () => sessionId } as Config,
+      settings: SETTINGS,
+      logger: { getPreviousUserMessages } as unknown as AppProps['logger'],
+      commands: [],
+      getSessionStats,
+      userMessages: [],
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    sessionId = 'new';
+    await act(async () => view.rerender(<OpenTuiApp {...props} />));
+    expect(mocks.state.inputProps?.['userMessages']).toEqual(['fresh']);
+    await act(async () => finishOld(['stale']));
+    expect(mocks.state.inputProps?.['userMessages']).toEqual(['fresh']);
   });
 
   it('uses the live display projection for recall and clears it on a new session', async () => {
@@ -1312,7 +1643,7 @@ describe('OpenTuiApp shell wiring', () => {
     } satisfies OpenTuiDispatchOutcome);
     const onQuit = vi.fn();
     const onInterrupt = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({
       onQuit,
       onInterrupt,
@@ -1349,7 +1680,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.executeUserShell.mockImplementation(() => shellDone);
     mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
     const onTranscriptEvent = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt, onTranscriptEvent });
     await settle();
     await act(async () => {
@@ -1391,7 +1722,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.executeUserShell.mockImplementation(() => shellDone);
     mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
     const onTranscriptEvent = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt, onTranscriptEvent });
     await settle();
     await act(async () => {
@@ -1653,7 +1984,7 @@ describe('OpenTuiApp shell wiring', () => {
       return command.startsWith('/') && command !== '/quit';
     };
     const onQuit = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ streaming: true, onQuit, onSubmitPrompt });
     await settle();
     mocks.state.handleResult = {
@@ -1722,7 +2053,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('replays held commands in submission order, pausing behind a submit_prompt', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     mocks.state.deferDuringStreaming = true;
     mocks.state.handleResults = [
       { kind: 'submit_prompt', content: 'generated' },
@@ -1851,7 +2182,7 @@ describe('OpenTuiApp shell wiring', () => {
   it('drops both mid-turn queues when a quit exits during the turn', async () => {
     const onQuit = vi.fn();
     const onInterrupt = vi.fn();
-    const onPopQueue = vi.fn(() => 'queued prompt');
+    const onPopQueue = vi.fn(() => ({ text: 'queued prompt' }));
     mocks.state.deferDuringStreaming = true;
     const props = {
       config: CONFIG,

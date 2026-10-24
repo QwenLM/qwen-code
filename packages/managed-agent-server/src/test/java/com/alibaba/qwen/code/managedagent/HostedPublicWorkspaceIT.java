@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -57,6 +56,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -88,6 +89,10 @@ class HostedPublicWorkspaceIT {
     private boolean residentRestart;
     private com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.Placement retainedPlacement;
     private boolean shellLifecycleV2;
+    private boolean publicChildren;
+    private boolean publicChildBackground;
+    private boolean publicChildRestarted;
+    private boolean publicChildFallback;
     private Map<String, byte[]> publicationObjects;
     private String shellFault;
     private HttpServer storeRelay;
@@ -101,6 +106,159 @@ class HostedPublicWorkspaceIT {
     // the Session owner, proving R1's second-operator handoff.
     private final java.util.Set<String> operatorAnswered = new java.util.HashSet<>();
     private final java.util.Set<String> fixedAnswered = new java.util.HashSet<>();
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Timeout(240)
+    void publicChildAgentsRunWritableTasksWithAggregatedApprovals(boolean background) throws Exception {
+        publicChildren = true;
+        publicChildBackground = background;
+        shell = true;
+        approvals = true;
+        definitionApproval = true;
+        shellLifecycleV2 = true;
+        Path root = boot().getFirst().resolve("child");
+        register("workspace-0", "storage-0");
+        boolean web = background;
+        String created = web ? "/api/agent/web-shell/v1/sessions/create" : "/v1/agents/sessions";
+        Map<String, Object> body = web
+                ? Map.of("agentId", "qwen-code", "idempotencyKey", "public-child", "input", List.of(),
+                        "workspace", Map.of("workspaceId", "workspace-0", "cwdRelative", "child"))
+                : Map.of("agent_id", "qwen-code", "input", List.of(),
+                        "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
+        String parent = request("POST", created, body, "public-child", "actor", 202).path(web ? "sessionId" : "id").asText();
+        assertThat(request("GET", "/v1/agents/sessions/" + parent, null, null, "actor", 200)
+                .at("/capabilities/child_agents").asBoolean()).isTrue();
+        String turn = request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", parent, "idempotencyKey", "public-child-turn",
+                        "input", List.of(Map.of("type", "input_text", "text", "G0_PUBLIC_PARENT"))),
+                "public-child-turn", "actor", 202).path("turnId").asText();
+        await().atMost(Duration.ofSeconds(120)).untilAsserted(() -> {
+            JsonNode page = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", parent, "includeChildren", true), null, "actor", 200);
+            for (JsonNode action : page.path("data")) {
+                String id = action.path("actionId").asText();
+                if (answered.add(action.path("sessionId").asText() + ":" + id)) {
+                    request("POST", "/api/agent/web-shell/v1/actions/respond",
+                            Map.of("sessionId", action.path("sessionId").asText(), "actionId", id, "idempotencyKey", id,
+                                    "response", Map.of("kind", "permission", "optionId", "allow",
+                                            "inputRevision", action.path("inputRevision").asLong(), "policyRevision", action.path("policyRevision").asText())),
+                            id, "actor", 202);
+                }
+            }
+            assertThat(modelFailure.get()).isNull();
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                    String.class, tenant, parent, turn)).isEqualTo("COMPLETED");
+            assertThat(root.resolve("public-child.txt")).hasContent("child-write");
+            assertThat(root.resolve("public-child-shell.txt")).hasContent("child-shell");
+            JsonNode tasks = request("POST", "/api/agent/web-shell/v1/tasks/query", Map.of("sessionId", parent), null, "actor", 200);
+            assertThat(tasks.path("data").size()).isEqualTo(1);
+            assertThat(tasks.at("/data/0/state").asText()).isEqualTo("completed");
+            assertThat(tasks.at("/data/0/approvalMode").asText()).isEqualTo("default");
+            assertThat(tasks.path("activeChildCount").asLong()).isZero();
+        });
+        String child = jdbc.queryForObject("SELECT session_id FROM ma_session WHERE tenant_id=? AND parent_session_id=?", String.class, tenant, parent);
+        assertThat(answered).anyMatch(id -> id.startsWith(child + ":"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=? AND parent_session_id=? AND public_child_agents_version=1",
+                Integer.class, tenant, parent)).isEqualTo(1);
+        JsonNode transcript = request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", child), null, "actor", 200);
+        assertThat(transcript.toString()).contains("G0_PUBLIC_CHILD_DONE");
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE tenant_id=? AND session_id=?"
+                    + " AND domain='child_run' AND delivery_state='consumed'", Integer.class, tenant, parent)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id=? AND session_id=?", String.class, tenant, child))
+                    .isEqualTo("CLOSED");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id=? AND session_id=?"
+                    + " AND operation_kind='CHILD_SESSION_CLOSE' AND state='close_debt'", Integer.class, tenant, parent)).isZero();
+        });
+        request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", child, "idempotencyKey", "forbidden-child-turn", "input", List.of(Map.of("type", "input_text", "text", "new turn"))),
+                "forbidden-child-turn", "actor", 409);
+    }
+
+    @Test
+    @Timeout(240)
+    void publicChildKeepsTheFallbackRuntimeModel() throws Exception {
+        publicChildFallback = true;
+        publicChildAgentsRunWritableTasksWithAggregatedApprovals(true);
+        assertThat(modelRequests).anyMatch(body -> "g0-source".equals(body.path("model").asText()));
+        assertThat(modelRequests.stream().filter(body -> "g0-fixture".equals(body.path("model").asText())).toList())
+                .isNotEmpty().allSatisfy(body -> assertThat(body.path("temperature").asDouble()).isEqualTo(0.2));
+    }
+
+    @Test
+    @Timeout(240)
+    void publicChildApprovalAndParentStopSurviveJavaAndHarnessRestart() throws Exception {
+        publicChildren = true;
+        shell = true;
+        approvals = true;
+        definitionApproval = true;
+        shellLifecycleV2 = true;
+        var roots = boot();
+        register("workspace-0", "storage-0");
+        String parent = request("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code", "input", List.of(),
+                        "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                "restart-child", "actor", 202).path("id").asText();
+        String turn = request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", parent, "idempotencyKey", "restart-child-turn",
+                        "input", List.of(Map.of("type", "input_text", "text", "G0_PUBLIC_PARENT"))),
+                "restart-child-turn", "actor", 202).path("turnId").asText();
+        JsonNode waiting = await().atMost(Duration.ofSeconds(90)).until(() -> {
+            JsonNode page = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", parent, "includeChildren", true), null, "actor", 200);
+            for (JsonNode action : page.path("data")) {
+                if (!parent.equals(action.path("sessionId").asText())) {
+                    return action;
+                }
+                String id = action.path("actionId").asText();
+                if (answered.add(id)) {
+                    request("POST", "/api/agent/web-shell/v1/actions/respond",
+                            Map.of("sessionId", parent, "actionId", id, "idempotencyKey", id,
+                                    "response", Map.of("kind", "permission", "optionId", "allow",
+                                            "inputRevision", action.path("inputRevision").asLong(),
+                                            "policyRevision", action.path("policyRevision").asText())), id, "actor", 202);
+                }
+            }
+            assertThat(modelFailure.get()).isNull();
+            return null;
+        }, Objects::nonNull);
+        String child = waiting.path("sessionId").asText();
+        var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
+        int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
+        int brokerPort = properties.getRuntimeBroker().getPort();
+        harness.destroyForcibly();
+        assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        spring.close();
+        publicChildRestarted = true;
+        Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
+        startSpring(cli, roots, harnessPort, brokerPort);
+        startHarness(cli, harnessPort, brokerPort);
+        await().atMost(Duration.ofSeconds(45)).untilAsserted(() -> {
+            JsonNode page = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", parent, "includeChildren", true), null, "actor", 200);
+            assertThat(page.path("data")).anyMatch(action -> action.path("sessionId").asText().equals(child)
+                    && action.path("actionId").equals(waiting.path("actionId"))
+                    && action.path("inputRevision").equals(waiting.path("inputRevision")));
+        });
+        Map<String, Object> cancel = Map.of("type", "agent.session.cancel", "turn_id", turn);
+        request("POST", "/v1/agents/sessions/" + parent + "/events", cancel, "stop-public-child", "actor", 202);
+        request("POST", "/v1/agents/sessions/" + parent + "/events", cancel, "stop-public-child", "actor", 202);
+        // Recovery may wait for the old writer lease and one full retry backoff.
+        await().atMost(Duration.ofSeconds(150)).untilAsserted(() -> {
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                    String.class, tenant, parent, turn)).isEqualTo("CANCELLED");
+            JsonNode tasks = request("POST", "/api/agent/web-shell/v1/tasks/query", Map.of("sessionId", parent), null, "actor", 200);
+            assertThat(tasks.at("/data/0/stopRequested").asBoolean()).isTrue();
+            assertThat(tasks.at("/data/0/state").asText()).isEqualTo("cancelled");
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id=? AND session_id=?", String.class, tenant, child))
+                    .isEqualTo("CLOSED");
+        });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=? AND parent_session_id=?", Integer.class, tenant, parent)).isEqualTo(1);
+        assertThat(roots.getFirst().resolve("child/public-child.txt")).doesNotExist();
+        assertThat(roots.getFirst().resolve("child/public-child-shell.txt")).doesNotExist();
+        assertThat(modelFailure.get()).isNull();
+    }
 
     @Test
     @Timeout(150)
@@ -484,9 +642,8 @@ class HostedPublicWorkspaceIT {
                         String.class, session)).containsExactly("UNKNOWN");
             });
             var connector = spring.getBean(HarnessConnector.class);
-            var attachments = (Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments");
-            var attached = attachments.values().stream().map(HarnessSessionRef.class::cast)
-                    .filter(ref -> session.equals(ref.getHarnessSessionId())).findFirst().orElseThrow();
+            var attached = attachment(connector, session);
+            assertThat(attached).as("Spring's attachment to %s", session).isNotNull();
             var client = (HostedHarnessClient) ReflectionTestUtils.getField(connector, "client");
             // The third request is counted before its handler finishes; wait for the
             // producer's prompt and all receipt handlers before taking final evidence.
@@ -1499,6 +1656,9 @@ class HostedPublicWorkspaceIT {
         if (definitionApproval) {
             arguments.add("--qwen.managed-agent.definition-tool-profiles=hosted-workspace-shell/1");
         }
+        if (!publicChildren) {
+            arguments.add("--qwen.managed-agent.harness.workspace-child-agents-enabled=false");
+        }
         if (shellLifecycleV2) {
             arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port,
                     "private-test-bucket", 1048576));
@@ -1524,14 +1684,16 @@ class HostedPublicWorkspaceIT {
                                 retainedPlacement);
                     }
                     if (shellLifecycleV2) {
-                        publicationObjects = new java.util.concurrent.ConcurrentHashMap<>();
+                        if (publicationObjects == null) {
+                            publicationObjects = new java.util.concurrent.ConcurrentHashMap<>();
+                        }
                         HostedGateTestSupport.stubPublicationOss(context,
                                 publicationObjects, "publication-oss-fixture");
                     }
                 })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
-        if (definitionApproval || "Linux".equals(System.getProperty("os.name"))) {
+        if (!publicChildRestarted && (definitionApproval || "Linux".equals(System.getProperty("os.name")))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
                 guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
@@ -1631,20 +1793,28 @@ class HostedPublicWorkspaceIT {
     }
 
     private void startHarness(Path cli, int harnessPort, int brokerPort) throws Exception {
-        Path home = Files.createDirectory(temporary.resolve("home"));
-        Path config = Files.createDirectory(home.resolve(".qwen"));
+        Path home = Files.createDirectories(temporary.resolve("home"));
+        Path config = Files.createDirectories(home.resolve(".qwen"));
         String modelUrl = "http://127.0.0.1:" + model.getAddress().getPort() + "/v1";
-        Files.writeString(config.resolve("settings.json"), json.writeValueAsString(Map.of(
-                "security", Map.of("auth", Map.of("selectedType", "openai")), "model", Map.of("name", "g0-fixture"),
-                "telemetry", Map.of("enabled", false), "modelProviders", Map.of("openai", List.of(Map.of(
-                        "id", "g0-fixture", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl))))));
+        List<Map<String, Object>> models = new ArrayList<>(List.of(Map.of(
+                "id", "g0-fixture", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl)));
+        Map<String, Object> settings = new java.util.LinkedHashMap<>(Map.of(
+                "security", Map.of("auth", Map.of("selectedType", "openai")), "model", Map.of("name", publicChildFallback ? "g0-source" : "g0-fixture"),
+                "telemetry", Map.of("enabled", false), "modelProviders", Map.of("openai", models)));
+        if (publicChildFallback) {
+            settings.put("modelFallbacks", "g0-fixture");
+            models.add(Map.of("id", "g0-source", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl,
+                    "generationConfig", Map.of("contextWindowSize", 100000, "samplingParams", Map.of("temperature", 0.2),
+                            "maxRetries", 0, "retryInitialDelayMs", 1, "retryMaxDelayMs", 1)));
+        }
+        Files.writeString(config.resolve("settings.json"), json.writeValueAsString(settings));
         Path log = temporary.resolve("harness.log");
         ProcessBuilder builder = new ProcessBuilder(node, cli.toString(),
                 "serve", "--profile", "hosted-harness", "--http-bridge", "--hostname", "127.0.0.1", "--port",
                 Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
                 "--managed-runtime-broker-url", "http://127.0.0.1:" + brokerPort,
                 "--managed-runtime-broker-token", TOKEN)
-                .directory(decoy.toFile()).redirectErrorStream(true).redirectOutput(log.toFile());
+                .directory(decoy.toFile()).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()));
         Map<String, String> environment = builder.environment();
         environment.clear();
         for (String name : List.of("PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT")) {
@@ -1656,7 +1826,9 @@ class HostedPublicWorkspaceIT {
                 "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
         if (shellLifecycleV2) {
-            environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "hosted-workspace-shell/1");
+            environment.remove("QWEN_HOSTED_LIFECYCLE_V2_PROFILES");
+        } else {
+            environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "");
         }
         environment.put("TMPDIR", temporary.toString());
         environment.put("TMP", temporary.toString());
@@ -1680,10 +1852,22 @@ class HostedPublicWorkspaceIT {
         try {
             JsonNode body = json.readTree(exchange.getRequestBody());
             modelRequests.add(body);
+            if (publicChildFallback && "g0-source".equals(body.path("model").asText())) {
+                byte[] response = "{\"error\":{\"message\":\"model overloaded\",\"type\":\"server_error\",\"code\":\"overloaded\"}}"
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.getResponseHeaders().set("retry-after-ms", "1");
+                exchange.sendResponseHeaders(503, response.length);
+                exchange.getResponseBody().write(response);
+                return;
+            }
             List<String> tools = new ArrayList<>();
             body.path("tools").forEach(tool -> tools.add(tool.path("function").path("name").asText()));
-            if (shell) {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor");
+            if (publicChildren) {
+                assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
+                assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
+            } else if (shell) {
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor", "glob");
             } else {
                 assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
             }
@@ -1732,7 +1916,9 @@ class HostedPublicWorkspaceIT {
                     .put("created", 0).put("model", "g0-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
             var delta = choice.putObject("delta").put("role", "assistant");
-            boolean toolCall = step < (definitionTurn ? 2 : shellFault != null || foregroundOnly ? 1 : 3);
+            boolean publicParent = publicChildren && tools.contains("agent");
+            boolean toolCall = publicChildren ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
+                    : step < (definitionTurn ? 2 : shellFault != null || foregroundOnly ? 1 : 3);
             if (toolCall) {
                 String name = runShell ? (!foregroundOnly && shellFault == null && step == 0 ? "monitor" : "run_shell_command")
                         : (residentSecond ? List.of("read_file", "edit", "read_file")
@@ -1758,17 +1944,26 @@ class HostedPublicWorkspaceIT {
                             : Map.of("command", "printf 'once\\n' >> " + marker + ".shell",
                                     "description", "Append the definition approval proof");
                 }
+                if (publicChildren) {
+                    name = publicParent ? "agent" : step == 0 ? "write_file" : "run_shell_command";
+                    args = publicParent ? Map.of("description", "write two proofs", "prompt", "G0_PUBLIC_CHILD", "run_in_background", publicChildBackground)
+                            : step == 0 ? Map.of("file_path", "public-child.txt", "content", "child-write")
+                            : Map.of("command", "printf child-shell > public-child-shell.txt");
+                    if (!publicParent) {
+                        assertThat(body.path("messages").toString()).doesNotContain("G0_PUBLIC_PARENT");
+                    }
+                }
                 if (shellFault != null) {
                     String producer = "const fs = require('fs'); fs.appendFileSync('proof.txt', 'x');"
                             + " process.stdout.write(Buffer.alloc(1024 * 1024, 0x61), () => {"
                             + " process.stdout.write('stdout-tail\\n'); process.stderr.write('stderr-tail\\n'); });";
-                    args = Map.of("command", shellQuote(node) + " -e " + shellQuote(producer), "timeout", 60000);
+                    args = Map.of("command", quote(node) + " -e " + quote(producer), "timeout", 60000);
                 }
                 delta.putArray("tool_calls").addObject().put("index", 0).put("id", "g0-tool-" + step)
                         .put("type", "function").putObject("function").put("name", name)
                         .put("arguments", json.writeValueAsString(args));
             } else {
-                delta.put("content", "G0_DONE");
+                delta.put("content", publicChildren && !publicParent ? "G0_PUBLIC_CHILD_DONE" : "G0_DONE");
             }
             choice.putNull("finish_reason");
             String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
@@ -1837,10 +2032,6 @@ class HostedPublicWorkspaceIT {
                 receiptResponses.incrementAndGet();
             }
         }
-    }
-
-    private static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
     private HttpResponse<String> rawRequest(String method, String path, Object body, String key, String actor)

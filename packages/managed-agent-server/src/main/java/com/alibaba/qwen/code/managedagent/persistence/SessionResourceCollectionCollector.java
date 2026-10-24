@@ -240,6 +240,11 @@ public final class SessionResourceCollectionCollector {
                                                                 .getToolPublication()
                                                                 .getDeletionGrace()
                                                                 .toMillis());
+                                    } else if ("reader_active".equals(blocker)) {
+                                        // A graceful close deletes the row without moving the
+                                        // scheduled instant; the claim interval bounds that path.
+                                        next = Math.min(next, ToolPublicationRetentionStore
+                                                .earliestReadLeaseExpiry(jdbc, tenant, session));
                                     }
                                     if (!blocker.equals(row.get("failure_code"))) {
                                         LOG.info(

@@ -15,9 +15,29 @@
     <version>0.1.0-alpha</version>
     <name>Qwen Managed Agent Server</name>
     <description>Standalone Spring control plane for Qwen Managed Agents.</description>
+    <url>https://github.com/QwenLM/qwen-code/tree/main/packages/managed-agent-server</url>
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <scm>
+        <url>https://github.com/QwenLM/qwen-code</url>
+        <connection>scm:git:https://github.com/QwenLM/qwen-code.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/QwenLM/qwen-code.git</developerConnection>
+    </scm>
+    <developers>
+        <developer>
+            <name>Qwen Code contributors</name>
+            <url>https://github.com/QwenLM/qwen-code/graphs/contributors</url>
+        </developer>
+    </developers>
 
     <properties>
         <java.version>21</java.version>
+        <managed.operator-tools.attach>true</managed.operator-tools.attach>
         <druid.version>1.2.25</druid.version>
         <qwencode-sdk.version>0.1.0-alpha</qwencode-sdk.version>
         <fastjson2.version>2.0.65</fastjson2.version>
@@ -107,7 +127,7 @@
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
-            <scope>test</scope>
+            <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -152,6 +172,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>workspace-bundle</classifier>
+                            <attach>${managed.operator-tools.attach}</attach>
                             <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceRecoveryMain</mainClass>
                         </configuration>
                     </execution>
@@ -160,6 +181,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>workspace-migration</classifier>
+                            <attach>${managed.operator-tools.attach}</attach>
                             <mainClass>com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceMigrationMain</mainClass>
                         </configuration>
                     </execution>
@@ -168,6 +190,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>workspace-maintenance-recovery</classifier>
+                            <attach>${managed.operator-tools.attach}</attach>
                             <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceMaintenanceRecoveryMain</mainClass>
                         </configuration>
                     </execution>
@@ -176,6 +199,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>csi-session</classifier>
+                            <attach>${managed.operator-tools.attach}</attach>
                             <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiSessionMain</mainClass>
                         </configuration>
                     </execution>
@@ -184,6 +208,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>csi-runtime</classifier>
+                            <attach>${managed.operator-tools.attach}</attach>
                             <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRuntimeMain</mainClass>
                         </configuration>
                     </execution>
@@ -192,6 +217,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>operator-recovery</classifier>
+                            <attach>${managed.operator-tools.attach}</attach>
                             <mainClass>com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryCommand</mainClass>
                         </configuration>
                     </execution>
@@ -231,6 +257,15 @@
                 <configuration>
                     <failIfNoTests>true</failIfNoTests>
                     <excludedGroups>fault-gate</excludedGroups>
+                    <!-- Runtime worker launch tests read these back from a spawned worker. -->
+                    <environmentVariables>
+                        <QWEN_MANAGED_AGENT_WORKER_ENV_PROBE>present</QWEN_MANAGED_AGENT_WORKER_ENV_PROBE>
+                        <spring_worker_env_probe>present</spring_worker_env_probe>
+                        <QWEN_MANAGEDAGENT_WORKER_ENV_PROBE>present</QWEN_MANAGEDAGENT_WORKER_ENV_PROBE>
+                        <OSS_WORKER_ENV_PROBE>present</OSS_WORKER_ENV_PROBE>
+                        <WORKER_ENV_PASSTHROUGH_PROBE>present</WORKER_ENV_PASSTHROUGH_PROBE>
+                        <ALIBABA_CLOUD_WORKER_ENV_PROBE>present</ALIBABA_CLOUD_WORKER_ENV_PROBE>
+                    </environmentVariables>
                 </configuration>
             </plugin>
             <plugin>
@@ -272,6 +307,67 @@
 
     <profiles>
         <profile>
+            <id>central-release</id>
+            <properties>
+                <managed.operator-tools.attach>false</managed.operator-tools.attach>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.11.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <autoPublish>true</autoPublish>
+                            <waitUntil>published</waitUntil>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>3.4.0</version>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals><goal>jar-no-fork</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>3.12.0</version>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals><goal>jar</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.8</version>
+                        <configuration>
+                            <gpgArguments>
+                                <arg>--pinentry-mode</arg>
+                                <arg>loopback</arg>
+                            </gpgArguments>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals><goal>sign</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
             <id>fault-gates</id>
             <properties>
                 <qwen.cli.entry>${project.basedir}/../../dist/cli.js</qwen.cli.entry>
@@ -293,6 +389,9 @@
         </profile>
         <profile>
             <id>mysql-integration</id>
+            <properties>
+                <mysql.integration.forks>1</mysql.integration.forks>
+            </properties>
             <build>
                 <plugins>
                     <plugin>
@@ -303,6 +402,18 @@
                             <excludes>
                                 <exclude>**/Hosted*IT.java</exclude>
                             </excludes>
+                            <forkCount>${mysql.integration.forks}</forkCount>
+                            <reuseForks>true</reuseForks>
+                            <systemPropertyVariables>
+                                <qwen.mysql.forkCount>${mysql.integration.forks}</qwen.mysql.forkCount>
+                                <!-- A literal prefix preserves the late fork placeholder through Maven interpolation. -->
+                                <qwen.mysql.forkNumber>0${surefire.forkNumber}</qwen.mysql.forkNumber>
+                            </systemPropertyVariables>
+                            <properties>
+                                <configurationParameters>
+                                    junit.jupiter.execution.parallel.enabled = false
+                                </configurationParameters>
+                            </properties>
                         </configuration>
                         <executions>
                             <execution>
@@ -593,8 +704,21 @@
                                  their measured 14.1 s and 6.1 s): healthy
                                  10575 s, fork 11175 s, Verify 197 minutes
                                  (11775 s of fork plus wrap no longer fit
-                                 196). -->
-                            <forkedProcessTimeoutInSeconds>11175</forkedProcessTimeoutInSeconds>
+                                 196). The FG11d cancel-retry cell adds 12 s (2x its measured 5.8 s):
+                                 healthy 10587 s, fork 11187 s, Verify 197 minutes. The FG11d
+                                 second-fire refusal cell adds 25 s (2x its measured 12.3 s):
+                                 healthy 10612 s, fork 11212 s, Verify 197 minutes. The FG11d
+                                 cancel-isolation cell adds 11 s (2x its measured 5.1 s):
+                                 healthy 10623 s, fork 11223 s, Verify 198 minutes
+                                 (11823 s of fork plus wrap no longer fit 197). The FG11d queue-one cell
+                                 adds 13 s (2x its measured 6.5 s): healthy 10636 s, fork 11236 s,
+                                 Verify 198 minutes. The FG12e Runtime connection replacement cell
+                                 adds 28 s (2x its measured 13.8 s): healthy 10664 s, fork 11264 s,
+                                 Verify 198 minutes. The pool fixture provisionally reserves 180 s
+                                 (its 120 s method ceiling plus 60 s for process/context cleanup),
+                                 pending CI measurement: healthy 10844 s, fork 11444 s,
+                                 Verify 201 minutes. -->
+                            <forkedProcessTimeoutInSeconds>11444</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
