@@ -302,6 +302,9 @@ export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
   'advisorModel',
   'advisorMaxUses',
   'pluginConfigs',
+  // Where verification evidence gets published is the operator's call: a
+  // cloned repository must not redirect it to another fork.
+  'verifyPr',
 ] as const;
 
 /**

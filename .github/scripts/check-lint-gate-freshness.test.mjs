@@ -48,6 +48,7 @@ test('pins the gate file list', () => {
   // assertion, or the check silently stops watching that gate.
   assert.deepEqual(GATE_FILES, [
     'scripts/lint.js',
+    'scripts/lint-scope.js',
     'eslint.config.js',
     'eslint.legacy-filenames.mjs',
     'eslint.legacy-core-barrel-imports.mjs',
