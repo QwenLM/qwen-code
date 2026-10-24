@@ -665,6 +665,21 @@ describe('Mem0CompatibleAdapter', () => {
 
   it.each([
     {
+      preset: 'mem0-v2' as const,
+      scope: { userId: 'fixed-user', agentId: 'fixed-agent' },
+      path: '/proxy/v2/memories/search',
+      authorization: 'Token project-key',
+      apiKey: undefined,
+      responseItem: { id: 'memory-1', memory: 'polardb memory' },
+      expectedBody: {
+        query: 'deployment',
+        limit: 5,
+        agent_id: 'fixed-agent',
+        filters: { user_id: 'fixed-user' },
+      },
+      expectedContent: 'polardb memory',
+    },
+    {
       preset: 'mem0-platform-v3' as const,
       scope: { appId: 'fixed-app' },
       path: '/proxy/v3/memories/search/',
@@ -748,6 +763,60 @@ describe('Mem0CompatibleAdapter', () => {
       expect(items).toEqual([
         { id: 'memory-1', content: expectedContent },
         { id: 'memory-1', content: expectedContent },
+      ]);
+    },
+  );
+
+  it.each([
+    {
+      preset: 'mem0-v2' as const,
+      scope: { userId: 'fixed-user' },
+      unwrap: true,
+    },
+    {
+      preset: 'aliyun-polardb-mysql-2026-08' as const,
+      scope: { userId: 'fixed-user' },
+      unwrap: false,
+    },
+    {
+      preset: 'mem0-platform-v3' as const,
+      scope: { appId: 'fixed-app' },
+      unwrap: false,
+    },
+  ])(
+    'preserves direct-import text for $preset without decoding unrelated JSON',
+    async ({ preset, scope, unwrap }) => {
+      const content =
+        '  Keep 🙂 this\nexactly. [{"role":"user","content":"literal JSON"}]  ';
+      const wrapped = JSON.stringify([
+        { role: 'user', content, created_at: null, timestamp: null },
+      ]);
+      const unrelated = JSON.stringify([
+        { role: 'assistant', content: 'not our direct import' },
+      ]);
+      const origin = await startServer(async (request, response) => {
+        await readBody(request);
+        json(response, {
+          results: [
+            { id: 'imported', memory: wrapped, infer: false, score: 0.9 },
+            { id: 'literal-json', memory: wrapped, infer: true },
+            { id: 'other-message', memory: unrelated, infer: false },
+            { id: 'plain', memory: 'older plain text', infer: false },
+          ],
+        });
+      });
+      const items = await new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(origin, preset, scope),
+      ).search({
+        query: 'deployment',
+        limit: 5,
+        signal: AbortSignal.timeout(1000),
+      });
+      expect(items).toEqual([
+        { id: 'imported', content: unwrap ? content : wrapped, score: 0.9 },
+        { id: 'literal-json', content: wrapped },
+        { id: 'other-message', content: unrelated },
+        { id: 'plain', content: 'older plain text' },
       ]);
     },
   );

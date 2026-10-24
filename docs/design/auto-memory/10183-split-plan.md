@@ -82,9 +82,14 @@ integration, and switching the session prompt to metadata-first delivery.
 In particular, do not introduce a new Dream scan that reads protected pinned
 files merely to collect keywords.
 
-PR 2 adds metadata guidance to existing writer/session prompts. It does not
-reduce their size or deliver a measured token saving. This transitional cost
-must be included when measuring the final runtime against main.
+PR 2 adds metadata guidance to existing writer/session prompts. It does change
+their size, in both directions: measured from base `65254472` to `4f6e6e56`, the
+main session prompt grew by 1,417 characters and Remember by 1,764, while the
+extraction prompt shrank by 12,341 and the Dream prompt by 3,829 — the two
+background agents moved to the bounded `renderWriterKeywordVocabularySnapshot`
+instead of an inline vocabulary dump. Those are prompt-character deltas, not a
+measured end-to-end token saving, and the transitional growth on the session
+prompt must still be included when measuring the final runtime against main.
 
 Only PR 3 can substantiate session-token savings. Compare the same corpus,
 task, model and settings. Report main-model input, selector/migration/Dream

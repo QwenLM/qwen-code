@@ -20,6 +20,7 @@ import {
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
+import type { ICommandLoader } from './services/types.js';
 import { commandRestrictionNames } from './services/commandUtils.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
@@ -407,6 +408,10 @@ async function registerModelInvocableCommands(
  * @param abortController Controller to cancel the operation
  * @param config The configuration object
  * @param settings The loaded settings
+ * @param admitPrompt Runs UserPromptSubmit on `rawQuery` once, before a custom
+ *   file command or skill (stacked skills included) can expand it. When it
+ *   returns false nothing runs, and `rawQuery` comes back unexpanded as the
+ *   prompt to submit, for the caller's send to block.
  * @returns A Promise that resolves to a `NonInteractiveSlashCommandResult` describing
  *   the outcome of the command execution.
  */
@@ -428,6 +433,8 @@ export const handleSlashCommand = async (
   settings: LoadedSettings,
   sessionHooks?: NonInteractiveSlashCommandSessionHooks,
   executionPolicy?: NonInteractiveSlashCommandPolicy,
+  modCommands?: ICommandLoader,
+  admitPrompt?: () => Promise<boolean>,
 ): Promise<NonInteractiveSlashCommandResult> => {
   const trimmed = rawQuery.trim();
   if (!trimmed.startsWith('/')) {
@@ -446,16 +453,40 @@ export const handleSlashCommand = async (
       ? 'interactive'
       : 'non_interactive';
 
+  // Actions that need `admitPrompt` first, identified by the loader that
+  // produced them: `CommandService` copies command objects, but keeps the
+  // action, and workflows and Mods share the kind and source of file commands.
+  const admittedActions = new WeakSet<NonNullable<SlashCommand['action']>>();
+  const admitFrom = (loader: ICommandLoader): ICommandLoader =>
+    admitPrompt
+      ? {
+          loadCommands: async (signal) => {
+            const commands = await loader.loadCommands(signal);
+            for (const command of commands) {
+              if (command.action) admittedActions.add(command.action);
+            }
+            return commands;
+          },
+        }
+      : loader;
+  const isAdmitted = async (commands: readonly SlashCommand[]) =>
+    !admitPrompt ||
+    !commands.some(
+      (command) => command.action && admittedActions.has(command.action),
+    ) ||
+    (await admitPrompt());
+
   // Load all commands to check if the command exists but is not allowed
   const allLoaders = sshWorkspace
     ? [new BuiltinCommandLoader(config)]
     : [
         new McpPromptLoader(config),
         new BuiltinCommandLoader(config),
-        new BundledSkillLoader(config),
-        new SkillCommandLoader(config),
+        admitFrom(new BundledSkillLoader(config)),
+        admitFrom(new SkillCommandLoader(config)),
         new SavedWorkflowLoader(config),
-        new FileCommandLoader(config),
+        admitFrom(new FileCommandLoader(config)),
+        ...(modCommands ? [modCommands] : []),
       ];
 
   // Build the disabled-command set (case-insensitive).
@@ -514,6 +545,9 @@ export const handleSlashCommand = async (
   // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
   const stackedResult = parseStackedSlashCommands(rawQuery, filteredCommands);
   if (stackedResult.skills.length >= 2) {
+    if (!(await isAdmitted(stackedResult.skills))) {
+      return { type: 'submit_prompt', content: [{ text: rawQuery }] };
+    }
     const combinedContent: PartListUnion[] = [];
     let firstModelOverride: string | undefined;
     let refreshContextFilesOnWrite = false;
@@ -704,6 +738,14 @@ export const handleSlashCommand = async (
     skillInvocationRecorded = true;
   };
 
+  if (!(await isAdmitted([commandToExecute]))) {
+    return {
+      type: 'submit_prompt',
+      content: [{ text: rawQuery }],
+      resolvedCommand,
+    };
+  }
+
   let result: SlashCommandActionReturn | void;
   try {
     result = await commandToExecute.action(context, args);
@@ -772,6 +814,7 @@ export const getAvailableCommands = async (
   mode: ExecutionMode = 'acp',
   settings?: LoadedSettings,
   executionPolicy?: NonInteractiveSlashCommandPolicy,
+  modCommands?: ICommandLoader,
 ): Promise<SlashCommand[]> => {
   try {
     const sshWorkspace = Boolean(config.getExecutionEnvironment?.());
@@ -785,6 +828,7 @@ export const getAvailableCommands = async (
           new SkillCommandLoader(config),
           new SavedWorkflowLoader(config),
           new FileCommandLoader(config),
+          ...(modCommands ? [modCommands] : []),
         ];
 
     const disabledSlashCommands = config.getDisabledSlashCommands();

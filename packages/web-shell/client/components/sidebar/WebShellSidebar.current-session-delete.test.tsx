@@ -89,6 +89,7 @@ const useSessionCatalogQueries = vi.hoisted(() => vi.fn(() => []));
 const loadSession = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useConnection: () => connection,
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,
@@ -172,6 +173,12 @@ function renderSidebar(
   props: {
     onError?: (error: unknown, message?: string) => void;
     onSessionsDeleted?: (sessionIds: string[]) => void;
+    currentSessionActive?: boolean;
+    managedWorkspaces?: React.ReactNode;
+    managedArchivedSessions?: React.ComponentProps<
+      typeof WebShellSidebar
+    >['managedArchivedSessions'];
+    onSearchQueryChange?: (query: string) => void;
   } = {},
 ): void {
   const onError = props.onError ?? (() => {});
@@ -191,6 +198,10 @@ function renderSidebar(
           onLoadSession={loadSession}
           onError={onError}
           onSessionsDeleted={props.onSessionsDeleted}
+          currentSessionActive={props.currentSessionActive}
+          managedWorkspaces={props.managedWorkspaces}
+          managedArchivedSessions={props.managedArchivedSessions}
+          onSearchQueryChange={props.onSearchQueryChange}
           // Surface delete as an inline hover button so the row's disabled
           // state is directly assertable without opening the dropdown.
           sessionActions={{ inlineItems: ['delete'] }}
@@ -256,6 +267,147 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar current-session delete (issue #12619)', () => {
+  it('keeps Managed and Local archives in the single bottom fold', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_archive'],
+    };
+    archived.sessions = [
+      makeSession('local-archive', { displayName: 'Local archive' }),
+    ];
+    archived.data = archived.sessions;
+    renderSidebar({
+      managedWorkspaces: <div>Managed workspace</div>,
+      managedArchivedSessions: {
+        content: <div data-managed-archive>Managed archive</div>,
+        count: 1,
+        loading: false,
+        error: false,
+      },
+    });
+    await flushSidebar();
+    const fold = [
+      ...container.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Archived')!;
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('[data-managed-archive]')).toBeNull();
+    act(() => click(fold));
+    await flushSidebar();
+    expect(fold.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('[data-managed-archive]')?.textContent).toBe(
+      'Managed archive',
+    );
+    expect(container.textContent).toContain('Local archive');
+    expect(container.textContent).toContain('Managed workspace');
+    act(() => click(fold));
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-managed-archive]')?.closest('[hidden]'),
+    ).not.toBeNull();
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps New task plain and labels daemon workspaces when Managed is available', async () => {
+    renderSidebar({
+      currentSessionActive: false,
+      managedWorkspaces: <div>Managed workspace</div>,
+    });
+    await flushSidebar();
+    const newTask = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="New task"]',
+    )!;
+    expect(newTask.textContent).toBe('New task');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (item) =>
+          item.textContent?.includes('project') &&
+          item.textContent.includes('Local'),
+      ),
+    ).toBe(true);
+    renderSidebar({
+      currentSessionActive: true,
+      managedWorkspaces: <div>Managed workspace</div>,
+    });
+    await flushSidebar();
+    expect(newTask.textContent).toBe('New task');
+  });
+  it('keeps Local history beside Managed workspace content without selecting the hidden Local conversation', async () => {
+    active.sessions = [
+      makeSession('session-current', { displayName: 'Current session' }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-current';
+    renderSidebar({
+      currentSessionActive: false,
+      managedWorkspaces: <div data-managed-workspaces>Managed workspace</div>,
+    });
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-managed-workspaces]')?.textContent,
+    ).toBe('Managed workspace');
+    expect(
+      container.querySelector('[data-web-shell-session-title]')?.textContent,
+    ).toBe('Current session');
+    const localRow = container
+      .querySelector('[data-web-shell-session-title]')!
+      .closest('[role="button"]')!;
+    expect(localRow.getAttribute('aria-current')).toBeNull();
+    renderSidebar({ currentSessionActive: true });
+    await flushSidebar();
+    expect(localRow.getAttribute('aria-current')).toBe('page');
+  });
+
+  it('keeps mutation ownership for a running Local session while Managed is selected', async () => {
+    active.sessions = [
+      makeSession('session-current', {
+        displayName: 'Current session',
+        hasActivePrompt: true,
+      }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-current';
+    renderSidebar({ currentSessionActive: false });
+    await flushSidebar();
+    expect(findSessionDeleteButton('Current session').disabled).toBe(true);
+    expect(active.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('shares the existing Projects search text with Managed navigation', async () => {
+    const onSearchQueryChange = vi.fn();
+    renderSidebar({
+      managedWorkspaces: <div data-managed-workspaces />,
+      onSearchQueryChange,
+    });
+    await flushSidebar();
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Search sessions"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    const input = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    )!;
+    expect(input).not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Managed needle');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('Managed needle');
+    await act(async () => {
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
+  });
+
   it('deletes the current session from the sidebar row when it is idle', async () => {
     active.sessions = [
       makeSession('session-current', { displayName: 'Current session' }),

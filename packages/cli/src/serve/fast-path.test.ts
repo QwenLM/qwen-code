@@ -677,6 +677,8 @@ describe('serve fast path argument parsing', () => {
       (name) => name.length > 1 && !options.alias[name]?.length,
     );
     const sampleArgvByOption = new Map<string, string[]>([
+      ['managed', ['--managed']],
+      ['managed-data-dir', ['--managed-data-dir', '/tmp/qwen-managed-data']],
       ['port', ['--port', '0']],
       ['hostname', ['--hostname', '127.0.0.1']],
       ['token', ['--token', 'token']],
@@ -777,11 +779,29 @@ describe('serve fast path argument parsing', () => {
         ['--external-tool-guard-timeout-ms', '3000'],
       ],
       ['channel', ['--channel', 'telegram']],
+      // The managed Agent Host worker flags. A Host runs its own `qwen serve`
+      // that only reaches out, so these have to be reachable the same way
+      // every other serve option is.
+      ['agent-host-server', ['--agent-host-server', 'https://example.invalid']],
+      ['agent-host-workspace-id', ['--agent-host-workspace-id', 'ws_1']],
+      ['agent-host-name', ['--agent-host-name', 'builder']],
+      ['agent-host-allow-http', ['--agent-host-allow-http']],
+      ['join', ['--join', 'https://example.invalid/join/ws_1']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
     const expectedFallbackOptions = new Set([
+      // The fast path exists to start a plain daemon without loading the full
+      // CLI. Managed local serve and Agent Host run different process
+      // lifecycles, so these hand off rather than being taught to the fast
+      // path.
+      'agent-host-allow-http',
+      'agent-host-name',
+      'agent-host-server',
+      'agent-host-workspace-id',
       'channel',
+      'managed',
+      'managed-data-dir',
       'profile',
       'hosted-harness-capability-digest',
       'experimental-paired-engines',
@@ -795,6 +815,7 @@ describe('serve fast path argument parsing', () => {
       'external-tool-guard-endpoint',
       'external-tool-guard-mode',
       'external-tool-guard-timeout-ms',
+      'join',
       'help',
       'local-control',
       'local-control-address',

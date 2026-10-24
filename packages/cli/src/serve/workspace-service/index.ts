@@ -49,7 +49,15 @@ import {
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
 import { loadSettings } from '../../config/settings.js';
-import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
+import {
+  evaluateDaemonWorkspaceTrust,
+  readDaemonTrustPolicySnapshot,
+} from '../../config/daemon-trust-policy.js';
+import {
+  getWorkspaceTrustStatus,
+  loadTrustedFolders,
+  TrustLevel,
+} from '../../config/trustedFolders.js';
 import { buildPermissionSettings } from '../../config/permission-settings.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
@@ -73,6 +81,7 @@ import {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
   WorkspaceSettingsPartialPersistError,
+  WorkspaceTrustGrantIneffectiveError,
 } from './types.js';
 import type {
   DaemonWorkspaceService,
@@ -693,6 +702,36 @@ export function createDaemonWorkspaceService(
         desiredState: request.desiredState,
         requiresOperatorAction: true,
       };
+    },
+
+    async grantWorkspaceTrust(_ctx: WorkspaceRequestContext) {
+      assertActiveGeneration();
+      loadTrustedFolders().setValue(
+        boundWorkspace,
+        TrustLevel.TRUST_FOLDER,
+        true,
+      );
+      // Workspace settings cannot establish bootstrap trust. Check the
+      // reconciler's host policy before checking the status we report.
+      const snapshot = await readDaemonTrustPolicySnapshot();
+      const decision = evaluateDaemonWorkspaceTrust(snapshot, boundWorkspace);
+      if (!decision.targetTrusted) {
+        throw new WorkspaceTrustGrantIneffectiveError(
+          decision.state,
+          decision.source,
+        );
+      }
+      const status = getWorkspaceTrustStatus(
+        loadBoundSettings(true).merged,
+        boundWorkspace,
+      );
+      if (status.effective.state !== 'trusted') {
+        throw new WorkspaceTrustGrantIneffectiveError(
+          status.effective.state,
+          status.effective.source,
+        );
+      }
+      return status;
     },
 
     async setWorkspacePermissionRules(
@@ -1561,14 +1600,34 @@ export function createDaemonWorkspaceService(
       invalidateWorkspaceSkillsSnapshot();
     },
 
-    async refreshExtensionsForAllSessions() {
+    async refreshWorkspaceSkills(_ctx, sessionIds) {
+      assertActiveGeneration();
+      try {
+        const result =
+          await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
+            SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+            {
+              cwd: boundWorkspace,
+              reason: 'all',
+              ...(sessionIds !== undefined ? { sessionIds } : {}),
+            },
+          );
+        assertActiveGeneration();
+        return result;
+      } finally {
+        invalidateWorkspaceSkillsSnapshot();
+      }
+    },
+
+    async refreshExtensionsForAllSessions(sessionIds) {
       assertActiveGeneration();
       try {
         if (!refreshExtensionsForAllSessionsOnBridge) {
           throw new Error('refreshExtensionsForAllSessions is not wired');
         }
-        return await refreshExtensionsForAllSessionsOnBridge();
+        return await refreshExtensionsForAllSessionsOnBridge(sessionIds);
       } catch (err) {
+        if (err instanceof SessionNotFoundError) throw err;
         writeStderrLine(
           `qwen serve: refreshExtensionsForAllSessions failed: ${err instanceof Error ? err.message : String(err)}`,
         );

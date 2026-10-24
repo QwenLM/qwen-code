@@ -12,6 +12,8 @@ import {
   useResumeCommand,
 } from './useResumeCommand.js';
 import { useHistory } from './useHistoryManager.js';
+import { ModSession } from '../../services/mod-session.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 import {
   makeSwapSlotClient,
   type SwapSlotClient,
@@ -159,6 +161,88 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 describe('useResumeCommand', () => {
+  it.each([
+    'rollback-init',
+    'forward-old',
+    'forward-target',
+    'before-invalidate',
+  ])('restores eligible Mod ownership after %s', async (mode) => {
+    resumeMocks.reset();
+    const config = makeSwapSlotConfig(makeSwapSlotClient());
+    let sessionId = config.getSessionId();
+    const oldSessionId = sessionId;
+    Object.assign(config, {
+      getSessionId: () => sessionId,
+      isInteractive: () => true,
+    });
+    const owner = new ModSession(config, { emitSystemMessage: vi.fn() });
+    const old = owner.captureToolSignal();
+    const restore = vi.fn(() => owner.restoreTools());
+    const binding = vi
+      .spyOn(interactiveMods, 'getInteractiveModSession')
+      .mockReturnValue({
+        invalidateTools: () => owner.invalidateTools(),
+        restoreTools: restore,
+        syncSession: vi.fn(),
+      } as unknown as interactiveMods.InteractiveModSession);
+    const settle = vi.fn(() => {
+      expect(owner.captureToolSignal().aborted).toBe(mode === 'forward-target');
+    });
+    const client = {
+      beginTelemetrySwap: () => true,
+      abortTelemetrySwap: settle,
+      commitTelemetrySwap: settle,
+      initialize: vi.fn(async () => {
+        throw new Error('init failed');
+      }),
+    };
+    vi.spyOn(config, 'startNewSession').mockImplementation((id) => {
+      if (!id) throw new Error('missing session ID');
+      if (mode === 'forward-old')
+        throw new Error('start failed before mutation');
+      sessionId = id;
+      if (mode === 'forward-target')
+        throw new Error('start failed after mutation');
+      return sessionId;
+    });
+    vi.spyOn(config, 'getLlmClient').mockReturnValue(
+      client as unknown as ReturnType<typeof config.getLlmClient>,
+    );
+    if (mode === 'before-invalidate')
+      vi.spyOn(config, 'getTargetDir').mockImplementation(() => {
+        throw new Error('load failed');
+      });
+    try {
+      const { result } = renderHook(() =>
+        useResumeCommand({
+          config,
+          settings: mockSettings,
+          historyManager: {
+            addItem: vi.fn(),
+            clearItems: vi.fn(),
+            loadHistory: vi.fn(),
+          },
+          startNewSession: vi.fn(),
+          seedPromptCount: vi.fn(),
+        }),
+      );
+      await act(async () => {
+        await result.current.handleResume('target-session');
+      });
+      const renew = mode === 'rollback-init' || mode === 'forward-old';
+      expect(restore).toHaveBeenCalledTimes(renew ? 1 : 0);
+      expect(old.aborted).toBe(mode !== 'before-invalidate');
+      expect(owner.captureToolSignal().aborted).toBe(mode === 'forward-target');
+      if (renew) expect(owner.captureToolSignal()).not.toBe(old);
+      else expect(owner.captureToolSignal()).toBe(old);
+      expect(sessionId === oldSessionId).toBe(mode !== 'forward-target');
+      expect(settle).toHaveBeenCalledOnce();
+    } finally {
+      binding.mockRestore();
+      await owner.close();
+    }
+  });
+
   it('should initialize with dialog closed', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -170,6 +254,7 @@ describe('useResumeCommand', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -187,6 +272,7 @@ describe('useResumeCommand', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -208,6 +294,7 @@ describe('useResumeCommand', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -233,6 +320,9 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    // Stable reference: an inline vi.fn() would be a new function on every
+    // render and invalidate the useCallback identity this test pins.
+    const seedPromptCount = vi.fn();
 
     const { result, rerender } = renderHook(() =>
       useResumeCommand({
@@ -240,6 +330,7 @@ describe('useResumeCommand', () => {
         config: null,
         historyManager,
         startNewSession,
+        seedPromptCount,
       }),
     );
 
@@ -268,6 +359,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -290,6 +382,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const seedPromptCount = vi.fn();
     const clearPendingState = vi.fn();
     const llmClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -340,6 +433,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount,
         clearPendingState,
       }),
     );
@@ -359,10 +453,20 @@ describe('useResumeCommand', () => {
     expect(result.current.isResumeDialogOpen).toBe(false);
 
     // Now finish the async load and let the handler complete.
+    const baseConversation = resumeMocks.makeConversation([
+      { role: 'user', parts: [{ text: 'hello' }] },
+    ]);
+    const conversation = {
+      ...baseConversation,
+      sessionId: 'session-2',
+      messages: baseConversation.messages.map((message) => ({
+        ...message,
+        sessionId: 'session-2',
+        promptId: 'session-2########2',
+      })),
+    };
     resumeMocks.resolvePendingLoadSession({
-      conversation: resumeMocks.makeConversation([
-        { role: 'user', parts: [{ text: 'hello' }] },
-      ]),
+      conversation,
     });
     await act(async () => {
       await resumePromise;
@@ -375,6 +479,10 @@ describe('useResumeCommand', () => {
       }),
     );
     expect(startNewSession).toHaveBeenCalledWith('session-2');
+    expect(seedPromptCount).toHaveBeenCalledWith(3);
+    expect(startNewSession.mock.invocationCallOrder[0]).toBeLessThan(
+      seedPromptCount.mock.invocationCallOrder[0]!,
+    );
     expect(llmClient.initialize).toHaveBeenCalledTimes(1);
     expect(llmClient.initialize).toHaveBeenCalledWith();
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
@@ -447,6 +555,7 @@ describe('useResumeCommand', () => {
         // rebuilt history must flow through it, not the raw manager.
         loadHistory: overrideLoadHistory,
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -525,6 +634,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -619,6 +729,7 @@ describe('useResumeCommand', () => {
         settings: settingsWithCollapse,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       });
       return { historyManager, resumeCommand };
     });
@@ -711,6 +822,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -781,6 +893,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -857,6 +970,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -935,6 +1049,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -1023,6 +1138,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -1109,6 +1225,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 
@@ -1181,6 +1298,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        seedPromptCount: vi.fn(),
       }),
     );
 

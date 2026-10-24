@@ -17,6 +17,12 @@ import {
   serializeChannelMemoryDocument,
 } from './channel-memory-document.js';
 
+const ID = 'm-123456789abc';
+const T0 = '2026-07-14T00:00:00.000Z';
+const parse = (value: unknown) =>
+  parseChannelMemoryDocument(JSON.stringify(value));
+const v1 = (...entries: unknown[]) => ({ version: 1, entries });
+
 describe('channel memory document', () => {
   it('normalizes channel memory text', () => {
     expect(normalizeChannelMemoryText('  USE\u00a0staging  ')).toBe(
@@ -32,98 +38,52 @@ describe('channel memory document', () => {
 
   it('rejects entries with invalid ids', () => {
     expect(() =>
-      parseChannelMemoryDocument(
-        JSON.stringify({
-          version: 1,
-          entries: [
-            { id: 'bad', text: 'x' },
-            { id: 'm-123456789abc', text: 'y' },
-          ],
-        }),
-      ),
+      parse(v1({ id: 'bad', text: 'x' }, { id: ID, text: 'y' })),
     ).toThrow('Invalid channel memory entry');
   });
 
   it('validates the complete version-1 document shape', () => {
-    const document = parseChannelMemoryDocument(
-      JSON.stringify({
-        version: 1,
-        migration: { legacySha256: 'a'.repeat(64) },
-        entries: [
-          {
-            id: 'm-123456789abc',
-            text: 'Use staging',
-            createdAt: '2026-07-14T00:00:00.000Z',
-            updatedAt: '2026-07-14T00:01:00.000Z',
-            createdBy: 'alice',
-          },
-        ],
-      }),
-    );
-
-    expect(document).toEqual({
+    const value = {
       version: 1,
       migration: { legacySha256: 'a'.repeat(64) },
       entries: [
         {
-          id: 'm-123456789abc',
+          id: ID,
           text: 'Use staging',
-          createdAt: '2026-07-14T00:00:00.000Z',
+          createdAt: T0,
           updatedAt: '2026-07-14T00:01:00.000Z',
           createdBy: 'alice',
         },
       ],
-    });
+    };
+    const document = parse(value);
+
+    expect(document).toEqual(value);
     expect(CHANNEL_MEMORY_ID_RE.test(document.entries[0].id)).toBe(true);
   });
 
   it.each([
     ['missing entries', { version: 1 }],
     ['entries is not an array', { version: 1, entries: {} }],
-    [
-      'empty text',
-      { version: 1, entries: [{ id: 'm-123456789abc', text: ' ' }] },
-    ],
+    ['empty text', v1({ id: ID, text: ' ' })],
     [
       'oversized text',
-      {
-        version: 1,
-        entries: [
-          {
-            id: 'm-123456789abc',
-            text: 'x'.repeat(MAX_CHANNEL_MEMORY_ENTRY_CODE_POINTS + 1),
-          },
-        ],
-      },
+      v1({
+        id: ID,
+        text: 'x'.repeat(MAX_CHANNEL_MEMORY_ENTRY_CODE_POINTS + 1),
+      }),
     ],
-    [
-      'duplicate ids',
-      {
-        version: 1,
-        entries: [
-          { id: 'm-123456789abc', text: 'x' },
-          { id: 'm-123456789abc', text: 'y' },
-        ],
-      },
-    ],
+    ['duplicate ids', v1({ id: ID, text: 'x' }, { id: ID, text: 'y' })],
     [
       'invalid optional fields',
       {
         version: 1,
         migration: { legacySha256: 'A'.repeat(64) },
-        entries: [
-          {
-            id: 'm-123456789abc',
-            text: 'x',
-            createdAt: null,
-          },
-        ],
+        entries: [{ id: ID, text: 'x', createdAt: null }],
       },
     ],
   ])('rejects %s', (_name, value) => {
-    expect(() => parseChannelMemoryDocument(JSON.stringify(value))).toThrow(
-      'Invalid channel memory',
-    );
+    expect(() => parse(value)).toThrow('Invalid channel memory');
   });
 
   it('rejects duplicate JSON object keys', () => {
@@ -147,21 +107,10 @@ describe('channel memory document', () => {
     ],
     [
       'entry',
-      {
-        version: 1,
-        entries: [
-          {
-            id: 'm-123456789abc',
-            text: 'Use staging',
-            futureMetadata: 'preserve me',
-          },
-        ],
-      },
+      v1({ id: ID, text: 'Use staging', futureMetadata: 'preserve me' }),
     ],
   ])('rejects unknown %s keys', (_level, value) => {
-    expect(() => parseChannelMemoryDocument(JSON.stringify(value))).toThrow(
-      'Invalid channel memory',
-    );
+    expect(() => parse(value)).toThrow('Invalid channel memory');
   });
 
   it('rejects documents exceeding the entry limit', () => {
@@ -172,9 +121,7 @@ describe('channel memory document', () => {
         text: 'x',
       }),
     );
-    expect(() =>
-      parseChannelMemoryDocument(JSON.stringify({ version: 1, entries })),
-    ).toThrow('maximum number of entries');
+    expect(() => parse(v1(...entries))).toThrow('maximum number of entries');
   });
 
   it('counts astral Unicode text by code point', () => {
@@ -183,29 +130,13 @@ describe('channel memory document', () => {
       MAX_CHANNEL_MEMORY_ENTRY_CODE_POINTS,
     );
 
-    expect(
-      parseChannelMemoryDocument(
-        JSON.stringify({
-          version: 1,
-          entries: [{ id: 'm-123456789abc', text: acceptedText }],
-        }),
-      ).entries[0].text,
-    ).toBe(acceptedText);
-    expect(() =>
-      parseChannelMemoryDocument(
-        JSON.stringify({
-          version: 1,
-          entries: [
-            {
-              id: 'm-123456789abc',
-              text: astralCharacter.repeat(
-                MAX_CHANNEL_MEMORY_ENTRY_CODE_POINTS + 1,
-              ),
-            },
-          ],
-        }),
-      ),
-    ).toThrow('Invalid channel memory entry');
+    expect(parse(v1({ id: ID, text: acceptedText })).entries[0].text).toBe(
+      acceptedText,
+    );
+    const rejectedText = acceptedText + astralCharacter;
+    expect(() => parse(v1({ id: ID, text: rejectedText }))).toThrow(
+      'Invalid channel memory entry',
+    );
   });
 
   it('converts legacy lines with stable ids and a migration hash', () => {
@@ -244,14 +175,14 @@ describe('channel memory document', () => {
       createChannelMemoryEntry({
         text: ' Use staging ',
         createdBy: 'alice',
-        now: '2026-07-14T00:00:00.000Z',
+        now: T0,
         randomHex: 'abcdef012345',
       }),
     ).toEqual({
       id: 'm-abcdef012345',
       text: 'Use staging',
-      createdAt: '2026-07-14T00:00:00.000Z',
-      updatedAt: '2026-07-14T00:00:00.000Z',
+      createdAt: T0,
+      updatedAt: T0,
       createdBy: 'alice',
     });
   });
@@ -260,7 +191,7 @@ describe('channel memory document', () => {
     expect(() =>
       createChannelMemoryEntry({
         text: 'Use staging',
-        now: '2026-07-14T00:00:00.000Z',
+        now: T0,
         randomHex: 'ABCDEF012345',
       }),
     ).toThrow('randomHex');
@@ -269,12 +200,8 @@ describe('channel memory document', () => {
   it('renders recall text without entry metadata', () => {
     expect(
       renderChannelMemoryRecall([
-        {
-          id: 'm-abcdef012345',
-          text: 'Use staging',
-          createdBy: 'alice',
-        },
-        { id: 'm-123456789abc', text: 'Run tests', updatedAt: 'now' },
+        { id: 'm-abcdef012345', text: 'Use staging', createdBy: 'alice' },
+        { id: ID, text: 'Run tests', updatedAt: 'now' },
       ]),
     ).toBe('Use staging\nRun tests\n');
     expect(renderChannelMemoryRecall([])).toBe('');

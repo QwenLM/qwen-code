@@ -12,6 +12,7 @@ export default {
   arena: 'Agent Arena',
   skills: 'Skills',
   memory: 'Memory',
+  mem0: 'Mem0',
   headless: 'Headless Mode',
   batch: 'Batch Mode (DashScope)',
   'structured-output': 'Structured Output',

@@ -13,14 +13,17 @@
  * image reaching the model goes through the prompt-side vision bridge.
  */
 
+import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   ApprovalMode,
+  MockTool,
   getUnsupportedImageFormatWarning,
   SendMessageType,
 } from '@qwen-code/qwen-code-core';
 import type {
   Config,
+  SendMessageOptions,
   ToolCallConfirmationDetails,
   VisionBridgeModelSelection,
 } from '@qwen-code/qwen-code-core';
@@ -28,20 +31,34 @@ import {
   ensureConfigInitialized,
   livePromptEvents,
   nextApprovalMode,
+  nextLivePromptId,
   resetPromptCountForTesting,
   selectAutoApprovals,
   STARTUP_CHAT_WAIT_MS,
+  type OpenTuiSteeringSubmission,
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
+function steering(...texts: string[]): OpenTuiSteeringSubmission[] {
+  return texts.map((text) => ({ text, content: text }));
+}
+
 // `runVisionBridge` is the one bridge collaborator that would reach a real
 // provider, so it is recorded here; every other core export (including the
 // bridge's gates and formatters) stays real.
 const visionMocks = vi.hoisted(() => ({
   run: vi.fn(),
+}));
+
+const modMocks = vi.hoisted(() => ({ get: vi.fn() }));
+const schedulerControl = vi.hoisted(() => ({
+  finish: null as (() => Promise<void>) | null,
+}));
+vi.mock('../../services/interactive-mod-session.js', () => ({
+  getInteractiveModSession: modMocks.get,
 }));
 
 // The round-trip tests also replace the tool scheduler with a stub that
@@ -68,6 +85,24 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       async schedule(
         calls: Array<{ callId: string; name?: string; args?: unknown }>,
       ): Promise<void> {
+        const failure = calls.find(
+          (c) => (c.args as { __scheduleFailure?: string })?.__scheduleFailure,
+        )?.args as { __scheduleFailure: string } | undefined;
+        if (failure) {
+          this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'scheduled', request })),
+          );
+          if (failure.__scheduleFailure === 'cancelled')
+            throw new DOMException('Mod generation revoked', 'AbortError');
+          throw new Error('Scheduler failed');
+        }
+        if (
+          calls.some((c) => (c.args as { __deferred?: boolean })?.__deferred)
+        ) {
+          schedulerControl.finish = () =>
+            this.schedule(calls.map((c) => ({ ...c, args: {} })));
+          return;
+        }
         const bounce = calls.some(
           (c) =>
             (c.args as { __bounceApproval?: boolean } | undefined)
@@ -205,8 +240,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             const a = (c.args ?? {}) as {
               __cancelled?: boolean;
               __cancelApproval?: boolean;
+              __modOutput?: string;
             };
             return {
+              nativeAttemptsObserved: a.__modOutput !== undefined,
               request: {
                 callId: c.callId,
                 name: c.name ?? 'test_tool',
@@ -224,11 +261,18 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                     functionResponse: {
                       name: c.name ?? 'test_tool',
                       id: c.callId,
-                      response: { ok: true },
+                      response:
+                        a.__modOutput !== undefined
+                          ? { output: a.__modOutput }
+                          : { ok: true },
                     },
                   },
                 ],
                 resultDisplay: 'done',
+                persistedOutputFiles:
+                  a.__modOutput !== undefined ? [] : undefined,
+                executionStatus:
+                  a.__modOutput !== undefined ? 'not_started' : undefined,
               },
             };
           }),
@@ -261,6 +305,11 @@ const atMocks = vi.hoisted(() => ({
    */
   abortAfter: null as (() => void) | null,
 }));
+
+vi.mock('../../services/interactive-mod-tool-scheduler.js', async () => {
+  const core = await import('@qwen-code/qwen-code-core');
+  return { InteractiveModToolScheduler: core.CoreToolScheduler };
+});
 
 vi.mock('../hooks/atCommandProcessor.js', () => ({
   handleAtCommand: async ({ query }: { query: string }) => {
@@ -324,7 +373,7 @@ function oneToolBatchStream(request: {
   args?: unknown;
 }) {
   let calls = 0;
-  return vi.fn(function* (): Generator<{
+  return vi.fn(function* (...args: unknown[]): Generator<{
     type: string;
     value?: unknown;
   }> {
@@ -333,11 +382,12 @@ function oneToolBatchStream(request: {
       yield { type: 'tool_call_request', value: request };
       return;
     }
+    (args[3] as SendMessageOptions | undefined)?.steerInput?.accept();
     yield { type: 'finished', value: {} };
   });
 }
 
-async function drain(gen: AsyncGenerator<unknown>): Promise<unknown[]> {
+async function drain<T>(gen: AsyncGenerator<T>): Promise<T[]> {
   const events = [];
   for await (const ev of gen) events.push(ev);
   return events;
@@ -369,6 +419,87 @@ describe('livePromptEvents', () => {
     atMocks.hang = null;
     atMocks.abortAfter = null;
     visionMocks.run.mockReset();
+    modMocks.get.mockReset();
+    schedulerControl.finish = null;
+  });
+
+  it('seeds prompt ids past claims in the resumed transcript', () => {
+    const messages = [0, 1, 2].map((turn) => ({
+      type: 'user' as const,
+      sessionId: 'session-1',
+      promptId: `session-1########${turn}`,
+      message: { parts: [{ text: `prompt ${turn}` }] },
+    }));
+    const config = {
+      getSessionId: () => 'session-1',
+      getResumedSessionData: () => ({ conversation: { messages } }),
+    } as unknown as Config;
+
+    expect(nextLivePromptId(config)).toBe('session-1########3');
+  });
+
+  it('records and restores only the finalized synthetic read response under a small batch budget', async () => {
+    const output = 'RAW-MOD-RESULT:'.repeat(2000);
+    const request = {
+      callId: 'synthetic-read',
+      name: 'read_file',
+      args: { __modOutput: output },
+    };
+    const stream = oneToolBatchStream(request);
+    const recordToolResult = vi.fn();
+    const config = createFakeConfig(stream, undefined, () => true, {
+      recordMidTurnUserMessage: vi.fn(),
+      recordToolResult,
+    } as Parameters<typeof createFakeConfig>[3]);
+    Object.assign(config, { getToolOutputBatchBudget: () => 1000 });
+    await drain(livePromptEvents(config, 'read', new AbortController().signal));
+    expect(recordToolResult).toHaveBeenCalledOnce();
+    const [parts, metadata] = recordToolResult.mock.calls[0];
+    expect(metadata.responseParts).toBeUndefined();
+    expect(metadata.executionStatus).toBe('not_started');
+    expect(JSON.stringify(parts)).not.toContain(output);
+    expect(JSON.stringify(parts).length).toBeLessThan(1500);
+    expect(stream.mock.calls[1][0]).toEqual(parts);
+    const restored = buildResumedHistoryItems(
+      {
+        conversation: {
+          messages: [
+            {
+              type: 'assistant',
+              timestamp: new Date().toISOString(),
+              message: {
+                parts: [
+                  {
+                    functionCall: {
+                      id: request.callId,
+                      name: request.name,
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              type: 'tool_result',
+              toolCallResult: metadata,
+              message: { parts },
+            },
+          ],
+        },
+      } as unknown as import('@qwen-code/qwen-code-core').ResumedSessionData,
+      {
+        getToolRegistry: () => ({
+          getTool: () =>
+            new MockTool({ name: 'read_file', displayName: 'Read File' }),
+        }),
+      } as unknown as Config,
+    );
+    const group = restored.find((item) => item.type === 'tool_group');
+    expect(group?.type).toBe('tool_group');
+    if (group?.type !== 'tool_group') throw new Error('missing restored read');
+    expect(group.tools[0].detailedDisplay).toBeDefined();
+    expect(group.tools[0].detailedDisplay?.length).toBeLessThan(1500);
+    expect(group.tools[0].detailedDisplay).not.toContain(output);
   });
 
   it('forwards string prompts as an explicit UserQuery send', async () => {
@@ -397,6 +528,27 @@ describe('livePromptEvents', () => {
     ]);
 
     expect(initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks model sends on Mod failure even when the native client is initialized', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({ isInitialized: () => true }),
+    } as unknown as Config;
+    const initializeMods = vi
+      .fn()
+      .mockRejectedValue(new Error('Unsupported terminal tool.call'));
+    modMocks.get.mockReturnValue({ initialize: initializeMods });
+
+    await expect(ensureConfigInitialized(config)).rejects.toThrow(
+      'terminal tool.call',
+    );
+    await expect(drain(livePromptEvents(config, 'hello'))).rejects.toThrow(
+      'terminal tool.call',
+    );
+    expect(sendMessageStream).not.toHaveBeenCalled();
+    expect(initializeMods).toHaveBeenCalledOnce();
   });
 
   it('waits for the shared initialization before the first send', async () => {
@@ -465,6 +617,62 @@ describe('livePromptEvents', () => {
       'auth exploded',
     );
   });
+
+  it('rejects pending Mod readiness when host initialization fails', async () => {
+    const error = new Error('Transcript restore failed');
+    let rejectReady!: (reason: unknown) => void;
+    const ready = new Promise<void>((_, reject) => {
+      rejectReady = reject;
+    });
+    const failed = vi.fn();
+    void ready.catch(failed);
+    const failStartup = vi.fn(rejectReady);
+    const initializeMods = vi.fn();
+    modMocks.get.mockReturnValue({
+      ready,
+      failStartup,
+      initialize: initializeMods,
+    });
+    const config = {
+      initialize: vi.fn().mockRejectedValue(error),
+      getGeminiClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    await expect(ensureConfigInitialized(config)).rejects.toBe(error);
+    expect(failed).toHaveBeenCalledExactlyOnceWith(error);
+    await expect(ready).rejects.toBe(error);
+    await expect(ensureConfigInitialized(config)).rejects.toBe(error);
+    expect(failStartup).toHaveBeenCalledExactlyOnceWith(error);
+    expect(initializeMods).not.toHaveBeenCalled();
+    expect(config.initialize).toHaveBeenCalledOnce();
+  });
+
+  it.each(['already initialized', 'client ready'])(
+    'still initializes Mods after a recoverable host re-entry: %s',
+    async (state) => {
+      const initializeMods = vi.fn().mockResolvedValue(undefined);
+      const failStartup = vi.fn();
+      modMocks.get.mockReturnValue({ initialize: initializeMods, failStartup });
+      const config = {
+        initialize: vi
+          .fn()
+          .mockRejectedValue(
+            new Error(
+              state === 'already initialized'
+                ? 'Config was already initialized'
+                : 'Background recovery failed',
+            ),
+          ),
+        getGeminiClient: () => ({
+          isInitialized: () => state === 'client ready',
+        }),
+      } as unknown as Config;
+
+      await expect(ensureConfigInitialized(config)).resolves.toBeUndefined();
+      expect(initializeMods).toHaveBeenCalledOnce();
+      expect(failStartup).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps surfacing the real initialization failure on later submits', async () => {
     // Core never retries a settled initialization, so the rejected shared
@@ -753,7 +961,7 @@ describe('livePromptEvents', () => {
 
     // Production always reaches this seam with provenance set (the composer
     // submit passes `submittedPrompt`), so the options here are what force the
-    // gate's string check — not the provenance short-circuit — to decide.
+    // non-mention check — not the provenance short-circuit — to decide.
     await drain(
       livePromptEvents(config, parts, undefined, {
         submittedPrompt: 'describe this: ',
@@ -762,9 +970,7 @@ describe('livePromptEvents', () => {
 
     const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
     expect(prompt).toBe(parts);
-    // ink expands only a string query (prepareQueryForLlm's
-    // `typeof query === 'string'` branch), so an attachment payload rides
-    // through untouched.
+    // No mention occurs in the typed text, so the attachment payload stays intact.
     expect(atMocks.calls).toEqual([]);
   });
 
@@ -806,6 +1012,29 @@ describe('livePromptEvents', () => {
       submittedPrompt: '@file.txt raw composer text',
     });
     expect(secondOptions).toEqual({ type: SendMessageType.ToolResult });
+  });
+
+  it('forwards a human declaration only on the initial send, independently from submittedPrompt', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'intent-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const humanInput = { text: 'ultracode inspect @notes' };
+    await drain(
+      livePromptEvents(config, 'expanded payload', undefined, { humanInput }),
+    );
+    expect((sendMessageStream.mock.calls[0] as unknown[])[3]).toMatchObject({
+      type: SendMessageType.UserQuery,
+      humanInput,
+    });
+    expect(
+      (sendMessageStream.mock.calls[0] as unknown[])[3],
+    ).not.toHaveProperty('submittedPrompt');
+    expect(
+      (sendMessageStream.mock.calls[1] as unknown[])[3],
+    ).not.toHaveProperty('humanInput');
   });
 
   it('expands an @-mention where the prompt enters the stream', async () => {
@@ -906,6 +1135,341 @@ describe('livePromptEvents', () => {
     expect(prompt).toBe('remember that @alice reviews PRs');
   });
 
+  it('expands typed mentions while retaining the separately attached image bytes', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+    const image = {
+      inlineData: {
+        mimeType: 'image/png',
+        data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
+      },
+    };
+    atMocks.result = {
+      processedQuery: [{ text: 'look @notes.md' }, { text: 'NOTES CONTENT' }],
+      shouldProceed: true,
+    };
+    await drain(
+      livePromptEvents(config, [{ text: 'look @notes.md' }, image], undefined, {
+        submittedPrompt: 'look @notes.md',
+      }),
+    );
+    expect(atMocks.calls).toEqual(['look @notes.md']);
+    expect(sendMessageStream).toHaveBeenCalledOnce();
+    expect((sendMessageStream.mock.calls[0] as unknown[])[0]).toEqual([
+      { text: 'look @notes.md' },
+      { text: 'NOTES CONTENT' },
+      image,
+    ]);
+  });
+
+  it('sends and records structured steering with mentions and exact image parts once', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+      recordMidTurnUserMessage,
+    });
+    const image = { inlineData: { mimeType: 'image/png', data: 'AAECA//+' } };
+    const entry = {
+      text: 'compare @notes.md',
+      submittedPrompt: 'raw compare @notes.md',
+      imagePaths: ['/owned/image.png'],
+      content: [{ text: 'compare @notes.md' }, image],
+    };
+    atMocks.result = {
+      processedQuery: [{ text: 'expanded notes' }],
+      shouldProceed: true,
+    };
+    const events = await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => [entry],
+      }),
+    );
+    expect(atMocks.calls).toEqual(['compare @notes.md']);
+    expect(sendMessageStream.mock.calls[1][0]).toEqual([
+      {
+        functionResponse: {
+          name: 'test_tool',
+          id: 't1',
+          response: { ok: true },
+        },
+      },
+      { text: 'expanded notes' },
+      image,
+    ]);
+    expect(recordMidTurnUserMessage).toHaveBeenCalledExactlyOnceWith(
+      [{ text: 'expanded notes' }, image],
+      'compare @notes.md',
+    );
+    expect(events.filter((event) => event.type === 'user')).toEqual([
+      { type: 'user', text: 'compare @notes.md', sentToModel: false },
+    ]);
+  });
+
+  it('restores the same structured batch when cancelled inside mention resolution', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const controller = new AbortController();
+    const entry: OpenTuiSteeringSubmission = {
+      text: 'look @notes.md',
+      submittedPrompt: 'raw look',
+      imagePaths: ['/owned/image.png'],
+      content: [
+        { text: 'look @notes.md' },
+        {
+          inlineData: { mimeType: 'image/png', data: 'AAECAw==' },
+        },
+      ],
+    };
+    const restoreSteering = vi.fn();
+    atMocks.hang = () => controller.abort();
+    const events = await drain(
+      livePromptEvents(config, 'start', controller.signal, {
+        drainSteering: () => [entry],
+        restoreSteering,
+      }),
+    );
+    expect(restoreSteering).toHaveBeenCalledOnce();
+    expect(restoreSteering.mock.calls[0][0][0]).toBe(entry);
+    expect(sendMessageStream).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.type === 'user')).toEqual([]);
+  });
+
+  it.each(['call', 'iteration'])(
+    'restores structured steering without echo or recording when continuation fails during %s',
+    async (failure) => {
+      const first = oneToolBatchStream({
+        callId: 't1',
+        name: 'test_tool',
+        args: {},
+      });
+      let sends = 0;
+      const sendMessageStream = vi.fn((...args: unknown[]) => {
+        if (++sends === 1) return first();
+        if (failure === 'call') throw new Error('not delivered');
+        return (async function* () {
+          try {
+            yield await Promise.reject(new Error('not delivered'));
+          } finally {
+            (args[3] as SendMessageOptions).steerInput?.restore();
+          }
+        })();
+      });
+      const recordMidTurnUserMessage = vi.fn();
+      const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+        recordMidTurnUserMessage,
+      });
+      const entry = {
+        text: 'steered image',
+        imagePaths: ['/owned/image.png'],
+        submittedPrompt: 'raw steered image',
+        content: [
+          { text: 'steered image' },
+          {
+            inlineData: { mimeType: 'image/png', data: 'AAECAw==' },
+          },
+        ],
+      };
+      const restoreSteering = vi.fn();
+      const events: OpenTuiStreamEvent[] = [];
+      await expect(
+        (async () => {
+          for await (const event of livePromptEvents(
+            config,
+            'start',
+            undefined,
+            {
+              drainSteering: () => [entry],
+              restoreSteering,
+            },
+          ))
+            events.push(event);
+        })(),
+      ).rejects.toThrow('not delivered');
+      expect(restoreSteering).toHaveBeenCalledOnce();
+      expect(restoreSteering.mock.calls[0][0][0]).toBe(entry);
+      expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type === 'user')).toEqual([]);
+    },
+  );
+
+  it('commits steering once when core accepts before a later stream failure', async () => {
+    let sends = 0;
+    const sendMessageStream = vi.fn(function* (...args: unknown[]) {
+      if (++sends === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 't1',
+            name: 'test_tool',
+            args: {},
+          },
+        };
+        return;
+      }
+      (args[3] as SendMessageOptions).steerInput?.accept();
+      yield { type: 'content', value: 'delivered' };
+      throw new Error('failed after delivery');
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+      recordMidTurnUserMessage,
+    });
+    const restoreSteering = vi.fn();
+    const events: OpenTuiStreamEvent[] = [];
+    await expect(
+      (async () => {
+        for await (const event of livePromptEvents(config, 'start', undefined, {
+          drainSteering: () => steering('send exactly once'),
+          restoreSteering,
+        }))
+          events.push(event);
+      })(),
+    ).rejects.toThrow('failed after delivery');
+    expect(recordMidTurnUserMessage).toHaveBeenCalledExactlyOnceWith(
+      [{ text: 'send exactly once' }],
+      'send exactly once',
+    );
+    expect(events.filter((event) => event.type === 'user')).toEqual([
+      { type: 'user', text: 'send exactly once', sentToModel: false },
+    ]);
+    expect(restoreSteering).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { type: 'max_session_turns' },
+    {
+      type: 'session_token_limit_exceeded',
+      value: { currentTokens: 20, limit: 10 },
+    },
+    { type: 'loop_detected' },
+    { type: 'zero-event exit' },
+  ])(
+    'restores a pre-push $type continuation even without an error',
+    async (event) => {
+      const entry = {
+        text: 'keep this image',
+        imagePaths: ['/owned/image.png'],
+        content: [
+          { text: 'keep this image' },
+          { inlineData: { mimeType: 'image/png', data: 'AAECAw==' } },
+        ],
+      };
+      let sends = 0;
+      const sendMessageStream = vi.fn(function* (...args: unknown[]) {
+        if (++sends === 1) {
+          yield {
+            type: 'tool_call_request',
+            value: { callId: 't1', name: 'test_tool', args: {} },
+          };
+          return;
+        }
+        const carrier = (args[3] as SendMessageOptions).steerInput;
+        expect(carrier?.parts).toEqual(entry.content);
+        try {
+          if (event.type !== 'zero-event exit') yield event;
+        } finally {
+          carrier?.restore();
+          carrier?.restore();
+          carrier?.accept();
+        }
+      });
+      const recordMidTurnUserMessage = vi.fn();
+      const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+        recordMidTurnUserMessage,
+      });
+      const restoreSteering = vi.fn();
+      const events = await drain(
+        livePromptEvents(config, 'start', undefined, {
+          drainSteering: () => [entry],
+          restoreSteering,
+        }),
+      );
+      expect(sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(sendMessageStream.mock.calls[1][0]).toEqual([
+        toolResponse,
+        ...entry.content,
+      ]);
+      expect(restoreSteering).toHaveBeenCalledOnce();
+      expect(restoreSteering.mock.calls[0][0][0]).toBe(entry);
+      expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+      expect(events.filter((item) => item.type === 'user')).toEqual([]);
+    },
+  );
+
+  it.each(['zero-event exit', 'throw before an event', 'loop_detected'])(
+    'commits core-accepted history once on %s',
+    async (outcome) => {
+      const entry = {
+        text: 'accepted image',
+        content: [
+          { text: 'accepted image' },
+          { inlineData: { mimeType: 'image/png', data: 'AAECAw==' } },
+        ],
+      };
+      let sends = 0;
+      const sendMessageStream = vi.fn(function* (...args: unknown[]) {
+        if (++sends === 1) {
+          yield {
+            type: 'tool_call_request',
+            value: { callId: 't1', name: 'test_tool', args: {} },
+          };
+          return;
+        }
+        const carrier = (args[3] as SendMessageOptions).steerInput;
+        expect(carrier?.parts).toEqual(entry.content);
+        carrier?.accept();
+        carrier?.accept();
+        carrier?.restore();
+        if (outcome === 'throw before an event') {
+          throw new Error('provider failed after history push');
+        }
+        if (outcome === 'loop_detected') yield { type: 'loop_detected' };
+      });
+      const recordMidTurnUserMessage = vi.fn();
+      const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+        recordMidTurnUserMessage,
+      });
+      const restoreSteering = vi.fn();
+      const events: OpenTuiStreamEvent[] = [];
+      const pending = (async () => {
+        for await (const event of livePromptEvents(config, 'start', undefined, {
+          drainSteering: () => [entry],
+          restoreSteering,
+        })) {
+          events.push(event);
+        }
+      })();
+      if (outcome === 'throw before an event') {
+        await expect(pending).rejects.toThrow(
+          'provider failed after history push',
+        );
+      } else {
+        await pending;
+      }
+      expect(sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(sendMessageStream.mock.calls[1][0]).toEqual([
+        toolResponse,
+        ...entry.content,
+      ]);
+      expect(recordMidTurnUserMessage).toHaveBeenCalledExactlyOnceWith(
+        entry.content,
+        entry.text,
+      );
+      expect(events.filter((event) => event.type === 'user')).toEqual([
+        { type: 'user', text: entry.text, sentToModel: false },
+      ]);
+      expect(restoreSteering).not.toHaveBeenCalled();
+    },
+  );
+
   it('appends drained steering texts after tool responses at the boundary', async () => {
     const sendMessageStream = oneToolBatchStream({
       callId: 't1',
@@ -916,7 +1480,7 @@ describe('livePromptEvents', () => {
 
     await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['steer me'],
+        drainSteering: () => steering('steer me'),
       }),
     );
 
@@ -934,8 +1498,112 @@ describe('livePromptEvents', () => {
     ]);
   });
 
+  it.each([false, true])(
+    'gates late acceptance by turn generation, not abort state (invalidated=%s)',
+    async (invalidated) => {
+      let current = true;
+      let sends = 0;
+      const controller = new AbortController();
+      const originalRecording = vi.fn();
+      const successorRecording = vi.fn();
+      const sendMessageStream = vi.fn(async function* (...args: unknown[]) {
+        if (++sends === 1) {
+          yield {
+            type: 'tool_call_request',
+            value: { callId: 't1', name: 'test_tool', args: {} },
+          };
+          return;
+        }
+        controller.abort();
+        current = !invalidated;
+        if (invalidated) {
+          vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+            recordMidTurnUserMessage: successorRecording,
+          } as unknown as ReturnType<Config['getChatRecordingService']>);
+        }
+        await Promise.resolve();
+        (args[3] as SendMessageOptions).steerInput?.accept();
+      });
+      const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+        recordMidTurnUserMessage: originalRecording,
+      });
+      const restoreSteering = vi.fn();
+      const events = await drain(
+        livePromptEvents(config, 'start', controller.signal, {
+          drainSteering: () => steering('owned by the old turn'),
+          restoreSteering,
+          isCurrentTurn: () => current,
+        }),
+      );
+      expect(successorRecording).not.toHaveBeenCalled();
+      expect(originalRecording).toHaveBeenCalledTimes(invalidated ? 0 : 1);
+      expect(events.filter((event) => event.type === 'user')).toHaveLength(
+        invalidated ? 0 : 1,
+      );
+      expect(restoreSteering).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'reports consumed mention declines even when core restores the continuation (mixed=%s)',
+    async (mixed) => {
+      let sends = 0;
+      const sendMessageStream = vi.fn(function* (...args: unknown[]) {
+        if (++sends === 1) {
+          yield {
+            type: 'tool_call_request',
+            value: { callId: 't1', name: 'test_tool', args: {} },
+          };
+          return;
+        }
+        (args[3] as SendMessageOptions).steerInput?.restore();
+        yield { type: 'max_session_turns' };
+      });
+      const recordMidTurnUserMessage = vi.fn();
+      const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+        recordMidTurnUserMessage,
+      });
+      const valid = {
+        text: 'keep image',
+        content: [{ text: 'keep image' }, imagePart],
+      };
+      atMocks.result = {
+        processedQuery: null,
+        shouldProceed: false,
+        toolDisplays: [
+          readDisplay({
+            status: ToolCallStatus.Error,
+            resultDisplay: 'missing.ts could not be read',
+          }),
+        ],
+      };
+      const restoreSteering = vi.fn();
+      const events = await drain(
+        livePromptEvents(config, 'start', undefined, {
+          drainSteering: () => [
+            ...steering('@missing.ts'),
+            ...(mixed ? [valid] : []),
+          ],
+          restoreSteering,
+        }),
+      );
+      expect(sendMessageStream.mock.calls[1][0]).toEqual([
+        toolResponse,
+        ...(mixed ? valid.content : []),
+      ]);
+      expect(restoreSteering.mock.calls).toEqual(mixed ? [[[valid]]] : []);
+      expect(events).toContainEqual({
+        type: 'tool-result',
+        id: 'client-read-1',
+        display: 'missing.ts could not be read',
+      });
+      expect(events.filter((event) => event.type === 'user')).toEqual([]);
+      expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
   it('skips steering when the turn is aborted', async () => {
-    const drainSteering = vi.fn(() => ['never']);
+    const drainSteering = vi.fn(() => steering('never'));
     const controller = new AbortController();
     const batch = oneToolBatchStream({
       callId: 't1',
@@ -981,7 +1649,7 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['look @src/a.ts'],
+        drainSteering: () => steering('look @src/a.ts'),
       }),
     )) as OpenTuiStreamEvent[];
 
@@ -1017,7 +1685,7 @@ describe('livePromptEvents', () => {
 
     await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['first', 'second'],
+        drainSteering: () => steering('first', 'second'),
       }),
     );
 
@@ -1044,14 +1712,16 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', controller.signal, {
-        drainSteering: () => ['read @a.ts', 'then @b.ts'],
+        drainSteering: () => steering('read @a.ts', 'then @b.ts'),
         restoreSteering,
       }),
     )) as OpenTuiStreamEvent[];
 
     // All-or-nothing: the resolved hop dies with the turn, so every text comes
     // back instead of a half-built message reaching the model.
-    expect(restoreSteering).toHaveBeenCalledWith(['read @a.ts', 'then @b.ts']);
+    expect(restoreSteering).toHaveBeenCalledWith(
+      steering('read @a.ts', 'then @b.ts'),
+    );
     // R6-5: the dead signal never sends the continuation — the completed
     // batch's responses reach history instead (the R5-4 shape, pinned below).
     expect(sendMessageStream).toHaveBeenCalledTimes(1);
@@ -1075,7 +1745,7 @@ describe('livePromptEvents', () => {
 
     await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['first', 'second'],
+        drainSteering: () => steering('first', 'second'),
       }),
     );
 
@@ -1102,7 +1772,7 @@ describe('livePromptEvents', () => {
 
     await drain(
       livePromptEvents(config, 'start', controller.signal, {
-        drainSteering: () => ['read @a.ts'],
+        drainSteering: () => steering('read @a.ts'),
       }),
     );
 
@@ -1156,7 +1826,7 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', controller.signal, {
-        drainSteering: () => ['read @a.ts'],
+        drainSteering: () => steering('read @a.ts'),
         restoreSteering,
       }),
     )) as OpenTuiStreamEvent[];
@@ -1166,7 +1836,7 @@ describe('livePromptEvents', () => {
     // the recording: writing it here would commit a mid-turn user message the
     // model never saw, and /resume would replay it as the user's words.
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
-    expect(restoreSteering).toHaveBeenCalledWith(['read @a.ts']);
+    expect(restoreSteering).toHaveBeenCalledWith(steering('read @a.ts'));
     expect(events.filter((e) => e.type === 'user')).toEqual([]);
     // The resolved hop does not ride the dead signal: no continuation send.
     expect(sendMessageStream).toHaveBeenCalledTimes(1);
@@ -1210,7 +1880,7 @@ describe('livePromptEvents', () => {
     await expect(
       drain(
         livePromptEvents(config, 'start', undefined, {
-          drainSteering: () => ['also check the tests'],
+          drainSteering: () => steering('also check the tests'),
           restoreSteering,
         }),
       ),
@@ -1221,7 +1891,9 @@ describe('livePromptEvents', () => {
     // text goes back raw so the retried turn re-expands it.
     expect(sendMessageStream).toHaveBeenCalledTimes(2);
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
-    expect(restoreSteering).toHaveBeenCalledWith(['also check the tests']);
+    expect(restoreSteering).toHaveBeenCalledWith(
+      steering('also check the tests'),
+    );
   });
 
   it('gives up on a hung mid-turn read instead of parking the boundary', async () => {
@@ -1239,7 +1911,7 @@ describe('livePromptEvents', () => {
     try {
       const pending = drain(
         livePromptEvents(config, 'start', undefined, {
-          drainSteering: () => ['read @hanging.ts'],
+          drainSteering: () => steering('read @hanging.ts'),
           restoreSteering,
         }),
       );
@@ -1283,7 +1955,7 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['first', 'second'],
+        drainSteering: () => steering('first', 'second'),
       }),
     )) as OpenTuiStreamEvent[];
 
@@ -1311,7 +1983,7 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['look @src/a.ts'],
+        drainSteering: () => steering('look @src/a.ts'),
       }),
     )) as OpenTuiStreamEvent[];
 
@@ -1346,7 +2018,7 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['one @src/a.ts', 'two @src/b.ts'],
+        drainSteering: () => steering('one @src/a.ts', 'two @src/b.ts'),
       }),
     )) as OpenTuiStreamEvent[];
 
@@ -1374,11 +2046,76 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['@declined.ts'],
+        drainSteering: () => steering('@declined.ts'),
       }),
     )) as OpenTuiStreamEvent[];
 
     expect(events.filter((e) => e.type === 'user')).toEqual([]);
+  });
+
+  it('reports a declined mixed mention and image without partial delivery or retry', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+      recordMidTurnUserMessage,
+    });
+    const restoreSteering = vi.fn();
+    const drainSteering = vi.fn(() => [
+      {
+        text: 'read @missing.ts',
+        submittedPrompt: 'read @missing.ts',
+        imagePaths: ['/attached.png'],
+        content: [
+          { text: 'read @missing.ts' },
+          { inlineData: { mimeType: 'image/png', data: 'AAECAw==' } },
+        ],
+      },
+    ]);
+    atMocks.result = {
+      processedQuery: null,
+      shouldProceed: false,
+      toolDisplays: [
+        readDisplay({
+          description: 'Error attempting to read files',
+          status: ToolCallStatus.Error,
+          resultDisplay: 'Error reading files (missing.ts): no such file',
+        }),
+      ],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering,
+        restoreSteering,
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(atMocks.calls).toHaveLength(1);
+    expect(drainSteering).toHaveBeenCalledOnce();
+    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(sendMessageStream.mock.calls[1][0]).toEqual([toolResponse]);
+    expect(restoreSteering).not.toHaveBeenCalled();
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'user')).toEqual([]);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        {
+          type: 'tool-result',
+          id: 'client-read-1',
+          display: 'Error reading files (missing.ts): no such file',
+        },
+        {
+          type: 'tool-end',
+          id: 'client-read-1',
+          success: false,
+          summary: 'error',
+        },
+      ]),
+    );
   });
 
   it('echoes a steer whose expansion resolved to no parts', async () => {
@@ -1397,7 +2134,7 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['@empty.ts'],
+        drainSteering: () => steering('@empty.ts'),
       }),
     )) as OpenTuiStreamEvent[];
 
@@ -1482,7 +2219,7 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, [{ text: 'look' }, imagePart], undefined, {
-        drainSteering: () => ['read @shot.png'],
+        drainSteering: () => steering('read @shot.png'),
       }),
     )) as OpenTuiStreamEvent[];
 
@@ -1517,7 +2254,7 @@ describe('livePromptEvents', () => {
     // primary model. A per-turn override read once would leave both the
     // continuation call and the model named in its own notice on the old one.
     let calls = 0;
-    const sendMessageStream = vi.fn(function* (): Generator<{
+    const sendMessageStream = vi.fn(function* (...args: unknown[]): Generator<{
       type: string;
       value?: unknown;
     }> {
@@ -1529,6 +2266,7 @@ describe('livePromptEvents', () => {
         };
         return;
       }
+      (args[3] as SendMessageOptions).steerInput?.accept();
       yield { type: 'chat_compressed', value: {} };
       yield { type: 'finished', value: {} };
     });
@@ -1543,7 +2281,7 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['read @shot.png'],
+        drainSteering: () => steering('read @shot.png'),
       }),
     )) as OpenTuiStreamEvent[];
 
@@ -1613,7 +2351,7 @@ describe('livePromptEvents', () => {
 
     await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['read @shot.png'],
+        drainSteering: () => steering('read @shot.png'),
       }),
     );
 
@@ -1734,7 +2472,7 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['see @shot.avif'],
+        drainSteering: () => steering('see @shot.avif'),
       }),
     )) as OpenTuiStreamEvent[];
 
@@ -1764,7 +2502,7 @@ describe('livePromptEvents', () => {
 
     const events = (await drain(
       livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['plain steer', 'see @shot.avif'],
+        drainSteering: () => steering('plain steer', 'see @shot.avif'),
       }),
     )) as OpenTuiStreamEvent[];
 
@@ -2072,6 +2810,76 @@ describe('livePromptEvents', () => {
     )) as OpenTuiStreamEvent[];
 
     expect(events.some((e) => e.type === 'tool-description')).toBe(false);
+  });
+
+  it.each(['cancelled', 'error'])(
+    'rejects a %s batch after draining UI-only terminal states without committing results',
+    async (summary) => {
+      const send = oneToolBatchStream({
+        callId: 'revoked',
+        name: 'test_tool',
+        args: { __scheduleFailure: summary },
+      });
+      const recordToolResult = vi.fn();
+      const config = {
+        ...createFakeConfig(send),
+        getChatRecordingService: () => ({ recordToolResult }),
+      } as unknown as Config;
+      const events: OpenTuiStreamEvent[] = [];
+      const run = (async () => {
+        for await (const event of livePromptEvents(config, 'run'))
+          events.push(event);
+      })();
+      await expect(run).rejects.toThrow(
+        summary === 'cancelled' ? 'Mod generation revoked' : 'Scheduler failed',
+      );
+      expect(events).toContainEqual({
+        type: 'tool-end',
+        id: 'revoked',
+        success: false,
+        summary,
+      });
+      expect(events).toContainEqual({
+        type: 'tool-queued',
+        id: 'revoked',
+        queued: false,
+      });
+      expect(events).toContainEqual({
+        type: 'confirm-resolved',
+        id: 'revoked',
+        outcome: 'rejected',
+      });
+      expect(events.some((event) => event.type === 'error')).toBe(false);
+      expect(send).toHaveBeenCalledOnce();
+      expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+      expect(recordToolResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the native queue open when schedule resolves before completion', async () => {
+    const send = oneToolBatchStream({
+      callId: 'deferred',
+      name: 'test_tool',
+      args: { __deferred: true },
+    });
+    let settled = false;
+    const run = drain(livePromptEvents(createFakeConfig(send), 'run')).then(
+      (events) => {
+        settled = true;
+        return events;
+      },
+    );
+    await vi.waitFor(() => expect(schedulerControl.finish).not.toBeNull());
+    expect(settled).toBe(false);
+    expect(send).toHaveBeenCalledOnce();
+    await schedulerControl.finish!();
+    expect(await run).toContainEqual({
+      type: 'tool-end',
+      id: 'deferred',
+      success: true,
+      summary: 'ok',
+    });
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it('ends the turn without a follow-up request when the whole batch was cancelled', async () => {

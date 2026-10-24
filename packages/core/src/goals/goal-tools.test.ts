@@ -31,6 +31,7 @@ import {
   formatProposeGoalRecoveryNotStarted,
   UpdateGoalTool,
   type GoalToolConfig,
+  type UpdateGoalToolParams,
 } from './goal-tools.js';
 import {
   buildExecDescription,
@@ -46,6 +47,8 @@ import {
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_PROPOSAL_REASON_MAX_BYTES,
   GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
+  type GoalRecord,
+  type GoalSnapshotV2,
   type GoalTurnPermit,
   type TranscriptCursor,
 } from './goal-protocol.js';
@@ -102,7 +105,89 @@ async function execute(tool: GetGoalTool) {
   return tool.build({}).execute(new AbortController().signal);
 }
 
+/** A v2 snapshot of one Goal record; `goal` overrides the record's fields. */
+const goalSnapshot = (
+  activity: GoalSnapshotV2['activity'],
+  goal: Partial<GoalRecord> & Record<string, unknown>,
+): GoalSnapshotV2 => ({
+  v: 2,
+  activity,
+  goal: {
+    goalId: 'goal-1',
+    revision: 3,
+    objective: 'Ship Goal v3',
+    status: 'active',
+    evidenceCursor: { recordId: 'record-1' },
+    turnCount: 1,
+    activeTimeMs: 0,
+    tokensUsed: 0,
+    createdAt: 1,
+    updatedAt: 2,
+    ...goal,
+  } as GoalRecord,
+});
+
+/** The worker view of the permitted Goal. */
+const workerView = (objective: string, recordId: string) => ({
+  goalId: permit.goalId,
+  revision: permit.revision,
+  objective,
+  evidenceCursor: { recordId },
+});
+
+const buildGet = (config: GoalToolConfig, turn = permit) =>
+  goalTurnContext.run(turn, () => new GetGoalTool(config).build({}));
+
+/** Builds update_goal under `turn`, by default a plain `complete` proposal. */
+const buildUpdate = (
+  config: GoalToolConfig,
+  turn = permit,
+  params: UpdateGoalToolParams = {
+    status: 'complete',
+    reason: 'done',
+    evidenceRefs: ['evidence-1'],
+  },
+) => goalTurnContext.run(turn, () => new UpdateGoalTool(config).build(params));
+
+/** Executes each invocation in order; each must refuse its stale permit. */
+async function expectStale(
+  ...invocations: Array<{ execute(signal: AbortSignal): Promise<unknown> }>
+) {
+  for (const invocation of invocations) {
+    await expect(
+      invocation.execute(new AbortController().signal),
+    ).rejects.toThrow('Goal turn permit is no longer valid');
+  }
+}
+
+/** Pauses `goal` (by default the current one) and returns it. */
+async function pauseGoal(
+  runtime: GoalRuntime,
+  goal: { goalId: string; revision: number } = runtime.getSnapshot().goal!,
+) {
+  await runtime.dispatch({
+    action: 'pause',
+    expectedGoalId: goal.goalId,
+    expectedRevision: goal.revision,
+  });
+  return goal;
+}
+
 describe('GetGoalTool', () => {
+  /** Reads get_goal outside any permit while the runtime holds this Goal. */
+  const readStopped = (
+    goal: Parameters<typeof goalSnapshot>[1],
+    getGoalForWorker = vi.fn(),
+  ) =>
+    execute(
+      new GetGoalTool(
+        makeConfig({
+          getGoalForWorker,
+          getSnapshot: () => goalSnapshot('idle', goal),
+        }),
+      ),
+    );
+
   it('uses the canonical Goal tool name', () => {
     const tool = new GetGoalTool(makeConfig({}));
 
@@ -110,29 +195,49 @@ describe('GetGoalTool', () => {
     expect(ToolDisplayNames.GET_GOAL).toBe('Goal');
     expect(tool.name).toBe(ToolNames.GET_GOAL);
     expect(tool.displayName).toBe(ToolDisplayNames.GET_GOAL);
-    expect(tool.shouldDefer).toBe(false);
+    expect(tool.shouldDefer).toBe(true);
     expect(tool.build({}).getDescription()).toBe('Read the current goal');
   });
 
-  it('keeps both Goal tools visible and out of deferred search', () => {
+  it('keeps Goal tools discoverable without declaring their schemas up front', () => {
+    const visibleTools = new Set<string>();
     const config = {
       getMcpTransportPool: () => undefined,
       getDisabledTools: () => new Set<string>(),
-      getVisibleTools: () => new Set<string>(),
+      getVisibleTools: () => visibleTools,
       getGoalRuntime: () => undefined as never,
+      isGoalProposalAvailable: () => true,
     } as unknown as Config & GoalToolConfig;
     const registry = new ToolRegistry(config);
     const getGoal = new GetGoalTool(config);
     const updateGoal = new UpdateGoalTool(config);
+    const proposeGoal = new ProposeGoalTool(
+      config as unknown as ProposeGoalToolConfig,
+    );
     registry.registerTool(getGoal);
     registry.registerTool(updateGoal);
+    registry.registerTool(proposeGoal);
 
-    expect(getGoal.shouldDefer).toBe(false);
-    expect(updateGoal.shouldDefer).toBe(false);
+    const names = [
+      ToolNames.GET_GOAL,
+      ToolNames.PROPOSE_GOAL,
+      ToolNames.UPDATE_GOAL,
+    ];
+    expect(registry.getFunctionDeclarations()).toEqual([]);
+    expect(registry.getDeferredToolSummary().map((tool) => tool.name)).toEqual(
+      names,
+    );
+    for (const name of names) {
+      expect(registry.getTool(name)).toBeDefined();
+      visibleTools.add(name);
+    }
     expect(registry.getDeferredToolSummary()).toEqual([]);
     expect(
-      registry.getFunctionDeclarations().map((declaration) => declaration.name),
-    ).toEqual([ToolNames.GET_GOAL, ToolNames.UPDATE_GOAL]);
+      registry
+        .getFunctionDeclarations()
+        .map((declaration) => declaration.name)
+        .sort(),
+    ).toEqual(names);
   });
 
   it('reports no active Goal outside a permitted Goal turn', async () => {
@@ -151,43 +256,31 @@ describe('GetGoalTool', () => {
 
   it('summarises the last Goal once it has stopped issuing permits', async () => {
     const getGoalForWorker = vi.fn();
-    const config = makeConfig({
-      getGoalForWorker,
-      getSnapshot: () => ({
-        v: 2 as const,
-        activity: 'idle' as const,
-        goal: {
-          goalId: 'goal-1',
-          revision: 3,
-          objective: 'Ship Goal v3',
-          status: 'usage_limited' as const,
-          evidenceCursor: { recordId: 'record-1' },
-          turnCount: 27,
-          activeTimeMs: 1_763_705,
-          tokensUsed: 4_500,
-          tokenBudget: 30_000_000,
-          turnBudget: 40,
-          activeTimeBudgetMs: 1_800_000,
-          createdAt: 1,
-          updatedAt: 2,
-          lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
-          evidenceCheckpoint: {
-            checkpointId: 'checkpoint-1',
-            createdAt: 2,
-            claims: [
-              {
-                id: 'checkpoint-1:1',
-                proofKind: 'external_fact' as const,
-                claim: 'note-01.md exists',
-                sourceRefs: ['record-1'],
-              },
-            ],
-          },
+    const result = await readStopped(
+      {
+        status: 'usage_limited',
+        turnCount: 27,
+        activeTimeMs: 1_763_705,
+        tokensUsed: 4_500,
+        tokenBudget: 30_000_000,
+        turnBudget: 40,
+        activeTimeBudgetMs: 1_800_000,
+        lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+        evidenceCheckpoint: {
+          checkpointId: 'checkpoint-1',
+          createdAt: 2,
+          claims: [
+            {
+              id: 'checkpoint-1:1',
+              proofKind: 'external_fact' as const,
+              claim: 'note-01.md exists',
+              sourceRefs: ['record-1'],
+            },
+          ],
         },
-      }),
-    });
-
-    const result = await execute(new GetGoalTool(config));
+      },
+      getGoalForWorker,
+    );
 
     expect(result.error).toBeUndefined();
     expect(JSON.parse(String(result.llmContent))).toEqual({
@@ -214,27 +307,11 @@ describe('GetGoalTool', () => {
   });
 
   it('summarises a paused Goal outside a permitted turn', async () => {
-    const config = makeConfig({
-      getGoalForWorker: vi.fn(),
-      getSnapshot: () => ({
-        v: 2 as const,
-        activity: 'idle' as const,
-        goal: {
-          goalId: 'goal-1',
-          revision: 2,
-          objective: 'Ship Goal v3',
-          status: 'paused' as const,
-          evidenceCursor: { recordId: 'record-1' },
-          turnCount: 1,
-          activeTimeMs: 750,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-        },
-      }),
+    const result = await readStopped({
+      revision: 2,
+      status: 'paused',
+      activeTimeMs: 750,
     });
-
-    const result = await execute(new GetGoalTool(config));
 
     expect(JSON.parse(String(result.llmContent))).toEqual({
       active: false,
@@ -256,33 +333,16 @@ describe('GetGoalTool', () => {
     // Goals no longer run evidence checkpoints. A record an earlier build
     // stopped on one still carries the streak and the failure; the model is
     // told why the Goal stopped, not about a mechanism that is gone.
-    const config = makeConfig({
-      getGoalForWorker: vi.fn(),
-      getSnapshot: () => ({
-        v: 2 as const,
-        activity: 'idle' as const,
-        goal: {
-          goalId: 'goal-1',
-          revision: 3,
-          objective: 'Ship Goal v3',
-          status: 'usage_limited' as const,
-          limitKind: 'checkpoint_request' as const,
-          evidenceCursor: { recordId: 'record-1' },
-          turnCount: 5,
-          activeTimeMs: 10,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-          checkpointStalls: 3,
-          lastCheckpointFailure: 'Error: provider failed',
-          lastReason: 'Three evidence checkpoints stalled.',
-        },
-      }),
+    const result = await readStopped({
+      status: 'usage_limited',
+      limitKind: 'checkpoint_request',
+      turnCount: 5,
+      activeTimeMs: 10,
+      checkpointStalls: 3,
+      lastCheckpointFailure: 'Error: provider failed',
+      lastReason: 'Three evidence checkpoints stalled.',
     });
-
-    const { lastGoal } = JSON.parse(
-      String((await execute(new GetGoalTool(config))).llmContent),
-    );
+    const { lastGoal } = JSON.parse(String(result.llmContent));
 
     expect(lastGoal).toMatchObject({
       status: 'usage_limited',
@@ -293,39 +353,25 @@ describe('GetGoalTool', () => {
   });
 
   it('keeps the objective and the evidence checkpoint behind the permit', async () => {
-    const config = makeConfig({
-      getGoalForWorker: vi.fn(),
-      getSnapshot: () => ({
-        v: 2 as const,
-        activity: 'idle' as const,
-        goal: {
-          goalId: 'goal-1',
-          revision: 1,
-          objective: 'SECRET_OBJECTIVE',
-          status: 'complete' as const,
-          evidenceCursor: { recordId: 'record-1' },
-          turnCount: 2,
-          activeTimeMs: 10,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-          evidenceCheckpoint: {
-            checkpointId: 'checkpoint-1',
-            createdAt: 2,
-            claims: [
-              {
-                id: 'checkpoint-1:1',
-                proofKind: 'delivered_output' as const,
-                claim: 'SECRET_CLAIM',
-                sourceRefs: ['record-1'],
-              },
-            ],
+    const result = await readStopped({
+      revision: 1,
+      objective: 'SECRET_OBJECTIVE',
+      status: 'complete',
+      turnCount: 2,
+      activeTimeMs: 10,
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 2,
+        claims: [
+          {
+            id: 'checkpoint-1:1',
+            proofKind: 'delivered_output' as const,
+            claim: 'SECRET_CLAIM',
+            sourceRefs: ['record-1'],
           },
-        },
-      }),
+        ],
+      },
     });
-
-    const result = await execute(new GetGoalTool(config));
 
     expect(String(result.llmContent)).not.toContain('SECRET_OBJECTIVE');
     expect(String(result.llmContent)).not.toContain('SECRET_CLAIM');
@@ -370,35 +416,22 @@ describe('GetGoalTool', () => {
   });
 
   it('returns only the worker view for the captured permit', async () => {
-    const snapshot = {
-      v: 2 as const,
-      activity: 'running' as const,
-      goal: {
-        goalId: 'goal-1',
-        revision: 3,
-        objective: 'Ship Goal v3',
-        status: 'active' as const,
-        evidenceCursor: { recordId: 'cursor-1' },
-        turnCount: 4,
-        activeTimeMs: 120,
-        tokensUsed: 0,
-        createdAt: 10,
-        updatedAt: 20,
-      },
-    };
-    const getGoalForWorker = vi.fn().mockResolvedValue({
-      goalId: 'goal-1',
-      revision: 3,
-      objective: 'Ship Goal v3',
+    const snapshot = goalSnapshot('running', {
       evidenceCursor: { recordId: 'cursor-1' },
+      turnCount: 4,
+      activeTimeMs: 120,
+      createdAt: 10,
+      updatedAt: 20,
+    });
+    const getGoalForWorker = vi.fn().mockResolvedValue({
+      ...workerView('Ship Goal v3', 'cursor-1'),
       verifierFeedback: 'retry: missing edge case',
       fullTranscript: ['must not leak'],
     });
     const getSnapshotForPermit = vi.fn(() => structuredClone(snapshot));
-    const tool = new GetGoalTool(
+    const invocation = buildGet(
       makeConfig({ getGoalForWorker, getSnapshotForPermit }),
     );
-    const invocation = goalTurnContext.run(permit, () => tool.build({}));
 
     const result = await invocation.execute(new AbortController().signal);
 
@@ -415,30 +448,18 @@ describe('GetGoalTool', () => {
   });
 
   it('returns the snapshot as it is and ignores the deprecated view parameter', async () => {
-    const snapshot = {
-      v: 2 as const,
-      activity: 'running' as const,
-      goal: {
-        goalId: 'goal-1',
-        revision: 3,
-        objective: 'Ship Goal v3',
-        status: 'active' as const,
-        evidenceCursor: { recordId: 'checkpoint-9' },
-        turnCount: 40,
-        activeTimeMs: 120,
-        tokensUsed: 0,
-        createdAt: 10,
-        updatedAt: 20,
-      },
-    };
+    const snapshot = goalSnapshot('running', {
+      evidenceCursor: { recordId: 'checkpoint-9' },
+      turnCount: 40,
+      activeTimeMs: 120,
+      createdAt: 10,
+      updatedAt: 20,
+    });
     const tool = new GetGoalTool(
       makeConfig({
-        getGoalForWorker: vi.fn().mockResolvedValue({
-          goalId: 'goal-1',
-          revision: 3,
-          objective: 'Ship Goal v3',
-          evidenceCursor: { recordId: 'checkpoint-9' },
-        }),
+        getGoalForWorker: vi
+          .fn()
+          .mockResolvedValue(workerView('Ship Goal v3', 'checkpoint-9')),
         getSnapshotForPermit: vi.fn(() => structuredClone(snapshot)),
       }),
     );
@@ -468,22 +489,36 @@ describe('GetGoalTool', () => {
 });
 
 describe('UpdateGoalTool', () => {
-  const activeSnapshot = () => ({
-    v: 2 as const,
-    activity: 'running' as const,
-    goal: {
+  const activeSnapshot = () =>
+    goalSnapshot('running', {
       goalId: permit.goalId,
       revision: permit.revision,
       objective: 'Deliver the result',
-      status: 'active' as const,
       evidenceCursor: { recordId: 'goal-created' },
       turnCount: 3,
       activeTimeMs: 100,
-      tokensUsed: 0,
-      createdAt: 1,
-      updatedAt: 2,
-    },
+    });
+  /** The permitted Goal's worker view and exact snapshot, and this recorder. */
+  const permittedRuntime = (recordTerminalProposal = vi.fn()) => ({
+    getGoalForWorker: vi
+      .fn()
+      .mockResolvedValue(workerView('Deliver the result', 'goal-created')),
+    getSnapshotForPermit: vi.fn(() => activeSnapshot()),
+    recordTerminalProposal,
   });
+  const recorded = () =>
+    vi.fn().mockReturnValue({ recorded: true, readyForVerification: true });
+  const focusedProposal = (): UpdateGoalToolParams => ({
+    status: 'complete',
+    reason: 'Focused tests passed',
+    evidenceRefs: ['tool-result-1'],
+  });
+  const permittedSnapshot = () =>
+    goalSnapshot('running', {
+      objective: 'permitted goal',
+      evidenceCursor: { recordId: 'cursor-1' },
+      updatedAt: 1,
+    });
 
   it('exposes the transcript-tail evidence contract', () => {
     const tool = new UpdateGoalTool(makeConfig({}));
@@ -495,19 +530,15 @@ describe('UpdateGoalTool', () => {
       >;
     };
 
-    expect(tool.description).toContain(
+    for (const fragment of [
       "only the most recent records of this Goal's transcript",
-    );
-    expect(tool.description).toContain(
       'run the checks that prove every objective condition immediately before calling',
-    );
-    expect(tool.description).toContain(
       'Never tell the user the Goal is complete or blocked',
-    );
-    expect(tool.description).toContain(
       'with no progress or completion commentary',
-    );
-    expect(tool.description).toContain('end the turn with no further text');
+      'end the turn with no further text',
+    ]) {
+      expect(tool.description).toContain(fragment);
+    }
     expect(tool.description).not.toContain('evidenceCatalog');
     expect(tool.description).not.toContain('cite');
 
@@ -546,41 +577,46 @@ describe('UpdateGoalTool', () => {
   });
 
   it('carries the blocker rules into the code-mode declaration', () => {
+    // The predicate is production's `isDeferredAndHidden`, true for this tool.
+    // With `tool_search` unavailable the exec declaration is the model's only
+    // surface, so the signature and its blocker rules have to survive there.
     const plan = planCodeModeBindings(
       [new UpdateGoalTool(makeConfig({}))],
-      () => false,
+      () => true,
     );
     const declaration = buildExecDescription(plan);
     expect(declaration).toContain('three consecutive Goal turns');
     expect(declaration).toContain('never for difficulty');
   });
 
+  it('routes the deferred Goal tool to the bridge in a default code-mode session', () => {
+    // The other corner, and the one production defaults to: the tool is
+    // deferred and `tool_search` is available, so the exec declaration drops
+    // its signature and points at the discovery path instead.
+    const plan = planCodeModeBindings(
+      [new UpdateGoalTool(makeConfig({}))],
+      () => true,
+    );
+    const declaration = buildExecDescription(plan, true);
+    expect(declaration).toContain(
+      'Deferred tool signatures and descriptions are omitted below',
+    );
+    expect(declaration).not.toContain('three consecutive Goal turns');
+  });
+
   it('repairs a mistyped value on the object the invocation executes with, deprecated key or not', async () => {
     // The schema validator coerces in place (a self-hosted model can send a
     // number for a string); the strip of a deprecated key must not leave that
     // repair on a copy that is then discarded.
-    const recordTerminalProposal = vi.fn().mockReturnValue({
-      recorded: true,
-      readyForVerification: true,
-    });
-    const tool = new UpdateGoalTool(
-      makeConfig({
-        getGoalForWorker: vi.fn().mockResolvedValue({
-          goalId: permit.goalId,
-          revision: permit.revision,
-          objective: 'Deliver the result',
-          evidenceCursor: { recordId: 'goal-created' },
-        }),
-        getSnapshotForPermit: vi.fn(() => activeSnapshot()),
-        recordTerminalProposal,
-      }),
-    );
-    const invocation = goalTurnContext.run(permit, () =>
-      tool.build({
+    const recordTerminalProposal = recorded();
+    const invocation = buildUpdate(
+      makeConfig(permittedRuntime(recordTerminalProposal)),
+      permit,
+      {
         status: 'complete',
         reason: 42,
         evidenceRefs: ['stale-reference-from-an-older-contract'],
-      } as never),
+      } as never,
     );
 
     await invocation.execute(new AbortController().signal);
@@ -617,30 +653,15 @@ describe('UpdateGoalTool', () => {
   });
 
   it('records the proposal without references and without reading a catalog', async () => {
-    const recordTerminalProposal = vi.fn().mockReturnValue({
-      recorded: true,
-      readyForVerification: true,
-    });
-    const getGoalForWorker = vi.fn().mockResolvedValue({
-      goalId: permit.goalId,
-      revision: permit.revision,
-      objective: 'Deliver the result',
-      evidenceCursor: { recordId: 'goal-created' },
-    });
-    const getSnapshotForPermit = vi.fn(() => activeSnapshot());
-    const tool = new UpdateGoalTool(
-      makeConfig({
-        getGoalForWorker,
-        getSnapshotForPermit,
-        recordTerminalProposal,
-      }),
-    );
-    const invocation = goalTurnContext.run(permit, () =>
-      tool.build({
+    const recordTerminalProposal = recorded();
+    const invocation = buildUpdate(
+      makeConfig(permittedRuntime(recordTerminalProposal)),
+      permit,
+      {
         status: 'complete',
         reason: '  Focused tests passed  ',
         evidenceRefs: ['stale-reference-from-an-older-contract'],
-      }),
+      },
     );
 
     const result = await invocation.execute(new AbortController().signal);
@@ -662,13 +683,10 @@ describe('UpdateGoalTool', () => {
 
   it('records one proposal while leaving the Goal active', async () => {
     const { runtime, permit: activePermit } = await activeRuntime();
-    const tool = new UpdateGoalTool(makeConfig(runtime));
-    const invocation = goalTurnContext.run(activePermit, () =>
-      tool.build({
-        status: 'complete',
-        reason: 'Focused tests passed',
-        evidenceRefs: ['tool-result-1'],
-      }),
+    const invocation = buildUpdate(
+      makeConfig(runtime),
+      activePermit,
+      focusedProposal(),
     );
 
     const result = await invocation.execute(new AbortController().signal);
@@ -723,13 +741,7 @@ describe('UpdateGoalTool', () => {
     const { runtime, permit: activePermit } = await activeRuntime();
     const tool = new UpdateGoalTool(makeConfig(runtime));
     const build = () =>
-      goalTurnContext.run(activePermit, () =>
-        tool.build({
-          status: 'complete',
-          reason: 'Focused tests passed',
-          evidenceRefs: ['tool-result-1'],
-        }),
-      );
+      goalTurnContext.run(activePermit, () => tool.build(focusedProposal()));
 
     await build().execute(new AbortController().signal);
     const second = await build().execute(new AbortController().signal);
@@ -748,23 +760,15 @@ describe('UpdateGoalTool', () => {
 
   it('rejects a proposal after pause invalidates its permit', async () => {
     const { runtime, permit: activePermit } = await activeRuntime();
-    const invocation = goalTurnContext.run(activePermit, () =>
-      new UpdateGoalTool(makeConfig(runtime)).build({
-        status: 'blocked',
-        reason: 'Needs authority',
-        evidenceRefs: ['user-request-1'],
-        blockerKind: 'authority',
-      }),
-    );
-    await runtime.dispatch({
-      action: 'pause',
-      expectedGoalId: activePermit.goalId,
-      expectedRevision: activePermit.revision,
+    const invocation = buildUpdate(makeConfig(runtime), activePermit, {
+      status: 'blocked',
+      reason: 'Needs authority',
+      evidenceRefs: ['user-request-1'],
+      blockerKind: 'authority',
     });
+    await pauseGoal(runtime, activePermit);
 
-    await expect(
-      invocation.execute(new AbortController().signal),
-    ).rejects.toThrow('Goal turn permit is no longer valid');
+    await expectStale(invocation);
     expect(runtime.getSnapshot().goal?.status).toBe('paused');
   });
 
@@ -773,50 +777,35 @@ describe('UpdateGoalTool', () => {
     const build = (params: Parameters<typeof tool.build>[0]) =>
       goalTurnContext.run(permit, () => tool.build(params));
 
-    expect(() =>
-      build({
+    const accepted: UpdateGoalToolParams[] = [
+      {
         status: 'complete',
         reason: 'x'.repeat(GOAL_PROPOSAL_REASON_MAX_CHARACTERS),
-      }),
-    ).not.toThrow();
-    expect(() =>
-      build({
+      },
+      {
         status: 'complete',
         reason: 'é'.repeat(GOAL_PROPOSAL_REASON_MAX_BYTES / 2),
-      }),
-    ).not.toThrow();
-    expect(() =>
-      build({ status: 'blocked', reason: 'Waiting for authority' }),
-    ).not.toThrow();
-    expect(() =>
-      build({
-        status: 'blocked',
-        reason: 'Waiting for authority',
-        evidenceRefs: [],
-      }),
-    ).not.toThrow();
-    expect(() =>
-      build({
+      },
+      { status: 'blocked', reason: 'Waiting for authority' },
+      { status: 'blocked', reason: 'Waiting for authority', evidenceRefs: [] },
+      {
         status: 'complete',
         reason: 'Focused tests passed',
         evidenceRefs: ['same-reference', ' same-reference '],
-      }),
-    ).not.toThrow();
-    expect(() => build({ status: 'complete', reason: '   ' })).toThrow(
-      /reason/i,
-    );
-    expect(() =>
-      build({
-        status: 'complete',
-        reason: 'x'.repeat(GOAL_PROPOSAL_REASON_MAX_CHARACTERS + 1),
-      }),
-    ).toThrow(/characters/i);
-    expect(() =>
-      build({
-        status: 'complete',
-        reason: '界'.repeat(Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3) + 1),
-      }),
-    ).toThrow(/UTF-8 bytes/i);
+      },
+    ];
+    for (const params of accepted) expect(() => build(params)).not.toThrow();
+    const rejected: Array<[string, RegExp]> = [
+      ['   ', /reason/i],
+      ['x'.repeat(GOAL_PROPOSAL_REASON_MAX_CHARACTERS + 1), /characters/i],
+      [
+        '界'.repeat(Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3) + 1),
+        /UTF-8 bytes/i,
+      ],
+    ];
+    for (const [reason, error] of rejected) {
+      expect(() => build({ status: 'complete', reason })).toThrow(error);
+    }
   });
 
   it.each(['edit', 'replace', 'clear', 'finish'] as const)(
@@ -824,15 +813,11 @@ describe('UpdateGoalTool', () => {
     async (action) => {
       const { runtime, permit: activePermit } = await activeRuntime();
       const config = makeConfig(runtime);
-      const getInvocation = goalTurnContext.run(activePermit, () =>
-        new GetGoalTool(config).build({}),
-      );
-      const updateInvocation = goalTurnContext.run(activePermit, () =>
-        new UpdateGoalTool(config).build({
-          status: 'complete',
-          reason: 'Focused tests passed',
-          evidenceRefs: ['tool-result-1'],
-        }),
+      const getInvocation = buildGet(config, activePermit);
+      const updateInvocation = buildUpdate(
+        config,
+        activePermit,
+        focusedProposal(),
       );
 
       if (action === 'finish') {
@@ -852,12 +837,7 @@ describe('UpdateGoalTool', () => {
         });
       }
 
-      await expect(
-        getInvocation.execute(new AbortController().signal),
-      ).rejects.toThrow('Goal turn permit is no longer valid');
-      await expect(
-        updateInvocation.execute(new AbortController().signal),
-      ).rejects.toThrow('Goal turn permit is no longer valid');
+      await expectStale(getInvocation, updateInvocation);
     },
   );
 
@@ -881,24 +861,11 @@ describe('UpdateGoalTool', () => {
     } as unknown as GoalRuntime;
     const getGoalRuntime = vi.fn().mockReturnValue(oldRuntime);
     const config: GoalToolConfig = { getGoalRuntime };
-    const getInvocation = goalTurnContext.run(permit, () =>
-      new GetGoalTool(config).build({}),
-    );
-    const updateInvocation = goalTurnContext.run(permit, () =>
-      new UpdateGoalTool(config).build({
-        status: 'complete',
-        reason: 'done',
-        evidenceRefs: ['evidence-1'],
-      }),
-    );
+    const getInvocation = buildGet(config);
+    const updateInvocation = buildUpdate(config);
     getGoalRuntime.mockReturnValue(newRuntime);
 
-    await expect(
-      getInvocation.execute(new AbortController().signal),
-    ).rejects.toThrow('Goal turn permit is no longer valid');
-    await expect(
-      updateInvocation.execute(new AbortController().signal),
-    ).rejects.toThrow('Goal turn permit is no longer valid');
+    await expectStale(getInvocation, updateInvocation);
     expect(oldGetGoalForWorker).toHaveBeenCalledTimes(2);
     expect(newGetGoalForWorker).not.toHaveBeenCalled();
     expect(getGoalRuntime).toHaveBeenCalledTimes(2);
@@ -912,16 +879,8 @@ describe('UpdateGoalTool', () => {
       recordTerminalProposal: vi.fn(),
     } as unknown as GoalRuntime;
     const config = makeConfig(runtime);
-    const getInvocation = goalTurnContext.run(permit, () =>
-      new GetGoalTool(config).build({}),
-    );
-    const updateInvocation = goalTurnContext.run(permit, () =>
-      new UpdateGoalTool(config).build({
-        status: 'complete',
-        reason: 'done',
-        evidenceRefs: ['evidence-1'],
-      }),
-    );
+    const getInvocation = buildGet(config);
+    const updateInvocation = buildUpdate(config);
 
     await expect(
       getInvocation.execute(new AbortController().signal),
@@ -934,12 +893,7 @@ describe('UpdateGoalTool', () => {
   });
 
   it('honors cancellation before recording an update proposal', async () => {
-    const workerRead = deferred<{
-      goalId: string;
-      revision: number;
-      objective: string;
-      evidenceCursor: { recordId: string };
-    }>();
+    const workerRead = deferred<ReturnType<typeof workerView>>();
     const recordTerminalProposal = vi.fn();
     const getGoalForWorker = vi.fn(() => workerRead.promise);
     const runtime = {
@@ -947,13 +901,7 @@ describe('UpdateGoalTool', () => {
       getSnapshotForPermit: vi.fn(),
       recordTerminalProposal,
     };
-    const invocation = goalTurnContext.run(permit, () =>
-      new UpdateGoalTool(makeConfig(runtime)).build({
-        status: 'complete',
-        reason: 'done',
-        evidenceRefs: ['evidence-1'],
-      }),
-    );
+    const invocation = buildUpdate(makeConfig(runtime));
     const controller = new AbortController();
     const execution = invocation.execute(controller.signal);
     await vi.waitFor(() => expect(getGoalForWorker).toHaveBeenCalledOnce());
@@ -961,12 +909,7 @@ describe('UpdateGoalTool', () => {
     controller.abort(new Error('cancelled'));
 
     await expect(execution).rejects.toThrow('cancelled');
-    workerRead.resolve({
-      goalId: permit.goalId,
-      revision: permit.revision,
-      objective: 'Ship Goal v3',
-      evidenceCursor: { recordId: 'cursor' },
-    });
+    workerRead.resolve(workerView('Ship Goal v3', 'cursor'));
     await Promise.resolve();
     expect(recordTerminalProposal).not.toHaveBeenCalled();
   });
@@ -974,18 +917,11 @@ describe('UpdateGoalTool', () => {
   it.each(['missing snapshot API', 'stale snapshot API'] as const)(
     'fails both tools closed with a stable stale-permit error for a %s',
     async (scenario) => {
-      const getGoalForWorker = vi.fn().mockResolvedValue({
-        goalId: permit.goalId,
-        revision: permit.revision,
-        objective: 'old session',
-        evidenceCursor: { recordId: 'old-cursor' },
-      });
-      const recordTerminalProposal = vi.fn().mockReturnValue({
-        recorded: true,
-        readyForVerification: true,
-      });
+      const recordTerminalProposal = recorded();
       const runtime = {
-        getGoalForWorker,
+        getGoalForWorker: vi
+          .fn()
+          .mockResolvedValue(workerView('old session', 'old-cursor')),
         recordTerminalProposal,
         ...(scenario === 'stale snapshot API'
           ? {
@@ -996,23 +932,10 @@ describe('UpdateGoalTool', () => {
           : {}),
       } as unknown as GoalRuntime;
       const config = makeConfig(runtime);
-      const getInvocation = goalTurnContext.run(permit, () =>
-        new GetGoalTool(config).build({}),
-      );
-      const updateInvocation = goalTurnContext.run(permit, () =>
-        new UpdateGoalTool(config).build({
-          status: 'complete',
-          reason: 'done',
-          evidenceRefs: ['evidence-1'],
-        }),
-      );
+      const getInvocation = buildGet(config);
+      const updateInvocation = buildUpdate(config);
 
-      await expect(
-        getInvocation.execute(new AbortController().signal),
-      ).rejects.toThrow('Goal turn permit is no longer valid');
-      await expect(
-        updateInvocation.execute(new AbortController().signal),
-      ).rejects.toThrow('Goal turn permit is no longer valid');
+      await expectStale(getInvocation, updateInvocation);
       expect(recordTerminalProposal).not.toHaveBeenCalled();
     },
   );
@@ -1025,22 +948,6 @@ describe('UpdateGoalTool', () => {
   ] as const)(
     'rejects a %s worker view with a mismatched %s after an exact snapshot check',
     async (toolName, mismatchedField) => {
-      const matchingSnapshot = {
-        v: 2 as const,
-        activity: 'running' as const,
-        goal: {
-          goalId: permit.goalId,
-          revision: permit.revision,
-          objective: 'permitted goal',
-          status: 'active' as const,
-          evidenceCursor: { recordId: 'cursor-1' },
-          turnCount: 1,
-          activeTimeMs: 0,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      };
       const getGoalForWorker = vi.fn().mockResolvedValue({
         goalId: mismatchedField === 'goalId' ? 'different-goal' : permit.goalId,
         revision:
@@ -1053,23 +960,14 @@ describe('UpdateGoalTool', () => {
       const recordTerminalProposal = vi.fn();
       const runtime = {
         getGoalForWorker,
-        getSnapshotForPermit: vi.fn(() => structuredClone(matchingSnapshot)),
+        getSnapshotForPermit: vi.fn(() => permittedSnapshot()),
         recordTerminalProposal,
       };
       const config = makeConfig(runtime);
-      const invocation = goalTurnContext.run(permit, () =>
-        toolName === 'get_goal'
-          ? new GetGoalTool(config).build({})
-          : new UpdateGoalTool(config).build({
-              status: 'complete',
-              reason: 'done',
-              evidenceRefs: ['evidence-1'],
-            }),
-      );
 
-      await expect(
-        invocation.execute(new AbortController().signal),
-      ).rejects.toThrow('Goal turn permit is no longer valid');
+      await expectStale(
+        toolName === 'get_goal' ? buildGet(config) : buildUpdate(config),
+      );
       expect(recordTerminalProposal).not.toHaveBeenCalled();
     },
   );
@@ -1090,77 +988,36 @@ describe('UpdateGoalTool', () => {
         runtime,
         'recordTerminalProposal',
       );
-      const invocation = goalTurnContext.run(activePermit, () =>
-        toolName === 'get_goal'
-          ? new GetGoalTool(makeConfig(runtime)).build({})
-          : new UpdateGoalTool(makeConfig(runtime)).build({
-              status: 'complete',
-              reason: 'done',
-              evidenceRefs: ['evidence-1'],
-            }),
-      );
+      const config = makeConfig(runtime);
 
-      await expect(
-        invocation.execute(new AbortController().signal),
-      ).rejects.toThrow('Goal turn permit is no longer valid');
+      await expectStale(
+        toolName === 'get_goal'
+          ? buildGet(config, activePermit)
+          : buildUpdate(config, activePermit),
+      );
       expect(recordTerminalProposal).not.toHaveBeenCalled();
     },
   );
 
   it('normalizes disposal from proposal recording', async () => {
     const runtime = {
-      getGoalForWorker: vi.fn().mockResolvedValue({
-        goalId: permit.goalId,
-        revision: permit.revision,
-        objective: 'permitted goal',
-        evidenceCursor: { recordId: 'cursor-1' },
-      }),
-      getSnapshotForPermit: vi.fn(() => ({
-        v: 2 as const,
-        activity: 'running' as const,
-        goal: {
-          goalId: permit.goalId,
-          revision: permit.revision,
-          objective: 'permitted goal',
-          status: 'active' as const,
-          evidenceCursor: { recordId: 'cursor-1' },
-          turnCount: 1,
-          activeTimeMs: 0,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      })),
+      getGoalForWorker: vi
+        .fn()
+        .mockResolvedValue(workerView('permitted goal', 'cursor-1')),
+      getSnapshotForPermit: vi.fn(() => permittedSnapshot()),
       recordTerminalProposal: vi.fn(() => {
         throw new Error('Goal runtime has been disposed');
       }),
     };
-    const invocation = goalTurnContext.run(permit, () =>
-      new UpdateGoalTool(makeConfig(runtime)).build({
-        status: 'complete',
-        reason: 'done',
-        evidenceRefs: ['evidence-1'],
-      }),
-    );
 
-    await expect(
-      invocation.execute(new AbortController().signal),
-    ).rejects.toThrow('Goal turn permit is no longer valid');
+    await expectStale(buildUpdate(makeConfig(runtime)));
   });
 
   it('does not expose Goal lifecycle controls through either invocation', async () => {
     const { runtime, permit: activePermit } = await activeRuntime();
     const dispatch = vi.spyOn(runtime, 'dispatch');
-    const getInvocation = goalTurnContext.run(activePermit, () =>
-      new GetGoalTool(makeConfig(runtime)).build({}),
-    );
-    const updateInvocation = goalTurnContext.run(activePermit, () =>
-      new UpdateGoalTool(makeConfig(runtime)).build({
-        status: 'complete',
-        reason: 'done',
-        evidenceRefs: ['evidence-1'],
-      }),
-    );
+    const getInvocation = buildGet(makeConfig(runtime), activePermit);
+    const updateInvocation = buildUpdate(makeConfig(runtime), activePermit);
 
     await getInvocation.execute(new AbortController().signal);
     await updateInvocation.execute(new AbortController().signal);
@@ -1229,11 +1086,28 @@ describe('ProposeGoalTool', () => {
     return { invocation, details };
   }
 
-  it('uses the canonical name, stays visible, and always goes through the dialog', async () => {
+  /** Proposes `objective` over an idle runtime and answers with `outcome`. */
+  async function proposeIdle(
+    outcome = ToolConfirmationOutcome.ProceedOnce,
+    overrides?: Partial<ProposeGoalToolConfig>,
+  ) {
+    const { runtime, host } = idleRuntime();
+    const config = proposeConfig(runtime, overrides);
+    const tool = new ProposeGoalTool(config);
+    return { runtime, host, config, tool, ...(await confirm(tool, outcome)) };
+  }
+
+  /** Opens the confirmation dialog for proposing `objective`. */
+  const openDialog = (config: ProposeGoalToolConfig, params = { objective }) =>
+    new ProposeGoalTool(config)
+      .build(params)
+      .getConfirmationDetails(new AbortController().signal);
+
+  it('uses the canonical name, stays deferred, and always goes through the dialog', async () => {
     const tool = new ProposeGoalTool(proposeConfig(idleRuntime().runtime));
     expect(tool.name).toBe(ToolNames.PROPOSE_GOAL);
     expect(tool.displayName).toBe(ToolDisplayNames.PROPOSE_GOAL);
-    expect(tool.shouldDefer).toBe(false);
+    expect(tool.shouldDefer).toBe(true);
 
     const invocation = tool.build({ objective });
     // Consent for an autonomous loop cannot come from a rule or an approval
@@ -1263,13 +1137,19 @@ describe('ProposeGoalTool', () => {
     ]) {
       expect(tool.description).toContain(fragment);
     }
-    const declaration = buildExecDescription(
-      planCodeModeBindings([tool], () => false),
-    );
+    const plan = planCodeModeBindings([tool], () => true);
+    const declaration = buildExecDescription(plan);
     expect(declaration).toContain('Done when');
     expect(declaration).toContain(
       String(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS),
     );
+    // A default code-mode session has the bridge, so the signature moves out
+    // of the exec declaration and the discovery path is announced instead.
+    const bridged = buildExecDescription(plan, true);
+    expect(bridged).toContain(
+      'Deferred tool signatures and descriptions are omitted below',
+    );
+    expect(bridged).not.toContain('Done when');
   });
 
   it('validates the objective', () => {
@@ -1297,11 +1177,19 @@ describe('ProposeGoalTool', () => {
   });
 
   it('keeps what the Goal tools cost every request inside a budget', () => {
-    // get_goal and update_goal are registered in every session, Goal or not,
-    // so their schemas ride along with every model request. The figure is
-    // what the three tools cost today plus room for a sentence; growing past
-    // it should be a decision, not drift. (5 860 before the descriptions
-    // were trimmed.)
+    // get_goal and update_goal are registered in every session, Goal or not.
+    // Since this change they are natively deferred, so their schemas ride
+    // along with a model request only once they are revealed or declared —
+    // an explicit reveal, `tools.visible`, the incomplete-bridge eager
+    // fallback, or the `tools.toolSearch.threshold` preload (which does cover
+    // natively deferred tools). Listing one in `tools.eager` does NOT force it
+    // resident: that allowlist only clears the permission-deferred flag, and
+    // these tools defer natively. The figure is what the three tools cost
+    // today plus room for a sentence; growing past it should be a decision, not
+    // drift. (5 860 before the descriptions were trimmed; the deferred
+    // discovery catalog renders `description.split('\n')[0]` only, so each
+    // description keeps one short self-contained first line and the body opens
+    // without restating it.)
     const tools = [
       new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
       new UpdateGoalTool(makeConfig({})),
@@ -1317,15 +1205,32 @@ describe('ProposeGoalTool', () => {
     expect(advertised.length).toBeLessThan(3_800);
   });
 
-  it('shows the objective in a plain-text info dialog and parks it on approval', async () => {
-    const { runtime, host } = idleRuntime();
-    const config = proposeConfig(runtime);
-    const tool = new ProposeGoalTool(config);
+  it('gives each Goal tool a catalog entry that is a whole first line', () => {
+    // A deferred tool's only up-front surface is its discovery-catalog entry,
+    // and `truncateDeferredToolDescription` (core/environmentContext.ts)
+    // renders that entry as `description.split('\n')[0]` capped at
+    // `MAX_DEFERRED_TOOL_DESC_LEN = 160`. A single-paragraph description would
+    // reach the model as a mid-clause slice dropping the clauses that gate the
+    // tool's use, so each one carries a short self-contained first line and
+    // keeps the full text below it, where `tool_search select:` still returns
+    // it verbatim.
+    const tools = [
+      new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
+      new UpdateGoalTool(makeConfig({})),
+      new ProposeGoalTool(proposeConfig(idleRuntime().runtime)),
+    ];
+    for (const tool of tools) {
+      const [firstLine, ...rest] = tool.description.split('\n');
+      // At or under the cap the catalog shows the line whole; over it the
+      // entry becomes the first 157 characters plus an ellipsis.
+      expect(firstLine!.length).toBeLessThanOrEqual(160);
+      expect(firstLine!.endsWith('.')).toBe(true);
+      expect(rest.join('\n').trim().length).toBeGreaterThan(0);
+    }
+  });
 
-    const { invocation, details } = await confirm(
-      tool,
-      ToolConfirmationOutcome.ProceedOnce,
-    );
+  it('shows the objective in a plain-text info dialog and parks it on approval', async () => {
+    const { runtime, host, config, invocation, details } = await proposeIdle();
     expect(details.type).toBe('info');
     if (details.type !== 'info') return;
     expect(details.renderPromptAsPlainText).toBe(true);
@@ -1395,16 +1300,12 @@ describe('ProposeGoalTool', () => {
     // hasPendingGoalProposal() re-check before either parks; the set-once
     // slot refuses the second, and execute() must surface that refusal
     // instead of reporting "approved".
-    const { runtime, host } = idleRuntime();
-    const config = proposeConfig(runtime, {
-      hasPendingGoalProposal: () => false,
-      setPendingGoalProposal: vi.fn(() => false),
-    });
-    const tool = new ProposeGoalTool(config);
-
-    const { invocation } = await confirm(
-      tool,
+    const { runtime, host, config, invocation } = await proposeIdle(
       ToolConfirmationOutcome.ProceedOnce,
+      {
+        hasPendingGoalProposal: () => false,
+        setPendingGoalProposal: vi.fn(() => false),
+      },
     );
     const result = await execute(invocation);
 
@@ -1416,13 +1317,7 @@ describe('ProposeGoalTool', () => {
   });
 
   it('refuses to park an approval it cannot bind to a turn', async () => {
-    const { runtime, host } = idleRuntime();
-    const config = proposeConfig(runtime);
-    const tool = new ProposeGoalTool(config);
-    const { invocation } = await confirm(
-      tool,
-      ToolConfirmationOutcome.ProceedOnce,
-    );
+    const { runtime, host, config, invocation } = await proposeIdle();
 
     // No scheduler prompt-id context: the settle boundary could not tell this
     // approval apart from a stale one, so it is refused instead of parked.
@@ -1436,17 +1331,15 @@ describe('ProposeGoalTool', () => {
   });
 
   it('refuses if a host runs it anyway after a cancelled dialog', async () => {
-    const { runtime, host } = idleRuntime();
-    const config = proposeConfig(runtime);
-    const tool = new ProposeGoalTool(config);
-
     // On the real path the scheduler settles a cancelled confirmation without
     // entering `execute()` at all -- that path is pinned by 'forwards the host
     // denial reason when a bounced edit confirmation is cancelled' in
     // coreToolScheduler.test.ts. What is checked here is the guard that stays
     // for a host which runs `execute()` anyway: the decline must refuse rather
     // than fall through to parking an approval.
-    const { invocation } = await confirm(tool, ToolConfirmationOutcome.Cancel);
+    const { runtime, host, config, invocation } = await proposeIdle(
+      ToolConfirmationOutcome.Cancel,
+    );
     const result = await execute(invocation);
 
     expect(config.setPendingGoalProposal).not.toHaveBeenCalled();
@@ -1461,32 +1354,21 @@ describe('ProposeGoalTool', () => {
 
   it('refuses before the dialog in plan mode, in an untrusted folder, and without persistence', async () => {
     const { runtime } = idleRuntime();
-    const signal = new AbortController().signal;
 
     await expect(
-      new ProposeGoalTool(
+      openDialog(
         proposeConfig(runtime, { getApprovalMode: () => ApprovalMode.PLAN }),
-      )
-        .build({ objective })
-        .getConfirmationDetails(signal),
+      ),
     ).rejects.toThrow(PROPOSE_GOAL_PLAN_MODE_MESSAGE);
-
     await expect(
-      new ProposeGoalTool(
-        proposeConfig(runtime, { isTrustedFolder: () => false }),
-      )
-        .build({ objective })
-        .getConfirmationDetails(signal),
+      openDialog(proposeConfig(runtime, { isTrustedFolder: () => false })),
     ).rejects.toThrow(PROPOSE_GOAL_UNTRUSTED_MESSAGE);
-
     await expect(
-      new ProposeGoalTool(
+      openDialog(
         proposeConfig(() => {
           throw new Error('no persistence');
         }),
-      )
-        .build({ objective })
-        .getConfirmationDetails(signal),
+      ),
     ).rejects.toThrow(PROPOSE_GOAL_UNAVAILABLE_MESSAGE);
 
     expect(runtime.getSnapshot().goal).toBeNull();
@@ -1501,32 +1383,22 @@ describe('ProposeGoalTool', () => {
         .mockRejectedValue(new Error('restore failed')),
     });
 
-    await expect(
-      new ProposeGoalTool(config)
-        .build({ objective })
-        .getConfirmationDetails(new AbortController().signal),
-    ).rejects.toThrow(PROPOSE_GOAL_UNAVAILABLE_MESSAGE);
+    await expect(openDialog(config)).rejects.toThrow(
+      PROPOSE_GOAL_UNAVAILABLE_MESSAGE,
+    );
   });
 
   it('refuses to replace an active Goal and points at /goal edit', async () => {
     const { runtime } = await activeRuntime();
-    const tool = new ProposeGoalTool(proposeConfig(runtime));
 
-    await expect(
-      tool
-        .build({ objective })
-        .getConfirmationDetails(new AbortController().signal),
-    ).rejects.toThrow('/goal edit');
+    await expect(openDialog(proposeConfig(runtime))).rejects.toThrow(
+      '/goal edit',
+    );
     expect(runtime.getSnapshot().goal?.objective).toBe('Ship Goal v3');
   });
 
   it('rechecks the active Goal after the dialog before parking approval', async () => {
-    const { runtime } = idleRuntime();
-    const config = proposeConfig(runtime);
-    const { invocation } = await confirm(
-      new ProposeGoalTool(config),
-      ToolConfirmationOutcome.ProceedOnce,
-    );
+    const { runtime, config, invocation } = await proposeIdle();
     await runtime.dispatch({ action: 'create', objective: 'Typed by hand' });
 
     const result = await execute(invocation);
@@ -1543,17 +1415,9 @@ describe('ProposeGoalTool', () => {
         'preserves the result of a concurrent %s',
         async (action) => {
           const { runtime, host } = idleRuntime();
-          const pauseCurrent = async () => {
-            const current = runtime.getSnapshot().goal!;
-            await runtime.dispatch({
-              action: 'pause',
-              expectedGoalId: current.goalId,
-              expectedRevision: current.revision,
-            });
-          };
           if (action !== 'create') {
             await runtime.dispatch({ action: 'create', objective: 'Original' });
-            await pauseCurrent();
+            await pauseGoal(runtime);
           }
           const config = proposeConfig(runtime);
           const invocation = new ProposeGoalTool(config).build({ objective });
@@ -1567,7 +1431,7 @@ describe('ProposeGoalTool', () => {
 
           if (action === 'create') {
             await runtime.dispatch({ action, objective: 'Concurrent' });
-            await pauseCurrent();
+            await pauseGoal(runtime);
           } else {
             const current = runtime.getSnapshot().goal!;
             const version = {
@@ -1579,7 +1443,7 @@ describe('ProposeGoalTool', () => {
                 ? { action, ...version }
                 : { action, objective: 'Concurrent', ...version },
             );
-            if (action === 'replace') await pauseCurrent();
+            if (action === 'replace') await pauseGoal(runtime);
           }
           const changed = runtime.getSnapshot().goal;
           const startedBefore = host.started.length;
@@ -1611,12 +1475,7 @@ describe('ProposeGoalTool', () => {
   it('replaces a stopped Goal when the parked approval is applied', async () => {
     const { runtime, host } = idleRuntime();
     await runtime.dispatch({ action: 'create', objective: 'Ship Goal v3' });
-    const paused = runtime.getSnapshot().goal!;
-    await runtime.dispatch({
-      action: 'pause',
-      expectedGoalId: paused.goalId,
-      expectedRevision: paused.revision,
-    });
+    const paused = await pauseGoal(runtime);
     expect(runtime.getSnapshot().goal?.status).toBe('paused');
     const startedBefore = host.started.length;
     const config = proposeConfig(runtime);
@@ -1648,13 +1507,7 @@ describe('ProposeGoalTool', () => {
   });
 
   it('does not set a parked approval over a Goal that became active meanwhile', async () => {
-    const { runtime } = idleRuntime();
-    const config = proposeConfig(runtime);
-    const tool = new ProposeGoalTool(config);
-    const { invocation } = await confirm(
-      tool,
-      ToolConfirmationOutcome.ProceedOnce,
-    );
+    const { runtime, config, invocation } = await proposeIdle();
     await execute(invocation);
 
     // The user typed `/goal set …` before the proposing turn ended.
@@ -1671,12 +1524,7 @@ describe('ProposeGoalTool', () => {
   it('does not replace a paused Goal resumed ahead of the proposal dispatch', async () => {
     const { runtime } = idleRuntime();
     await runtime.dispatch({ action: 'create', objective: 'Paused by user' });
-    const original = runtime.getSnapshot().goal!;
-    await runtime.dispatch({
-      action: 'pause',
-      expectedGoalId: original.goalId,
-      expectedRevision: original.revision,
-    });
+    const original = await pauseGoal(runtime);
 
     const resumed = runtime.dispatch({
       action: 'resume',
@@ -1712,12 +1560,7 @@ describe('ProposeGoalTool', () => {
   it('reports a conflict instead of throwing when the expected version moved', async () => {
     const { runtime } = idleRuntime();
     await runtime.dispatch({ action: 'create', objective: 'Ship Goal v3' });
-    const first = runtime.getSnapshot().goal!;
-    await runtime.dispatch({
-      action: 'pause',
-      expectedGoalId: first.goalId,
-      expectedRevision: first.revision,
-    });
+    await pauseGoal(runtime);
     const paused = runtime.getSnapshot().goal!;
     const stale = {
       getSnapshot: () => ({

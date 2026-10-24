@@ -40,10 +40,10 @@ const LANES = ['test_macos', 'test_windows'];
 const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
-// The extended ceilings are scoped to the ECS pool: `runs-on` falls back to
-// ubuntu-latest for fork PRs from untrusted authors and when
-// MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths keep the
-// pre-contention ceiling. Evaluate the real timeout expression for both
+// The extended ceilings below, except the test lane's, are scoped to the ECS
+// pool: `runs-on` falls back to ubuntu-latest for fork PRs from untrusted
+// authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths
+// keep the pre-contention ceiling. Evaluate the real timeout expression for both
 // routings instead of pinning a bare number -- the same
 // substitute-then-evaluate technique
 // `.github/scripts/ci-runner-routing.test.mjs` uses on `runs-on` -- so a
@@ -71,13 +71,138 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
   return Number(new Function(`return (${expr});`)());
 };
 
-it('keeps the shared Linux test lane above its contention budget on ECS', () => {
-  expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
+describe('raw JUnit report retention', () => {
+  const steps = ci.jobs.test.steps;
+  const upload = steps.find(
+    (step) => step.name === 'Upload Test Results Artifact',
+  );
+  // The rule `gateRunsOn` states for itself applies here too: a context term
+  // these stubs do not model must throw rather than read as `undefined`,
+  // where an inequality such as `x != true` would silently evaluate true.
+  const loud = (value, path) =>
+    typeof value !== 'object' || value === null
+      ? value
+      : new Proxy(value, {
+          get: (target, key) => {
+            if (typeof key === 'symbol' || key in target) {
+              return loud(target[key], `${path}${String(key)}.`);
+            }
+            throw new Error(
+              `gate carries a term this guard does not model: ${path}${String(key)}`,
+            );
+          },
+        });
+
+  const evaluate = (expression, event, headRepo, skipCi, profile) =>
+    new Function(
+      'github',
+      'needs',
+      'steps',
+      'always',
+      `return (${expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '')});`,
+    )(
+      loud(
+        {
+          event_name: event,
+          repository: 'QwenLM/qwen-code',
+          event: { pull_request: { head: { repo: { full_name: headRepo } } } },
+        },
+        'github.',
+      ),
+      loud({ classify_pr: { outputs: { skip_ci: skipCi } } }, 'needs.'),
+      loud({ ci_profile: { outputs: { ci_profile: profile } } }, 'steps.'),
+      () => true,
+    );
+
+  it.each([
+    [
+      'pull_request',
+      'contributor/qwen-code',
+      'test-results-fork-22.x-ubuntu-latest',
+    ],
+    ['pull_request', 'QwenLM/qwen-code', 'test-results-22.x-ubuntu-latest'],
+    ['push', '', 'test-results-22.x-ubuntu-latest'],
+  ])(
+    'retains reports for %s from %s, including failed runs',
+    (event, repo, name) => {
+      expect(upload.if).toContain('always()');
+      expect(evaluate(upload.if, event, repo, 'false', 'full')).toBe(true);
+      expect(evaluate(upload.with.name, event, repo, 'false', 'full')).toBe(
+        name,
+      );
+      expect(evaluate(upload.if, event, repo, 'true', 'full')).toBe(false);
+      expect(evaluate(upload.if, event, repo, 'false', 'web-shell-only')).toBe(
+        false,
+      );
+      expect(evaluate(upload.if, event, repo, 'false', '')).toBe(false);
+    },
+  );
+
+  it('uploads raw XML for seven days without requiring a report to exist', () => {
+    // Pinned to the 40-hex SHA, not the bare action name: this step now runs
+    // on every full-profile lane inside a job holding `checks: write`, so a
+    // relaxation to a mutable tag must not pass unnoticed.
+    expect(upload.uses).toMatch(/^actions\/upload-artifact@[0-9a-f]{40}$/);
+    expect(upload.with.path).toBe('packages/*/junit.xml');
+    expect(upload.with['retention-days']).toBe(7);
+    expect(upload.with['if-no-files-found']).toBe('ignore');
+  });
+
+  it('throws on a context term the stubs do not model', () => {
+    // An inequality over an unmodelled term would otherwise read `undefined`
+    // and pass: `undefined != true` is true, so all three rows above would
+    // stay green while asserting nothing about the new term.
+    expect(() =>
+      evaluate(
+        '${{ github.event.pull_request.draft != true }}',
+        'push',
+        '',
+        'false',
+        'full',
+      ),
+    ).toThrow(/does not model/);
+  });
+
+  it('keeps report publication advisory and unit-test failures blocking', () => {
+    const publisher = steps.find(
+      (step) => step.name === 'Publish Test Report (for non-forks)',
+    );
+    const unitTests = steps.find((step) => step.id === 'unit_tests');
+    expect(publisher['continue-on-error']).toBe(true);
+    expect(publisher.with['fail-on-error']).toBe('false');
+    expect(upload['continue-on-error']).toBe(true);
+    expect(unitTests['continue-on-error']).not.toBe(true);
+    expect(unitTests.run).toContain('exit "$RC"');
+    expect(steps.indexOf(upload)).toBeGreaterThan(steps.indexOf(publisher));
+  });
 });
 
-it('keeps the shared Linux test lane on its pre-contention ceiling when hosted', () => {
-  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(60);
-  expect(timeoutMinutesOn('test', '')).toBe(60);
+// The smoke lane keeps the classifier's trust decision and hosted overrides
+// but picks its own architecture, so its `runs-on` cannot be compared with
+// another lane's. Evaluate the real expression the way
+// `.github/scripts/ci-runner-routing.test.mjs` does.
+const runnerOn = (job, ubuntuRunner) => {
+  const expression = String(ci.jobs[job]['runs-on'])
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '');
+  return new Function(
+    'needs',
+    'fromJSON',
+    'contains',
+    `return (${expression});`,
+  )(
+    { classify_pr: { outputs: { ubuntu_runner: ubuntuRunner } } },
+    JSON.parse,
+    (labels, label) => labels.includes(label),
+  );
+};
+
+it('gives the shared Linux test lane one ceiling on both pools', () => {
+  // The full suite outgrew 60 minutes on hosted runners too: on 2026-10-17,
+  // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
+  expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
+  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(120);
+  expect(timeoutMinutesOn('test', '')).toBe(120);
 });
 
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
@@ -102,15 +227,33 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
   expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
-it('keeps browser gates hosted independently of the shared Linux runner', () => {
-  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
-  // 30, not 20: at 184 smoke tests plus ~7.5 min of setup, passing runs hit
-  // 20 flat (tests done at 20:07:49, cancelled 20:07:53; the last of 184
-  // still running at 02:04:58, cancelled 02:05:04). Sharding is the fix at
-  // the source once the suite keeps growing.
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(30);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(30);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(30);
+it('routes the browser smoke to ARM64 independently of the shared Linux test lane', () => {
+  // The lane keeps the classifier's trust decision and hosted overrides, but
+  // it no longer inherits the ordinary Linux fleet's architecture.
+  expect(runnerOn('web_shell_e2e_smoke', ECS_RUNNER)).toEqual([
+    'self-hosted',
+    'linux',
+    'arm64',
+  ]);
+  expect(runnerOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toEqual([
+    'ubuntu-latest',
+  ]);
+  // A missing classifier output (classify_pr skipped) is the hosted routing.
+  expect(runnerOn('web_shell_e2e_smoke', '')).toEqual(['ubuntu-latest']);
+  const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Run web-shell browser smoke',
+  );
+  expect(smoke.run).toMatch(/ -- --workers=2$/);
+  // Slow hosted browser installs took over 23 min, so reserve time in the
+  // 60-minute job for transcript/smoke tests and artifact upload, while the
+  // install step itself stays bounded.
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(60);
+  const hostedInstall = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Install Playwright Chromium and WebKit (hosted)',
+  );
+  expect(hostedInstall['timeout-minutes']).toBe(30);
 });
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
@@ -144,7 +287,7 @@ const gateRunsOn = (cond, event) => {
     // evaluates here at the pin and may mis-report its reachability —
     // re-derive this helper's verdict before adding such a gate.
     [/needs\.classify_pr\.outputs\.skip_ci/g, '"false"'],
-    [/needs\.test\.outputs\.ci_profile/g, '"full"'],
+    [/needs\.classify_pr\.outputs\.ci_profile/g, '"full"'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name/g,
       event === 'pull_request' ? '"QwenLM/qwen-code"' : '""',
@@ -373,7 +516,11 @@ describe('post-merge push lane', () => {
     // dispatch and push; widening this — say by copying `test`'s block when
     // adding a reporter — hands write tokens to that code. `test`'s own
     // wider block is legitimate: dorny/test-reporter needs `checks: write`.
-    expect(ci.jobs.lint_and_static.permissions).toEqual({ contents: 'read' });
+    // The contract guard reads the PR file list; it needs no write access.
+    expect(ci.jobs.lint_and_static.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'read',
+    });
   });
 
   it('keeps every shared prelude step identical between test and lint_and_static', () => {
@@ -409,6 +556,17 @@ describe('post-merge push lane', () => {
       new Map(
         (ci.jobs[job].steps ?? []).map((s) => {
           const { name: _artifactName, ...restWith } = s.with ?? {};
+          if (job === 'lint_and_static' && s.name === 'Install dependencies') {
+            expect(s.env).toEqual({
+              QWEN_SKIP_PREPARE: '1',
+              QWEN_SKIP_NOTICE_GENERATION: '1',
+            });
+            const { env: _installEnv, ...install } = s;
+            return [
+              s.name,
+              JSON.stringify(canon({ ...install, with: restWith })),
+            ];
+          }
           return [s.name, JSON.stringify(canon({ ...s, with: restWith }))];
         }),
       );
@@ -447,8 +605,43 @@ describe('post-merge push lane', () => {
       'shared prelude reordered between the two jobs',
     ).toEqual(namesIn('test').filter((n) => sharedSet.has(n)));
     const lintNames = namesIn('lint_and_static');
+    expect(ci.jobs.lint_and_static.env?.QWEN_SKIP_PREPARE).toBeUndefined();
+    expect(
+      ci.jobs.lint_and_static.env?.QWEN_SKIP_NOTICE_GENERATION,
+    ).toBeUndefined();
+    expect(
+      lintNames.indexOf('Check serve fast-path bundle closure'),
+    ).toBeLessThan(lintNames.indexOf('Run i18n check'));
     expect(lintNames.indexOf('Use trusted CI profile')).toBeLessThan(
       lintNames.indexOf('Install dependencies'),
+    );
+    // The incremental opt-in is two pieces — the job-level LINT_BASE_SHA
+    // binding and the history fetch — and neither was pinned: dropping the
+    // env, deleting the step or reordering it left every suite green while
+    // each PR quietly paid for the whole-repository scan this feature exists
+    // to remove (full scanning IS the designed fallback).
+    expect(String(ci.jobs.lint_and_static.env?.LINT_BASE_SHA)).toContain(
+      'github.event.pull_request.base.sha',
+    );
+    const lintStep = (name) => {
+      const index = lintNames.indexOf(name);
+      expect(index, `step "${name}" is missing`).toBeGreaterThan(-1);
+      return index;
+    };
+    // Both steps above refetch shallow history, and a depth-1 fetch of the
+    // base ref grafts the very commit LINT_BASE_SHA names: `merge-base` then
+    // has no ancestry to walk and lint-scope falls back to a full scan.
+    for (const refetch of [
+      'Check the API contract version advances',
+      'Report test growth',
+    ]) {
+      expect(
+        lintStep('Fetch incremental lint history'),
+        `"Fetch incremental lint history" must stay below "${refetch}"`,
+      ).toBeGreaterThan(lintStep(refetch));
+    }
+    expect(lintStep('Fetch incremental lint history')).toBeLessThan(
+      lintStep('Install linters'),
     );
   });
 
@@ -476,13 +669,13 @@ describe('post-merge push lane', () => {
       'Run yamllint',
       'Run Prettier',
       'Run sensitive keyword linter',
+      'Check serve fast-path bundle closure',
+      'Check core subpath exports resolve',
       'Run i18n check',
       'Generate settings schema',
       'Check settings schema is up-to-date',
-      'Generate VS Code companion notices',
-      'Check VS Code companion notices are up-to-date',
-      'Check serve fast-path bundle closure',
-      'Check core subpath exports resolve',
+      'Generate Web Shell and VS Code companion notices',
+      'Check Web Shell and VS Code companion notices are up-to-date',
       'Run .github/scripts helper tests',
     ];
     const steps = ci.jobs.lint_and_static.steps ?? [];
@@ -500,6 +693,30 @@ describe('post-merge push lane', () => {
         )
         .map((x) => x.name),
     ).toEqual(FULL_PAYLOAD);
+    const generateNotices = stepByName.get(
+      'Generate Web Shell and VS Code companion notices',
+    ).run;
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=@qwen-code/web-shell',
+    );
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=qwen-code-vscode-ide-companion',
+    );
+    expect(
+      stepByName.get(
+        'Check Web Shell and VS Code companion notices are up-to-date',
+      ).run,
+    ).toContain(
+      'git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt',
+    );
+    const checkNotices = stepByName.get(
+      'Check Web Shell and VS Code companion notices are up-to-date',
+    );
+    expect(checkNotices['continue-on-error']).toBeUndefined();
+    expect(checkNotices.run).toContain(
+      'if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt) ]]; then',
+    );
+    expect(checkNotices.run).toContain('exit 1');
     for (const n of FULL_PAYLOAD) {
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
     }
@@ -609,10 +826,16 @@ describe('post-merge push lane', () => {
     // the most common head_ref there is. Dropping the ref half entirely would
     // collapse every PR into one group and leave this suite green.
     //
-    // cancel-in-progress: flipping it to `true` was measured to be invisible
-    // to all 1854 test:scripts tests, while consecutive merges would cancel
-    // each other — the history this repo already recorded once, when 67 of
-    // 100 push runs were cancelled and only 25 ever reported.
+    // cancel-in-progress: `main` stays out of cancellation on purpose, not by
+    // accident. A shared group holds at most one running plus one pending run,
+    // and a newer pending run REPLACES the older one even while this reads
+    // `false`, so back-to-back merges still coalesce onto the newest tree —
+    // but the in-flight run always finishes and reports, which matters
+    // because with no merge queue this lane is the only fast witness of a
+    // merged tree and its coverage upload is `always()`-gated. The history of
+    // flipping it the other way is recorded once already: 67 of 100 push runs
+    // cancelled and only 25 ever reported (#5859). Pinning the literal keeps
+    // a later "make main cancellable" change from landing unnoticed.
     expect(String(ci.concurrency.group)).toBe(
       '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}',
     );

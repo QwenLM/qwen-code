@@ -11,7 +11,9 @@ import {
   handleManagedRuntimeJsonError,
   managedRuntimeJsonBody,
   managedRuntimeNoStore,
+  nameManagedRuntimeIncarnation,
   OWNED_MANAGED_RUNTIME_ROUTES,
+  type ManagedRuntimeAttestationIdentity,
   type ManagedRuntimeRequestIdentity,
 } from './managed-runtime-attestation-contract.js';
 import {
@@ -19,8 +21,10 @@ import {
   ManagedToolInvalidError,
   ManagedToolUnavailableError,
   type ManagedToolExecutor,
+  ManagedMcpToolUnknownError,
   type ManagedToolReference,
 } from './managed-runtime-tool-executor.js';
+import { ManagedMcpError } from './managed-mcp-runtime.js';
 
 const REFERENCE_KEYS = Object.freeze([
   'argsDigest',
@@ -90,7 +94,8 @@ function invalid(res: express.Response): void {
 /** Mounts the v2 execute/status/cancel routes with the shared discipline. */
 export function registerManagedRuntimeToolRoutes(
   app: Application,
-  identity: ManagedRuntimeRequestIdentity,
+  identity: ManagedRuntimeRequestIdentity &
+    Pick<ManagedRuntimeAttestationIdentity, 'runtimeIncarnation'>,
   executor: ManagedToolExecutor,
 ): void {
   const routes = new Map(
@@ -103,6 +108,7 @@ export function registerManagedRuntimeToolRoutes(
     routes.get('execute')!.path,
     managedRuntimeNoStore,
     authorizeManagedRuntime(identity),
+    nameManagedRuntimeIncarnation(identity),
     managedRuntimeJsonBody(routes.get('execute')!.requestBodyLimitBytes),
     async (req: express.Request, res: express.Response) => {
       const body = parseClosedBody(req.body, [
@@ -140,6 +146,14 @@ export function registerManagedRuntimeToolRoutes(
         );
         res.status(200).json({ protocolVersion: 2, state: 'settled', result });
       } catch (error) {
+        if (error instanceof ManagedMcpError) {
+          res.status(400).json({ code: error.code });
+          return;
+        }
+        if (error instanceof ManagedMcpToolUnknownError) {
+          res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+          return;
+        }
         if (error instanceof ManagedToolInvalidError) {
           invalid(res);
           return;
@@ -161,6 +175,7 @@ export function registerManagedRuntimeToolRoutes(
     routes.get('status')!.path,
     managedRuntimeNoStore,
     authorizeManagedRuntime(identity),
+    nameManagedRuntimeIncarnation(identity),
     managedRuntimeJsonBody(routes.get('status')!.requestBodyLimitBytes),
     (req: express.Request, res: express.Response) => {
       const body = parseClosedBody(
@@ -208,6 +223,7 @@ export function registerManagedRuntimeToolRoutes(
     routes.get('cancel')!.path,
     managedRuntimeNoStore,
     authorizeManagedRuntime(identity),
+    nameManagedRuntimeIncarnation(identity),
     managedRuntimeJsonBody(routes.get('cancel')!.requestBodyLimitBytes),
     (req: express.Request, res: express.Response) => {
       const body = parseClosedBody(req.body, ['protocolVersion', 'reference']);
@@ -226,6 +242,40 @@ export function registerManagedRuntimeToolRoutes(
           protocolVersion: 2,
           state: view.state,
           ...(view.state === 'settled' ? { result: view.result } : {}),
+        });
+      } catch (error) {
+        if (error instanceof ManagedToolConflictError) {
+          res.status(409).json({ code: error.code, error: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+    handleManagedRuntimeJsonError,
+  );
+
+  app.post(
+    routes.get('acknowledge')!.path,
+    managedRuntimeNoStore,
+    authorizeManagedRuntime(identity),
+    nameManagedRuntimeIncarnation(identity),
+    managedRuntimeJsonBody(routes.get('acknowledge')!.requestBodyLimitBytes),
+    (req: express.Request, res: express.Response) => {
+      const body = parseClosedBody(req.body, ['protocolVersion', 'reference']);
+      const reference = body && parseReference(body['reference']);
+      if (!body || !reference) {
+        invalid(res);
+        return;
+      }
+      try {
+        const view = executor.acknowledge(reference);
+        if (!view) {
+          res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+          return;
+        }
+        res.status(200).json({
+          protocolVersion: 2,
+          state: view.state,
         });
       } catch (error) {
         if (error instanceof ManagedToolConflictError) {

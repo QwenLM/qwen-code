@@ -8,6 +8,10 @@
 // Deutsche Übersetzungen für Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Aktiviert die integrierte Generated UI in unterstützten lokalen Sitzungen. Starten Sie die zugehörige Sitzung neu, um Änderungen anzuwenden.',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -169,6 +173,8 @@ export default {
     'Das Zurückspulen wirkt sich nicht auf Dateien aus, die manuell oder per Shell-Befehl geändert wurden.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Zu einem komprimierten Turn kann nicht zurückgespult werden. Bitte einen aktuelleren Turn versuchen.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Die Unterhaltung kann nicht zu diesem Turn zurückgespult werden: Er passt nicht mehr zum Modellverlauf (z. B. nach einem erneuten Versuch). Bitte einen aktuelleren Turn versuchen.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'Datei-Wiederherstellung ist für diesen Turn nicht verfügbar (keine erfassten Dateiänderungen, oder dieser Turn liegt vor der aktuellen Sitzung).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -2135,6 +2141,10 @@ export default {
   'to retry last request': 'um die letzte Anfrage erneut zu versuchen',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'Ungültiger API Key. Coding Plan API Keys beginnen mit "sk-sp-". Bitte prüfen.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'Ungültiger API Key. Pay-as-you-go-Keys beginnen mit "sk-" oder "sk-ws-". Token Plan Keys ("sk-sp-") benötigen den Token Plan Eintrag.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'Ungültiger API Key. Token Plan API Keys beginnen mit "sk-sp-". Erstellen Sie einen in der Token Plan Konsole oder verwenden Sie den Standard API Key Eintrag für einen Pay-as-you-go-Key.',
   'Lock release warning': 'Warnung zur Sperrfreigabe',
   'Metadata write warning': 'Warnung beim Schreiben der Metadaten',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":

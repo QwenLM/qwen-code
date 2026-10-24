@@ -65,6 +65,7 @@ import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { extensionComponentsSummary } from '../../services/extension-components-summary.js';
+import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
@@ -97,6 +98,8 @@ function advisorSelector(
   model: NonNullable<OpenTuiModelEntry['model']>,
 ): string {
   const selector = `${model.authType}:${model.id}`;
+  // Registry-exact, matching the ink dialog's list key: this selector is both
+  // the row key and the persisted value, and consumers compare it with `===`.
   return model.isRuntimeModel
     ? selector
     : `${selector}\0${model.registryBaseUrl ?? ''}`;
@@ -221,6 +224,32 @@ export function resolveModelPersistScope(
   if (persistScope === 'workspace') return SettingScope.Workspace;
   if (persistScope === 'user') return SettingScope.User;
   return getPersistScopeForModelSelection(settings);
+}
+
+/**
+ * Parity of `shareableAuxSelector` in ModelDialog.tsx: workspace settings are
+ * shareable (`<project>/.qwen/settings.json` gets committed), so only a
+ * provably public endpoint may be persisted there; otherwise drop just the
+ * `\0baseUrl` disambiguator, matching the policy in
+ * serve/routes/workspace-models.ts. `publicProviderBaseUrl` is the fail-closed
+ * of the two URL predicates — it also rejects query/hash secrets — and a kept
+ * URL stays byte-identical, which `Config.pinnedAuxEndpoint` requires.
+ */
+function shareableAuxSelector(selector: string, scope: SettingScope): string {
+  if (scope !== SettingScope.Workspace) return selector;
+  const sep = selector.indexOf('\0');
+  if (sep === -1) return selector;
+  const endpoint = selector.slice(sep + 1);
+  return publicProviderBaseUrl(endpoint) === endpoint
+    ? selector
+    : selector.slice(0, sep);
+}
+
+/** Parity of `endpointNotSavedNote` in ModelDialog.tsx. */
+function endpointNotSavedNote(selector: string, persisted: string): string {
+  return selector === persisted
+    ? ''
+    : t(' (endpoint not saved: project settings are shared)');
 }
 
 /**
@@ -443,17 +472,21 @@ export async function applyModelSelection(
 
   hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model?.envKey);
 
-  // Fast model mode: save authType:modelId so duplicate model ids across
-  // providers remain unambiguous. baseUrl is intentionally discarded.
+  // Fast model mode: save authType:modelId (plus the baseUrl endpoint
+  // disambiguator when the row carries one) so duplicate model ids across
+  // providers bind the selected provider's credentials.
   if (mode === 'fast') {
     const fastModel = encodeAuxModelSelector(selectionKey);
     // Sync the runtime Config so forked agents pick up the change immediately.
     config?.setFastModel?.(fastModel);
     const scope = resolveModelPersistScope(settings, persistScope);
-    settings.setValue(scope, 'fastModel', fastModel);
+    // The shareable workspace file only ever receives a provably public
+    // endpoint; this session's in-memory pin keeps the picked row.
+    const persistedFastModel = shareableAuxSelector(fastModel, scope);
+    settings.setValue(scope, 'fastModel', persistedFastModel);
     return {
       ok: true,
-      message: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
+      message: `${t('Fast Model')}: ${persistedFastModel.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(fastModel, persistedFastModel)}`,
     };
   }
 
@@ -502,10 +535,14 @@ export async function applyModelSelection(
     // Sync runtime Config so the compression service picks it up immediately.
     config.setCompactionModel(compactionModelId);
     const scope = resolveModelPersistScope(settings, persistScope);
-    settings.setValue(scope, 'compactionModel', compactionModelId);
+    const persistedCompactionModel = shareableAuxSelector(
+      compactionModelId,
+      scope,
+    );
+    settings.setValue(scope, 'compactionModel', persistedCompactionModel);
     return {
       ok: true,
-      message: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
+      message: `${t('Compaction Model')}: ${persistedCompactionModel.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(compactionModelId, persistedCompactionModel)}`,
     };
   }
 

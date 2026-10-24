@@ -2,7 +2,7 @@
 
 [English](2026-09-24-runtime-binding-reconciliation.md) | [简体中文](2026-09-24-runtime-binding-reconciliation.zh-CN.md)
 
-状态：已在 `packages/sdk-java/runtime-broker` 实现；尚无生产 provisioner 启用
+状态：已在 `packages/managed-agent-server` 实现。2026-09-27 更新：生产本地进程 provisioner 已使用持久身份，但 worker 归属仍仅在进程内保存，尚未实现重启后的接管。
 
 相关：#12380（Managed Agent 分阶段交付）、#12358 的集成预览，以及该分支上的端点恢复参考设计 `docs/design/2026-09-21-managed-runtime-endpoint-recovery.md`。
 
@@ -23,7 +23,7 @@
 
 范围外：
 
-- 可恢复的 provisioner 实现。本地进程 provisioner 保持当前的进程内所有权模型并报告 `legacy` 类型，其恢复的绑定仍按原样失败关闭。本地进程的可持久接管属于后续切片。
+- 可恢复的 provisioner 实现。本地进程 provisioner 报告 `local-process`，归属保存在内存。恢复的绑定进入对账，观察为 `UNKNOWN`，直到截止期仍未接管或退役。生产本地恢复由 #12766 跟踪，执行丢失的前提决策由 #12670 跟踪，参见待评审的 [W0e 恢复设计](2026-09-27-managed-workspace-recovery.zh-CN.md)。
 - Drain 生命周期、已接管绑定的后台健康刷新，以及 Kubernetes provisioner。
 - 对既有数据库的 schema 迁移。runtime-broker 的 schema 仍以 `CREATE TABLE IF NOT EXISTS` 应用，部署方按原方式重建 schema。
 
@@ -44,7 +44,7 @@ JDBC 仓储用必需的 `SecretProtector`（附带 `AesGcmSecretProtector`）按
 - `ensureResource(request, seed, knownHandle)` 以 `UnsupportedOperationException` 失败——启用持久类型的 provisioner 必须实现持久 provision 路径；
 - `reconcile(request, seed, handle, lastLease)` 返回 `RuntimeObservation.unknown(handle)`——无法观察的 provisioner 什么都证明不了，Broker 选择等待而不是猜测。
 
-`RuntimeTransport` 新增默认 `attest(lease, request, seed)`，以 `runtime_broker_attestation_unavailable` 失败关闭。目前尚无生产 transport 实现 `RuntimeTransport`，因此生产接线仍留待后续切片。
+`RuntimeTransport` 新增默认 `attest(lease, request, seed)`，以 `runtime_broker_attestation_unavailable` 失败关闭。后续切片已经增加生产 `HttpRuntimeTransport` 和本地 worker 接线，但实现 attestation 本身并不意味着可以恢复本地 worker 的归属。
 
 ### 3.3 持久 provision
 
@@ -82,7 +82,7 @@ legacy 路径逐字节保持已评审的行为，包括其认领生命周期。
 
 ## 4. 验证
 
-在 `packages/sdk-java/runtime-broker` 执行 `mvn test`：188 个测试通过，其中新增 `DurableRuntimeRecoveryTest` 29 例（受门控的对账-接管、unknown 观察永不替换并重试到截止期、starting 观察永不替换、超时释放认领且新请求可恢复、在途对账受截止期约束、迟到 attestation 被围栏、初始 provision 身份不匹配即阻塞、每一项持久身份不匹配都阻塞、不可重试 attestation 失败会阻塞恢复、不可重试与可重试的 reconcile 失败、冲突观察保留最后可信句柄、不可重试 ensure 失败不空转、可重试 ensure 失败保留已确保资源、可重试 provision 失败让新绑定可重试、provision 受操作截止期约束、并发 provision 与回收各只收敛一次、迟到的 ensure 结果不能覆盖新 owner、SPI 默认实现失败关闭、丢失仅在空闲时创建新代数、丢失在有活跃会话或活跃执行时保持阻塞直至可以安全释放、瞬时 attestation 失败选择等待而非阻塞恢复、崩溃遗留的 `ACQUIRING` 或 `RELEASING` 会话仍可对已丢失绑定结算、Runtime 未被证明消失时绝不本地结算）。`JdbcRepositoryContract` 在 H2 上往返验证 seed、句柄、attestation 代数与对账时间，断言 seed 与 legacy 租约令牌均为加密存储、认领续租后 seed 密文保持不变、200 字符 provisioner kind 可往返，并覆盖 `releaseOperation` 移交与其拒绝路径。`mvn checkstyle:check` 通过。
+在 `packages/managed-agent-server` 执行 `mvn test`：188 个测试通过，其中新增 `DurableRuntimeRecoveryTest` 29 例（受门控的对账-接管、unknown 观察永不替换并重试到截止期、starting 观察永不替换、超时释放认领且新请求可恢复、在途对账受截止期约束、迟到 attestation 被围栏、初始 provision 身份不匹配即阻塞、每一项持久身份不匹配都阻塞、不可重试 attestation 失败会阻塞恢复、不可重试与可重试的 reconcile 失败、冲突观察保留最后可信句柄、不可重试 ensure 失败不空转、可重试 ensure 失败保留已确保资源、可重试 provision 失败让新绑定可重试、provision 受操作截止期约束、并发 provision 与回收各只收敛一次、迟到的 ensure 结果不能覆盖新 owner、SPI 默认实现失败关闭、丢失仅在空闲时创建新代数、丢失在有活跃会话或活跃执行时保持阻塞直至可以安全释放、瞬时 attestation 失败选择等待而非阻塞恢复、崩溃遗留的 `ACQUIRING` 或 `RELEASING` 会话仍可对已丢失绑定结算、Runtime 未被证明消失时绝不本地结算）。`JdbcRepositoryContract` 在 H2 上往返验证 seed、句柄、attestation 代数与对账时间，断言 seed 与 legacy 租约令牌均为加密存储、认领续租后 seed 密文保持不变、200 字符 provisioner kind 可往返，并覆盖 `releaseOperation` 移交与其拒绝路径。`mvn checkstyle:check` 通过。
 
 ## 5. 后续工作
 

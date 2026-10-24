@@ -22,6 +22,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { buildSessionRecoveryPlan } from '@qwen-code/qwen-code-core/core/session-recovery.js';
 import { SessionStartSource } from '@qwen-code/qwen-code-core/hooks/types.js';
@@ -133,6 +134,7 @@ export async function handleResumeSession(
   const oldSessionId = config.getSessionId();
   let coreSwapped = false;
   let uiSwapped = false;
+  let toolsInvalidated = false;
 
   try {
     const cwd = config.getTargetDir();
@@ -168,6 +170,9 @@ export async function handleResumeSession(
     // 1. Core swap first (ink order): any failure before the UI commits
     //    rolls the core back to the previous session below.
     resetBackgroundStateForSessionSwitch(config);
+    const modSession = getInteractiveModSession(config);
+    modSession?.invalidateTools();
+    toolsInvalidated = modSession !== undefined;
     config.startNewSession(sessionId, sessionData);
     coreSwapped = true;
     await waitForGoalRuntime(config);
@@ -201,12 +206,25 @@ export async function handleResumeSession(
     }
     uiSwapped = true;
     config.getLlmClient()?.commitTelemetrySwap?.();
+    await getInteractiveModSession(config)?.syncSession('resume');
   } catch (error) {
     if (coreSwapped && !uiSwapped) {
       try {
         resetBackgroundStateForSessionSwitch(config);
+        getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(oldSessionId, undefined);
         await config.loadPausedBackgroundAgents(oldSessionId).catch(() => {});
+        // Re-hydrate the client against the restored session, mirroring the
+        // other three rollback routes (useResumeCommand, useBranchCommand,
+        // the TUI session-switch): startNewSession cleared the reviewed-schema
+        // evidence, and without a fresh startChat the chat keeps serving the
+        // abandoned session's replayed history, so the next hidden deferred
+        // call is refused as un-reviewed even though its tool_search block is
+        // still in context. Must run BEFORE abortTelemetrySwap below — the
+        // re-initialize replays the old session's history on top of the
+        // abandoned session's replay, and restore overwrites rather than
+        // subtracts, so the final state is exactly pre-swap (#9833).
+        await config.getGeminiClient()?.initialize?.();
       } catch (rollbackErr) {
         config
           .getDebugLogger()
@@ -214,12 +232,22 @@ export async function handleResumeSession(
       }
       // Core is back on the old session: restore the usage aggregate to
       // pre-swap state, dropping the abandoned session's replayed history.
+      if (toolsInvalidated && config.getSessionId() === oldSessionId) {
+        await getInteractiveModSession(config)?.restoreTools();
+      }
       config.getLlmClient()?.abortTelemetrySwap?.();
     } else {
       // Either the core swap never happened (nothing was replayed — the
       // transaction is unarmed) or the UI already committed (the replay
       // belongs to the session the user is on): close this attempt's
       // transaction without restoring.
+      if (
+        toolsInvalidated &&
+        !uiSwapped &&
+        config.getSessionId() === oldSessionId
+      ) {
+        await getInteractiveModSession(config)?.restoreTools();
+      }
       config.getLlmClient()?.commitTelemetrySwap?.();
     }
     host.addItem(
@@ -300,6 +328,7 @@ export async function handleBranchSession(
 
   let coreSwapped = false;
   let uiSwapped = false;
+  let toolsInvalidated = false;
   let forkCreated = false;
   let prevSessionData: ResumedSessionData | undefined;
 
@@ -351,6 +380,9 @@ export async function handleBranchSession(
     }
 
     // 7. Core swap first.
+    const modSession = getInteractiveModSession(config);
+    modSession?.invalidateTools();
+    toolsInvalidated = modSession !== undefined;
     config.startNewSession(newSessionId, resumed);
     coreSwapped = true;
     await waitForGoalRuntime(config);
@@ -368,6 +400,8 @@ export async function handleBranchSession(
     // The UI re-key commits the swap: from here on a failure keeps the
     // replay — it belongs to the session the user is on.
     config.getLlmClient()?.commitTelemetrySwap?.();
+
+    await getInteractiveModSession(config)?.syncSession('resume');
 
     // 9. Apply the persisted title to the session-name surface.
     host.setSessionName(effectiveTitle);
@@ -391,6 +425,7 @@ export async function handleBranchSession(
   } catch (err) {
     if (coreSwapped && !uiSwapped) {
       try {
+        getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(oldSessionId, prevSessionData);
         await config.getGeminiClient()?.initialize?.();
       } catch (rollbackErr) {
@@ -399,10 +434,20 @@ export async function handleBranchSession(
           .warn(`Rollback after failed /branch init failed: ${rollbackErr}`);
       }
       // Core is back on the old session: restore the usage aggregate.
+      if (toolsInvalidated && config.getSessionId() === oldSessionId) {
+        await getInteractiveModSession(config)?.restoreTools();
+      }
       config.getLlmClient()?.abortTelemetrySwap?.();
     } else {
       // Unarmed (core never swapped) or already committed (UI re-keyed):
       // close this attempt's transaction without restoring.
+      if (
+        toolsInvalidated &&
+        !uiSwapped &&
+        config.getSessionId() === oldSessionId
+      ) {
+        await getInteractiveModSession(config)?.restoreTools();
+      }
       config.getLlmClient()?.commitTelemetrySwap?.();
     }
     if (forkCreated && !uiSwapped) {

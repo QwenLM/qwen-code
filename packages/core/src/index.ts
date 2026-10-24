@@ -246,7 +246,7 @@ export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 export {
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
-} from './tools/write-file.js';
+} from './tools/artifact/workspace-auto-record.js';
 export {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,
@@ -314,6 +314,7 @@ export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
 } from './tools/tool-call.js';
 export type {
@@ -361,9 +362,13 @@ export type {
   DurableCronTask,
   CronTaskRun,
   CronRunSessionOutcome,
+  CronGateStatus,
+  CronGateOutcome,
+  CronGateRunOutcome,
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
+  withTaskGate,
   cronTaskSessionDeletionId,
   updateCronTasks,
   removeCronTasks,
@@ -378,6 +383,7 @@ export {
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,
   MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
+export { MAX_CRON_GATE_CHARS, gateCommandError } from './services/cron-gate.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
@@ -399,8 +405,9 @@ export {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   GLOBAL_DUPLICATE_THRESHOLD,
   getToolCallRepeatKey,
-  shouldHaltOnTurnToolCallCap,
+  getTurnToolCallCapHalt,
 } from './services/loopDetectionService.js';
+export type { TurnToolCallCapHalt } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
@@ -414,6 +421,8 @@ export * from './ipc/peer-controllers.js';
 export * from './ipc/peer-directory.js';
 export * from './ipc/peer-drop-reports.js';
 export * from './ipc/peer-envelope.js';
+export * from './agents/session-agents/contract.js';
+export * from './agents/session-agents/envelope.js';
 export * from './ipc/peer-frames.js';
 export * from './ipc/peer-routing.js';
 export * from './ipc/peer-send.js';
@@ -664,6 +673,7 @@ export {
   IdeConnectionEvent,
   IdeConnectionType,
   LoopDetectedEvent,
+  LoopReason,
   LoopType,
   RepeatedToolFailureGuardEvent,
   ModelSlashCommandEvent,
@@ -673,6 +683,7 @@ export {
   WorkflowRunEvent,
   WorkflowSizeWarningEvent,
 } from './telemetry/types.js';
+export type { LoopStopDetail } from './telemetry/types.js';
 
 // ============================================================================
 // Extensions, Skills, Subagents & Agents
@@ -909,6 +920,10 @@ export {
   type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
+export {
+  appendToolHookContextToParts,
+  boundToolHookContext,
+} from './core/tool-hook-context.js';
 
 // ============================================================================
 // Startup profiler — cross-package event sink (first-screen perf observability)
@@ -965,3 +980,22 @@ export type {
 export * from './services/session-sources.js';
 export { RecordSourceTool } from './tools/record-source.js';
 export { resolveReviewWorkflowConcurrency } from './agents/runtime/review-workflow.js';
+
+export {
+  captureHookExecutionOwner,
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from './hooks/hook-execution-context.js';
+export type { HookExecutionOwner } from './hooks/hook-execution-context.js';
+
+export type { RequestLifecycleEvent } from './telemetry/request-lifecycle.js';
+
+export {
+  createToolLifecycle,
+  TOOL_LIFECYCLE_DRAIN_MS,
+} from './telemetry/tool-lifecycle.js';
+export type {
+  ToolLifecycleEvent,
+  ToolLifecycleRecord,
+  ToolLifecycleOutcome,
+} from './telemetry/tool-lifecycle.js';

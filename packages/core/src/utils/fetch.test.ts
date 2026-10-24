@@ -5,6 +5,26 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { promises as dns } from 'node:dns';
+import * as undici from 'undici';
+import * as runtimeFetchOptions from './runtimeFetchOptions.js';
+
+const agentOptions = vi.hoisted(() => vi.fn());
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof undici>();
+  return {
+    ...actual,
+    fetch: vi.fn((...args: Parameters<typeof fetch>) =>
+      globalThis.fetch(...args),
+    ),
+    Agent: class extends actual.Agent {
+      constructor(options?: undici.Agent.Options) {
+        super(options);
+        agentOptions(options);
+      }
+    },
+  };
+});
 import {
   CONNECTION_LEVEL_ERROR_CODES,
   FetchError,
@@ -13,18 +33,161 @@ import {
   isConnectionLevelError,
   isPermittedRedirect,
   isPrivateHost,
+  type FetchPolicyOptions,
 } from './fetch.js';
 
-function makeTlsError(): Error {
-  const tlsCause = new Error('unable to verify the first certificate');
-  (tlsCause as Error & { code?: string }).code =
-    'UNABLE_TO_VERIFY_LEAF_SIGNATURE';
-  const fetchError = new TypeError('fetch failed') as TypeError & {
-    cause?: unknown;
-  };
-  fetchError.cause = tlsCause;
-  return fetchError;
+/** undici's `fetch failed` TypeError whose `cause` carries a Node `code`. */
+function fetchFailed(causeMessage: string, code: string): Error {
+  const err = new TypeError('fetch failed') as TypeError & { cause?: unknown };
+  err.cause = Object.assign(new Error(causeMessage), { code });
+  return err;
 }
+
+const makeTlsError = () =>
+  fetchFailed(
+    'unable to verify the first certificate',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  );
+
+const redirect = (status: number, location: string) =>
+  new Response(null, { status, headers: { location } });
+
+/** Fetches, asserts a `response` result and narrows it for the checks after. */
+async function fetchResponse(url: string, options: FetchPolicyOptions) {
+  const result = await fetchWithPolicy(url, options);
+  expect(result.kind).toBe('response');
+  if (result.kind !== 'response') throw new Error(`got ${result.kind}`);
+  return result;
+}
+
+/** Stubs fetch to answer its n-th call with `respond(n)`; returns a counter. */
+function stubByCall(respond: (call: number) => Response): () => number {
+  let calls = 0;
+  globalThis.fetch = vi.fn(async () => respond(++calls)) as typeof fetch;
+  return () => calls;
+}
+
+const realFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+describe('public fetch policy', () => {
+  const options: FetchPolicyOptions = {
+    networkPolicy: 'public',
+    timeoutMs: 5_000,
+    maxBytes: 1024,
+    maxRedirects: 3,
+  };
+
+  beforeEach(() => {
+    agentOptions.mockClear();
+    vi.mocked(undici.fetch).mockClear();
+    globalThis.fetch = vi
+      .fn()
+      .mockImplementation(async () => new Response('docs'));
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    'http://example.com',
+    'https://user:secret@example.com',
+    'https://127.0.0.1',
+    'https://169.254.169.254',
+    'https://100.100.100.200',
+    'https://[::1]',
+    'https://[::ffff:7f00:1]',
+  ])('refuses %s before opening a connection', async (url) => {
+    await expect(fetchWithPolicy(url, options)).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses mixed public/private DNS answers', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+      { address: '10.0.0.1', family: 4 },
+    ] as never);
+    await expect(
+      fetchWithPolicy('https://example.com', options),
+    ).rejects.toThrow('blocked address');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses runtimes that cannot enforce the pinned dispatcher', async () => {
+    vi.spyOn(runtimeFetchOptions, 'detectRuntime').mockReturnValue('bun');
+    await expect(fetchWithPolicy('https://8.8.8.8', options)).rejects.toThrow(
+      'require Node.js',
+    );
+    expect(fetch).not.toHaveBeenCalled();
+    expect(agentOptions).not.toHaveBeenCalled();
+  });
+
+  it.each(['redirect', 'retry'])(
+    'rechecks DNS after a %s and refuses rebinding',
+    async (mode) => {
+      const lookup = vi
+        .spyOn(dns, 'lookup')
+        .mockResolvedValueOnce([
+          { address: '93.184.216.34', family: 4 },
+        ] as never)
+        .mockResolvedValue([{ address: '127.0.0.1', family: 4 }] as never);
+      vi.mocked(fetch).mockResolvedValueOnce(
+        mode === 'redirect'
+          ? redirect(302, '/next')
+          : new Response(null, { status: 429 }),
+      );
+      if (mode === 'redirect')
+        await expect(
+          fetchWithPolicy('https://example.com', options),
+        ).rejects.toThrow('blocked address');
+      else
+        expect(
+          (await fetchWithPolicy('https://example.com', options)).kind,
+        ).toBe('response');
+      expect(lookup).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('pins DNS in a dedicated TLS-verified dispatcher and closes it after the body', async () => {
+    const lookup = vi
+      .spyOn(dns, 'lookup')
+      .mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as never);
+    const response = await fetchResponse('https://example.com/docs', options);
+    expect(response.body.toString()).toBe('docs');
+    expect(undici.fetch).toHaveBeenCalledTimes(1);
+    expect(agentOptions).toHaveBeenCalledWith({
+      connect: { lookup: expect.any(Function), rejectUnauthorized: true },
+    });
+    const pinnedLookup = agentOptions.mock.calls[0][0]!.connect as {
+      lookup: NonNullable<import('node:net').LookupFunction>;
+    };
+    const resolved = vi.fn();
+    pinnedLookup.lookup('example.com', {}, resolved);
+    expect(resolved).toHaveBeenCalledWith(null, '93.184.216.34', 4);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit & {
+      dispatcher: undici.Agent;
+    };
+    expect(init.dispatcher).toBeInstanceOf(undici.Agent);
+    expect(init.dispatcher.closed).toBe(true);
+  });
+
+  it('does not follow a cross-host redirect', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      redirect(302, 'https://127.0.0.1/private'),
+    );
+    expect(
+      await fetchWithPolicy('https://8.8.8.8/docs', options),
+    ).toMatchObject({
+      kind: 'cross-host-redirect',
+      redirectUrl: 'https://127.0.0.1/private',
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('formatFetchErrorForUser', () => {
   const saved = {
@@ -172,12 +335,6 @@ describe('isPermittedRedirect', () => {
 });
 
 describe('fetchWithPolicy', () => {
-  const realFetch = globalThis.fetch;
-
-  afterEach(() => {
-    globalThis.fetch = realFetch;
-  });
-
   const opts = { timeoutMs: 5000, maxBytes: 1000, maxRedirects: 3 };
 
   function stubFetch(
@@ -201,55 +358,33 @@ describe('fetchWithPolicy', () => {
           headers: { 'content-type': 'text/plain' },
         }),
     );
-    const result = await fetchWithPolicy('https://example.com/x', opts);
-    expect(result.kind).toBe('response');
-    if (result.kind === 'response') {
-      expect(result.status).toBe(200);
-      expect(result.contentType).toBe('text/plain');
-      expect(result.body.toString()).toBe('hello');
-      expect(result.finalUrl).toBe('https://example.com/x');
-    }
+    const result = await fetchResponse('https://example.com/x', opts);
+    expect(result.status).toBe(200);
+    expect(result.contentType).toBe('text/plain');
+    expect(result.body.toString()).toBe('hello');
+    expect(result.finalUrl).toBe('https://example.com/x');
   });
 
   it('follows same-host redirects and reports the final URL', async () => {
-    stubFetch((url) => {
-      if (url.endsWith('/start')) {
-        return new Response(null, {
-          status: 302,
-          headers: { location: '/target' },
-        });
-      }
-      return new Response('landed', { status: 200 });
-    });
-    const result = await fetchWithPolicy('https://example.com/start', opts);
-    expect(result.kind).toBe('response');
-    if (result.kind === 'response') {
-      expect(result.finalUrl).toBe('https://example.com/target');
-      expect(result.body.toString()).toBe('landed');
-    }
+    stubFetch((url) =>
+      url.endsWith('/start')
+        ? redirect(302, '/target')
+        : new Response('landed', { status: 200 }),
+    );
+    const result = await fetchResponse('https://example.com/start', opts);
+    expect(result.finalUrl).toBe('https://example.com/target');
+    expect(result.body.toString()).toBe('landed');
   });
 
   it('wraps a malformed Location header in a FetchError', async () => {
-    stubFetch(
-      () =>
-        new Response(null, {
-          status: 301,
-          headers: { location: 'http://[invalid' },
-        }),
-    );
+    stubFetch(() => redirect(301, 'http://[invalid'));
     await expect(
       fetchWithPolicy('https://example.com/bad-redirect', opts),
     ).rejects.toThrow(/malformed Location header/);
   });
 
   it('surfaces cross-host redirects without following them', async () => {
-    stubFetch(
-      () =>
-        new Response(null, {
-          status: 301,
-          headers: { location: 'https://other.example.org/t' },
-        }),
-    );
+    stubFetch(() => redirect(301, 'https://other.example.org/t'));
     const result = await fetchWithPolicy('https://example.com/start', opts);
     expect(result).toEqual({
       kind: 'cross-host-redirect',
@@ -261,13 +396,7 @@ describe('fetchWithPolicy', () => {
 
   it('errors after exceeding the redirect hop limit', async () => {
     let n = 0;
-    stubFetch(
-      () =>
-        new Response(null, {
-          status: 302,
-          headers: { location: `/hop-${n++}` },
-        }),
-    );
+    stubFetch(() => redirect(302, `/hop-${n++}`));
     await expect(
       fetchWithPolicy('https://example.com/start', opts),
     ).rejects.toThrow(/Too many redirects/);
@@ -330,13 +459,10 @@ describe('fetchWithPolicy', () => {
           statusText: 'Internal Server Error',
         }),
     );
-    const result = await fetchWithPolicy('https://example.com/boom', opts);
-    expect(result.kind).toBe('response');
-    if (result.kind === 'response') {
-      expect(result.status).toBe(500);
-      expect(result.statusText).toBe('Internal Server Error');
-      expect(result.body.length).toBe(0);
-    }
+    const result = await fetchResponse('https://example.com/boom', opts);
+    expect(result.status).toBe(500);
+    expect(result.statusText).toBe('Internal Server Error');
+    expect(result.body.length).toBe(0);
     expect(cancelled).toBe(true);
   });
 
@@ -351,163 +477,93 @@ describe('fetchWithPolicy', () => {
           headers: { 'content-length': '5000' },
         }),
     );
-    const result = await fetchWithPolicy('https://example.com/missing', opts);
-    expect(result.kind).toBe('response');
-    if (result.kind === 'response') {
-      expect(result.status).toBe(404);
-      expect(result.body.length).toBe(0);
-    }
+    const result = await fetchResponse('https://example.com/missing', opts);
+    expect(result.status).toBe(404);
+    expect(result.body.length).toBe(0);
   });
 });
 
 describe('fetchWithPolicy retry', () => {
-  const realFetch = globalThis.fetch;
-
-  afterEach(() => {
-    globalThis.fetch = realFetch;
-  });
-
   const opts = { timeoutMs: 10_000, maxBytes: 1000, maxRedirects: 3 };
 
-  it('retries once on 403 and returns the successful second response', async () => {
-    let calls = 0;
-    globalThis.fetch = vi.fn(async () => {
-      calls++;
-      return calls === 1
-        ? new Response('blocked', { status: 403 })
-        : new Response('recovered', { status: 200 });
-    }) as typeof fetch;
+  it.each([
+    [403, 'blocked', 'https://example.com/flaky'],
+    [429, 'rate limited', 'https://example.com/limited'],
+  ])(
+    'retries once on %s and returns the successful second response',
+    async (status, body, url) => {
+      const calls = stubByCall((call) =>
+        call === 1
+          ? new Response(body, { status })
+          : new Response('recovered', { status: 200 }),
+      );
 
-    const result = await fetchWithPolicy('https://example.com/flaky', opts);
-    expect(calls).toBe(2);
-    expect(result.kind).toBe('response');
-    if (result.kind === 'response') {
+      const result = await fetchResponse(url, opts);
+      expect(calls()).toBe(2);
       expect(result.status).toBe(200);
       expect(result.body.toString()).toBe('recovered');
-    }
-  });
-
-  it('retries once on 429 and returns the successful second response', async () => {
-    let calls = 0;
-    globalThis.fetch = vi.fn(async () => {
-      calls++;
-      return calls === 1
-        ? new Response('rate limited', { status: 429 })
-        : new Response('recovered', { status: 200 });
-    }) as typeof fetch;
-
-    const result = await fetchWithPolicy('https://example.com/limited', opts);
-    expect(calls).toBe(2);
-    expect(result.kind).toBe('response');
-    if (result.kind === 'response') {
-      expect(result.status).toBe(200);
-      expect(result.body.toString()).toBe('recovered');
-    }
-  });
+    },
+  );
 
   it('returns the original 403 when the retry also fails', async () => {
-    let calls = 0;
-    globalThis.fetch = vi.fn(async () => {
-      calls++;
-      return new Response('blocked', { status: 403 });
-    }) as typeof fetch;
+    const calls = stubByCall(() => new Response('blocked', { status: 403 }));
 
     const result = await fetchWithPolicy('https://example.com/blocked', opts);
-    expect(calls).toBe(2);
+    expect(calls()).toBe(2);
     if (result.kind === 'response') expect(result.status).toBe(403);
   });
 
   it.each(['ECONNRESET', 'EAI_AGAIN'])(
     'retries once on transient network errors (%s)',
     async (code) => {
-      let calls = 0;
-      globalThis.fetch = vi.fn(async () => {
-        calls++;
-        if (calls === 1) {
-          const err = new TypeError('fetch failed') as TypeError & {
-            cause?: unknown;
-          };
-          err.cause = Object.assign(new Error('transient failure'), { code });
-          throw err;
-        }
+      const calls = stubByCall((call) => {
+        if (call === 1) throw fetchFailed('transient failure', code);
         return new Response('ok', { status: 200 });
-      }) as typeof fetch;
+      });
 
       const result = await fetchWithPolicy('https://example.com/reset', opts);
-      expect(calls).toBe(2);
+      expect(calls()).toBe(2);
       if (result.kind === 'response') expect(result.status).toBe(200);
     },
   );
 
   it('does not retry deterministic statuses like 404', async () => {
-    let calls = 0;
-    globalThis.fetch = vi.fn(async () => {
-      calls++;
-      return new Response('nope', { status: 404 });
-    }) as typeof fetch;
+    const calls = stubByCall(() => new Response('nope', { status: 404 }));
 
     const result = await fetchWithPolicy('https://example.com/missing', opts);
-    expect(calls).toBe(1);
+    expect(calls()).toBe(1);
     if (result.kind === 'response') expect(result.status).toBe(404);
   });
 
   it('does not retry non-transient network errors', async () => {
-    let calls = 0;
-    globalThis.fetch = vi.fn(async () => {
-      calls++;
-      const err = new TypeError('fetch failed') as TypeError & {
-        cause?: unknown;
-      };
-      err.cause = Object.assign(new Error('cert invalid'), {
-        code: 'CERT_HAS_EXPIRED',
-      });
-      throw err;
-    }) as typeof fetch;
+    const calls = stubByCall(() => {
+      throw fetchFailed('cert invalid', 'CERT_HAS_EXPIRED');
+    });
 
     await expect(
       fetchWithPolicy('https://example.com/tls', opts),
     ).rejects.toThrow('fetch failed');
-    expect(calls).toBe(1);
+    expect(calls()).toBe(1);
   });
 });
 
 describe('fetchWithPolicy retry abort handling', () => {
-  const realFetch = globalThis.fetch;
-
-  afterEach(() => {
-    globalThis.fetch = realFetch;
-  });
-
   const opts = { timeoutMs: 10_000, maxBytes: 1000, maxRedirects: 3 };
 
   it('retries once on undici socket errors (UND_ERR_SOCKET)', async () => {
-    let calls = 0;
-    globalThis.fetch = vi.fn(async () => {
-      calls++;
-      if (calls === 1) {
-        const err = new TypeError('fetch failed') as TypeError & {
-          cause?: unknown;
-        };
-        err.cause = Object.assign(new Error('other side closed'), {
-          code: 'UND_ERR_SOCKET',
-        });
-        throw err;
-      }
+    const calls = stubByCall((call) => {
+      if (call === 1) throw fetchFailed('other side closed', 'UND_ERR_SOCKET');
       return new Response('ok', { status: 200 });
-    }) as typeof fetch;
+    });
 
     const result = await fetchWithPolicy('https://example.com/reset', opts);
-    expect(calls).toBe(2);
+    expect(calls()).toBe(2);
     if (result.kind === 'response') expect(result.status).toBe(200);
   });
 
   it('propagates caller abort over the original 403 during the retry window', async () => {
     const controller = new AbortController();
-    let calls = 0;
-    globalThis.fetch = vi.fn(async () => {
-      calls++;
-      return new Response('blocked', { status: 403 });
-    }) as typeof fetch;
+    const calls = stubByCall(() => new Response('blocked', { status: 403 }));
     setTimeout(() => controller.abort(new Error('user cancelled')), 100);
 
     await expect(
@@ -516,13 +572,11 @@ describe('fetchWithPolicy retry abort handling', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow('user cancelled');
-    expect(calls).toBe(1);
+    expect(calls()).toBe(1);
   });
 
   it('propagates timeout over the original 403 during the retry window', async () => {
-    globalThis.fetch = vi.fn(
-      async () => new Response('blocked', { status: 403 }),
-    ) as typeof fetch;
+    stubByCall(() => new Response('blocked', { status: 403 }));
 
     // 200ms budget expires inside the 500ms retry delay.
     await expect(
@@ -672,31 +726,17 @@ describe('isPrivateHost', () => {
 });
 
 describe('fetchWithPolicy same-host redirects', () => {
-  const realFetch = globalThis.fetch;
-
-  afterEach(() => {
-    globalThis.fetch = realFetch;
-  });
-
   const opts = { timeoutMs: 5000, maxBytes: 1000, maxRedirects: 3 };
 
   it('follows same-host redirects to completion', async () => {
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
-      const url = input.toString();
-      if (url.endsWith('/QwenLM/old')) {
-        return new Response(null, {
-          status: 302,
-          headers: { location: '/QwenLM/new' },
-        });
-      }
-      return new Response('landed', { status: 200 });
-    }) as typeof fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) =>
+      input.toString().endsWith('/QwenLM/old')
+        ? redirect(302, '/QwenLM/new')
+        : new Response('landed', { status: 200 }),
+    ) as typeof fetch;
 
-    const result = await fetchWithPolicy('https://github.com/QwenLM/old', opts);
-    expect(result.kind).toBe('response');
-    if (result.kind === 'response') {
-      expect(result.finalUrl).toBe('https://github.com/QwenLM/new');
-      expect(result.body.toString()).toBe('landed');
-    }
+    const result = await fetchResponse('https://github.com/QwenLM/old', opts);
+    expect(result.finalUrl).toBe('https://github.com/QwenLM/new');
+    expect(result.body.toString()).toBe('landed');
   });
 });

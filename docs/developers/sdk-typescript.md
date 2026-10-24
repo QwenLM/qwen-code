@@ -78,6 +78,10 @@ Creates a new query session with the Qwen Code.
 > [!note]
 > For `coreTools`, aliases like `Read`, `Edit`, and `Bash` also work, but invocation specifiers such as `Bash(git *)` are stripped. `coreTools` restricts tool registration, not invocation patterns.
 
+#### Empty core-tool allowlists
+
+An omitted or empty `coreTools` list is treated as unspecified; `coreTools: []` does **not** create a tool-free session. A non-empty list restricts core tools, not every tool category: MCP and other non-core tools have separate registration and permission rules. Use `excludeTools` to exclude named tools explicitly. `allowedTools` controls approval, not which tools are registered.
+
 ### Timeouts
 
 The SDK enforces the following default timeouts:
@@ -196,10 +200,11 @@ Startup selection does not save shared defaults or impose a lifetime pin. Defini
 `@qwen-code/sdk/peer` lets a program that is not a Qwen Code session join the
 sessions running as the same user on the same machine — a voice front-end, a
 relay, a build watcher. The program shows up in `qwen sessions ps`, and in the
-`list_agents` of every session that has `agents.crossSessionMessaging` turned
-on — which is also what lets those sessions message it by name with
-`send_message`. It can message them back. It runs on Node only and needs
-nothing beyond Node itself.
+`list_agents` of every session that takes part in cross-session messaging — its
+`agents.crossSessionMessaging` setting is on, and it was not started with
+`--bare` or `--safe-mode` — which is also what lets those sessions message it
+by name with `send_message`. It can message them back. It runs on Node only and
+needs nothing beyond Node itself.
 
 ```typescript
 import { PeerEndpoint } from '@qwen-code/sdk/peer';
@@ -245,9 +250,11 @@ await endpoint.send({
 Things to know:
 
 - A session has an inbox only while its `agents.crossSessionMessaging` setting
-  is on, which it is by default. A session that turned it off does not appear
-  in `list()`, and its own `list_agents` and `send_message` cannot see or
-  reach the program either. `qwen sessions ps` lists the program regardless.
+  is on, which it is by default, and it was not started with `--bare` or
+  `--safe-mode` — those turn messaging off whatever the setting says. A session
+  that turned it off does not appear in `list()`, and its own `list_agents` and
+  `send_message` cannot see or reach the program either. `qwen sessions ps`
+  lists the program regardless.
 - A message is delivered without review in exactly two cases: the send
   presents a controller token (`controller: true`), or its `fromMode` names the
   receiving session's own review class. `fromMode` is a claim nothing
@@ -537,3 +544,7 @@ try {
   }
 }
 ```
+
+## Human-origin workflow hints
+
+Streaming `SDKUserMessage` input supports per-message `origin: { kind: 'human' }` for original human submissions. Messages without the declaration and string convenience prompts remain ordinary chat without keyword activation. See the [workflow intent contract](../users/workflow-intent.md) ([简体中文](../users/workflow-intent.zh-CN.md)) for examples and exclusions.

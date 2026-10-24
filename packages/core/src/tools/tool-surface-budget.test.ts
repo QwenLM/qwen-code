@@ -29,6 +29,7 @@ import { ListAgentsTool } from './list-agents.js';
 import { LoopWakeupTool } from './loop-wakeup.js';
 import { LSTool } from './ls.js';
 import { LspTool } from './lsp.js';
+import { ManageMemoryTool } from './manage-memory.js';
 import { MonitorTool } from './monitor.js';
 import { NotebookEditTool } from './notebook-edit.js';
 import { ReadFileTool } from './read-file.js';
@@ -38,6 +39,7 @@ import { RecordSourceTool } from './record-source.js';
 import { ReportFindingsTool } from './report-findings.js';
 import { RequestShutdownTool } from './request-shutdown.js';
 import { RipGrepTool } from './ripGrep.js';
+import { SearchMemoryTool } from './search-memory.js';
 import { SendMessageTool } from './send-message.js';
 import { SkillTool } from './skill.js';
 import { TaskCreateTool } from './task-create.js';
@@ -139,10 +141,10 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['team_create', (c) => new TeamCreateTool(c), 7_800],
   ['ask_user_question', (c) => new AskUserQuestionTool(c), 3_100],
   ['read_file', (c) => new ReadFileTool(c), 2_650],
+  ['search_memory', (c) => new SearchMemoryTool(c), 2_600],
   ['exit_plan_mode', (c) => new ExitPlanModeTool(c), 2_450],
   ['skill', (c) => new SkillTool(c), 2_400],
   ['edit', (c) => new EditTool(c), 2_400],
-  ['update_goal', (c) => new UpdateGoalTool(c), 2_050],
   ['todo_write', (c) => new TodoWriteTool(c), 1_950],
   ['write_file', (c) => new WriteFileTool(c), 1_850],
   [
@@ -152,10 +154,8 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ],
   ['tool_search', (c) => new ToolSearchTool(c), 1_600],
   ['enter_plan_mode', (c) => new EnterPlanModeTool(c), 1_400],
-  ['propose_goal', (c) => new ProposeGoalTool(c), 1_350],
   ['task_update', (c) => new TaskUpdateTool(c), 1_250],
   ['notebook_edit', (c) => new NotebookEditTool(c), 1_200],
-  ['list_agents', (c) => new ListAgentsTool(c), 1_200],
   ['grep_search (ripgrep)', (c) => new RipGrepTool(c), 1_200],
   ['list_directory', (c) => new LSTool(c), 1_100],
   ['grep_search (fallback)', (c) => new GrepTool(c), 1_050],
@@ -164,14 +164,18 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['tool_call', () => new ToolCallTool(), 650],
   ['team_plan_approval', (c) => new TeamPlanApprovalTool(c), 600],
   ['image_gen', (c) => new ImageGenTool(c), 600],
+  ['manage_memory', (c) => new ManageMemoryTool(c), 600],
   ['display_image', (c) => new DisplayImageTool(c), 550],
-  ['get_goal', (c) => new GetGoalTool(c), 550],
   ['task_list', (c) => new TaskListTool(c), 500],
   ['team_delete', (c) => new TeamDeleteTool(c), 300],
 ];
 
 /** Tools that stay out of the first request until `tool_search` loads them. */
 const DEFERRED: ReadonlyArray<[name: string, build: Build]> = [
+  ['get_goal', (c) => new GetGoalTool(c)],
+  ['list_agents', (c) => new ListAgentsTool(c)],
+  ['propose_goal', (c) => new ProposeGoalTool(c)],
+  ['update_goal', (c) => new UpdateGoalTool(c)],
   ['advisor', (c) => new AdvisorTool(c)],
   ['create_sub_session', (c) => new CreateSubSessionTool(c)],
   ['cron_create', (c) => new CronCreateTool(c)],

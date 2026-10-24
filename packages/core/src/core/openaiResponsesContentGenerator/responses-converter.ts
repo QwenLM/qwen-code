@@ -20,7 +20,6 @@ import type {
   ResponsesApiInputItem,
   ResponsesApiMessageItem,
   ResponsesApiFunctionCallItem,
-  ResponsesApiFunctionCallOutputItem,
   ResponsesApiReasoningItem,
   ResponsesApiTool,
   ResponsesApiContentPart,
@@ -30,6 +29,9 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
+import { ToolNames } from '../../tools/tool-names.js';
+import { REATTACH_BOUNDARY_METADATA } from '../../services/image-payload-references.js';
+import type { ResponsesCacheBoundary } from './prompt-caching.js';
 import {
   getResponsesMessage,
   type ResponsesMessageMetadata,
@@ -281,6 +283,17 @@ export function convertResponsesEventToGemini(
         state.updateMessage(data.output_index, data.item);
         return null;
       }
+      if (data.item.type === 'custom_tool_call') {
+        return makeChunkResponse(model, state, [
+          {
+            functionCall: {
+              id: data.item.call_id,
+              name: data.item.name,
+              args: { source: data.item.input },
+            },
+          },
+        ]);
+      }
       if (data.item.type === 'function_call') {
         const fc = data.item as ResponsesApiOutputFunctionCall;
         const buf = state.getFunctionCallBuffer(data.output_index);
@@ -520,10 +533,17 @@ function mapFinishReason(reason: string): FinishReason {
 
 export function convertGeminiContentsToResponsesInput(
   request: GenerateContentParameters,
-): { instructions: string | undefined; input: ResponsesApiInputItem[] } {
+  freeformExec = false,
+): {
+  instructions: string | undefined;
+  input: ResponsesApiInputItem[];
+  cacheBoundary?: ResponsesCacheBoundary;
+} {
   let instructions: string | undefined;
+  let cacheBoundary: ResponsesCacheBoundary | undefined;
   const items: ResponsesApiInputItem[] = [];
   let callIdCounter = 0;
+  const customCallIds = new Set<string>();
 
   if (request.config?.systemInstruction) {
     const si = request.config.systemInstruction;
@@ -603,6 +623,19 @@ export function convertGeminiContentsToResponsesInput(
         continue;
       }
 
+      if (
+        role === 'user' &&
+        part.partMetadata?.[REATTACH_BOUNDARY_METADATA] === true &&
+        !cacheBoundary
+      ) {
+        cacheBoundary = pendingContentParts.length
+          ? {
+              itemIndex: items.length,
+              contentIndex: pendingContentParts.length - 1,
+            }
+          : { itemIndex: items.length - 1 };
+      }
+
       if ('thought' in part && part.thought) {
         flushPendingMessage();
         // Prior-turn reasoning can only be replayed as a real 'reasoning'
@@ -655,12 +688,26 @@ export function convertGeminiContentsToResponsesInput(
         flushPendingMessage();
         const callId =
           part.functionCall.id || `call_${Date.now()}_${callIdCounter++}`;
-        items.push({
-          type: 'function_call',
-          call_id: callId,
-          name: part.functionCall.name ?? '',
-          arguments: JSON.stringify(part.functionCall.args ?? {}),
-        } as ResponsesApiFunctionCallItem);
+        const fc = part.functionCall;
+        if (freeformExec && fc.name === ToolNames.EXEC) {
+          customCallIds.add(callId);
+          items.push({
+            type: 'custom_tool_call',
+            call_id: callId,
+            name: fc.name,
+            input:
+              typeof fc.args?.['source'] === 'string'
+                ? fc.args['source']
+                : JSON.stringify(fc.args ?? {}),
+          });
+        } else {
+          items.push({
+            type: 'function_call',
+            call_id: callId,
+            name: fc.name ?? '',
+            arguments: JSON.stringify(fc.args ?? {}),
+          } as ResponsesApiFunctionCallItem);
+        }
       }
 
       if ('functionResponse' in part && part.functionResponse) {
@@ -686,8 +733,7 @@ export function convertGeminiContentsToResponsesInput(
           output = JSON.stringify(fr.response ?? {});
         }
         // A tool can return media (e.g. read_file on an image) in
-        // functionResponse.parts alongside its textual output. The
-        // function_call_output.output field is string-only, so surface the
+        // functionResponse.parts alongside its textual output. Surface the
         // media the way the sibling Chat converter does
         // (createToolMessage/splitToolMedia) instead of dropping it: append
         // any text entries (e.g. compaction-slimmer placeholders) to the
@@ -731,10 +777,14 @@ export function convertGeminiContentsToResponsesInput(
           }
         }
         items.push({
-          type: 'function_call_output',
+          type:
+            freeformExec &&
+            (fr.name === ToolNames.EXEC || customCallIds.has(fr.id ?? ''))
+              ? 'custom_tool_call_output'
+              : 'function_call_output',
           call_id: fr.id || `call_${Date.now()}_${callIdCounter++}`,
           output,
-        } as ResponsesApiFunctionCallOutputItem);
+        });
       }
 
       if ('inlineData' in part && part.inlineData && role === 'user') {
@@ -783,11 +833,11 @@ export function convertGeminiContentsToResponsesInput(
     }
   }
 
-  return { instructions, input: items };
+  return { instructions, input: items, cacheBoundary };
 }
 
 /**
- * Remove any `function_call`/`function_call_output` item whose `call_id` has
+ * Remove any function/custom tool call or output whose `call_id` has
  * no matching counterpart in the input array. This prevents the Responses
  * API from rejecting the request over a broken call/output pair.
  *
@@ -806,21 +856,27 @@ export function cleanOrphanedFunctionCalls(
     if (typeof item !== 'object' || item === null || !('type' in item)) {
       continue;
     }
-    if (item.type === 'function_call' && 'call_id' in item) {
-      callIds.add((item as ResponsesApiFunctionCallItem).call_id);
-    } else if (item.type === 'function_call_output' && 'call_id' in item) {
-      outputCallIds.add((item as ResponsesApiFunctionCallOutputItem).call_id);
+    if (item.type === 'function_call' || item.type === 'custom_tool_call') {
+      callIds.add(`${item.type}:${item.call_id}`);
+    } else if (
+      item.type === 'function_call_output' ||
+      item.type === 'custom_tool_call_output'
+    ) {
+      outputCallIds.add(`${item.type}:${item.call_id}`);
     }
   }
   return items.filter((item) => {
     if (typeof item !== 'object' || item === null || !('type' in item)) {
       return true;
     }
-    if (item.type === 'function_call' && 'call_id' in item) {
-      return outputCallIds.has((item as ResponsesApiFunctionCallItem).call_id);
+    if (item.type === 'function_call' || item.type === 'custom_tool_call') {
+      return outputCallIds.has(`${item.type}_output:${item.call_id}`);
     }
-    if (item.type === 'function_call_output' && 'call_id' in item) {
-      return callIds.has((item as ResponsesApiFunctionCallOutputItem).call_id);
+    if (item.type === 'function_call_output') {
+      return callIds.has(`function_call:${item.call_id}`);
+    }
+    if (item.type === 'custom_tool_call_output') {
+      return callIds.has(`custom_tool_call:${item.call_id}`);
     }
     return true;
   });
@@ -828,6 +884,7 @@ export function cleanOrphanedFunctionCalls(
 
 export function convertGeminiToolsToResponsesTools(
   request: GenerateContentParameters,
+  freeformExec = false,
 ): ResponsesApiTool[] | undefined {
   const tools = request.config?.tools;
   if (!tools || !Array.isArray(tools)) return undefined;
@@ -841,6 +898,15 @@ export function convertGeminiToolsToResponsesTools(
 
     for (const func of funcDecls) {
       if (!func.name) continue;
+      if (freeformExec && func.name === ToolNames.EXEC) {
+        result.push({
+          type: 'custom',
+          name: func.name,
+          description: `${func.description ?? ''}\nPass raw JavaScript source as the tool input, without JSON wrapping or Markdown fences.`,
+          format: { type: 'text' },
+        });
+        continue;
+      }
       result.push({
         type: 'function',
         name: func.name,
@@ -874,16 +940,21 @@ export function convertGeminiToolsToResponsesTools(
  * helper patches such schemas (including nested object schemas) to include
  * `properties: {}` so Azure accepts them. Well-formed schemas pass through
  * unchanged.
+ *
+ * Explicitly preserve JSON Schema's default openness for patched nested
+ * objects. Whether a Responses backend interpreted the implicit default as
+ * closed in #12889 remains unverified. Keep the existing root-object patch
+ * and any explicit additionalProperties constraint unchanged.
  */
 export function normalizeResponsesParameters(
   schema: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (schema === undefined) return undefined;
   if (schema === null || typeof schema !== 'object') return schema;
-  return normalizeResponsesSchemaNode(schema) as Record<string, unknown>;
+  return normalizeResponsesSchemaNode(schema, true) as Record<string, unknown>;
 }
 
-function normalizeResponsesSchemaNode(node: unknown): unknown {
+function normalizeResponsesSchemaNode(node: unknown, isRoot = false): unknown {
   if (Array.isArray(node)) {
     return node.map((item) => normalizeResponsesSchemaNode(item));
   }
@@ -913,6 +984,9 @@ function normalizeResponsesSchemaNode(node: unknown): unknown {
 
   if (out['type'] === 'object' && out['properties'] === undefined) {
     out['properties'] = {};
+    if (!isRoot && out['additionalProperties'] === undefined) {
+      out['additionalProperties'] = true;
+    }
   }
 
   return out;

@@ -38,6 +38,9 @@ function setStdoutIsTTY(value: boolean): void {
 }
 
 function createFakeMmdc(binDir: string, bodyLines?: string[]): void {
+  // The POSIX fake is an extensionless CommonJS script; scope it explicitly
+  // so a "type": "module" package.json above os.tmpdir() cannot flip it.
+  fs.writeFileSync(path.join(binDir, 'package.json'), '{"type":"commonjs"}');
   const fakeMmdcScript = path.join(binDir, 'fake-mmdc.cjs');
   const defaultBodyLines = [
     'const fs = require("node:fs");',
@@ -65,6 +68,9 @@ function createFakeMmdc(binDir: string, bodyLines?: string[]): void {
 }
 
 function createFakeChafa(binDir: string, bodyLines?: string[]): void {
+  // The POSIX fake is an extensionless CommonJS script; scope it explicitly
+  // so a "type": "module" package.json above os.tmpdir() cannot flip it.
+  fs.writeFileSync(path.join(binDir, 'package.json'), '{"type":"commonjs"}');
   const fakeChafaScript = path.join(binDir, 'fake-chafa.cjs');
   const defaultBodyLines = [
     'process.stdout.write("ansi line 1\\nansi line 2\\n");',

@@ -5,7 +5,8 @@
  */
 
 // The Java integration-test jobs split `*IT.java` by name: `Hosted*IT` runs
-// only in the Hosted MySQL job, every other `*IT` only in the MariaDB job.
+// only in the Hosted MySQL job, and every other `*IT` runs in both engines'
+// legs of the mysql-integration job (MySQL 8.4 and MariaDB 10.11).
 // Maven still passes when a profile's <includes>, or -Dit.test in MAVEN_ARGS
 // or .mvn/maven.config, narrows that selection, so after a job's tests this
 // compares the failsafe reports with the source tree of each module: every
@@ -20,16 +21,28 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const isHosted = (className) => /^Hosted.*IT$/.test(className);
+const isGate = (className) => /^Hosted.*Gate$/.test(className);
 const [family, ...modules] = process.argv.slice(2);
-const inFamily =
-  family === 'hosted'
-    ? isHosted
-    : family === 'non-hosted'
-      ? (className) => /IT$/.test(className) && !isHosted(className)
-      : undefined;
+const optIn =
+  family === 'o4-mysql' ||
+  family === 'o4-oss' ||
+  family === 'event-transport' ||
+  family === 'event-transport-multi-node';
+const inFamily = new Map([
+  ['hosted', isHosted],
+  ['non-hosted', (className) => /IT$/.test(className) && !isHosted(className)],
+  ['hosted-gates', isGate],
+  ['o4-mysql', (className) => className === 'O4MySqlGate'],
+  ['o4-oss', (className) => className === 'O4OssGate'],
+  ['event-transport', (className) => className === 'EventTransportBrokerGate'],
+  [
+    'event-transport-multi-node',
+    (className) => className === 'EventTransportMultiNodeGate',
+  ],
+]).get(family);
 if (!inFamily || modules.length === 0) {
   console.error(
-    'usage: node scripts/check-failsafe-reports.js hosted|non-hosted <maven-module-dir>...',
+    'usage: node scripts/check-failsafe-reports.js hosted|non-hosted|hosted-gates|o4-mysql|o4-oss|event-transport|event-transport-multi-node <maven-module-dir>...',
   );
   process.exit(2);
 }
@@ -46,9 +59,15 @@ const javaFiles = (dir, prefix = []) =>
 let failed = false;
 for (const module of modules) {
   const expected = javaFiles(path.join(module, 'src', 'test', 'java'))
-    .filter((file) => file.endsWith('IT.java'))
+    .filter((file) => file.endsWith('.java'))
     .map((file) => file.slice(0, -'.java'.length))
     .filter((className) => inFamily(simpleName(className)));
+  if (optIn && expected.length !== 1) {
+    failed = true;
+    console.error(
+      `::error::${module}: expected exactly one ${family} gate source`,
+    );
+  }
   const reports = path.join(module, 'target', 'failsafe-reports');
   const ran = new Map();
   const filters = new Set();
@@ -65,6 +84,15 @@ for (const module of modules) {
     );
     const count = (element) =>
       report.match(new RegExp(`<${element}\\b`, 'g'))?.length ?? 0;
+    if (
+      optIn &&
+      ['skipped', 'failure', 'error'].some((element) => count(element))
+    ) {
+      failed = true;
+      console.error(
+        `::error::${module}: ${file} contains a skipped or failed gate case`,
+      );
+    }
     ran.set(
       className,
       (ran.get(className) ?? 0) + count('testcase') - count('skipped'),

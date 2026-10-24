@@ -9,6 +9,15 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
+import {
+  verifyBundledRipgrep,
+  verifyRuntimeIntegrity,
+} from './runtime-smoke-checks.js';
+import {
+  findLinuxInstallers,
+  findRuntimeRoot,
+  verifyExtractedRuntime,
+} from './smoke-linux-installers.js';
 
 const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -39,15 +48,20 @@ const root = fs.mkdtempSync(
   path.join(os.tmpdir(), 'qwen-desktop-release-test-'),
 );
 try {
+  const canSpawnShebang = probeShebangExecution(path.join(root, 'exec-probe'));
   testBootstrapBridgeConfiguration();
   testZoomHotkeyScript();
   await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
   testReleaseMatrixCoversUpdaterPlatforms();
+  testLinuxReleaseLegsShareGlibcFloor();
   testDesktopReleaseSigningWorkflow();
   testDesktopReleaseHardening();
-  testRuntimeNodePtyTargetMapping();
+  testImmutableRuntimePatchelf(path.join(root, 'patchelf'), canSpawnShebang);
+  testLinuxInstallerSmokeDiscovery(path.join(root, 'linux-installers'));
+  testRuntimeSmokeChecks(path.join(root, 'runtime-smoke'), canSpawnShebang);
+  testRuntimeTargetMappings();
   testUpdaterMirrorConfiguration();
   testResolveLogRoot();
   testSliceNewLog();
@@ -58,6 +72,14 @@ try {
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+function probeShebangExecution(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '#!/usr/bin/env sh\nexit 0\n');
+  fs.chmodSync(file, 0o755);
+  const result = spawnSync(file, [], { stdio: 'ignore' });
+  return !result.error && result.status === 0;
 }
 
 async function testBootstrapWorkspaceVisibility() {
@@ -334,6 +356,80 @@ function testReleaseMatrixCoversUpdaterPlatforms() {
   );
 }
 
+function testLinuxReleaseLegsShareGlibcFloor() {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
+    'utf8',
+  );
+  // The AppImage and .deb link against the glibc of the runner image that
+  // builds them, and the updater feed publishes whatever the matrix built.
+  // Both Linux legs therefore have to stay on the same Ubuntu generation:
+  // 22.04 gives glibc 2.35, which Ubuntu 22.04 and Debian 12 users can run,
+  // while 24.04 gives 2.39, which they cannot. A runner bump on one leg
+  // (`ubuntu-24.04-arm`, or an `ubuntu-latest` sweep) keeps every other check
+  // here green because the rust target does not change, and the artifact
+  // only refuses to start on the user's machine (#12877). The image floor is
+  // pinned here so that raising it is a deliberate edit of both legs and of
+  // this line, never a side effect of a runner modernisation.
+  const linuxImageFloor = 'ubuntu-22.04';
+  // `os:` only names the image when the job runs on it directly. The build
+  // job binds `runs-on` to the matrix field and runs no `container:`, and
+  // both facts are what make the pin below a statement about the glibc the
+  // artifacts link against rather than about a label nothing reads.
+  assert.match(
+    workflow,
+    /^ {4}runs-on: '\$\{\{ matrix\.os \}\}'$/m,
+    'the build job must run directly on the matrix `os:` image',
+  );
+  assert.doesNotMatch(
+    workflow,
+    /^ +container:/m,
+    'desktop-release.yml must not build inside a container: the glibc floor ' +
+      'is pinned to the runner image, so a container needs its own witness',
+  );
+  const legs = [];
+  for (const [, name, body] of workflow.matchAll(
+    /^ {10}- name: '([^']+)'[ \t]*\n((?: {12}\w+: '[^']*'[ \t]*\n)+)/gm,
+  )) {
+    const field = (key) =>
+      body.match(new RegExp(`^ {12}${key}: '([^']*)'[ \\t]*$`, 'm'))?.[1];
+    legs.push({ name, os: field('os'), rustTarget: field('rust_target') });
+  }
+  // The parity check above keys on `rust_target:` lines alone; this walk keys
+  // on whole matrix entries, so a shape drift that hides an `os:` from the
+  // entry regex has to surface as a count mismatch rather than as silence.
+  const targetLines = workflow.match(/^ +rust_target: '[^']+'\s*$/gm) ?? [];
+  assert.equal(
+    legs.length,
+    targetLines.length,
+    'every build matrix entry must be readable as a `- name:` block with its ' +
+      'own `os:` and `rust_target:` fields',
+  );
+  for (const leg of legs) {
+    assert.ok(
+      leg.os && leg.rustTarget,
+      `build matrix entry ${leg.name} must carry both \`os:\` and ` +
+        '`rust_target:` as adjacent quoted fields',
+    );
+  }
+  const linuxLegs = legs.filter((leg) =>
+    leg.rustTarget?.endsWith('-unknown-linux-gnu'),
+  );
+  assert.ok(
+    linuxLegs.length >= 2,
+    'the build matrix must declare both Linux legs',
+  );
+  for (const leg of linuxLegs) {
+    assert.ok(
+      leg.os === linuxImageFloor || leg.os === `${linuxImageFloor}-arm`,
+      `${leg.name} (${leg.rustTarget}) builds on '${leg.os}', but the Linux ` +
+        `artifacts must link against the glibc of ${linuxImageFloor}; raise ` +
+        'the floor for both Linux legs together, or keep this leg on the ' +
+        'pinned image',
+    );
+  }
+}
+
 function testDesktopReleaseSigningWorkflow() {
   const workflow = fs.readFileSync(
     path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
@@ -527,9 +623,338 @@ function testDesktopReleaseHardening() {
       prepareRuntime.indexOf('writeChecksums();'),
     'runtime replacement must happen only after assembly and checksums finish',
   );
+  assert.match(
+    workflow,
+    /^ {12}PATCHELF="\$GITHUB_WORKSPACE\/packages\/desktop\/scripts\/patchelf-immutable-runtime\.sh"$/m,
+    'Linux installer builds must protect the checksummed runtime from post-link rewrites',
+  );
+  assert.match(
+    workflow,
+    /^ {12}QWEN_DESKTOP_PATCHELF="\$\(command -v patchelf\)"$/m,
+    'the patchelf wrapper must be given the real patchelf to delegate to',
+  );
+  assert.match(
+    workflow,
+    /^ {12}export QWEN_DESKTOP_PATCHELF PATCHELF$/m,
+    'both patchelf variables must be exported to the Tauri build',
+  );
+  const smokeRuntime = fs.readFileSync(
+    path.join(packageDir, 'scripts', 'smoke-runtime.js'),
+    'utf8',
+  );
+  const integrityCheck = smokeRuntime.indexOf(
+    'const manifest = verifyRuntimeIntegrity(runtimeRoot);',
+  );
+  const ripgrepCheck = smokeRuntime.indexOf(
+    'verifyBundledRipgrep(runtimeRoot, manifest.target);',
+  );
+  assert.ok(
+    integrityCheck !== -1 && integrityCheck < ripgrepCheck,
+    'the pre-bundle gate must probe ripgrep after verifying the runtime',
+  );
+  const buildIndex = workflow.indexOf("name: 'Build desktop installers'");
+  const installerSmokeIndex = workflow.indexOf(
+    "name: 'Verify Linux installer runtimes'",
+  );
+  const collectIndex = workflow.indexOf("name: 'Collect artifacts'");
+  assert.ok(
+    buildIndex < installerSmokeIndex && installerSmokeIndex < collectIndex,
+    'final Linux installer runtimes must be verified before artifacts are collected',
+  );
 }
 
-function testRuntimeNodePtyTargetMapping() {
+function testImmutableRuntimePatchelf(directory, canSpawnShebang) {
+  if (!canSpawnShebang) {
+    console.log('SKIP patchelf wrapper: shebang execution unavailable');
+    return;
+  }
+  const wrapper = path.join(
+    packageDir,
+    'scripts',
+    'patchelf-immutable-runtime.sh',
+  );
+  const fakePatchelf = path.join(directory, 'patchelf');
+  const log = path.join(directory, 'patchelf.log');
+  const runtimeElf = path.join(
+    directory,
+    'AppDir',
+    'usr',
+    'lib',
+    'Qwen Code Desktop',
+    'runtime',
+    'qwen-code',
+    'lib',
+    'vendor',
+    'ripgrep',
+    'x64-linux',
+    'rg',
+  );
+  const appElf = path.join(directory, 'AppDir', 'usr', 'bin', 'desktop');
+  fs.mkdirSync(path.dirname(runtimeElf), { recursive: true });
+  fs.mkdirSync(path.dirname(appElf), { recursive: true });
+  fs.writeFileSync(runtimeElf, 'runtime');
+  fs.writeFileSync(appElf, 'app');
+  fs.writeFileSync(log, '');
+  fs.writeFileSync(
+    fakePatchelf,
+    [
+      '#!/usr/bin/env sh',
+      '{',
+      '  printf \'argc=%s\' "$#"',
+      '  for arg in "$@"; do printf \'[%s]\' "$arg"; done',
+      "  printf '\\n'",
+      '} >> "$QWEN_TEST_PATCHELF_LOG"',
+      'printf \'%s\\n\' "$QWEN_TEST_PATCHELF_STDOUT"',
+      'exit "${QWEN_TEST_PATCHELF_STATUS:-0}"',
+      '',
+    ].join('\n'),
+  );
+  fs.chmodSync(fakePatchelf, 0o755);
+  const env = {
+    ...process.env,
+    QWEN_DESKTOP_PATCHELF: fakePatchelf,
+    QWEN_TEST_PATCHELF_LOG: log,
+    QWEN_TEST_PATCHELF_STDOUT: '$ORIGIN/../lib',
+  };
+
+  const skipped = spawnSync(wrapper, ['--set-rpath', '$ORIGIN', runtimeElf], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(skipped.status, 0, skipped.stderr);
+  assert.equal(
+    skipped.stderr,
+    `patchelf-immutable-runtime: skipped --set-rpath on ${runtimeElf}\n`,
+  );
+  assert.equal(fs.readFileSync(log, 'utf8'), '');
+
+  const readOnly = spawnSync(wrapper, ['--print-rpath', runtimeElf], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(readOnly.status, 0, readOnly.stderr);
+  assert.equal(readOnly.stdout, '$ORIGIN/../lib\n');
+  const delegated = spawnSync(wrapper, ['--set-rpath', '$ORIGIN', appElf], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(delegated.status, 0, delegated.stderr);
+  assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n'), [
+    `argc=2[--print-rpath][${runtimeElf}]`,
+    `argc=3[--set-rpath][$ORIGIN][${appElf}]`,
+  ]);
+
+  const failed = spawnSync(wrapper, ['--print-rpath', appElf], {
+    encoding: 'utf8',
+    env: { ...env, QWEN_TEST_PATCHELF_STATUS: '3' },
+  });
+  assert.equal(failed.status, 3);
+
+  const missing = spawnSync(
+    wrapper,
+    ['--set-rpath', '$ORIGIN', path.join(runtimeElf, 'missing')],
+    { encoding: 'utf8', env },
+  );
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /Runtime ELF is missing/);
+}
+
+function testLinuxInstallerSmokeDiscovery(directory) {
+  const bundleRoot = path.join(directory, 'bundle');
+  const appImage = path.join(bundleRoot, 'appimage', 'Desktop.AppImage');
+  const deb = path.join(bundleRoot, 'deb', 'desktop.deb');
+  fs.mkdirSync(path.dirname(appImage), { recursive: true });
+  fs.mkdirSync(path.dirname(deb), { recursive: true });
+  fs.writeFileSync(appImage, 'appimage');
+  fs.writeFileSync(deb, 'deb');
+  assert.deepEqual(findLinuxInstallers(bundleRoot), { appImage, deb });
+
+  const extractedRoot = path.join(directory, 'extracted');
+  const runtimeRoot = path.join(
+    extractedRoot,
+    'usr',
+    'lib',
+    'Qwen Code Desktop',
+    'runtime',
+    'qwen-code',
+  );
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.writeFileSync(path.join(runtimeRoot, 'manifest.json'), '{}');
+  assert.equal(findRuntimeRoot(extractedRoot), runtimeRoot);
+
+  fs.writeFileSync(path.join(bundleRoot, 'duplicate.AppImage'), 'duplicate');
+  assert.throws(
+    () => findLinuxInstallers(bundleRoot),
+    /Expected one AppImage, found 2/,
+  );
+}
+
+function testRuntimeSmokeChecks(directory, canSpawnShebang) {
+  const runtimeRoot = path.join(directory, 'runtime', 'qwen-code');
+  const manifest = {
+    name: '@qwen-code/qwen-code',
+    desktopVersion: '0.0.0-test',
+    qwenCodeVersion: '0.0.0-test',
+    qwenCodeCommit: 'test-commit',
+    target: 'linux-x64',
+    node: process.version,
+    builtAt: '2026-10-08T00:00:00.000Z',
+  };
+  const files = new Map([
+    ['manifest.json', `${JSON.stringify(manifest)}\n`],
+    ['LICENSE', 'license\n'],
+    ['NOTICE', 'notice\n'],
+    ['node/LICENSE', 'node license\n'],
+    ['node/bin/node', "#!/usr/bin/env sh\nprintf 'v22.0.0\\n'\n"],
+    ['lib/cli-entry.js', ''],
+    ['lib/web-shell/index.html', '<div id="root"></div>\n'],
+    ['lib/generated-ui/main.js', '// bundled Generated UI\n'],
+    ['lib/generated-ui/app.html', '<html></html>\n'],
+    ['lib/generated-ui/skills/generated-ui/SKILL.md', '# Generated UI\n'],
+    ['lib/generated-ui/THIRD_PARTY_NOTICES.txt', 'third-party licenses\n'],
+    [
+      'lib/vendor/ripgrep/x64-linux/rg',
+      "#!/usr/bin/env sh\nprintf 'ripgrep 15.0.0\\n'\n",
+    ],
+  ]);
+  for (const [relative, contents] of files) {
+    const file = path.join(runtimeRoot, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, contents);
+  }
+  const ripgrep = path.join(
+    runtimeRoot,
+    'lib',
+    'vendor',
+    'ripgrep',
+    'x64-linux',
+    'rg',
+  );
+  const node = path.join(runtimeRoot, 'node', 'bin', 'node');
+  fs.chmodSync(node, 0o755);
+  fs.chmodSync(ripgrep, 0o755);
+  const checksums = Object.fromEntries(
+    [...files.keys()].map((relative) => [
+      relative,
+      crypto
+        .createHash('sha256')
+        .update(fs.readFileSync(path.join(runtimeRoot, relative)))
+        .digest('hex'),
+    ]),
+  );
+  fs.writeFileSync(
+    path.join(runtimeRoot, 'checksums.json'),
+    `${JSON.stringify(checksums)}\n`,
+  );
+
+  assert.deepEqual(verifyRuntimeIntegrity(runtimeRoot), manifest);
+
+  const checksumsPath = path.join(runtimeRoot, 'checksums.json');
+  const webShell = path.join(runtimeRoot, 'lib', 'web-shell', 'index.html');
+  const hiddenWebShell = `${webShell}.missing`;
+  const checksumsWithoutWebShell = { ...checksums };
+  delete checksumsWithoutWebShell['lib/web-shell/index.html'];
+  fs.writeFileSync(
+    checksumsPath,
+    `${JSON.stringify(checksumsWithoutWebShell)}\n`,
+  );
+  fs.renameSync(webShell, hiddenWebShell);
+  assert.throws(
+    () => verifyRuntimeIntegrity(runtimeRoot),
+    /Bundled runtime file is missing: lib\/web-shell\/index\.html/,
+  );
+  fs.renameSync(hiddenWebShell, webShell);
+  fs.writeFileSync(checksumsPath, `${JSON.stringify(checksums)}\n`);
+
+  const generatedUiAssets = [
+    'lib/generated-ui/main.js',
+    'lib/generated-ui/app.html',
+    'lib/generated-ui/skills/generated-ui/SKILL.md',
+    'lib/generated-ui/THIRD_PARTY_NOTICES.txt',
+  ];
+  for (const relative of generatedUiAssets) {
+    const asset = path.join(runtimeRoot, relative);
+    fs.renameSync(asset, `${asset}.missing`);
+    assert.throws(
+      () => verifyRuntimeIntegrity(runtimeRoot),
+      /Bundled runtime file is missing: lib\/generated-ui\//,
+    );
+    fs.renameSync(`${asset}.missing`, asset);
+    const incompleteChecksums = { ...checksums };
+    delete incompleteChecksums[relative];
+    fs.writeFileSync(checksumsPath, `${JSON.stringify(incompleteChecksums)}\n`);
+    assert.throws(
+      () => verifyRuntimeIntegrity(runtimeRoot),
+      /Bundled runtime checksum is missing: lib\/generated-ui\//,
+    );
+    fs.writeFileSync(checksumsPath, `${JSON.stringify(checksums)}\n`);
+  }
+
+  const hiddenNode = `${node}.missing`;
+  fs.renameSync(node, hiddenNode);
+  assert.throws(
+    () => verifyRuntimeIntegrity(runtimeRoot),
+    /Checksummed runtime file is missing: node\/bin\/node/,
+  );
+  fs.renameSync(hiddenNode, node);
+
+  const incompleteManifest = { ...manifest };
+  delete incompleteManifest.desktopVersion;
+  fs.writeFileSync(
+    path.join(runtimeRoot, 'manifest.json'),
+    `${JSON.stringify(incompleteManifest)}\n`,
+  );
+  assert.throws(
+    () => verifyRuntimeIntegrity(runtimeRoot),
+    /Runtime manifest is missing desktopVersion/,
+  );
+  fs.writeFileSync(
+    path.join(runtimeRoot, 'manifest.json'),
+    files.get('manifest.json'),
+  );
+
+  fs.writeFileSync(path.join(runtimeRoot, 'LICENSE'), 'mutated license\n');
+  fs.writeFileSync(path.join(runtimeRoot, 'NOTICE'), 'mutated notice\n');
+  assert.throws(
+    () => verifyRuntimeIntegrity(runtimeRoot),
+    /Bundled runtime checksum mismatch: LICENSE, NOTICE/,
+  );
+  fs.writeFileSync(path.join(runtimeRoot, 'LICENSE'), files.get('LICENSE'));
+  fs.writeFileSync(path.join(runtimeRoot, 'NOTICE'), files.get('NOTICE'));
+
+  const ripgrepHidden = `${ripgrep}.missing`;
+  fs.renameSync(ripgrep, ripgrepHidden);
+  assert.throws(
+    () => verifyBundledRipgrep(runtimeRoot, manifest.target),
+    /Bundled ripgrep is missing for linux-x64/,
+  );
+  fs.renameSync(ripgrepHidden, ripgrep);
+  assert.throws(
+    () => verifyBundledRipgrep(runtimeRoot, 'linux-x64-musl'),
+    /Unsupported desktop target/,
+  );
+
+  if (!canSpawnShebang) {
+    console.log('SKIP runtime executables: shebang execution unavailable');
+    return;
+  }
+  verifyExtractedRuntime(directory);
+
+  fs.chmodSync(node, 0o644);
+  assert.throws(
+    () => verifyExtractedRuntime(directory),
+    /Bundled runtime node is not runnable/,
+  );
+  fs.chmodSync(node, 0o755);
+
+  fs.writeFileSync(ripgrep, "#!/usr/bin/env sh\nprintf 'unexpected\\n'\n");
+  assert.throws(
+    () => verifyBundledRipgrep(runtimeRoot, manifest.target),
+    /Bundled ripgrep failed its version probe/,
+  );
+}
+
+function testRuntimeTargetMappings() {
   const prepareRuntime = fs.readFileSync(
     path.join(packageDir, 'scripts', 'prepare-runtime.js'),
     'utf8',
@@ -561,6 +986,78 @@ function testRuntimeNodePtyTargetMapping() {
       mapping.get(target),
       `@lydell/node-pty-${target}`,
       `${target} must stage the prebuild package its own wrapper requires`,
+    );
+  }
+
+  const assetFilter =
+    /const opentuiScope =[\s\S]*?(?=\n {2}stageNodePty\(target\);)/.exec(
+      prepareRuntime,
+    )?.[0];
+  assert.ok(
+    assetFilter,
+    'the final copied runtime must filter OpenTUI native targets',
+  );
+  for (const target of supported) {
+    const libDir = path.join(root, 'opentui-targets', target);
+    const scope = path.join(libDir, 'opentui-assets', '@opentui');
+    for (const candidate of supported) {
+      const directory = path.join(scope, `core-${candidate}`);
+      fs.mkdirSync(directory, { recursive: true });
+      const library = candidate.startsWith('darwin')
+        ? 'libopentui.dylib'
+        : candidate.startsWith('win32')
+          ? 'opentui.dll'
+          : 'libopentui.so';
+      fs.writeFileSync(path.join(directory, library), candidate);
+    }
+    fs.mkdirSync(path.join(scope, 'core'), { recursive: true });
+    fs.writeFileSync(path.join(scope, 'core', 'parser.worker.js'), 'common');
+    // Run the actual preparation block against disk for every release target;
+    // the full cross-build preparation fixture below verifies its call site.
+    vm.runInNewContext(assetFilter, { fs, path, libDir, target });
+    assert.deepEqual(fs.readdirSync(scope).sort(), ['core', `core-${target}`]);
+    assert.equal(
+      fs.readFileSync(path.join(scope, 'core', 'parser.worker.js'), 'utf8'),
+      'common',
+    );
+    assert.equal(fs.readdirSync(path.join(scope, `core-${target}`)).length, 1);
+  }
+
+  const runtimeSmokeChecks = fs.readFileSync(
+    path.join(packageDir, 'scripts', 'runtime-smoke-checks.js'),
+    'utf8',
+  );
+  const ripgrepLiteral =
+    /const ripgrepByTarget = new Map\(\[([\s\S]*?)\]\);/.exec(
+      runtimeSmokeChecks,
+    );
+  assert.ok(
+    ripgrepLiteral,
+    'runtime smoke checks must map desktop targets to bundled ripgrep binaries',
+  );
+  const ripgrepMapping = vm.runInNewContext(`new Map([${ripgrepLiteral[1]}])`);
+  assert.deepEqual(
+    [...ripgrepMapping.keys()].sort(),
+    [...supported].sort(),
+    'every target desktopTarget() accepts needs a bundled ripgrep binary',
+  );
+  for (const target of supported) {
+    const targetPath = ripgrepMapping.get(target);
+    assert.ok(
+      fs
+        .statSync(
+          path.join(
+            repoRoot,
+            'packages',
+            'core',
+            'vendor',
+            'ripgrep',
+            ...targetPath,
+          ),
+          { throwIfNoEntry: false },
+        )
+        ?.isFile(),
+      `${target} must point to a bundled ripgrep binary`,
     );
   }
 
@@ -633,9 +1130,48 @@ function testRuntimePreparation(directory) {
     'cli-entry.js',
     path.join('web-shell', 'index.html'),
     path.join('web-shell', 'assets', 'app.js'),
+    path.join('generated-ui', 'main.js'),
+    path.join('generated-ui', 'app.html'),
+    path.join('generated-ui', 'skills', 'generated-ui', 'SKILL.md'),
+    path.join('generated-ui', 'THIRD_PARTY_NOTICES.txt'),
   ]) {
+    fs.mkdirSync(path.dirname(path.join(sourceRoot, 'dist', file)), {
+      recursive: true,
+    });
     fs.writeFileSync(path.join(sourceRoot, 'dist', file), 'test');
   }
+  const sourceRipgrep = path.join(
+    sourceRoot,
+    'dist',
+    'vendor',
+    'ripgrep',
+    'x64-darwin',
+    'rg',
+  );
+  fs.mkdirSync(path.dirname(sourceRipgrep), { recursive: true });
+  fs.writeFileSync(sourceRipgrep, 'test ripgrep');
+  const sourceOpenTui = path.join(
+    sourceRoot,
+    'dist',
+    'opentui-assets',
+    '@opentui',
+  );
+  for (const target of [
+    'darwin-arm64',
+    'darwin-x64',
+    'linux-arm64',
+    'linux-x64',
+    'win32-x64',
+  ]) {
+    const directory = path.join(sourceOpenTui, `core-${target}`);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'native-library'), target);
+  }
+  fs.mkdirSync(path.join(sourceOpenTui, 'core'), { recursive: true });
+  fs.writeFileSync(
+    path.join(sourceOpenTui, 'core', 'parser.worker.js'),
+    'shared-worker',
+  );
   // Staging installs the target's pinned packages into a throwaway prefix
   // instead of reading a host node_modules that cannot hold a cross-built
   // target's addon (#11872), so npm is stubbed: it records the argv it is
@@ -722,6 +1258,36 @@ globalThis.fetch = async (url) => {
   assert.ok(
     fs.existsSync(path.join(runtimeDir, 'qwen-code', 'checksums.json')),
   );
+  const stagedOpenTui = path.join(
+    runtimeDir,
+    'qwen-code',
+    'lib',
+    'opentui-assets',
+    '@opentui',
+  );
+  assert.deepEqual(fs.readdirSync(stagedOpenTui).sort(), [
+    'core',
+    'core-darwin-x64',
+  ]);
+  assert.equal(
+    fs.readFileSync(
+      path.join(stagedOpenTui, 'core-darwin-x64', 'native-library'),
+      'utf8',
+    ),
+    'darwin-x64',
+  );
+  assert.equal(
+    fs.readFileSync(
+      path.join(stagedOpenTui, 'core', 'parser.worker.js'),
+      'utf8',
+    ),
+    'shared-worker',
+  );
+  assert.equal(
+    fs.readdirSync(sourceOpenTui).length,
+    6,
+    'filter only the owned copied runtime, not the reusable dist',
+  );
 
   // The Web Terminal resolves its PTY backend from lib/, so the runtime has to
   // carry the wrapper and this target's prebuild under lib/node_modules
@@ -756,12 +1322,42 @@ globalThis.fetch = async (url) => {
       'utf8',
     ),
   );
+  for (const relative of [
+    'lib/generated-ui/main.js',
+    'lib/generated-ui/app.html',
+    'lib/generated-ui/skills/generated-ui/SKILL.md',
+    'lib/generated-ui/THIRD_PARTY_NOTICES.txt',
+  ]) {
+    assert.equal(
+      fs.readFileSync(path.join(runtimeDir, 'qwen-code', relative), 'utf8'),
+      'test',
+    );
+    assert.equal(
+      stagedChecksums[relative],
+      crypto.createHash('sha256').update('test').digest('hex'),
+    );
+  }
   assert.equal(
     stagedChecksums[
       'lib/node_modules/@lydell/node-pty-darwin-x64/prebuilds/darwin-x64/pty.node'
     ],
     crypto.createHash('sha256').update('test addon').digest('hex'),
     'the staged prebuild must be checksummed so signing refresh and smoke verification cover it',
+  );
+  const stagedRipgrep = path.join(
+    runtimeDir,
+    'qwen-code',
+    'lib',
+    'vendor',
+    'ripgrep',
+    'x64-darwin',
+    'rg',
+  );
+  assert.equal(fs.readFileSync(stagedRipgrep, 'utf8'), 'test ripgrep');
+  assert.equal(
+    stagedChecksums['lib/vendor/ripgrep/x64-darwin/rg'],
+    crypto.createHash('sha256').update('test ripgrep').digest('hex'),
+    'the target ripgrep binary must be staged and checksummed',
   );
 
   // ...and it has to get there by fetching the TARGET's pinned package, at the

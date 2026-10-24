@@ -30,6 +30,7 @@ import {
   count as countTestSurface,
   measure as measureTestSurface,
 } from '../../.github/scripts/count-test-surface.mjs';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 // A hung-runner bound, not a performance budget, so it rides the suite's own
 // knob (scripts/tests/vitest.config.ts) instead of a figure measured on a
@@ -1319,6 +1320,14 @@ describe('qwen-autofix workflow', () => {
           'The self-hosted runner lost communication with the server',
       }),
     ).toEqual({ reran: true, continued: true });
+    // A per-host test lock starving past its budget (#14550) is capacity
+    // contention on the shared pool, not the PR's change: no test ran.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'sdk-java host lock not acquired within 40 minutes',
+      }),
+    ).toEqual({ reran: true, continued: true });
     // A REAL failure (no infra signature in the annotation) → never rerun; the
     // agent/human handles it. This is the gate that stops masking real bugs.
     expect(
@@ -1372,6 +1381,8 @@ describe('qwen-autofix workflow', () => {
       'The runner has been terminated',
       'fatal: fetch-pack: invalid index-pack output',
       'error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)',
+      // #13622: the hosted pool never assigned a runner — no step ran.
+      'The job was not started because it repeatedly failed to be acquired (5 attempts).',
     ]) {
       expect(run({ checks: [FAIL], annotations: msg })).toEqual({
         reran: true,
@@ -6015,6 +6026,11 @@ exit 1
     expect(seedOf('@qwen-code /takeover from 3')).toBe('add|3');
     expect(seedOf('  @qwen-code /takeover from 12  ')).toBe('add|12');
     expect(seedOf('@qwen-code /takeover from 99')).toBe('add|99');
+    // A trailing NEWLINE engages through a different mechanism than the
+    // trailing-space body above, so one fixture cannot cover both: sed is
+    // line-oriented (af-083), the newline is a record terminator, and it is
+    // the surrounding $(...) that strips it.
+    expect(seedOf('@qwen-code /takeover from 4\n')).toBe('add|4');
     // 'from 0' is the explicit no-seed spelling: it must engage exactly like
     // the bare command rather than being rejected, so a maintainer who types
     // it gets management, not silence.
@@ -6045,6 +6061,18 @@ exit 1
       '@qwen-code /takeover from 3; rm -rf /',
       '@qwen-code /takeover from $(id)',
       '@qwen-code /takeover from `id`',
+      // A leading NEWLINE fails closed for a different reason than the
+      // prefixed bodies above: $(...) strips only TRAILING newlines, so
+      // BODY_TRIMMED keeps the '\n'; the end-anchored `from N` regex (af-007)
+      // still matches, but BASH_REMATCH[1] then fails the TAKEOVER_COMMAND
+      // comparison. Production stops it earlier at the router prefilter
+      // (af-004); this pins the in-job trim itself.
+      '\n@qwen-code /takeover from 4',
+      // An INTERIOR newline fails closed too, and is the only body here that
+      // pins it: the `from N` regex (af-007) is end-anchored, so trailing
+      // prose blocks the match. Without this a first-line-only trim would
+      // silently engage a comment that merely quotes the command.
+      '@qwen-code /takeover from 4\nthanks',
     ]) {
       expect(seedOf(body)).toBe('|');
     }
@@ -25148,13 +25176,22 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // Two siblings a main merge added went ungated and turned the revived
     // macOS lane red; the pin keeps a dropped gate from doing it again.
     const self = readFileSync(fileURLToPath(import.meta.url), 'utf8');
-    for (const title of [
-      'keeps the green path intact',
-      'rejects a conflict verdict whose round completed as fixed',
-      'locks the runner file-command backing files against env plants',
+    for (const [title, guard] of [
+      ['keeps the green path intact', '!hasBashMapfile'],
+      [
+        'rejects a conflict verdict whose round completed as fixed',
+        '!hasBashMapfile',
+      ],
+      [
+        'locks the runner file-command backing files against env plants',
+        // Its read-only lock also needs permission bits to bind.
+        '!hasBashMapfile || !arePermissionBitsEnforced()',
+      ],
     ]) {
+      const exact = guard.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       expect(self).toMatch(
-        new RegExp(`it\\.skipIf\\(!hasBashMapfile\\)\\(\\s*'${title}'`),
+        // However Prettier wraps the guard.
+        new RegExp(`it\\.skipIf\\(\\s*${exact},?\\s*\\)\\(\\s*'${title}'`),
       );
     }
   });
@@ -25761,7 +25798,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('kiss_audit=true');
   });
 
-  it.skipIf(!hasBashMapfile)(
+  // The lock is a read-only mode, which only binds where permission bits do:
+  // root with its DAC capabilities appends to the backing file anyway.
+  it.skipIf(!hasBashMapfile || !arePermissionBitsEnforced())(
     'locks the runner file-command backing files against env plants',
     () => {
       // The strip removes the GITHUB_ENV VARIABLE from the checks, but the
@@ -27683,7 +27722,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(accepting.length).toBeGreaterThan(8);
     expect(
       accepting
-        .filter((chunk) => !chunk.startsWith('.skipIf(!hasBashMapfile)('))
+        // Alone or ahead of another guard, however Prettier wraps it.
+        .filter(
+          (chunk) =>
+            !/^\.skipIf\(\s*!hasBashMapfile\s*(?:,?\s*\)|\|\|)/.test(chunk),
+        )
         .map((chunk) => chunk.slice(0, 90)),
     ).toEqual([]);
   });
@@ -28301,8 +28344,6 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // measurement that quietly went UNAVAILABLE.
       [{ dropCounter: true }, 'removed after staging'],
       [{ dropParser: true }, 'removed after staging'],
-      // ...and so is one that can no longer be read.
-      [{ unreadableCounter: true }, 'made unreadable after staging'],
     ]) {
       const r = runGate({ weaken: 'assert', ...knob });
       expect(r.status).toBe(1);
@@ -28311,6 +28352,20 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       expect(r.rejection).toContain(reason);
     }
   });
+
+  // An unreadable mode only binds where permission bits do: not for root
+  // with its DAC capabilities.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'refuses an instrument made unreadable after staging',
+    () => {
+      // One that can no longer be read is tampering too.
+      const r = runGate({ weaken: 'assert', unreadableCounter: true });
+      expect(r.status).toBe(1);
+      expect(r.outputs).toContain('outcome=failed');
+      expect(r.outputs).not.toContain('retryable=true');
+      expect(r.rejection).toContain('made unreadable after staging');
+    },
+  );
 
   it.skipIf(!hasBashMapfile)(
     'does not charge non-test files or non-JS test edits',

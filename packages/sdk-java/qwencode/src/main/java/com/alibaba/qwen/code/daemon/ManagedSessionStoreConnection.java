@@ -11,10 +11,14 @@ import java.util.regex.Pattern;
 public final class ManagedSessionStoreConnection {
     private static final Pattern TENANT_PATTERN = Pattern.compile(
             "^[A-Za-z0-9._:-]{1,128}$");
+    private static final Pattern WRITER_TOKEN_PATTERN = Pattern.compile(
+            "^[A-Za-z0-9_-]{32,512}$");
     private final URI baseUri;
     private final String tenantId;
     private final String workspaceId;
     private final String writerId;
+    private final String writerToken;
+    private final boolean allowInsecureHttp;
     private final long leaseDurationMs;
 
     private ManagedSessionStoreConnection(Builder builder) {
@@ -26,6 +30,13 @@ public final class ManagedSessionStoreConnection {
         this.workspaceId = requireText(builder.workspaceId,
                 "workspaceId", 512);
         this.writerId = requireText(builder.writerId, "writerId", 512);
+        if (builder.writerToken != null
+                && !WRITER_TOKEN_PATTERN.matcher(builder.writerToken)
+                        .matches()) {
+            throw new IllegalArgumentException("writerToken is invalid");
+        }
+        this.writerToken = builder.writerToken;
+        this.allowInsecureHttp = builder.allowInsecureHttp;
         if (builder.leaseDuration == null) {
             throw new IllegalArgumentException(
                     "leaseDuration must not be null");
@@ -47,6 +58,12 @@ public final class ManagedSessionStoreConnection {
         result.put("tenantId", tenantId);
         result.put("workspaceId", workspaceId);
         result.put("writerId", writerId);
+        if (writerToken != null) {
+            result.put("writerToken", writerToken);
+        }
+        if (allowInsecureHttp) {
+            result.put("allowInsecureHttp", true);
+        }
         result.put("leaseDurationMs", leaseDurationMs);
         return result;
     }
@@ -86,6 +103,8 @@ public final class ManagedSessionStoreConnection {
         private String tenantId;
         private String workspaceId;
         private String writerId;
+        private String writerToken;
+        private boolean allowInsecureHttp;
         private Duration leaseDuration = Duration.ofSeconds(60);
 
         private Builder() {
@@ -108,6 +127,17 @@ public final class ManagedSessionStoreConnection {
 
         public Builder writerId(String writerId) {
             this.writerId = writerId;
+            return this;
+        }
+
+        public Builder writerToken(String writerToken) {
+            this.writerToken = writerToken;
+            return this;
+        }
+
+        /** Opt-in for plaintext http on a trusted network. */
+        public Builder allowInsecureHttp(boolean allowInsecureHttp) {
+            this.allowInsecureHttp = allowInsecureHttp;
             return this;
         }
 

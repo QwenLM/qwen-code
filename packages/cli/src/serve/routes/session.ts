@@ -58,6 +58,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
+  SESSION_ATTACHMENT_CHUNK_BYTES,
+  SessionAttachmentUploadError,
+} from '@qwen-code/acp-bridge/sessionAttachments';
+import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -152,6 +156,7 @@ import {
   assertSessionArchived,
   assertSessionLoadable,
   assertSessionRestorable,
+  DaemonDrainingError,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   logSessionArchiveWarning,
@@ -159,6 +164,11 @@ import {
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
+import {
+  readWorkspaceArtifactLibrary,
+  removeWorkspaceLibraryArtifact,
+} from '../server/session-artifact-library.js';
+import { bindSessionPrsFromReviewPrompt } from './session-pr-backfill.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
@@ -172,6 +182,10 @@ import {
   withPromptTerminals,
 } from '../prompt-terminal-ledger.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 import {
   omitSkillDetailsForSdkSurface,
   omitSkillDetailsFromReplayArrays,
@@ -220,6 +234,7 @@ import {
   redactWorkflowsFromReplayArrays,
   redactWorkflowsFromSupportedCommands,
 } from '../workflow-session-gate.js';
+import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -301,6 +316,7 @@ interface RegisterSessionRoutesDeps {
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable?: boolean;
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
   materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
@@ -415,7 +431,6 @@ function mediaBlockParseError(
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
-  'POST /session/:id/side-task',
   'POST /session/:id/fork',
 ] as const;
 type PrimaryOnlyLiveSessionRoute =
@@ -788,6 +803,20 @@ function parseRequestedSessionSource(
   body: Record<string, unknown>,
   res: Response,
 ): { sourceType?: string; sourceId?: string } | null {
+  // Agent sessions are created by the session-agents orchestrator
+  // in-process, never through this route. Accepting the source here would let
+  // a client relabel a session it restores so a real run is sent into it.
+  if (
+    body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE ||
+    body['sourceType'] === AGENT_SESSION_SOURCE_TYPE
+  ) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned agent sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
   if (
     isReservedStandaloneSessionSource({
       sourceType:
@@ -820,10 +849,16 @@ function parseRequestedSessionSource(
   return source;
 }
 
+export type ResolveSubagentSessionRuntime = (
+  res: Response,
+  route: string,
+  parentSessionId: string,
+) => Promise<WorkspaceRuntime | undefined>;
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
-): void {
+): { resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime } {
   const {
     boundWorkspace,
     workspaceRegistry,
@@ -1499,6 +1534,10 @@ export function registerSessionRoutes(
         archiveState: 'active',
         size: 1,
         signal,
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
       });
       signal.throwIfAborted();
       return page.items.length > 0;
@@ -1870,6 +1909,19 @@ export function registerSessionRoutes(
     });
   };
 
+  const sendStandaloneActionUnsupported = (
+    res: Response,
+    route: string,
+    sessionId: string,
+  ): void => {
+    res.status(400).json({
+      error: 'This action is not supported in a standalone session.',
+      code: 'unsupported_action',
+      sessionId,
+      route,
+    });
+  };
+
   const isStandaloneOwner = (
     runtime: WorkspaceRuntime,
     sessionId: string,
@@ -1924,6 +1976,7 @@ export function registerSessionRoutes(
       options: {
         cwdBound?: 'always' | 'rewind-files' | 'sync-output-language';
         promptAdmission?: boolean;
+        rejectStandalone?: boolean;
       } = {},
     ): RequestHandler =>
     async (req, res) => {
@@ -1933,6 +1986,10 @@ export function registerSessionRoutes(
         const owner = await resolveOwnerSessionRuntime(sessionId, res, route);
         if (!owner) return;
         const { runtime, standalone } = owner;
+        if (options.rejectStandalone && standalone) {
+          sendStandaloneActionUnsupported(res, route, sessionId);
+          return;
+        }
         const cwdBound =
           options.cwdBound === 'always' ||
           (options.cwdBound === 'rewind-files' &&
@@ -2300,6 +2357,44 @@ export function registerSessionRoutes(
     return throwMissingActiveTranscript();
   };
 
+  const resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime = async (
+    res,
+    route,
+    parentSessionId,
+  ) => {
+    const owner = workspaceRegistry.resolveLiveSessionOwner(parentSessionId);
+    if (owner.kind !== 'not_found') {
+      return requireSessionRuntime({
+        sessionId: parentSessionId,
+        route,
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+    }
+    try {
+      return await resolveTranscriptSessionRuntime(
+        res,
+        route,
+        parentSessionId,
+        false,
+      );
+    } catch (error) {
+      if (
+        error instanceof SessionNotFoundError &&
+        error.code === 'session_not_found' &&
+        (workspaceRegistry.primaryEntry.state !== 'active' ||
+          !workspaceRegistry.primaryEntry.current)
+      ) {
+        logSessionRoutingFailure(route, 'workspace_runtime_unavailable', {
+          sessionId: parentSessionId,
+        });
+        return requirePrimarySessionRuntime(workspaceRegistry, res);
+      }
+      throw error;
+    }
+  };
+
   const resolveSessionAnyStateRuntime = async (
     res: Response,
     route: string,
@@ -2586,6 +2681,20 @@ export function registerSessionRoutes(
     return undefined;
   };
 
+  const parseRequireIdle = (
+    req: Request,
+    res: Response,
+  ): boolean | undefined => {
+    const value: unknown = safeBody(req)['requireIdle'];
+    if (value === undefined) return false;
+    if (typeof value === 'boolean') return value;
+    res.status(400).json({
+      error: '`requireIdle` must be a boolean',
+      code: 'invalid_request',
+    });
+    return undefined;
+  };
+
   // Mirrors the bridge's displayName control-character rule (ESLint forbids
   // control-char regexes).
   const hasControlCharacter = (value: string): boolean =>
@@ -2736,6 +2845,7 @@ export function registerSessionRoutes(
     route: string,
     sessionIds: string[],
     resolveConflicts = false,
+    requireIdle = false,
   ) => {
     const run = async (
       runtime: WorkspaceRuntime,
@@ -2758,6 +2868,7 @@ export function registerSessionRoutes(
               coordinator: archiveCoordinator,
               coordinatorLockHeld,
               resolveConflicts,
+              requireIdle,
               assertCanMutate,
             }),
           ),
@@ -2827,12 +2938,7 @@ export function registerSessionRoutes(
         if (!owner) return;
         const { runtime, standalone } = owner;
         if (options.rejectStandalone && standalone) {
-          res.status(400).json({
-            error: 'This action is not supported in a standalone session.',
-            code: 'unsupported_action',
-            sessionId,
-            route,
-          });
+          sendStandaloneActionUnsupported(res, route, sessionId);
           return;
         }
         if (
@@ -3068,7 +3174,16 @@ export function registerSessionRoutes(
         // by a "new chat" does not block a fresh branch session.
         const sharedCheckoutSession = runtime.bridge
           .listWorkspaceSessions(workspaceCwd)
-          .find((session) => !session.worktree && session.clientCount > 0);
+          .find(
+            (session) =>
+              session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
+              // Mesh agent bodies hold no user edits and are driven by the
+              // daemon, not by a person at a checkout — they must not block
+              // branch creation in the workspace they happen to share.
+              session.sourceType !== AGENT_SESSION_SOURCE_TYPE &&
+              !session.worktree &&
+              session.clientCount > 0,
+          );
         if (sharedCheckoutSession) {
           res.status(409).json({
             error:
@@ -3747,17 +3862,15 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const runtime = requireSessionRuntime({
-          sessionId: virtualKey.parentSessionId,
-          route,
-          res,
-          workspaceRegistry,
-          daemonLog,
-        });
-        if (!runtime) return;
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         try {
+          const runtime = await resolveSubagentSessionRuntime(
+            res,
+            route,
+            virtualKey.parentSessionId,
+          );
+          if (!runtime) return;
           const session = await runOwnerRuntimeActivity(runtime, () =>
             virtualSubagentSessions.load(runtime, sessionId, clientId),
           );
@@ -4001,9 +4114,15 @@ export function registerSessionRoutes(
               sourceId: _reservedSourceId,
               ...metadataWithoutSource
             } = metadata;
+            // Agent-source sessions strip their source on restore as well:
+            // the restore is a person reading history, and the admission gate
+            // in acpAgent refuses `sourceType: 'agent'` materialisation with
+            // no live run behind it — keeping the source would make a finished
+            // agent's transcript unopenable while it stays listed.
             const restoreMetadata =
-              !isInternalWorkspaceRuntime(runtime) &&
-              isReservedStandaloneSessionSource(metadata)
+              (!isInternalWorkspaceRuntime(runtime) &&
+                isReservedStandaloneSessionSource(metadata)) ||
+              metadata.sourceType === AGENT_SESSION_SOURCE_TYPE
                 ? metadataWithoutSource
                 : metadata;
             const hasPersistedSource =
@@ -5353,15 +5472,13 @@ export function registerSessionRoutes(
       });
       return;
     }
-    const runtime = requireSessionRuntime({
-      sessionId,
-      route,
-      res,
-      workspaceRegistry,
-      daemonLog,
-    });
-    if (!runtime) return;
     try {
+      const runtime = await resolveSubagentSessionRuntime(
+        res,
+        route,
+        sessionId,
+      );
+      if (!runtime) return;
       await runOwnerRuntimeActivity(runtime, async () => {
         const resolved = await virtualSubagentSessions.resolve(
           runtime,
@@ -5956,7 +6073,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/side-task',
     mutate(),
-    withRestrictedMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/side-task',
       async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
@@ -6816,15 +6933,13 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'GET /session/:id/context',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'GET /session/:id/context',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             v: 1,
@@ -6888,15 +7003,13 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'GET /session/:id/supported-commands',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'GET /session/:id/supported-commands',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             v: 1,
@@ -6942,6 +7055,25 @@ export function registerSessionRoutes(
               runtime.trusted && req.query['includeWorkflows'] === 'true',
           }),
         );
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/tasks/:taskId/runtime',
+    withOwnerReadSession(
+      'GET /session/:id/tasks/:taskId/runtime',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionTaskRuntime(sessionId, taskId));
       },
     ),
   );
@@ -7173,6 +7305,88 @@ export function registerSessionRoutes(
       },
     ),
   );
+
+  // Persisted workspace management neither borrows a session client identity
+  // nor loads cold sessions.
+  for (const operation of ['read', 'remove'] as const) {
+    const route =
+      '/workspaces/:workspace/session/:id/artifact-library' +
+      (operation === 'remove' ? '/:artifactId' : '');
+    const handler: RequestHandler = async (req, res) => {
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      if (deps.sessionArtifactsPersistenceAvailable === false) {
+        res.status(409).json({
+          code: 'artifact_library_unavailable',
+          error: 'Artifact persistence is unavailable',
+        });
+        return;
+      }
+      try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [sessionId],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
+        const run = async () => {
+          assertOpen?.();
+          const liveOwner =
+            workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          if (liveOwner.kind === 'unavailable') {
+            sendWorkspaceRuntimeUnavailable(res);
+            return undefined;
+          }
+          if (liveOwner.kind === 'ambiguous') {
+            sendAmbiguousSessionOwner(
+              res,
+              route,
+              sessionId,
+              liveOwner.runtimes,
+            );
+            return undefined;
+          }
+          if (liveOwner.kind === 'found' && liveOwner.runtime !== runtime) {
+            sendSessionWorkspaceConflict(
+              res,
+              route,
+              sessionId,
+              runtime,
+              liveOwner.runtime,
+            );
+            return undefined;
+          }
+          const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
+            operation === 'read'
+              ? readWorkspaceArtifactLibrary(runtime, sessionId)
+              : removeWorkspaceLibraryArtifact(
+                  runtime,
+                  sessionId,
+                  req.params['artifactId']!,
+                  () => assertOpen?.(),
+                ),
+          );
+          assertOpen?.();
+          return result;
+        };
+        const result = await runOwnerRuntimeActivity(runtime, () =>
+          operation === 'read'
+            ? archiveCoordinator.runSharedMany([sessionId], run)
+            : archiveCoordinator.runExclusiveMany([sessionId], run),
+        );
+        if (result)
+          res.status(200).set('Cache-Control', 'no-store').json(result);
+      } catch (error) {
+        if (sendArtifactValidationError(res, error)) return;
+        sendBridgeError(res, error, { route, sessionId });
+      }
+    };
+    if (operation === 'read') app.get(route, handler);
+    else app.delete(route, mutate({ strict: true }), handler);
+  }
 
   app.get(
     '/session/:id/artifacts',
@@ -7487,6 +7701,9 @@ export function registerSessionRoutes(
         const promptId = crypto.randomUUID();
         const result = await runtime.bridge.continueSession(sessionId, {
           ...(clientId !== undefined ? { clientId } : {}),
+          ...(typeof req.body?.confirmCancellation === 'string'
+            ? { confirmCancellation: req.body.confirmCancellation }
+            : {}),
           promptId,
         });
         if (daemonLog && result.accepted) {
@@ -7499,6 +7716,172 @@ export function registerSessionRoutes(
         res.status(200).json(result);
       },
       { cwdBound: 'always' },
+    ),
+  );
+
+  const attachmentUploadBodyError: ErrorRequestHandler = (
+    error,
+    _req,
+    res,
+    next,
+  ) => {
+    const status =
+      error && typeof error === 'object' && 'status' in error
+        ? error.status
+        : undefined;
+    if (status === 400 || status === 413 || status === 415) {
+      res.status(status).json({
+        error:
+          status === 413
+            ? 'Attachment upload request body exceeds its limit'
+            : 'Invalid attachment upload request body',
+        code:
+          status === 413
+            ? 'attachment_upload_too_large'
+            : status === 415
+              ? error.type === 'encoding.unsupported'
+                ? 'invalid_attachment_upload_encoding'
+                : 'invalid_attachment_upload_content_type'
+              : 'invalid_attachment_upload_body',
+      });
+      return;
+    }
+    next(error);
+  };
+
+  app.post(
+    '/session/:id/attachment-uploads',
+    mutate(),
+    express.json({ limit: '4kb', inflate: false }),
+    attachmentUploadBodyError,
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads',
+      (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        if (
+          typeof body['name'] !== 'string' ||
+          typeof body['mimeType'] !== 'string' ||
+          !body['mimeType'].trim() ||
+          typeof body['size'] !== 'number'
+        ) {
+          throw new SessionAttachmentUploadError(
+            400,
+            'invalid_attachment_upload_metadata',
+            'name, mimeType, and size are required',
+          );
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const upload = runtime.bridge.createSessionAttachmentUpload(
+            sessionId,
+            {
+              name: body['name'],
+              mimeType: body['mimeType'].trim().toLowerCase(),
+              size: body['size'],
+            },
+            clientId === undefined ? undefined : { clientId },
+          );
+          res.set('Cache-Control', 'no-store').status(201).json(upload);
+        } catch (error) {
+          if (error instanceof TypeError || error instanceof RangeError) {
+            throw new SessionAttachmentUploadError(
+              error instanceof RangeError ? 413 : 400,
+              'invalid_attachment_upload_metadata',
+              error.message,
+            );
+          }
+          throw error;
+        }
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/attachment-uploads/:uploadId/chunks',
+    mutate(),
+    express.raw({
+      type: '*/*',
+      limit: SESSION_ATTACHMENT_CHUNK_BYTES,
+      inflate: false,
+    }),
+    attachmentUploadBodyError,
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads/:uploadId/chunks',
+      (req, res, sessionId, runtime) => {
+        if (
+          req.headers['content-type']
+            ?.split(';', 1)[0]
+            ?.trim()
+            .toLowerCase() !== 'application/octet-stream'
+        ) {
+          throw new SessionAttachmentUploadError(
+            415,
+            'invalid_attachment_upload_content_type',
+            'Chunks require application/octet-stream',
+          );
+        }
+        const offset = req.query['offset'];
+        if (
+          typeof offset !== 'string' ||
+          !/^\d+$/.test(offset) ||
+          !Number.isSafeInteger(Number(offset)) ||
+          !Buffer.isBuffer(req.body)
+        ) {
+          throw new SessionAttachmentUploadError(
+            400,
+            'invalid_attachment_upload_chunk',
+            'A raw chunk and a non-negative integer offset are required',
+          );
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.appendSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          Number(offset),
+          req.body,
+          clientId === undefined ? undefined : { clientId },
+        );
+        res.set('Cache-Control', 'no-store').status(200).json(result);
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/attachment-uploads/:uploadId/complete',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads/:uploadId/complete',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const reference = await runtime.bridge.completeSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          clientId === undefined ? undefined : { clientId },
+          captureRuntimeGenerationAssertion(runtime),
+        );
+        res.set('Cache-Control', 'no-store').status(200).json(reference);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/attachment-uploads/:uploadId',
+    mutate(),
+    withOwnerMutableSession(
+      'DELETE /session/:id/attachment-uploads/:uploadId',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        runtime.bridge.cancelSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          clientId === undefined ? undefined : { clientId },
+        );
+        res.status(204).end();
+      },
     ),
   );
 
@@ -7882,6 +8265,58 @@ export function registerSessionRoutes(
         }
         res.off('close', onResClose);
 
+        // A `/review <N|url>` prompt binds the PR to this session as soon as
+        // the turn is admitted, instead of waiting for an on-demand backfill
+        // sweep. Off the prompt path: a failed bind never affects the turn.
+        if (runtime.trusted && channelPrompt === undefined) {
+          // Only the prompt the user typed is a source: take the first text
+          // block. Later blocks can carry @-imported file content whose
+          // line-leading examples would forge a binding; a channel-relayed
+          // turn is an external sender's message, not the local user's.
+          const firstTextBlock: Record<string, unknown> | undefined =
+            prompt.find(
+              (item: unknown) =>
+                (item as Record<string, unknown>)['type'] === 'text',
+            );
+          const promptText =
+            typeof firstTextBlock?.['text'] === 'string'
+              ? (firstTextBlock['text'] as string)
+              : undefined;
+          if (promptText !== undefined) {
+            void bindSessionPrsFromReviewPrompt(
+              runtime,
+              sessionId,
+              promptText,
+              {
+                archiveCoordinator: deps.archiveCoordinator,
+              },
+            )
+              .then((result) => {
+                if (!result) return;
+                if (result.writeErrors || result.unresolved) {
+                  daemonLog?.warn('review PR bind incomplete', {
+                    sessionId,
+                    unresolved: result.unresolved,
+                    writeErrors: result.writeErrors,
+                    overLimit: result.overLimit,
+                  });
+                }
+              })
+              .catch((error) => {
+                if (
+                  error instanceof WorkspaceGenerationClosedError ||
+                  error instanceof DaemonDrainingError
+                ) {
+                  return;
+                }
+                daemonLog?.warn('review PR bind failed', {
+                  sessionId,
+                  error: describePromptTurnFailure(error),
+                });
+              });
+          }
+        }
+
         promptPromise
           .then(
             () => {
@@ -8029,17 +8464,15 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'POST /session/:id/heartbeat',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'POST /session/:id/heartbeat',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             sessionId,
@@ -8080,17 +8513,15 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'POST /session/:id/detach',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'POST /session/:id/detach',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(204).end();
         });
@@ -8158,6 +8589,7 @@ export function registerSessionRoutes(
             runtime.bridge.closeSession(
               sessionId,
               clientId !== undefined ? { clientId } : undefined,
+              { cancelReason: 'user' },
             ),
           ),
         ),
@@ -8206,6 +8638,8 @@ export function registerSessionRoutes(
     if (uniqueIds === undefined) return;
     const resolveConflicts = parseResolveConflicts(req, res);
     if (resolveConflicts === undefined) return;
+    const requireIdle = parseRequireIdle(req, res);
+    if (requireIdle === undefined) return;
     if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
 
     try {
@@ -8215,6 +8649,7 @@ export function registerSessionRoutes(
         'POST /sessions/archive',
         uniqueIds,
         resolveConflicts,
+        requireIdle,
       );
       if (!operation) return;
       const { result } = operation;
@@ -8296,6 +8731,8 @@ export function registerSessionRoutes(
       if (uniqueIds === undefined) return;
       const resolveConflicts = parseResolveConflicts(req, res);
       if (resolveConflicts === undefined) return;
+      const requireIdle = parseRequireIdle(req, res);
+      if (requireIdle === undefined) return;
       if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const operation = await archiveSessions(
@@ -8304,6 +8741,7 @@ export function registerSessionRoutes(
           route,
           uniqueIds,
           resolveConflicts,
+          requireIdle,
         );
         if (!operation) return;
         const { result } = operation;
@@ -9415,6 +9853,9 @@ export function registerSessionRoutes(
       }
       const sessions = bridge
         .listWorkspaceSessions(runtime.workspaceCwd)
+        .filter(
+          (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+        )
         .map((session) => ({
           sessionId: session.sessionId,
           clientCount: session.clientCount,
@@ -9771,6 +10212,26 @@ export function registerSessionRoutes(
     ),
   );
 
+  // Deliver the queued mid-turn messages now: the agent cuts a streaming
+  // model response short instead of waiting for its next tool boundary,
+  // unless that response has started a tool call.
+  app.post(
+    '/session/:id/mid-turn-messages/send-now',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/mid-turn-messages/send-now',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.sendMidTurnMessagesNow(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
   app.delete(
     '/session/:id/mid-turn-messages/:messageId',
     mutate(),
@@ -9983,6 +10444,54 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/message-groups',
+    withOwnerReadSession(
+      'GET /session/:id/message-groups',
+      async (_req, res, sessionId, runtime) => {
+        res.status(200).json(await runtime.bridge.getMessageGroups(sessionId));
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/messages/delete',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/messages/delete',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const snapshot = body['snapshot'];
+        const groupIds = body['groupIds'];
+        if (
+          typeof snapshot !== 'string' ||
+          snapshot.length === 0 ||
+          !Array.isArray(groupIds) ||
+          groupIds.length === 0 ||
+          !groupIds.every((id) => typeof id === 'string' && id.length > 0) ||
+          new Set(groupIds).size !== groupIds.length
+        ) {
+          res.status(400).json({
+            error: 'A snapshot and distinct non-empty groupIds are required',
+            code: 'invalid_message_groups',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.deleteMessageGroups(
+              sessionId,
+              { snapshot, groupIds },
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/rewind/snapshots',
     withOwnerReadSession(
       'GET /session/:id/rewind/snapshots',
@@ -10157,4 +10666,5 @@ export function registerSessionRoutes(
       { cwdBound: 'sync-output-language' },
     ),
   );
+  return { resolveSubagentSessionRuntime };
 }

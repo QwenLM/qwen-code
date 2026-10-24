@@ -21,6 +21,7 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import {
   estimateTextTokens,
@@ -47,6 +48,7 @@ import { isDisclosureText } from '../../omni/disclosure.js';
 import { evictOldestImagesBeyondCap } from './image-budget.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
+import { TrailingThinkingTagFilter } from './trailing-thinking-tag-filter.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -1235,12 +1237,31 @@ function extractTextFromContentUnion(contentUnion: unknown): string {
 function convertOpenAITextToParts(
   text: string,
   requestContext: RequestContext,
-  final = true,
+  final: boolean,
+  completed: boolean,
 ): Part[] {
+  // Tagged-thinking streams are out of scope for the trailing-tag filter: once
+  // a stream opens a literal thinking block, the parser below owns its tags.
   if (
     !requestContext.responseParsingOptions?.taggedThinkingTags &&
     !requestContext.taggedThinkingParser
   ) {
+    if (requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks) {
+      text = (requestContext.trailingThinkingTagFilter ??=
+        new TrailingThinkingTagFilter()).parse(
+        text,
+        final || requestContext.hasThinkingTagInReasoning === true,
+        completed && !requestContext.hasThinkingTagInReasoning,
+      );
+      const filter = requestContext.trailingThinkingTagFilter;
+      if (filter.sanitizedTagName) {
+        requestContext.protocolTagSanitized = {
+          tagName: filter.sanitizedTagName,
+          toolCallCount: 0,
+        };
+        filter.sanitizedTagName = undefined;
+      }
+    }
     return text ? [{ text }] : [];
   }
 
@@ -1265,6 +1286,30 @@ const STANDALONE_CLOSING_THINKING_TAG_PATTERN =
 const STANDALONE_OPENING_THINKING_TAG_PATTERN =
   /^\s*<(think|thinking)\s*>\s*$/i;
 const MAX_THINKING_TAG_CANDIDATE_LENGTH = 128;
+
+/**
+ * "Finished normally" for the trailing-tag filter, spelled with the same
+ * finish-reason mapper that stamps the candidate: `tool_calls`,
+ * `function_call`, an absent reason, and any casing a gateway uses all report
+ * `FinishReason.STOP` downstream, so all of them must suppress a trailing
+ * orphan tag. Truncation, safety and unknown reasons stay incomplete and
+ * release the tail verbatim instead.
+ *
+ * The `reasoningText` conjunct is the cross-channel guard, and it is not
+ * redundant: `hasThinkingTagInReasoning` is only set inside
+ * `convertOpenAIChunkToLlm`, so on the non-streaming path this is the only
+ * thing stopping the content channel from being stripped while tagged
+ * reasoning survives.
+ */
+function completedNormally(
+  finishReason: string | null | undefined,
+  reasoningText: string | null | undefined,
+): boolean {
+  return (
+    mapOpenAIFinishReasonToLlm(finishReason || 'stop') === FinishReason.STOP &&
+    !THINKING_TAG_PATTERN.test(reasoningText ?? '')
+  );
+}
 
 function canBeStandaloneThinkingTagPrefix(text: string): boolean {
   const candidate = text.trimStart().toLowerCase();
@@ -1366,7 +1411,12 @@ export function convertOpenAIResponseToLlm(
   if (choice) {
     const parts: Part[] = [];
     const textParts = choice.message.content
-      ? convertOpenAITextToParts(choice.message.content, requestContext)
+      ? convertOpenAITextToParts(
+          choice.message.content,
+          requestContext,
+          true,
+          completedNormally(choice.finish_reason, reasoningText),
+        )
       : [];
 
     // Handle reasoning content (thoughts).
@@ -1511,6 +1561,13 @@ export function convertOpenAIChunkToLlm(
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
 
+    if (
+      !requestContext.responseParsingOptions?.taggedThinkingTags &&
+      THINKING_TAG_PATTERN.test(reasoningText ?? '')
+    ) {
+      requestContext.hasThinkingTagInReasoning = true;
+    }
+
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
       const rawContent = choice.delta.content;
@@ -1551,8 +1608,13 @@ export function convertOpenAIChunkToLlm(
       ) {
         requestContext.taggedThinkingParser ??= new TaggedThinkingParser();
         requestContext.pendingThinkingTagCandidate = undefined;
+        // The takeover stops calling the trailing-tag filter for the rest of
+        // the turn, so a whitespace hold it still has is handed over rather
+        // than stranded between two prose runs.
+        const drainedWhitespace =
+          requestContext.trailingThinkingTagFilter?.drainWhitespace() ?? '';
         contentParts = requestContext.taggedThinkingParser.parse(
-          taggedThinkingCandidate,
+          drainedWhitespace + taggedThinkingCandidate,
           Boolean(choice.finish_reason),
         );
       } else if (normalizedContent || choice.finish_reason) {
@@ -1562,11 +1624,17 @@ export function convertOpenAIChunkToLlm(
           normalizedContent,
           requestContext,
           Boolean(choice.finish_reason),
+          completedNormally(choice.finish_reason, reasoningText),
         );
       }
     } else if (choice.finish_reason) {
       // Flush any buffered tagged-thinking content on stream end
-      contentParts = convertOpenAITextToParts('', requestContext, true);
+      contentParts = convertOpenAITextToParts(
+        '',
+        requestContext,
+        true,
+        completedNormally(choice.finish_reason, reasoningText),
+      );
     }
 
     if (
@@ -1860,6 +1928,14 @@ export function convertOpenAIChunkToLlm(
     const toolCallsTruncated = choice.finish_reason
       ? toolCallParser.hasIncompleteToolCalls()
       : false;
+    // The trailing-tag filter stamps this from inside convertOpenAITextToParts,
+    // which runs before tool calls are parsed, so it can only record the tag
+    // name. Fill the count in here, where it exists, so the two writers of one
+    // field agree on its meaning.
+    if (choice.finish_reason && requestContext.protocolTagSanitized) {
+      requestContext.protocolTagSanitized.toolCallCount =
+        completedToolCalls.length;
+    }
     if (
       choice.finish_reason &&
       requestContext.pendingThinkingTagCandidate?.closingTagName
@@ -1927,11 +2003,56 @@ export function convertOpenAIChunkToLlm(
     }
 
     // If tool call JSON was truncated, override to "length" so downstream
-    // (turn.ts) correctly sets wasOutputTruncated=true.
+    // (turn.ts) correctly sets wasOutputTruncated=true. Brace depth alone
+    // does not prove truncation: providers can emit malformed (e.g. fused)
+    // tool-call arguments that end incomplete without any token-limit cut,
+    // and the override then misdiagnoses the schema-validation failure as
+    // max_tokens truncation (QwenLM/qwen-code#12970). Only apply it when
+    // the reported usage cannot disprove truncation.
+    const suspectTruncation =
+      toolCallsTruncated && choice.finish_reason !== 'length';
+    const usageVerdict = corroborateTruncationFromCompletionTokens(
+      chunk.usage?.completion_tokens,
+      requestContext.maxOutputTokens,
+    );
+    if (suspectTruncation) {
+      // This rewrite decides whether a file-modifying call is rejected and
+      // whether the max_tokens recovery loop runs, and the heuristic has been
+      // wrong in both directions (#4964 missed a real cut, #12970 invented
+      // one), so the two numbers it was decided from have to be recoverable
+      // from a log rather than re-derived from source.
+      debugLogger.debug('Truncated tool-call finish_reason override', {
+        providerFinishReason: choice.finish_reason,
+        completionTokens: chunk.usage?.completion_tokens ?? null,
+        maxOutputTokens: requestContext.maxOutputTokens ?? null,
+        verdict: usageVerdict,
+        overrideApplied: usageVerdict !== 'disproved',
+      });
+    }
     const effectiveFinishReason =
-      toolCallsTruncated && choice.finish_reason !== 'length'
+      suspectTruncation && usageVerdict !== 'disproved'
         ? 'length'
         : choice.finish_reason;
+    if (suspectTruncation && usageVerdict === 'unknown') {
+      // This chunk carried no usable usage, which is the normal case rather
+      // than an edge one: the pipeline requests `stream_options.include_usage`
+      // (pipeline.ts) and under that convention the finish chunk reports
+      // `usage: null` while the totals land on a later `choices: []` chunk.
+      // Hand the provider's own reason to the pipeline so it can settle the
+      // rewrite on the parked finish response, where the delayed evidence is
+      // merged in before the response is ever yielded.
+      requestContext.pendingTruncationOverride = {
+        finishReason: mapOpenAIFinishReasonToLlm(choice.finish_reason),
+      };
+    }
+    if (suspectTruncation && usageVerdict === 'disproved') {
+      // The token-limit diagnosis is withdrawn, so `wasOutputTruncated` will
+      // not be set downstream — but the arguments really did arrive
+      // unterminated and were repaired into shape. Mark them so the
+      // scheduler's reject-incomplete-file-writes guard stays armed and only
+      // the wording follows the corrected diagnosis (#12970).
+      markToolCallArgumentsIncomplete(parts);
+    }
 
     // Only include finishReason key if finish_reason is present
     const candidate: Candidate = {
@@ -2018,6 +2139,63 @@ export function convertOpenAIChunkToLlm(
   }
 
   return response;
+}
+
+/**
+ * Fraction of the output budget a response must have consumed before
+ * incomplete tool-call JSON may be attributed to max_tokens truncation.
+ * Deliberately conservative: genuine truncation lands at ~100% of the budget,
+ * so 50% keeps the heuristic for plausible cuts while clearing it for
+ * responses that ended far below the ceiling.
+ */
+const TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD = 0.5;
+
+/** What reported usage says about a suspected token-limit cut. */
+export type TruncationUsageVerdict =
+  /** Consumption reached the threshold, so a real cut is plausible. */
+  | 'corroborated'
+  /** Consumption is decisively below the ceiling: not a token-limit cut. */
+  | 'disproved'
+  /** No usable evidence either way; the legacy brace-depth inference stands. */
+  | 'unknown';
+
+/**
+ * The truncated-tool-call finish_reason override exists for providers that
+ * report "stop"/"tool_calls" for output actually cut by the token limit
+ * (QwenLM/qwen-code#4964). A genuine cut means the model generated (very
+ * nearly) the full output budget, so usage reporting completion tokens well
+ * below the ceiling disproves truncation — the incomplete tool-call JSON then
+ * comes from malformed generation instead (QwenLM/qwen-code#12970). When
+ * usage or the ceiling is unavailable the check is inconclusive and the
+ * legacy inference stands.
+ *
+ * A count that is missing, non-numeric or non-positive is *not* a disproof.
+ * Callers only consult this once the parser found incomplete tool-call JSON,
+ * so output existed and merely went uncounted: providers that zero-fill usage
+ * on the finish chunk and send the real totals on a trailing `choices: []`
+ * chunk (ModelScope) would otherwise read as proof against truncation, which
+ * suppresses the #4964 recovery and disarms the scheduler's
+ * reject-file-writes-while-truncated guard on exactly the responses it exists
+ * for. Such a count returns `unknown` so the delayed totals can still settle
+ * it (see RequestContext.pendingTruncationOverride).
+ */
+export function corroborateTruncationFromCompletionTokens(
+  completionTokens: number | null | undefined,
+  maxOutputTokens: number | undefined,
+): TruncationUsageVerdict {
+  if (
+    typeof completionTokens !== 'number' ||
+    !Number.isFinite(completionTokens) ||
+    completionTokens <= 0 ||
+    maxOutputTokens === undefined ||
+    maxOutputTokens <= 0
+  ) {
+    return 'unknown';
+  }
+  return completionTokens >=
+    maxOutputTokens * TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD
+    ? 'corroborated'
+    : 'disproved';
 }
 
 function mapOpenAIFinishReasonToLlm(openaiReason: string | null): FinishReason {

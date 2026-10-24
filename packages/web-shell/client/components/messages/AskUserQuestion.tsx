@@ -13,6 +13,7 @@ import { isEditableTarget } from '../../utils/dom';
 import { Spinner } from '../ui/spinner';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './AskUserQuestion.module.css';
+import { BrowserNotificationControl } from './BrowserNotificationControl';
 
 interface Question {
   question: string;
@@ -476,6 +477,20 @@ export function AskUserQuestion({
   // option navigation remains scoped to the roving-tabindex option group.
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (
+        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
+        ((e.key === 'Enter' && (e.ctrlKey || e.metaKey)) ||
+          (!isEditableTarget(e.target) &&
+            e.target instanceof Element &&
+            e.target.closest('[data-web-shell-ask-option]') &&
+            ((e.key >= '1' && e.key <= '9') ||
+              e.key === 'Enter' ||
+              e.key === ' ')))
+      ) {
+        e.preventDefault();
+        return;
+      }
+
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       if (collapsed) {
         if (
@@ -730,6 +745,7 @@ export function AskUserQuestion({
               />
             </svg>
           </button>
+          <BrowserNotificationControl />
         </div>
       </div>
 
