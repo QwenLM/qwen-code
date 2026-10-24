@@ -1160,7 +1160,7 @@ class Issue13181QueryBudgetTest {
     void asynchronousVerificationHeartbeatsAndStatusAvoidJournalBodyReads() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        byte[] bytes = new byte[] {1, 2, 3, 4};
+        byte[] bytes = new byte[16];
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
             public void putIfAbsent(String key, byte[] input) {}
@@ -1191,13 +1191,18 @@ class Issue13181QueryBudgetTest {
             public void validateConfiguration() {}
         };
         ToolPublicationDataStore data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager,
-                publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofMillis(300),
+                publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofSeconds(2),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
         data.publishSegment(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat",
                 "stdout", 0, bytes, null, true);
         fixture.ledger.reset();
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                verifier.runOnce();
+                assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+                        "async-heartbeat").path("state").asText()).isEqualTo("SUCCEEDED");
+            });
         }
         long renewals = fixture.ledger.count("update ma_operation set",
                 "claim_until = ?, verification_next_at = case when");

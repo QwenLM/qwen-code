@@ -45,12 +45,24 @@ import * as hookOutputs from './types.js';
 import type { Config } from '../config/config.js';
 import type { AggregatedHookResult } from './hookAggregator.js';
 import type { HookOutput } from './types.js';
+import path from 'node:path';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { FileChangedWatcher } from './file-changed-watcher.js';
+import { applySkillHooks } from '../tools/skill-utils.js';
+import { getHookExecutionOwner } from './hook-execution-context.js';
+import {
+  runWithInvocationContext,
+  getInvocationContext,
+} from '../utils/invocation-context.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 
 vi.mock('./hookRegistry.js');
 vi.mock('./hookRunner.js');
 vi.mock('./hookAggregator.js');
 vi.mock('./hookPlanner.js');
 vi.mock('./hookEventHandler.js');
+vi.mock('./file-changed-watcher.js');
 
 const aggregated = (
   finalOutput?: HookOutput,
@@ -123,6 +135,7 @@ describe('HookSystem', () => {
     mockHookEventHandler = {
       fireUserPromptSubmitEvent: vi.fn(),
       fireInstructionsLoadedEvent: vi.fn(),
+      fireFileChangedEvent: vi.fn(),
       fireUserPromptExpansionEvent: vi.fn(),
       fireStopEvent: vi.fn(),
       fireMessageDisplayEvent: vi.fn(),
@@ -149,6 +162,13 @@ describe('HookSystem', () => {
     vi.mocked(HookAggregator).mockImplementation(() => mockHookAggregator);
     vi.mocked(HookPlanner).mockImplementation(() => mockHookPlanner);
     vi.mocked(HookEventHandler).mockImplementation(() => mockHookEventHandler);
+    vi.mocked(FileChangedWatcher).mockImplementation(
+      () =>
+        ({
+          setPaths: vi.fn().mockResolvedValue(undefined),
+          close: vi.fn().mockResolvedValue(undefined),
+        }) as unknown as FileChangedWatcher,
+    );
 
     hookSystem = new HookSystem(mockConfig);
   });
@@ -163,6 +183,604 @@ describe('HookSystem', () => {
     return Reflect.apply(hookSystem[method], hookSystem, args);
   };
   afterEach(() => vi.restoreAllMocks());
+
+  describe('FileChanged registration', () => {
+    const watchOutput = (watchPaths: unknown): HookOutput => ({
+      hookSpecificOutput: { hookEventName: 'SessionStart', watchPaths },
+    });
+    const start = (allOutputs: HookOutput[] = []) =>
+      fire('fireSessionStartEvent', [SessionStartSource.Startup, 'model'], {
+        ...aggregated(),
+        allOutputs,
+      });
+    const watcher = () =>
+      vi.mocked(FileChangedWatcher).mock.results.at(-1)!
+        .value as FileChangedWatcher;
+
+    beforeEach(() => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([
+        { ...registryEntry(HookEventName.FileChanged), matcher: '.env|.envrc' },
+      ]);
+    });
+
+    it('does not derive recursive directory watches from static matchers', async () => {
+      const directory = mkdtempSync(path.join(tmpdir(), 'hook-static-'));
+      try {
+        mkdirSync(path.join(directory, 'node_modules'));
+        vi.mocked(mockConfig.getWorkingDir).mockReturnValue(directory);
+        vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([
+          {
+            ...registryEntry(HookEventName.FileChanged),
+            matcher: 'node_modules|future.md',
+          },
+        ]);
+        await hookSystem.initialize();
+        expect(watcher().setPaths).toHaveBeenCalledWith(
+          [path.join(directory, 'future.md')],
+          [path.join(directory, 'future.md')],
+        );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      '(notes|todo|other)\\.md',
+      '^notes|todo.md',
+      '(notes)|todo.md',
+      '**.md',
+      '[abc].env',
+      'notes\\|todo\\.md',
+    ])('does not derive static paths from regex %s', async (matcher) => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([
+        { ...registryEntry(HookEventName.FileChanged), matcher },
+      ]);
+      await hookSystem.initialize();
+      expect(FileChangedWatcher).not.toHaveBeenCalled();
+    });
+
+    it('relocates static paths without losing explicit dynamic roots', async () => {
+      await hookSystem.initialize();
+      await start([watchOutput(['/explicit/root'])]);
+      vi.mocked(mockConfig.getWorkingDir).mockReturnValue('/new/cwd');
+      await hookSystem.refreshFileWatchingForWorkingDirectory();
+      expect(watcher().setPaths).toHaveBeenLastCalledWith(
+        [
+          '/explicit/root',
+          path.resolve('/new/cwd', '.env'),
+          path.resolve('/new/cwd', '.envrc'),
+        ],
+        [path.resolve('/new/cwd', '.env'), path.resolve('/new/cwd', '.envrc')],
+      );
+    });
+
+    it('gives normalized dynamic paths precedence over static file roles', async () => {
+      await start([watchOutput(['/test/cwd/sub/../.env'])]);
+      expect(watcher().setPaths).toHaveBeenLastCalledWith(
+        [
+          '/test/cwd/sub/../.env',
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [path.resolve('/test/cwd', '.envrc')],
+      );
+    });
+
+    it('does not start bootstrap watching during cwd refresh', async () => {
+      await hookSystem.initialize({ skipFileWatching: true });
+      vi.mocked(mockConfig.getWorkingDir).mockReturnValue('/new/cwd');
+      await hookSystem.refreshFileWatchingForWorkingDirectory();
+      expect(FileChangedWatcher).not.toHaveBeenCalled();
+    });
+
+    it('starts static paths during initialization without any SessionStart hook', async () => {
+      await hookSystem.initialize();
+      expect(watcher().setPaths).toHaveBeenCalledWith(
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
+      expect(mockHookEventHandler.fireSessionStartEvent).not.toHaveBeenCalled();
+    });
+
+    it('loads bootstrap hooks without starting watches, including after reload', async () => {
+      await hookSystem.initialize({ skipFileWatching: true });
+      await hookSystem.reload();
+      expect(mockHookRegistry.initialize).toHaveBeenCalledOnce();
+      expect(FileChangedWatcher).not.toHaveBeenCalled();
+      await start();
+      expect(watcher().setPaths).toHaveBeenCalledWith(
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
+    });
+
+    it('refreshes static paths when a skill registers directly with the session manager', async () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+      await hookSystem.initialize();
+      applySkillHooks(
+        {
+          getHookSystem: () => hookSystem,
+          getSessionId: () => 'test-session-id',
+        },
+        {
+          name: 'watch-topic',
+          description: 'Watch topic',
+          level: 'user',
+          filePath: '/skills/watch-topic/SKILL.md',
+          skillRoot: '/skills/watch-topic',
+          body: '',
+          hooks: {
+            FileChanged: [
+              {
+                matcher: 'topic.md',
+                hooks: [{ type: HookType.Command, command: 'echo changed' }],
+              },
+            ],
+          },
+        },
+      );
+      await vi.waitFor(() => {
+        expect(watcher().setPaths).toHaveBeenLastCalledWith(
+          [path.resolve('/test/cwd', 'topic.md')],
+          [path.resolve('/test/cwd', 'topic.md')],
+        );
+      });
+      const manager = hookSystem.getSessionHooksManager();
+      const [entry] = manager.getHooksForEvent(
+        'test-session-id',
+        HookEventName.FileChanged,
+      );
+      manager.removeHook('test-session-id', entry.hookId);
+      await vi.waitFor(() =>
+        expect(watcher().setPaths).toHaveBeenLastCalledWith([], []),
+      );
+    });
+
+    it('keeps watchPaths from an earlier output when a later hook only adds context', async () => {
+      const context = {
+        hookSpecificOutput: {
+          hookEventName: 'SessionStart',
+          additionalContext: 'context',
+        },
+      };
+      const output = await fire(
+        'fireSessionStartEvent',
+        [SessionStartSource.Startup, 'model'],
+        {
+          ...aggregated(context),
+          allOutputs: [watchOutput(['/memory']), context],
+        },
+      );
+      expect(output?.hookSpecificOutput?.['additionalContext']).toBe('context');
+      expect(watcher().setPaths).toHaveBeenCalledWith(
+        [
+          '/memory',
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
+    });
+
+    it('uses the last valid list and rejects an entire invalid list', async () => {
+      await start([
+        watchOutput(['/first']),
+        watchOutput(['/second']),
+        watchOutput(['/partial', 'relative']),
+      ]);
+      expect(watcher().setPaths).toHaveBeenLastCalledWith(
+        [
+          '/second',
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
+    });
+
+    it('clears dynamic paths with [] while retaining static paths', async () => {
+      await start([watchOutput(['/memory'])]);
+      await fire('fireFileChangedEvent', ['/memory/topic.md', 'change'], {
+        ...aggregated(),
+        allOutputs: [
+          {
+            hookSpecificOutput: {
+              hookEventName: 'FileChanged',
+              watchPaths: [],
+            },
+          },
+        ],
+      });
+      expect(watcher().setPaths).toHaveBeenLastCalledWith(
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
+    });
+
+    it('does not interpret match-all or path matchers as a workspace scan', async () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue(
+        ['', '*', '.*', '../secret', '.', '..'].map((matcher) => ({
+          ...registryEntry(HookEventName.FileChanged),
+          matcher,
+        })),
+      );
+      await start();
+      expect(FileChangedWatcher).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      'remote',
+      'sandbox',
+      'managed',
+      'managed-engine',
+      'disabled',
+    ] as const)(
+      'does not create a local watcher for %s sessions',
+      async (kind) => {
+        Object.assign(mockConfig, {
+          getExecutionEnvironment: () => (kind === 'remote' ? {} : undefined),
+          getSessionExecutionEngine: () =>
+            kind === 'managed-engine' ? 'managed' : undefined,
+          getShellExecutionSandbox: () => (kind === 'sandbox' ? {} : undefined),
+          getDisableAllHooks: () => kind === 'disabled',
+        });
+        if (kind === 'managed')
+          hookSystem = new HookSystem(mockConfig, {
+            hasHooksForEvent: () => true,
+            execute: async () => aggregated(),
+          });
+        await start([watchOutput(['/memory'])]);
+        expect(FileChangedWatcher).not.toHaveBeenCalled();
+      },
+    );
+
+    it('binds observed changes to the listening session without a stale prompt or invocation', async () => {
+      await start([watchOutput(['/memory'])]);
+      const observations: unknown[] = [];
+      vi.mocked(mockHookEventHandler.fireFileChangedEvent).mockImplementation(
+        async () => {
+          observations.push(
+            getHookExecutionOwner(),
+            getInvocationContext(),
+            promptIdContext.getStore(),
+          );
+          return aggregated();
+        },
+      );
+      const callback = vi.mocked(FileChangedWatcher).mock.calls[0][0];
+      await runWithInvocationContext(
+        { version: 1, sessionId: 'other', promptId: 'old' },
+        () =>
+          promptIdContext.run('old', () =>
+            callback('/memory/topic.md', 'add', new AbortController().signal),
+          ),
+      );
+      expect(observations).toEqual([
+        {
+          runtimeId: hookSystem.runtimeId,
+          sessionId: 'test-session-id',
+          agentId: null,
+        },
+        undefined,
+        undefined,
+      ]);
+    });
+
+    it('disposes the watcher and does not restart after shutdown', async () => {
+      await start([watchOutput(['/memory'])]);
+      const active = watcher();
+      await hookSystem.close();
+      await start([watchOutput(['/later'])]);
+      expect(active.close).toHaveBeenCalledOnce();
+      expect(FileChangedWatcher).toHaveBeenCalledOnce();
+    });
+
+    it('drops static registrations on disable and reload', async () => {
+      await start();
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+      hookSystem.setHookEnabled('test-hook', false);
+      await vi.waitFor(() =>
+        expect(watcher().setPaths).toHaveBeenLastCalledWith([], []),
+      );
+      await hookSystem.reload();
+      expect(watcher().setPaths).toHaveBeenLastCalledWith([], []);
+    });
+
+    it('rebinds the watcher on session rotation and discards outgoing dynamic paths', async () => {
+      await start([watchOutput(['/old-memory'])]);
+      const oldWatcher = watcher();
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session');
+      await start();
+      expect(oldWatcher.close).toHaveBeenCalledOnce();
+      expect(FileChangedWatcher).toHaveBeenCalledTimes(2);
+      expect(watcher().setPaths).toHaveBeenCalledWith(
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
+    });
+
+    it.each(['reload', 'skill', 'enable', 'cwd'] as const)(
+      'starts later FileChanged hooks after session rotation through %s',
+      async (refresh) => {
+        vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+        await hookSystem.initialize();
+        await fire('fireSessionEndEvent', [SessionEndReason.Clear]);
+        vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session');
+
+        if (refresh === 'skill') {
+          hookSystem
+            .getSessionHooksManager()
+            .addSessionHook(
+              'new-session',
+              HookEventName.FileChanged,
+              'notes.md',
+              { type: HookType.Command, command: 'echo changed' },
+            );
+        } else {
+          vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([
+            {
+              ...registryEntry(HookEventName.FileChanged),
+              matcher: 'notes.md',
+            },
+          ]);
+          if (refresh === 'reload') await hookSystem.reload();
+          if (refresh === 'enable')
+            hookSystem.setHookEnabled('test-hook', true);
+          if (refresh === 'cwd')
+            await hookSystem.refreshFileWatchingForWorkingDirectory();
+        }
+
+        await vi.waitFor(() => {
+          expect(FileChangedWatcher).toHaveBeenCalledOnce();
+          expect(watcher().setPaths).toHaveBeenCalledWith(
+            [path.resolve('/test/cwd', 'notes.md')],
+            [path.resolve('/test/cwd', 'notes.md')],
+          );
+        });
+        expect(
+          mockHookEventHandler.fireSessionStartEvent,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rebinds on reload without SessionEnd and ignores outgoing FileChanged results', async () => {
+      await start([watchOutput(['/old-memory'])]);
+      const outgoing = watcher();
+      let finish!: (result: AggregatedHookResult) => void;
+      vi.mocked(mockHookEventHandler.fireFileChangedEvent).mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const changed = hookSystem.fireFileChangedEvent(
+        '/old-memory/topic.md',
+        'change',
+      );
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session');
+      await hookSystem.reload();
+      finish({
+        ...aggregated(),
+        allOutputs: [
+          {
+            hookSpecificOutput: {
+              hookEventName: 'FileChanged',
+              watchPaths: ['/outgoing-result'],
+            },
+          },
+        ],
+      });
+      await changed;
+
+      expect(outgoing.close).toHaveBeenCalledOnce();
+      expect(outgoing.setPaths).toHaveBeenCalledOnce();
+      expect(FileChangedWatcher).toHaveBeenCalledTimes(2);
+      expect(watcher().setPaths).toHaveBeenCalledOnce();
+      expect(watcher().setPaths).toHaveBeenLastCalledWith(
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+        [
+          path.resolve('/test/cwd', '.env'),
+          path.resolve('/test/cwd', '.envrc'),
+        ],
+      );
+    });
+
+    it('keeps the ended session stopped when hooks change before rotation', async () => {
+      await start();
+      const outgoing = watcher();
+      await fire('fireSessionEndEvent', [SessionEndReason.Clear]);
+      await hookSystem.reload();
+      await hookSystem.refreshFileWatchingForWorkingDirectory();
+      hookSystem.setHookEnabled('test-hook', true);
+      hookSystem
+        .getSessionHooksManager()
+        .addSessionHook(
+          'test-session-id',
+          HookEventName.FileChanged,
+          'notes.md',
+          { type: HookType.Command, command: 'echo changed' },
+        );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(outgoing.close).toHaveBeenCalledOnce();
+      expect(outgoing.setPaths).toHaveBeenCalledOnce();
+      expect(FileChangedWatcher).toHaveBeenCalledOnce();
+    });
+
+    it('keeps bootstrap optout across session rotation and later hook reload', async () => {
+      await hookSystem.initialize({ skipFileWatching: true });
+      await fire('fireSessionEndEvent', [SessionEndReason.Clear]);
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session');
+      await hookSystem.reload();
+      expect(FileChangedWatcher).not.toHaveBeenCalled();
+    });
+
+    it('does not arm a session ended while its outgoing watcher is closing', async () => {
+      await start();
+      let finish!: () => void;
+      vi.mocked(watcher().close).mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session');
+      const reloaded = hookSystem.reload();
+      await vi.waitFor(() => expect(watcher().close).toHaveBeenCalledOnce());
+      const ended = fire('fireSessionEndEvent', [SessionEndReason.Clear]);
+      finish();
+      await Promise.all([reloaded, ended]);
+      expect(FileChangedWatcher).toHaveBeenCalledOnce();
+    });
+
+    it('does not rearm a session when its pending SessionStart finishes after SessionEnd', async () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+      await hookSystem.initialize();
+      let finish!: (result: AggregatedHookResult) => void;
+      vi.mocked(mockHookEventHandler.fireSessionStartEvent).mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const started = hookSystem.fireSessionStartEvent(
+        SessionStartSource.Startup,
+        'model',
+      );
+      await vi.waitFor(() =>
+        expect(
+          mockHookEventHandler.fireSessionStartEvent,
+        ).toHaveBeenCalledOnce(),
+      );
+      await fire('fireSessionEndEvent', [SessionEndReason.Clear]);
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([
+        { ...registryEntry(HookEventName.FileChanged), matcher: 'notes.md' },
+      ]);
+      finish({ ...aggregated(), allOutputs: [watchOutput(['/ended-memory'])] });
+      await started;
+      await hookSystem.reload();
+      expect(FileChangedWatcher).not.toHaveBeenCalled();
+    });
+
+    it('does not resume ended watching after an aborted SessionStart', async () => {
+      await start();
+      await fire('fireSessionEndEvent', [SessionEndReason.Clear]);
+      const controller = new AbortController();
+      controller.abort();
+      await fire('fireSessionStartEvent', [
+        SessionStartSource.Clear,
+        'model',
+        undefined,
+        undefined,
+        controller.signal,
+      ]);
+      await hookSystem.reload();
+      expect(FileChangedWatcher).toHaveBeenCalledOnce();
+    });
+
+    it('ignores an outgoing SessionStart that finishes after the replacement starts', async () => {
+      await start();
+      let finish!: (result: AggregatedHookResult) => void;
+      vi.mocked(mockHookEventHandler.fireSessionStartEvent).mockReturnValueOnce(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const outgoing = hookSystem.fireSessionStartEvent(
+        SessionStartSource.Clear,
+        'model',
+      );
+      await vi.waitFor(() =>
+        expect(
+          mockHookEventHandler.fireSessionStartEvent,
+        ).toHaveBeenCalledTimes(2),
+      );
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session');
+      await start();
+      const replacement = watcher();
+      finish({
+        ...aggregated(),
+        allOutputs: [watchOutput(['/outgoing-memory'])],
+      });
+      await outgoing;
+
+      expect(FileChangedWatcher).toHaveBeenCalledTimes(2);
+      expect(replacement.close).not.toHaveBeenCalled();
+      expect(replacement.setPaths).toHaveBeenCalledOnce();
+    });
+
+    it('does not close the replacement watcher when an outgoing SessionEnd completes late', async () => {
+      await start();
+      const oldWatcher = watcher();
+      let finish!: (value: AggregatedHookResult) => void;
+      vi.mocked(mockHookEventHandler.fireSessionEndEvent).mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const ended = hookSystem.fireSessionEndEvent(SessionEndReason.Clear);
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session');
+      await start();
+      const replacement = watcher();
+      finish(aggregated());
+      await ended;
+      expect(oldWatcher.close).toHaveBeenCalledOnce();
+      expect(replacement.close).not.toHaveBeenCalled();
+    });
+
+    it('awaits watcher cleanup already started by SessionEnd when closed again', async () => {
+      await start();
+      let finish!: () => void;
+      vi.mocked(watcher().close).mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      vi.mocked(mockHookEventHandler.fireSessionEndEvent).mockResolvedValue(
+        aggregated(),
+      );
+      const ended = hookSystem.fireSessionEndEvent(SessionEndReason.Clear);
+      let closed = false;
+      const shutdown = hookSystem.close().then(() => {
+        closed = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(closed).toBe(false);
+      finish();
+      await Promise.all([ended, shutdown]);
+      expect(closed).toBe(true);
+    });
+  });
 
   describe('constructor', () => {
     it('should create instance with all dependencies', () => {

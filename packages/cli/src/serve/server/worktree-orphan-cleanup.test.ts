@@ -52,6 +52,9 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     git(repoRoot, 'config', 'user.email', 't@e.com');
     git(repoRoot, 'config', 'user.name', 't');
     git(repoRoot, 'config', 'commit.gpgsign', 'false');
+    const emptyExcludes = path.join(repoParent, 'empty-excludes');
+    fs.writeFileSync(emptyExcludes, '');
+    git(repoRoot, 'config', 'core.excludesFile', emptyExcludes);
     fs.writeFileSync(
       path.join(repoRoot, '.gitignore'),
       'secret.env\nnode_modules/\n',

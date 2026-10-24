@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
@@ -383,6 +384,7 @@ class HostedProcessCrashIT {
             }
             startSpring();
             if (List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"))) {
+                WorkspaceTestStorage.prepareNativeRoot(root.resolve("workspace"));
                 var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
                 storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
                 storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(

@@ -173,6 +173,10 @@ const TRANSCRIPT_STUBS = new Map(
     ],
     ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
     [
+      './client/browser-notifications/messages.ts',
+      './client/browser-notifications/messages.transcript-stub.ts',
+    ],
+    [
       './client/mcp-app/messages.ts',
       './client/mcp-app/messages.transcript-stub.ts',
     ],

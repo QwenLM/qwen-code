@@ -388,6 +388,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | `TodoCreated`         | When a new todo item is created                                        | None (always fires)                                              |
 | `TodoCompleted`       | When a todo item is marked as completed                                | None (always fires)                                              |
 | `InstructionsLoaded`  | When a context file such as `QWEN.md`, or a file it imports, is loaded | File path of the loaded file                                     |
+| `FileChanged`         | After an explicitly watched file is added, modified, or deleted        | Basename of the changed file                                     |
 
 ### Matcher Patterns
 
@@ -410,6 +411,9 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Stop Events         | `StopFailure`                                                                              | ✅ Regex        | Error type: `rate_limit`, `authentication_failed`, `billing_error`, `invalid_request`, `server_error`, `max_output_tokens`, `loop_detected`, `unknown` |
 | Message Display     | `MessageDisplay`                                                                           | ❌ No           | N/A                                                                                                                                                    |
 | Instruction Events  | `InstructionsLoaded`                                                                       | ✅ Regex        | File path of the loaded file                                                                                                                           |
+| File Events         | `FileChanged`                                                                              | ✅ Regex        | Basename of the changed file                                                                                                                           |
+
+For `FileChanged`, registering static paths uses literal filenames in cwd; filtering events uses the basename and the rules below. See [FileChanged hooks](file-changed-hooks.md) for dynamic files and recursive directories.
 
 **Matcher Syntax:**
 
@@ -896,6 +900,7 @@ A command hook that exits 0 with plain-text `stdout` has that text treated as `a
 **Output Options**:
 
 - `hookSpecificOutput.additionalContext`: context to be available in the session
+- `hookSpecificOutput.watchPaths`: absolute files or recursive directories to watch for `FileChanged`, from synchronous output with `hookEventName: "SessionStart"`. See [FileChanged path registration](file-changed-hooks.md#watch-directories-and-paths-outside-cwd) for replacement, clearing, and validation rules.
 - Standard hook output fields
 
 **Example Output**:
@@ -1519,6 +1524,29 @@ It fires when the session starts, when context files are reloaded during the ses
 **Output Options**:
 
 - **None** - InstructionsLoaded output and exit codes are ignored.
+
+#### FileChanged
+
+**Purpose**: Observes additions, modifications, and deletions of explicitly watched files in local, non-managed sessions. Changes may come from Qwen Code, shell commands, editors, or other processes. The common input fields identify the listening session, including when another session writes a shared directory.
+
+**Matcher**: Filters against the file basename using the existing matcher rules. Literal cwd filenames separated by `|` also register static paths. Omitted or empty matchers, `*`, and `.*` register no static paths; they receive events from the session's watched paths, including dynamically registered paths.
+
+**Event-specific fields**:
+
+```json
+{
+  "file_path": "/home/me/work/demo/.envrc",
+  "event": "change"
+}
+```
+
+`file_path` is absolute. `event` is `add`, `change`, or `unlink`. The initial directory scan is not replayed, but native filesystem events from a recent write may arrive after registration. Symbolic links are not traversed; register the real directory root. Notifications are best effort after writes settle. Hook output cannot veto or undo a write or add model context.
+
+**Output Options**:
+
+- Successful synchronous `hookSpecificOutput.watchPaths`, with `hookEventName: "FileChanged"`, replaces the dynamic watch list with absolute files or recursive directories. The last valid, explicit list in hook execution order wins; `[]` clears it, while omitted or invalid lists leave it unchanged. Async output does not register paths. Static registrations remain active.
+
+See [FileChanged hooks](file-changed-hooks.md) for configuration, a memory-directory example, session ownership, and self-trigger and delivery limits. Memory directories are watched only when explicitly registered; there is no dedicated auto-memory enable/disable event.
 
 ## Hook Configuration
 

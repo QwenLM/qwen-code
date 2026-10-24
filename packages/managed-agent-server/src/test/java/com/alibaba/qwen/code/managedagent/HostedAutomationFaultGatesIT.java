@@ -72,6 +72,8 @@ class HostedAutomationFaultGatesIT {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     // A public task event cursor: base64url of its scope key and sequence.
     private static final Pattern TASK_CURSOR = Pattern.compile("tev2:[^:]+:([0-9]+)");
+    private static final Pattern HARNESS_LISTENING = Pattern.compile(
+            "qwen serve listening on http://127\\.0\\.0\\.1:(\\d+)");
     private static final String OPERATIONS = "/automations/operations";
     // The Harness store client's bounded retry of one commit (http-managed-session-store.ts).
     private static final int STORE_ATTEMPTS = 3;
@@ -2500,7 +2502,7 @@ class HostedAutomationFaultGatesIT {
         return filter;
     }
 
-    // A cold Harness: a fresh HOME and QWEN_HOME each start, on the same port.
+    // A cold Harness: fresh HOME and QWEN_HOME; the relay follows its bound port.
     private void startHarness() throws Exception {
         Path cli = harnessCli;
         Path home = Files.createDirectory(temporary.resolve("home-" + UUID.randomUUID()));
@@ -2511,6 +2513,7 @@ class HostedAutomationFaultGatesIT {
                 "telemetry", Map.of("enabled", false), "modelProviders", Map.of("openai", List.of(Map.of(
                         "id", "fg11-fixture", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl))))));
         Path log = temporary.resolve("harness.log");
+        int logOffset = Files.exists(log) ? Files.readString(log).length() : 0;
         ProcessBuilder builder = new ProcessBuilder(node, cli.toString(),
                 "serve", "--profile", "hosted-harness", "--http-bridge", "--hostname", "127.0.0.1", "--port",
                 Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
@@ -2538,6 +2541,10 @@ class HostedAutomationFaultGatesIT {
             if (!harness.isAlive()) {
                 throw new AssertionError("Hosted Harness exited: " + Files.readString(log));
             }
+            var listening = HARNESS_LISTENING.matcher(Files.readString(log).substring(logOffset));
+            assertThat(listening.find()).as("Hosted Harness reported its bound port").isTrue();
+            harnessPort = Integer.parseInt(listening.group(1));
+            harnessRelay.backend(URI.create("http://127.0.0.1:" + harnessPort));
             assertThat(http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                     + "/capabilities")).timeout(Duration.ofSeconds(2)).header("Authorization", "Bearer " + TOKEN)
                     .build(), HttpResponse.BodyHandlers.discarding()).statusCode()).isEqualTo(200);

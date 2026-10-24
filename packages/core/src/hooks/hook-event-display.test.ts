@@ -21,7 +21,7 @@ const DEDICATED_MESSAGE_EVENTS = [
 
 describe('HOOK_EVENT_DISPLAY', () => {
   it('classifies every hook event and nothing else', () => {
-    expect(allEvents).toHaveLength(22);
+    expect(allEvents).toHaveLength(23);
     expect(Object.keys(HOOK_EVENT_DISPLAY).sort()).toEqual(
       [...allEvents].sort(),
     );

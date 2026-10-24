@@ -117,6 +117,10 @@ for (const name of [
   while (ports[name] === undefined) {
     const port = await pick();
     if (port === null) continue;
+    if (name === 'RMQ_BROKER_PORT' && (port < 3 || port > 65534)) {
+      release(port);
+      continue;
+    }
     let kept = true;
     if (name === 'RMQ_BROKER_PORT') {
       // A companion can repeat a port an earlier role already parked: the

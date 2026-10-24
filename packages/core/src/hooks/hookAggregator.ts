@@ -85,7 +85,18 @@ export class HookAggregator {
       }
 
       if (result.output) {
-        allOutputs.push(result.output);
+        if (
+          !result.success &&
+          (eventName === HookEventName.SessionStart ||
+            eventName === HookEventName.FileChanged) &&
+          result.output.hookSpecificOutput
+        ) {
+          const specific = { ...result.output.hookSpecificOutput };
+          delete specific['watchPaths'];
+          allOutputs.push({ ...result.output, hookSpecificOutput: specific });
+        } else {
+          allOutputs.push(result.output);
+        }
       }
     }
 
