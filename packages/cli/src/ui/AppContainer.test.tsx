@@ -553,7 +553,10 @@ describe('AppContainer State Management', () => {
       isReceivingContent: false,
       clearPendingState: mockClearPendingState,
     });
-    mockedUseVim.mockReturnValue({ handleInput: vi.fn() });
+    mockedUseVim.mockReturnValue({
+      handleInput: vi.fn(),
+      ownsEscape: vi.fn().mockReturnValue(false),
+    });
     mockedUseFolderTrust.mockReturnValue({
       isFolderTrustDialogOpen: false,
       handleFolderTrustSelect: vi.fn(),
@@ -1056,19 +1059,26 @@ describe('AppContainer State Management', () => {
     });
   });
 
-  afterEach(() => {
-    if (originalStdoutIsTTY === undefined) {
-      delete (process.stdout as { isTTY?: unknown }).isTTY;
-    } else {
-      Object.defineProperty(process.stdout, 'isTTY', {
-        value: originalStdoutIsTTY,
-        configurable: true,
-      });
+  afterEach(async () => {
+    try {
+      try {
+        cleanup();
+      } finally {
+        vi.useRealTimers();
+        await mockConfig.shutdown({ strictResourceCleanup: true });
+      }
+    } finally {
+      if (originalStdoutIsTTY === undefined) {
+        delete (process.stdout as { isTTY?: unknown }).isTTY;
+      } else {
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalStdoutIsTTY,
+          configurable: true,
+        });
+      }
+      vi.unstubAllEnvs();
+      restoreCiEnv();
     }
-    vi.unstubAllEnvs();
-    restoreCiEnv();
-    cleanup();
-    vi.useRealTimers();
   });
 
   const rewindUserItem = (
@@ -1634,20 +1644,28 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
-    it('handles debug mode state', () => {
+    it('handles debug mode state', async () => {
       const debugConfig = makeFakeConfig();
       vi.spyOn(debugConfig, 'getDebugMode').mockReturnValue(true);
 
-      expect(() => {
-        render(
-          <AppContainer
-            config={debugConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-      }).not.toThrow();
+      try {
+        expect(() => {
+          render(
+            <AppContainer
+              config={debugConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+        }).not.toThrow();
+      } finally {
+        try {
+          cleanup();
+        } finally {
+          await debugConfig.shutdown({ strictResourceCleanup: true });
+        }
+      }
     });
   });
 
@@ -4749,56 +4767,63 @@ describe('AppContainer State Management', () => {
       capturedOnCancelSubmit(info);
     };
 
-    it('does not fire outer cancel handler on Esc when vim is enabled in INSERT mode', async () => {
-      mockedUseVimModeState.mockReturnValue({
-        vimEnabled: true,
-        vimMode: 'INSERT',
-      });
-      const cancelSpy = vi.fn();
-      installCancelCapture({
-        streamingState: 'responding',
-        submitQuery: vi.fn(),
-        initError: null,
-        pendingHistoryItems: [],
-        thought: null,
-        cancelOngoingRequest: cancelSpy,
-        retryLastPrompt: vi.fn(),
-      });
-      mockedUseTextBuffer.mockReturnValue({
-        text: '',
-        setText: vi.fn(),
-      });
-      mockedUseMessageQueue.mockReturnValue({
-        removeGoalTurns: vi.fn().mockReturnValue([]),
-        messageQueue: [],
-        addMessage: vi.fn(),
-        clearQueue: vi.fn(),
-        getQueuedMessagesText: vi.fn().mockReturnValue(''),
-        popAllMessages: vi.fn().mockReturnValue(null),
-        drainQueue: vi.fn().mockReturnValue([]),
-        popNextTurn: vi.fn().mockReturnValue(null),
-      });
+    it.each(['INSERT', 'NORMAL'])(
+      'does not fire outer cancel when Vim owns Esc in %s mode',
+      async (mode) => {
+        mockedUseVimModeState.mockReturnValue({
+          vimEnabled: true,
+          vimMode: mode,
+        });
+        const ownsEscape = vi.fn().mockReturnValue(true);
+        mockedUseVim.mockReturnValue({ handleInput: vi.fn(), ownsEscape });
+        const cancelSpy = vi.fn();
+        installCancelCapture({
+          streamingState: 'responding',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: cancelSpy,
+          retryLastPrompt: vi.fn(),
+        });
+        mockedUseTextBuffer.mockReturnValue({
+          text: '',
+          setText: vi.fn(),
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: vi.fn(),
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
 
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
 
-      await Promise.resolve();
-      await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
 
-      const handleKeypress = getGlobalKeypress();
-      expect(handleKeypress).toBeDefined();
+        const handleKeypress = getGlobalKeypress();
+        expect(handleKeypress).toBeDefined();
 
-      handleKeypress!(escKey);
+        handleKeypress!(escKey);
 
-      // In vim INSERT mode, Esc must NOT trigger the outer cancel handler.
-      expect(cancelSpy).not.toHaveBeenCalled();
-    });
+        expect(ownsEscape).toHaveBeenCalledOnce();
+        expect(ownsEscape.mock.calls[0][0]).toBe(escKey);
+        // A Vim-owned Esc must not also trigger the outer cancel handler.
+        expect(cancelSpy).not.toHaveBeenCalled();
+      },
+    );
 
     it('cancels the ongoing request on a single Esc with an empty buffer and queued follow-ups', async () => {
       // Positive counterpart to the vim-INSERT guard above: while the agent
@@ -6572,23 +6597,31 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Error Handling', () => {
-    it('handles config methods that might throw', () => {
+    it('handles config methods that might throw', async () => {
       const errorConfig = makeFakeConfig();
       vi.spyOn(errorConfig, 'getModel').mockImplementation(() => {
         throw new Error('Config error');
       });
 
       // Should still render without crashing - errors should be handled internally
-      expect(() => {
-        render(
-          <AppContainer
-            config={errorConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-      }).not.toThrow();
+      try {
+        expect(() => {
+          render(
+            <AppContainer
+              config={errorConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+        }).not.toThrow();
+      } finally {
+        try {
+          cleanup();
+        } finally {
+          await errorConfig.shutdown({ strictResourceCleanup: true });
+        }
+      }
     });
 
     it('handles undefined settings gracefully', () => {
@@ -7655,6 +7688,11 @@ describe('AppContainer State Management', () => {
           },
           setPresentation: vi.fn(),
         } as unknown as interactiveMods.InteractiveModSession;
+        // Scope the mock to this test's own Config: mount effects from
+        // earlier tests can still be in flight (they run the real
+        // config.initialize()), and an unscoped mockReturnValue lets those
+        // stale effects call this test's initialize(), inflating the
+        // exact-once assertion below.
         const owner = vi
           .spyOn(interactiveMods, 'getInteractiveModSession')
           .mockImplementation((config) =>

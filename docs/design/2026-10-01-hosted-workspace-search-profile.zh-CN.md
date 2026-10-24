@@ -6,18 +6,15 @@
 
 ## 问题与范围
 
-Hosted Session 只能看到其固定 profile 声明的工具：
-`hosted-workspace-files/1` 提供 Read/Write/Edit，`hosted-workspace-shell/1`
-再加前台 Shell。两者都无法找到模型未被告知的文件：文件 profile 完全没有
-搜索能力，Shell profile 只能在命令里退回 `rg`/`find`，每次都要走一次完整
-的持久化派发。
+Hosted Session 只能看到其固定 profile 声明的工具。
+`hosted-workspace-files/1` 提供 Read/Write/Edit，files `/2` 增加只读的 `glob`。
+统一后的 `hosted-workspace-shell/1` 包含这些文件工具、Shell、Monitor 与 `glob`。
+尚未上线的 Shell 版本已合并，不再接受 Shell `/2` 标识，详见
+[合并设计](2026-10-23-managed-shell-profile.zh-CN.md)。
 
-本切片在新的 profile 版本 `hosted-workspace-files/2` 与
-`hosted-workspace-shell/2` 之后加入只读的 `glob` 工具。面向模型的 profile
-决定提供什么，worker 准入在现有 `managed-runtime-tools/1` 身份下放宽。
-与 H1 不同，glob 的声明是静态的，并非通过 worker 发现得来；不变的摘要无法
-证明 worker 支持 glob。Java 和 Broker 保持不变，公开入口仍选择 `/1`。
-下文的协调升级要求同样适用于私有 `/2` Session。
+面向模型的 profile 决定提供什么，worker 准入使用现有 `managed-runtime-tools/1` 身份。
+与 H1 不同，glob 的声明是静态的，并非通过 worker 发现得来；不变的摘要无法证明 worker 支持
+glob。因此必须一并部署匹配的 Harness 与 Runtime 产物，私有会话同样如此。
 
 `grep_search` 不在范围内：hosted-runtime 边界文档规定，在具备物理进程归属
 和取消结算之前排除两种 Grep 实现。`list_directory` 不在范围内：它在本地
@@ -25,11 +22,10 @@ Hosted Session 只能看到其固定 profile 声明的工具：
 
 ## Harness
 
-Hosted Harness 在 Session 创建与加载时接受这两个新 profile 字符串，与 `/1`
-一样持久化进 Session 定义；以不同 profile 加载仍然是
-`409 hosted_tool_profile_conflict`，已有 Session 保留其固定的 `/1` 快照。
-初始回合与继续执行都用已保存的 profile 构建工具回合。
-Shell `/2` 原样继承 Shell 的接线（捕获容量、publisher 或延迟捕获选项）。
+Hosted Harness 在 Session 创建与加载时接受文件搜索与统一后的 Shell profile，并持久化进
+Session 定义。以不同 profile 加载仍然是 `409 hosted_tool_profile_conflict`。
+初始回合与继续执行都用已保存的 profile 构建工具回合。统一后的 Shell profile 增加 glob，
+保留原有捕获容量、publisher 与延迟捕获接线。files `/1` 保持原有工具清单。
 
 `glob` 声明包含必填的 `pattern` 和可选的 `path`（相对于 Session 保存的
 工作目录）。Harness 在获取 Runtime 之前用现有的
@@ -99,9 +95,9 @@ glob 的结果是路径列表。当序列化后的结果将超过 64 KiB 的 Ses
 - CLI worker：准入、范围约束、Workspace 相对输出。
 - Core：`GlobTool` 新增可选的 `containmentRoot` 和 `executionTimeoutMs` 构造选项；普通 CLI 不设置
   它，外部 glob 仍需权限确认。
-- Workspace 恢复：W1 恢复通过与创建、加载相同的共享 profile 判断接受 `/2`。
-- Java：不变。生产 connector 仍固定 `hosted-workspace-files/1`；是否为公开
-  Session 启用 `/2` 是单独的部署决定。
+- Workspace 恢复：W1 恢复通过与创建、加载相同的共享 profile 判断接受搜索 profile。
+- Java：普通 Shell 使用统一后的 `/1` profile 和现有生命周期 v2 准入。
+  files `/2` 的准入仍属于部署决定。
 
 ## 验证与验收
 
@@ -111,7 +107,7 @@ glob 的结果是路径列表。当序列化后的结果将超过 64 KiB 的 Ses
 `workspace-recovery-session`。它们覆盖各 profile 的声明与创建/加载/继续执行
 时的固定、无 Runtime 开销的可纠正拒绝和规范化派发、展开预算、实时与恢复
 路径在两种持久化上限内的前缀截断、相对输出和错误处理、本 worker 的文件
-范围校验、链接读取、经软链接创建，以及 W1 `/2` 恢复。相对化单测固定路径
+范围校验、链接读取、经软链接创建，以及 W1 搜索 profile 恢复。相对化单测固定路径
 词法单元的锚定和文件系统根目录情形。Core 的 `glob` 套件覆盖受约束的遍历与
 普通 CLI 行为兼容。实际验证的平台和测试总数记在 PR 验证报告中，不写进这份
 会持续变化的设计清单。
@@ -122,10 +118,10 @@ worker 对 `glob` 的准入不按 Session 区分。不变的 worker 身份无法
 worker 与支持 glob 的 worker。新 Harness 向旧 worker 派发 glob，可能让
 执行结果未知并持续占用 Workspace 租约，阻塞其他 Session。
 
-**升级要求：** 创建任何 `/2` Session 前，必须停止准入、排空已有 Runtime
+**升级要求：** 启用原生 glob 前，必须停止准入、排空已有 Runtime
 worker，将本次 worker 构建部署到所有 provisioner，并确认旧 worker 既不能
-被复用，也不能被新建。之后才能升级并启用 Harness 的 `/2` 路径。无法证明
-这些条件时，保持 `/2` 关闭。回滚同样必须先排空 `/2` Session，再恢复旧
+被复用，也不能被新建。之后才能升级并启用匹配的 Harness。无法证明
+这些条件时，保持支持 glob 的 profile 关闭。回滚同样必须先排空支持 glob 的 Session，再恢复旧
 worker。这是由运维执行的要求，并非协商能力或自动安全检查。公开 connector
 的启用仍单独处理。要支持版本混用，需先实现 worker 身份版本化或来自 worker
 的能力声明。

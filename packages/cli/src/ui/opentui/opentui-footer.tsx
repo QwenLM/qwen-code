@@ -26,6 +26,7 @@ import type {
   useStatusLineState,
 } from '../hooks/useStatusLine.js';
 import { t } from '../../i18n/index.js';
+import type { VimMode } from '../contexts/VimModeContext.js';
 import {
   SPINNER_FRAMES,
   SPINNER_INTERVAL_MS,
@@ -195,6 +196,7 @@ export interface OpenTuiFooterProps {
   approvalMode?: ApprovalMode;
   /** `!` shell mode: takes the hint slot over the steer/approval segments. */
   shellModeActive?: boolean;
+  vimMode?: VimMode;
   /** Armed two-press quit warning: takes the bottom hint slot and gates the
    * status line off, as it does in ink. */
   exitHint?: string | null;
@@ -211,6 +213,7 @@ export function OpenTuiFooter({
   queueLength = 0,
   approvalMode,
   shellModeActive = false,
+  vimMode,
   exitHint = null,
 }: OpenTuiFooterProps) {
   const { width } = useTerminalDimensions();
@@ -238,27 +241,29 @@ export function OpenTuiFooter({
       ? t('(tab to cycle)')
       : t('(shift + tab to cycle)');
   const pausePrefix = approvalMode === ApprovalMode.DEFAULT ? '⏸ ' : '';
-  const modeHint: HintPart[] = shellModeActive
-    ? [{ text: 'shell mode enabled (esc to disable)', color: C.dim }]
-    : [
-        ...(streaming
-          ? [
-              { text: t('Enter to steer · Ctrl+Q to queue'), color: C.dim },
-              // ink's leftBottomContent puts ' · ' between its own segments,
-              // but only where two of them are actually present.
-              ...(approvalMode ? [{ text: ' · ', color: C.dim }] : []),
-            ]
-          : []),
-        ...(approvalMode
-          ? [
-              {
-                text: `${pausePrefix}${formatApprovalModeName(approvalMode)}`,
-                color: approvalModeColor(approvalMode),
-              },
-              { text: ` ${cycleText}`, color: C.dim },
-            ]
-          : []),
-      ];
+  const modeHint: HintPart[] = vimMode
+    ? [{ text: `-- ${vimMode} --`, color: C.dim }]
+    : shellModeActive
+      ? [{ text: 'shell mode enabled (esc to disable)', color: C.dim }]
+      : [
+          ...(streaming
+            ? [
+                { text: t('Enter to steer · Ctrl+Q to queue'), color: C.dim },
+                // ink's leftBottomContent puts ' · ' between its own segments,
+                // but only where two of them are actually present.
+                ...(approvalMode ? [{ text: ' · ', color: C.dim }] : []),
+              ]
+            : []),
+          ...(approvalMode
+            ? [
+                {
+                  text: `${pausePrefix}${formatApprovalModeName(approvalMode)}`,
+                  color: approvalModeColor(approvalMode),
+                },
+                { text: ` ${cycleText}`, color: C.dim },
+              ]
+            : []),
+        ];
   const queuedHint =
     queueLength > 0
       ? `⏳ ${t('{{count}} queued', { count: String(queueLength) })}`

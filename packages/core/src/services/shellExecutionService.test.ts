@@ -2545,6 +2545,7 @@ describe('ShellExecutionService child_process fallback', () => {
       const result = await handle.result;
       expect(settledEarly).toBe(true);
       expect(result.exitCode).toBe(0);
+      expect(result.stdoutHeldAfterExit).toBeUndefined();
       expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('after'));
     });
 
@@ -2564,7 +2565,26 @@ describe('ShellExecutionService child_process fallback', () => {
       );
       expect(result.exitCode).toBe(0);
       expect(result.aborted).toBe(false);
+      // Callers that need the background part's output can tell it was cut.
+      expect(result.stdoutHeldAfterExit).toBe(true);
       expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('before'));
+    });
+
+    it('does not report a held stdout when only stderr stays open past the drain', async () => {
+      // A helper that silenced its stdout but kept stderr: what the caller
+      // reads from stdout is complete.
+      const { result } = await simulateExecution(
+        'stderr-held',
+        (cp) => {
+          emitOut('before');
+          cp.stdout?.emit('end');
+          cp.emit('exit', 0, null);
+          // No 'close': the helper holds stderr.
+        },
+        { streamStdout: true },
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.stdoutHeldAfterExit).toBeUndefined();
     });
 
     it('reports capture-limit notice for streaming child_process output', async () => {

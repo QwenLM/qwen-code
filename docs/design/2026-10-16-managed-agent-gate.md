@@ -28,7 +28,8 @@ machine hours per day.
 - A PR that does not touch those paths pays nothing beyond a few seconds of
   path matching.
 - A regression that still reaches main files an issue through the existing
-  `main-ci-failure-issue.yml` route.
+  `main-ci-failure-issue.yml` route, except when main has already advanced
+  past the failing head and a newer run owns the result.
 
 ## Non-goals
 
@@ -173,9 +174,22 @@ pre-checkout hygiene steps; fork runs stay hosted.
 ### Failure reporting
 
 `main-ci-failure-issue.yml` also watches `Managed Agent gate`, so a red
-post-merge fast tier files the same deduplicated autofix issue as other main
-failures. `qwen-triage-finalize.yml` now lists `Managed Agent gate` in place
-of `SDK Java`, which has had no `pull_request` trigger since #14205.
+post-merge fast tier is recorded there: a run that names failing tests reuses
+or files a per-signature issue deduped by the test markers in its body, and a
+run without one comments on the workflow's shared aggregate issue, reopening a
+matching closed issue when found. New aggregates receive `scope/ci-cd` and
+`status/needs-triage` for human triage, with no automatic autofix assignment.
+`qwen-triage-finalize.yml` now lists `Managed Agent gate` in place of `SDK Java`,
+which has had no `pull_request` trigger since #14205.
+
+A post-merge push failure whose head is no longer main's tip is recorded only
+on the analyze run's step summary, not on the workflow issue, when a newer push
+run of the same workflow exists at the new tip and can report the result
+itself. Queued and in-progress successors count as a deferral, as do
+successors that completed `success` or `failure` — a failed successor's own
+completion event re-enters this workflow. A successor that ended `cancelled`,
+`timed_out`, `skipped`, or `startup_failure` is never analyzed, so the original
+failure is reported instead.
 
 ## Cost
 
