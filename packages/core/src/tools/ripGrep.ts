@@ -748,13 +748,6 @@ export class RipGrepTool extends BaseDeclarativeTool<
       return 'limit must be a positive integer';
     }
 
-    // Validate pattern is a valid regex
-    try {
-      new RegExp(params.pattern);
-    } catch (error) {
-      return `Invalid regular expression pattern: ${params.pattern}. Error: ${getErrorMessage(error)}`;
-    }
-
     // Only validate path if one is provided
     if (params.path) {
       params.path = unescapePath(params.path.trim());
