@@ -5,9 +5,10 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   expandsAgainstHome,
@@ -290,7 +291,54 @@ describe('settings locations in a given environment', () => {
     runOn('linux');
 
     expect(getGlobalQwenDirLite({ qwen_home: home })).toBe(
-      path.join(os.homedir(), '.qwen'),
+      getGlobalQwenDirLite({}),
     );
+  });
+
+  describe('the default on Linux', () => {
+    let userHome: string;
+
+    beforeEach(() => {
+      userHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-lite-home-'));
+      vi.stubEnv('HOME', userHome);
+      vi.stubEnv('USERPROFILE', userHome);
+      vi.stubEnv('QWEN_HOME', undefined);
+      vi.stubEnv('XDG_CONFIG_HOME', undefined);
+      runOn('linux');
+    });
+
+    afterEach(() => {
+      fs.rmSync(userHome, { recursive: true, force: true });
+    });
+
+    it('locates a new install and an existing ~/.qwen where core does', () => {
+      expect(getGlobalQwenDirLite()).toBe(
+        path.join(userHome, '.config', 'qwen'),
+      );
+      expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
+
+      fs.mkdirSync(path.join(userHome, '.qwen'));
+      expect(getGlobalQwenDirLite()).toBe(path.join(userHome, '.qwen'));
+      expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
+
+      const xdgDir = path.join(userHome, '.config', 'qwen');
+      fs.mkdirSync(xdgDir, { recursive: true });
+      expect(getGlobalQwenDirLite()).toBe(path.join(userHome, '.qwen'));
+      fs.writeFileSync(path.join(xdgDir, 'installation_id'), 'id');
+      expect(getGlobalQwenDirLite()).toBe(xdgDir);
+      expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
+    });
+
+    it('reads XDG_CONFIG_HOME from the given environment', () => {
+      const configHome = path.join(userHome, 'xdg-config');
+      vi.stubEnv('XDG_CONFIG_HOME', path.join(userHome, 'ambient'));
+
+      expect(getGlobalQwenDirLite({ XDG_CONFIG_HOME: configHome })).toBe(
+        path.join(configHome, 'qwen'),
+      );
+      expect(getGlobalQwenDirLite({})).toBe(
+        path.join(userHome, '.config', 'qwen'),
+      );
+    });
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -20,9 +20,42 @@ describe('channels/base paths – getGlobalQwenDir', () => {
     }
   });
 
-  it('defaults to ~/.qwen when QWEN_HOME is not set', () => {
-    delete process.env['QWEN_HOME'];
-    expect(getGlobalQwenDir()).toBe(path.join(os.homedir(), '.qwen'));
+  describe('without QWEN_HOME', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    let home: string;
+
+    beforeEach(() => {
+      home = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-channels-home-'));
+      vi.stubEnv('HOME', home);
+      vi.stubEnv('USERPROFILE', home);
+      vi.stubEnv('QWEN_HOME', undefined);
+      vi.stubEnv('XDG_CONFIG_HOME', undefined);
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', platform);
+      vi.unstubAllEnvs();
+      fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    it('uses ~/.config/qwen for a new install on Linux', () => {
+      expect(getGlobalQwenDir()).toBe(path.join(home, '.config', 'qwen'));
+    });
+
+    it('keeps an existing ~/.qwen on Linux until the XDG directory holds Qwen Code files', () => {
+      const xdgDir = path.join(home, '.config', 'qwen');
+      fs.mkdirSync(path.join(home, '.qwen'));
+      fs.mkdirSync(xdgDir, { recursive: true });
+      expect(getGlobalQwenDir()).toBe(path.join(home, '.qwen'));
+      fs.writeFileSync(path.join(xdgDir, 'output-language.md'), '');
+      expect(getGlobalQwenDir()).toBe(xdgDir);
+    });
+
+    it.each(['darwin', 'win32'])('keeps ~/.qwen on %s', (value) => {
+      Object.defineProperty(process, 'platform', { value });
+      expect(getGlobalQwenDir()).toBe(path.join(home, '.qwen'));
+    });
   });
 
   it('uses QWEN_HOME when set to absolute path', () => {

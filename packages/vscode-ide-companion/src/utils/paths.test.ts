@@ -63,9 +63,51 @@ describe('vscode-ide-companion paths – getGlobalQwenDir', () => {
     }
   });
 
-  it('defaults to ~/.qwen when QWEN_HOME is not set', () => {
-    delete process.env['QWEN_HOME'];
-    expect(getGlobalQwenDir()).toBe(path.join(home.tempHome, '.qwen'));
+  describe('without QWEN_HOME', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const originalXdg = process.env['XDG_CONFIG_HOME'];
+    const legacyDir = () => path.join(home.tempHome, '.qwen');
+    const xdgDir = () => path.join(home.tempHome, '.config', 'qwen');
+
+    beforeEach(() => {
+      delete process.env['QWEN_HOME'];
+      delete process.env['XDG_CONFIG_HOME'];
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', platform);
+      if (originalXdg !== undefined) {
+        process.env['XDG_CONFIG_HOME'] = originalXdg;
+      } else {
+        delete process.env['XDG_CONFIG_HOME'];
+      }
+    });
+
+    it('uses ~/.config/qwen for a new install on Linux', () => {
+      expect(getGlobalQwenDir()).toBe(xdgDir());
+    });
+
+    it('keeps an existing ~/.qwen on Linux until the XDG directory holds Qwen Code files', () => {
+      fs.mkdirSync(legacyDir());
+      expect(getGlobalQwenDir()).toBe(legacyDir());
+      fs.mkdirSync(xdgDir(), { recursive: true });
+      expect(getGlobalQwenDir()).toBe(legacyDir());
+      fs.writeFileSync(path.join(xdgDir(), 'installation_id'), 'id');
+      expect(getGlobalQwenDir()).toBe(xdgDir());
+    });
+
+    it('uses an absolute XDG_CONFIG_HOME', () => {
+      const configHome = path.join(home.tempHome, 'xdg-config');
+      process.env['XDG_CONFIG_HOME'] = configHome;
+      expect(getGlobalQwenDir()).toBe(path.join(configHome, 'qwen'));
+    });
+
+    it.each(['darwin', 'win32'])('keeps ~/.qwen on %s', (value) => {
+      Object.defineProperty(process, 'platform', { value });
+      fs.mkdirSync(xdgDir(), { recursive: true });
+      expect(getGlobalQwenDir()).toBe(legacyDir());
+    });
   });
 
   it('uses QWEN_HOME when set to absolute path', () => {

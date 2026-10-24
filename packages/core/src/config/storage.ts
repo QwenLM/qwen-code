@@ -22,6 +22,9 @@ const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
+// Written into the global dir on first run (installation_id unless usage
+// statistics are off, output-language.md unless in bare mode).
+const GLOBAL_DIR_MARKERS = ['installation_id', 'output-language.md'];
 
 // Win32 and darwin default volumes equate names differing only in case,
 // and realpath preserves the spelling it was given — so the same physical
@@ -199,7 +202,26 @@ export class Storage {
     if (!homeDir) {
       return path.join(os.tmpdir(), '.qwen');
     }
-    return path.join(homeDir, QWEN_DIR);
+    const legacyDir = path.join(homeDir, QWEN_DIR);
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      return legacyDir;
+    }
+    // XDG Base Directory spec: a relative XDG_CONFIG_HOME is invalid and ignored.
+    const xdgConfigHome = process.env['XDG_CONFIG_HOME'];
+    const xdgDir = path.join(
+      xdgConfigHome && path.isAbsolute(xdgConfigHome)
+        ? xdgConfigHome
+        : path.join(homeDir, '.config'),
+      'qwen',
+    );
+    // An existing ~/.qwen keeps working unless the XDG dir already holds files
+    // Qwen Code writes on first run: then a ~/.qwen recreated later (e.g. by
+    // an older release) cannot pull the install back, while an unrelated
+    // ~/.config/qwen never takes over an existing ~/.qwen.
+    return !fs.existsSync(legacyDir) ||
+      GLOBAL_DIR_MARKERS.some((file) => fs.existsSync(path.join(xdgDir, file)))
+      ? xdgDir
+      : legacyDir;
   }
 
   static getMcpOAuthTokensPath(): string {

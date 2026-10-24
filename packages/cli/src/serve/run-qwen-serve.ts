@@ -35,6 +35,7 @@ import {
 } from './hosted-harness-profile.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
+import { getDefaultQwenDirLite } from '../config/storage-paths-lite.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   acquireInheritedLoaderEnvScrub,
@@ -5475,10 +5476,7 @@ async function runQwenServeImpl(
       if (qwenHome) {
         return resolveConfiguredPath(qwenHome, process.cwd());
       }
-      const homeDir = os.homedir();
-      return homeDir
-        ? path.join(homeDir, '.qwen')
-        : path.join(os.tmpdir(), '.qwen');
+      return getDefaultQwenDirLite(effectiveEnv['XDG_CONFIG_HOME']);
     };
     const logRuntimeEnvFileReadFailures = (
       workspace: string,

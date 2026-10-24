@@ -7,6 +7,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { promises as fs } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import {
   clearQwenCredentials,
@@ -126,6 +128,13 @@ vi.mock('node:fs', () => ({
 beforeEach(() => {
   mockOpenBrowserSecurely.mockReset();
   mockOpenBrowserSecurely.mockResolvedValue(undefined);
+  // node:fs is mocked without existsSync, which the default global dir
+  // consults on Linux.
+  vi.stubEnv('QWEN_HOME', path.join(os.homedir(), '.qwen'));
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 const SCOPE = 'openid profile email model.completion';
@@ -1016,8 +1025,6 @@ describe('Utility Functions', () => {
 
   describe('getQwenCachedCredentialPath', () => {
     it('should return correct path to cached credentials', async () => {
-      const os = await import('os');
-      const path = await import('path');
       const expectedPath = path.join(os.homedir(), '.qwen', 'oauth_creds.json');
 
       // The path helper is private, so it is tested through clearQwenCredentials.
