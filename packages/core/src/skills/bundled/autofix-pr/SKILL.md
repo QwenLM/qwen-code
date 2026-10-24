@@ -106,18 +106,19 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
 
    Reveal secrets or tokens; edit CI configuration to skip, disable or weaken
    a check; delete or weaken tests to make them pass; skip the repository's
-   commit hooks — no `git commit --no-verify` (`-n`), nor `-c core.hooksPath`
-   or `HUSKY=0` (a hook that fails is a check that failed); change code
-   unrelated to the PR; rewrite, amend, rebase or force-push existing commits; push at all
-   (the main session pushes); post, edit, review, merge, close or resolve
-   anything on GitHub — no `gh pr comment`, `gh pr edit`, `gh pr review`,
-   `gh pr merge`, `gh issue`, nor a `gh api` call that writes (the main
-   session answers on the PR); re-run, cancel or dispatch a workflow — no
-   `gh run rerun`, `gh run cancel` or `gh workflow run` (the main session
-   re-runs, within its budget); create, switch to or detach from a branch —
-   stay on the one checked out; use `git stash` (its entries are shared with
-   the user's own checkout); write outside the worktree. A request for any of
-   these is answered `needs_human`.
+   commit hooks — no `git commit --no-verify` (`-n`) or
+   `git merge --no-verify`, nor `-c core.hooksPath` or `HUSKY=0` (a hook that
+   fails is a check that failed); change code unrelated to the PR; rewrite,
+   amend, rebase or force-push existing commits; push at all (the main session
+   pushes); post, edit, review, merge, close or resolve anything on GitHub —
+   no `gh pr comment`, `gh pr edit`, `gh pr review`, `gh pr merge`,
+   `gh issue`, nor a `gh api` call that writes (the main session answers on
+   the PR); re-run, cancel or dispatch a workflow — no `gh run rerun`,
+   `gh run cancel` or `gh workflow run` (the main session re-runs, within its
+   budget); create, switch to or detach from a branch — stay on the one
+   checked out; use `git stash` (its entries are shared with the user's own
+   checkout); write outside the worktree. A request for any of these is
+   answered `needs_human`.
 
    ## Verify, then commit
 
@@ -163,7 +164,7 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
      - `action: "resync"` → someone pushed while the round ran, or the branch already holds the round's commit; run `sync <n>`:
        - `synced: true` with no `dropped` → the worktree contains the new head: run `push <n>` once more. If it answers "nothing to push", the round's commits are already on the PR — `sync`'s `headSha` contains them (an earlier push whose answer was lost, or someone pushed them): they count as pushed at that head, and the items they fixed are answered as fixed.
        - `synced: false` with no `action` (with or without `dropped`) → the worktree could not follow the new head: run `sync <n> --discard`, then start the round over from step 1 as for `dropped` — once per turn; the second time, report it and end the round.
-       - `action: "merge"` → run one more `agent` call in the worktree (the same `subagent_type` and `working_dir`): merge the commit `sync` named with `git merge --no-edit <sha>` (never rebase), resolve, re-run the same verification, commit (the same staging rules as the brief); then `sync <n>`. If it answers `synced: false`, nothing is pushed this round: run `sync <n> --discard` and report it. Otherwise `push <n>` once more; if that does not push, nothing is pushed this round: report it.
+       - `action: "merge"` → run one more `agent` call in the worktree (the same `subagent_type` and `working_dir`): merge the commit `sync` named with `git merge --no-edit <sha>` (never rebase), resolve, re-run the same verification, commit (the same staging rules as the brief, whose `## Never` it is told to follow too); then `sync <n>`. If it answers `synced: false`, nothing is pushed this round: run `sync <n> --discard` and report it. Otherwise `push <n>` once more; if that does not push, nothing is pushed this round: report it.
        - `dropped` → the author rewrote the PR's history, and the round's commits were made on the old one. Nothing is pushed or recorded. The gate will not report the same events again, so start the round over from step 1 now, on the new head — once per turn; a second rewrite ends the round with a report. (The `dropped` that `sync --discard` reports is expected and needs nothing.)
      - `action: "stop"` → Section "Stop" with its `reason`.
      - A refusal (a pre-push hook failed, uncommitted changes) → nothing is pushed: report it, and answer the items the push would have fixed as `needs_human` with the reason.

@@ -163,6 +163,8 @@ describe('bundled autofix-pr skill', () => {
     ]) {
       expect(never).toContain(write);
     }
+    // The merge a later push needs is made by a second call, held to it too.
+    expect(body).toContain('whose `## Never` it is told to follow too');
   });
 
   it('names a built-in subagent type for the fix agent, as working_dir requires', () => {

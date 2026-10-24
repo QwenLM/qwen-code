@@ -244,9 +244,9 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 能发什么由辅助命令决定，依据是重新读一次 PR（按 prepared snapshot 的规则）：
 
-- 回复只发到此刻有可信作者新评论的 thread，`handled` 列出的必须是该 thread 的评论。不可信评论不能标记为已处理；check 键必须是 head 上某个 `ci_failed` 事件报告的（prepared 模式会输出它的 `key`）；冲突只有在确实存在时才能留给人处理。PR 必须仍处于打开状态。
+- 回复只发到此刻有可信作者新评论的 thread，`handled` 列出的必须是该 thread 的评论。不可信评论不能标记为已处理；check 键必须是 head 上某个 `ci_failed` 事件报告的（prepared 模式会输出它的 `key`）——此刻报告的，或这一轮的 prepared snapshot 文件里报告过的：一轮运行期间 head 可能已越过某个失败（重跑、review 启动的运行、被延后的运行），这一轮对它的回答仍然有效，记在由 review 启动的 workflow 在该 head 上下一次失败会带的那个键下；冲突只有在确实存在时才能留给人处理。PR 必须仍处于打开状态。
 - 判断计划所依据的 head 是监视已知的那个（`sync` 和 `push` 从分支读取），而不是 API 的——API 可能比推送滞后。
-- 其他 head 的失败键（这一轮已推送越过了它）被忽略并计入 `ignoredChecks`：prepared snapshot 只读当前 head。这一轮运行期间 head 上已越过的检查的键也一样：列出了它更新的一次运行（正在进行的重跑、评审者启动的运行，或 `rerun` 回答丢失的那次），或者对于不指明运行的 attempt，该检查仍在列表里，但已不再以这个键失败。指向 head 上不存在的检查、或比任何已列出运行都新的运行的键，会被拒绝。根本不是失败键的字符串会被拒绝。`handledConflict` 只在 GitHub 报告冲突时，或者在本监视推送的 head 上报告 `UNKNOWN` 时，才记在当前 head 上：推送刚完成时 GitHub 会报告 `UNKNOWN`，直到重新算完合并。
+- 其他 head 的失败键（这一轮已推送越过了它）被忽略并计入 `ignoredChecks`：prepared snapshot 只读当前 head。根本不是失败键的字符串会被拒绝。`handledConflict` 只在 GitHub 报告冲突时，或者在本监视推送的 head 上报告 `UNKNOWN` 时，才记在当前 head 上：推送刚完成时 GitHub 会报告 `UNKNOWN`，直到重新算完合并。
 - 同一 thread 有两条回复，或同一个评论 id 出现两次的计划会被拒绝。
 - 所有检查在发出任何内容之前完成，被拒绝的计划什么都不发。
 - 每次 POST 之前先在状态文件里登记（`pendingPosts`：发往哪里、回复哪些评论、正文的哈希、发帖时的 head——之后认领的总结只算作那个 head 的推送，而不是更晚的推送）。下一次运行会在 PR 上找每条登记过的回复：找到的——POST 已到达 GitHub 但响应丢失——按它当初回复的那些评论记录（`adopted`）；找不到的说明从未发出。回复永远不会按之后计划的措辞来认，为别的评论发的回复也永远不会被当成对新评论的回答。

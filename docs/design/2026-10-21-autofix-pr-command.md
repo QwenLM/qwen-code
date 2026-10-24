@@ -553,17 +553,16 @@ The helper decides what may be posted, against one fresh read of the PR
 - A reply goes only to a thread that has, right now, a new comment from a
   trusted author, and `handled` names comments of that thread. Untrusted
   comments cannot be marked handled; a check key must be one a `ci_failed`
-  event reports on the head (prepared mode prints its `key`); a conflict can
+  event reports on the head (prepared mode prints its `key`) — now, or in
+  the round's prepared snapshot file: the head can move on from a failure
+  while the round runs (a re-run, a run a review starts, a deferred run),
+  and the round's answer still stands, under the key the next failure of a
+  review-started workflow on that head carries; a conflict can
   be left for a human only while there is one. The PR must be open.
 - The head the plan is judged by is the one the watch knows (`sync` and
   `push` read it from the branch), not the API's, which can lag a push.
 - A failure key of another head — the round pushed past it — is ignored and
   counted in `ignoredChecks`: prepared snapshots read only the current head.
-  So is one of a check the head moved past while the round ran: a later run
-  of it is listed (a re-run under way, one a reviewer started, or one whose
-  `rerun` answer was lost), or, for an attempt that names no run, the
-  check is still listed but no longer fails under that key. A key naming a
-  check the head does not list, or a run later than any listed, is refused.
   A string that is not a failure key at all is refused.
   `handledConflict` is recorded against the head while GitHub reports a
   conflict, or reports `UNKNOWN` on a head this watch pushed: right after a

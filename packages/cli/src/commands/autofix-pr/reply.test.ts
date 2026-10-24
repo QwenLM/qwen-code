@@ -265,8 +265,9 @@ describe('runReply', () => {
     expect(() => reply({ summary: { body: 'x', handled: ['IC_9'] } })).toThrow(
       /not a new comment from a trusted author/,
     );
-    // A run later than any listed, or a check the head does not list.
+    // No failure snapshot reported, earlier or later than the one it does.
     for (const key of [
+      `Test@${HEAD}@#4`,
       `Test@${HEAD}@#6`,
       `Lint@${HEAD}@#on:1:pull_request_review`,
     ]) {
@@ -284,16 +285,24 @@ describe('runReply', () => {
     expect(state().handledChecks).toBeUndefined();
   });
 
-  it('drops the key of a failure the head moved past while the round ran', () => {
-    // Test ran again (#5) after the round's snapshot saw run #4 fail.
-    expect(reply({ handledChecks: [`Test@${HEAD}@#4`] })).toMatchObject({
-      ignoredChecks: 1,
-      handledChecks: 0,
-    });
-    // A workflow a review starts, re-run and still running: a re-run whose
-    // answer was lost, or one a reviewer started.
-    const rerunning = prData();
-    rerunning.commits.nodes[0]!.commit.statusCheckRollup!.contexts.nodes.push({
+  it("records a failure the round's snapshot reported, though the head moved on from it since", () => {
+    const gate = `Gate@${HEAD}@#on:9:pull_request_review`;
+    const startup = `CI@${HEAD}@#startup:3:pull_request`;
+    const earlier = `Test@${HEAD}@#4`;
+    writeFileSync(
+      paths.snapshotPath,
+      JSON.stringify({
+        events: [
+          { type: 'ci_failed', check: 'Gate', key: gate },
+          { type: 'ci_failed', check: 'CI', key: startup },
+          { type: 'ci_failed', check: 'Test', key: earlier },
+        ],
+      }),
+    );
+    // A stranger's review started Gate again while the round ran; CI
+    // started this time; Test ran again (#5).
+    const moved = prData();
+    moved.commits.nodes[0]!.commit.statusCheckRollup!.contexts.nodes.push({
       __typename: 'CheckRun',
       databaseId: 9,
       name: 'Gate',
@@ -301,14 +310,17 @@ describe('runReply', () => {
       conclusion: null,
       detailsUrl: 'https://github.com/o/r/actions/runs/90/job/9',
     });
-    mocks.fetchPrData.mockImplementation(() => ({
-      pr: rerunning,
-      viewer: 'me',
-    }));
-    expect(
-      reply({ handledChecks: [`Gate@${HEAD}@#on:9:pull_request_review`] }),
-    ).toMatchObject({ ignoredChecks: 1, handledChecks: 0 });
-    expect(state().handledChecks ?? []).toEqual([]);
+    mocks.fetchPrData.mockImplementation(() => ({ pr: moved, viewer: 'me' }));
+    expect(reply({ handledChecks: [gate, startup, earlier] })).toMatchObject({
+      handledChecks: 3,
+      ignoredChecks: 0,
+    });
+    // Gate's next failure on this head carries the key: it stays handled.
+    expect(state().handledChecks).toEqual([gate, startup, earlier]);
+    // A failure neither the file nor the head reports is still refused.
+    expect(() => reply({ handledChecks: [`Test@${HEAD}@#3`] })).toThrow(
+      /not a failure snapshot reports/,
+    );
   });
 
   it("checks bot threads opened since the snapshot leniently: they are not the plan's", () => {

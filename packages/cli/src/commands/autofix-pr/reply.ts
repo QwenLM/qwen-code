@@ -196,25 +196,26 @@ function keyHead(key: string): string | null {
 }
 
 /**
- * Whether the head has moved on from a failure snapshot no longer offers:
- * a later run of the check is listed (a check run's key names its run),
- * or — for an attempt that names no run, a workflow a review starts or a
- * status — the check is still listed: it is being re-run, or ended another
- * way. A key naming a check the head does not list, or a run later than
- * any listed, is no failure the round saw.
+ * The failure keys the round's prepared snapshot reported. The head can
+ * move on from one while the round runs — a re-run, a run a review starts,
+ * a run that is deferred — and the round's answer to it still stands: a
+ * key that names no run (a workflow a review starts) is the one the next
+ * failure of that check on the head carries.
  */
-function supersededOnHead(pr: PrData, key: string): boolean {
-  const match = /^([\s\S]*)@[0-9a-f]{40,64}@([^@]*)$/.exec(key);
-  const commit = pr.commits.nodes[0]?.commit;
-  if (!match || commit?.oid !== pr.headRefOid) return false;
-  const [, check, attempt] = match;
-  const runs = (commit.statusCheckRollup?.contexts.nodes ?? []).filter((ctx) =>
-    ctx.__typename === 'CheckRun' ? ctx.name === check : ctx.context === check,
-  );
-  const run = /^#(\d+)$/.exec(attempt);
-  if (!run) return runs.length > 0;
-  return runs.some(
-    (ctx) => ctx.__typename === 'CheckRun' && ctx.databaseId > Number(run[1]),
+function snapshotChecks(path: string): Set<string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return new Set();
+  }
+  const events = (parsed as { events?: unknown } | null)?.events;
+  if (!Array.isArray(events)) return new Set();
+  return new Set(
+    events.flatMap((event: unknown) => {
+      const { type, key } = (event ?? {}) as { type?: unknown; key?: unknown };
+      return type === 'ci_failed' && typeof key === 'string' ? [key] : [];
+    }),
   );
 }
 
@@ -415,6 +416,7 @@ function replyLocked(
   // pushed while it ran — is history: prepared snapshots read only the
   // current head, so it is not recorded.
   const knownChecks = new Set(state.handledChecks ?? []);
+  const roundChecks = snapshotChecks(paths.snapshotPath);
   const currentChecks: string[] = [];
   let ignoredChecks = 0;
   for (const key of new Set(plan.handledChecks)) {
@@ -430,13 +432,7 @@ function replyLocked(
       continue;
     }
     if (knownChecks.has(key)) continue;
-    // A check that moved on while the round ran answers for that failure
-    // itself, like one of another head: its key is history.
-    if (!offer.checks.has(key) && supersededOnHead(pr, key)) {
-      ignoredChecks += 1;
-      continue;
-    }
-    if (!offer.checks.has(key)) {
+    if (!offer.checks.has(key) && !roundChecks.has(key)) {
       throw new Error(
         `${key} is not a failure snapshot reports on the PR head; pass the \`key\` of a ci_failed event.`,
       );
