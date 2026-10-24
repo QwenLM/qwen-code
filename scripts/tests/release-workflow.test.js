@@ -752,6 +752,10 @@ describe('release workflow', () => {
         '#!/bin/sh\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
         { mode: 0o755 },
       );
+      // The publish retry backoff must not slow this test down.
+      writeFileSync(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n', {
+        mode: 0o755,
+      });
       try {
         const result = spawnSync(
           'bash',
@@ -781,8 +785,9 @@ describe('release workflow', () => {
           .map((line) => line.split('\t'));
         const publishesCli =
           failure === '0' && (dryRun === 'true' || cliPublished !== '0');
+        const workspaceAttempts = failure === '0' ? 1 : 4;
         expect(publishCalls.map(([cwd]) => cwd)).toEqual([
-          canonicalDirectory,
+          ...Array(workspaceAttempts).fill(canonicalDirectory),
           ...(publishesCli ? [join(canonicalDirectory, 'dist')] : []),
         ]);
         const selected = publishCalls[0][1]
@@ -815,6 +820,65 @@ describe('release workflow', () => {
           expect(args.includes('--dry-run'), cwd).toBe(dryRun === 'true');
         }
         expect(publishCalls[0][1].includes('--force')).toBe(dryRun === 'true');
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retries the recursive publish after a transient failure',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-publish-retry-'));
+      const bin = join(directory, 'bin');
+      const publishLog = join(directory, 'published');
+      const attempts = join(directory, 'attempts');
+      mkdirSync(bin);
+      mkdirSync(join(directory, 'dist'));
+      writeFileSync(
+        join(directory, 'dist/package.json'),
+        JSON.stringify({ name: '@qwen-code/qwen-code' }),
+      );
+      writeFileSync(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n', {
+        mode: 0o755,
+      });
+      // Fail only the first attempt: the step must retry and finish.
+      writeFileSync(
+        join(bin, 'corepack'),
+        '#!/bin/sh\ncount=0\n[ -f "$ATTEMPTS" ] && count=$(cat "$ATTEMPTS")\ncount=$((count + 1))\nprintf "%s" "$count" > "$ATTEMPTS"\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\n[ "$count" -ge 2 ]\n',
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(bin, 'npm'),
+        '#!/bin/sh\n[ "$1" = "view" ] && exit 0\nexit 1\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'publish-packages'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              IS_DRY_RUN: 'false',
+              NPM_TAG: 'nightly',
+              PUBLISH_AUDIO_CAPTURE: 'false',
+              PUBLISH_EXTERNAL_CONTEXT_MEM0: 'false',
+              ATTEMPTS: attempts,
+              PUBLISH_LOG: publishLog,
+              RELEASE_VERSION: '1.2.3-nightly.20261024.abcdef123',
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(readFileSync(attempts, 'utf8')).toBe('2');
+        const retryCalls = readFileSync(publishLog, 'utf8').trim().split('\n');
+        expect(retryCalls).toHaveLength(2);
+        expect(retryCalls[0]).not.toContain('--prefer-online');
+        expect(retryCalls[1]).toContain('--prefer-online');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }

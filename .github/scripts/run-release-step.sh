@@ -195,7 +195,30 @@ case "${step}" in
       # Exercise packing and lifecycle checks even for an existing version.
       publish_args+=(--dry-run --force)
     fi
-    corepack pnpm -r publish "${publish_args[@]}"
+    # The registry can answer a publish request while still processing the
+    # upload (publish-time scanning), so the next recursive upload may be
+    # rejected as arriving before the previous package finished (#15484).
+    # Recursive publish skips versions already in the registry, so a delayed
+    # retry resumes at the failed package instead of republishing the rest.
+    attempt=1
+    retry_flags=()
+    while true; do
+      if corepack pnpm "${retry_flags[@]}" -r publish "${publish_args[@]}"; then
+        break
+      else
+        publish_status=$?
+        if (( attempt >= 4 )); then
+          exit "${publish_status}"
+        fi
+        delay=$(( attempt * 30 ))
+        echo "::warning::pnpm recursive publish attempt ${attempt} failed; retrying in ${delay}s."
+        sleep "${delay}"
+        attempt=$(( attempt + 1 ))
+        # The first attempt cached the pre-publish metadata; revalidate it so
+        # the packages it already published are recognized and skipped.
+        retry_flags=(--prefer-online)
+      fi
+    done
     publish_package 'dist'
     ;;
 
