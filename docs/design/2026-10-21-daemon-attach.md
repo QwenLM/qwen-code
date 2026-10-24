@@ -23,6 +23,7 @@ qwen attach --session <session-id> [--port <port>] [--workspace <path>] [--token
 - Render the load replay snapshot (`compactedReplay` and `liveJournal`) before starting the SSE subscription, so history and an in-flight turn are visible on attach.
 - Subscribe to `GET /session/:id/events` before accepting stdin, so model-switch, lifecycle, and prompt response events are not missed.
 - Render sanitized `assistant.text.delta` and `thought.text.delta` to stdout; turn settlement (`turn_complete`/`turn_error`) and prompt settlement end the line; normalized errors go to stderr.
+- Other normalized event types (tool calls, file diffs, lifecycle notices) are intentionally not rendered; attach is a text-only terminal client, not a full Web Shell transcript.
 - Each non-empty stdin line is sent as a single text content block through `POST /session/:id/prompt`.
 - Ctrl+C or Ctrl+D closes the local subscription, releases this client's daemon registration, and exits. Detaching does not cancel an already accepted prompt; an in-flight turn continues server-side. When this is the last client and no turn is pending, the daemon may close the session.
 

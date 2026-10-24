@@ -59,13 +59,17 @@ describe('qwen attach target selection', () => {
 
   it('selects the only registered daemon', () => {
     const target = entry(4170);
-    expect(selectAttachRecord([target], undefined)).toEqual({
+    expect(selectAttachRecord([target], undefined, () => true)).toEqual({
       record: target.record,
     });
   });
 
   it('requires --port when several daemons are registered', () => {
-    const result = selectAttachRecord([entry(4170), entry(4171)], undefined);
+    const result = selectAttachRecord(
+      [entry(4170), entry(4171)],
+      undefined,
+      () => true,
+    );
     expect(result.record).toBeUndefined();
     expect(result.error).toContain('--port');
   });
@@ -73,15 +77,27 @@ describe('qwen attach target selection', () => {
   it('selects the daemon named by --port', () => {
     const first = entry(4170);
     const second = entry(4171);
-    expect(selectAttachRecord([first, second], 4171)).toEqual({
+    expect(selectAttachRecord([first, second], 4171, () => true)).toEqual({
       record: second.record,
     });
   });
 
   it('reports an unknown --port', () => {
-    const result = selectAttachRecord([entry(4170)], 4171);
+    const result = selectAttachRecord([entry(4170)], 4171, () => true);
     expect(result.record).toBeUndefined();
     expect(result.error).toContain('4171');
+  });
+
+  it('skips stale records when a live daemon remains', () => {
+    const stale = entry(4170);
+    const live = entry(4171);
+    expect(
+      selectAttachRecord(
+        [stale, live],
+        undefined,
+        (record) => record.port === live.record.port,
+      ),
+    ).toEqual({ record: live.record });
   });
 });
 

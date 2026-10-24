@@ -23,6 +23,7 @@ qwen attach --session <session-id> [--port <port>] [--workspace <path>] [--token
 - 先渲染 load 返回的 `compactedReplay` 与 `liveJournal` 快照，再启动 SSE 订阅，确保 attach 前的历史与进行中的回复可见。
 - 在接收 stdin 前订阅 `GET /session/:id/events`，避免漏掉 model-switch、生命周期与 prompt 响应事件。
 - 将净化后的 `assistant.text.delta` 与 `thought.text.delta` 写到 stdout；turn 结算（`turn_complete`/`turn_error`）或 prompt 结算时结束当前行；错误写 stderr。
+- 其他归一化事件（工具调用、文件差异、生命周期通知）有意不渲染；attach 是纯文本终端客户端，不是完整的 Web Shell 转录器。
 - stdin 的每个非空行作为单个 text content block，经 `POST /session/:id/prompt` 发送。
 - Ctrl+C 或 Ctrl+D 关闭本地订阅、释放本客户端的 daemon 注册并退出。脱离终端不会取消已接受的 prompt；进行中的 turn 会在服务端继续执行。当本客户端是最后一个客户端且没有待处理的 turn 时，daemon 可能关闭该 session。
 

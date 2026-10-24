@@ -17,12 +17,19 @@ import {
   sanitizeTerminalText,
 } from '@qwen-code/sdk/daemon/ui';
 import {
+  currentPidNamespace,
+  isProcessAlive,
   readDaemonDiscoveries,
   readDaemonToken,
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
-import { listenerIdentityVerified } from './daemon.js';
+import {
+  listenerIdentityVerified,
+  pidResolvableHere,
+  processStartMatchesRecord,
+  processStartTime,
+} from './daemon.js';
 import { ignoreBrokenPipe, writeStderrLine } from '../utils/stdioHelpers.js';
 
 interface AttachArgs {
@@ -36,25 +43,37 @@ export function formatAttachError(message: string): string {
   return sanitizeTerminalText(message).replace(/[\t\n]/g, '');
 }
 
+function defaultAttachRecordAlive(record: DaemonDiscoveryRecord): boolean {
+  if (!pidResolvableHere(record, currentPidNamespace())) return true;
+  return (
+    isProcessAlive(record.pid) &&
+    processStartMatchesRecord(record.startedAt, processStartTime(record.pid))
+  );
+}
+
 export function selectAttachRecord(
   entries: readonly DaemonDiscoveryEntry[],
   port: number | undefined,
+  alive: (record: DaemonDiscoveryRecord) => boolean = defaultAttachRecordAlive,
 ): { record?: DaemonDiscoveryRecord; error?: string } {
+  const candidates = entries.filter((entry) => alive(entry.record));
   if (port !== undefined) {
-    const entry = entries.find((candidate) => candidate.record.port === port);
+    const entry = candidates.find(
+      (candidate) => candidate.record.port === port,
+    );
     return entry
       ? { record: entry.record }
       : { error: `No daemon is registered on port ${port}.` };
   }
-  if (entries.length === 0) {
+  if (candidates.length === 0) {
     return { error: 'no daemon is registered. Start one with `qwen serve`.' };
   }
-  if (entries.length > 1) {
+  if (candidates.length > 1) {
     return {
-      error: `${entries.length} daemons are registered; pass --port <port> to choose one.`,
+      error: `${candidates.length} daemons are registered; pass --port <port> to choose one.`,
     };
   }
-  return { record: entries[0]!.record };
+  return { record: candidates[0]!.record };
 }
 
 export function resolveAttachToken(
@@ -122,7 +141,13 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   };
   process.once('SIGINT', earlyShutdown);
   process.once('SIGTERM', earlyShutdown);
-  const target = selectAttachRecord(readDaemonDiscoveries().entries, argv.port);
+  const { entries, invalid } = readDaemonDiscoveries();
+  for (const item of invalid) {
+    writeStderrLine(
+      `qwen attach: ignoring ${formatAttachError(`${item.path}: ${item.reason}`)}`,
+    );
+  }
+  const target = selectAttachRecord(entries, argv.port);
   if (!target.record) {
     writeStderrLine(`qwen attach: ${formatAttachError(target.error ?? '')}`);
     process.exitCode = 1;
@@ -220,6 +245,8 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
           )}); missed events ${start}..${end}; reattach to reload the session.`,
         );
         process.exitCode = 1;
+      } else {
+        // Text-only client: structured tool, diff, and lifecycle items are ignored.
       }
     }
     if (settled) notifyTurnSettled();
