@@ -186,9 +186,11 @@ function readSettings(): Record<string, unknown> {
     throw err;
   }
   try {
-    return JSON.parse(
-      stripTrailingCommas(stripJsonComments(content)),
-    ) as Record<string, unknown>;
+    const jsonc = content.startsWith('\uFEFF') ? content.slice(1) : content;
+    return JSON.parse(stripTrailingCommas(stripJsonComments(jsonc))) as Record<
+      string,
+      unknown
+    >;
   } catch (err) {
     // Surface an actionable message rather than the raw SyntaxError. The
     // caller's catch will see this; refusing to overwrite a malformed file
