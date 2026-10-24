@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { fdir } from 'fdir';
 import type { Ignore } from './ignore.js';
 import * as cache from './crawlCache.js';
+import { resolveRipgrepCommand } from '../ripgrepUtils.js';
 
 export interface CrawlOptions {
   // The directory to start the crawl from.
@@ -24,6 +25,10 @@ export interface CrawlOptions {
   ignore: Ignore;
   // Whether gitignore filtering should be respected by git/rg paths.
   useGitignore?: boolean;
+  // Whether the bundled ripgrep may be used (tools.useBuiltinRipgrep). Callers
+  // without a config inherit the default, which is what the setting's own
+  // default resolves to.
+  useBuiltinRipgrep?: boolean;
   // Caching options.
   cache: boolean;
   cacheTtl: number;
@@ -1318,6 +1323,18 @@ async function crawlWithRipgrep(
   cwd: string,
   options: CrawlOptions,
 ): Promise<{ success: boolean; files: string[] }> {
+  // Not a bare `rg`: that only reaches the bundled binary when an install
+  // happens to put it on PATH, so a machine without system ripgrep degraded
+  // to the fdir walk although the package carried a working one (#14537).
+  // The resolver takes the configured selection so this path agrees with the
+  // grep tool when `tools.useBuiltinRipgrep` is false.
+  const rgCommand = await resolveRipgrepCommand(
+    options.useBuiltinRipgrep ?? true,
+  );
+  if (!rgCommand) {
+    return { success: false, files: [] };
+  }
+
   const rgArgs = ['--files', '--no-require-git', '--hidden'];
   if (options.useGitignore === false) {
     rgArgs.push('--no-ignore');
@@ -1351,14 +1368,20 @@ async function crawlWithRipgrep(
     return !hasReachedFileBudget(budgetedFileCount, options.maxFiles);
   };
 
-  const rgResult = await commandRunner('rg', rgArgs, crawlDirectory, 20_000, {
-    collectLines: false,
-    onLine: processRgFile,
-    // An optional-capability probe: its failure is already narrated by the
-    // "falling back to fdir (ripgrep unavailable)" warn below, so the raw
-    // spawn diagnostics would only be noise (#14537).
-    silentOnFailure: true,
-  });
+  const rgResult = await commandRunner(
+    rgCommand,
+    rgArgs,
+    crawlDirectory,
+    20_000,
+    {
+      collectLines: false,
+      onLine: processRgFile,
+      // An optional-capability probe: its failure is already narrated by the
+      // "falling back to fdir (ripgrep unavailable)" warn below, so the raw
+      // spawn diagnostics would only be noise (#14537).
+      silentOnFailure: true,
+    },
+  );
 
   if (!rgResult.success) {
     return { success: false, files: [] };

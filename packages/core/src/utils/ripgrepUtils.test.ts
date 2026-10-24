@@ -11,6 +11,7 @@ import {
   canUseRipgrep,
   getBuiltinRipgrep,
   resolveRipgrep,
+  resolveRipgrepCommand,
   runRipgrep,
 } from './ripgrepUtils.js';
 import { fileExists } from './fileUtils.js';
@@ -240,6 +241,66 @@ describe('ripgrepUtils', () => {
         mode: 'system',
         command: 'rg',
       });
+    });
+  });
+
+  describe('resolveRipgrepCommand', () => {
+    it('returns the bundled command when it exists and runs', async () => {
+      stubInstall({ builtin: true, system: true });
+
+      await expect(resolveRipgrepCommand()).resolves.toBe(getBuiltinRipgrep());
+    });
+
+    it('falls back to system rg when the bundled binary cannot run (#2676)', async () => {
+      stubInstall({ builtin: true, system: true });
+      // The bundled binary is selected by existence alone, so the probe is what
+      // rejects it. A binary that cannot exec fails the spawn, not with a
+      // non-zero exit, so fail it the way the OS would.
+      vi.mocked(execCommand).mockRejectedValueOnce(
+        Object.assign(new Error('Command failed: spawn'), { code: 126 }),
+      );
+
+      await expect(resolveRipgrepCommand()).resolves.toBe('rg');
+    });
+
+    it('returns null when nothing usable is installed', async () => {
+      stubInstall({ builtin: false, system: false });
+
+      await expect(resolveRipgrepCommand()).resolves.toBeNull();
+    });
+
+    it('memoizes a negative resolution instead of forking on every crawl', async () => {
+      // The crawler runs on every `@` keystroke window; an unresolved ripgrep
+      // otherwise pays a synchronous `command -v` fork each time.
+      stubInstall({ builtin: false, system: false });
+
+      await resolveRipgrepCommand();
+      await resolveRipgrepCommand();
+
+      expect(vi.mocked(isCommandAvailable)).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns null when the bundled probe throws and no system rg exists', async () => {
+      // Covers the catch: without it the rejection escapes into the crawl and
+      // @-completion dies instead of degrading to fdir.
+      stubInstall({ builtin: true, system: false });
+      vi.mocked(execCommand).mockRejectedValue(new Error('bundled rg broken'));
+
+      await expect(resolveRipgrepCommand()).resolves.toBeNull();
+    });
+
+    it('probes each distinct selection once when two consumers alternate', async () => {
+      // The crawl resolves with tools.useBuiltinRipgrep while the grep tool
+      // resolves its configured value; a single-slot health cache made the two
+      // evict each other and re-probe on every call.
+      stubInstall({ builtin: true, system: true });
+
+      for (let i = 0; i < 4; i++) {
+        await resolveRipgrepCommand();
+        await canUseRipgrep(false);
+      }
+
+      expect(vi.mocked(execCommand)).toHaveBeenCalledTimes(2);
     });
   });
 
