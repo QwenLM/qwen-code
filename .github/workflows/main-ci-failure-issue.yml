@@ -404,6 +404,18 @@ jobs:
           # within one workflow — this key is what scopes a marker match back
           # to the workflow that owns it.
           scope_key="main-ci-failure-scope:${WORKFLOW_ID}"
+          # Writes get the same transient-failure tolerance the lookups have
+          # had all along; a one-shot write that dies loses the occurrence.
+          gh_write() {
+            local attempt
+            for attempt in 1 2 3; do
+              if gh "$@"; then
+                return 0
+              fi
+              sleep "${attempt}"
+            done
+            return 1
+          }
           # Look up inside the serialized writer. renderIssueTitle emitted the
           # legacy " on <sha12>" and " — <shortened test>" title suffixes, and
           # the aggregate's dated retitle below rides the " — " arm too — the
@@ -548,7 +560,7 @@ jobs:
                   echo '::error::Could not re-read the closed issue body; not writing.'
                   exit 1
                 fi
-                gh issue reopen "${existing_issue}" --repo "${REPO}"
+                gh_write issue reopen "${existing_issue}" --repo "${REPO}"
               fi
             fi
 
@@ -557,7 +569,7 @@ jobs:
               printf '%s\n\nRun attempt: %s\n' "${ISSUE_BODY}" "${RUN_ATTEMPT}" \
                 > "${comment_file}"
               echo "issue_url=https://github.com/${REPO}/issues/${existing_issue}" >> "${GITHUB_OUTPUT}"
-              gh issue comment "${existing_issue}" --repo "${REPO}" --body-file "${comment_file}"
+              gh_write issue comment "${existing_issue}" --repo "${REPO}" --body-file "${comment_file}"
               # Tests that join a standing failure set later must still find
               # this issue, so accrete their markers into its body; the scope
               # key rides along, so a human retitle later never drops the
@@ -572,9 +584,42 @@ jobs:
                 for test_marker in "${markers[@]}"; do
                   grep -qF -- "${test_marker}" "${matched_body}" || missing+=("${test_marker}")
                 done
-                grep -qF -- "${scope_key}" "${matched_body}" || missing+=("${scope_key}")
                 if [[ "${#missing[@]}" -gt 0 ]]; then
-                  if ! { printf '<!-- %s -->\n' "${missing[@]}" >> "${matched_body}" &&
+                  # A marker a sibling tracker already owns belongs to it:
+                  # accreting it here would shadow that issue on later runs.
+                  # The family bodies were read this pass, inside the writer
+                  # lock; candidates past the first hit are read now, only
+                  # when there is anything to accrete.
+                  siblings_ok=true
+                  siblings_corpus="${RUNNER_TEMP}/sibling-bodies.md"
+                  : > "${siblings_corpus}"
+                  for family_line in "${family[@]}"; do
+                    sibling="${family_line%%$'\t'*}"
+                    [[ "${sibling}" == "${existing_issue}" ]] && continue
+                    sibling_body="${RUNNER_TEMP}/candidate-${sibling}.md"
+                    if [[ ! -f "${sibling_body}" ]] &&
+                      ! gh issue view "${sibling}" --repo "${REPO}" \
+                        --json body --jq '.body // ""' > "${sibling_body}"; then
+                      siblings_ok=false
+                      break
+                    fi
+                    cat "${sibling_body}" >> "${siblings_corpus}"
+                  done
+                  if [[ "${siblings_ok}" == true ]]; then
+                    accrete=()
+                    for test_marker in "${missing[@]}"; do
+                      grep -qF -- "${test_marker}" "${siblings_corpus}" || accrete+=("${test_marker}")
+                    done
+                  else
+                    echo '::warning::Could not read every sibling tracker body; skipping marker accretion this run.'
+                    accrete=()
+                  fi
+                else
+                  accrete=()
+                fi
+                grep -qF -- "${scope_key}" "${matched_body}" || accrete+=("${scope_key}")
+                if [[ "${#accrete[@]}" -gt 0 ]]; then
+                  if ! { printf '<!-- %s -->\n' "${accrete[@]}" >> "${matched_body}" &&
                     gh issue edit "${existing_issue}" --repo "${REPO}" --body-file "${matched_body}"; }; then
                     echo '::warning::Could not accrete the new test markers onto the tracking issue.'
                   fi
@@ -591,7 +636,7 @@ jobs:
                 printf '%s\n\nRun attempt: %s\n\n' "${ISSUE_BODY}" "${RUN_ATTEMPT}"
                 printf '<!-- %s -->\n' "${markers[@]}" "${scope_key}"
               } > "${body_file}"
-              issue_url="$(gh issue create --repo "${REPO}" \
+              issue_url="$(gh_write issue create --repo "${REPO}" \
                 --title "${SIGNATURE_TITLE}" --body-file "${body_file}")"
               echo "issue_url=${issue_url}" >> "${GITHUB_OUTPUT}"
               # Label churn must not cost the failure record. A named
@@ -616,10 +661,21 @@ jobs:
           existing_issue=''
           match_kind=''
           via_title_lookup=false
+          # An exact machine title certifies the aggregate without a body read
+          # — per-signature titles always carry the " — " suffix, and every
+          # create below embeds the workflow marker — so it wins first, before
+          # any read that a transient failure could strand.
           for family_line in "${family[@]}"; do
-            candidate="${family_line%%$'\t'*}"
-            candidate_kind="${family_line#*$'\t'}"
-            if [[ "${candidate_kind}" == legacy ]]; then
+            if [[ "${family_line#*$'\t'}" == exact ]]; then
+              existing_issue="${family_line%%$'\t'*}"
+              match_kind='exact'
+              via_title_lookup=true
+              break
+            fi
+          done
+          if [[ -z "${existing_issue}" ]]; then
+            for family_line in "${family[@]}"; do
+              candidate="${family_line%%$'\t'*}"
               candidate_body="${RUNNER_TEMP}/family-${candidate}.md"
               if ! gh issue view "${candidate}" --repo "${REPO}" \
                 --json body --jq '.body // ""' > "${candidate_body}"; then
@@ -636,12 +692,12 @@ jobs:
                 ! grep -qF -- "${marker}" "${candidate_body}"; then
                 continue
               fi
-            fi
-            existing_issue="${candidate}"
-            match_kind="${candidate_kind}"
-            via_title_lookup=true
-            break
-          done
+              existing_issue="${candidate}"
+              match_kind='legacy'
+              via_title_lookup=true
+              break
+            done
+          fi
 
           if [[ -z "${existing_issue}" ]]; then
             # A bot-owned aggregate remains recognizable after a human retitles it.
@@ -688,7 +744,7 @@ jobs:
               # stops at the first line, which is the only one wanted.
               IFS=$'\t' read -r existing_issue match_kind <<< "${issue_match}"
               via_title_lookup=true
-              gh issue reopen "${existing_issue}" --repo "${REPO}"
+              gh_write issue reopen "${existing_issue}" --repo "${REPO}"
             fi
           fi
 
@@ -698,7 +754,7 @@ jobs:
             # Publish the record before retiring a legacy route: an edit failure
             # must not lose the comment or report_pr's tracking-issue link.
             echo "issue_url=https://github.com/${REPO}/issues/${existing_issue}" >> "${GITHUB_OUTPUT}"
-            gh issue comment "${existing_issue}" --repo "${REPO}" --body-file "${body_file}"
+            gh_write issue comment "${existing_issue}" --repo "${REPO}" --body-file "${body_file}"
             # Migrate adopted bodies so a later human retitle can still find
             # the issue. Decoration is best-effort: the occurrence is already
             # recorded above. `had_marker` is read BEFORE the migration: an
@@ -736,7 +792,7 @@ jobs:
                 echo '::warning::Could not retitle the aggregate issue.'
             fi
           else
-            issue_url="$(gh issue create --repo "${REPO}" --title "${title}" \
+            issue_url="$(gh_write issue create --repo "${REPO}" --title "${title}" \
               --body-file "${body_file}")"
             echo "issue_url=${issue_url}" >> "${GITHUB_OUTPUT}"
             # Label churn must not cost the failure record. Unlike the image-build

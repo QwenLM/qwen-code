@@ -441,6 +441,7 @@ printf '%s\\n' '${liveAttempt}'
         failEdit = false,
         failBodyRead = false,
         failBodyReadFor = '',
+        failCommentOnce = false,
         issueBody = '<!-- main-ci-failure-aggregate:1234 -->',
         issueBodies = {},
         signatureTitle = '',
@@ -501,6 +502,12 @@ elif [[ "$1 $2" == 'issue view' ]]; then
   ${failBodyRead ? 'exit 1' : ':'}
   ${failBodyReadFor ? `[[ "$3" != "${failBodyReadFor}" ]] || exit 1` : ':'}
   if [[ -f "${tmp}/body-$3.md" ]]; then cat "${tmp}/body-$3.md"; else cat '${tmp}/current-body.md'; fi
+elif [[ "$1 $2" == 'issue comment' ]]; then
+  c=0
+  [[ ! -f "${tmp}/comment-count" ]] || read -r c < "${tmp}/comment-count"
+  c=$((c + 1))
+  printf '%s\\n' "$c" > "${tmp}/comment-count"
+  [[ "\${FAIL_COMMENT_ONCE:-0}" != '1' || "$c" -gt 1 ]] || exit 1
 elif [[ "$1 $2" == 'issue edit' ]]; then
   ${failEdit ? 'exit 1' : ':'}
   if [[ "$*" == *'--body-file'* ]]; then
@@ -530,6 +537,7 @@ fi
               TEST_MARKERS: testMarkers,
               RUN_AT: runAt,
               LOOKUP_FAILURES: String(lookupFailures),
+              FAIL_COMMENT_ONCE: failCommentOnce ? '1' : '0',
             },
           },
         );
@@ -598,17 +606,17 @@ fi
     });
 
     it('never adopts a per-signature issue as the workflow aggregate', () => {
-      // The per-signature issue sorts first: its title rides the same " — "
-      // family arm, and only the body check keeps the no-test occurrence off
-      // it — the hijack from the review round, where adoption rewrote the
-      // per-signature title into the generic dated one.
-      const result = run([botIssue(7, ' — Foo.test'), botIssue(42)], {
+      // With no exact-titled aggregate in the family, only the body check
+      // keeps the no-test occurrence off the per-signature issue — the hijack
+      // from the review round, where adoption rewrote the per-signature title
+      // into the generic dated one.
+      const result = run([botIssue(7, ' — Foo.test')], {
         issueBodies: {
           7: 'Tracked failure.\n\n<!-- qwen-main-ci-failure-test:aaa111bbb222 -->\n',
         },
       });
       expect(result.status).toBe(0);
-      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).toContain('issue create');
       expect(result.calls).not.toContain('issue comment 7');
       expect(result.calls).not.toContain('issue edit 7');
     });
@@ -846,11 +854,14 @@ fi
       },
     );
 
-    it('chooses the oldest matching issue consistently', () => {
+    it('prefers an exact-titled aggregate over an older legacy candidate', () => {
+      // The exact machine title certifies the aggregate without a body read,
+      // so it wins over an older legacy candidate that could otherwise absorb
+      // the occurrence while unreadable or unmarked.
       const result = run([botIssue(50), botIssue(42, ' on abc123')]);
-      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).toContain('issue comment 50');
       expect(result.output).toContain(
-        'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/50',
       );
     });
 
@@ -859,6 +870,17 @@ fi
       expect(result.status).toBe(0);
       expect(result.calls.match(/issue list .*--state open/g)).toHaveLength(2);
       expect(result.calls).toContain('issue comment 42');
+    });
+
+    it('retries a transient failure of the record write itself', () => {
+      // Every lookup retries 3x; the comment carrying the occurrence gets the
+      // same tolerance, or a transient 5xx permanently loses the record.
+      const result = run([botIssue(42)], { failCommentOnce: true });
+      expect(result.status).toBe(0);
+      expect(result.calls.match(/issue comment 42/g)).toHaveLength(2);
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+      );
     });
 
     it.each([{ lookupFailures: 3 }, { failMarkerLookup: true }])(
@@ -1237,6 +1259,25 @@ fi
         expect(result.status).toBe(0);
         expect(result.calls).toContain('issue comment 42');
         expect(result.calls).not.toContain('issue create');
+      });
+
+      it('does not accrete a marker another family tracker already owns', () => {
+        // #20 tracks A, #21 tracks C; a run failing {A, C} comments on #20
+        // (oldest hit), but pulling C's marker into #20 would shadow #21:
+        // every later C-only run would land on the wrong-numbered issue.
+        const owned = (marker) =>
+          `<!-- ${marker} -->\n<!-- main-ci-failure-scope:1234 -->\n`;
+        const result = run(
+          [botIssue(20, ' — A.test'), botIssue(21, ' — C.test')],
+          {
+            signatureTitle,
+            testMarkers: `${markerA}\n${markerB}`,
+            issueBodies: { 20: owned(markerA), 21: owned(markerB) },
+          },
+        );
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 20');
+        expect(result.calls).not.toContain('issue edit');
       });
     });
   });
