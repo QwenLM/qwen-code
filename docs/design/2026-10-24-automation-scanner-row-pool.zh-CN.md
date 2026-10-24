@@ -59,11 +59,21 @@ scanner-threads`，它仍是正确的后续方向。
 
 - Harness 在自动化 funnel 的串行队列里运行每个探针，每个 Session 一个队列，因此
   线程池只能并行不同 Session 之间，不能并行同一个 Session 之内。
+- 共享一个 Session 的多个定义会并发地做出准入决定：没有公开 Turn 时，同时到期
+  的定义都会 fire——跨定义的准入只守卫公开 Turn（`hasOpenTurn`，自动化 fire
+  不会产生 `ma_turn` 行）和每个定义的活跃计数。它们的运行仍在 Harness funnel
+  里串行执行，所以一个 Session 的执行仍然一次一个。这是接受的语义，由
+  `twoDefinitionsSharingOneSessionBothFireWhenDueTogether` 钉住（#15442 验证
+  lane 发现 1）。
 - 冷 Session 加载时（中继开始前最长 120 秒），一次 fire 仍可能超过 60 秒租约。
   fence 会拒绝旧持有者的写入，occurrence 保持 `firing`，后续 tick 用派生 run id
   幂等地重新驱动它。本次改动不增加续期运行。
 - 同一行内，时间槽、重驱动和 reconcile 调用保持串行；线程池只并行行之间。
   `SCAN_LIMIT`（100）仍是每次 tick 的行数上限。
+- 上下文关闭时，线程池除了进行中的行，还会在非 daemon 线程上把**排队中**的行
+  也运行完：`destroy()` 仍然立即返回，但进程退出会等待排队的工作。每个排队的
+  行都在同一 fence 下认领与触发，丢失的应答会由后续 tick 重新驱动（#15442 验证
+  lane 发现 3）。
 
 ## 验证
 
@@ -75,9 +85,12 @@ scanner-threads`，它仍是正确的后续方向。
   `aTickJoinsEveryRowBeforeItReportsOneFailure`、
   `theScannerWorksRowsOnItsOwnBoundedPool`、
   `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`、
-  `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`，
-  以及新属性的绑定/启动校验。既有的租约与 fence 回归套件经由直接执行器原样
-  运行，钉住同一套分发与 join 的串行形态。
+  `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`、
+  `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`，以及新属性的
+  绑定/启动校验。既有的租约与 fence 回归套件经由直接执行器原样运行，钉住
+  同一套分发与 join 的串行形态。`aTickJoinsEveryRowBeforeItReportsOneFailure`
+  在真实的单线程池上运行，第一个认领抛出时第二个行的认领仍在飞行中：直接执行器
+  钉不住 join，因为它的任务在提交阶段就已跑完（#15442 验证 lane 发现 2）。
 - MySQL（`AutomationScannerConcurrencyMySqlIT`，`mysql-integration` profile）：
   InnoDB 行锁下竞争认领只有一个 fence 赢家；接管后旧所有者无法移动账本；两个
   扫描器跨线程池对每个 occurrence 只结算一次。

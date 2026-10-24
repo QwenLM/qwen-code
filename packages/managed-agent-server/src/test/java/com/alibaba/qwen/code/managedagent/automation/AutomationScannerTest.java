@@ -43,6 +43,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -2439,28 +2440,89 @@ class AutomationScannerTest {
     }
 
     @Test
+    void twoDefinitionsSharingOneSessionBothFireWhenDueTogether() {
+        // #15442 verify finding 1, accepted behavior (design §Residual
+        // ceilings): two definitions on ONE Session are admitted
+        // concurrently and both fire. Across definitions the admission
+        // guards only on public Turns — automation fires never write
+        // ma_turn rows, so neither executor shape suppresses the second
+        // definition — and the runs still serialize in the Harness funnel.
+        PublicAutomation firstAutomation = define("* * * * *", "skip",
+                "none", null, true);
+        PublicAutomation secondAutomation = define("* * * * *", "skip",
+                "none", null, true);
+        ThreadPoolTaskExecutor rows = rowPool(2);
+        try {
+            AutomationScanner pooled = scanner("scanner-shared-session",
+                    rows.getThreadPoolExecutor());
+            clock.set(T0 + MINUTE + 1_000);
+            assertThat(pooled.tick(clock.get())).isEqualTo(2);
+        } finally {
+            rows.destroy();
+        }
+        String slot = "schedule:2026-06-01T10:01:00Z";
+        assertThat(occurrence(firstAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(occurrence(secondAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+    }
+
+    @Test
     void aTickJoinsEveryRowBeforeItReportsOneFailure() {
         // A row task that escapes claimed() — here, the claim write itself
-        // going down — must not abort the tick: every row is still worked,
-        // and the FIRST failure is what the tick reports.
+        // going down — must not abort the tick: the other row runs to
+        // completion BEFORE the tick reports the first failure. A direct
+        // executor cannot pin this (its tasks finish during submission, so
+        // a fail-fast break in the join survives), so on this real pool the
+        // second row's claim is still in flight when the first one throws.
         define("* * * * *", "allow", "none", null, true);
         define("* * * * *", "allow", "none", null, true);
+        CountDownLatch firstFailed = new CountDownLatch(1);
+        AtomicBoolean secondDone = new AtomicBoolean();
         AtomicInteger claims = new AtomicInteger();
-        AutomationLedgerStore downAtClaim = new AutomationLedgerStore(jdbc) {
-            @Override
-            public long claim(String tenantId, String scheduleId,
-                    String owner, long leaseUntil, long now) {
-                claims.incrementAndGet();
-                throw new IllegalStateException("claim store down");
-            }
-        };
-        AutomationScanner broken = new AutomationScanner(downAtClaim,
-                connector, settings, clock::get, "scanner-broken-store");
-        clock.set(T0 + MINUTE + 1_000);
-        assertThatThrownBy(() -> broken.tick(clock.get()))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("claim store down");
-        assertThat(claims.get()).isEqualTo(2);
+        AutomationLedgerStore downAtFirstClaim =
+                new AutomationLedgerStore(jdbc) {
+                    @Override
+                    public long claim(String tenantId, String scheduleId,
+                            String owner, long leaseUntil, long now) {
+                        if (claims.incrementAndGet() == 1) {
+                            firstFailed.countDown();
+                            throw new IllegalStateException(
+                                    "claim store down");
+                        }
+                        try {
+                            assertThat(firstFailed.await(10,
+                                    TimeUnit.SECONDS)).isTrue();
+                            // Stay in flight well past the first failure:
+                            // a tick that stopped joining there reports
+                            // before this claim ever lands.
+                            Thread.sleep(300);
+                        } catch (InterruptedException error) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError(error);
+                        }
+                        long fence = super.claim(tenantId, scheduleId,
+                                owner, leaseUntil, now);
+                        if (fence >= 0) {
+                            secondDone.set(true);
+                        }
+                        return fence;
+                    }
+                };
+        ThreadPoolTaskExecutor rows = rowPool(1);
+        try {
+            AutomationScanner broken = new AutomationScanner(
+                    downAtFirstClaim, connector, settings, clock::get,
+                    "scanner-broken-store", rows.getThreadPoolExecutor());
+            clock.set(T0 + MINUTE + 1_000);
+            assertThatThrownBy(() -> broken.tick(clock.get()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("claim store down");
+            assertThat(secondDone).isTrue();
+            assertThat(claims.get()).isEqualTo(2);
+        } finally {
+            rows.destroy();
+        }
     }
 
     @Test

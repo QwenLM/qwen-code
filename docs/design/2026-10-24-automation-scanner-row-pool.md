@@ -67,12 +67,25 @@ follow-up if probe durations keep saturating `SCAN_LIMIT × scanner-threads`.
 
 - The Harness runs each probe inside the automation funnel's serial queue per
   Session, so the pool parallelizes across Sessions, not within one.
+- Admission decisions for definitions sharing one Session are made
+  concurrently: with no public Turn open, both due definitions fire — across
+  definitions the admission guards only on public Turns (`hasOpenTurn`, which
+  automation fires never create: they leave no `ma_turn` row) and on
+  per-definition active counts. Their runs still serialize in the Harness
+  funnel, so a Session's executions stay one at a time. Accepted semantics,
+  pinned by `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`
+  (#15442 verify lane, finding 1).
 - One fire can still out-live the 60 s lease while a cold Session loads (up to
   120 s before the relay starts). The fence denies the stale holder's writes,
   the occurrence stays `firing`, and a later tick re-drives it idempotently on
   the derived run id. No renewal run is added in this change.
 - In one row, slots, re-drives and reconcile calls stay serial; the pool
   parallelizes rows. `SCAN_LIMIT` (100) stays the per-tick row bound.
+- At context close the pool also runs its **queued** rows, not only the
+  in-flight one, on its non-daemon threads: `destroy()` still returns
+  immediately, but process exit waits for queued work. Every queued row
+  claims and fires under the same fence, and a lost answer is re-driven by
+  a later tick (#15442 verify lane, finding 3).
 
 ## Validation
 
@@ -85,9 +98,13 @@ follow-up if probe durations keep saturating `SCAN_LIMIT × scanner-threads`.
   `theScannerWorksRowsOnItsOwnBoundedPool`,
   `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`,
   `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`,
+  `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`,
   plus binding/startup validation of the new property. The pre-existing lease
   and fence suite runs unchanged through a direct executor, pinning the serial
-  shape of the same fan-out and join.
+  shape of the same fan-out and join. `aTickJoinsEveryRowBeforeItReportsOneFailure`
+  runs on a real one-thread pool with the second row's claim in flight when
+  the first one throws: a direct executor cannot pin the join, because its
+  tasks finish during submission (#15442 verify lane, finding 2).
 - MySQL (`AutomationScannerConcurrencyMySqlIT`, `mysql-integration` profile):
   racing claims reach exactly one fence winner under InnoDB row locks, a stale
   owner cannot move the ledger after a takeover, and two scanners settle one
