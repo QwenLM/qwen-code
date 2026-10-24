@@ -85,6 +85,10 @@ import {
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 import * as hostedPlan from './hosted-plan-mode.js';
+import {
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
@@ -93,6 +97,7 @@ const broker = vi.hoisted(() => ({
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
   warm: vi.fn(),
+  resolveCapabilities: vi.fn(),
   acquire: vi.fn(),
   prepare: vi.fn(),
   prepareV3: vi.fn(),
@@ -128,6 +133,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
     warm = broker.warm;
+    resolveCapabilities = broker.resolveCapabilities;
     acquire = (...args: unknown[]) => {
       this.claim = `claim-${broker.acquire.mock.calls.length + 1}`;
       return broker.acquire(...args);
@@ -253,11 +259,13 @@ const parts: Part[] = calls.map((call) => ({
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  broker.capabilityDigest = WORKSPACE_CAPABILITY_DIGEST;
   broker.backgroundProcessStatus.mockResolvedValue({ state: 'unknown' });
   expectWritesStopped = false;
   for (const method of [
     broker.authorizeLifecycle,
     broker.warm,
+    broker.resolveCapabilities,
     broker.acquire,
     broker.cancel,
     broker.release,
@@ -1638,6 +1646,120 @@ it('does not dispatch a denied web_fetch', async () => {
   expect(broker.execute).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
 });
+
+it('declares only resident file tools without waiting for runtime warmup', async () => {
+  broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  broker.warm.mockReturnValueOnce(new Promise(() => {}));
+  const resident = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+  );
+  expect(
+    (await resident.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    ),
+  ).toEqual(['read_file', 'write_file', 'edit']);
+  expect(broker.resolveCapabilities).toHaveBeenCalledOnce();
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('refuses unresolved capability instead of advertising ordinary tools', async () => {
+  broker.resolveCapabilities.mockRejectedValueOnce(
+    new Error('scope unavailable'),
+  );
+  await expect(turn.declarations(new AbortController().signal)).rejects.toThrow(
+    'scope unavailable',
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('preserves resident public Plan approval before restoring file mutations', async () => {
+  broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  const active = vi
+    .spyOn(hostedPlan, 'hostedPublicPlanActive')
+    .mockResolvedValue(true);
+  turn = createTurn(
+    false,
+    { mode: 'auto-edit' },
+    undefined,
+    undefined,
+    'public',
+  );
+  const signal = new AbortController().signal;
+  expect((await turn.declarations(signal)).map((tool) => tool.name)).toEqual([
+    'read_file',
+    'exit_plan_mode',
+  ]);
+  expect(
+    JSON.stringify(await turn.execute([calls[1]], [parts[1]], 'model', signal)),
+  ).toContain('Plan mode is read-only');
+  const plan = {
+    ...calls[0],
+    name: 'exit_plan_mode',
+    callId: 'plan',
+    args: { plan: 'Read the file, then edit it after approval.' },
+  };
+  const running = turn.execute(
+    [plan],
+    [{ functionCall: { id: plan.callId, name: plan.name, args: plan.args } }],
+    'model',
+    signal,
+  );
+  const requestId = await requested();
+  active.mockResolvedValue(false);
+  await resolveHostedAction(session, waiters, requestId, answer('allow'));
+  expect(JSON.stringify(await running)).toContain('The user approved the plan');
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect((await turn.declarations(signal)).map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'exit_plan_mode',
+  ]);
+  const edit = { ...calls[1], callId: 'approved-edit' };
+  await turn.execute(
+    [edit],
+    [{ functionCall: { id: edit.callId, name: edit.name, args: edit.args } }],
+    'model',
+    signal,
+  );
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it.each(['web_fetch', 'run_shell_command', 'glob', 'todo_write', 'skill'])(
+  'records a resident %s refusal before acquiring or preparing any work',
+  async (name) => {
+    broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    const resident = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+    );
+    const call = { ...calls[0], name, args: {}, isClientInitiated: true };
+    const response = await resident.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(response)).toContain(
+      'Resident Workspace supports only',
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await resident.consumeResults();
+    await resident.finish();
+  },
+);
 
 it('offers glob under the unified Shell, file-search and read profiles', async () => {
   const signal = new AbortController().signal;

@@ -28,6 +28,60 @@ const identity = {
   harnessSessionId: 'session',
   runtimeSessionId: 'turn',
 };
+
+it('resolves and pins Harness capability once without acquiring or warming a Runtime', async () => {
+  const requests: string[] = [];
+  const broker = await fixture((path, body) => {
+    requests.push(path);
+    expect(body['runtimeSessionId']).toBeUndefined();
+    return {
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        scope: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          workspaceGeneration: '1',
+          capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+          isolationClass: 'workspace',
+        },
+      },
+    };
+  });
+  await Promise.all([
+    broker.resolveCapabilities(),
+    broker.resolveCapabilities(),
+  ]);
+  expect(broker.capabilityDigest).toBe(RESIDENT_WORKSPACE_CAPABILITY_DIGEST);
+  expect(requests).toEqual([
+    '/internal/runtime-broker/v1/runtimes:capabilities',
+  ]);
+  expect(broker.acquired).toBe(false);
+  expect(broker.runtime).toBeUndefined();
+});
+
+it.each(['tenantId', 'workspaceId', 'capabilityDigest', 'isolationClass'])(
+  'refuses a mismatched %s in Harness capability resolution',
+  async (field) => {
+    const broker = await fixture(() => ({
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        scope: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          workspaceGeneration: '1',
+          capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+          isolationClass: 'workspace',
+          [field]: 'wrong',
+        },
+      },
+    }));
+    await expect(broker.resolveCapabilities()).rejects.toThrow('scope');
+    expect(() => broker.capabilityDigest).toThrow('unavailable');
+    expect(broker.runtime).toBeUndefined();
+  },
+);
 async function fixture(
   handler: (
     path: string,
