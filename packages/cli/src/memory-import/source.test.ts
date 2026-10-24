@@ -94,21 +94,39 @@ describe('Codex source preview', () => {
       content:
         '# Shared\n## Alpha\n### Task\ncwd: /alpha\nAlpha fact\n## Beta\nBeta fact',
       project: '/alpha',
+      siblingTitle: 'Beta',
       sibling: 'Beta fact',
     },
     {
       content:
         '# Knowledge\n## Notes\n### /beta\nBeta fact\n## Other\nOther fact',
       project: '/beta',
+      siblingTitle: 'Other',
+      sibling: 'Other fact',
+    },
+    {
+      content:
+        '# Shared\n## Alpha\n### Notes\n#### /beta\nBeta fact\n### Other\nOther fact',
+      project: '/beta',
+      siblingTitle: 'Other',
       sibling: 'Other fact',
     },
   ])(
-    'does not absorb a later sibling section when a project hint is nested',
-    ({ content, project, sibling }) => {
+    'keeps a later sibling visible as its own section when a project hint is nested',
+    ({ content, project, siblingTitle, sibling }) => {
       const preview = previewSource(source(content));
-      expect(preview.sections).toHaveLength(1);
-      expect(preview.sections[0].sourceProject).toBe(project);
-      expect(preview.sections[0].content).not.toContain(sibling);
+      expect(preview.sections).toHaveLength(2);
+      const projectSection = preview.sections.find(
+        (section) => section.sourceProject === project,
+      );
+      expect(projectSection).toBeDefined();
+      expect(projectSection?.content).not.toContain(sibling);
+      const siblingSection = preview.sections.find(
+        (section) => section.title === siblingTitle,
+      );
+      expect(siblingSection?.suggestedScope).toBe('unassigned');
+      expect(siblingSection?.content).toContain(sibling);
+      expect(preview.warnings).toEqual([]);
     },
   );
   it('splits a memory file at its shallowest heading depth', () => {

@@ -280,16 +280,22 @@ export function previewSource(input: unknown): ImportPreview {
         depth: 0,
         preface: '',
       });
+    // A split parent can sit deeper than the file's shallowest heading, so the
+    // heading after a split child may not be a boundary yet. Add it as one, or
+    // its facts fall between sections and never reach the preview.
+    for (let i = 0; i < boundaries.length; i++) {
+      const peer = headings.find(
+        (heading) =>
+          heading.offset > boundaries[i].offset &&
+          heading.depth <= boundaries[i].depth,
+      );
+      if (peer && peer.offset < (boundaries[i + 1]?.offset ?? Infinity))
+        boundaries.splice(i + 1, 0, peer);
+    }
     for (let i = 0; i < boundaries.length; i++) {
       const boundary = boundaries[i];
-      const nextBoundary = boundaries[i + 1]?.offset ?? Infinity;
-      const nextPeer =
-        headings.find(
-          (heading) =>
-            heading.offset > boundary.offset && heading.depth <= boundary.depth,
-        )?.offset ?? Infinity;
       const own = file.content
-        .slice(boundary.offset, Math.min(nextBoundary, nextPeer))
+        .slice(boundary.offset, boundaries[i + 1]?.offset)
         .trim();
       if (
         !own ||
