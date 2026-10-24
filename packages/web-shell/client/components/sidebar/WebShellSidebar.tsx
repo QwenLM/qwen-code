@@ -7201,50 +7201,6 @@ export function WebShellSidebar({
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
                       {!channelView && managedWorkspaces}
-                      {standaloneSessionsVisible &&
-                        onLoadStandaloneSession &&
-                        onStandaloneNotice && (
-                          <StandaloneRecents
-                            archiveState="active"
-                            currentSessionId={connection.sessionId}
-                            currentSessionReady={
-                              connection.status === 'connected' &&
-                              !connection.error &&
-                              !connection.loadingTranscript &&
-                              !connection.catchingUp
-                            }
-                            refreshKey={standaloneRefreshKey}
-                            searchQuery={searchQuery}
-                            renderSession={(session, standalone) =>
-                              renderSessionRow(session, {
-                                isArchived: standalone.isArchived,
-                                standalone,
-                              })
-                            }
-                            onNewSession={
-                              onNewStandaloneSession
-                                ? () => {
-                                    void Promise.resolve(
-                                      onNewStandaloneSession(),
-                                    ).then((created) => {
-                                      if (created) handleStandaloneMutation();
-                                    });
-                                  }
-                                : undefined
-                            }
-                            onLoadSession={onLoadStandaloneSession}
-                            onRenameSession={(sessionId, displayName) =>
-                              onSessionRenameConfirmed?.(
-                                undefined,
-                                sessionId,
-                                displayName,
-                              )
-                            }
-                            onMutated={handleStandaloneMutation}
-                            onError={onError}
-                            onNotice={onStandaloneNotice}
-                          />
-                        )}
                       {orderedProjectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
@@ -7654,6 +7610,51 @@ export function WebShellSidebar({
                   />
                 )}
               </div>
+              {!liveView &&
+                standaloneSessionsVisible &&
+                onLoadStandaloneSession &&
+                onStandaloneNotice && (
+                  <StandaloneRecents
+                    archiveState="active"
+                    currentSessionId={connection.sessionId}
+                    currentSessionReady={
+                      connection.status === 'connected' &&
+                      !connection.error &&
+                      !connection.loadingTranscript &&
+                      !connection.catchingUp
+                    }
+                    refreshKey={standaloneRefreshKey}
+                    searchQuery={searchQuery}
+                    renderSession={(session, standalone) =>
+                      renderSessionRow(session, {
+                        isArchived: standalone.isArchived,
+                        standalone,
+                      })
+                    }
+                    onNewSession={
+                      onNewStandaloneSession
+                        ? () => {
+                            void Promise.resolve(onNewStandaloneSession()).then(
+                              (created) => {
+                                if (created) handleStandaloneMutation();
+                              },
+                            );
+                          }
+                        : undefined
+                    }
+                    onLoadSession={onLoadStandaloneSession}
+                    onRenameSession={(sessionId, displayName) =>
+                      onSessionRenameConfirmed?.(
+                        undefined,
+                        sessionId,
+                        displayName,
+                      )
+                    }
+                    onMutated={handleStandaloneMutation}
+                    onError={onError}
+                    onNotice={onStandaloneNotice}
+                  />
+                )}
               {!sectionView &&
                 !hideProjectHeader &&
                 workspaceQualifiedRestCoreEnabled && (
