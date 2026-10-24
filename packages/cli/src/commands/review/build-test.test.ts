@@ -187,9 +187,11 @@ describe.skipIf(process.platform === 'win32')(
     afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
     // A grandchild that outlives a killed shell unless something kills it:
-    // the shape of a test runner's workers, two levels below the spawn.
+    // the shape of a test runner's workers, two levels below the spawn. The
+    // shell records its pid at the fork, so a node slow to start on a loaded
+    // machine is still there to be killed when the deadline fires.
     const grandchild = (pidFile: string): string =>
-      `node -e "require('fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)" ${pidFile} & wait`;
+      `node -e "setInterval(() => {}, 1000)" & echo $! > ${pidFile}; wait`;
     const pidIn = async (pidFile: string): Promise<number> => {
       for (let i = 0; i < 100; i++) {
         try {
