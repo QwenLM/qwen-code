@@ -317,7 +317,7 @@ Event rules:
   `.qwen/tmp/autofix-pr-<n>-replies.json`, which the gate, prepared
   snapshots and `reply` share. A comment deleted meanwhile is no request.
   Each answer is kept as it comes. The gate asks about 20 at most a fire,
-  for 30 seconds at most, and stops at the first failure, leaving the rest — neither requests nor seen — for its next fire; a
+  within the gate's read budget, and stops at the first failure, leaving the rest — neither requests nor seen — for its next fire; a
   round asks about every one and fails when GitHub does not answer, so it
   never drops a request the gate reported; after eight minutes it stops,
   the answers kept, and asks to be run again. The gate keeps bot replies
@@ -406,7 +406,11 @@ when there are none, so the session is woken only for them:
   one. The exception is a flood: more than 100 arriving between two checks
   push out one that no check has read. That is a known limit; the round
   names the cut in its report.
-- The output stays within 12 KiB, under the 16 KiB the gate hands the
+- A gate run reads GitHub for 15 seconds at most, inside a Managed
+  automation's 20-second gate (a scheduled task allows 60): past it, paging
+  stops and what was not read stays cut.
+- The output stays within 12 KiB — counted as a gate hands it on, with each
+  `<` written as `&lt;` — under the 16 KiB the gate hands the
   session (and cuts beyond). Events go in order — head move, conflict,
   failures, comments — and those that do not fit, or the later comments of a
   thread that does not fit whole, are left out, counted in `deferred` and

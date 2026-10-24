@@ -180,7 +180,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - head SHA 和 `lastKnownHeadSha` 不同时，如果分支本身（对推送目标执行 `git ls-remote`）也已离开已知 head——包括回退到本监视早先推送过的 head——记为 `head_moved_externally`；分支仍在已知 head 上时，是 API 滞后（上文的 `lagging`）。读不到分支时，`pushedShas` 里的 head 视为本监视自己的。
 - `title` 是 PR 的标题，这一轮的总结使用它的语言。
 - GitHub 没能启动的 workflow（`STARTUP_FAILURE`，常见原因是 workflow 文件无效）在 rollup 里没有任何 check run——它是唯一的 workflow 时根本没有 rollup——只留下它的 check suite。在读到的 suite 里（如上所述向前翻页），每个 workflow 和触发事件只看最近一次运行，而且只看由 PR 代码触发的（`pull_request`、`pull_request_target`、`push`）：为每条 review 评论触发的运行在 GitHub 出问题时也会启动失败，与代码无关。它被报告为带 `startupFailure: true` 和 run id 的 `ci_failed`，每个 head 只报一次（`<workflow>@<head>@#startup:<workflow id>:<event>`），没有日志也没有可重跑的 job，所以 skill 把它答复为需要人工处理。
-- 尚未提交的 review 里的评论（`PENDING`）是只有作者能看到的草稿，会被跳过。bot 在开启 thread 的评论（以及 review）里提要求；它在 thread 里的回复是在回答某人，不算请求。被回复的评论删除后，GraphQL 会丢掉回复的 `replyTo`，并把它列为 thread 的第一条，所以看起来像是开启了 thread、又尚未见过的 bot 评论，会通过 REST 逐条查询（`in_reply_to_id` 仍保留在这条评论上），只针对打开的 PR 上未解决的 thread，而且每条只问一次：答案保存在 `.qwen/tmp/autofix-pr-<n>-replies.json`，闸门、已准备快照和 `reply` 共用。期间被删除的评论不算请求。每条答案一拿到就保存。闸门每次触发最多问 20 条、最多 30 秒，遇到第一次失败就停，剩下的留到下一次触发，这次既不算请求也不记为已看过；一轮则问完所有条目，GitHub 没有回应时直接失败，绝不丢掉闸门已经报告过的请求；问了八分钟仍未问完时就停下，保留已有答案，并提示再运行一次。闸门也把 bot 的回复记为已看过。否则，会回复每条回复的评审 bot 会让每次都多跑一轮，不受信任的评论者也能借 bot 之口提要求，删掉自己的评论之后也一样。
+- 尚未提交的 review 里的评论（`PENDING`）是只有作者能看到的草稿，会被跳过。bot 在开启 thread 的评论（以及 review）里提要求；它在 thread 里的回复是在回答某人，不算请求。被回复的评论删除后，GraphQL 会丢掉回复的 `replyTo`，并把它列为 thread 的第一条，所以看起来像是开启了 thread、又尚未见过的 bot 评论，会通过 REST 逐条查询（`in_reply_to_id` 仍保留在这条评论上），只针对打开的 PR 上未解决的 thread，而且每条只问一次：答案保存在 `.qwen/tmp/autofix-pr-<n>-replies.json`，闸门、已准备快照和 `reply` 共用。期间被删除的评论不算请求。每条答案一拿到就保存。闸门每次触发最多问 20 条、不超出闸门的读取时限，遇到第一次失败就停，剩下的留到下一次触发，这次既不算请求也不记为已看过；一轮则问完所有条目，GitHub 没有回应时直接失败，绝不丢掉闸门已经报告过的请求；问了八分钟仍未问完时就停下，保留已有答案，并提示再运行一次。闸门也把 bot 的回复记为已看过。否则，会回复每条回复的评审 bot 会让每次都多跑一轮，不受信任的评论者也能借 bot 之口提要求，删掉自己的评论之后也一样。
 - 失败的检查只有在它是 PR 所在仓库的 GitHub Actions job 时才带 `runId`（它的 suite 有 workflow run，URL 位于 `https://<host>/<owner>/<repo>/actions/runs/` 之下）：commit status 或其他应用的检查可以链接任意 run，`ci-log` 会去读它。
 - 已合并或已关闭的 PR 只读第一次调用：它的结果就是停止，不需要再翻检查、suite 或 thread 的后续页。
 - check 和 suite 属于提交而不属于 PR：同一个 head 提交的另一个 PR 会共用它们。这是已知的局限。
@@ -200,7 +200,8 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - head 与上次运行不同时记为 `head_moved_externally`（`resync`），除非同一 PR 的已准备监视记录过或推送过它（`lastKnownHeadSha`、`pushedShas`）；首次运行只记录 head，不报告。
 - 合并或关闭报告一次（`stop`）；之后探针保持安静，重新打开的 PR 会再次被监视。
 - 从头读取的连接（`checks`、`reviewThreads`）开始被截断时报告一次，没有其他事件时动作为 `wait`：超出最后一页的新 thread 不会留下别的痕迹。持续的截断保持安静。评论、review 和 thread 评论从最新的读起，那里的截断只会藏住更早的内容：它列在 `truncated` 里，但不唤醒会话。例外是刷屏：两次检查之间到达超过 100 条时，会把一条还没被任何检查读到的挤出去。这是已知的局限；该轮在报告里会写明截断。
-- 输出不超过 12 KiB，低于闸门交给会话的 16 KiB（超出部分会被闸门截掉）。事件按顺序排列——head 移动、冲突、失败、评论——放不下的事件，或放不下整体的 thread 里靠后的评论，会被留下，计入 `deferred`，且不记为已报告，所以下一次运行会报告它们。每次至少输出一个事件或一条评论，所以每次运行都有进展。
+- 一次闸门运行读取 GitHub 最多 15 秒，在 Managed 自动化 20 秒的闸门之内（定时任务允许 60 秒）：超时后停止翻页，没读到的部分保持截断。
+- 输出不超过 12 KiB——按闸门转交时的形式计算，每个 `<` 写成 `&lt;`——低于闸门交给会话的 16 KiB（超出部分会被闸门截掉）。事件按顺序排列——head 移动、冲突、失败、评论——放不下的事件，或放不下整体的 thread 里靠后的评论，会被留下，计入 `deferred`，且不记为已报告，所以下一次运行会报告它们。每次至少输出一个事件或一条评论，所以每次运行都有进展。
 - 首次运行报告所有尚未处理的事项：失败的检查、冲突，以及没人处理过的评论。
 
 游标在输出之前写入，所以打印之后崩溃的探针不会把同一批迁移报告两次。`ci_pending` 和安静 PR 的 `wait` 动作只存在于已准备模式。

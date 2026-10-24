@@ -1144,9 +1144,14 @@ function graphql(query: string, target: PrTarget, extra: string[]): unknown {
 
 /** Bot comments the gate asks about over REST in one fire; the rest wait. */
 const MAX_GATE_REPLY_CHECKS = 20;
-/** How long the gate spends asking, well inside its 60 seconds: `gh`
- * retries a 5xx for nine seconds before it fails. */
-const GATE_REPLY_CHECK_BUDGET_MS = 30_000;
+/**
+ * A gate run's time for reading GitHub, inside the shortest gate it runs
+ * under: a Managed automation kills it at 20 seconds (a scheduled task
+ * allows 60), at about 1.5 seconds a page. Past it, paging stops — what was
+ * not read stays cut — and the bot comments not asked about wait for the
+ * next fire.
+ */
+export const GATE_READ_BUDGET_MS = 15_000;
 /** How long a round spends asking, inside the shell tool's ten minutes;
  * what it learned is kept, and the next run goes on from there. */
 const ROUND_REPLY_CHECK_BUDGET_MS = 8 * 60_000;
@@ -1189,6 +1194,7 @@ function markOrphanReplies(
   target: PrTarget,
   pr: PrData,
   check: ReplyCheck,
+  gateDeadline: number,
 ): void {
   const cache = readReplyCache(check.cachePath);
   // Kept as each answer comes, so a run that fails or is killed later
@@ -1202,9 +1208,9 @@ function markOrphanReplies(
       `${JSON.stringify({ ...readReplyCache(check.cachePath), [id]: parent })}\n`,
     );
   };
-  const deadline =
-    Date.now() +
-    (check.strict ? ROUND_REPLY_CHECK_BUDGET_MS : GATE_REPLY_CHECK_BUDGET_MS);
+  const deadline = check.strict
+    ? Date.now() + ROUND_REPLY_CHECK_BUDGET_MS
+    : gateDeadline;
   let asked = 0;
   let failed = false;
   for (const thread of pr.reviewThreads.nodes) {
@@ -1267,6 +1273,7 @@ function markOrphanReplies(
 export function fetchPrData(
   target: PrTarget,
   replyCheck?: ReplyCheck,
+  deadline = Number.POSITIVE_INFINITY,
 ): { pr: PrData; viewer: string } {
   const data = graphql(PR_QUERY, target, []) as {
     data: {
@@ -1290,7 +1297,8 @@ export function fetchPrData(
     let page = 1;
     rollup?.contexts.pageInfo.hasNextPage &&
     rollup.contexts.pageInfo.endCursor &&
-    page < MAX_CHECK_PAGES;
+    page < MAX_CHECK_PAGES &&
+    Date.now() < deadline;
     page++
   ) {
     const more = (
@@ -1325,7 +1333,8 @@ export function fetchPrData(
     let page = 1;
     suites?.pageInfo?.hasPreviousPage &&
     suites.pageInfo.startCursor &&
-    page < MAX_SUITE_PAGES;
+    page < MAX_SUITE_PAGES &&
+    Date.now() < deadline;
     page++
   ) {
     const more = (
@@ -1355,7 +1364,8 @@ export function fetchPrData(
     let page = 1;
     threads.pageInfo.hasNextPage &&
     threads.pageInfo.endCursor &&
-    page < MAX_THREAD_PAGES;
+    page < MAX_THREAD_PAGES &&
+    Date.now() < deadline;
     page++
   ) {
     const more = (
@@ -1375,7 +1385,14 @@ export function fetchPrData(
     threads.pageInfo = more.pageInfo;
   }
   // A merged or closed PR asks nothing more: its `stop` must get through.
-  if (replyCheck) markOrphanReplies(target, pr, replyCheck);
+  if (replyCheck) {
+    markOrphanReplies(
+      target,
+      pr,
+      replyCheck,
+      Math.min(deadline, Date.now() + GATE_READ_BUDGET_MS),
+    );
+  }
   return { pr, viewer: data.data.viewer.login };
 }
 
@@ -1387,6 +1404,7 @@ export interface SnapshotArgs {
 }
 
 function runGate(args: SnapshotArgs): void {
+  const deadline = Date.now() + GATE_READ_BUDGET_MS;
   // A blank --host is refused here: resolved, it would be '', recorded as
   // the cursor's host, and later fires would ask whatever host `gh` defaults to.
   setGhHost(args.host);
@@ -1479,6 +1497,7 @@ function runGate(args: SnapshotArgs): void {
       strict: false,
       cachePath: paths.repliesPath,
     },
+    deadline,
   );
   const cursor: AutofixPrGateCursor = {
     ...(existing ?? {

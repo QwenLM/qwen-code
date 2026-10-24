@@ -18,6 +18,7 @@ import { CRON_GATE_OUTPUT_CAP_BYTES } from '@qwen-code/qwen-code-core/services/c
 import { GATE_OUTPUT_BUDGET_BYTES } from '../review/lib/gate-budget.js';
 import { getGhHost, setGhHost } from '../review/lib/gh.js';
 import {
+  GATE_READ_BUDGET_MS,
   buildGateSnapshot,
   checkEvents,
   fetchPrData,
@@ -316,6 +317,33 @@ describe('buildGateSnapshot', () => {
     const third = buildGateSnapshot(data, stale);
     expect(third.cursor.reportedCommentIds).toHaveLength(2000 + 2100);
     expect(third.cursor.reportedCommentIds[0]).toBe('old500');
+  });
+
+  it('fits the output a Managed gate sanitizes, where each < grows to &lt;', () => {
+    const angled = '<'.repeat(900);
+    const nodes = Array.from({ length: 30 }, (_, t) =>
+      thread(`T${t}`, [comment(`T${t}C`, 'alice', 'MEMBER', angled)]),
+    );
+    const data = pr({
+      reviewThreads: { pageInfo: { hasNextPage: false }, nodes },
+    });
+    let current = cursor();
+    const seen: string[] = [];
+    for (let run = 0; run < 30; run++) {
+      const result = buildGateSnapshot(data, current);
+      current = result.cursor;
+      if (!result.snapshot) break;
+      const sanitized = JSON.stringify(result.snapshot).replace(/</g, '&lt;');
+      expect(Buffer.byteLength(sanitized)).toBeLessThanOrEqual(
+        GATE_OUTPUT_BUDGET_BYTES,
+      );
+      for (const event of result.snapshot.events) {
+        if (event.type === 'review_thread') {
+          seen.push(...event.comments.map((c) => c.id));
+        }
+      }
+    }
+    expect(new Set(seen).size).toBe(30);
   });
 
   it('spreads what does not fit the gate output over later runs, none twice', () => {
@@ -1102,6 +1130,29 @@ describe('fetchPrData', () => {
     ).toHaveLength(0);
     mockGh.mockReset();
     rmSync(cacheDir, { recursive: true, force: true });
+  });
+
+  it('stops paging past its time, leaving what it did not read cut', () => {
+    const open = pr();
+    open.commits.nodes[0]!.commit.statusCheckRollup!.contexts.pageInfo = {
+      hasNextPage: true,
+      endCursor: 'c1',
+    };
+    mockGh.mockReset();
+    mockGh.mockReturnValueOnce(
+      JSON.stringify({
+        data: { viewer: { login: 'me' }, repository: { pullRequest: open } },
+      }),
+    );
+    const { pr: data } = fetchPrData(
+      { owner: 'o', repo: 'r', prNumber: 7 },
+      undefined,
+      Date.now() - 1,
+    );
+    expect(mockGh).toHaveBeenCalledTimes(1);
+    expect(checkEvents(data).truncated).toBe(true);
+    expect(GATE_READ_BUDGET_MS).toBeLessThan(20_000);
+    mockGh.mockReset();
   });
 
   it('reads a merged or closed PR with one call, however much its first page leaves', () => {
