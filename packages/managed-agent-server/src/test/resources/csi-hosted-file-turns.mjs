@@ -177,7 +177,9 @@ export async function runHostedFileTurn({
           request,
           actor,
         ) => {
-          const state = request.state;
+          const state = Buffer.isBuffer(request.state)
+            ? JSON.parse(request.state.toString())
+            : request.state;
           if (
             state.continuation.phase === 'results_ready' &&
             state.tools?.items.length &&
