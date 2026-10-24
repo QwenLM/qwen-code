@@ -51,7 +51,7 @@ export interface ScreenReaderPolicy {
 export interface ScreenReaderPolicyOptions {
   /** `Config.getScreenReader()` value (CLI flag ?? settings ?? undefined). */
   screenReader: boolean | undefined;
-  /** `settings.merged.ui?.useTerminalBuffer` (defaults to true, as ink). */
+  /** Raw `settings.merged.ui?.useTerminalBuffer`; unset means the terminal default. */
   useTerminalBuffer?: boolean | undefined;
   /** Defaults to probing the real terminal, like `startInteractiveUI`. */
   isTTY?: boolean | undefined;
@@ -89,6 +89,7 @@ export function resolveScreenReaderPolicy(
       options.useTerminalBuffer,
       enabled,
       interactive,
+      options.env ?? process.env,
     ),
     mouse: !enabled,
     synchronizedOutput: Boolean(stdoutIsTTY) && !enabled,
