@@ -14,7 +14,7 @@ import {
   translateAndCheckAbsoluteWorkspacePath,
   MAX_WORKSPACE_PATH_LENGTH,
 } from '@qwen-code/acp-bridge/workspacePaths';
-import { realpathSync } from 'node:fs';
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
@@ -275,7 +275,10 @@ export function registerWorkspaceManagementRoutes(
   } = deps;
   const pickWorkspaceDirectory =
     pickWorkspaceDirectoryOverride ?? pickNativeDirectory;
-  const canonicalizeIfPresent = (candidate: string): string => {
+  const canonicalizeIfPresent = (
+    candidate: string,
+    seen: ReadonlySet<string> = new Set(),
+  ): string => {
     const resolved = resolve(candidate);
     let current = resolved;
     const missing: string[] = [];
@@ -286,6 +289,20 @@ export function registerWorkspaceManagementRoutes(
           ? canonical
           : join(canonical, ...missing.reverse());
       } catch {
+        try {
+          if (!seen.has(current) && lstatSync(current).isSymbolicLink()) {
+            const link = readlinkSync(current);
+            const destination = isAbsolute(link)
+              ? link
+              : resolve(dirname(current), link);
+            return canonicalizeIfPresent(
+              join(destination, ...missing.reverse()),
+              new Set([...seen, current]),
+            );
+          }
+        } catch {
+          // Not a symlink (or unreadable); walk to the parent below.
+        }
         const parent = dirname(current);
         if (parent === current) return resolved;
         missing.push(basename(current));
@@ -293,6 +310,15 @@ export function registerWorkspaceManagementRoutes(
       }
     }
   };
+  // Case-folded containment is deliberately conservative: on a
+  // case-insensitive filesystem `Documents/qwen code` is the physical
+  // ancestor of `Documents/Qwen Code/Conversations`, and a clone target there
+  // must not own the reserved root's cleanup scope.
+  const isWithinOrEqual = (child: string, parent: string): boolean =>
+    child === parent ||
+    isWithinRoot(child, parent) ||
+    child.toLowerCase() === parent.toLowerCase() ||
+    isWithinRoot(child.toLowerCase(), parent.toLowerCase());
   const isReservedWorkspacePath = (candidate: string): boolean => {
     const resolvedCandidate = resolve(candidate);
     const canonicalCandidate = canonicalizeIfPresent(candidate);
@@ -300,10 +326,8 @@ export function registerWorkspaceManagementRoutes(
       const resolvedRoot = resolve(configuredRoot);
       const canonicalRoot = canonicalizeIfPresent(configuredRoot);
       return (
-        resolvedCandidate === resolvedRoot ||
-        isWithinRoot(resolvedCandidate, resolvedRoot) ||
-        canonicalCandidate === canonicalRoot ||
-        isWithinRoot(canonicalCandidate, canonicalRoot)
+        isWithinOrEqual(resolvedCandidate, resolvedRoot) ||
+        isWithinOrEqual(canonicalCandidate, canonicalRoot)
       );
     });
   };
@@ -317,8 +341,8 @@ export function registerWorkspaceManagementRoutes(
       const resolvedRoot = resolve(configuredRoot);
       const canonicalRoot = canonicalizeIfPresent(configuredRoot);
       return (
-        isWithinRoot(resolvedRoot, resolvedCandidate) ||
-        isWithinRoot(canonicalRoot, canonicalCandidate)
+        isWithinOrEqual(resolvedRoot, resolvedCandidate) ||
+        isWithinOrEqual(canonicalRoot, canonicalCandidate)
       );
     });
   };

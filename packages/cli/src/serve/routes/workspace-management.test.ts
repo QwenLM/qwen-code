@@ -3905,6 +3905,64 @@ describe('git clone target reservations', () => {
     }
   });
 
+  it('rejects a case-variant ancestor of a missing reserved root', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-case-'));
+    const documents = join(root, 'Documents');
+    await mkdir(documents);
+    const target = join(documents, 'qwen code');
+    const conversations = join(documents, 'Qwen Code', 'Conversations');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [conversations],
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(stat(target)).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a clone target reached through a dangling reserved-root symlink', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-dangling-'));
+    const target = join(root, 'missing-documents');
+    const documents = join(root, 'Documents');
+    await symlink(target, documents);
+    const conversations = join(documents, 'Qwen Code', 'Conversations');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [conversations],
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(stat(target)).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the Live runtime outside an active clone target', async () => {
     const root = await mkdtemp(join(REAL_DIR, 'qwen-live-clone-'));
     const target = join(root, 'Qwen Code');
