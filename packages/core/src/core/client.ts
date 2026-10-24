@@ -1146,6 +1146,23 @@ export class LlmClient {
   }
 
   /**
+   * Ids answered by a synthesized orphan-repair placeholder. See
+   * `LlmChat.getSynthesizedRepairCallIds`; called per tool-completion
+   * batch alongside {@link getHistoryFunctionResponseIds}.
+   */
+  getSynthesizedRepairCallIds(): Set<string> {
+    return this.getChat().getSynthesizedRepairCallIds();
+  }
+
+  /**
+   * Swap a synthesized orphan-repair placeholder for the tool's real
+   * response parts. See `LlmChat.replaceSynthesizedToolResponse`.
+   */
+  replaceSynthesizedToolResponse(callId: string, realParts: Part[]): boolean {
+    return this.getChat().replaceSynthesizedToolResponse(callId, realParts);
+  }
+
+  /**
    * Walk-only accessor for the handled tool-call id → (name, args)
    * fingerprint map used by duplicate provider-id replay detection. Same
    * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
@@ -1229,6 +1246,9 @@ export class LlmClient {
    * the live history before submitting its own `tool_result` — otherwise a
    * late real result lands as a second `user[tool_result]` block (orphan
    * because the synthetic already consumed the matching `tool_use`).
+   * When the late result's placeholder is one of these synthesized
+   * responses the scheduler instead replaces it in place
+   * (`replaceSynthesizedToolResponse`) so the model sees the real output.
    */
   repairOrphanedToolUseTurnsInHistory(
     reason?: string,
