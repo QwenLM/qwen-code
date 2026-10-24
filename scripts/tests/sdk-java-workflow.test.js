@@ -27,7 +27,7 @@ const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
   .join(',');
 
 const m2WriteBack =
-  "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
+  "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
 const m2WriteBackWarnings = [
   'if [ "${write_back}" -eq 124 ]; then\n  echo "::warning::Maven cache write-back stopped after 300 s;',
   'elif [ "${write_back}" -ne 0 ]; then\n  echo "::warning::Maven cache write-back failed; the gate result above is unaffected"',
@@ -215,7 +215,12 @@ describe('SDK Java self-hosted workflow guards', () => {
         locked.run.indexOf('cd "${RUNNER_TEMP}/m2-repo"'),
         locked.name,
       ).toBeGreaterThan(lockAt);
-      expect(locked.run).toContain('mkdir -p "${HOME}/.m2/repository" 9>&-');
+      expect(locked.run, locked.name).toContain(
+        'mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the suite result above is unaffected"; exit "${suite_status}"; }',
+      );
+      expect(locked.run, locked.name).toContain(
+        'cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the suite result above is unaffected"; exit "${suite_status}"; }',
+      );
       expect(locked.run).toContain(m2WriteBack);
       for (const arm of m2WriteBackWarnings) {
         expect(locked.run).toContain(arm);
@@ -251,6 +256,19 @@ describe('SDK Java self-hosted workflow guards', () => {
       /if \[ -d "\$\{HOME\}\/\.m2\/repository" \]; then\n\s+cp -aln "\$\{HOME\}\/\.m2\/repository"/g,
     );
     expect(guarded).toHaveLength(4);
+    // Maven rewrites resolver tracking files in place, so every seed needs
+    // the de-alias before that lane runs Maven against the job-local copy.
+    const deAlias =
+      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \\) -links +1 -delete";
+    let from = 0;
+    for (const seed of seeds) {
+      const seedAt = workflow.indexOf(seed, from);
+      expect(seedAt, seed).toBeGreaterThan(-1);
+      const mvnAt = workflow.indexOf('mvn ', seedAt);
+      expect(mvnAt, seed).toBeGreaterThan(seedAt);
+      expect(workflow.slice(seedAt, mvnAt), seed).toContain(deAlias);
+      from = seedAt + seed.length;
+    }
   });
 
   it.skipIf(process.platform !== 'linux')(
@@ -271,6 +289,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       const trackingFiles = [
         join('com', 'example', 'resolver-status.properties'),
         join('com', 'example', 'artifact.pom.lastUpdated'),
+        join('com', 'example', '_remote.repositories'),
       ];
       mkdirSync(join(home, '.cache', 'qwen-code-ci'), { recursive: true });
       mkdirSync(dirname(seeded), { recursive: true });
@@ -487,6 +506,66 @@ describe('SDK Java self-hosted workflow guards', () => {
         // The skip must survive on a green or red run without opening the log.
         expect(readFileSync(summary, 'utf8')).toContain(
           'Maven cache write-back skipped after a lock wait on test-host',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux').each([
+    ['test', 'Run Java SDK tests (self-hosted)'],
+    [
+      'mysql-integration',
+      'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
+    ],
+  ])(
+    'demotes an unusable lock directory to the suite status (%s)',
+    (jobName, stepName) => {
+      const run = step(job(jobName), stepName);
+      const body = run.slice(
+        run.indexOf('if [ -d "${HOME}/.m2/repository" ]; then'),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-dir-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const workspace = join(dir, 'workspace');
+      mkdirSync(home, { recursive: true });
+      mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+      // A regular file at ~/.cache keeps the directory uncreatable even when
+      // the suite runs as root, where a mode-only check would still write.
+      writeFileSync(join(home, '.cache'), 'not a directory\n');
+      writeFileSync(
+        join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+        'sdk_java_lock_acquire() { echo "HELPER-RAN"; return 0; }\n',
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          ['-e', '-c', `mvn() { :; }\n${body}`],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: workspace,
+              GITHUB_STEP_SUMMARY: join(dir, 'summary.md'),
+              RUNNER_NAME: 'test-host',
+              MATRIX_JAVA: '11',
+              TIER: 'fast',
+            },
+          },
+        );
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(0);
+        // The helper would spin its whole budget on an unwritable queue, so
+        // the guard must skip it and keep the suite status.
+        expect(result.stdout).not.toContain('HELPER-RAN');
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back skipped (lock directory unusable)',
         );
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -1674,10 +1753,14 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // above it the rename lands in the iteration whose timeout arm deletes
     // the ticket, and no test would see the anti-starvation arm go dead.
     const helper = readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8');
-    const promoteAfter = Number(
-      step.env?.SDK_JAVA_LOCK_PROMOTE_AFTER ??
-        helper.match(/SDK_JAVA_LOCK_PROMOTE_AFTER:-(\d+)/)?.[1],
+    const promoteAfter = Number(step.env?.SDK_JAVA_LOCK_PROMOTE_AFTER);
+    const helperDefault = Number(
+      helper.match(/SDK_JAVA_LOCK_PROMOTE_AFTER:-(\d+)/)?.[1],
     );
+    // Both call sites set the window, so the helper default has no
+    // production reader; it must still stay inside the budget, or a future
+    // call site that sets nothing inherits an invariant-violating window.
+    expect(helperDefault).toBeLessThan(seconds);
     const writeBackBound = Number(
       step.run.match(/timeout (\d+) find \. /)?.[1],
     );
@@ -1721,8 +1804,8 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait, its unlocked suite (the sdk-java suite plus the
     // managed-agent H2 suite, 925 s), the bounded write-back and ~11 minutes
-    // of setup, leaving 1715 s — 300 s less than the 5400 s wait left,
-    // because the write-back term is new.
+    // of setup, leaving 1715 s — 300 s less than the 5400 s (90-minute)
+    // ceiling would leave without the write-back term.
     const testCeiling = seconds + 925 + writeBackBound + 11 * 60;
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
       testCeiling,
@@ -1756,7 +1839,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // has already passed.
     expect(step.run).toContain('mkdir -p "${HOME}/.m2/repository"');
     expect(step.run).toContain(
-      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' \\) -links +1 -delete",
+      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \\) -links +1 -delete",
     );
     // Run 39563394993 spent 60 minutes streaming the whole seeded tree and
     // was cancelled at the job ceiling. Only the nlink == 1 delta Maven

@@ -171,11 +171,16 @@ const startAcquire = (
       },
     },
   );
-  const state = { out: '' };
-  child.stdout.on('data', (d) => (state.out += d));
+  const state = { out: '', stdout: '' };
+  child.stdout.on('data', (d) => {
+    state.out += d;
+    state.stdout += d;
+  });
   child.stderr.on('data', (d) => (state.out += d));
   const done = new Promise((resolve) =>
-    child.on('close', (code) => resolve({ code, out: state.out })),
+    child.on('close', (code) =>
+      resolve({ code, out: state.out, stdout: state.stdout }),
+    ),
   );
   return { child, state, done };
 };
@@ -586,7 +591,9 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       expect(result.code).toBe(1);
       // The `::error::` prefix is what the infra classifier matches: a bare
       // echo would leave the check-run unannotated and the auto-rerun cold.
-      expect(result.out).toContain(
+      // The workflow's demotion filters stdout only (`> >(grep -v ...)`), so
+      // the signature must stay on that stream to be scrubbed.
+      expect(result.stdout).toContain(
         '::error::sdk-java host lock not acquired within',
       );
       // A lone waiter's own ticket is gone by then; the empty glob must not

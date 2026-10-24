@@ -137,10 +137,10 @@ a pool OOM; since #14903 the MariaDB lane has run its suite unlocked on the
 same pool without that failure mode returning, and both suites now resolve
 from job-local repositories whose mutable tracking files are de-aliased after
 the seed, so the only host-shared state the suites mutate is the cache
-write-back the queue serializes. The checkstyle and package steps on the same
-legs also resolve from a seeded job-local repository, unlocked; they do not
-write back, and their seed still hardlinks Maven's tracking files (out of
-scope here). The sharding alternative below is rejected for queue overhead,
+write-back the queue serializes. The test job's checkstyle and package steps
+carry no `-Dmaven.repo.local` and no seed, so they read and write host-shared
+`~/.m2/repository` directly, unlocked (see the residual failure modes). The
+sharding alternative below is rejected for queue overhead,
 not because concurrent suites are assumed unsafe.
 
 ### Fast-tier priority
@@ -176,7 +176,9 @@ physical lock:
   it, and an older normal ticket promoted after that — and the kernel serves
   them in the order they parked.
 - A normal ticket that waits past `SDK_JAVA_LOCK_PROMOTE_AFTER` (default
-  1200 s) is renamed into the fast class. It keeps its sequence, so it
+  1200 s) is renamed into the fast class. Both workflow call sites set 600 s
+  — 1800 − 4 × 300, so four write-back holds still fit after promotion; the
+  helper's 1200 s default has no reader today. It keeps its sequence, so it
   precedes fast tickets that arrived after it, and continuous fast traffic
   cannot starve the full tier. Promotion protects waiting full-tier tickets,
   not parked ones: a parked head never loops back to the promotion check, and
@@ -244,12 +246,17 @@ order this section exists to prevent.
   write-back is skipped; the step summary records that skip. A queue that
   cannot be created or written returns the same status as a consumed
   budget, so it also skips the write-back; separating the two needs a
-  change to the helper and is left for a follow-up.
+  change to the helper and is left for a follow-up. The `-w` guard at both
+  call sites skips the wait when the queue directory itself is unusable, but
+  a mode-locked `.queue` subdirectory still reaches the demoted status only
+  after the whole 1800 s budget.
 - Both jobs' suites now run concurrently on one physical host. #10552's
   per-host suite serialization is retired: each suite resolves from a
   job-local repository, and only the bounded cache write-back moves suite
-  downloads into host-shared state. If suite concurrency does surface a
-  failure, bound it with a suite-scoped shard or a registration cap rather
+  downloads into host-shared state. The test job's checkstyle and package
+  steps are additional unlocked host-cache writers: they carry no job-local
+  repository, no seed, and no write-back. If suite concurrency does surface
+  a failure, bound it with a suite-scoped shard or a registration cap rather
   than restoring the whole-suite hold.
 
 ## Validation plan
@@ -272,10 +279,10 @@ order this section exists to prevent.
   Maven runs above their acquisition, their write-back children's fd 9 close,
   the demoted paths' signature-free output (run against a stub helper on both
   a green and a red suite, with the real `INFRA_FAILURE_SIGNATURES` as the
-  oracle), the tracking-file de-aliasing after the seed, the `mkdir`/`cd`
-  demotions when the host cache or job-local copy is unusable, the
-  re-derived 600 s promotion window at both sites, and the `.size-baseline`
-  records the workflow's new size.
+  oracle), the tracking-file de-aliasing after the seed, the lock-directory
+  writability guard and the `mkdir`/`cd` demotions when the host cache or
+  job-local copy is unusable, the re-derived 600 s promotion window at both
+  sites, and the `.size-baseline` records the workflow's new size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
