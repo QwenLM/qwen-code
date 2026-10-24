@@ -172,6 +172,13 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
    * (`kind: 'agent_message'`): its run status, error, steps and tokens.
    */
   agentMessage?: QwenAgentMessageMeta;
+  /**
+   * The daemon's `_meta.source` tag. Present on the model's reply to a
+   * background notification (`background_notification_response`); the
+   * turn-collapse ack fold and /copy use it to tell a bookkeeping ack
+   * from a substantive reply.
+   */
+  source?: string;
 }
 
 export interface DaemonThinkingMessage extends DaemonMessageMeta {
