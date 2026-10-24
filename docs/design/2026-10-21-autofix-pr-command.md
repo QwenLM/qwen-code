@@ -381,8 +381,9 @@ when there are none, so the session is woken only for them:
   attempt of a workflow a review or a comment starts is the workflow and its
   trigger (`#on:<workflow id>:<event>`): it runs again for every review
   anyone submits, and a new run of a handled failure says nothing new of
-  the code. Once a round re-ran it on the head (`rerunChecks` records the
-  check run re-run), a failure of a later run is the re-run's answer,
+  the code. Once a round re-ran it on the head, or deferred its re-run
+  (`rerunChecks` records the check run), a failure of a later run is the
+  re-run's answer,
   reported once more under `#rerun:<workflow id>:<event>`; the run re-run
   keeps its key, so a re-run GitHub has not listed yet, or one whose
   answer was lost, is not taken for it. The cursor key
@@ -392,8 +393,10 @@ when there are none, so the session is woken only for them:
   over. A failure a prepared watch of the PR handled without a push
   (`handledChecks`) counts as reported. A failure of a run whose re-run was
   deferred because the run was still going (`deferredRuns`, Section 6.9) is
-  reported once more when that run has ended, so the watch can re-run it
-  then.
+  left out while that run goes, as prepared snapshots leave it out, and
+  reported once more when it has ended, so the watch can re-run it then: a
+  report before would wake a round with nothing to do, and keep the key a
+  later run of the check carries.
 - Pending checks are never reported; `ci_pending` does not appear.
 - A conflict is reported once per head; `mergeable` clears the mark,
   `UNKNOWN` keeps it. A conflict a prepared watch left for a human on the
@@ -559,7 +562,8 @@ The helper decides what may be posted, against one fresh read of the PR
   answer still stands, under the key the next failure of a review-started
   workflow on that head carries. A failure of a run still deferred is not
   recorded (it counts in `ignoredChecks`): the gate reports it once more
-  when the run has ended, and the round answers it then; a conflict can
+  when the run has ended, or reports a later run of the check that fails,
+  and the round answers it then; a conflict can
   be left for a human only while there is one. The PR must be open.
 - The head the plan is judged by is the one the watch knows (`sync` and
   `push` read it from the branch), not the API's, which can lag a push.
@@ -790,7 +794,10 @@ the same failure to defer again. The deferral holds the re-run of each of
 its failed checks (in `rerunChecks`, with the check run deferred): that run
 is re-run when it ends, and a later run of the check on the head — one a
 review started before it ended, say — answers for it as a re-run's would,
-under the re-run's key (Section 6.2), and is treated as real.
+under the re-run's key (Section 6.2), and is treated as real. Two jobs of
+one workflow that share a name are one check: when the second fails only
+after the deferral, the re-run is held by the first, and the second is
+treated as real once the run has ended. That is a known limit.
 
 `push`, `sync`, `reply` and `rerun` each hold the watch's lock
 (`.qwen/tmp/autofix-pr-<n>.lock`) while they read and write the state file:

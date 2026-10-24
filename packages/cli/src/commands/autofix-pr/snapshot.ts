@@ -897,7 +897,8 @@ export function buildSnapshot(
 export interface GateWatch {
   knownHeads: string[];
   seenCommentIds: string[];
-  /** Checks a round re-ran, by identity and head. */
+  /** Checks a round re-ran, or deferred a re-run of, by identity, head and
+   * check run. */
   rerunChecks?: string[];
   /** This run stopped reading at its time budget, in the check runs, in
    * the suites read after them (where failures to start are found) or in
@@ -1005,6 +1006,13 @@ export function buildGateSnapshot(
   const checkKeys = new Map<SnapshotEvent, string[]>();
   const candidates: SnapshotEvent[] = [];
   for (const { event, attempt, runDone } of checks.failed) {
+    // A run deferred while it is going is the round's again once it has
+    // ended, and prepared snapshots leave it out until then: a failure of
+    // it now would wake a round with nothing to do, and keep the key a
+    // later run of the check carries — one a review starts, say.
+    if (!runDone && event.runId !== null && deferred.has(event.runId)) {
+      continue;
+    }
     const key = checkAttemptKey(event.check, pr.headRefOid, attempt);
     const keys = [key];
     if (runDone && event.runId !== null && deferred.has(event.runId)) {

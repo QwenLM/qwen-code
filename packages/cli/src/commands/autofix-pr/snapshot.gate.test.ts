@@ -269,6 +269,48 @@ describe('buildGateSnapshot', () => {
     expect(quiet.cursor.reportedTruncated).toEqual([]);
   });
 
+  it('leaves a deferred run out until it ends, so a later run of its check is reported', () => {
+    const job = (
+      databaseId: number,
+      runId: number,
+      status: string,
+    ): Contexts[number] => ({
+      __typename: 'CheckRun',
+      name: 'B',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl: `https://github.com/o/r/actions/runs/${runId}/job/${databaseId}`,
+      databaseId,
+      checkSuite: {
+        status,
+        app: { databaseId: 1 },
+        workflowRun: {
+          event: 'pull_request_review',
+          workflow: { databaseId: 9 },
+        },
+      },
+    });
+    const watch = { knownHeads: [], seenCommentIds: [], deferredRuns: [456] };
+    // B failed after the round deferred its run: quiet, and not kept.
+    const going = buildGateSnapshot(
+      pr({}, [job(5, 456, 'IN_PROGRESS')]),
+      cursor(),
+      watch,
+    );
+    expect(going.snapshot).toBeNull();
+    expect(going.cursor.reportedChecks).toEqual([]);
+    // A review started the workflow again before the run ended, and B
+    // failed in it under the key a run of B on this head carries.
+    const later = buildGateSnapshot(
+      pr({}, [job(5, 456, 'IN_PROGRESS'), job(8, 457, 'COMPLETED')]),
+      going.cursor,
+      watch,
+    );
+    expect(later.snapshot).toMatchObject({
+      events: [{ type: 'ci_failed', check: 'B', runId: 457 }],
+    });
+  });
+
   it('forgets a check gone green on a run its time budget cut in the threads', () => {
     const red = buildGateSnapshot(pr({}, [failed('Test', 1)]), cursor());
     expect(red.cursor.reportedChecks).toHaveLength(1);
@@ -1923,14 +1965,15 @@ describe('runSnapshot --gate', () => {
         lint('IN_PROGRESS'),
       ]),
     );
+    // Its run is still going: the round has nothing to do with it yet.
     runSnapshot({ pr: 7, gate: true });
-    expect(printed()).toEqual([['ci_failed']]);
+    expect(mocks.stdout).not.toHaveBeenCalled();
     // Its run ended: reported once more, from the state file's deferredRuns.
     respond(
       pr({ mergeable: 'CONFLICTING' }, [failed('Test', 5), lint('COMPLETED')]),
     );
     runSnapshot({ pr: 7, gate: true });
-    expect(printed()).toEqual([['ci_failed'], ['ci_failed']]);
+    expect(printed()).toEqual([['ci_failed']]);
   });
 
   it('uses what a prepared watch of the PR knows: its host, pushes and handled comments', () => {
