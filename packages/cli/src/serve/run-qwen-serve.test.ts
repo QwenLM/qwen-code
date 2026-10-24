@@ -41,6 +41,7 @@ import {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,
+  maxSessionsFromSettings,
   subSessionConcurrencyCapsFromSettings,
   validatePolicyConfig,
   verifyWorkerTlsTrust,
@@ -2092,6 +2093,34 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
     const onWarning = vi.fn();
     subSessionConcurrencyCapsFromSettings({}, onWarning);
     expect(onWarning).not.toHaveBeenCalled();
+  });
+});
+
+describe('maxSessionsFromSettings', () => {
+  it('honors non-negative integers and Infinity', () => {
+    expect(maxSessionsFromSettings({ maxSessions: 0 })).toBe(0);
+    expect(maxSessionsFromSettings({ maxSessions: 64 })).toBe(64);
+    expect(
+      maxSessionsFromSettings({ maxSessions: Number.POSITIVE_INFINITY }),
+    ).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('omits an absent key so the built-in default applies', () => {
+    const onWarning = vi.fn();
+    expect(maxSessionsFromSettings({}, onWarning)).toBeUndefined();
+    expect(maxSessionsFromSettings(undefined, onWarning)).toBeUndefined();
+    expect(onWarning).not.toHaveBeenCalled();
+  });
+
+  it('rejects values the bridge would refuse and warns', () => {
+    const onWarning = vi.fn();
+    for (const value of [-1, 2.5, Number.NaN, '32', true, null]) {
+      expect(maxSessionsFromSettings({ maxSessions: value }, onWarning)) //
+        .toBeUndefined();
+    }
+    expect(onWarning).toHaveBeenCalledTimes(6);
+    expect(onWarning.mock.calls[0][0]).toContain('serve.maxSessions');
+    expect(onWarning.mock.calls[0][0]).toContain('-1');
   });
 });
 
@@ -4774,6 +4803,61 @@ describe('runQwenServe daemon logger wiring', () => {
   }, 10_000);
 });
 
+describe('serve.maxSessions boot resolution', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function bootAndAdvertise(
+    optionMaxSessions: number | undefined,
+    settingsMaxSessions: unknown,
+  ): Promise<number | null> {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ms-')));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        ...(optionMaxSessions !== undefined
+          ? { maxSessions: optionMaxSessions }
+          : {}),
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        preheatBridge: false,
+        bootSettings: { serve: { maxSessions: settingsMaxSessions } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const res = await fetch(`${handle.url}/capabilities`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: { maxSessionsPerWorkspace: number | null };
+      };
+      return body.limits.maxSessionsPerWorkspace;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  it('applies serve.maxSessions when the flag is omitted', async () => {
+    await expect(bootAndAdvertise(undefined, 7)).resolves.toBe(7);
+  });
+
+  it('lets the flag win over serve.maxSessions', async () => {
+    await expect(bootAndAdvertise(5, 7)).resolves.toBe(5);
+  });
+
+  it('keeps the built-in default for an invalid setting', async () => {
+    await expect(bootAndAdvertise(undefined, -1)).resolves.toBe(32);
+  });
+});
+
 describe('runQwenServe telemetry validation', () => {
   let tmpDir: string;
   const originalSensitiveSpanAttributeMaxLengthEnv =
@@ -4964,6 +5048,57 @@ describe('runQwenServe telemetry validation', () => {
         reason: 'daemon_shutdown',
       });
     }
+  });
+
+  it('derives the multi-workspace total cap from serve.maxSessions', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ms-total-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxRegisteredWorkspaces: 2,
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        bootSettings: { serve: { maxSessions: 3 } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const res = await fetch(`${handle.url}/capabilities`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: {
+          maxSessionsPerWorkspace: number | null;
+          maxTotalSessions: number | null;
+        };
+      };
+      expect(body.limits.maxSessionsPerWorkspace).toBe(3);
+      // maxRegisteredWorkspaces: 2 keeps the capacity at or below the 25
+      // threshold, so the total is derived from the resolved per-workspace
+      // cap instead of the flat 800.
+      expect(body.limits.maxTotalSessions).toBe(6);
+    } finally {
+      await handle.close();
+    }
+    expect(createBridge).toHaveBeenCalledTimes(2);
   });
 
   it('drains every lifecycle runtime before close yields', async () => {
@@ -6536,6 +6671,8 @@ describe('runQwenServe deployment profiles', () => {
   });
 
   it('does not restore channels or scheduled sessions for Hosted Harness', async () => {
+    vi.stubEnv('QWEN_HOSTED_HARNESS_BROKER_URL', 'https://broker.internal');
+    vi.stubEnv('QWEN_HOSTED_HARNESS_BROKER_TOKEN', 'file-fed-broker-secret');
     const workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-profile-')),
     );
@@ -6567,12 +6704,19 @@ describe('runQwenServe deployment profiles', () => {
         },
       );
       expect(createApp.mock.calls[0]?.[0].channelSelection).toBeUndefined();
+      expect(createApp.mock.calls[0]?.[0].managedRuntimeBrokerUrl).toBe(
+        'https://broker.internal',
+      );
+      expect(createApp.mock.calls[0]?.[0].managedRuntimeBrokerToken).toBe(
+        'file-fed-broker-secret',
+      );
       expect(createApp.mock.calls[0]?.[2]?.manageScheduledTaskSessions).toBe(
         false,
       );
     } finally {
       await handle?.close();
       createApp.mockRestore();
+      vi.unstubAllEnvs();
       fs.rmSync(workspace, { recursive: true, force: true });
     }
   });
@@ -20244,6 +20388,61 @@ describe('runQwenServe channel worker supervisor', () => {
 
     expect(order).toEqual(['registry', 'worker', 'bridge']);
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('lets the supervising application own signals while mounting Managed routes on the ordinary daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-unified-managed-')),
+    );
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+    const listeners = signals.map((signal) => process.rawListeners(signal));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: tmpDir,
+        token: 'unified-token',
+        mode: 'http-bridge',
+        requireAuth: true,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        installSignalHandlers: false,
+        managedLocalWeb: {
+          javaUrl: 'http://127.0.0.1:5011',
+          signingKey: 'private-signing-key',
+          tenantId: 'local',
+          actorId: 'owner',
+          agentId: 'qwen-code',
+          productScope: 'local:installation',
+        },
+      },
+    );
+    try {
+      for (const [index, signal] of signals.entries()) {
+        const added = process
+          .rawListeners(signal)
+          .filter((listener) => !listeners[index].includes(listener));
+        expect(added.some((listener) => listener.name === 'onSignal')).toBe(
+          false,
+        );
+      }
+      expect((await fetch(`${handle.url}/managed/boot`)).status).toBe(401);
+      const headers = { Authorization: 'Bearer unified-token' };
+      const boot = await fetch(`${handle.url}/managed/boot`, { headers });
+      expect(boot.status).toBe(200);
+      expect(await boot.json()).toMatchObject({
+        mode: 'managed',
+        productScope: 'local:installation',
+      });
+      const capabilities = await fetch(`${handle.url}/capabilities`, {
+        headers,
+      });
+      expect(await capabilities.json()).toHaveProperty('workspaces');
+    } finally {
+      await handle.close();
+    }
   });
 
   it('force-kills channel worker, bridge, and pidfile on a second shutdown signal', async () => {

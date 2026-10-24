@@ -363,6 +363,17 @@ const SETTINGS_SCHEMA = {
           "Print the token-bearing QR even when stdout is captured and the bearer is an operator-supplied (stable) token. Honored from user, system, and system-defaults settings only — a workspace settings file must not be able to push the operator's credential into logs; qwen serve --no-token-qr suppresses the QR for that run. Same effect as qwen serve --token-qr.",
         showInDialog: false,
       },
+      maxSessions: {
+        type: 'integer',
+        label: 'Max Sessions',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 32,
+        minimum: 0,
+        description:
+          'Per-workspace cap on concurrent live sessions. New spawn requests beyond this return 503; attaching to an existing session still works. Set to 0 to disable. Honored from user, system, and system-defaults settings only — a workspace settings file must not raise a daemon-wide resource cap; qwen serve --max-sessions wins when passed.',
+        showInDialog: false,
+      },
       maxConcurrentSubSessionsPerCaller: {
         type: 'integer',
         label: 'Max Concurrent Sub-Sessions Per Caller',
@@ -850,6 +861,38 @@ const SETTINGS_SCHEMA = {
         description:
           'How many rounds a pull request must reach before the review may add one advisory paragraph saying the shape of the change, rather than the current patch, looks like the open question. It appears only when the diff has also grown several times over since the review first measured it, and never on an Approve. It is disclosure only: it adds no finding, changes no verdict, and blocks nothing — it exists because every finding is anchored to a line in the current diff, so the review can report where an approach leaks but never that a different approach would retire all of the leaks at once. Leave at 0 to keep the built-in threshold of 5 rounds; raise it to make the paragraph appear later, and set it very high to silence it. A value that is not a whole number above zero is ignored. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
         showInDialog: true,
+      },
+    },
+  },
+  verifyPr: {
+    type: 'object',
+    label: 'Verify PR',
+    category: 'General',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Coordinates for a manual /verify-pr publish round. Each value is surfaced at startup as the environment variable the skill already reads, so the host does not have to be repeated per round. Only honored from User, System, and SystemDefaults settings scopes.',
+    showInDialog: false,
+    properties: {
+      assetsRepo: {
+        type: 'string',
+        label: 'Assets repository: verify-pr',
+        category: 'General',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'The `owner/repo` that hosts the screenshots a `--publish` round links from its PR comment, surfaced as `QWEN_VERIFY_ASSETS_REPO`; `--assets-repo` still overrides it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot choose where its own verification evidence is published.',
+        showInDialog: false,
+      },
+      assetsBranch: {
+        type: 'string',
+        label: 'Assets branch: verify-pr',
+        category: 'General',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'The branch inside that repository, surfaced as `QWEN_VERIFY_ASSETS_BRANCH`; without it a round publishes to `assets/pr<n>-validation`. Only honored from User, System, and SystemDefaults settings scopes, for the same reason as `verifyPr.assetsRepo`.',
+        showInDialog: false,
       },
     },
   },
@@ -1663,6 +1706,12 @@ const SETTINGS_SCHEMA = {
             description:
               'Mod tool input dialect. Defaults to native; claude exposes the supported Bash/Edit/Write input subset.',
           },
+          unsupportedEvents: {
+            type: 'string',
+            enum: ['skip', 'reject'],
+            description:
+              'Hooks for Claude Code events Qwen Code does not support. Defaults to skip, which reports them at startup; reject fails initialization instead.',
+          },
           options: {
             type: 'object',
             additionalProperties: {
@@ -1678,7 +1727,7 @@ const SETTINGS_SCHEMA = {
       },
     },
     description:
-      'Mod options and tool dialect keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
+      'Mod options, tool dialect and unsupported-event policy keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
     showInDialog: false,
   },
 
@@ -2098,7 +2147,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: false,
             description:
-              "Force scope:'global' on Anthropic cache_control entries even when the base URL is not an Anthropic-native origin (e.g. proxy providers like Routify, OpenRouter). Requires the proxy to forward cache_control fields and the prompt-caching-scope-2026-01-05 beta.",
+              "Opt in to scope:'global' on Anthropic cache_control entries. Off by default for every base URL, api.anthropic.com included: the API only accepts a global breakpoint when every preceding block is globally scoped too, which a real tool list cannot satisfy within the four-breakpoint cap. Turn on only for a backend whose validation differs and that forwards cache_control fields plus the prompt-caching-scope-2026-01-05 beta.",
             parentKey: 'generationConfig',
             showInDialog: false,
           },

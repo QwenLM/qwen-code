@@ -113,6 +113,7 @@ import {
   DEFAULT_RECURRING_MAX_AGE_DAYS,
   normalizeRecurringMaxAge,
 } from '../services/cronScheduler.js';
+import { createCronGateRunner } from '../services/cron-gate.js';
 import {
   MemoryPressureMonitor,
   DEFAULT_PRESSURE_CONFIG,
@@ -2432,11 +2433,16 @@ export interface CurrentSessionScheduledTaskCreateRequest {
   prompt: string;
   recurring: boolean;
   promptId: string;
+  /** Shell command run at each fire outside the model; see cron-gate.ts. */
+  gate?: string;
 }
 
 export interface CurrentSessionScheduledTaskCreateResult {
   id: string;
   cron: string;
+  /** The gate the daemon stored, or null for none; absent from a daemon that
+   * predates gated tasks and would have dropped a requested gate. */
+  gate?: string | null;
 }
 
 /** Daemon-only capability used by `cron_create` to bind a durable task to the
@@ -10369,6 +10375,9 @@ export class Config {
       this.cronScheduler = new CronScheduler(
         this.getProjectRoot(),
         this.getCronRecurringMaxAgeDays() * 24 * 60 * 60 * 1000,
+        // Gates run with this session's cwd, environment and permission
+        // state — in the daemon that is the ACP child's, not the daemon's.
+        { runGate: createCronGateRunner(this) },
       );
     }
     return this.cronScheduler;

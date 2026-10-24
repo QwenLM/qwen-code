@@ -213,6 +213,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
+  workspaceMemoryImportPlan: 'qwen/control/workspace/memory/import/plan',
   workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   /**

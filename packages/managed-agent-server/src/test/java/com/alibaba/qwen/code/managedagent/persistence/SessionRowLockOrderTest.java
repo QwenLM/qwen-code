@@ -134,6 +134,7 @@ class SessionRowLockOrderTest {
     // new sibling turn-row access — fails here instead of passing
     // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
+            "HarnessPlacementStore.java",
             "ManagedActionStore.java", "ManagedExtensionRecordStore.java",
             "ManagedLegacySessionGuard.java",
             "ManagedProjectionResourceCollector.java",
@@ -180,6 +181,10 @@ class SessionRowLockOrderTest {
                             Set.of("ChildWorkspaceStore.find/3",
                                     "ChildWorkspaceStore.row/2",
                                     "Row.snapshot/0")),
+                    // Same-package lifecycle refusals share this local name;
+                    // both factories only construct an exception.
+                    Map.entry("HarnessPlacementStore.java",
+                            Set.of("HarnessPlacementStore.blocked/1")),
                     Map.entry("JdbcChannelRouteRepository.java",
                             Set.of("JdbcChannelRouteRepository.row/2")),
                     Map.entry("ManagedAgentDefinitionStore.java",
@@ -196,6 +201,11 @@ class SessionRowLockOrderTest {
                                     "ManagedExtensionRecordStore.storedRow/2")),
                     Map.entry("ManagedExtensionRecords.java",
                             Set.of("ManagedExtensionRecords.require/2")),
+                    // The closure callback validates resource/JOURNAL ownership
+                    // under its caller's pinned head; it never locks Session
+                    // rows or accesses Turn rows.
+                    Map.entry("ManagedHostedRecoveryRecords.java",
+                            Set.of("HistoricalResources.checkpointHistory/1")),
                     Map.entry("ManagedSchemaJdbcTemplate.java",
                             Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
                     Map.entry("ManagedSessionStore.java",
@@ -255,8 +265,7 @@ class SessionRowLockOrderTest {
                                     "ReadLease.close/0",
                                     "ToolPublicationRetentionStore.open/4")),
                     Map.entry("ToolPublicationStore.java",
-                            Set.of("HeadActivation.current/5",
-                                    "Original.csi/0",
+                            Set.of("Original.csi/0",
                                     "Row.withState/2",
                                     "ToolPublicationStore.usesDataSource/1")),
                     Map.entry("WorkspaceCreationStore.java",
@@ -384,8 +393,9 @@ class SessionRowLockOrderTest {
         // session-row INSERT is the lock.
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
                 "insertTurnCommand", "insertCancelCommand", "changeSessionModel", "changeSessionApproval",
+                "requireMcpManagement", "requireMcpSettingsCommit",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
-                "insertChildSessionCommand",
+                "insertChildSessionCommand", "insertPublicChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
                 "beginSessionMutation",
                 "beginTaskCancelOperation", "completeSessionMutation",
@@ -463,7 +473,7 @@ class SessionRowLockOrderTest {
                         "findRuntimeRecoveryParked",
                         "parkTurnForRuntimeRecovery",
                         "insertCancelCommand", "insertChildSession",
-                        "insertChildSessionCommand", "insertCsiSessionCommand",
+                        "insertChildSessionCommand", "insertPublicChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
                         "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
@@ -474,7 +484,8 @@ class SessionRowLockOrderTest {
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",
                         "releaseTurnLease", "renewTurn", "requireTurn",
-                        "requireTurnForUpdate", "requirePolicyChange", "retractContinuationOutput",
+                        "requireTurnForUpdate", "requirePolicyChange", "requireMcpManagement", "requireMcpSettingsCommit",
+                        "requireMcpManagementIdle", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
                         "settleTurnCommands",
                         // D7-2's journal evidence for a parked input reads
