@@ -68,3 +68,60 @@ describe('ToolApproval disabled options', () => {
     expect(declarations(goal[0]!)).toEqual(['opacity: 0.5', 'cursor: default']);
   });
 });
+
+describe('ToolApproval floating scroll layout', () => {
+  // Regression guard for the nested-scrollbar bug: the floating sheet used to
+  // stack three scroll containers (sheet, 300px content cap, 400px diff-line
+  // cap). The sheet must stay scroll-free; the command/content region is its
+  // single scroll container so the decision buttons stay pinned.
+  it('keeps the sheet itself out of the scroll path', () => {
+    const rules = find('.floating');
+    expect(rules).toHaveLength(1);
+    const props = rules[0]!.nodes
+      ?.filter((node: ChildNode) => node.type === 'decl')
+      .map((node: { prop: string }) => node.prop);
+    expect(props).toContain('overflow-y');
+    const overflowY = rules[0]!.nodes
+      ?.filter((node: ChildNode) => node.type === 'decl')
+      .find((node: { prop: string }) => node.prop === 'overflow-y') as {
+      value: string;
+    };
+    expect(overflowY.value).toBe('hidden');
+  });
+
+  it('makes the content and command regions the sheet scroll container', () => {
+    const rules = find('.floating > .content:not(.planContent)');
+    expect(rules).toHaveLength(1);
+    // One rule carries both selectors — the text/diff wrapper and the
+    // exec-command wrapper scroll identically.
+    expect(rules[0]!.selectors.map(tidy)).toEqual([
+      '.floating > .content:not(.planContent)',
+      '.floating > .code',
+    ]);
+    expect(declarations(rules[0]!)).toEqual([
+      'flex: 1 1 auto',
+      'min-height: 0',
+      'overflow-y: auto',
+    ]);
+    // .planContent (the plan-approval text under .floatingWorkflow) keeps its
+    // own 240px layout — the :not() guard is load-bearing.
+    expect(rules[0]!.selectors[0]).toContain(':not(.planContent)');
+  });
+
+  it('lifts the command block cap inside the sheet only', () => {
+    const rules = find('.floating .codeBlock');
+    expect(rules).toHaveLength(1);
+    expect(declarations(rules[0]!)).toEqual(['max-height: none']);
+  });
+
+  it('leaves the inline variant caps intact', () => {
+    const content = find('.content');
+    expect(content).toHaveLength(1);
+    const contentDecls = declarations(content[0]!);
+    expect(contentDecls).toContain('max-height: 300px');
+    expect(contentDecls).toContain('overflow-y: auto');
+    const codeBlock = find('.codeBlock');
+    expect(codeBlock).toHaveLength(1);
+    expect(declarations(codeBlock[0]!)).toContain('max-height: 300px');
+  });
+});
