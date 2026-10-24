@@ -8951,7 +8951,21 @@ describe('Hosted Harness no-tool session', () => {
       state: 'settled',
     });
     const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    let finishAutomaticRetry!: () => void;
+    const automaticRetry = new Promise<void>((resolve) => {
+      finishAutomaticRetry = resolve;
+    });
     release.mockRejectedValueOnce(new Error('release unavailable'));
+    release.mockImplementationOnce(() => automaticRetry);
+    const kick = HostedMonitorWakeScheduler.prototype.kick;
+    let wake: HostedMonitorWakeScheduler | undefined;
+    vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick').mockImplementation(
+      function (this: HostedMonitorWakeScheduler) {
+        if (wake) return;
+        wake = this;
+        kick.call(this);
+      },
+    );
     const server = await app(true);
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -9003,12 +9017,43 @@ describe('Hosted Harness no-tool session', () => {
       .expect(409);
     expect((await readJournal()).events).toHaveLength(parked.events.length);
     expect(state.model).not.toHaveBeenCalled();
-    const redriven = await headers(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({
-      managedSessionStore: store(),
-      passiveManagedRuntimeRecovery: true,
-    });
+    const redriven = await (async () => {
+      kick.call(wake!);
+      const cleanup = await import('./hosted-turn-cleanup.js');
+      const debt = vi.spyOn(cleanup, 'hasHostedCleanupDebt');
+      try {
+        await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(2), {
+          timeout: SETTLE_TIMEOUT_MS,
+        });
+        const loading = headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        )
+          .send({
+            managedSessionStore: store(),
+            passiveManagedRuntimeRecovery: true,
+          })
+          .then((response) => response);
+        await vi.waitFor(
+          () => expect(debt).toHaveBeenCalledWith(capturedWakeSession().managed),
+          { timeout: SETTLE_TIMEOUT_MS },
+        );
+        finishAutomaticRetry();
+        return await loading;
+      } finally {
+        finishAutomaticRetry();
+        debt.mockRestore();
+      }
+    })();
+    process.stderr.write(
+      `CLEANUP_RACE_WITNESS ${JSON.stringify({
+        root: state.root,
+        releaseCalls: release.mock.calls,
+        owners: release.mock.contexts.map(
+          (owner) => (owner as HostedWorkspaceBroker).runtimeSessionId,
+        ),
+        redrivenStatus: redriven.status,
+      })}\n`,
+    );
     expect(redriven.status).toBe(200);
     expect(redriven.body.clientId).toBe(loaded.body.clientId);
     expect(release).toHaveBeenCalledTimes(2);
