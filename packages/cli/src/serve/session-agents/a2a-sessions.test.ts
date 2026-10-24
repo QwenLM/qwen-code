@@ -19,6 +19,26 @@ import {
 import { SessionAgentError } from './orchestrator.js';
 
 const SESSION = '11111111-2222-4333-8444-555555555555';
+const transcriptFault = vi.hoisted(() => ({
+  error: undefined as Error | undefined,
+}));
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/jsonl-utils.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/jsonl-utils.js')
+      >();
+    return {
+      ...actual,
+      read: vi.fn(async (...args: Parameters<typeof actual.read>) => {
+        if (transcriptFault.error) throw transcriptFault.error;
+        return actual.read(...args);
+      }),
+    };
+  },
+);
 
 function setup(
   options: {
@@ -239,4 +259,59 @@ describe('A2A session port', () => {
       }
     },
   );
+
+  it('keeps a completed reply available after a transient transcript read error', async () => {
+    const runtimeBaseDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'a2a-port-'),
+    );
+    const timestamp = '2026-10-06T00:00:00.000Z';
+    try {
+      const service = new SessionService('/ws', { runtimeBaseDir });
+      const transcript = service.getSessionTranscriptPath(SESSION);
+      await fs.mkdir(path.dirname(transcript), { recursive: true });
+      await fs.writeFile(
+        transcript,
+        `${JSON.stringify({
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId: SESSION,
+          timestamp,
+          type: 'user',
+          subtype: 'agent_message',
+          cwd: '/ws',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'Done.' }] },
+          systemPayload: {
+            displayText: 'Done.',
+            author: { agentId: 'ag_lead', name: 'lead' },
+            runId: 'sr_1',
+            status: 'completed',
+          },
+        })}\n`,
+      );
+      const { port } = setup({ transcriptsIn: runtimeBaseDir });
+      const readError = Object.assign(new Error('temporary I/O failure'), {
+        code: 'EIO',
+      });
+      transcriptFault.error = readError;
+      try {
+        await expect(port.recordedReply(SESSION, 'sr_1')).rejects.toMatchObject(
+          { kind: 'unavailable' },
+        );
+      } finally {
+        transcriptFault.error = undefined;
+      }
+
+      await expect(port.recordedReply(SESSION, 'sr_1')).resolves.toEqual({
+        at: Date.parse(timestamp),
+        payload: expect.objectContaining({
+          displayText: 'Done.',
+          runId: 'sr_1',
+          status: 'completed',
+        }),
+      });
+    } finally {
+      await fs.rm(runtimeBaseDir, { recursive: true, force: true });
+    }
+  });
 });
