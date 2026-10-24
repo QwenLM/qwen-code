@@ -80,14 +80,15 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 90 分钟等待预算。run 39627609266 的 fast 通道 job 17:38 到达，一直是队首，
 19:15 失败，Maven 一次都没启动 —— 约束它的是持锁时长，不是排队顺序。
 
-两次 Maven 运行本来就都从 job 本地仓库解析。但种子复制并不是完全只读：
-`mvn install` 会通过硬链接原地改写 in-house 坐标的
-`_remote.repositories` 和 `maven-metadata-local.xml`，因此种子复制会从 job
-本地副本中删除这两个文件名，让 Maven 重新创建。只有缓存写回会修改
-`~/.m2`，因此只有写回取锁。种子复制是尽力而为的，放在取锁之前；两次
-Maven 运行不持锁；写回只取一次锁，且它的 `mkdir` 和有界 `find`/`cp`
-子进程会关闭 fd 9，避免幸存进程继续持有锁。这样一次持锁只量一次复制，
-而不是一整套测试。
+两次 Maven 运行本来就都从 job 本地仓库解析。种子复制以硬链接方式复制宿主
+缓存，Maven 的 resolver 可能通过这些链接原地改写自己的簿记文件；因此种子
+复制会从整个 job 本地副本中删除 `_remote.repositories`、
+`maven-metadata-local.xml`、`resolver-status.properties` 和
+`*.lastUpdated`，让 Maven 重新创建。只有缓存写回会修改 `~/.m2`，因此只有
+写回取锁：它先删除宿主缓存中本就不应存在的 in-house 坐标，再发布本 job 的
+增量。种子复制是尽力而为的，放在取锁之前；两次 Maven 运行不持锁；写回只取
+一次锁，且它的 `rm`、`mkdir` 和有界 `find`/`cp` 子进程会关闭 fd 9，避免
+幸存进程继续持有锁。这样一次持锁只量一次复制，而不是一整套测试。
 
 push 时运行的 test job 是最后一个整套持锁的站点。2026-10-22 的 run
 39805834871 中，fast 档 Java 21 leg 以 fast 票进入队列、成为队首，在兄弟
@@ -176,6 +177,17 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
 - 计数器由只追加 `.seq` 文件上的 `flock` 串行化，持有者死亡时内核会
   释放该锁，因此没有需要清理的老化路径；在读取-递增-写入之间被 kill
   最多只多一次重试。
+- 现在不同 job 的套件可以在同一台宿主机上并发运行，而没有任何上界约束
+  它们的内存总量。本仓库既没有记录池中宿主机的 RAM，也没有记录每台
+  宿主机的 runner 注册数；`packages/managed-agent-server/pom.xml` 中
+  仅有的堆上限（`-Xmx256m`、`forkCount 1`）位于 failsafe profile 内，
+  而不持锁的 `mvn clean test` 走 Surefire，既无 `argLine`，又继承 JVM
+  的人体工学最大堆（宿主 RAM 的 25%；在一台 247 GB 的开发机上是约
+  30 GiB，并非池上测量）。一旦宿主机内存耗尽，内核会在 Surefire fork、
+  MySQL 和 runner listener 之间选择牺牲者，于是一个什么都没做错的 job
+  会以套件中途 JVM 崩溃的形式失败，而不是上文所述 job 超时。合并后的
+  最初几次池上运行即为 soak：它收集每条 leg 的墙钟时间与任何套件中途的
+  JVM 崩溃，并发布到 issue #15281，使这项被接受的风险保持可归因。
 
 ## 验证计划
 
@@ -191,8 +203,11 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   也不会被超过。
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
   pin 的是 source 该辅助脚本和两处 `sdk_java_lock_acquire 5400` 预算、
-  MariaDB 通道的 Maven 运行在取锁之前、写回子进程关闭 fd 9，以及
-  `.size-baseline` 记录的工作流新尺寸。
+  每条持锁通道的 Maven 运行在取锁之前、写回子进程关闭 fd 9、写回对宿主
+  缓存中 in-house 坐标的删除、`sdk-java.yml` 与
+  `release-managed-agent-reference.yml` 两处种子对 resolver 簿记文件的
+  unlink、test job 对套件退出状态的保留、Checkstyle 步骤的 Java 21
+  生产者顺序，以及 `.size-baseline` 记录的工作流新尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 

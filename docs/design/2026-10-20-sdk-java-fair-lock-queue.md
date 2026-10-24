@@ -92,16 +92,18 @@ pool contention that verify ran for about three hours (run 39628985638 held it
 failed at 19:15 without starting Maven — the hold, not the queue order, was
 the bound.
 
-Both Maven runs already resolve from a job-local repository. The seed is
-still not fully read-only: `mvn install` rewrites the in-house coordinates'
-`_remote.repositories` and `maven-metadata-local.xml` in place through the
-hardlink, so the seed unlinks those two names from the job-local copy and
-lets Maven create fresh ones. Only the cache write-back may mutate `~/.m2`,
-so only the write-back takes the lock. The seed is best-effort and runs
-before the acquisition; the Maven runs run unlocked; the write-back holds
-one acquisition, and its `mkdir` and bounded `find`/`cp` children drop fd 9
-so a survivor cannot retain the lock. A hold now measures the copy instead
-of the suite.
+Both Maven runs already resolve from a job-local repository. The seed copies
+the host cache as hardlinks, so Maven's resolver could rewrite its
+bookkeeping in place through those links; the seed therefore unlinks
+`_remote.repositories`, `maven-metadata-local.xml`,
+`resolver-status.properties`, and `*.lastUpdated` across the whole job-local
+copy and lets Maven create fresh ones. Only the cache write-back may mutate
+`~/.m2`, so only the write-back takes the lock: it drops the in-house
+coordinates the host cache must never carry, then publishes this job's
+delta. The seed is best-effort and runs before the acquisition; the Maven
+runs run unlocked; the write-back holds one acquisition, and its `rm`,
+`mkdir`, and bounded `find`/`cp` children drop fd 9 so a survivor cannot
+retain the lock. A hold now measures the copy instead of the suite.
 
 The push-time test job was the remaining whole-suite hold. On 2026-10-22 run
 39805834871's fast-tier Java 21 leg entered the queue as a fast ticket, became
@@ -211,6 +213,19 @@ order this section exists to prevent.
   the kernel releases that lock when the holder dies, so there is no aging
   path to clear; a kill inside the read-increment-write costs at most one
   retry.
+- Suites from different jobs can now run concurrently on one host, and no
+  bound covers their aggregate memory. This repository records neither the
+  pool hosts' RAM nor their registrations per host; the only heap caps in
+  `packages/managed-agent-server/pom.xml` (`-Xmx256m`, `forkCount 1`) sit on
+  failsafe profiles, while the unlocked `mvn clean test` runs Surefire with
+  no `argLine` and inherits the JVM's ergonomic maximum heap (25% of host
+  RAM; about 30 GiB on a 247 GB development host, not a pool measurement).
+  If the host runs out of memory, the kernel picks the victim among the
+  Surefire forks, MySQL, and the runner listener, so a job that did nothing
+  wrong can fail as a mid-suite JVM crash rather than the job timeout named
+  above. The first pool runs after merge are the soak: it collects each
+  leg's wall clock and any mid-suite JVM crash and posts them on issue
+  #15281, so the accepted risk stays attributable.
 
 ## Validation plan
 
@@ -228,9 +243,13 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
-  `sdk_java_lock_acquire 5400` budget at each acquisition site, the MariaDB
+  `sdk_java_lock_acquire 5400` budget at each acquisition site, each locked
   lane's Maven runs above its acquisition and its write-back children's fd 9
-  close, and the `.size-baseline` records the workflow's new size.
+  close, the write-back's host-cache in-house prune, the seed's resolver
+  bookkeeping unlink across `sdk-java.yml` and
+  `release-managed-agent-reference.yml`, the test job's suite-status
+  preservation, the Checkstyle step's Java-21 producer ordering, and the
+  `.size-baseline` records the workflow's new size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
