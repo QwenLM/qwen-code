@@ -303,6 +303,76 @@ When the selector resolves to another auth type, Qwen Code creates a dedicated
 runtime provider for that subagent request and sends the provider only the bare
 model ID.
 
+#### API leader with a local worker
+
+Keep your existing API login and selected leader model. Add a local model entry
+to the existing `modelProviders.openai` array in `settings.json`, preserving
+other providers and entries:
+
+```json
+{
+  "env": {
+    "OLLAMA_API_KEY": "ollama"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen2.5-coder:7b",
+        "envKey": "OLLAMA_API_KEY",
+        "baseUrl": "http://localhost:11434/v1",
+        "generationConfig": {
+          "contextWindowSize": 8192,
+          "timeout": 300000
+        }
+      }
+    ]
+  }
+}
+```
+
+Replace the model ID with the exact ID served by your local server. Select a
+model that supports tool calls and configure the context window to match the
+server. The placeholder key is only for servers that do not require
+authentication; protected endpoints need their own real key. Do not put the
+leader's key in `OLLAMA_API_KEY`.
+
+Create `.qwen/agents/local-reviewer.md`:
+
+```markdown
+---
+name: local-reviewer
+description: Reviews code using the local model
+model: openai:qwen2.5-coder:7b
+tools:
+  - read_file
+  - grep_search
+  - glob
+---
+
+Review the assigned code and return findings with file references. Do not edit.
+```
+
+Restart Qwen Code and ask: "Delegate a review of this change to local-reviewer,
+then summarize its findings." The leader stays on its current API provider;
+only the delegated worker uses the local endpoint. No `/auth` or `/model`
+switch is needed. This also works when the leader uses Gemini.
+
+An explicitly configured worker `envKey` must be set. Missing credentials stop
+the worker rather than borrowing the leader's key. A different endpoint does
+not inherit the leader's custom headers or model-specific request options;
+configure those on the local entry if needed.
+
+Use distinct IDs for local and remote models: agent selectors identify the auth
+type and model ID, not the endpoint. Local workers still consume memory; start
+with one worker and a model that fits your machine.
+
+With [Agent Team](./multi-agent-coordination.md) enabled, the same definition
+can be selected for a named teammate. Ordinary delegation does not require
+Agent Team. Neither path starts a separate Ollama CLI: Ollama must already be
+serving the configured model.
+
+#### Built-in Explore model
+
 The built-in Explore agent inherits the main session model by default. To
 select a different model for only that built-in agent, configure
 `agents.builtin.exploreModel` in `settings.json` and restart Qwen Code:
