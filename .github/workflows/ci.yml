@@ -1471,15 +1471,19 @@ jobs:
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
+    # Gate on the classifier's own profile output instead of the copy `test`
+    # re-derives: it is the same value (the classifier already forces an
+    # unknown one to `full`), and dropping the `test` edge lets this
+    # 35-minute lane run beside Test instead of behind it. `|| 'full'`
+    # extends that fail-safe to a classifier that emitted nothing at all.
     needs:
       - 'classify_pr'
-      - 'test'
     if: |-
       ${{
         !cancelled() &&
         (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
-        needs.test.outputs.ci_profile == 'full'
+        (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
       }}
     # Keep the classifier's trust and hosted overrides, but use ARM64 for
     # this lane independently of the ordinary Linux CI fleet. The history
