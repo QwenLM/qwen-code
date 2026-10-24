@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
   extractRawOutputText,
+  formatJsonPayload,
   formatToolDisplayName,
   getAgentCurrentToolHint,
   getSubagentDetailsUnavailableReason,
@@ -590,6 +591,52 @@ describe('toolFormatting', () => {
         'Shell',
       );
     });
+  });
+});
+
+describe('formatJsonPayload', () => {
+  it('pretty-prints a compact object', () => {
+    expect(formatJsonPayload('{"a":1,"b":[2]}')).toEqual({
+      text: '{\n  "a": 1,\n  "b": [\n    2\n  ]\n}',
+      json: true,
+    });
+  });
+
+  it('pretty-prints an array of objects', () => {
+    const formatted = formatJsonPayload('[{"id":1}]');
+    expect(formatted.json).toBe(true);
+    expect(formatted.text).toBe('[\n  {\n    "id": 1\n  }\n]');
+  });
+
+  it('keeps an already indented document as JSON', () => {
+    expect(formatJsonPayload('{\n  "a": 1\n}')).toEqual({
+      text: '{\n  "a": 1\n}',
+      json: true,
+    });
+  });
+
+  it('formats JSON Lines per line but leaves them plain text', () => {
+    expect(formatJsonPayload('{"a":1}\n{"b":2}')).toEqual({
+      text: '{\n  "a": 1\n}\n{\n  "b": 2\n}',
+      json: false,
+    });
+  });
+
+  it.each(['hello', '42', '"text"', 'null', '{"a":'])(
+    'leaves %s untouched',
+    (text) => {
+      expect(formatJsonPayload(text)).toEqual({ text, json: false });
+    },
+  );
+
+  it('skips numbers JSON.parse cannot round-trip', () => {
+    for (const text of [
+      '{"id":12345678901234567890}',
+      '{"n":1e400}',
+      '{"nested":{"id":-9007199254740993}}',
+    ]) {
+      expect(formatJsonPayload(text)).toEqual({ text, json: false });
+    }
   });
 });
 

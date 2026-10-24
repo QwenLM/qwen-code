@@ -1027,7 +1027,13 @@ describe('tool row rendering', () => {
         undefined,
         'document',
       );
-      expect(container.textContent).toContain(text);
+      // Valid JSON is pretty-printed for display; other text is shown exactly
+      // as recorded, including its trailing whitespace.
+      const expected =
+        toolName === 'tool_call'
+          ? JSON.stringify(JSON.parse(text) as unknown, null, 2)
+          : text;
+      expect(container.textContent).toContain(expected);
       expect(container.querySelector('iframe')).toBeNull();
     },
   );
@@ -3201,5 +3207,108 @@ describe('pending edit approval rows', () => {
     // hand-back (#10557). Without content in the fixture the expanded card is
     // empty and the two assertions above pass with nothing on screen.
     expect(handedBack.textContent).toContain('handed back content');
+  });
+});
+
+describe('generic tool card details', () => {
+  it('pretty-prints arguments and a compact JSON result on expansion', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__github__pull_request_read',
+        args: { method: 'get_check_runs', owner: 'QwenLM' },
+        rawOutput: '{"total_count":38,"check_runs":[{"name":"smoke"}]}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('Arguments');
+    expect(text).toContain('Result');
+    expect(text).toContain('"method": "get_check_runs"');
+    expect(text).toContain('"total_count": 38');
+    expect(text).not.toContain('"total_count":38');
+  });
+
+  it('keeps a non-JSON result as plain text', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__echo',
+        rawOutput: 'line one\nline two',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('line one');
+    expect(container.textContent).toContain('line two');
+    expect(container.querySelector('pre')).not.toBeNull();
+  });
+
+  it('shows the failure text in the Result block', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__fail',
+        status: 'failed',
+        content: [{ type: 'content', content: { type: 'text', text: 'boom' } }],
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Result');
+    expect(container.textContent).toContain('boom');
+  });
+
+  it('offers Show more for a payload over the inline cap', () => {
+    const tail = 'TAIL-MARKER';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__dump',
+        rawOutput: `${'x'.repeat(4200)}${tail}`,
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+  });
+
+  it('offers Show more when pretty-printing grows a payload past the cap', () => {
+    const items = Array.from({ length: 160 }, (_, i) => ({
+      id: i,
+      name: 'x',
+    }));
+    const compact = JSON.stringify(items);
+    // Guard the fixture: the raw payload fits inline, the formatted one does
+    // not, so the button must follow the formatted length.
+    expect(compact.length).toBeLessThanOrEqual(4000);
+    expect(JSON.stringify(items, null, 2).length).toBeGreaterThan(4000);
+
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__grow', rawOutput: compact }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Show more');
+  });
+
+  it('keeps the header description out of the expanded body', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__inspect',
+        title: 'Inspect check runs',
+        args: { method: 'get_check_runs' },
+        rawOutput: '{"total_count":38}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(
+      'Inspect check runs',
+    ).length;
+    expect(occurrences - 1).toBe(1);
   });
 });

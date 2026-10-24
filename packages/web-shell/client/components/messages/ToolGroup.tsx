@@ -52,7 +52,11 @@ import {
 import {
   extractText,
   hasRecordedOutput,
+  EXPANDED_TOOL_PAYLOAD_LENGTH,
+  formatJsonPayload,
   formatTokenCount,
+  MAX_TOOL_PAYLOAD_LENGTH,
+  stringifyValue,
   getAgentCancellationReason,
   getAgentCurrentToolHint,
   getAgentDescription,
@@ -351,6 +355,98 @@ function ToolExpandedCard({
         {detail && <span className={styles.expandedCardDetail}>{detail}</span>}
       </div>
       {children && <div className={styles.expandedCardBody}>{children}</div>}
+    </div>
+  );
+}
+
+function ToolPayloadBlock({
+  payload,
+  limit,
+}: {
+  payload: { text: string; json: boolean };
+  limit: number;
+}) {
+  const { t } = useI18n();
+  const renderMode = useTranscriptRenderMode();
+  const truncated = payload.text.length > limit;
+  const displayed = truncated
+    ? `${payload.text.slice(0, limit)}...`
+    : payload.text;
+  return (
+    <>
+      {payload.json ? (
+        <div className={styles.payloadJson}>
+          <Markdown content={fencedCodeBlock('json', displayed)} />
+        </div>
+      ) : (
+        <pre className={styles.payloadText}>
+          {renderWithSessionLinks(displayed, renderMode)}
+        </pre>
+      )}
+      {truncated && (
+        <p className={styles.payloadTruncated}>
+          {t('trajectory.inspector.truncated')}
+        </p>
+      )}
+    </>
+  );
+}
+
+function GenericToolDetails({
+  argumentsText,
+  resultText,
+  pending,
+}: {
+  argumentsText: string;
+  resultText: string;
+  pending: boolean;
+}) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  const limit = expanded
+    ? EXPANDED_TOOL_PAYLOAD_LENGTH
+    : MAX_TOOL_PAYLOAD_LENGTH;
+  // Pretty-printing grows a compact payload, and the blocks truncate what they
+  // render, so the "Show more" decision has to use the formatted lengths.
+  const argumentsPayload = useMemo(
+    () => formatJsonPayload(argumentsText),
+    [argumentsText],
+  );
+  const resultPayload = useMemo(
+    () => formatJsonPayload(resultText),
+    [resultText],
+  );
+  const canExpand =
+    !expanded &&
+    (argumentsPayload.text.length > MAX_TOOL_PAYLOAD_LENGTH ||
+      resultPayload.text.length > MAX_TOOL_PAYLOAD_LENGTH);
+  return (
+    <div className={styles.payloadSections}>
+      {argumentsText && (
+        <section className={styles.payloadSection}>
+          <div className={styles.payloadLabel}>{t('turnCalls.arguments')}</div>
+          <ToolPayloadBlock payload={argumentsPayload} limit={limit} />
+        </section>
+      )}
+      {(resultText || pending) && (
+        <section className={styles.payloadSection}>
+          <div className={styles.payloadLabel}>{t('turnCalls.result')}</div>
+          {resultText ? (
+            <ToolPayloadBlock payload={resultPayload} limit={limit} />
+          ) : (
+            <p className={styles.payloadEmpty}>{t('shell.result.waiting')}</p>
+          )}
+        </section>
+      )}
+      {canExpand && (
+        <button
+          type="button"
+          className={styles.payloadMore}
+          onClick={() => setExpanded(true)}
+        >
+          {t('trajectory.inspector.expand')}
+        </button>
+      )}
     </div>
   );
 }
@@ -1445,6 +1541,18 @@ export const ToolLine = memo(function ToolLine({
   // Contentless tools still get a titled card when the user opens them.
   const showExpandedSummaryPanel =
     expanded && !detailView && (!isTodo || (!hasTodoList && !result));
+  // A card outside the built-in detail renderers shows the call itself rather
+  // than repeating the header summary. The values are already redacted at the
+  // daemon boundary and carried by the ACP tool call; no extra read is needed.
+  const genericArguments = showExpandedSummaryPanel
+    ? stringifyValue(tool.args)
+    : '';
+  const genericResult = showExpandedSummaryPanel
+    ? extractText(tool) || stringifyValue(tool.rawOutput) || ''
+    : '';
+  const hasGenericPayload =
+    Boolean(genericArguments || genericResult) ||
+    (showExpandedSummaryPanel && isActiveToolStatus(tool.status));
 
   return (
     <div className={styles.line} data-transcript-tool-call-id={tool.callId}>
@@ -1566,16 +1674,24 @@ export const ToolLine = memo(function ToolLine({
       {!mcpApp && showExpandedSummaryPanel && (
         <ToolExpandedCard
           title={displayName}
-          detail={expandedCardDetail}
+          detail={hasGenericPayload ? undefined : expandedCardDetail}
           status={tool.status}
           action={filePreviewAction}
         >
-          {result && (
-            <div
-              className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
-            >
-              {renderWithSessionLinks(result, transcriptRenderMode)}
-            </div>
+          {hasGenericPayload ? (
+            <GenericToolDetails
+              argumentsText={genericArguments}
+              resultText={genericResult}
+              pending={isActiveToolStatus(tool.status)}
+            />
+          ) : (
+            result && (
+              <div
+                className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
+              >
+                {renderWithSessionLinks(result, transcriptRenderMode)}
+              </div>
+            )
           )}
         </ToolExpandedCard>
       )}
