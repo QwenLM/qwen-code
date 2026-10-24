@@ -76,7 +76,18 @@ export const StickyPlanStrip = memo(function StickyPlanStrip({
       compensate(delta);
     });
     observer.observe(strip);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      // Layout-effect cleanup runs before React removes the strip, so this is
+      // still the pre-removal geometry: hand back the height the list regains.
+      // Also undoes the mount compensation when StrictMode re-runs the effect.
+      const list = strip.parentElement?.querySelector<HTMLElement>(
+        '[data-web-shell-message-list]',
+      );
+      if (!list) return;
+      if (list.scrollHeight - list.scrollTop - list.clientHeight < 30) return;
+      list.scrollTop -= height;
+    };
   }, [mounted]);
   if (!mounted) return null;
 
