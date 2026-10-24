@@ -160,6 +160,10 @@ S1 已接入选择器的三处是 `core/src/code-mode/host-client.ts`、`core/sr
 
 迁移规则：任意 JS worker 使用 `getJsInterpreterCommand`；上文明确列出的宿主工具和 worker-runtime 探针保留宿主身份。再唤起应用的位置使用 `QWEN_CODE_CLI` / 入口回退。
 
+### 3. npm 私有 Bun 启动选项
+
+`BUN_OPTIONS` 复用既有 loader-key 策略：所有作用域的 `.env`、`settings.env`、reload 和运行时快照均不可提供该键，daemon 的 loader 清理也删除继承副本。npm handoff 还会拒绝启动环境中非空的 `BUN_OPTIONS`，与 `NODE_OPTIONS` 及不兼容 Node flags 一致：普通模式保留既有回退，strict 模式在启动 Bun 前抛错。这阻止项目 preload 在私有解释器中执行，不改变 launcher 或配置模型。
+
 ## 跨运行时加密文件身份
 
 加密文件密钥保留既有 hostname/OS 用户名盐、scrypt 参数与 AES-256-GCM 格式。Node 使用 `os.userInfo().username`；Bun 在受支持 POSIX 平台通过绝对 `/usr/bin/id -un` 查询 effective OS 账户，无 shell，限制为1000ms和4096输出字节。仅删除一个末尾换行；空、NUL、多行、超时或命令不可用均在文件访问或写入前拒绝。`USER`、`LOGNAME`、home 目录名不是 canonical 身份来源。不依赖 Node parent、不改环境，即覆盖 npm handoff、standalone 和 direct Bun；Windows classic Node 不变。

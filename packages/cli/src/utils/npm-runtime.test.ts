@@ -131,6 +131,7 @@ describe('npm Bun runtime admission', () => {
     ['Node FFI flag', { execArgv: ['--experimental-ffi'] }],
     ['Node memory flag', { execArgv: ['--max-old-space-size=4096'] }],
     ['NODE_OPTIONS', { env: { NODE_OPTIONS: '--trace-warnings' } }],
+    ['BUN_OPTIONS', { env: { BUN_OPTIONS: '--preload ./payload.mjs' } }],
   ];
   it.each([
     ['default renderer', { env: {} }],

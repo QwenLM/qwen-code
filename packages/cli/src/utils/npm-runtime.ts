@@ -159,9 +159,10 @@ export function selectNpmBunHandoff({
   }
   if (
     execArgv.some((arg) => arg !== '--expose-gc') ||
-    env['NODE_OPTIONS']?.trim()
+    env['NODE_OPTIONS']?.trim() ||
+    env['BUN_OPTIONS']?.trim()
   ) {
-    return unavailable('inherited Node runtime flags require the Node runtime');
+    return unavailable('inherited runtime flags prevent Bun handoff');
   }
   if (!script) return undefined;
   let root: string;

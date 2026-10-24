@@ -789,7 +789,7 @@ const conditions = [
   { id: 'missing-bun', reason: 'host optional Bun is missing' },
   {
     id: 'ffi-flag',
-    reason: 'inherited Node runtime flags require the Node runtime',
+    reason: 'inherited runtime flags prevent Bun handoff',
   },
 ];
 for (const condition of conditions)

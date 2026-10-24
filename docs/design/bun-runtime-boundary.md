@@ -224,6 +224,10 @@ Migration rule: arbitrary-JS workers use `getJsInterpreterCommand`; the
 explicit host-tool and worker-runtime probes above preserve their host identity.
 Sites that re-invoke the app use `QWEN_CODE_CLI` / the entry fallback.
 
+### 3. npm private Bun loader options
+
+`BUN_OPTIONS` uses the existing loader-key policy: `.env` at every scope, `settings.env`, reloads and runtime snapshots cannot supply it, and daemon loader scrubs remove inherited copies. The npm handoff also refuses nonempty launch-environment `BUN_OPTIONS`, like `NODE_OPTIONS` and incompatible Node flags: ordinary mode retains the existing fallback, strict mode throws before spawning Bun. This prevents a project preload from running in the private interpreter without changing the launcher or configuration model.
+
 ## Encrypted-file identity across runtimes
 
 Encrypted-file keys retain the existing hostname/OS-username salt, scrypt parameters and AES-256-GCM format. Node uses `os.userInfo().username`. Bun on supported POSIX targets resolves the effective OS account with absolute `/usr/bin/id -un`, without a shell, bounded to 1000 ms and 4096 output bytes. Only one final newline is removed; empty, NUL or multiline output, timeout or an unavailable command fails before file access or writes. `USER`, `LOGNAME` and home-directory names are not canonical identity sources. This covers npm handoff, standalone and direct Bun without requiring a Node parent or changing the environment; Windows classic Node is unchanged.
