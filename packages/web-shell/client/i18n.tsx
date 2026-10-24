@@ -2056,6 +2056,8 @@ const EN: Messages = {
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New task',
   'sidebar.newWorktreeTask': 'New worktree task',
+  'sidebar.moveWorkspaceUp': 'Move up',
+  'sidebar.moveWorkspaceDown': 'Move down',
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
   'sidebar.sessionSource': 'Session source',
@@ -2548,7 +2550,7 @@ const EN: Messages = {
   'language.invalid': 'Invalid language. Available: en, zh-CN',
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
-  'language.usage': 'Usage: /language ui [en|zh-CN]',
+  'language.usage': 'Usage: /language ui [en|zh-CN] | output <language>',
   'localCommand.noSession':
     'No active session yet. Send your first message before using this command.',
   'localCommand.diffNoWorkspace':
@@ -6443,6 +6445,8 @@ const ZH: Messages = {
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建任务',
   'sidebar.newWorktreeTask': '新建 Worktree 任务',
+  'sidebar.moveWorkspaceUp': '上移',
+  'sidebar.moveWorkspaceDown': '下移',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
   'sidebar.sessionSource': '会话来源',
@@ -6895,7 +6899,7 @@ const ZH: Messages = {
   'language.invalid': '语言无效。可用值：en, zh-CN',
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
-  'language.usage': '用法：/language ui [en|zh-CN]',
+  'language.usage': '用法：/language ui [en|zh-CN] | output <language>',
   'localCommand.noSession':
     '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'localCommand.diffNoWorkspace': '当前还没有可用于查看变更的工作区。',
