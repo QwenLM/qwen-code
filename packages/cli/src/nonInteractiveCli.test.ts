@@ -2581,6 +2581,7 @@ describe('runNonInteractive', () => {
       'prompt-id-1',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Test input',
       },
@@ -3772,6 +3773,7 @@ describe('runNonInteractive', () => {
       'prompt-id-2',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Use a tool',
         humanInput: { text: 'ultracode use a tool' },
@@ -3783,7 +3785,7 @@ describe('runNonInteractive', () => {
       [{ text: 'Tool response' }],
       expect.any(AbortSignal),
       'prompt-id-2',
-      { type: SendMessageType.ToolResult },
+      { type: SendMessageType.ToolResult, workflowModeEligible: false },
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
     // Verify recordCompletedToolCall is called with the tool name and args.
@@ -3863,7 +3865,11 @@ describe('runNonInteractive', () => {
       [{ text: 'Tool response with image' }, { text: 'Skill response' }],
       expect.any(AbortSignal),
       'prompt-tool-image',
-      { type: SendMessageType.ToolResult, modelOverride: model },
+      {
+        type: SendMessageType.ToolResult,
+        workflowModeEligible: false,
+        modelOverride: model,
+      },
     );
   });
 
@@ -3943,7 +3949,11 @@ describe('runNonInteractive', () => {
       [{ text: 'first image' }, { text: 'second image' }],
       expect.any(AbortSignal),
       'prompt-tool-image',
-      { type: SendMessageType.ToolResult, modelOverride: first },
+      {
+        type: SendMessageType.ToolResult,
+        workflowModeEligible: false,
+        modelOverride: first,
+      },
     );
   });
 
@@ -5561,7 +5571,7 @@ describe('runNonInteractive', () => {
       ],
       expect.any(AbortSignal),
       'prompt-id-3',
-      { type: SendMessageType.ToolResult },
+      { type: SendMessageType.ToolResult, workflowModeEligible: false },
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
@@ -5770,6 +5780,7 @@ describe('runNonInteractive', () => {
       'prompt-id-7',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Summarize @file.txt',
       },
@@ -5842,6 +5853,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-route',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: selector,
         submittedPrompt: 'inspect @image.png',
       },
@@ -5851,7 +5863,11 @@ describe('runNonInteractive', () => {
       [{ text: 'tool response' }],
       expect.any(AbortSignal),
       'prompt-vision-route',
-      { type: SendMessageType.ToolResult, modelOverride: selector },
+      {
+        type: SendMessageType.ToolResult,
+        workflowModeEligible: false,
+        modelOverride: selector,
+      },
     );
     expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
       mockConfig,
@@ -5966,6 +5982,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -6047,6 +6064,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge-failed',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -6085,6 +6103,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge-skipped',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -6132,6 +6151,7 @@ describe('runNonInteractive', () => {
       'prompt-oversized-image',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -6189,6 +6209,7 @@ describe('runNonInteractive', () => {
       'prompt-id-1',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Test input',
       },
@@ -6348,6 +6369,7 @@ describe('runNonInteractive', () => {
       'prompt-id-empty',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Empty response test',
       },
@@ -6725,6 +6747,7 @@ describe('runNonInteractive', () => {
       'prompt-id-slash',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: false,
         modelOverride: undefined,
         submittedPrompt: '/testcommand',
       },
@@ -6820,6 +6843,7 @@ describe('runNonInteractive', () => {
         'prompt-id-admit',
         {
           type: SendMessageType.UserQuery,
+          workflowModeEligible: false,
           modelOverride: undefined,
           submittedPrompt: '/deploy prod',
           promptAdmission: admission,
@@ -6994,6 +7018,7 @@ describe('runNonInteractive', () => {
       'prompt-id-unknown',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: false,
         modelOverride: undefined,
         submittedPrompt: '/unknowncommand',
       },
@@ -8112,6 +8137,7 @@ describe('runNonInteractive', () => {
       'prompt-envelope',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Message from stream-json input',
       },
@@ -8790,6 +8816,7 @@ describe('runNonInteractive', () => {
       'prompt-string-content',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Simple string content',
       },
@@ -8827,6 +8854,7 @@ describe('runNonInteractive', () => {
       'prompt-blocks-content',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'First part Second part',
       },
