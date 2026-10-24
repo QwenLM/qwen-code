@@ -19,7 +19,7 @@ const t = createChromeStrings('en');
 
 function makeSession(
   sessionId: string,
-  displayName: string,
+  displayName?: string,
 ): DaemonSessionSummary {
   const stamp = new Date().toISOString();
   return {
@@ -33,7 +33,17 @@ function makeSession(
 
 const mounted: Array<{ container: HTMLElement; root: Root }> = [];
 
-async function renderDropdown(hasMore = false) {
+async function renderDropdown({
+  strings = t,
+  sessions = [makeSession('s1', 'First'), makeSession('s2', 'Second')],
+  searchQuery = '',
+  hasMore = false,
+}: {
+  strings?: ReturnType<typeof createChromeStrings>;
+  sessions?: readonly DaemonSessionSummary[];
+  searchQuery?: string;
+  hasMore?: boolean;
+} = {}) {
   const onClose = vi.fn();
   const onLoadMore = vi.fn();
   const onSelect = vi.fn();
@@ -44,10 +54,10 @@ async function renderDropdown(hasMore = false) {
   await act(async () => {
     root.render(
       <SessionHistoryDropdown
-        t={t}
-        sessions={[makeSession('s1', 'First'), makeSession('s2', 'Second')]}
+        t={strings}
+        sessions={sessions}
         currentSessionId="s1"
-        searchQuery=""
+        searchQuery={searchQuery}
         loading={false}
         hasMore={hasMore}
         onSearchChange={() => {}}
@@ -69,6 +79,51 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+});
+
+describe('SessionHistoryDropdown search', () => {
+  it('matches untitled sessions by the localized label users see', async () => {
+    const strings = createChromeStrings('zh-CN');
+    const { container } = await renderDropdown({
+      strings,
+      sessions: [
+        makeSession('missing-title'),
+        makeSession('empty-title', ''),
+        makeSession('named', 'Named session'),
+      ],
+      searchQuery: strings('session.untitled'),
+    });
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-session-id]'),
+    );
+    expect(rows.map((row) => row.dataset.sessionId)).toEqual([
+      'missing-title',
+      'empty-title',
+    ]);
+    expect(
+      rows.map(
+        (row) =>
+          row.querySelector<HTMLElement>('span:not(.qwen-session-row-actions)')
+            ?.textContent,
+      ),
+    ).toEqual([strings('session.untitled'), strings('session.untitled')]);
+  });
+
+  it('matches a session by its own display name', async () => {
+    const { container } = await renderDropdown({
+      sessions: [
+        makeSession('report', 'Quarterly Report'),
+        makeSession('missing-title'),
+      ],
+      searchQuery: ' REPORT ',
+    });
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-session-id]'),
+    );
+    expect(rows.map((row) => row.dataset.sessionId)).toEqual(['report']);
+  });
 });
 
 describe('SessionHistoryDropdown focus management', () => {
@@ -164,7 +219,7 @@ describe('SessionHistoryDropdown focus management', () => {
 
 describe('SessionHistoryDropdown pagination', () => {
   it('offers a focusable load-more control without requiring scroll overflow', async () => {
-    const { container, onLoadMore } = await renderDropdown(true);
+    const { container, onLoadMore } = await renderDropdown({ hasMore: true });
     expect(container.querySelector('[data-session-source]')).toBeNull();
     const loadMore = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent === t('session.loadMore'),

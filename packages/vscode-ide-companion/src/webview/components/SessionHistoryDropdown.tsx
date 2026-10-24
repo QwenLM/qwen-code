@@ -178,9 +178,12 @@ export function SessionHistoryDropdown({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
 
+  const getSessionLabel = (session: DaemonSessionSummary) =>
+    session.displayName || t('session.untitled');
+
   const filtered = searchQuery.trim()
     ? sessions.filter((session) =>
-        (session.displayName ?? 'Untitled')
+        getSessionLabel(session)
           .toLowerCase()
           .includes(searchQuery.trim().toLowerCase()),
       )
@@ -493,7 +496,7 @@ export function SessionHistoryDropdown({
                           fontWeight: active ? 600 : 400,
                         }}
                       >
-                        {session.displayName || t('session.untitled')}
+                        {getSessionLabel(session)}
                       </span>
                     )}
 
