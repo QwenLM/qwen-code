@@ -26,8 +26,15 @@ import {
 } from './agent-transcript.js';
 import { ToolMode } from '../tools/code-mode.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { AgentTerminateMode } from './runtime/agent-types.js';
-import { SubagentError, SubagentErrorCode } from '../subagents/types.js';
+import {
+  AgentTerminateMode,
+  type AgentExternalInput,
+} from './runtime/agent-types.js';
+import {
+  SubagentError,
+  SubagentErrorCode,
+  type SubagentConfig,
+} from '../subagents/types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
 import {
   getCurrentAgentDepth,
@@ -200,15 +207,17 @@ describe('BackgroundAgentResumeService', () => {
     } = {},
   ) {
     const subagentManager = {
-      loadSubagent: vi.fn(async (name: string) =>
-        name === 'researcher'
-          ? {
-              name: 'researcher',
-              color: 'cyan',
-              model: undefined as string | undefined,
-              approvalMode: undefined as string | undefined,
-            }
-          : null,
+      loadSubagent: vi.fn(
+        async (name: string): Promise<Partial<SubagentConfig> | null> =>
+          name === 'researcher'
+            ? {
+                name: 'researcher',
+                color: 'cyan',
+                systemPrompt: 'You are a researcher.',
+                model: undefined,
+                approvalMode: undefined,
+              }
+            : null,
       ),
       createAgentHeadless: vi.fn(),
     };
@@ -1188,10 +1197,114 @@ describe('BackgroundAgentResumeService', () => {
       throw new Error('Expected resume execute context');
     }
     expect(contextArg.get('hook_context')).toBe('resume-context');
-    expect(contextArg.get('task_prompt')).toBe('continue');
+    expect(contextArg.get('task_prompt')).toBe('continue\n\nresume-context');
     expect(resumedInvocation).toBeUndefined();
     await waitForStatus(agentId, 'completed');
   });
+
+  it.each([
+    { template: false, structured: false },
+    { template: true, structured: false },
+    { template: false, structured: true },
+    { template: true, structured: true },
+  ])(
+    'delivers cold-resume hook context (template=$template, structured=$structured)',
+    async ({ template, structured }) => {
+      const agentId = 'agent-cold-hook-context';
+      seedPaused('session-cold-hook-context', agentId, 'Resume with context');
+      const subagent = stubSubagent({
+        executeExternalInputs: vi.fn().mockResolvedValue(undefined),
+      });
+      const { service, subagentManager, hookSystem } = createService({
+        subagent,
+      });
+      const definition = await subagentManager.loadSubagent('researcher');
+      subagentManager.loadSubagent.mockResolvedValue({
+        ...definition!,
+        systemPrompt: template
+          ? 'Research with ${hook_context}.'
+          : 'Research the task.',
+      });
+      hookSystem.fireSubagentStartEvent.mockResolvedValue({
+        getAdditionalContext: () => 'cold-hook-context',
+      });
+      const input: AgentExternalInput = structured
+        ? { kind: 'notification', text: 'Monitor completed.' }
+        : 'continue';
+
+      await service.resumeBackgroundAgent(agentId, input);
+      await waitForStatus(agentId, 'completed');
+
+      expect(subagent.execute).toHaveBeenCalledOnce();
+      expect(subagent.executeExternalInputs).not.toHaveBeenCalled();
+      const context = subagent.execute.mock.calls[0]![0];
+      expect(context.get('hook_context')).toBe('cold-hook-context');
+      const inputs = context.get('external_inputs_override');
+      if (structured) {
+        expect(inputs).toEqual(
+          template ? [input] : [input, 'cold-hook-context'],
+        );
+      } else {
+        expect(inputs).toBeUndefined();
+        expect(context.get('task_prompt')).toBe(
+          template ? 'continue' : 'continue\n\ncold-hook-context',
+        );
+      }
+      const actualInput = JSON.stringify(inputs ?? context.get('task_prompt'));
+      expect(actualInput.split('cold-hook-context')).toHaveLength(
+        template ? 1 : 2,
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'delivers new hook context to resident inputs (structured=%s)',
+    async (structured) => {
+      const agentId = 'agent-resident-hook-context';
+      seedPaused(
+        'session-resident-hook-context',
+        agentId,
+        'Resume with context',
+      );
+      const subagent = stubSubagent();
+      const { service, subagentManager, hookSystem } = createService({
+        subagent,
+      });
+      const definition = await subagentManager.loadSubagent('researcher');
+      subagentManager.loadSubagent.mockResolvedValue({
+        ...definition!,
+        systemPrompt: 'Research with ${hook_context}.',
+      });
+      hookSystem.fireSubagentStartEvent
+        .mockResolvedValueOnce({ getAdditionalContext: () => 'first-context' })
+        .mockResolvedValueOnce({ getAdditionalContext: () => 'next-context' });
+      const registerResident = vi.spyOn(registry, 'registerResidentAgent');
+      await service.resumeBackgroundAgent(agentId, 'continue');
+      await waitForStatus(agentId, 'completed');
+      const input: AgentExternalInput = structured
+        ? { kind: 'notification', text: 'Monitor completed.' }
+        : 'follow up';
+
+      const resident = registerResident.mock.calls[0]![1];
+      expect(resident.continue(input)).toBe('continued');
+      await waitForStatus(agentId, 'completed');
+
+      expect(hookSystem.fireSubagentStartEvent).toHaveBeenCalledTimes(2);
+      expect(subagent.execute).toHaveBeenCalledTimes(2);
+      const context = subagent.execute.mock.calls[1]![0];
+      expect(context.get('hook_context')).toBe('next-context');
+      const inputs = context.get('external_inputs_override');
+      if (structured) {
+        expect(inputs).toEqual([input, 'next-context']);
+      } else {
+        expect(context.get('task_prompt')).toBe('follow up\n\nnext-context');
+      }
+      const actualInput = JSON.stringify(inputs ?? context.get('task_prompt'));
+      expect(actualInput.split('next-context')).toHaveLength(2);
+      expect(actualInput).not.toContain('first-context');
+      expect(actualInput).not.toContain('undefined');
+    },
+  );
 
   it('sets hook_context to empty string when no hook system is configured', async () => {
     const agentId = 'agent-no-hook';
@@ -1934,21 +2047,25 @@ describe('BackgroundAgentResumeService', () => {
           description: `${kind} interactive question schema`,
         },
       ];
-      const { service, subagentManager, stubToolRegistry } = createService({
-        currentForkRuntime: {
-          systemInstruction: currentSystemInstruction,
-          advertisedTools: [
-            ...surface('advertised'),
-            { name: 'mcp__removed__search' },
-          ],
-          registeredTools: [
-            ...surface('registered'),
-            {
-              name: 'mcp__docs__search',
-              description: 'registered deferred MCP target',
-            },
-          ],
-        },
+      const { service, subagentManager, stubToolRegistry, hookSystem } =
+        createService({
+          currentForkRuntime: {
+            systemInstruction: currentSystemInstruction,
+            advertisedTools: [
+              ...surface('advertised'),
+              { name: 'mcp__removed__search' },
+            ],
+            registeredTools: [
+              ...surface('registered'),
+              {
+                name: 'mcp__docs__search',
+                description: 'registered deferred MCP target',
+              },
+            ],
+          },
+        });
+      hookSystem.fireSubagentStartEvent.mockResolvedValue({
+        getAdditionalContext: () => 'fork-resume-context',
       });
       const deniedBuild = vi.fn();
       stubToolRegistry.getTool.mockReturnValue({
@@ -2001,6 +2118,14 @@ describe('BackgroundAgentResumeService', () => {
         'Earlier capability listings in the conversation history are obsolete',
       );
       expect(contextArg.get('task_prompt')).toContain('continue');
+      expect(contextArg.get('hook_context')).toBe('fork-resume-context');
+      expect(contextArg.get('task_prompt')).toContain(
+        'continue\n\nfork-resume-context',
+      );
+      expect(currentSystemInstruction).toEqual({
+        role: 'system',
+        parts: [{ text: 'current parent system instruction' }],
+      });
       expect(captured.deniedError).toContain('execution allowlist');
       expect(captured.deniedError).not.toContain('not found');
       expect(stubToolRegistry.getTool).not.toHaveBeenCalled();
