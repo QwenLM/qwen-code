@@ -1208,15 +1208,10 @@ jobs:
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: 'node .github/scripts/check-test-growth.mjs'
 
-      # Deliberately BELOW the two steps above that refetch shallow history:
-      # `Report test growth` fetches the merge base at depth 1, and
-      # `Check the API contract version advances` fetches refs/heads/<base> at
-      # depth 1 — the very commit LINT_BASE_SHA names whenever the base has not
-      # moved since the event. Depth 1 grafts that commit, `merge-base` then has
-      # no ancestry to walk, and lint-scope silently falls back to the full scan
-      # this job exists to avoid. Nothing above here needs this history.
-      # `github_ci_only` still gets it: the gate below is the profile check, and
-      # the helper-checks step that uses lint.js comes after this point.
+      # Stays below the two steps above that refetch shallow history: a
+      # depth-1 fetch of the base ref grafts the commit LINT_BASE_SHA names and
+      # `merge-base` then fails closed to a silent full scan (design doc,
+      # "PR-lane history"). The helper-checks step that runs lint.js is below.
       - name: 'Fetch incremental lint history'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
         timeout-minutes: 2
