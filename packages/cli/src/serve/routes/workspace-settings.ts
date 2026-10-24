@@ -90,6 +90,7 @@ const OUTPUT_LANGUAGE_OPTIONS = SUPPORTED_LANGUAGES.map(
 const WEB_SHELL_SETTINGS = new Set([
   'ui.allowedApprovalModes',
   'ui.compactMode',
+  'serve.maxSessions',
   'voiceModel',
   'imageModel',
   'advisorModel',
