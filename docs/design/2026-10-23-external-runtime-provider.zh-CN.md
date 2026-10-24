@@ -20,9 +20,9 @@ Broker 在配置的 provider URL 下相对请求 `provision` 和 `observe`，使
 
 `provision` 请求包含 `protocolVersion`、`provisionRequestId`、`identity`、`scope`、`boot` 和固定逻辑 `handle: {requestId: provisionRequestId}`。Broker 在首次 HTTP 请求之前先持久化该 handle：ensureResource 不进行远程操作，provision 才发出幂等请求。scope 包含租户、Workspace ID/generation、worker 内 cwd、隔离类型和隔离键。boot 原样使用现有封闭的 v1 协议，携带 Broker 生成的 runtime/incarnation、lease/epoch/token、capability digest 等字段，不得记录到日志。
 
-适配服务必须持久化按 provisionRequestId 去重的结果，并绑定 identity；相同请求只能指向原物理资源，丢失响应或原 worker 消失后不能悄悄新建替代者。响应为 `{protocolVersion:1,handle:{requestId:provisionRequestId},endpoint?:"https://worker.example/"}`。实际 sandbox ID 只保存在适配器的不可变资源记录中，不作为公共 handle 返回。Broker 保存带 providerId、requestId、identity 的封装，拒绝返回不同逻辑 handle 的响应。identity 是 providerId、隔离键及去掉 token 的 boot 的规范 JSON SHA-256。这样首次 HTTP 响应丢失时 Broker 仍有已保存的 handle，可以重试同一幂等请求。
+适配服务必须持久化按 provisionRequestId 去重的结果，并绑定 identity；请求 ID 相同但 identity 不一致时必须拒绝（不能返回原资源）。相同请求只能指向原物理资源，丢失响应或原 worker 消失后不能悄悄新建替代者。响应为 `{protocolVersion:1,handle:{requestId:provisionRequestId},endpoint?:"https://worker.example/"}`。实际 sandbox ID 只保存在适配器的不可变资源记录中；物理 ID 和凭据都不作为 handle 返回。Broker 保存带 providerId、requestId、identity 的封装，拒绝返回不同逻辑 handle 的响应。identity 是 providerId、隔离键及去掉 token 的 boot 的规范 JSON SHA-256。这样首次 HTTP 响应丢失时 Broker 仍有已保存的 handle，可以重试同一幂等请求。
 
-`observe` 请求包含版本、请求 ID、identity 和原 handle，必须只读。响应为 `RUNNING`（必须有 worker HTTP(S) origin）、`STARTING` 或 `UNKNOWN`。`GONE` 会阻止接管，不会触发自动替换。Broker 会独立向 worker 执行身份认证，provider 报告 RUNNING 不等于 worker 身份已验证。
+`observe` 请求包含版本、请求 ID、identity 和原 handle，必须只读，且必须校验原物理 handle 完全一致。响应为 `RUNNING`（必须有 worker HTTP(S) origin）、`STARTING` 或 `UNKNOWN`。`GONE` 会阻止接管，不会触发自动替换。Broker 会独立向 worker 执行身份认证，provider 报告 RUNNING 不等于 worker 身份已验证。
 
 **没有 release HTTP 接口。** Broker 在并发竞争失败或认证失败时也可能调用 release，因此它不能授权杀死另一持有者正在使用的 worker。自动关闭与恢复必须另行定义带所有权约束的停止协议和持久化停止证明。TTL 到期属于资源丢失，不属于干净停止证明。
 
@@ -34,17 +34,17 @@ Runtime provisioner 设为 `external-scratch`，使用 session 隔离，明确�
 - `QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_TOKEN`
 - `QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID`：稳定 provider 身份，默认 `external`
 - `QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT`：默认 `30s`
-- `QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT`：默认 `3m`
+- `QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT`：默认 `2m`；Broker 的首次尝试受当前四倍 operation lease 截止时间约束，超过该栅栏的配置可能需要一次重试才能收养原 worker
 
 Preflight 仅验证配置，不证明网络连通、worker 身份或 Hosted 工具可用。适配服务重启后必须保留幂等记录。当前有界的进程内 placement 缓存沿用 scratch 模型，不代表已经实现完整资源回收机制。
 
 ## Hosted Workspace 必须补齐的扩展
 
-增加明确的 `external-workspace` 能力，避免改变已保存 scratch handle 的含义。复用 `managed-context/1`、boot-v2 和现有 install/activate/tool 协议，不向封闭 boot 塞入 Aone 字段。
+增加明确的 `external-workspace` 能力，避免改变已保存 scratch handle 的含义。复用 `managed-context/1`、boot-v2 和现有 install/activate/tool 协议，不向封闭的 worker boot 文档塞入任何 provider 专有字段。
 
 1. 独立注册远程存储：provider ID、稳定物理存储身份、注册 revision、租户/storage alias 和 worker mountRoot。提供只读连续性与规范 cwd 探测。一次性 sandbox ID 不能替代持久存储身份。
 2. 为 `WorkspaceStorageGuard`、`WorkspaceExecutionStore` 和 `WorkspaceRuntimeResolver` 增加外部存储所有权与物理键映射，保留 SQL writer/generation 约束、跨租户授权和别名冲突保护。中心不能对 worker 内路径执行本地 Files 检查。
-3. `WorkspaceRuntimeTransport` 在 claim 前验证外部存储，再安装 context 和激活；结果不确定时保留所有权。不能简单放开所有 provider 类型。
+3. `WorkspaceRuntimeTransport` 在 claim 前验证外部存储，再安装 context 和激活；结果不确定时保留所有权。不能大范围绕过现有的 local/SSH/CSI 分支。
 4. CLI worker 增加明确的远程 managed container 启动路径。当前 container 模式拒绝普通 boot-v2。worker 和控制面都必须验证预期存储身份，保留路径范围与进程所有权检查。
 5. 前台 shell 需要 worker 可访问的中心 publication/capture 地址和相应控制限制。文件浏览、MCP、本地目录导入、子 Workspace、快照、迁移，未实现前继续拒绝。
 6. 声称自动关闭或恢复前，必须定义针对原 worker 的 stopDrained 证明。release、探测失败、GONE 或沙箱过期均不足以释放存储持有者。
@@ -63,4 +63,4 @@ Aone SDK、分配、入口地址、挂载和进程监管留在独立适配服务
 | Broker + 真实 worker | 身份验证和文件工具、重复或丢响应、重启接管                        | 原进程身份及真实工具调用               |
 | 公开 Hosted 远程 E2E | 文件读写编辑、前台 shell/审批/capture、租户与存储不匹配、资源丢失 | 用户使用中心服务调用远程工具的完整路径 |
 
-留存的本地 Surefire 报告记录了 external provisioner、HTTP client 和配置三个测试套件共 11 项测试，失败、错误和跳过均为零。这些报告缺少将被测源码及 sibling SDK 构建输入完整绑定到当前 PR head 的来源记录，因此属于历史证据，不能作为当前 head 的验收结果。已安装 SDK jar 与 worktree 中构建的 SDK jar 一致，但构件一致本身不能确定源码输入。之后在 commit `1e67e2f` 上补上了仅针对 Java 源码的溯源：JDK 21、离线 Maven、macOS 下 `mvn -o -DskipTests test-compile` BUILD SUCCESS，同样三个套件 11 项测试零失败/错误/跳过，`checkstyle:check checkstyle:check@runtime-broker-checkstyle` BUILD SUCCESS。该 head 早于当前对 `main` 的合并，期间改动与这些文件无关；CI 每次推送都会重跑，仍是验收依据。当前 revision 的 CI 验证另行记录；完整 MySQL/Hosted/fault 门禁需要仓库的 full-tier workflow。`ExternalRuntimeWorkerFaultGateTest` 在 full-tier fault gates 中通过受控 operator fixture 串联真实 Broker、HTTP client 和 CLI worker；当前执行证据记录在 PR 中。它不能证明厂商沙箱或 Hosted Workspace 集成。另行报告的私有适配器测试也不能证明这两条集成路径。
+留存的本地 Surefire 报告记录了 external provisioner、HTTP client 和配置三个测试套件共 11 项测试，失败、错误和跳过均为零。这些报告缺少将被测源码及 sibling SDK 构建输入完整绑定到当前 PR head 的来源记录，因此属于历史证据，不能作为当前 head 的验收结果。已安装 SDK jar 与 worktree 中构建的 SDK jar 一致，但构件一致本身不能确定源码输入。之后在 commit `1e67e2f` 上补上了仅针对 Java 源码的溯源：JDK 21、离线 Maven、macOS 下 `mvn -o -DskipTests test-compile` BUILD SUCCESS，同样三个套件 11 项测试零失败/错误/跳过，`checkstyle:check checkstyle:check@runtime-broker-checkstyle` BUILD SUCCESS。该 head 早于当前 head；此后 Java 生产与测试源码均已变化，因此所引用的运行不覆盖 head 的 Java 源码。CI 每次推送都会重跑，仍是验收依据。当前 revision 的 CI 验证另行记录；完整 MySQL/Hosted/fault 门禁需要仓库的 full-tier workflow。`ExternalRuntimeWorkerFaultGateTest` 在 full-tier fault gates 中通过受控 operator fixture 串联真实 Broker、HTTP client 和 CLI worker；当前执行证据记录在 PR 中。它不能证明厂商沙箱或 Hosted Workspace 集成。另行报告的私有适配器测试也不能证明这两条集成路径。

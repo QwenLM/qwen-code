@@ -50,9 +50,17 @@ class ExternalRuntimeProvisionerTest {
             assertEquals(seed.getToken(), lease.getToken());
             assertFalse(handle.toJson().contains(seed.getToken()));
             var boot = (Map<?, ?>) api.provisionRequest.get("boot");
+            assertEquals(seed.getToken(), boot.get("token"));
             assertEquals(seed.getLeaseId(), boot.get("leaseId"));
             assertEquals(seed.getGatewayIncarnation(), boot.get("runtimeIncarnation"));
             assertEquals("/workspace", boot.get("workspaceCwd"));
+            var scope = (Map<?, ?>) api.provisionRequest.get("scope");
+            assertEquals("tenant", scope.get("tenantId"));
+            assertEquals("workspace", scope.get("workspaceId"));
+            assertEquals("1", scope.get("workspaceGeneration"));
+            assertEquals("/workspace", scope.get("workspaceCwd"));
+            assertEquals("session", scope.get("isolationClass"));
+            assertEquals("harness", scope.get("isolationKey"));
         }
         try (var restored = provisioner(api)) {
             var observed = join(restored.reconcile(request, seed, handle, lease));
@@ -63,6 +71,9 @@ class ExternalRuntimeProvisionerTest {
             assertTrue(restored.isUsable(lease));
         }
         assertEquals(1, api.provisions);
+        assertEquals(seed.getProvisionRequestId(), api.observeRequest.get("provisionRequestId"));
+        assertEquals(api.provisionRequest.get("identity"), api.observeRequest.get("identity"));
+        assertEquals(api.provisionRequest.get("handle"), api.observeRequest.get("handle"));
     }
 
     @Test
@@ -74,9 +85,17 @@ class ExternalRuntimeProvisionerTest {
             var handle = join(provider.ensureResource(request, seed, null));
             api.handle = Map.of("requestId", "replacement");
             assertEquals(handle, join(provider.ensureResource(request, seed, handle)));
-            assertThrows(CompletionException.class, () -> join(provider.provision(request, seed)));
+            var mismatch = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                    () -> join(provider.provision(request, seed))).getCause();
+            assertEquals(409, mismatch.getStatusCode());
+            assertEquals("runtime_broker_resource_conflict", mismatch.getCode());
+            assertFalse(mismatch.isRetryable());
             api.handle = null;
-            assertThrows(CompletionException.class, () -> join(provider.provision(request, seed)));
+            var forgotten = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                    () -> join(provider.provision(request, seed))).getCause();
+            assertEquals(409, forgotten.getStatusCode());
+            assertEquals("runtime_broker_resource_conflict", forgotten.getCode());
+            assertFalse(forgotten.isRetryable());
             assertEquals(1, api.provisions);
             var otherScope = provider.createRequest(new RuntimeScope("other-tenant", "workspace", "1", "/workspace",
                     "sha256:" + "a".repeat(64), "session"), "harness");
@@ -128,6 +147,118 @@ class ExternalRuntimeProvisionerTest {
     }
 
     @Test
+    void shutdownDuringReconcileAnswersUnknownInsteadOfConflict() {
+        var api = new Provider();
+        var provider = provisioner(api);
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        var request = request(provider);
+        var handle = join(provider.ensureResource(request, seed, null));
+        api.closing = provider;
+        assertEquals(RuntimeObservation.Outcome.UNKNOWN,
+                join(provider.reconcile(request, seed, handle, null)).getOutcome());
+    }
+
+    @Test
+    void shutdownDuringProvisionPollFailsRetryable() {
+        var api = new Provider();
+        var provider = provisioner(api);
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        var request = request(provider);
+        join(provider.ensureResource(request, seed, null));
+        api.closing = provider;
+        var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                () -> join(provider.provision(request, seed))).getCause();
+        assertEquals("runtime_external_unavailable", failure.getCode());
+        assertTrue(failure.isRetryable());
+    }
+
+    @Test
+    void permanentProvisionFailureFreesThePlacement() {
+        var api = new Provider();
+        api.provisionFailure = new RuntimeBrokerException(404, "runtime_external_provider_failed",
+                "Provider path is missing.", false);
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        try (var provider = provisioner(api)) {
+            var request = request(provider);
+            join(provider.ensureResource(request, seed, null));
+            assertThrows(CompletionException.class, () -> join(provider.provision(request, seed)));
+            assertThrows(CompletionException.class, () -> join(provider.provision(request, seed)));
+            assertEquals(1, api.provisions);
+        }
+    }
+
+    @Test
+    void providerFailureSurfacesWithItsOwnCodeStatusAndRetryableFlag() {
+        var api = new Provider();
+        api.failure = new RuntimeBrokerException(404, "runtime_external_provider_failed",
+                "Provider path is missing.", false);
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        try (var provider = provisioner(api)) {
+            var request = request(provider);
+            join(provider.ensureResource(request, seed, null));
+            var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                    () -> join(provider.provision(request, seed))).getCause();
+            assertEquals(404, failure.getStatusCode());
+            assertEquals("runtime_external_provider_failed", failure.getCode());
+            assertFalse(failure.isRetryable());
+        }
+    }
+
+    @Test
+    void placementCapacityRejectsFreshSeedsButReadmitsAdmittedOnes() {
+        var api = new Provider();
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        try (var provider = provisioner(api)) {
+            var request = request(provider);
+            var admittedHandle = join(provider.ensureResource(request, seed, null));
+            for (int n = 0; n < ExternalRuntimeProvisioner.MAX_PLACEMENTS - 1; n++) {
+                join(provider.ensureResource(request, RuntimeProvisionSeed.create("binding-" + n, 1), null));
+            }
+            assertEquals(0, api.provisions);
+            assertEquals(0, api.observations);
+            // An admitted seed re-admits without rechecking the bound.
+            assertEquals(admittedHandle, join(provider.ensureResource(request, seed, admittedHandle)));
+            var bindings = new InMemoryRuntimeBindingRepository();
+            var fresh = bindings.claimOperation(bindings.findOrCreate(request).getBindingId(),
+                    "broker", Duration.ofMinutes(1));
+            var failure = assertThrows(RuntimeBrokerException.class, () -> provider.reserveResource(fresh));
+            assertEquals(503, failure.getStatusCode());
+            assertEquals("runtime_external_capacity", failure.getCode());
+            assertTrue(failure.isRetryable());
+        }
+    }
+
+    @Test
+    void startingPollsUntilRunning() {
+        var api = new Provider();
+        api.startingLeft = 2;
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        try (var provider = provisioner(api)) {
+            var request = request(provider);
+            join(provider.ensureResource(request, seed, null));
+            var lease = join(provider.provision(request, seed));
+            assertEquals(seed.getToken(), lease.getToken());
+            assertEquals(3, api.observations);
+        }
+    }
+
+    @Test
+    void alwaysStartingExhaustsTheStartupTimeoutRetryably() {
+        var api = new Provider();
+        api.state = "STARTING";
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        try (var provider = provisioner(api)) {
+            var request = request(provider);
+            join(provider.ensureResource(request, seed, null));
+            var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                    () -> join(provider.provision(request, seed))).getCause();
+            assertEquals("runtime_external_unavailable", failure.getCode());
+            assertTrue(failure.isRetryable());
+            assertTrue(api.observations > 1, "poll loop must not collapse to one observation");
+        }
+    }
+
+    @Test
     void brokerPersistsLogicalHandleBeforeLostProvisionReplyAndRetriesSameOperation() throws Exception {
         var api = new Provider();
         var bindings = new InMemoryRuntimeBindingRepository();
@@ -135,7 +266,11 @@ class ExternalRuntimeProvisionerTest {
         try (var provider = provisioner(api);
                 var broker = broker(provider, bindings)) {
             api.provisionFailure = new RuntimeBrokerException(503, "timeout", "reply lost", true);
-            assertThrows(CompletionException.class, () -> join(broker.warm("harness")));
+            var lost = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                    () -> join(broker.warm("harness"))).getCause();
+            assertEquals(503, lost.getStatusCode());
+            assertEquals("timeout", lost.getCode());
+            assertTrue(lost.isRetryable());
             var retained = bindings.findOrCreate(request(provider));
             assertEquals(RuntimeBindingRecord.State.PROVISIONING, retained.getState());
             var handle = retained.getResourceHandle();
@@ -250,10 +385,13 @@ class ExternalRuntimeProvisionerTest {
     private static final class Provider implements ExternalRuntimeClient {
         private Map<String, Object> handle;
         private volatile Map<String, Object> provisionRequest;
+        private volatile Map<String, Object> observeRequest;
         private RuntimeBrokerException failure;
         private RuntimeBrokerException provisionFailure;
+        private ExternalRuntimeProvisioner closing;
         private String endpoint = "https://worker.example/";
         private String state = "RUNNING";
+        private int startingLeft;
         private int provisions;
         private int observations;
 
@@ -271,10 +409,19 @@ class ExternalRuntimeProvisionerTest {
         @Override
         public CompletionStage<Map<String, Object>> observe(Map<String, Object> request) {
             observations++;
+            observeRequest = request;
+            if (closing != null) {
+                closing.close();
+            }
             if (failure != null) {
                 return CompletableFuture.failedFuture(failure);
             }
-            return CompletableFuture.completedFuture(Map.of("protocolVersion", 1, "state", state,
+            String observed = state;
+            if (startingLeft > 0) {
+                startingLeft--;
+                observed = "STARTING";
+            }
+            return CompletableFuture.completedFuture(Map.of("protocolVersion", 1, "state", observed,
                     "endpoint", endpoint));
         }
     }

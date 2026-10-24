@@ -143,6 +143,6 @@ qwen:
       external-provider-token: '${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_TOKEN:}'
       external-provider-id: '${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID:external}'
       external-request-timeout: '${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT:30s}'
-      external-startup-timeout: '${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT:3m}'
+      external-startup-timeout: '${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT:2m}'
       static-endpoint: '${QWEN_MANAGED_AGENT_STATIC_RUNTIME_ENDPOINT:}'
       static-token: '${QWEN_MANAGED_AGENT_STATIC_RUNTIME_TOKEN:}'

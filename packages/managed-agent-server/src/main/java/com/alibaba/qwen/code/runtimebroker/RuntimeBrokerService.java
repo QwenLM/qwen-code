@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
@@ -3599,14 +3600,23 @@ public final class RuntimeBrokerService implements AutoCloseable {
         try {
             provisioner.reserveResource(claimed);
         } catch (RuntimeException failure) {
+            // Pre-create admission has not committed a resource identity yet,
+            // so any retryable failure leaves the binding PROVISIONING with its
+            // original seed for a later Broker round. Once a handle exists,
+            // only the capacity/busy answers are known to stay adoptable; the
+            // external provisioner's retryable reserveResource outcomes are
+            // exactly capacity and shutdown.
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
-                    && ((request.isManagedContext() && brokerFailure.getStatusCode() == 409
-                            && "workspace_csi_busy".equals(brokerFailure.getCode()))
+                    && (claimed.getResourceHandle() == null
+                            || (request.isManagedContext() && brokerFailure.getStatusCode() == 409
+                                    && "workspace_csi_busy".equals(brokerFailure.getCode()))
                             || (!request.isManagedContext() && brokerFailure.getStatusCode() == 503
                                     && (("kubernetes-scratch".equals(request.getProvisionerKind())
                                             && "runtime_kubernetes_capacity".equals(brokerFailure.getCode()))
-                                            || ("external-scratch".equals(request.getProvisionerKind())
-                                                    && "runtime_external_capacity".equals(brokerFailure.getCode())))));
+                                            || (ExternalRuntimeProvisioner.KIND.equals(request.getProvisionerKind())
+                                                    && ("runtime_external_capacity".equals(brokerFailure.getCode())
+                                                            || "runtime_external_unavailable"
+                                                                    .equals(brokerFailure.getCode()))))));
             if (!busy) {
                 blockRecoveryQuietly(claimed, failure);
             }
@@ -3716,7 +3726,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                                 cause);
                                     }
                                 } else if (currentClaim
-                                        .getResourceHandle() == null) {
+                                        .getResourceHandle() == null
+                                        // The external ensureResource commits
+                                        // nothing before the handle is returned.
+                                        && !ExternalRuntimeProvisioner.KIND
+                                                .equals(request.getProvisionerKind())) {
                                     blockRecoveryQuietly(currentClaim, cause);
                                 }
                             }

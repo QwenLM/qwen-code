@@ -55,7 +55,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     private final Map<List<Object>, Placement> placementsByLease = new ConcurrentHashMap<>();
 
     public ExternalRuntimeProvisioner(ExternalRuntimeClient client, String providerId) {
-        this(client, providerId, Duration.ofMinutes(3));
+        this(client, providerId, Duration.ofMinutes(2));
     }
 
     public ExternalRuntimeProvisioner(ExternalRuntimeClient client, String providerId, Duration startupTimeout) {
@@ -131,7 +131,17 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             body.put("scope", scope(request));
             body.put("boot", boot(request, seed));
             body.put("handle", saved.handle().getValue().get("provider"));
-            Map<String, Object> response = call(client.provision(Map.copyOf(body)));
+            Map<String, Object> response;
+            try {
+                response = call(client.provision(Map.copyOf(body)));
+            } catch (RuntimeBrokerException error) {
+                // A permanent outcome frees this seed's bounded retry slot; a
+                // retryable one keeps it so the original resource stays recoverable.
+                if (!error.isRetryable()) {
+                    forgetPlacement(saved);
+                }
+                throw error;
+            }
             if (!saved.handle().getValue().get("provider").equals(response.get("handle"))) {
                 forgetPlacement(saved);
                 throw conflict();
@@ -303,8 +313,11 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     private void savePlacement(Placement value) {
         synchronized (placements) {
+            if (executor.isShutdown()) {
+                throw unavailable();
+            }
             Placement current = placements.get(value.seed());
-            if (executor.isShutdown() || current == null || !current.request().equals(value.request())
+            if (current == null || !current.request().equals(value.request())
                     || (current.handle() != null && !current.handle().equals(value.handle()))) {
                 throw conflict();
             }
@@ -422,7 +435,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             return response;
         } catch (CompletionException error) {
             if (error.getCause() instanceof RuntimeBrokerException failure) {
-                throw failure.isRetryable() ? unavailable() : conflict();
+                throw failure;
             }
             throw unavailable();
         }

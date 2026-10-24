@@ -96,6 +96,43 @@ class ManagedAgentPropertiesTest {
                 });
     }
 
+    private static final String PROVIDER_ID_KEY =
+            "qwen.managed-agent.runtime-broker.external-provider-id";
+    private static final String REQUEST_TIMEOUT_KEY =
+            "qwen.managed-agent.runtime-broker.external-request-timeout";
+    private static final String STARTUP_TIMEOUT_KEY =
+            "qwen.managed-agent.runtime-broker.external-startup-timeout";
+
+    @Test
+    void applicationYmlBindsTheExternalRuntimeDefaults() throws java.io.IOException {
+        var values = applicationYmlValues();
+        // The named contract itself: renaming or typoing a variable shows up
+        // here, and dropping the '2m' unit flips the startup bind to PT2S
+        // instead of PT2M while every duration floor keeps passing.
+        assertThat(values).containsEntry(PROVIDER_ID_KEY,
+                "${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID:external}");
+        assertThat(values).containsEntry(REQUEST_TIMEOUT_KEY,
+                "${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT:30s}");
+        assertThat(values).containsEntry(STARTUP_TIMEOUT_KEY,
+                "${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT:2m}");
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        PROVIDER_ID_KEY + "=" + values.get(PROVIDER_ID_KEY),
+                        REQUEST_TIMEOUT_KEY + "=" + values.get(REQUEST_TIMEOUT_KEY),
+                        STARTUP_TIMEOUT_KEY + "=" + values.get(STARTUP_TIMEOUT_KEY))
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    var broker = started.getBean(ManagedAgentProperties.class)
+                            .getRuntimeBroker();
+                    assertThat(broker.getExternalProviderId()).isEqualTo("external");
+                    assertThat(broker.getExternalRequestTimeout())
+                            .isEqualTo(java.time.Duration.ofSeconds(30));
+                    assertThat(broker.getExternalStartupTimeout())
+                            .isEqualTo(java.time.Duration.ofMinutes(2));
+                });
+    }
+
     private static java.util.Map<String, Object> applicationYmlValues() throws java.io.IOException {
         var loaded = new org.springframework.boot.env.YamlPropertySourceLoader().load(
                 "application.yml",

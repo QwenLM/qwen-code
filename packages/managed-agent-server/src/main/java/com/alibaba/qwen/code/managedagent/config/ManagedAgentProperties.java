@@ -526,6 +526,18 @@ public class ManagedAgentProperties implements EnvironmentAware {
         if (token == null || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
             throw new IllegalStateException("External Runtime provider token must be 16-4096 safe characters");
         }
+        // The shipped templates' placeholder satisfies the format rule, but
+        // anyone can read it in the distribution (preflight refuses the same
+        // shape for the Harness token).
+        if (token.startsWith("replace-")) {
+            throw new IllegalStateException("External Runtime provider token is still"
+                    + " the shipped template placeholder");
+        }
+        String digest = harness.getCapabilityDigest();
+        if (StringUtils.isNotBlank(digest) && !digest.matches("sha256:[0-9a-f]{64}")) {
+            throw new IllegalStateException("External Runtime Harness capability digest"
+                    + " must be sha256:<64 lowercase hex>");
+        }
         BrokerValues.requireId(runtimeBroker.getExternalProviderId(), "External Runtime provider ID");
         BrokerValues.requireId(runtimeBroker.getWorkspaceId(), "External Runtime workspace ID");
         String cwd = runtimeBroker.getWorkspaceCwd();
@@ -1262,7 +1274,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration externalRequestTimeout = Duration.ofSeconds(30);
         @DurationUnit(ChronoUnit.SECONDS)
-        private Duration externalStartupTimeout = Duration.ofMinutes(3);
+        private Duration externalStartupTimeout = Duration.ofMinutes(2);
         private String staticRuntimeInstanceId = "standalone-runtime";
         private String staticLeaseId = "standalone-lease";
         private long staticEpoch = 1;

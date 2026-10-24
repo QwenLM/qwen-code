@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.file.Files;
@@ -81,7 +82,11 @@ class ExternalRuntimeWorkerFaultGateTest {
                 assertEquals("beta\n", Files.readString(file));
 
                 operator.unknown = true;
-                assertThrows(ExecutionException.class, () -> join(broker.warm("harness")));
+                var unknownFailure = assertThrows(ExecutionException.class, () -> join(broker.warm("harness")));
+                assertTrue(unknownFailure.getCause() instanceof RuntimeBrokerException);
+                assertTrue(((RuntimeBrokerException) unknownFailure.getCause()).isRetryable());
+                assertEquals("runtime_external_unavailable",
+                        ((RuntimeBrokerException) unknownFailure.getCause()).getCode());
                 assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(ready.getBindingId()).getState());
                 operator.unknown = false;
                 assertSameLease(ready.getLease(), join(broker.warm("harness")).getLease());
@@ -104,7 +109,18 @@ class ExternalRuntimeWorkerFaultGateTest {
                 assertEquals(RuntimeSessionRecord.State.READY, reacquired.getState());
                 var duplicate = join(broker.createExecution("harness", "runtime-session", "write-key", write));
                 assertEquals(written.getExecutionCallId(), duplicate.getExecutionCallId());
-                assertEquals("beta\n", Files.readString(file), "Retry must not replay the write over the later edit");
+                assertTrue(duplicate.isSettled(), "Duplicate must be the original settled terminal receipt");
+                assertEquals(written.getExecutionStatus(), duplicate.getExecutionStatus());
+                assertEquals(written.getResult(), duplicate.getResult());
+                // A replayed terminal write would land after this receipt;
+                // hold the window the sibling gate uses to catch it.
+                FaultGateRig.hold(() -> {
+                    try {
+                        return Files.readString(file);
+                    } catch (IOException readFailure) {
+                        throw new UncheckedIOException(readFailure);
+                    }
+                }, "beta\n"::equals, Duration.ofSeconds(6), "file content after the duplicate receipt");
                 var read = reference("read", "read_file", Map.of("file_path", file.toString()));
                 var result = settle(broker, join(broker.createExecution("harness", "runtime-session", "read-key", read)));
                 assertEquals("success", result.getExecutionStatus());

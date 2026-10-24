@@ -64,6 +64,38 @@ class ExternalRuntimeConfigurationTest {
     }
 
     @Test
+    void rejectsAMalformedHarnessCapabilityDigestDuringStartupValidation() {
+        var properties = scratchProperties();
+        // Every external scope carries this digest (EmbeddedRuntimeBroker
+        // resolves it from the Harness properties); a malformed one only
+        // fails later, per warm, as a provider-blaming permanent 409.
+        properties.getHarness().setCapabilityDigest("SHA256:" + "A".repeat(64));
+        var error = assertThrows(IllegalStateException.class, properties::validateForPreflight);
+        assertTrue(error.getMessage().contains("capability digest"), error.getMessage());
+    }
+
+    @Test
+    void acceptsABlankHarnessCapabilityDigestDuringStartupValidation() {
+        // The digest is still optional at this gate: the Broker's
+        // construction refuses a blank one with its own named message.
+        var properties = scratchProperties();
+        assertEquals("", properties.getHarness().getCapabilityDigest());
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.startupValidationCheck(properties).status());
+    }
+
+    @Test
+    void rejectsTheShippedTemplateProviderTokenDuringStartupValidation() {
+        var properties = scratchProperties();
+        // Matches the Harness token precedent: the placeholder satisfies the
+        // token format, so it needs its own refusal to not boot as a live
+        // bearer credential anyone can read in the distribution.
+        properties.getRuntimeBroker().setExternalProviderToken("replace-with-a-long-random-token");
+        var error = assertThrows(IllegalStateException.class, properties::validateForPreflight);
+        assertTrue(error.getMessage().contains("template placeholder"), error.getMessage());
+    }
+
+    @Test
     void preflightDoesNotRequireWorkerCwdOrLocalStateDirectory(@TempDir Path directory) {
         Path missing = directory.resolve("worker-only");
         assertFalse(Files.exists(missing));
@@ -80,6 +112,9 @@ class ExternalRuntimeConfigurationTest {
                 "--qwen.managed-agent.runtime-broker.external-provider-token=provider-token-for-tests",
                 "--spring.datasource.url=jdbc:unsupported:preflight",
                 "--server.port=0"});
+        var validation = checks.stream().filter(check -> check.name().equals("validation"))
+                .findFirst().orElseThrow();
+        assertEquals(ManagedAgentPreflight.Status.PASS, validation.status());
         var workspace = checks.stream().filter(check -> check.name().equals("workspace"))
                 .findFirst().orElseThrow();
         assertEquals(ManagedAgentPreflight.Status.SKIP, workspace.status());

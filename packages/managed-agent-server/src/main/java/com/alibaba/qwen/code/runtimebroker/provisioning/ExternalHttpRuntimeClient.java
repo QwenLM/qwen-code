@@ -81,7 +81,7 @@ public final class ExternalHttpRuntimeClient implements ExternalRuntimeClient {
         var result = exchange.thenApply(response -> {
             int status = response.statusCode();
             if (status != 200) {
-                // 404/409 from the provider are definite answers; everything else may be transient.
+                // Only 408/429/5xx are retryable; every other non-200 (3xx, 4xx) is a permanent answer.
                 throw failure(status, status == 408 || status == 429 || status >= 500);
             }
             if (response.body().overflow()) {

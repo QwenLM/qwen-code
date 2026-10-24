@@ -150,11 +150,22 @@ managed-context (registered Workspace) requests are refused.
 Select it with `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-scratch` plus
 `QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL`, `..._PROVIDER_TOKEN`,
 `..._PROVIDER_ID` and optional `..._REQUEST_TIMEOUT` / `..._STARTUP_TIMEOUT`. The
-provider URL must be HTTP(S) without credentials, query or fragment; use HTTPS
-for anything outside a trusted control plane. Workspace files and Shell must stay
-disabled, and the configured `workspace-cwd` is the worker-side path, so the
-Broker host does not need that directory. Preflight validates configuration only;
-reachability and worker identity are checked on first use.
+selection does not imply the Broker itself: also set
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED=true`, a non-empty
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`, the
+`QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID` /
+`QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY` pair (the external path persists
+provision seeds encrypted through it) and
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. An explicit
+`QWEN_MANAGED_AGENT_WORKSPACE_ID` is required: the worker-side cwd cannot be
+hashed on the Broker host, so the local-process/Kubernetes derivation does not
+apply. The README's [Broker deployment](../README.md#broker-deployment) recipe
+lists the full export block. The provider URL must be HTTP(S) without
+credentials, query or fragment; use HTTPS for anything outside a trusted control
+plane. Workspace files and Shell must stay disabled, and the configured
+`workspace-cwd` is the worker-side path, so the Broker host does not need that
+directory. Preflight validates configuration only; reachability and worker
+identity are checked on first use.
 
 The provider implements two authenticated POST routes, `provision` and `observe`.
 `provision` is idempotent on `provisionRequestId`: the Broker persists a
@@ -169,7 +180,11 @@ bearer/lease protocol and keeps every lease, epoch and execution decision.
 
 Transient provider failures stay retryable against the same request and lease, so
 a temporary outage does not invalidate a healthy binding; endpoint or identity
-mismatch does. There is deliberately no `release` route. Release can run after an
+mismatch does. The provider ID, Workspace ID, Workspace generation, Workspace
+cwd and Harness capability digest are all digested into the handle identity
+described in the design; changing any of them after Sessions have been placed
+invalidates every existing binding, with no unblock path — set them once before
+the first Session. There is deliberately no `release` route. Release can run after an
 operation loses its CAS or fails attestation, so it cannot authorize stopping a
 worker another Broker may own. Closing a Session therefore does not stop its
 scratch worker: budget the provider's own TTL and inspect retained resources.

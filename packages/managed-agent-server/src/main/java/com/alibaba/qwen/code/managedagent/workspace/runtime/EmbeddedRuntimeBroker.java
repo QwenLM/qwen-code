@@ -578,12 +578,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     broker.getStaticEpoch()));
         }
         if (ExternalRuntimeProvisioner.KIND.equals(broker.getProvisioner())) {
-            if (!"session".equals(broker.getIsolationClass())) {
-                throw new IllegalStateException("External Runtime requires"
-                        + " session isolation");
-            }
-            require(broker.getExternalProviderUrl(), "External Runtime provider URL");
-            require(broker.getExternalProviderToken(), "External Runtime provider token");
+            // validateExternalRuntime() runs first in the constructor and
+            // owns every rule for this branch; duplicating it here would
+            // only rot against it.
             return new ExternalRuntimeProvisioner(new ExternalHttpRuntimeClient(
                     URI.create(broker.getExternalProviderUrl()), broker.getExternalProviderToken(),
                     broker.getExternalRequestTimeout()), broker.getExternalProviderId(),
