@@ -110,7 +110,7 @@ export interface CommandContext {
      *
      * @param history The array of history items to load.
      */
-    loadHistory: UseHistoryManagerReturn['loadHistory'];
+    loadHistory: (history: HistoryItem[], mode?: 'expand') => void;
     /** Refreshes the static history display in Ink. */
     refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;

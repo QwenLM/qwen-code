@@ -29,6 +29,7 @@ import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { helpCommand } from '../commands/helpCommand.js';
 import { quitCommand } from '../commands/quitCommand.js';
 import { clearCommand } from '../commands/clearCommand.js';
+import { rewindCommand } from '../commands/rewindCommand.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import {
@@ -164,6 +165,56 @@ function createTestCommandPath(path: string): SlashCommand {
 }
 
 describe('useSlashCommandProcessor', () => {
+  it.each(['rewind', 'rollback'])(
+    'marks only the real registry-cloned builtin /%s as slash-origin rewind',
+    async (invocation) => {
+      const actual = await vi.importActual<
+        typeof import('../../services/BuiltinCommandLoader.js')
+      >('../../services/BuiltinCommandLoader.js');
+      const loaderConfig = makeFakeConfig({});
+      vi.spyOn(loaderConfig, 'isInteractive').mockReturnValue(false);
+      const definitions = await new actual.BuiltinCommandLoader(
+        loaderConfig,
+      ).loadCommands(new AbortController().signal);
+      const result = setupProcessorHook(
+        definitions.filter((command) => command.name === 'rewind'),
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      const registered = result.current.slashCommands[0];
+      expect(registered).not.toBe(rewindCommand);
+      expect(registered?.action).toBe(rewindCommand.action);
+      await act(async () => {
+        await result.current.handleSlashCommand(`/${invocation}`);
+      });
+      expect(mockOpenRewindSelector).toHaveBeenCalledExactlyOnceWith(
+        'slash-command',
+      );
+    },
+  );
+
+  it.each([CommandKind.FILE, CommandKind.BUILT_IN])(
+    'does not grant builtin rewind origin to a same-name replacement of kind %s',
+    async (kind) => {
+      const replacement = createTestCommand(
+        {
+          name: 'rewind',
+          action: async () => ({ type: 'dialog', dialog: 'rewind' }),
+        },
+        kind,
+      );
+      const result = setupProcessorHook([rewindCommand], [replacement]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      expect(result.current.slashCommands[0]?.action).not.toBe(
+        rewindCommand.action,
+      );
+      await act(async () => {
+        await result.current.handleSlashCommand('/rewind');
+      });
+      expect(mockOpenRewindSelector).toHaveBeenCalledOnce();
+      expect(mockOpenRewindSelector).not.toHaveBeenCalledWith('slash-command');
+    },
+  );
+
   const mockAddItem = vi.fn();
   const mockUpdateItem = vi.fn();
   const mockClearItems = vi.fn();
@@ -175,6 +226,7 @@ describe('useSlashCommandProcessor', () => {
   const mockOpenModelDialog = vi.fn();
   const mockOpenOutputStyleDialog = vi.fn();
   const mockOpenHelpDialog = vi.fn();
+  const mockOpenRewindSelector = vi.fn();
   const mockSetQuittingMessages = vi.fn();
   const mockClearPendingState = vi.fn();
 
@@ -213,7 +265,7 @@ describe('useSlashCommandProcessor', () => {
     openExtensionsManagerDialog: vi.fn(),
     openMcpDialog: vi.fn(),
     openHooksDialog: vi.fn(),
-    openRewindSelector: vi.fn(),
+    openRewindSelector: mockOpenRewindSelector,
     clearPendingState: mockClearPendingState,
   });
 
