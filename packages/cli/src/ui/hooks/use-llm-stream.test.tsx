@@ -14636,114 +14636,129 @@ describe('useLlmStream', () => {
       expect(scheduledSignal?.aborted).toBe(true);
     });
 
-    it('owns a restored client tool before a scheduler completes immediately', async () => {
-      const { LlmClient: ActualClient } = await import(
-        '@qwen-code/qwen-code-core/core/client.js'
-      );
-      const { LlmChat } = await import(
-        '@qwen-code/qwen-code-core/core/llm-chat.js'
-      );
-      const { makeFakeConfig } = await import(
-        '@qwen-code/qwen-code-core/test-utils/config.js'
-      );
-      const { createRestoreToolResponseBinding } = await import(
-        '../utils/restore-tool-response.js'
-      );
-      const directory = await fs.mkdtemp(
-        path.join(tmpdir(), 'restore-ink-caller-'),
-      );
-      const realConfig = makeFakeConfig({
-        targetDir: directory,
-        cwd: directory,
-        disableAllHooks: true,
-        usageStatisticsEnabled: false,
-      });
-      const client = new ActualClient(realConfig);
-      const chat = new LlmChat(realConfig);
-      chat.setTools([]);
-      vi.spyOn(client, 'getChat').mockReturnValue(chat);
-      vi.spyOn(client, 'isInitialized').mockReturnValue(true);
-      const sends = vi.spyOn(client, 'sendMessageStream');
-      mockConfig.getLlmClient = vi.fn(() => client);
-      const args = {
-        file_path: path.join(directory, 'owned.txt'),
-        old_string: 'A',
-        new_string: 'B',
-      };
-      client.setHistory([
-        {
-          role: 'model',
-          parts: [
-            { functionCall: { id: 'original-ink-edit', name: 'edit', args } },
-          ],
-        },
-      ]);
-      const binding = createRestoreToolResponseBinding(
-        mockConfig,
-        'edit',
-        args,
-      )!;
-      mockHandleSlashCommand.mockResolvedValue({
-        type: 'schedule_tool',
-        toolName: 'edit',
-        toolArgs: args,
-        restoreResponseBinding: binding,
-      });
-      const hook = renderTestHook([], client);
-      let completion: Promise<void> | undefined;
-      mockScheduleToolCalls.mockImplementation(
-        (requests: ToolCallRequestInfo[]) => {
-          const request = requests[0];
-          const onComplete = hook.getLastOnComplete();
-          if (!onComplete)
-            throw new Error('actual completion callback missing');
-          completion = onComplete([
-            {
-              request,
-              status: 'success',
-              responseSubmittedToLlm: false,
-              tool: { displayName: 'Edit' },
-              response: {
-                callId: request.callId,
-                responseParts: [
-                  {
-                    functionResponse: {
-                      id: request.callId,
-                      name: 'edit',
-                      response: { output: 'NEW_IMMEDIATE_REPLAY_RESULT' },
-                    },
-                  },
-                ],
-                resultDisplay: 'done',
-              },
-            } as TrackedCompletedToolCall,
-          ]);
-        },
-      );
-      try {
-        await act(async () => {
-          await hook.result.current.submitQuery('/restore owned');
-          await completion;
+    it.each([false, true])(
+      'owns a restored client tool before immediate completion with rewritten arguments=%s',
+      async (rewritten) => {
+        const { LlmClient: ActualClient } = await import(
+          '@qwen-code/qwen-code-core/core/client.js'
+        );
+        const { LlmChat } = await import(
+          '@qwen-code/qwen-code-core/core/llm-chat.js'
+        );
+        const { makeFakeConfig } = await import(
+          '@qwen-code/qwen-code-core/test-utils/config.js'
+        );
+        const { createRestoreToolResponseBinding } = await import(
+          '../utils/restore-tool-response.js'
+        );
+        const directory = await fs.mkdtemp(
+          path.join(tmpdir(), 'restore-ink-caller-'),
+        );
+        const realConfig = makeFakeConfig({
+          targetDir: directory,
+          cwd: directory,
+          disableAllHooks: true,
+          usageStatisticsEnabled: false,
         });
-        expect(mockScheduleToolCalls).toHaveBeenCalledOnce();
-        expect(client.getHistoryShallow()).toHaveLength(2);
-        expect(client.getHistoryShallow()[1].parts).toEqual([
+        const client = new ActualClient(realConfig);
+        const chat = new LlmChat(realConfig);
+        chat.setTools([]);
+        vi.spyOn(client, 'getChat').mockReturnValue(chat);
+        vi.spyOn(client, 'isInitialized').mockReturnValue(true);
+        const sends = vi.spyOn(client, 'sendMessageStream');
+        mockConfig.getLlmClient = vi.fn(() => client);
+        const args = {
+          file_path: path.join(directory, 'owned.txt'),
+          old_string: 'A',
+          new_string: 'B',
+        };
+        client.setHistory([
           {
-            functionResponse: {
-              id: 'original-ink-edit',
-              name: 'edit',
-              response: { output: 'NEW_IMMEDIATE_REPLAY_RESULT' },
-            },
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'original-ink-edit', name: 'edit', args } },
+            ],
           },
         ]);
-        expect(sends).not.toHaveBeenCalled();
-        expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
-          mockScheduleToolCalls.mock.calls[0][0][0].callId,
-        ]);
-      } finally {
-        await fs.rm(directory, { recursive: true, force: true });
-      }
-    });
+        const binding = createRestoreToolResponseBinding(
+          mockConfig,
+          'edit',
+          args,
+        )!;
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'schedule_tool',
+          toolName: 'edit',
+          toolArgs: args,
+          restoreResponseBinding: binding,
+        });
+        const hook = renderTestHook([], client);
+        let completion: Promise<void> | undefined;
+        mockScheduleToolCalls.mockImplementation(
+          (requests: ToolCallRequestInfo[]) => {
+            const request = requests[0];
+            expect(binding.executionCallId).toBe(request.callId);
+            const onComplete = hook.getLastOnComplete();
+            if (!onComplete)
+              throw new Error('actual completion callback missing');
+            completion = onComplete([
+              {
+                request: rewritten
+                  ? {
+                      ...request,
+                      args: {
+                        ...request.args,
+                        new_string: 'USER_APPROVED',
+                        modified_by_user: true,
+                      },
+                    }
+                  : request,
+                status: 'success',
+                responseSubmittedToLlm: false,
+                tool: { displayName: 'Edit' },
+                response: {
+                  callId: request.callId,
+                  responseParts: [
+                    {
+                      functionResponse: {
+                        id: request.callId,
+                        name: 'edit',
+                        response: { output: 'NEW_IMMEDIATE_REPLAY_RESULT' },
+                      },
+                    },
+                  ],
+                  resultDisplay: 'done',
+                },
+              } as TrackedCompletedToolCall,
+            ]);
+          },
+        );
+        try {
+          await act(async () => {
+            await hook.result.current.submitQuery('/restore owned');
+            await completion;
+          });
+          expect(mockScheduleToolCalls).toHaveBeenCalledOnce();
+          expect(client.getHistoryShallow()).toHaveLength(2);
+          expect(client.getHistoryShallow()[1].parts).toEqual([
+            {
+              functionResponse: {
+                id: 'original-ink-edit',
+                name: 'edit',
+                response: { output: 'NEW_IMMEDIATE_REPLAY_RESULT' },
+              },
+            },
+          ]);
+          expect(sends).not.toHaveBeenCalled();
+          expect(chat.peekLastHistoryEntry()?.role).toBe('user');
+          expect(binding.tail.parts?.[0].functionCall?.args).toEqual(args);
+          expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+            mockScheduleToolCalls.mock.calls[0][0][0].callId,
+          ]);
+        } finally {
+          await fs.rm(directory, { recursive: true, force: true });
+        }
+      },
+    );
 
     it('does not publish a restored response cancelled while actual hook finalization is held', async () => {
       const { LlmClient: ActualClient } = await import(

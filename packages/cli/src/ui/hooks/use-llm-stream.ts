@@ -4037,6 +4037,10 @@ export const useLlmStream = (
           preparedQuery;
 
         if (scheduledClientTool && foregroundAbortController) {
+          if (scheduledClientTool.restoreResponseBinding) {
+            scheduledClientTool.restoreResponseBinding.executionCallId =
+              scheduledClientTool.request.callId;
+          }
           keepToolContinuationAbortController = true;
           continuationOwnersByToolCallIdRef.current.set(
             scheduledClientTool.request.callId,
@@ -6449,6 +6453,7 @@ export const useLlmStream = (
                   clientHistory,
                   ...(promptIds?.some(Boolean) ? { promptIds } : {}),
                   toolCall: {
+                    callId: toolCall.request.callId,
                     name: toolCall.request.name,
                     args: toolCall.request.args,
                   },

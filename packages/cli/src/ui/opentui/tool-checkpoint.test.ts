@@ -34,6 +34,7 @@ describe('complete tool checkpoint publication', () => {
         writeToolCheckpoint({
           directory,
           request: {
+            callId: 'same-call',
             name: 'replace',
             args: { file_path: '/owned/a' },
             prompt_id: 'p',
@@ -78,7 +79,12 @@ describe('complete tool checkpoint publication', () => {
     };
     const result = await writeToolCheckpoint({
       directory,
-      request: { name: 'replace', args, prompt_id: 'session########0' },
+      request: {
+        callId: 'original-replace',
+        name: 'replace',
+        args,
+        prompt_id: 'session########0',
+      },
       isCurrent: () => true,
       snapshot: () => ({
         history,
@@ -91,7 +97,7 @@ describe('complete tool checkpoint publication', () => {
       history,
       clientHistory: [{ role: 'user', parts: [{ text: 'original' }] }],
       promptIds: ['session########0'],
-      toolCall: { name: 'replace', args },
+      toolCall: { callId: 'original-replace', name: 'replace', args },
       promptId: 'session########0',
       filePath: '/owned/a.ts',
     });
@@ -103,6 +109,7 @@ describe('complete tool checkpoint publication', () => {
       writeToolCheckpoint({
         directory,
         request: {
+          callId: 'capture-failed',
           name: 'replace',
           args: { file_path: '/owned/a' },
           prompt_id: 'p',
@@ -124,6 +131,7 @@ describe('complete tool checkpoint publication', () => {
       const result = await writeToolCheckpoint({
         directory,
         request: {
+          callId: 'owner-expired',
           name: 'replace',
           args: { file_path: '/owned/a' },
           prompt_id: 'p',
@@ -143,6 +151,7 @@ describe('complete tool checkpoint publication', () => {
     await writeToolCheckpoint({
       directory,
       request: {
+        callId: 'owner-invalid',
         name: 'replace',
         args: { file_path: '/owned/a' },
         prompt_id: 'p',

@@ -228,9 +228,7 @@ describe('restored tool response binding with real client and chat', () => {
     (mode) => {
       const f = setup();
       if (mode === 'mismatch')
-        f.tail.parts![0].functionCall!.args = {
-          file_path: 'not the checkpoint',
-        };
+        f.tail.parts![0].functionCall!.name = 'read_file';
       if (mode === 'ambiguous')
         f.tail.parts!.push({
           functionCall: { id: 'second-edit', name: 'edit', args: f.args },
@@ -284,9 +282,7 @@ describe('restored tool response binding with real client and chat', () => {
       const f = setup();
       const saved = pendingCheckpoint(f.args);
       expect(getApiHistoryPromptId(saved.tail)).toBeUndefined();
-      expect(
-        selectRestoreCheckpointCall(saved.history, 'edit', f.args),
-      ).toEqual({
+      expect(selectRestoreCheckpointCall(saved.history, 'edit')).toEqual({
         callId: 'original-edit',
         name: 'edit',
         args: f.args,
@@ -294,15 +290,46 @@ describe('restored tool response binding with real client and chat', () => {
       });
     });
 
-    it('rejects checkpoint arguments that match no original pending call', () => {
+    it('recovers the unique legacy logical call when a hook changed execution arguments', () => {
       const f = setup();
       const saved = pendingCheckpoint(f.args);
-      expect(() =>
-        selectRestoreCheckpointCall(saved.history, 'edit', {
+      f.client.setHistory(saved.history);
+      expect(
+        createRestoreToolResponseBinding(f.config, 'edit', {
           ...f.args,
           new_string: 'DIFFERENT',
         }),
-      ).toThrow();
+      ).toMatchObject({
+        callId: 'original-edit',
+        name: 'edit',
+        args: f.args,
+        promptId: 'real-user-prompt',
+      });
+    });
+
+    it('requires a saved call ID when modified arguments cannot distinguish sibling edits', () => {
+      const f = setup();
+      const saved = pendingCheckpoint(f.args);
+      saved.tail.parts!.push({
+        functionCall: {
+          id: 'sibling-edit',
+          name: 'edit',
+          args: { ...f.args, new_string: 'SIBLING' },
+        },
+      });
+      f.client.setHistory(saved.history);
+      // The authorized rewrite exactly matches the sibling's original args.
+      const executionArgs = { ...f.args, new_string: 'SIBLING' };
+      expect(() =>
+        createRestoreToolResponseBinding(f.config, 'edit', executionArgs),
+      ).toThrow(/one pending/);
+      expect(
+        selectRestoreCheckpointCall(saved.history, 'edit', 'original-edit')
+          ?.args,
+      ).toEqual(f.args);
+      expect(() =>
+        selectRestoreCheckpointCall(saved.history, 'edit', 'absent'),
+      ).toThrow(/one pending/);
     });
 
     it('rejects a duplicated original pending identity in the actual saved API parts', () => {
@@ -312,7 +339,7 @@ describe('restored tool response binding with real client and chat', () => {
         functionCall: { id: 'original-edit', name: 'edit', args: f.args },
       });
       expect(() =>
-        selectRestoreCheckpointCall(saved.history, 'edit', f.args),
+        selectRestoreCheckpointCall(saved.history, 'edit'),
       ).toThrow();
     });
 
@@ -334,9 +361,7 @@ describe('restored tool response binding with real client and chat', () => {
           ],
         },
       ];
-      expect(
-        selectRestoreCheckpointCall(paired, 'edit', f.args),
-      ).toBeUndefined();
+      expect(selectRestoreCheckpointCall(paired, 'edit')).toBeUndefined();
     });
 
     function durableSetup() {
@@ -378,6 +403,51 @@ describe('restored tool response binding with real client and chat', () => {
         completion,
       };
     }
+
+    it('publishes approved replay arguments against the unchanged logical anchor only for the bound execution', async () => {
+      const f = durableSetup();
+      f.binding.executionCallId = f.execution.callId;
+      const actualExecution = {
+        ...f.execution,
+        args: {
+          ...f.args,
+          new_string: 'USER_APPROVED',
+          modified_by_user: true,
+        },
+      };
+      const foreignParts = response();
+      foreignParts[0].functionResponse!.id = 'foreign-execution';
+      expect(
+        await completeRestoreToolResponse(
+          f.binding,
+          { ...actualExecution, callId: 'foreign-execution' },
+          foreignParts,
+          () => true,
+          f.completion,
+        ),
+      ).toBe(false);
+      expect(f.restore).not.toHaveBeenCalled();
+      expect(
+        await completeRestoreToolResponse(
+          f.binding,
+          actualExecution,
+          response(),
+          () => true,
+          f.completion,
+        ),
+      ).toBe(true);
+      expect(f.restore).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: f.args,
+          execution: actualExecution,
+          originalCallId: 'original-edit',
+        }),
+      );
+      expect(
+        f.client.getHistoryFunctionResponseIds().has('original-edit'),
+      ).toBe(true);
+      expect(f.tail.parts![0].functionCall!.args).toEqual(f.args);
+    });
 
     it('admits only one completion before an awaited strict recorder write settles', async () => {
       const f = durableSetup();

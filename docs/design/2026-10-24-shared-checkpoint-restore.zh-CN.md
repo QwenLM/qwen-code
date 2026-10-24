@@ -12,9 +12,11 @@
 
 ## 副作用前的 restore 权限
 
-从 checkpoint API history 唯一解析原 pending function call，核对名称、完整参数、逻辑 ID 与最近真实 user prompt 元数据。捕获真实 recorder/session，并在文件 rewind、UI history load 或 API history replacement 前验证已持久 assistant anchor。缺失、歧义、已配对、错误 prompt 或 recorder 必须在这些副作用前拒绝。无 pending API history 的 legacy tool-only checkpoint 保留原本地行为；关闭 recording 的会话保留 hot-only 路径。
+从 checkpoint API history 唯一解析原 pending function call，核对名称、原模型参数、逻辑 ID 与最近真实 user prompt 元数据。捕获真实 recorder/session，并在文件 rewind、UI history load 或 API history replacement 前验证已持久 assistant anchor。缺失、歧义、已配对、错误 prompt 或 recorder 必须在这些副作用前拒绝。无 pending API history 的 legacy tool-only checkpoint 保留原本地行为；关闭 recording 的会话保留 hot-only 路径。
 
 替换 history 后，若现有 edit 目标要求先读，使用真实 interactive scheduler 执行新 Read，保留既有 client-tool Mod policy 和普通 Core Read 权限/hooks。Ask 使用已有 confirmation API，不追加新的 UI history。拒绝、取消、abort、owner 丢失、session 替换或原参数变化均不可授权 edit。新文件创建和缺失目标保持既有合法语义。真实 Read 执行时采样 cache-clear generation，防止过时读取的 fast path、record 或 catch cleanup 跨 replacement generation 授权或误清继任权限。
+
+checkpoint writer 保存原逻辑 call ID，实际执行参数可被合法 hook 或审批改写，不与原模型参数混为一谈。新 checkpoint 按 call ID 选择原调用；旧格式仅允许同名调用唯一时恢复身份。执行参数在合法改写后不能证明原调用身份，因此缺 ID 且有多个同名候选时，即便某组参数恰好匹配，也必须在副作用前拒绝。recorder anchor 始终用原模型参数校验。调度前将物理 execution ID 绑定到现有 owner，完成时校验执行 ID 与工具名称，并保留原会话、history revision、tail 和 recorder guards；允许同一授权执行的实际参数变化，实际结果仍配对原逻辑调用。
 
 ## 实际重放绑定
 

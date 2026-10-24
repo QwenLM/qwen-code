@@ -36,6 +36,7 @@ export interface RestoreToolResponseCompletion {
 
 export interface RestoreToolResponseBinding {
   completionStarted: boolean;
+  executionCallId?: string;
   readonly durability?: RestoreToolResponseDurability;
   readonly config: Config;
   readonly client: LlmClient;
@@ -46,7 +47,9 @@ export interface RestoreToolResponseBinding {
   readonly length: number;
   readonly callId: string;
   readonly name: string;
+  readonly args: Record<string, unknown>;
   readonly fingerprint: string;
+  readonly executionFingerprint: string;
   readonly promptId: string | undefined;
 }
 
@@ -56,7 +59,7 @@ const fingerprint = (name: string, args: unknown) =>
 export function selectRestoreCheckpointCall(
   history: readonly Content[],
   toolName: string,
-  toolArgs: Record<string, unknown>,
+  originalCallId?: string,
 ) {
   const tail = history.at(-1);
   const calls =
@@ -66,12 +69,16 @@ export function selectRestoreCheckpointCall(
         )
       : [];
   if (calls.length === 0) return;
-  const expected = fingerprint(toolName, toolArgs);
-  const matches = calls.filter(
+  const named = calls.filter(
     (call) =>
       typeof call.name === 'string' &&
-      fingerprint(call.name, call.args) === expected,
+      canonicalToolName(call.name) === canonicalToolName(toolName),
   );
+  // Older checkpoints lack a call ID and can contain hook-modified execution
+  // arguments, even matching a sibling. Parameter equality cannot prove identity.
+  const matches = originalCallId
+    ? named.filter((call) => call.id === originalCallId)
+    : named;
   if (matches.length !== 1 || !matches[0].id || !matches[0].name)
     throw new Error('Checkpoint does not identify one pending tool call.');
   const call = matches[0];
@@ -90,7 +97,7 @@ export function selectRestoreCheckpointCall(
   return {
     callId: call.id!,
     name: call.name!,
-    args: toolArgs,
+    args: structuredClone(call.args ?? {}),
     promptId:
       getApiHistoryPromptId(tail!) ?? getLastApiHistoryPromptId(history),
   };
@@ -101,13 +108,14 @@ export function createRestoreToolResponseBinding(
   toolName: string,
   toolArgs: Record<string, unknown>,
   durability?: RestoreToolResponseDurability,
+  originalCallId?: string,
 ): RestoreToolResponseBinding | undefined {
   const client = config.getLlmClient();
   const chat = client.getChat();
   const selected = selectRestoreCheckpointCall(
     client.getHistoryShallow(),
     toolName,
-    toolArgs,
+    originalCallId,
   );
   if (!selected) return;
   const tail = chat.peekLastHistoryEntry()!;
@@ -123,7 +131,9 @@ export function createRestoreToolResponseBinding(
     length: chat.getHistoryLength(),
     callId: selected.callId,
     name: selected.name,
-    fingerprint: fingerprint(toolName, toolArgs),
+    args: selected.args,
+    fingerprint: fingerprint(selected.name, selected.args),
+    executionFingerprint: fingerprint(toolName, toolArgs),
     promptId: selected.promptId ?? durability?.promptId,
   };
 }
@@ -165,7 +175,11 @@ export async function completeRestoreToolResponse(
   if (
     binding.completionStarted ||
     !isCurrent() ||
-    fingerprint(execution.name, execution.args) !== binding.fingerprint ||
+    canonicalToolName(execution.name) !== canonicalToolName(binding.name) ||
+    (binding.executionCallId !== undefined
+      ? execution.callId !== binding.executionCallId
+      : fingerprint(execution.name, execution.args) !==
+        binding.executionFingerprint) ||
     !isRestoreToolResponseBindingCurrent(binding)
   )
     return false;
@@ -190,7 +204,7 @@ export async function completeRestoreToolResponse(
       sessionId: binding.sessionId,
       originalCallId: binding.callId,
       name: binding.name,
-      args: execution.args,
+      args: binding.args,
       promptId: binding.promptId,
       execution,
       responseParts,
