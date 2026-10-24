@@ -54,10 +54,6 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     private final Map<RuntimeProvisionSeed, Placement> placements = new ConcurrentHashMap<>();
     private final Map<List<Object>, Placement> placementsByLease = new ConcurrentHashMap<>();
 
-    public ExternalRuntimeProvisioner(ExternalRuntimeClient client, String providerId) {
-        this(client, providerId, Duration.ofMinutes(2));
-    }
-
     public ExternalRuntimeProvisioner(ExternalRuntimeClient client, String providerId, Duration startupTimeout) {
         if (client == null || startupTimeout == null || startupTimeout.isNegative() || startupTimeout.isZero()) {
             throw new IllegalArgumentException("Client and positive startup timeout are required");
