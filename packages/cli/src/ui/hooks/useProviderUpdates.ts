@@ -17,6 +17,7 @@ import {
   getModelsForProviderProtocol,
   buildProviderTemplate,
   computeModelListVersion,
+  discoverProviderModels,
   getDefaultModelIds,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
@@ -49,6 +50,8 @@ export interface ProviderUpdateEntry {
 }
 
 export interface ProviderUpdateRequest {
+  /** Distinct per prompt, so the dialog remounts with a fresh selection. */
+  id: number;
   entries: ProviderUpdateEntry[];
   onConfirm: (choice: UpdateChoice) => void;
 }
@@ -63,6 +66,10 @@ interface ProviderMetadata {
   ignoredVersion?: string;
   postponedVersion?: string;
   postponedAt?: number;
+  /** Built-in model ids served to the key when the provider was last checked. */
+  servedModels?: string[];
+  /** Served model ids whose re-check prompt was answered with "Later". */
+  postponedServedModels?: string[];
 }
 
 // "Later" suppresses re-prompting for the same version for this long, so a
@@ -158,27 +165,69 @@ interface PendingUpdate {
   metadataKey: string;
   baseUrl: string;
   currentVersion: string;
+  /**
+   * The stored version already matches the preset. Such an install is only
+   * re-checked for a change in the models served to its key.
+   */
+  upToDate: boolean;
+  /** Served model ids recorded by the last check. */
+  storedServedModels?: string[];
+  /** Served model ids postponed by "Later", set only while the cooldown runs. */
+  postponedServedModels?: string[];
+  existingModelIds: string[];
   diff: ModelUpdateDiff;
+  /** Key for `/models`, set only for providers that support discovery. */
+  discoveryApiKey?: string;
+  /**
+   * Built-in model ids to install, when discovery narrowed the list. The
+   * prompt's diff is computed from the same list. Unset means every built-in.
+   */
+  installModelIds?: string[];
+  /** Sorted built-in model ids served to the key, when narrowed. */
+  servedModels?: string[];
 }
 
-function readInstalledOwnedIds(
+function resolveDiscoveryApiKey(provider: ProviderConfig): string | undefined {
+  // Owned models always carry the provider's envKey, so the stored key is
+  // read from that variable.
+  if (!provider.supportsModelDiscovery || typeof provider.envKey !== 'string') {
+    return undefined;
+  }
+  return process.env[provider.envKey]?.trim() || undefined;
+}
+
+function readModelIdList(value: unknown): string[] | undefined {
+  return Array.isArray(value) &&
+    value.every((id): id is string => typeof id === 'string')
+    ? value
+    : undefined;
+}
+
+function sameModelIds(a: readonly string[], b: readonly string[] | undefined) {
+  return (
+    b !== undefined && a.length === b.length && a.every((id, i) => id === b[i])
+  );
+}
+
+function isCooldownActive(postponedAt: unknown): boolean {
+  // Negative elapsed time (a backward clock jump) is treated as expired so
+  // the prompt is not suppressed until the wall clock catches up.
+  if (typeof postponedAt !== 'number') return false;
+  const elapsed = Date.now() - postponedAt;
+  return elapsed >= 0 && elapsed < LATER_COOLDOWN_MS;
+}
+
+function readInstalledOwnedModels(
   settings: LoadedSettings,
   provider: ProviderConfig,
-): string[] {
-  const protocol = provider.protocol;
-  if (!protocol) return [];
-  const mergedSettings = settings.merged as Record<string, unknown>;
-  const modelProviders = mergedSettings['modelProviders'] as
-    | Record<string, ProviderModelConfig[]>
-    | undefined;
-  if (!modelProviders) return [];
-  const allModels = (modelProviders[protocol] ?? []).filter(
-    (model) => tryResolveModelProtocol(protocol, model) === protocol,
-  );
-  const ownsFn = resolveOwnsModel(provider);
-  return ownsFn
-    ? allModels.filter(ownsFn).map((m) => m.id)
-    : allModels.map((m) => m.id);
+): ProviderModelConfig[] {
+  if (!provider.protocol) return [];
+  const ownsModel = resolveOwnsModel(provider);
+  return getModelsForProviderProtocol(
+    settings.merged.modelProviders,
+    provider.protocol,
+    settings.merged.providerProtocol,
+  ).filter((model) => !ownsModel || ownsModel(model));
 }
 
 function getInstalledOwnedModelIds(
@@ -187,11 +236,16 @@ function getInstalledOwnedModelIds(
 ): string[] {
   // Only compare built-in model IDs — user-added custom models should not
   // appear as "removed" in the diff since they were never part of the
-  // provider's built-in list.
+  // provider's built-in list. Uses the same reader as the update itself, so
+  // a built-in stored on the Responses wire counts as installed.
   const builtinIds = new Set(getDefaultModelIds(provider));
-  return readInstalledOwnedIds(settings, provider).filter((id) =>
-    builtinIds.has(id),
-  );
+  return [
+    ...new Set(
+      readInstalledOwnedModels(settings, provider)
+        .map((model) => model.id)
+        .filter((id) => builtinIds.has(id)),
+    ),
+  ];
 }
 
 function findAllPendingUpdates(
@@ -210,30 +264,137 @@ function findAllPendingUpdates(
     const currentVersion = computeModelListVersion(
       buildProviderTemplate(provider, baseUrl),
     );
+    const discoveryApiKey = resolveDiscoveryApiKey(provider);
 
-    if (metadata.version === currentVersion) continue;
-    if (metadata.ignoredVersion === currentVersion) continue;
+    // An up-to-date install is still re-checked when the provider supports
+    // discovery: the models served to the key can change without a preset
+    // change (a different key, plan or entitlement).
+    const upToDate = metadata.version === currentVersion;
+    if (upToDate && !discoveryApiKey) continue;
+    if (!upToDate && metadata.ignoredVersion === currentVersion) continue;
 
     // A "later" choice suppresses re-prompting for the same version while the
     // cooldown is active. A new version (postponedVersion mismatch) re-prompts.
-    // Negative elapsed time (a backward clock jump) is treated as expired so
-    // the prompt is not suppressed until the wall clock catches up.
+    // An up-to-date install is postponed per served-model set instead, which
+    // is only known after discovery.
+    const cooldownActive = isCooldownActive(metadata.postponedAt);
     if (
-      metadata.postponedVersion === currentVersion &&
-      typeof metadata.postponedAt === 'number' &&
-      Date.now() - metadata.postponedAt >= 0 &&
-      Date.now() - metadata.postponedAt < LATER_COOLDOWN_MS
+      !upToDate &&
+      cooldownActive &&
+      metadata.postponedVersion === currentVersion
     ) {
       continue;
     }
+    const storedServedModels = readModelIdList(metadata.servedModels);
+    const postponedServedModels = cooldownActive
+      ? readModelIdList(metadata.postponedServedModels)
+      : undefined;
 
     const existingModelIds = getInstalledOwnedModelIds(settings, provider);
     const newModelIds = provider.models!.map((s) => s.id);
     const diff = computeModelDiff(existingModelIds, newModelIds, currentModel);
 
-    results.push({ provider, metadataKey, baseUrl, currentVersion, diff });
+    results.push({
+      provider,
+      metadataKey,
+      baseUrl,
+      currentVersion,
+      upToDate,
+      ...(storedServedModels ? { storedServedModels } : {}),
+      ...(postponedServedModels ? { postponedServedModels } : {}),
+      existingModelIds,
+      diff,
+      ...(discoveryApiKey ? { discoveryApiKey } : {}),
+    });
   }
   return results;
+}
+
+/**
+ * Narrow a pending update to the built-in models served to the stored key,
+ * the same filter the setup wizard applies at install time. Without it, an
+ * update would install every built-in model, including ones the key's plan
+ * or region rejects (403/404). Falls back to the full built-in list when
+ * discovery fails or matches no built-in model.
+ */
+async function narrowToServedModels(
+  pending: PendingUpdate,
+  getCurrentModel: () => string,
+  signal: AbortSignal,
+): Promise<PendingUpdate> {
+  if (!pending.discoveryApiKey) return pending;
+  const builtInModels = pending.provider.models ?? [];
+  const discovered = await discoverProviderModels({
+    baseUrl: resolveBaseUrl(pending.provider, pending.baseUrl),
+    apiKey: pending.discoveryApiKey,
+    staticModels: builtInModels,
+    signal,
+  });
+  if (!discovered) return pending;
+  const servedIds = new Set(discovered.map((model) => model.id));
+  const builtInIds = builtInModels.map((model) => model.id);
+  const servedBuiltInIds = builtInIds.filter((id) => servedIds.has(id));
+  if (servedBuiltInIds.length === 0) return pending;
+  // Read the selection after the request: the user can switch models while
+  // it is in flight. Discovery alone never removes the selected model, so
+  // one incomplete listing cannot drop the model in use. The preset can
+  // still remove it.
+  const currentModel = getCurrentModel();
+  const existingIds = new Set(pending.existingModelIds);
+  const keepsCurrentModel = existingIds.has(currentModel);
+  // An up-to-date install keeps the user's own selection: it only adds
+  // models that became served since the last check. Without a recorded
+  // check nothing is added, so a model left out in /auth is not offered.
+  const storedServed = new Set(pending.storedServedModels ?? servedBuiltInIds);
+  const offers = (id: string) =>
+    !pending.upToDate || existingIds.has(id) || !storedServed.has(id);
+  const installModelIds = builtInIds.filter(
+    (id) =>
+      (servedIds.has(id) && offers(id)) ||
+      (keepsCurrentModel && id === currentModel),
+  );
+  return {
+    ...pending,
+    installModelIds,
+    servedModels: [...servedBuiltInIds].sort(),
+    diff: computeModelDiff(
+      pending.existingModelIds,
+      installModelIds,
+      currentModel,
+    ),
+  };
+}
+
+/**
+ * Whether installing a narrowed update would change nothing for the key.
+ * For an up-to-date install that means no model added or removed. For a new
+ * preset version it also needs every installed model to match its template,
+ * which happens when the version only touches models the key is not served.
+ */
+function isNarrowedUpdateNoop(
+  settings: LoadedSettings,
+  pending: PendingUpdate,
+): boolean {
+  const { installModelIds, diff } = pending;
+  if (!installModelIds || diff.added.length || diff.removed.length) {
+    return false;
+  }
+  if (pending.upToDate) return true;
+  const installed = readInstalledOwnedModels(settings, pending.provider);
+  const ids = new Set(installModelIds);
+  return buildProviderTemplate(pending.provider, pending.baseUrl)
+    .filter((model) => ids.has(model.id))
+    .every((template) => {
+      const model = installed.find((m) => m.id === template.id);
+      if (!model) return false;
+      // Owned models of discovery providers always carry the provider's
+      // envKey, so every template field, envKey included, is compared.
+      return Object.entries(template).every(
+        ([key, value]) =>
+          JSON.stringify(model[key as keyof ProviderModelConfig]) ===
+          JSON.stringify(value),
+      );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -256,19 +417,32 @@ export function useProviderUpdates(
     ProviderUpdateRequest | undefined
   >();
   const migrated = useRef(false);
+  // Prompts waiting for the one on screen to close. Providers with model
+  // discovery prompt after their `/models` request, which can resolve while
+  // another provider's prompt is still open.
+  const promptQueue = useRef<PendingUpdate[][]>([]);
+  const promptOpen = useRef(false);
+  const promptCount = useRef(0);
 
   const executeUpdate = useCallback(
     async (pending: PendingUpdate) => {
       try {
         const providerCfg = pending.provider;
         const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
-        const defaultIds = getDefaultModelIds(providerCfg);
-        const ownsModel = resolveOwnsModel(providerCfg);
-        const existingModels = getModelsForProviderProtocol(
-          settings.merged.modelProviders,
-          providerCfg.protocol,
-          settings.merged.providerProtocol,
-        ).filter((model) => !ownsModel || ownsModel(model));
+        const builtInIds = getDefaultModelIds(providerCfg);
+        // Re-check the selection at confirm time as well, so a narrowed
+        // update never removes the model in use.
+        const liveModel = config.getModel();
+        const installIds = pending.installModelIds;
+        const defaultIds = !installIds
+          ? builtInIds
+          : installIds.includes(liveModel) ||
+              !pending.existingModelIds.includes(liveModel)
+            ? installIds
+            : builtInIds.filter(
+                (id) => installIds.includes(id) || id === liveModel,
+              );
+        const existingModels = readInstalledOwnedModels(settings, providerCfg);
         const prebuiltModels: ProviderModelConfig[] = defaultIds.flatMap(
           (id) => {
             const installed = existingModels.filter((model) => model.id === id);
@@ -288,8 +462,10 @@ export function useProviderUpdates(
             );
           },
         );
+        // Keep user-added models; a built-in model no longer served to the
+        // key is dropped rather than kept as if it were custom.
         prebuiltModels.push(
-          ...existingModels.filter((model) => !defaultIds.includes(model.id)),
+          ...existingModels.filter((model) => !builtInIds.includes(model.id)),
         );
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
@@ -297,9 +473,14 @@ export function useProviderUpdates(
           modelIds: prebuiltModels.map((model) => model.id),
           prebuiltModels,
         });
-        installPlan.providerState![
-          `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
-        ]!['version'] = pending.currentVersion;
+        const providerState =
+          installPlan.providerState![
+            `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
+          ]!;
+        providerState['version'] = pending.currentVersion;
+        // Unset when discovery did not narrow the list, which clears the
+        // served models recorded for an earlier key.
+        providerState['servedModels'] = pending.servedModels;
         delete installPlan.env;
         // Template updates never change the selected model.
         delete installPlan.modelSelection;
@@ -373,86 +554,217 @@ export function useProviderUpdates(
     [settings, config, addItem],
   );
 
-  const checkForUpdates = useCallback(() => {
-    if (!migrated.current) {
-      migrated.current = true;
-      migrateProviderMetadata(settings);
-    }
-
-    const currentModel = config.getModel();
-    const pendingList = findAllPendingUpdates(settings, currentModel);
-
-    if (pendingList.length === 0) return;
+  const showNextPrompt = useCallback(() => {
+    const pendingList = promptQueue.current.shift();
+    promptOpen.current = pendingList !== undefined;
+    if (!pendingList) return;
 
     const entries: ProviderUpdateEntry[] = pendingList.map((p) => ({
       providerLabel: t(p.provider.label),
       diff: p.diff,
     }));
 
+    // Escape calls onConfirm straight from the keypress handler, so two
+    // Escapes in one input chunk can call it twice. Answer each request once.
+    let settled = false;
     setUpdateRequest({
+      id: ++promptCount.current,
       entries,
       onConfirm: async (choice: UpdateChoice) => {
+        if (settled) return;
+        settled = true;
         setUpdateRequest(undefined);
-        if (choice === 'update') {
-          for (const p of pendingList) {
-            await executeUpdate(p);
-          }
-        } else if (choice === 'skip') {
-          const persistScope = getPersistScopeForModelSelection(settings);
-          for (const p of pendingList) {
-            settings.setValue(
-              persistScope,
-              `${PROVIDER_METADATA_NS}.${p.metadataKey}.ignoredVersion`,
-              p.currentVersion,
-            );
-          }
-        } else if (choice === 'later') {
-          // Persist a cooldown so "later" does not re-prompt on every launch.
-          // One batched write keeps the version/timestamp pair atomic, so a
-          // partial persist cannot invalidate the cooldown guard on next launch.
-          const persistScope = getPersistScopeForModelSelection(settings);
-          const postponedAt = Date.now();
-          try {
-            settings.setValues(
-              pendingList.flatMap((p) => [
+        try {
+          if (choice === 'update') {
+            for (const p of pendingList) {
+              await executeUpdate(p);
+            }
+          } else if (choice === 'skip') {
+            const persistScope = getPersistScopeForModelSelection(settings);
+            try {
+              for (const p of pendingList) {
+                // For an up-to-date install, skipping accepts the served
+                // models as they are, so it is not asked again until they
+                // change.
+                settings.setValue(
+                  persistScope,
+                  p.upToDate
+                    ? `${PROVIDER_METADATA_NS}.${p.metadataKey}.servedModels`
+                    : `${PROVIDER_METADATA_NS}.${p.metadataKey}.ignoredVersion`,
+                  p.upToDate ? p.servedModels : p.currentVersion,
+                );
+              }
+            } catch (error) {
+              addItem(
                 {
-                  scope: persistScope,
-                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
-                  value: p.currentVersion,
+                  type: 'error',
+                  text: t('Failed to save the skipped update: {{message}}', {
+                    message: getErrorMessage(error),
+                  }),
                 },
+                Date.now(),
+              );
+            }
+          } else if (choice === 'later') {
+            // Persist a cooldown so "later" does not re-prompt on every launch.
+            // One batched write keeps the version/timestamp pair atomic, so a
+            // partial persist cannot invalidate the cooldown guard on next launch.
+            // An up-to-date install postpones its served-model set, so a later
+            // change to that set still prompts.
+            const persistScope = getPersistScopeForModelSelection(settings);
+            const postponedAt = Date.now();
+            try {
+              settings.setValues(
+                pendingList.flatMap((p) => [
+                  p.upToDate
+                    ? {
+                        scope: persistScope,
+                        key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedServedModels`,
+                        value: p.servedModels,
+                      }
+                    : {
+                        scope: persistScope,
+                        key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
+                        value: p.currentVersion,
+                      },
+                  {
+                    scope: persistScope,
+                    key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
+                    value: postponedAt,
+                  },
+                ]),
+              );
+            } catch (error) {
+              addItem(
                 {
-                  scope: persistScope,
-                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
-                  value: postponedAt,
+                  type: 'error',
+                  text: t('Failed to save update postponement: {{message}}', {
+                    message: getErrorMessage(error),
+                  }),
                 },
-              ]),
-            );
-          } catch (error) {
-            addItem(
-              {
-                type: 'error',
-                text: t('Failed to save update postponement: {{message}}', {
-                  message: getErrorMessage(error),
-                }),
-              },
-              Date.now(),
-            );
+                Date.now(),
+              );
+            }
           }
+        } finally {
+          showNextPrompt();
         }
       },
     });
-  }, [settings, config, executeUpdate, addItem]);
+  }, [settings, executeUpdate, addItem]);
+
+  const queueUpdatePrompt = useCallback(
+    (pendingList: PendingUpdate[]) => {
+      if (pendingList.length === 0) return;
+      promptQueue.current.push(pendingList);
+      if (!promptOpen.current) showNextPrompt();
+    },
+    [showNextPrompt],
+  );
+
+  const checkForUpdates = useCallback(
+    (signal: AbortSignal) => {
+      if (!migrated.current) {
+        migrated.current = true;
+        migrateProviderMetadata(settings);
+      }
+
+      const currentModel = config.getModel();
+      const pendingList = findAllPendingUpdates(settings, currentModel);
+
+      if (pendingList.length === 0) return;
+
+      // Providers without discovery prompt right away. Providers with it
+      // compare against the models served to the stored key, so the prompt's
+      // diff matches what Update installs; they prompt once `/models` answers.
+      queueUpdatePrompt(pendingList.filter((p) => !p.discoveryApiKey));
+      const discoverable = pendingList.filter((p) => p.discoveryApiKey);
+      if (discoverable.length === 0) return;
+
+      void Promise.all(
+        discoverable.map((p) =>
+          narrowToServedModels(p, () => config.getModel(), signal),
+        ),
+      )
+        .then((narrowed) => {
+          if (signal.aborted) return;
+          const toPrompt: PendingUpdate[] = [];
+          const persistScope = getPersistScopeForModelSelection(settings);
+          for (const p of narrowed) {
+            if (p.upToDate) {
+              // Only a change in the served models matters here; without a
+              // discovery result there is nothing to compare.
+              if (!p.servedModels) continue;
+              if (sameModelIds(p.servedModels, p.storedServedModels)) continue;
+              if (sameModelIds(p.servedModels, p.postponedServedModels)) {
+                continue;
+              }
+            }
+            if (!isNarrowedUpdateNoop(settings, p)) {
+              toPrompt.push(p);
+              continue;
+            }
+            // Nothing changes for this key: record the version and served
+            // models without asking, in one write.
+            try {
+              settings.setValues([
+                ...(p.upToDate
+                  ? []
+                  : [
+                      {
+                        scope: persistScope,
+                        key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.version`,
+                        value: p.currentVersion,
+                      },
+                    ]),
+                {
+                  scope: persistScope,
+                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.servedModels`,
+                  value: p.servedModels,
+                },
+              ]);
+            } catch (error) {
+              addItem(
+                {
+                  type: 'error',
+                  text: t(
+                    'Failed to update provider configuration: {{message}}',
+                    { message: getErrorMessage(error) },
+                  ),
+                },
+                Date.now(),
+              );
+            }
+          }
+          queueUpdatePrompt(toPrompt);
+        })
+        .catch((error: unknown) => {
+          addItem(
+            {
+              type: 'error',
+              text: t('Failed to update provider configuration: {{message}}', {
+                message: getErrorMessage(error),
+              }),
+            },
+            Date.now(),
+          );
+        });
+    },
+    [settings, config, addItem, queueUpdatePrompt],
+  );
 
   useEffect(() => {
-    checkForUpdates();
+    const controller = new AbortController();
+    checkForUpdates(controller.signal);
+    return () => {
+      controller.abort();
+      // A re-run re-checks from scratch; drop prompts queued by this run.
+      promptQueue.current = [];
+      promptOpen.current = false;
+    };
   }, [checkForUpdates]);
-
-  const dismissProviderUpdate = useCallback(() => {
-    setUpdateRequest(undefined);
-  }, []);
 
   return {
     providerUpdateRequest: updateRequest,
-    dismissProviderUpdate,
   };
 }
