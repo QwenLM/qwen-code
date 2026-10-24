@@ -6,7 +6,7 @@
 
 2026-10-24，运维方同意将完整 CSI 审计移出 [#13395](https://github.com/QwenLM/qwen-code/issues/13395) 首版前置条件。本文件沿用原路径并替代此前 P1 证据来源提案。[已发布的原提案](https://github.com/QwenLM/qwen-code/issues/13395#issuecomment-6363776281) 转为历史记录；原 P1 → P2 → P3 → P4 依赖链由下述交付计划替代。首版不再等待插件提供审计 hook。
 
-审计撤出时，未发布切片已恢复到其历史基准 `7ab5a95c61d5785ac66e50144e41ce29a7cf4cd5`。后续 S1 验收单独固定为 main `2c0c9fa8dc4a8ea5ec688060549e0ff0aed717b4`。文档分支没有新增生产改动；后续同步主干不会将原生验收结论扩展到已测版本之外。本次范围调整不新增回收服务。平台托管回收、自动释放物理归属和跨 Workspace 卷交接仍是后续工作。范围调整不代表整个 issue 已通过验收。
+审计撤出时，未发布切片已恢复到其历史基准 `7ab5a95c61d5785ac66e50144e41ce29a7cf4cd5`。后续原生 S1 验收单独固定为 main `2c0c9fa8dc4a8ea5ec688060549e0ff0aed717b4`。最初的范围调整只改文档；2026-10-25 运维方要求在同一 PR 中实现下述两项 S1 修复。这些修复和后续同步主干均不会将原生验收结论扩展到已测版本之外。本工作不新增回收服务。平台托管回收、自动释放物理归属和跨 Workspace 卷交接仍是后续工作。范围调整不代表整个 issue 已通过验收。
 
 ## 现有实现
 
@@ -33,7 +33,19 @@
 
 撤出本任务尚未提交的 `CsiEvidenceProtocol`、`CsiEvidenceStore` 及其 fixtures/tests，同时撤出 `CSI_EVIDENCE`/`CSI_EVIDENCE_PAGE` schema 和 operation kind、证据专属 retention 与 inventory 改动。对应 tracked Java/SQL/测试文件精确恢复到已核对基准。撤出文件和测试历史保存在本任务忽略目录快照中；此前测试描述被撤出的源码，不代表本版或平台资格验收。
 
-保留已有 `WORKSPACE_RETIREMENT`、`POD_DELETE_ATTEMPT`、私有 CSI 退役、runtime recovery、retention 和诊断 reader。不增加无消费者的 feature flag、来源配置或 ingress。最终交付只改变文档与计划，运行时代码和 schema 相对文档分支的 main 基准保持不变。归档的撤出比较指向此前历史基准，不代表当前主干验收。
+保留已有 `WORKSPACE_RETIREMENT`、`POD_DELETE_ATTEMPT`、私有 CSI 退役、runtime recovery、retention 和诊断 reader。不增加无消费者的 feature flag、来源配置或证据 ingress。撤出本身只改变文档与计划；后续下述 S1 修复修改运行时准入，不改变 schema。归档的撤出比较指向此前历史基准，不代表当前主干验收。
+
+## 本 PR 的 S1 修复
+
+两个独立 resident 容器均挂载到 `/workspace` 不代表共享存储。内存和 SQL 放置围栏仅在双方请求均选择精确的 resident capability、Workspace isolation 和 `kubernetes-workspace` provisioner 时，忽略共同规范路径。相同 tenant/Workspace 或存储身份仍阻止新放置，涉及非 resident 请求的路径维持原规则。注册物理归属、原 slot 校验和退役准入继续作为权威；不同存储 alias 不授予占用中物理卷的使用许可。
+
+Hosted 模型必须先获知已保存 Workspace 的能力，再声明工具。新增内部 `POST /internal/runtime-broker/v1/runtimes:capabilities` 经由已有 Harness Session 的 admission resolver 解析并仅返回 scope。请求体精确为 `protocolVersion`、`requestId`、`harnessSessionId`；响应增加 `scope`，其中包含 `tenantId`、`workspaceId`、`workspaceGeneration`、`isolationClass`、`capabilityDigest`。它使用已有 Broker 鉴权和 lifecycle-authority 校验，不创建 binding、Pod、Runtime Session 或 storage reservation，不返回 worker 凭证或 endpoint。该路由以保存的 Harness Session 解析出的 Workspace 为范围，不接受调用方指定 Workspace，也不回退 primary runtime。
+
+Hosted client 缓存该能力解析，使用 warm/acquire 相同的 scope parser 校验。catalog 构建只等待轻量解析，物理 warmup 仍并行进行，纯文本推理不等待 Pod Ready。解析失败或 scope 不匹配时不能回退普通 Workspace 工具。resident 运行时词表仅包含 `read_file`、`write_file`、`edit`；模型返回不支持的调用（含客户端主动 Skill）时，在 acquire、prepare 和 dispatch 前持久化为可纠正的整批拒绝。已有公开 Plan 模式保留 Harness 本地处理的 `exit_plan_mode` 控制：计划活跃时声明 Read 和计划退出，持久批准后恢复 Write/Edit，计划退出不 dispatch 到 worker。
+
+对旧 Harness 或直接调用 Broker 的客户端，有效但不支持的 resident payload 在 dispatch 前拒绝。仅当原 identity、version 和 `PREPARED` 状态仍匹配时，使用已有原子 `settlePrepared` 写入 `not_started`、空 `responseParts`、显式 `capture: null` 和 `resident_tool_unsupported` 错误。dispatch generation 保持零，不调用 worker。发生 claim 竞争或已有 `UNKNOWN` 时，Broker 返回已保存记录，不改变其结果。worker HTTP 错误和未知副作用不能转成未开始执行的本地证明。
+
+回归覆盖各保留故障/退役状态下独立 resident 存储共用 mount path、仓库重启及真实 MySQL，并保留相同 Workspace/存储和非 resident 路径拒绝。工具检查覆盖只读且有鉴权的能力解析、未解析/不匹配 scope、普通非 resident 词表、resident catalog 与伪造调用、dispatch 前结算、重复请求及已 dispatch/unknown 工作保留。真实进程 Hosted 文件交接仍为独立必需检查。本地检查与 CI 不替代修复版本上的新一轮原生 ACK 验收。
 
 ## 后续平台托管回收
 
@@ -60,7 +72,7 @@
 
 同一轮原生测试还发现第二项公开工具边界阻塞：实际模型 catalog 声明了 `web_fetch`，原 resident worker 却返回 HTTP 409 拒绝。没有注入响应故障，已 dispatch 的调用仍停在 SQL `UNKNOWN`，后续 Session 被 `workspace_busy` 拒绝。携带真实鉴权的探测确认同一原 worker 精确拒绝不支持的工具，前后 Read 均成功，但这不能证明公开 catalog 正确。S1 验收前需要让声明能力与 resident 准入一致，并验证已知不支持的调用不会卡住 Workspace。MCP catalog 和缺少 Hook catalog 的观察不代表有副作用的 MCP 或 Hook 执行通过验收。
 
-本次调整验证文档分支相对其 main 基准没有生产 Java/SQL/测试改动，同时保留精确的 S1 源码 pin 和归档撤出的历史比较；检查撤出源码和 evidence kind 不再有生产引用、双语内容一致，以及 Markdown 格式和相对引用。没有新增运行时行为，本次文档变更不需要新的 CLI、Maven 或 MySQL 测试作为证据。此前证据来源测试快照保留为历史。
+最初的文档调整检查归档撤出比较、无遗留生产引用、双语一致性与 Markdown 引用。S1 运行时修复需要独立的定向 Java/真实 MySQL 与 Hosted 进程证据、TypeScript build/typecheck 和受影响消费者测试，以及适用的完整 CI 门禁。保留精确的历史 S1 源码 pin；此前文档检查和撤出证据来源测试均不能验证新的运行时增量。
 
 后续 S1/S2/S3 验收继续区分源码实现、定向测试、CI、原生 ACK 资格与生产就绪。此前在 `c61044fae46cfeed70b882140730c0caaa944524` 上的 ACK 测试覆盖同 Pod/PVC 文件交接和有界退役，不能验证新的源码版本或物理回收。先解决 S1 验收阻塞，再推进 S2 的完成/隔离契约；插件审计能力是否可用不再是前提。
 
