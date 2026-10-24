@@ -247,7 +247,8 @@ jobs:
           # source's contents, so a pre-existing destination is not nested.
           if [ -d "${HOME}/.m2/repository" ]; then SDK_JAVA_M2_SEED_EXISTED=1; else SDK_JAVA_M2_SEED_EXISTED=0; fi
           mkdir -p "${RUNNER_TEMP}/m2-repo"
-          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          SDK_JAVA_M2_SEED_STATUS=0
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || SDK_JAVA_M2_SEED_STATUS=$?
           # Maven rewrites its tracking files in place; copy them to private
           # inodes so a seeded hardlink cannot carry that write into the host
           # cache without the lock.
@@ -289,7 +290,7 @@ jobs:
                 local attribution="${1#'::error::sdk-java host lock not acquired within'}"
                 builtin echo "::warning::sdk-java host lock wait exhausted after${attribution}"
                 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-                  printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after%s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+                  printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after%s; host cache present at seed: %s; seed status: %s\n' "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" "${SDK_JAVA_M2_SEED_STATUS:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
                 fi
               else
                 builtin echo "$@"
@@ -307,7 +308,7 @@ jobs:
             if ! flock --wait 5400 9; then
               echo "::warning::sdk-java host lock wait exhausted; cache write-back skipped"
               if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-                printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted in the bare-flock fallback; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+                printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted in the bare-flock fallback; host cache present at seed: %s; seed status: %s\n' "${RUNNER_NAME:-unknown}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" "${SDK_JAVA_M2_SEED_STATUS:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
               fi
               lock_status=1
             fi
@@ -338,7 +339,7 @@ jobs:
             echo "::warning::Maven cache write-back failed; the test result above is unaffected"
           fi
           if [ "${write_back}" -ne 0 ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            printf -- '- sdk-java cache write-back failed on %s: status %s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${write_back}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+            printf -- '- sdk-java cache write-back failed on %s: status %s; host cache present at seed: %s; seed status: %s\n' "${RUNNER_NAME:-unknown}" "${write_back}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" "${SDK_JAVA_M2_SEED_STATUS:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
           fi
           exit "${suite_status}"
 
@@ -811,7 +812,8 @@ jobs:
           # no lock and cannot delay the lane.
           if [ -d "${HOME}/.m2/repository" ]; then SDK_JAVA_M2_SEED_EXISTED=1; else SDK_JAVA_M2_SEED_EXISTED=0; fi
           mkdir -p "${RUNNER_TEMP}/m2-repo"
-          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          SDK_JAVA_M2_SEED_STATUS=0
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || SDK_JAVA_M2_SEED_STATUS=$?
           # Maven rewrites its tracking files in place; copy them to private
           # inodes so a seeded hardlink cannot carry that write into the host
           # cache without the lock.
@@ -855,7 +857,7 @@ jobs:
                 local attribution="${1#'::error::sdk-java host lock not acquired within'}"
                 builtin echo "::warning::sdk-java host lock wait exhausted after${attribution}"
                 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-                  printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after%s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+                  printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after%s; host cache present at seed: %s; seed status: %s\n' "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" "${SDK_JAVA_M2_SEED_STATUS:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
                 fi
               else
                 builtin echo "$@"
@@ -873,7 +875,7 @@ jobs:
             if ! flock --wait 5400 9; then
               echo "::warning::sdk-java host lock wait exhausted; cache write-back skipped"
               if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-                printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted in the bare-flock fallback; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+                printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted in the bare-flock fallback; host cache present at seed: %s; seed status: %s\n' "${RUNNER_NAME:-unknown}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" "${SDK_JAVA_M2_SEED_STATUS:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
               fi
               lock_status=1
             fi
@@ -913,7 +915,7 @@ jobs:
             echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
           fi
           if [ "${write_back}" -ne 0 ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            printf -- '- sdk-java cache write-back failed on %s: status %s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${write_back}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+            printf -- '- sdk-java cache write-back failed on %s: status %s; host cache present at seed: %s; seed status: %s\n' "${RUNNER_NAME:-unknown}" "${write_back}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" "${SDK_JAVA_M2_SEED_STATUS:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
           fi
           exit "${gate_status}"
 

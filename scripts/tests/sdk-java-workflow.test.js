@@ -247,6 +247,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         const workspace = join(dir, 'workspace');
         const home = join(dir, 'home');
         const summary = join(dir, 'summary.md');
+        const seedStatus = seed === 'unknown' ? 'unknown' : '0';
         const env = {
           ...process.env,
           GITHUB_WORKSPACE: workspace,
@@ -261,6 +262,10 @@ describe('SDK Java self-hosted workflow guards', () => {
           mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
         }
         delete env.SDK_JAVA_M2_SEED_EXISTED;
+        delete env.SDK_JAVA_M2_SEED_STATUS;
+        if (seed !== 'unknown') {
+          env.SDK_JAVA_M2_SEED_STATUS = '0';
+        }
         if (mode.startsWith('helper')) {
           // The stub mirrors the real helper's fatal timeout line plus a
           // diagnostic the rewrite must pass through. The success case proves
@@ -335,8 +340,8 @@ echo REACHED_END`,
           }
           expect(readFileSync(summary, 'utf8')).toContain(
             mode.startsWith('helper')
-              ? `sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted after${mode === 'helper-nonspace' ? ':' : ''} 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued); host cache present at seed: ${seed}`
-              : `sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted in the bare-flock fallback; host cache present at seed: ${seed}`,
+              ? `sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted after${mode === 'helper-nonspace' ? ':' : ''} 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued); host cache present at seed: ${seed}; seed status: ${seedStatus}`
+              : `sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted in the bare-flock fallback; host cache present at seed: ${seed}; seed status: ${seedStatus}`,
           );
           // The guard must stop before the copy; a warning alone would still
           // run the write-back and hold the lock.
@@ -528,6 +533,62 @@ echo REACHED_END`,
     },
   );
 
+  it.skipIf(process.platform !== 'linux')(
+    'records a failed seed copy in the seed status',
+    () => {
+      const run = parse(workflow).jobs.test.steps.find(
+        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+      ).run;
+      const seed = run
+        .split('\n')
+        .filter(
+          (line) =>
+            line.includes('SDK_JAVA_M2_SEED_STATUS=') ||
+            line.includes('cp -aln "${HOME}/.m2/repository/."') ||
+            line.includes('find "${RUNNER_TEMP}/m2-repo"'),
+        )
+        .join('\n');
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-seed-status-'));
+      const shims = join(dir, 'bin');
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      mkdirSync(shims);
+      mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+      mkdirSync(runnerTemp);
+      writeFileSync(join(shims, 'cp'), '#!/bin/sh\nexit 1\n', {
+        mode: 0o755,
+      });
+      try {
+        const result = spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            `${seed}\necho "SEED_STATUS=\${SDK_JAVA_M2_SEED_STATUS}"`,
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${shims}:${process.env.PATH}`,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+            },
+          },
+        );
+        // The seed stays best-effort, but the postmortem must see the failure.
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain('SEED_STATUS=1');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform !== 'linux').each(['test', 'mysql-integration'])(
     'runs the %s cache write-back after a failed suite and exits red',
     (name) => {
@@ -693,6 +754,7 @@ echo REACHED_END`,
       mkdirSync(shims);
       mkdirSync(home);
       mkdirSync(runnerTemp);
+      mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
       mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
       mkdirSync(working, { recursive: true });
       mkdirSync(join(workspace, 'packages', 'managed-agent-server'), {
@@ -746,7 +808,7 @@ echo REACHED_END`,
         // A permanently unwritable host cache must leave a machine-readable
         // record; the warning alone lives only in each job's own log.
         expect(readFileSync(summary, 'utf8')).toContain(
-          'sdk-java cache write-back failed on ecs-runner-7: status 1; host cache present at seed: 0',
+          'sdk-java cache write-back failed on ecs-runner-7: status 1; host cache present at seed: 1; seed status: 0',
         );
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -795,6 +857,7 @@ echo REACHED_END`,
               GITHUB_STEP_SUMMARY: summary,
               RUNNER_NAME: 'ecs-runner-7',
               SDK_JAVA_M2_SEED_EXISTED: '0',
+              SDK_JAVA_M2_SEED_STATUS: '0',
             },
           },
         );
@@ -804,7 +867,7 @@ echo REACHED_END`,
           '::warning::Maven cache write-back stopped after 300 s; the test result above is unaffected',
         );
         expect(readFileSync(summary, 'utf8')).toContain(
-          'sdk-java cache write-back failed on ecs-runner-7: status 124; host cache present at seed: 0',
+          'sdk-java cache write-back failed on ecs-runner-7: status 124; host cache present at seed: 0; seed status: 0',
         );
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -872,7 +935,7 @@ echo REACHED_END`,
     // The suite resolves from the job-local repository so it needs no lock.
     expect(block).toContain('-Dmaven.repo.local=${{ runner.temp }}/m2-repo');
     expect(block).toContain(
-      'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true',
+      'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || SDK_JAVA_M2_SEED_STATUS=$?',
     );
     // The suite result is captured instead of aborting under errexit, so the
     // write-back still runs after a failed suite and the step exits red.

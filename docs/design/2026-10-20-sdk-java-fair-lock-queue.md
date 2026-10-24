@@ -133,7 +133,8 @@ cannot be acquired within its budget warns and skips the copy instead of
 failing a step whose suite already passed. On that path the workflow rewrites
 the helper's fatal line to a distinct `sdk-java host lock wait exhausted`
 warning with the same ticket/class/queue-head attribution and appends a
-step-summary line, instead of leaving the pinned `lock not acquired within`
+step-summary line that reports host-cache presence and the seed copy's exit
+status separately, instead of leaving the pinned `lock not acquired within`
 error, so a succeeding step cannot leave the infrastructure signature on a
 job where a later genuine failure would be misclassified. The write-back's own
 failure arms — the 300 s backstop and any mkdir or copy error — append the
