@@ -15,6 +15,7 @@ import type {
 import { writeDaemonToken } from '../serve/daemon-discovery.js';
 import {
   attachCommand,
+  formatAttachError,
   resolveAttachToken,
   resolveAttachWorkspace,
   selectAttachRecord,
@@ -148,6 +149,17 @@ describe('qwen attach workspace resolution', () => {
       primaryWorkspace: '/tmp/one',
     };
     expect(resolveAttachWorkspace(record, undefined)).toBeUndefined();
+  });
+});
+
+describe('qwen attach error formatting', () => {
+  it('strips terminal escapes, tabs, and newlines from server messages', () => {
+    const message = '\x1b]52;c;SGV sbG8=\x07\x1b[2Jfailed\tto\nload';
+    const safe = formatAttachError(message);
+    expect(safe).not.toContain('\x1b');
+    expect(safe).not.toContain('\t');
+    expect(safe).not.toContain('\n');
+    expect(safe).toContain('failed');
   });
 });
 

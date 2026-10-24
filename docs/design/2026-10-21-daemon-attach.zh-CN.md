@@ -24,13 +24,13 @@ qwen attach --session <session-id> [--port <port>] [--workspace <path>] [--token
 - 在接收 stdin 前订阅 `GET /session/:id/events`，避免漏掉 model-switch、生命周期与 prompt 响应事件。
 - 将净化后的 `assistant.text.delta` 与 `thought.text.delta` 写到 stdout；turn 结算（`turn_complete`/`turn_error`）或 prompt 结算时结束当前行；错误写 stderr。
 - stdin 的每个非空行作为单个 text content block，经 `POST /session/:id/prompt` 发送。
-- Ctrl+C 或 Ctrl+D 关闭本地订阅并退出，不关闭 daemon session。脱离终端不会取消已接受的 prompt；进行中的 turn 会在服务端继续执行。没有进行中的 turn 时，退出会释放本客户端的 daemon 注册。
+- Ctrl+C 或 Ctrl+D 关闭本地订阅、释放本客户端的 daemon 注册并退出。脱离终端不会取消已接受的 prompt；进行中的 turn 会在服务端继续执行。当本客户端是最后一个客户端且没有待处理的 turn 时，daemon 可能关闭该 session。
 
 ## 安全
 
 - token 依次来自显式 flag、环境变量、pid-scoped sidecar；不会打印。
 - 只有 `listenerIdentityVerified` 确认监听者确为记录中的 daemon 后，才会发送环境 `QWEN_SERVER_TOKEN` 或 sidecar token；显式 `--token` 由操作者提供，仍然允许。`auth: none` 的 daemon 不会收到任何环境 token。
-- assistant/thought/permission/error 文本在写终端前经过 `sanitizeTerminalText`，模型提供的转义序列不能清屏或改写剪贴板。
+- assistant/thought/permission/error 文本在写终端前经过 `sanitizeTerminalText`，模型提供的转义序列不能清屏或改写剪贴板。写入 stderr 的服务端错误信息同样经过净化。
 - 命令复用 SDK 的 bearer-aware HTTP/SSE transport，重定向与 daemon 认证遵循既有客户端契约。
 
 ## 限制与后续

@@ -31,6 +31,10 @@ interface AttachArgs {
   workspace?: string;
 }
 
+export function formatAttachError(message: string): string {
+  return sanitizeTerminalText(message).replace(/[\t\n]/g, '');
+}
+
 export function selectAttachRecord(
   entries: readonly DaemonDiscoveryEntry[],
   port: number | undefined,
@@ -92,13 +96,13 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   ignoreBrokenPipe();
   const target = selectAttachRecord(readDaemonDiscoveries().entries, argv.port);
   if (!target.record) {
-    writeStderrLine(`qwen attach: ${target.error}`);
+    writeStderrLine(`qwen attach: ${formatAttachError(target.error ?? '')}`);
     process.exitCode = 1;
     return;
   }
   const resolved = resolveAttachToken(target.record, argv.token);
   if (resolved.error) {
-    writeStderrLine(`qwen attach: ${resolved.error}`);
+    writeStderrLine(`qwen attach: ${formatAttachError(resolved.error)}`);
     process.exitCode = 1;
     return;
   }
@@ -121,9 +125,9 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
         ? ' If the session belongs to another workspace, pass --workspace <path>.'
         : '';
     writeStderrLine(
-      `qwen attach: could not load session: ${
-        error instanceof Error ? error.message : String(error)
-      }${workspaceHint}`,
+      `qwen attach: could not load session: ${formatAttachError(
+        error instanceof Error ? error.message : String(error),
+      )}${workspaceHint}`,
     );
     process.exitCode = 1;
     return;
@@ -132,7 +136,6 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   let atLineStart = true;
   let terminalClosed = false;
   let promptInFlight = 0;
-  let turnActive = session.hasActivePrompt;
   let notifyTurnSettled: () => void = () => {};
   const writeText = (text: string): void => {
     const safe = sanitizeTerminalText(text);
@@ -147,7 +150,6 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   };
   const renderEvent = (event: DaemonEvent): void => {
     if (event.type === 'turn_complete' || event.type === 'turn_error') {
-      turnActive = false;
       endLine();
       notifyTurnSettled();
     }
@@ -159,7 +161,6 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
         item.type === 'assistant.text.delta' ||
         item.type === 'thought.text.delta'
       ) {
-        turnActive = true;
         writeText(item.text);
       } else if (item.type === 'prompt.cancelled') {
         endLine();
@@ -198,9 +199,9 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     } catch (error) {
       if (!shuttingDown) {
         writeStderrLine(
-          `qwen attach: stream ended: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `qwen attach: stream ended: ${formatAttachError(
+            error instanceof Error ? error.message : String(error),
+          )}`,
         );
         process.exitCode = 1;
       }
@@ -239,7 +240,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
       .catch((error: unknown) => {
         if (!terminalClosed) {
           writeStderrLine(
-            `qwen attach: prompt failed: ${sanitizeTerminalText(
+            `qwen attach: prompt failed: ${formatAttachError(
               error instanceof Error ? error.message : String(error),
             )}`,
           );
@@ -264,9 +265,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     process.removeListener('SIGINT', shutdown);
     rl.close();
     void iterator.return(undefined).catch(() => {});
-    if (!turnActive && promptInFlight === 0) {
-      await session.detach().catch(() => {});
-    }
+    await session.detach().catch(() => {});
   }
 }
 
