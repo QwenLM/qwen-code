@@ -1097,6 +1097,16 @@ describe('runCliEntry', () => {
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
+  it('does not treat an option-shifted memory argv as a bare help request', async () => {
+    await runCliEntry(['memory', '--json', 'import', 'codex']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stdout.join('')).not.toContain('Usage: qwen memory <command>');
+    expect(stderr.join('')).toContain('Unknown command: codex');
+    expect(mocks.memoryImportHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
   it('prints the version instead of executing mcp remove on version argv', async () => {
     await runCliEntry(['mcp', 'remove', 'victim', '-v']);
 

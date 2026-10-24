@@ -93,6 +93,12 @@ describe('Codex source preview', () => {
     expect(project.sections[0].suggestedScope).toBe('project');
     expect(project.sections[0].sourceProject).toBe('/home/u/b');
 
+    const multiline = previewSource(
+      source('/home/u/proj\nand more text\n-------------\nfact\n'),
+    );
+    expect(multiline.sections[0].title).toBe('/home/u/proj and more text');
+    expect(multiline.sections[0].suggestedScope).toBe('unassigned');
+
     const user = previewSource({
       version: 1,
       source: 'codex',

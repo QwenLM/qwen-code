@@ -124,6 +124,44 @@ it('resolves the flushed write when the reader has already left (EPIPE)', async 
   }
 });
 
+it('flushes the human-readable preview before completing', async () => {
+  const directory = await codexDir();
+  const callbacks: Array<() => void> = [];
+  let unflushedWrites = 0;
+  const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((
+    chunk: unknown,
+    a?: unknown,
+    b?: unknown,
+  ) => {
+    const callback = (typeof a === 'function' ? a : b) as
+      | (() => void)
+      | undefined;
+    if (callback) callbacks.push(callback);
+    else unflushedWrites++;
+    return true;
+  }) as typeof process.stdout.write);
+  let settled = false;
+  try {
+    const parsing = yargs(['memory', 'import', 'codex', '--source', directory])
+      .command(memoryCommand)
+      .exitProcess(false)
+      .fail(fail)
+      .parseAsync()
+      .then(() => {
+        settled = true;
+      });
+    await vi.waitFor(() =>
+      expect(callbacks.length + unflushedWrites).toBeGreaterThan(0),
+    );
+    expect(settled).toBe(false);
+    expect(unflushedWrites).toBe(0);
+    for (const callback of callbacks) callback();
+    await parsing;
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 it('flushes the --json preview envelope before completing', async () => {
   const directory = await codexDir();
   const callbacks: Array<() => void> = [];

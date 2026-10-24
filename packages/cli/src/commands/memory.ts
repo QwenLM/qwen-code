@@ -8,12 +8,12 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { previewSource, readLocalSource } from '../memory-import/source.js';
-import { ignoreBrokenPipe, writeStdoutLine } from '../utils/stdioHelpers.js';
+import { ignoreBrokenPipe } from '../utils/stdioHelpers.js';
 
-// The JSON envelopes are the result of this command; exiting on an
-// unflushed async write truncates them on a pipe. A reader that left
-// (EPIPE) must not fail an already-committed import: the write is lost
-// with the reader, so resolve it instead of rejecting.
+// This command's stdout is its result; exiting on an unflushed async write
+// truncates it on a pipe. A reader that left (EPIPE) must not fail an
+// already-committed import: the write is lost with the reader, so resolve it
+// instead of rejecting.
 const writeStdoutLineFlushed = (message: string): Promise<void> =>
   new Promise((resolve, reject) =>
     process.stdout.write(
@@ -101,28 +101,25 @@ export const memoryCommand: CommandModule = {
             if (args['json'])
               await writeStdoutLineFlushed(JSON.stringify(preview));
             else {
-              writeStdoutLine(
+              const lines = [
                 `Preview only: ${preview.sections.length} source sections. No memory was written.`,
-              );
-              for (const group of preview.groups)
-                writeStdoutLine(
-                  `[${group.sectionIds.length} sections] ${group.scope}: ${JSON.stringify(group.sourceProject ?? 'No project hint')}`,
-                );
-              writeStdoutLine(
+                ...preview.groups.map(
+                  (group) =>
+                    `[${group.sectionIds.length} sections] ${group.scope}: ${JSON.stringify(group.sourceProject ?? 'No project hint')}`,
+                ),
                 `Estimated usage (all selectable sections): ${preview.estimate.modelCalls} model calls, ${preview.estimate.sourceTokens} source tokens, up to ${preview.estimate.maxOutputTokens} output tokens; ${preview.estimate.reservedTokens} reserved token units including context.`,
-              );
-              writeStdoutLine(
                 `Task limits: ${preview.estimate.limits.maxCalls} calls / ${preview.estimate.limits.maxReservedTokens} reserved token units. Estimates are not billing quotes; explicit selection and existing context affect usage.`,
-              );
+              ];
               if (preview.estimate.exceedsBudget)
-                writeStdoutLine(
+                lines.push(
                   'Warning: the full selection may exceed the task budget; select fewer sections before confirming.',
                 );
               for (const warning of preview.warnings)
-                writeStdoutLine(`Warning: ${JSON.stringify(warning)}`);
-              writeStdoutLine(
+                lines.push(`Warning: ${JSON.stringify(warning)}`);
+              lines.push(
                 'Use --json for section IDs, details and source text. To import, provide --apply --selection <JSON file> --idempotency-key <key>. Unassigned sections require an explicit scope.',
               );
+              await writeStdoutLineFlushed(lines.join('\n'));
             }
             return;
           }

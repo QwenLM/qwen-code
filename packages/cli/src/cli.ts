@@ -495,7 +495,7 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
 
 async function runMemoryFastPath(rawArgv: readonly string[]): Promise<void> {
   const argv: readonly string[] = normalizeServeFastPathArgv(rawArgv);
-  const hasSubcommand = argv.length > 1 && !argv[1]!.startsWith('-');
+  const hasSubcommand = argv.slice(1).some((token) => !token.startsWith('-'));
   if (!hasSubcommand) {
     printMemoryHelp();
     return;

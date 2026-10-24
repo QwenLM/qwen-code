@@ -140,7 +140,11 @@ function headingTitle(raw: string): string {
       .replace(/[\t ]+#+[\t ]*$/, '')
       .trim();
   // A setext heading's slice includes its underline on the next line.
-  return raw.split(/\r\n|[\r\n]/, 1)[0]!.trim();
+  return raw
+    .split(/\r\n|[\r\n]/)
+    .slice(0, -1)
+    .join(' ')
+    .trim();
 }
 function scopeFor(
   content: string,
