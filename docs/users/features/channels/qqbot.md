@@ -83,6 +83,7 @@ export QQ_APP_SECRET=<your-app-secret>
 | `sandbox`             | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`)                                                                |
 | `moderationTools`     | `false` | Expose the QQ group-management tools to the agent — see [Group Management Tools](#group-management-tools). Off by default; set `true` to opt in. |
 | `purgeLegacySessions` | `false` | Delete legacy single-scope and user-scope session routes — see below.                                                                            |
+| `fileTools`           | `false` | Expose `qq_send_file` so the agent can send a local file to the chat — see [Outbound Files](#outbound-files).                                    |
 
 All standard channel options (see [Channel Overview](./overview#options)) are also supported:
 `privatePolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
@@ -138,6 +139,18 @@ For a group action to reach a member's message by name, the channel remembers th
 
 Each channel instance owns its tools: one bridge can serve several channels, and a tool is only offered to sessions of the channel that registered it, so two QQ channels in one process never act on each other's chats or credentials.
 
+## Outbound Files
+
+With `fileTools: true`, the channel exposes `qq_send_file` to the agent as a client MCP tool: the model passes an absolute local path and the file arrives in the chat as a downloadable file card. It is off by default, because the tool hands a local file to QQ under the bot's own identity.
+
+The tool only reads a path that resolves inside the session's workspace or the system temporary directory — a symlink out of the workspace is resolved first and refused, a file with more than one hard link is refused, and where the platform exposes `/proc/self/fd` the opened descriptor is re-resolved so a directory swapped between the check and the open is caught — and the file must be a non-empty regular file of at most 20 MiB. The platform's own limit is 200 MB; the channel keeps the repository's 20 MiB outbound cap so the file stays in memory and the exposure stays bounded.
+
+The file goes up through the platform's chunked path (`upload_prepare` → PUT each part → `upload_part_finish` → merge), which is the only path that fits a local file: the URL form needs a public origin the bot does not have, and the binary form stops at 5 MB. A transient `40093001` on a part is retried; `40093002` (the chat's daily file-sending limit) is reported as permanent. A rejected send is never replaced by a text message, because that would read as success while the user never received the file.
+
+The upload is followed by a `msg_type=7` send that reuses the text path's reply anchor and `msg_seq` counter, so a file sent mid-turn stays in the same reply chain as that turn's text and cannot replay a `(msg_id, msg_seq)` pair the platform dedupes. The channel anchors a reply for 5 minutes in every chat type — the platform allows 60 minutes for a direct chat, but the channel's own anchor expires first, so a long turn can fall out of the reply window and the file is then sent as an active message. When a group admin has turned active messages off and that window has closed, the tool reports the refusal instead of dropping the file.
+
+Each channel instance owns its tool: one bridge can serve several channels, and `qq_send_file` is only offered to sessions of the channel that registered it.
+
 ## Markdown Support
 
 The QQ Bot channel supports Markdown formatting (`msg_type=2`). The agent's Markdown responses are sent as-is, and QQ renders them with rich formatting (bold, italic, code blocks, links, lists).
@@ -179,7 +192,7 @@ Image input requires a model that accepts images. Declare the capability when th
 
 With a text-only model the agent receives an "unsupported image" note plus the saved path instead of the picture.
 
-Sending images, videos, files, or voice messages back to QQ is not supported.
+Sending a file back to QQ is supported through the opt-in `qq_send_file` tool — see [Outbound Files](#outbound-files). Images, videos, and voice messages cannot be sent back.
 
 ## Token Management
 
