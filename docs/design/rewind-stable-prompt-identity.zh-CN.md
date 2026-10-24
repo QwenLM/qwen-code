@@ -41,8 +41,6 @@ file-history snapshot 的 key 可能比声明它的轮次活得更久。
 因此两侧都选择显式失败而不是靠猜——对话截断要求恰好只有一条匹配的 API 条目，
 而 `FileHistoryService.rewind` 会拒绝被多个 snapshot 同时穿戴的 key，
 否则它会把共享 key 解析到最后一次出现的位置，然后裁剪掉更新的备份。
-该拒绝是文件侧唯一的守卫；TUI 通过既有的 restore 错误路径把它呈现给用户，
-而不是自己先跑一遍统计（census）。
 
 压缩记录会把 prompt id 持久化为一个与其历史快照平行的数组。
 恢复某个压缩 checkpoint 时，会把每个 id 重新挂回同一条目。

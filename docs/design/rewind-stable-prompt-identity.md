@@ -55,9 +55,7 @@ transcript. Both halves therefore fail loud rather than guess — conversation
 truncation requires exactly one matching API entry, and
 `FileHistoryService.rewind` refuses a key that more than one snapshot wears,
 because it would otherwise resolve the shared key to the last occurrence and
-then prune the newer backups. That refusal is the single guard on the file
-side; the TUI surfaces it through the existing restore-error path instead of
-running its own census first.
+then prune the newer backups.
 
 Compression records persist prompt ids in an array parallel to their history
 snapshot. Restoring a compression checkpoint reattaches each id to the same
