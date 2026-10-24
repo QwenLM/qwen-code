@@ -85,6 +85,7 @@ import {
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 import * as hostedPlan from './hosted-plan-mode.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
@@ -3833,11 +3834,67 @@ function actionIds(): string[] {
   ];
 }
 
+// requested() polls the Turn's sequential fsynced durable writes (options
+// publish, action request, durable-wait checkpoint). A fixed budget for that
+// chain flaked on the shared pool (#13397, #15093), so budget it through the
+// slow-host policy. The budget is per wait, so the two tests that call
+// requested() twice need 2 x 20 s < 60 s on the ecs-qwen pool; the other
+// slow-host arm keeps 3 s of headroom under its 15 s ceiling so a hang still
+// fails on the assertion rather than as a bare runner timeout. The autofix
+// verification gate strips RUNNER_NAME and passes --testTimeout=60000, so
+// this lands at 12 s there; closing that needs a gate sentinel, not a local
+// change.
+function requestedWaitBudgetMs(
+  slowHost: boolean,
+  runnerName: string | undefined,
+): number {
+  if (!slowHost) return 10_000;
+  const ceiling = runnerName?.startsWith('ecs-qwen-') ? 60_000 : 15_000;
+  return Math.min(20_000, ceiling - 3_000);
+}
+
+const SLOW_HOST = isSlowTestHost();
+const BUDGET_RUNNER_NAME = process.env['RUNNER_NAME'];
+const REQUESTED_TIMEOUT_MS = requestedWaitBudgetMs(
+  SLOW_HOST,
+  BUDGET_RUNNER_NAME,
+);
+
+it('keeps the requested() wait budget under the per-test ceiling', () => {
+  expect(requestedWaitBudgetMs(true, 'ecs-qwen-64c-01')).toBe(20_000);
+  expect(requestedWaitBudgetMs(true, 'ubuntu-latest')).toBe(12_000);
+  expect(requestedWaitBudgetMs(true, undefined)).toBe(12_000);
+  expect(requestedWaitBudgetMs(false, undefined)).toBe(10_000);
+  expect(requestedWaitBudgetMs(true, 'ecs-qwen-64c-01') * 2).toBeLessThan(
+    60_000,
+  );
+});
+
+it('passes REQUESTED_TIMEOUT_MS to the requested() wait', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const waitFor = vi.spyOn(vi, 'waitFor');
+  try {
+    const requestId = await requested();
+    expect(waitFor.mock.calls.at(-1)?.[1]).toEqual({
+      timeout: REQUESTED_TIMEOUT_MS,
+    });
+    await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  } finally {
+    waitFor.mockRestore();
+  }
+  await running;
+});
+
 async function requested(count = 1): Promise<string> {
   let requestId = '';
   // The Action request commits first and its await_action checkpoint after
-  // it, each behind fsynced durable writes; on the coverage-enabled, shared
-  // post-merge CI runners the checkpoint lost vitest's 1s default (#13397).
+  // it, each behind fsynced durable writes.
   await vi.waitFor(
     async () => {
       const ids = actionIds();
@@ -3846,7 +3903,7 @@ async function requested(count = 1): Promise<string> {
       expect(session.authority.action(requestId)?.state).toBe('requested');
       expect((await checkpoint()).continuation.phase).toBe('await_action');
     },
-    { timeout: 10_000 },
+    { timeout: REQUESTED_TIMEOUT_MS },
   );
   return requestId;
 }
