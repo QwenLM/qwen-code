@@ -44,3 +44,15 @@ metadata does not grant daemon mutation protection. Explicit REST and ACP
 close, delete, and archive keep their existing behavior, including protection
 for sessions owned by an active built-in Live call. External clients remain
 responsible for their task lifecycle; those API calls can terminate their work.
+
+## Standalone Sessions
+
+Session Overview lists standalone (no-workspace) conversations alongside
+workspace sessions, merged from the standalone client catalog behind the
+`standalone_sessions_v1` capability. A standalone row's catalog
+`workspaceCwd` is the daemon's internal Conversations root, not a product
+workspace, so the panel routes its rename, export, archive, and delete
+actions to the standalone client routes; workspace-qualified calls would
+target the Conversations workspace and bypass the standalone lifecycle
+(working directory, deletion journal, live-runtime guard). A host-locked
+shell hides the standalone catalog, matching the sidebar's scope gate.
