@@ -722,6 +722,7 @@ export class Turn {
     private readonly promptIdentity?: string,
     private readonly retractDeliveredOutputOnRetry?: boolean,
     private readonly onPreparedRequest?: LlmPreparedRequestCallback,
+    private readonly suppressedHookContext?: string,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -740,10 +741,14 @@ export class Turn {
       const sendOptions =
         this.promptIdentity !== undefined ||
         this.retractDeliveredOutputOnRetry === true ||
-        this.onPreparedRequest !== undefined
+        this.onPreparedRequest !== undefined ||
+        this.suppressedHookContext !== undefined
           ? {
               ...(this.onPreparedRequest
                 ? { onPreparedRequest: this.onPreparedRequest }
+                : {}),
+              ...(this.suppressedHookContext
+                ? { suppressedHookContext: this.suppressedHookContext }
                 : {}),
               ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
               ...(this.retractDeliveredOutputOnRetry
