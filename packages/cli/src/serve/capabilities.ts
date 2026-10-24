@@ -90,6 +90,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
+  session_artifact_library: { since: 'v1' },
   session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
@@ -117,6 +118,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // hierarchical QWEN.md state and accepts append/replace writes scoped
   // to either the bound workspace or the global ~/.qwen directory.
   workspace_memory: { since: 'v1' },
+  memory_import_v1: { since: 'v1' },
   workspace_memory_remember: {
     since: 'v1',
     modes: ['workspace', 'clean'],
@@ -158,6 +160,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_agents: { since: 'v1' },
   session_agent_trace: { since: 'v1' },
   scheduled_task_session_reuse: { since: 'v1' },
+  // Scheduled tasks accept a `gate`: a command run at each fire outside the
+  // model, so a quiet watch costs no turn. Clients that send `gate` to an
+  // older daemon would have it silently dropped on POST.
+  scheduled_task_gate: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
@@ -437,6 +443,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch_worktree: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  workspace_model_reload: { since: 'v1' },
   // Immediate best-effort channel delivery for prompt/scheduled finals and
   // direct workspace notifications. Presence describes the route/event
   // contract; current worker availability is reported per delivery.
@@ -766,6 +773,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_shell_command',
     (toggles) => toggles.sessionShellCommandEnabled === true,
+  ],
+  [
+    'session_artifact_library',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [
     'session_artifacts_persistence',

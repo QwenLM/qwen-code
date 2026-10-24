@@ -14,6 +14,10 @@ import {
   resolveModelManagement,
   type WebShellModelManagementOptions,
 } from './modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from './unavailableModels';
 import './styles/globals.css';
 import {
   useMessageNavigation,
@@ -137,6 +141,7 @@ import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { TurnCallsProvider } from './turnCallsContext';
 import { useModelConfigurations } from './hooks/useModelConfigurations';
+import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
@@ -221,7 +226,12 @@ import {
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
-import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import type {
+  ManagedAgentProvider,
+  ManagedAgentWorkspace,
+} from './components/managed/managed-agent-provider';
+import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
+import { DropdownMenuItem } from './components/ui/dropdown-menu';
 import {
   managedSelectionFromUrl,
   saveManagedSelection,
@@ -337,6 +347,7 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
+import { WorkspaceExecutionSelect } from './components/workspaces/WorkspaceExecutionSelect';
 import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
 import { StandaloneContext } from './config/standalone';
 import {
@@ -364,7 +375,6 @@ import {
   navigateToDaemon,
 } from './config/daemon';
 import { Button } from './components/ui/button';
-import { Tabs, TabsList, TabsTrigger } from './components/ui/tabs';
 import { isDesktopShell } from './utils/externalOpen';
 import {
   isPluginShadowPanel,
@@ -468,6 +478,7 @@ import {
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
 import { McpManagerPage } from './components/mcp/McpManagerPage';
+import { ManagedMcpManagerPage } from './components/managed/ManagedMcpManagerPage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import {
   createAndAttachSessionForPrompt,
@@ -525,6 +536,7 @@ import {
 } from './themeContext';
 import {
   WebShellCustomizationProvider,
+  type WebShellCustomization,
   type WebShellAssistantFeedbackOptions,
   type WebShellComposerApi,
   type WebShellComposerInput,
@@ -1351,10 +1363,16 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
+  /** Refresh and persist the host catalog before Qwen reloads models. No return data is required. */
+  onRefreshModels?: WebShellCustomization['onRefreshModels'];
   /** Native settings-page presentation. Does not restrict commands or daemon access. */
   settings?: WebShellSettingsOptions;
   /** Model add/delete interactions across WebShell. Not a backend permission policy. */
   modelManagement?: WebShellModelManagementOptions;
+  /** Extra catalog models shown disabled in the composer picker. */
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  /** Host-owned hint for a disabled model. DOM/Solid hosts mount into the container. */
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
@@ -1650,6 +1668,7 @@ export interface WebShellProps {
    * Override the witty phrases cycled while a prompt is streaming. Receives the
    * resolved UI language; return phrases to replace the built-in defaults, an
    * empty array to hide the phrase, or `undefined`/`null` to keep the defaults.
+   * `ui.accessibility.enableLoadingPhrases: false` hides even custom phrases.
    */
   loadingPhrases?: LoadingPhrasesResolver;
   /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
@@ -3381,6 +3400,7 @@ function readScopedModelSetting(
 }
 
 export function App({
+  onRefreshModels,
   askUserFreeTextLabel,
   onSessionIdChange,
   onSessionInfoChange,
@@ -3436,6 +3456,8 @@ export function App({
   sidebar,
   settings: settingsPresentation,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   header,
   rightPanel,
   showToolCalls = false,
@@ -3508,6 +3530,35 @@ export function App({
   managedModeRef.current = managedMode;
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
+  const [managedArchivedNavigationTarget, setManagedArchivedNavigationTarget] =
+    useState<HTMLDivElement | null>(null);
+  const [managedArchivedStatus, setManagedArchivedStatus] = useState({
+    count: 0,
+    loading: false,
+    error: false,
+  });
+  const [managedNavigationSearch, setManagedNavigationSearch] = useState('');
+  const [managedWorkspaceId, setManagedWorkspaceId] = useState<string | null>();
+  const [managedWorkspaceCreationOpen, setManagedWorkspaceCreationOpen] =
+    useState(false);
+  const managedWorkspaceCreationOpenRef = useRef(managedWorkspaceCreationOpen);
+  managedWorkspaceCreationOpenRef.current = managedWorkspaceCreationOpen;
+  const managedProviderKey = managedAgentProvider?.storageKey;
+  const [managedWorkspaceCatalog, setManagedWorkspaceCatalog] = useState<{
+    providerKey: string;
+    workspaces: ManagedAgentWorkspace[];
+  }>();
+  const handleManagedWorkspacesChange = useCallback(
+    (workspaces: ManagedAgentWorkspace[]) => {
+      if (managedProviderKey) {
+        setManagedWorkspaceCatalog({
+          providerKey: managedProviderKey,
+          workspaces,
+        });
+      }
+    },
+    [managedProviderKey],
+  );
   useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -3751,6 +3802,7 @@ export function App({
   const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
   const customization = useMemo(
     () => ({
+      onRefreshModels,
       allowedApprovalModes,
       artifact,
       filterArtifact,
@@ -3786,6 +3838,7 @@ export function App({
       fileDropAction,
     }),
     [
+      onRefreshModels,
       allowedApprovalModes,
       artifact,
       filterArtifact,
@@ -3833,6 +3886,7 @@ export function App({
     structuralOnly: true,
   });
   const connection = useConnection();
+  const modelRefresh = useModelRefresh(onRefreshModels);
   const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
@@ -3882,6 +3936,58 @@ export function App({
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  const [skillsSource, setSkillsSource] = useState<{
+    client: typeof workspace.client;
+    cwd: string;
+  }>();
+  const [pluginInitialTab, setPluginInitialTab] = useState<
+    'extensions' | 'skills'
+  >('extensions');
+  const skillsSourceCwd =
+    skillsSource?.client === workspace.client
+      ? skillsSource.cwd
+      : workspace.workspaceCwd;
+  const selectSkillsWorkspace = useCallback(
+    (cwd: string) => {
+      setSkillsSource((current) =>
+        current?.client === workspace.client && current.cwd === cwd
+          ? current
+          : { client: workspace.client, cwd },
+      );
+    },
+    [workspace.client],
+  );
+  const managedCreationSkills = useMemo(() => {
+    if (!managedAgentProvider || !skillsSourceCwd) return undefined;
+    const sourceCwd = skillsSourceCwd;
+    return {
+      workspaceCwd: sourceCwd,
+      async list(signal: AbortSignal) {
+        const status = await workspace.client
+          .workspaceByCwd(sourceCwd)
+          .workspaceConfigSkills();
+        signal.throwIfAborted();
+        if (status.workspaceCwd !== sourceCwd)
+          throw new Error('Skills source Workspace identity changed.');
+        if (!status.initialized || status.errors?.length)
+          throw new Error('Skills source Workspace is unavailable.');
+        return status.skills
+          .filter(
+            (skill) => skill.status === 'ok' && skill.userInvocable !== false,
+          )
+          .map(({ name, description }) => ({ name, description }));
+      },
+      async load(signal: AbortSignal) {
+        const snapshot = await workspace.client
+          .workspaceByCwd(sourceCwd)
+          .workspaceSkillsSnapshot(signal);
+        if (snapshot.workspaceCwd !== sourceCwd)
+          throw new Error('Skills source Workspace identity changed.');
+        return snapshot.skills;
+      },
+    };
+  }, [managedAgentProvider, skillsSourceCwd, workspace.client]);
+
   // Multi-daemon (#13727): saved hosts stay connected read-only alongside
   // the provider that owns this App subtree; the picker and sidebar consume
   // their live workspaces/sessions; embedded shells have no controller and
@@ -4012,7 +4118,9 @@ export function App({
         ...ordinaryWorkspaces.map((entry) => ({
           id: entry.id,
           cwd: entry.cwd,
-          label: workspaceLabel(entry),
+          label: managedAgentProvider
+            ? `${workspaceLabel(entry)} · ${t('managed.localMode')}`
+            : workspaceLabel(entry),
           primary: entry.primary,
           trusted: entry.trusted,
           hostOrigin: focusedHostOrigin,
@@ -4027,7 +4135,9 @@ export function App({
             .map((entry) => ({
               id: `${origin}${entry.id}`,
               cwd: entry.cwd,
-              label: workspaceLabel(entry),
+              label: managedAgentProvider
+                ? `${workspaceLabel(entry)} · ${t('managed.localMode')}`
+                : workspaceLabel(entry),
               primary: entry.primary,
               trusted: entry.trusted,
               hostOrigin: origin,
@@ -4336,6 +4446,14 @@ export function App({
   // a mismatch means connection.sessionId moved on (reconnect cycling or a
   // user-initiated switch) and the stale response is dropped.
   const worktreeSessionKeyRef = useRef<string | undefined>(undefined);
+  const sidebarStandaloneTitleRef = useRef<
+    | {
+        sessionId: string;
+        displayName?: string;
+        client: typeof workspace.client;
+      }
+    | undefined
+  >(undefined);
   const sessionStatusRequestRef = useRef(0);
   useLayoutEffect(() => {
     setSessionWorktree(undefined);
@@ -4354,17 +4472,22 @@ export function App({
     // session switch still starts from an empty title.
     setSessionStatusDisplayName(
       (prev) =>
-        peekSessionCatalogDisplayName(
-          workspace.client,
-          connection.sessionId,
-          connection.workspaceCwd,
-        ) ?? prev,
+        (connection.sessionContext?.kind === 'standalone' &&
+        sidebarStandaloneTitleRef.current?.client === workspace.client &&
+        sidebarStandaloneTitleRef.current.sessionId === connection.sessionId
+          ? sidebarStandaloneTitleRef.current.displayName
+          : peekSessionCatalogDisplayName(
+              workspace.client,
+              connection.sessionId,
+              connection.workspaceCwd,
+            )) ?? prev,
     );
   }, [
     logicalSessionKey,
     workspace.client,
     connection.sessionId,
     connection.workspaceCwd,
+    connection.sessionContext?.kind,
   ]);
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
@@ -9862,6 +9985,9 @@ export function App({
         navigation?.route.page !== 'chat' || !navigation.route.sessionId,
       );
       setManagedHome(selection.open);
+      if (managedSessionId !== selection.sessionId) {
+        setManagedWorkspaceId(undefined);
+      }
       setManagedSessionId(selection.sessionId);
     }
   }
@@ -9902,6 +10028,7 @@ export function App({
     if (activePanel !== 'settings') {
       setSettingsInitialCategory(undefined);
     }
+    if (activePanel !== 'plugins') setPluginInitialTab('extensions');
   }, [activePanel]);
   const closePanel = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
@@ -11048,6 +11175,28 @@ export function App({
   );
   const refreshActiveSessionDisplayName = useCallback(async () => {
     const activeConnection = connectionRef.current;
+    if (
+      activeConnection.sessionId &&
+      activeConnection.sessionContext?.kind === 'standalone'
+    ) {
+      const owner = sessionOwnerGuard.capture();
+      try {
+        const summary = await workspace.client.getStandaloneSession(
+          activeConnection.sessionId,
+        );
+        if (
+          owner.isCurrent() &&
+          connectionRef.current.sessionId === activeConnection.sessionId &&
+          !('state' in summary) &&
+          summary.displayName?.trim()
+        ) {
+          setSessionStatusDisplayName(summary.displayName);
+        }
+      } catch {
+        // A title refresh must not disrupt the completed conversation.
+      }
+      return;
+    }
     if (
       !activeConnection.sessionId ||
       !activeConnection.workspaceCwd ||
@@ -12292,6 +12441,7 @@ export function App({
     showMemoryDialog ||
     (modelManagementPolicy.allowAdd && showAuthDialog) ||
     showAddWorkspaceDialog ||
+    managedWorkspaceCreationOpen ||
     scratchOutcomeUnknown !== 'clear' ||
     externalInteractionBlockCount > 0 ||
     // The Settings / Daemon Status panel replaces the chat surface, so — like a
@@ -13224,6 +13374,10 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'ui.showResponseTokensPerSecond',
     )?.values.effective === true;
+  const enableLoadingPhrases =
+    workspaceSettings.find(
+      (setting) => setting.key === 'ui.accessibility.enableLoadingPhrases',
+    )?.values.effective !== false;
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -13897,6 +14051,53 @@ export function App({
     ],
   );
 
+  const handleSettingsOutputLanguageChange = useCallback(
+    async (language: string): Promise<boolean> => {
+      if (sessionWriteBlocked) return false;
+      const owner = { current: sessionOwnerGuard.capture() };
+      if (
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current ||
+        isGoalGateBlocked()
+      ) {
+        blockCommand();
+        return false;
+      }
+      // Only the language command rewrites output-language.md and refreshes
+      // running sessions; a plain settings write would leave both stale.
+      const command = `/language output ${language.trim() || 'auto'}`;
+      try {
+        await sendPrompt(command, undefined, undefined, { ownerRef: owner });
+      } catch (error) {
+        if (owner.current.isCurrent()) {
+          reportError(error, 'Failed to sync /language output command');
+        }
+        return false;
+      }
+      if (!owner.current.isCurrent()) return true;
+      try {
+        await reloadWorkspaceSettings();
+      } catch (error) {
+        if (owner.current.isCurrent()) {
+          reportError(
+            error,
+            'Failed to refresh settings after /language output',
+          );
+        }
+      }
+      return true;
+    },
+    [
+      blockCommand,
+      reloadWorkspaceSettings,
+      reportError,
+      sessionWriteBlocked,
+      sendPrompt,
+      sessionOwnerGuard,
+      isGoalGateBlocked,
+    ],
+  );
+
   const handleClearScreen = useCallback(() => {
     if (streamingStateRef.current !== 'idle') {
       store.dispatch([
@@ -14283,6 +14484,9 @@ export function App({
             void refreshActiveSessionDisplayNameRef.current();
           }
         }
+      }
+      if (productContext?.kind === 'standalone' && !sessionDisplayName) {
+        void refreshActiveSessionDisplayNameRef.current();
       }
       dispatchSessionChangeRef.current?.({
         type: 'turn_complete',
@@ -15312,6 +15516,7 @@ export function App({
         if (!reconciled) {
           throw new Error(t('sidebar.addWorkspaceRefreshError'));
         }
+        setManagedHome(false);
       } finally {
         if (workspaceMutationTokenRef.current === token) {
           workspaceMutationTokenRef.current = null;
@@ -15569,6 +15774,47 @@ export function App({
     },
     [daemonTarget, focusedHostOrigin, handleSelectComposerWorkspace],
   );
+  const handleSelectDaemonWorkspace = useCallback(
+    (workspace: WorkspaceSelectorOption) => {
+      const target = composerWorkspaces?.find(
+        (item) =>
+          item.id === workspace.id &&
+          item.cwd === workspace.cwd &&
+          item.hostOrigin === workspace.hostOrigin,
+      );
+      if (!target?.trusted) return;
+      if (target.hostOrigin && target.hostOrigin !== focusedHostOrigin) {
+        if (!daemonTarget) return;
+        setManagedHome(false);
+        handleSelectHostedWorkspace(target.hostOrigin, target.cwd);
+      } else if (connectionRef.current.sessionId) {
+        void createNewSession({ kind: 'workspace', cwd: target.cwd });
+      } else {
+        setManagedHome(false);
+        void switchWorkspace(target.cwd);
+        returnToChat();
+      }
+    },
+    [
+      composerWorkspaces,
+      createNewSession,
+      daemonTarget,
+      focusedHostOrigin,
+      handleSelectHostedWorkspace,
+      returnToChat,
+      switchWorkspace,
+    ],
+  );
+  const handleSelectManagedWorkspace = useCallback(
+    (workspaceId: string) => {
+      setManagedWorkspaceId(workspaceId);
+      setManagedSessionId(undefined);
+      setManagedHome(true);
+      closeMobileDrawer();
+      returnToChat();
+    },
+    [closeMobileDrawer, returnToChat],
+  );
   const handleSelectComposerStandalone = useCallback(() => {
     if (connectionRef.current.sessionId) {
       void createNewSession({ kind: 'global' });
@@ -15588,10 +15834,42 @@ export function App({
   const handleCreateComposerScratchWorkspace = useCallback(() => {
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
-  const handleOpenExistingWorkspace = useCallback(() => {
+  const handleOpenLocalWorkspace = useCallback(() => {
     workspaceBrowseActiveRef.current = standalone;
     setShowAddWorkspaceDialog(true);
   }, [standalone]);
+  const handleOpenManagedWorkspace = useCallback(() => {
+    setShowAddWorkspaceDialog(false);
+    setWorkspaceAddLocation(undefined);
+    workspaceBrowseActiveRef.current = false;
+    completeRemoteWorkspaceAdd();
+    setManagedWorkspaceCreationOpen(true);
+    closeMobileDrawer();
+  }, [closeMobileDrawer]);
+  const handleOpenExistingWorkspace = useCallback(() => {
+    if (
+      managedMode &&
+      managedAgentProvider?.workspaceBinding?.createWorkspace
+    ) {
+      handleOpenManagedWorkspace();
+    } else {
+      handleOpenLocalWorkspace();
+    }
+  }, [
+    managedMode,
+    managedAgentProvider,
+    handleOpenManagedWorkspace,
+    handleOpenLocalWorkspace,
+  ]);
+  const workspaceExecutionField = managedAgentProvider?.workspaceBinding
+    ?.createWorkspace ? (
+    <WorkspaceExecutionSelect
+      value="daemon"
+      onValueChange={(mode) => {
+        if (mode === 'managed') handleOpenManagedWorkspace();
+      }}
+    />
+  ) : undefined;
 
   const handleComposerAttachmentsChange = useCallback(
     (hasAttachments: boolean) => {
@@ -21036,6 +21314,8 @@ export function App({
     onError: reportError,
     sessionWorkflowEnabled,
     modelManagement,
+    unavailableModels,
+    mountUnavailableModelTooltip,
     workflow: sessionWorkflowEnabled
       ? {
           todos: sessionWorkflowTodos,
@@ -21164,6 +21444,9 @@ export function App({
             >
               <ModelDialog
                 mode={modelDialogMode}
+                modelRefresh={
+                  modelDialogMode === 'main' ? modelRefresh : undefined
+                }
                 models={modelDialogModels[modelDialogMode]}
                 loading={
                   (modelDialogMode === 'advisor' && providersState.loading) ||
@@ -21478,7 +21761,9 @@ export function App({
                 tone={workspace.status === 'error' ? 'alert' : 'status'}
                 subtitle={workspaceAddLocationSubtitle}
                 onClose={closeAddWorkspaceDialog}
-              />
+              >
+                {workspaceExecutionField}
+              </WorkspaceAddStatusDialog>
             ) : workspaceBrowseActiveRef.current &&
               workspaceAddLocationIsConnected &&
               !dynamicWorkspaceRegistrationSupported ? (
@@ -21487,9 +21772,19 @@ export function App({
                 tone="alert"
                 subtitle={workspaceAddLocationSubtitle}
                 onClose={closeAddWorkspaceDialog}
-              />
+              >
+                {workspaceExecutionField}
+              </WorkspaceAddStatusDialog>
             ) : (
               <AddWorkspaceDialog
+                executionMode={
+                  managedAgentProvider?.workspaceBinding?.createWorkspace
+                    ? 'daemon'
+                    : undefined
+                }
+                onExecutionModeChange={(mode) => {
+                  if (mode === 'managed') handleOpenManagedWorkspace();
+                }}
                 browseDirectories={workspaceBrowseActiveRef.current}
                 initialPath={
                   !workspaceBrowseActiveRef.current
@@ -21660,6 +21955,7 @@ export function App({
                       : undefined
                   }
                   onOpenPlugins={() => {
+                    setPluginInitialTab('extensions');
                     closeMobileDrawer();
                     openPanel('plugins');
                   }}
@@ -21728,7 +22024,14 @@ export function App({
                   // chat it opens an ordinary task; a fresh voice conversation
                   // comes from the Live controls.
                   onNewSession={(workspaceCwd) => {
-                    if (managedMode) {
+                    if (managedMode && typeof workspaceCwd !== 'string') {
+                      if (
+                        managedSessionId &&
+                        managedAgentProvider?.workspaceBinding &&
+                        managedWorkspaceId === undefined
+                      ) {
+                        return false;
+                      }
                       setManagedSessionId(undefined);
                       closeMobileDrawer();
                       returnToChat();
@@ -21740,32 +22043,23 @@ export function App({
                         : { kind: 'inherit', leaveLive: true },
                     );
                   }}
-                  sessionContent={
-                    managedMode ? (
+                  managedWorkspaces={
+                    managedAgentProvider ? (
                       <div ref={setManagedNavigationTarget} />
                     ) : undefined
                   }
-                  sessionHeader={managedAgentProvider ? (
-                    <Tabs
-                      className="px-2 pb-2"
-                      value={managedMode ? 'managed' : 'local'}
-                      onValueChange={(value) =>
-                        setManagedHome(value === 'managed')
-                      }
-                    >
-                      <TabsList
-                        aria-label={t('managed.executionMode')}
-                        className="w-full"
-                      >
-                        <TabsTrigger value="local" className="flex-1">
-                          {t('managed.localMode')}
-                        </TabsTrigger>
-                        <TabsTrigger value="managed" className="flex-1">
-                          {t('managed.managedMode')}
-                        </TabsTrigger>
-                      </TabsList>
-                    </Tabs>
-                  ) : undefined}
+                  managedArchivedSessions={
+                    managedAgentProvider?.lifecycle
+                      ? {
+                          ...managedArchivedStatus,
+                          content: <div ref={setManagedArchivedNavigationTarget} />,
+                        }
+                      : undefined
+                  }
+                  onSearchQueryChange={
+                    managedAgentProvider ? setManagedNavigationSearch : undefined
+                  }
+                  currentSessionActive={!managedMode}
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
@@ -21774,7 +22068,8 @@ export function App({
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
                   onOpenHostSession={handleOpenHostSession}
-                  onLoadStandaloneSession={(sessionId) => {
+                  onLoadStandaloneSession={(sessionId, displayName) => {
+                    sidebarStandaloneTitleRef.current = { sessionId, displayName, client: workspace.client };
                     setMainView('chat');
                     return loadSidebarSession(
                       sessionId,
@@ -21787,6 +22082,7 @@ export function App({
                   }
                   projectFeaturesEnabled={projectFeaturesAvailable}
                   onSelectCurrentSession={() => {
+                    setManagedHome(false);
                     closeMobileDrawer();
                     splitFoldedByShrinkRef.current = false;
                     returnToChat();
@@ -21875,7 +22171,8 @@ export function App({
                   }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported ||
-                    hasRemoteWorkspaceLocation
+                    hasRemoteWorkspaceLocation ||
+                    Boolean(managedAgentProvider?.workspaceBinding?.createWorkspace)
                       ? handleOpenExistingWorkspace
                       : undefined
                   }
@@ -22312,6 +22609,9 @@ export function App({
                         embedded
                         initialCategory={settingsInitialCategory}
                         onLanguageChange={handleSettingsLanguageChange}
+                        onOutputLanguageChange={
+                          handleSettingsOutputLanguageChange
+                        }
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
@@ -22385,6 +22685,13 @@ export function App({
                         onClose={closePanel}
                         initialFocusRef={panelHeadingRef}
                       />
+                    ) : activePanel === 'mcp' && managedMode && managedAgentProvider ? (
+                      <ManagedMcpManagerPage
+                        provider={managedAgentProvider}
+                        sessionId={managedSessionId}
+                        workspaceId={managedWorkspaceId ?? undefined}
+                        onClose={closePanel}
+                      />
                     ) : activePanel === 'mcp' && mcpDialogMessage ? (
                       <McpManagerPage
                         message={mcpDialogMessage}
@@ -22424,6 +22731,15 @@ export function App({
                         onClose={returnToChat}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
+                        initialTab={pluginInitialTab}
+                        skillsWorkspaceCwd={skillsSourceCwd}
+                        onSkillsWorkspaceChange={selectSkillsWorkspace}
+                        managedSkills={managedAgentProvider !== undefined}
+                        managedMcp={managedMode && managedAgentProvider ? {
+                          provider: managedAgentProvider,
+                          sessionId: managedSessionId,
+                          workspaceId: managedWorkspaceId ?? undefined,
+                        } : undefined}
                       />
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
@@ -22559,6 +22875,9 @@ export function App({
                       }
                       currentSessionSchedulingAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_session_reuse',
+                      )}
+                      gateAvailable={workspace.capabilities?.features?.includes(
+                        'scheduled_task_gate',
                       )}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
@@ -22830,6 +23149,10 @@ export function App({
                       <SplitView
                         showResponseTokensPerSecond={showResponseTokensPerSecond}
                         modelManagement={modelManagement}
+                        unavailableModels={unavailableModels}
+                        mountUnavailableModelTooltip={
+                          mountUnavailableModelTooltip
+                        }
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
                         onAssistantTurnSettled={onAssistantTurnSettled}
@@ -22885,21 +23208,69 @@ export function App({
                     <ManagedSessionsPage
                       key={managedAgentProvider.storageKey}
                       sessionId={managedSessionId}
-                      onSelectSession={(id) => {
+                      workspaceCreationOpen={managedWorkspaceCreationOpen}
+                      onWorkspaceCreationOpenChange={setManagedWorkspaceCreationOpen}
+                      onWorkspaceCreated={(workspaceId) => {
+                        if (!managedWorkspaceCreationOpenRef.current) return;
+                        setManagedWorkspaceId(workspaceId);
+                        setManagedSessionId(undefined);
+                        setManagedHome(true);
+                        returnToChat();
+                      }}
+                      onOpenLocalWorkspace={
+                        !lockedWorkspaceCwd &&
+                        (dynamicWorkspaceRegistrationSupported || hasRemoteWorkspaceLocation)
+                          ? handleOpenLocalWorkspace
+                          : undefined
+                      }
+                      workspaceId={managedWorkspaceId ?? undefined}
+                      onSessionWorkspaceChange={setManagedWorkspaceId}
+                      onSelectWorkspace={handleSelectManagedWorkspace}
+                      daemonWorkspaces={composerWorkspaces}
+                      onSelectDaemonWorkspace={handleSelectDaemonWorkspace}
+                      onWorkspacesChange={handleManagedWorkspacesChange}
+                      navigationActive={managedMode}
+                      navigationSearch={managedNavigationSearch}
+                      onOpenSession={(id, workspaceId) => {
+                        if (
+                          id !== managedSessionId ||
+                          workspaceId !== undefined
+                        ) {
+                          setManagedWorkspaceId(workspaceId);
+                        }
+                        setManagedSessionId(id);
+                        setManagedHome(true);
+                        closeMobileDrawer();
+                        returnToChat();
+                      }}
+                      onSelectSession={(id, workspaceId) => {
+                        if (
+                          id !== managedSessionId ||
+                          workspaceId !== undefined
+                        ) {
+                          setManagedWorkspaceId(workspaceId);
+                        }
                         setManagedSessionId(id);
                         if (managedModeRef.current) {
                           closeMobileDrawer();
                           returnToChat();
                         }
                       }}
-                      workspaceCwd={lockedWorkspaceCwd}
                       managedAgentProvider={managedAgentProvider}
+                      creationSkills={managedCreationSkills}
+                      onManageSkills={() => {
+                        setPluginInitialTab('skills');
+                        closeMobileDrawer();
+                        openPanel('plugins');
+                      }}
                       interactive={managedChatVisible}
                       navigationTarget={
                         sidebarOptions.enabled
                           ? managedNavigationTarget
                           : undefined
                       }
+                      archivedNavigationTarget={managedArchivedNavigationTarget}
+                      onArchivedSessionsStatusChange={setManagedArchivedStatus}
                     />
                   </WebShellCustomizationProvider>
                 </div>
@@ -23469,6 +23840,7 @@ export function App({
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
+                              showPhrase={enableLoadingPhrases}
                               showResponseTokensPerSecond={showResponseTokensPerSecond && !approvalOverlayActive}
                               startedAt={
                                 failedPromptRetry?.startedAt ??
@@ -23797,7 +24169,12 @@ export function App({
                           onOpenContextUsage={
                             contextUsageAvailable ? openCurrentContextUsagePanel : undefined
                           }
+                          modelRefresh={modelRefresh}
                           availableModels={availableModels}
+                          unavailableModels={unavailableModels}
+                          mountUnavailableModelTooltip={
+                            mountUnavailableModelTooltip
+                          }
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
                           reasoning={displayedReasoning}
@@ -23812,6 +24189,22 @@ export function App({
                             composerWorkspaceSelectEnabled
                               ? composerWorkspaces
                               : undefined
+                          }
+                          workspaceSelectorAlwaysVisible={Boolean(managedAgentProvider) && composerWorkspaceSelectEnabled}
+                          workspaceMenuItems={
+                            composerWorkspaceSelectEnabled && !lockedWorkspaceCwd &&
+                            managedAgentProvider &&
+                            managedWorkspaceCatalog &&
+                            managedWorkspaceCatalog.providerKey === managedProviderKey &&
+                            managedWorkspaceCatalog.workspaces.map((item) => (
+                              <DropdownMenuItem
+                                key={item.workspaceId}
+                                disabled={!item.canCreateSession}
+                                onSelect={() => handleSelectManagedWorkspace(item.workspaceId)}
+                              >
+                                {item.displayName} · {t('managed.managedMode')}
+                              </DropdownMenuItem>
+                            ))
                           }
                           selectedWorkspaceCwd={
                             workspaceContextActive

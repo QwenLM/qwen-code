@@ -64,6 +64,7 @@ import {
 } from './managed-mcp-runtime.js';
 import {
   MANAGED_MCP_WORKER_ROUTE,
+  MANAGED_MCP_DEFINITIONS_WORKER_ROUTE,
   registerManagedMcpRoutes,
 } from './managed-mcp-routes.js';
 import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
@@ -87,6 +88,7 @@ export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   ...MANAGED_CONTEXT_ROUTES,
   WORKSPACE_ACTIVATION_ROUTE,
   MANAGED_MCP_WORKER_ROUTE,
+  MANAGED_MCP_DEFINITIONS_WORKER_ROUTE,
   MANAGED_HOOK_WORKER_ROUTE,
   MANAGED_SHELL_WORKER_ROUTE,
   MANAGED_MONITOR_WORKER_ROUTE,
@@ -527,6 +529,7 @@ export function registerManagedContextRoutes(
   } else {
     for (const route of [
       MANAGED_MCP_WORKER_ROUTE,
+      MANAGED_MCP_DEFINITIONS_WORKER_ROUTE,
       MANAGED_HOOK_WORKER_ROUTE,
       MANAGED_SHELL_WORKER_ROUTE,
       MANAGED_MONITOR_WORKER_ROUTE,

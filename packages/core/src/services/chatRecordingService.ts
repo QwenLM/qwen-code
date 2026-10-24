@@ -70,7 +70,11 @@ import {
   SessionWriterLease,
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
-import { getApiHistoryPromptId } from './session-api-history.js';
+import {
+  getApiHistoryPromptId,
+  isApiHistoryDirectoryContext,
+} from '../utils/api-history-metadata.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
 import { computeInitialTurnFromHistory } from './session-turn-state.js';
 import {
   deleteTranscriptMessageGroups,
@@ -483,6 +487,8 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Hosted assistant batch synthesized from explicit user Skill invocations. */
+  clientInitiatedSkills?: true;
   /** Effective session settings when user input reaches the recorder. */
   executionContext?: {
     modelId: string;
@@ -667,10 +673,13 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  contextPrefixLength?: number;
   /** Generated summary and restore entries preceding any retained raw input. */
   summaryPrefixLength?: number;
   /** Prompt identities parallel to compressedHistory. */
   promptIds?: Array<string | null>;
+  /** Internal directory context, without changing the model-facing snapshot. */
+  directoryContextIndices?: number[];
   completedToolCallIds?: string[];
 }
 
@@ -2517,6 +2526,11 @@ export class ChatRecordingService {
     return this.userDisplayTextsForTitle;
   }
 
+  /** User turns in the active transcript: the boundaries `/rewind` uses. */
+  getUserTurnCount(): number {
+    return this.turnParentUuids.length;
+  }
+
   recordGoalRuntimeMessage(
     message: PartListUnion,
     goalContext: GoalTurnPermit,
@@ -3258,6 +3272,10 @@ export class ChatRecordingService {
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
       );
+      const directoryContextIndices = compressedHistory.flatMap(
+        (content, index) =>
+          isApiHistoryDirectoryContext(content) ? [index] : [],
+      );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
@@ -3265,8 +3283,14 @@ export class ChatRecordingService {
         systemPayload: {
           ...payload,
           compressedHistory,
+          contextPrefixLength: getStartupContextLength(compressedHistory, {
+            includeCompressed: true,
+          }),
           summaryPrefixLength,
           ...(promptIds.some(Boolean) ? { promptIds } : {}),
+          ...(directoryContextIndices.length
+            ? { directoryContextIndices }
+            : {}),
         },
       };
 
