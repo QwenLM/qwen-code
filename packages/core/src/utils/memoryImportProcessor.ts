@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { isSubpath } from './paths.js';
+import { isSubpath, realpathNearestExisting } from './paths.js';
 import { marked, type Token } from 'marked';
 import { createDebugLogger } from './debugLogger.js';
 import { findProjectRoot } from './projectRoot.js';
@@ -470,9 +470,13 @@ export function validateImportPath(
     return false;
   }
 
-  const resolvedPath = path.resolve(basePath, importPath);
+  // Canonicalize both sides before the containment check: a symlink entry can
+  // live inside an allowed directory while its target points outside of it.
+  const resolvedPath = realpathNearestExisting(
+    path.resolve(basePath, importPath),
+  );
 
   return allowedDirectories.some((allowedDir) =>
-    isSubpath(allowedDir, resolvedPath),
+    isSubpath(realpathNearestExisting(allowedDir), resolvedPath),
   );
 }

@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   processImports,
@@ -593,6 +595,116 @@ Inner content
       // Same file reached via different relative segments.
       const dotPath = path.join('.', '..', path.basename(allowed), 'file.md');
       expect(valid(dotPath, [allowed])).toBe(true);
+    });
+
+    function makeSymlinkFixture() {
+      const root = fsSync.mkdtempSync(
+        path.join(fsSync.realpathSync(os.tmpdir()), 'qwen-import-'),
+      );
+      const allowedDir = path.join(root, 'allowed');
+      const outsideDir = path.join(root, 'outside');
+      fsSync.mkdirSync(allowedDir);
+      fsSync.mkdirSync(outsideDir);
+      fsSync.writeFileSync(path.join(allowedDir, 'real.md'), 'ok');
+      fsSync.writeFileSync(path.join(outsideDir, 'sensitive.md'), 'secret');
+      return {
+        root,
+        allowedDir,
+        outsideDir,
+        dispose: () => fsSync.rmSync(root, { recursive: true, force: true }),
+      };
+    }
+
+    function createSymlink(
+      target: string,
+      linkPath: string,
+      type: 'dir' | 'file',
+    ): boolean {
+      try {
+        fsSync.symlinkSync(target, linkPath, type);
+        return true;
+      } catch (error: unknown) {
+        if (
+          process.platform === 'win32' &&
+          error &&
+          typeof error === 'object' &&
+          'code' in error &&
+          error.code === 'EPERM'
+        ) {
+          return false;
+        }
+        throw error;
+      }
+    }
+
+    it('should reject paths that escape allowed directories through symbolic links', () => {
+      const fixture = makeSymlinkFixture();
+      try {
+        if (
+          !createSymlink(
+            fixture.outsideDir,
+            path.join(fixture.allowedDir, 'sym_outside'),
+            'dir',
+          )
+        ) {
+          return;
+        }
+        expect(
+          validateImportPath('real.md', fixture.allowedDir, [
+            fixture.allowedDir,
+          ]),
+        ).toBe(true);
+        expect(
+          validateImportPath('sym_outside/sensitive.md', fixture.allowedDir, [
+            fixture.allowedDir,
+          ]),
+        ).toBe(false);
+      } finally {
+        fixture.dispose();
+      }
+    });
+
+    it('should reject dangling symbolic links that point outside allowed directories', () => {
+      const fixture = makeSymlinkFixture();
+      try {
+        if (
+          !createSymlink(
+            path.join(fixture.outsideDir, 'missing.md'),
+            path.join(fixture.allowedDir, 'dangling.md'),
+            'file',
+          )
+        ) {
+          return;
+        }
+        expect(
+          validateImportPath('dangling.md', fixture.allowedDir, [
+            fixture.allowedDir,
+          ]),
+        ).toBe(false);
+      } finally {
+        fixture.dispose();
+      }
+    });
+
+    it('should allow imports under an allowed directory reached through a symbolic link', () => {
+      const fixture = makeSymlinkFixture();
+      try {
+        const realDir = path.join(fixture.root, 'real');
+        fsSync.mkdirSync(realDir);
+        fsSync.writeFileSync(path.join(realDir, 'file.md'), 'ok');
+        if (!createSymlink(realDir, path.join(fixture.root, 'link'), 'dir')) {
+          return;
+        }
+        expect(
+          validateImportPath(
+            path.join(fixture.root, 'link', 'file.md'),
+            fixture.root,
+            [realDir],
+          ),
+        ).toBe(true);
+      } finally {
+        fixture.dispose();
+      }
     });
   });
 });
