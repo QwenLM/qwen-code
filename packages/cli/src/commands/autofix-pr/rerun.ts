@@ -101,18 +101,16 @@ function rerunLocked(
   // before it ended, say — answers for it, as a re-run's would.
   const deferredHere = (state.deferredRuns ?? []).includes(runId);
   const repeated = jobs
-    .filter(({ checkRunId }, index) => {
+    .filter(({ floor }, index) => {
       const from = already.get(rerunKeys[index]);
-      return from !== undefined && !(deferredHere && from === checkRunId);
+      return from !== undefined && !(deferredHere && from === floor);
     })
     .map(({ check }) => check);
-  // Each with the check run re-run: the re-run's runs come after it.
+  // Each with the check run the re-run's runs come after.
   const reran = [
     ...new Set([
       ...(state.rerunChecks ?? []),
-      ...jobs.map(
-        ({ checkRunId }, index) => `${rerunKeys[index]}@${checkRunId}`,
-      ),
+      ...jobs.map(({ floor }, index) => `${rerunKeys[index]}@${floor}`),
     ]),
   ];
   if (repeated.length > 0) {

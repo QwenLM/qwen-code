@@ -393,10 +393,15 @@ when there are none, so the session is woken only for them:
   over. A failure a prepared watch of the PR handled without a push
   (`handledChecks`) counts as reported. A failure of a run whose re-run was
   deferred because the run was still going (`deferredRuns`, Section 6.9) is
-  left out while that run goes, as prepared snapshots leave it out, and
-  reported once more when it has ended, so the watch can re-run it then: a
-  report before would wake a round with nothing to do, and keep the key a
-  later run of the check carries.
+  left out while that run goes, as prepared snapshots leave it out — the
+  check runs the deferral held, not a job of the run that failed after it —
+  and reported once more when it has ended, so the watch can re-run it
+  then, unless a round has answered its key since. A key that names no run
+  (`#on:`, `#rerun:`) is the same for every run of its check on the head:
+  the cursor marks the run it was reported for, so a later run's failure
+  (a review started the run while a round read the PR) is reported again
+  until a round handles the key. A job a run skipped (an `if:` that was
+  false) did not run: it never takes the place of the run before it.
 - Pending checks are never reported; `ci_pending` does not appear.
 - A conflict is reported once per head; `mergeable` clears the mark,
   `UNKNOWN` keeps it. A conflict a prepared watch left for a human on the
@@ -767,14 +772,15 @@ merged.
 Re-runs the failed jobs of a run the fix agent judged an infrastructure
 failure, with `gh run rerun <run-id> --failed`, on an open PR only. Only a GitHub Actions job of
 the PR's repository counts: a commit status or another app may link any URL,
-and a run id read from it would re-run some unrelated run. Each failed job
-of the run's latest attempt spends its check's one re-run — one a later run
-of the check took the place of on the PR as well, since `--failed` re-runs
-it too (`rerunChecks`, keyed by the
+and a run id read from it would re-run some unrelated run. Each failed or
+cancelled job of the run's latest attempt spends its check's one re-run —
+one a later run of the check took the place of on the PR as well, since
+`--failed` re-runs it too (`rerunChecks`, keyed by the
 check's identity — app, workflow, trigger and job name, as Section 6.2 tells
 checks apart — and the head, so two workflows with a job of the same name
-each keep theirs, with the check run re-run, which Section 6.2 keys the
-re-run's answer by);
+each keep theirs, with the check run a run of the check must come after to
+be the re-run's answer, which Section 6.2 keys it by: the job's, or the
+latest of its check on the PR when a later run is there already);
 a run with a check that was re-run on this head already answers
 `{"rerun": false}`, and the failure is treated as real. The attempts it
 re-ran are recorded in `handledChecks`, so the prepared snapshot does not
@@ -795,8 +801,10 @@ in `deferredRuns`: the gate reports its failures once more when the run has
 ended (Section 6.2), and the round then re-runs it. Until then prepared
 snapshots leave them out as well, so another event does not hand the round
 the same failure to defer again. The deferral holds the re-run of each of
-its failed checks (in `rerunChecks`, with the check run deferred): that run
-is re-run when it ends, and a later run of the check on the head — one a
+its failed checks (in `rerunChecks`, with the check run deferred), and only
+those check runs are left out: a job of the run that fails after it is the
+round's at once, however long the run goes on. The run is re-run when it
+ends, and a later run of the check on the head — one a
 review started before it ended, say — answers for it as a re-run's would,
 under the re-run's key (Section 6.2), and is treated as real. Two jobs of
 one workflow that share a name are one check: when the second fails only

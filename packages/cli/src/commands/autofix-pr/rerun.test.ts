@@ -270,7 +270,8 @@ describe('runRerun', () => {
     });
     expect(state().rerunChecks).toEqual([
       `run:15368:1:pull_request:Lint@${HEAD}@5`,
-      `run:15368:1:pull_request:Test@${HEAD}@6`,
+      // Run 51's Test is there already: a later one answers the re-run.
+      `run:15368:1:pull_request:Test@${HEAD}@8`,
     ]);
     // Test was re-run with it: run 51's failure is real.
     expect(runRerun(7, 51)).toMatchObject({
@@ -278,6 +279,40 @@ describe('runRerun', () => {
       reason: expect.stringMatching(/re-run on this head already/),
     });
     expect(mocks.ghWithInput).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts a job the run cancelled, which `--failed` re-runs too', () => {
+    contexts = [
+      failedRun(5, 'Test 1', 50),
+      { ...failedRun(6, 'Test 2', 50), conclusion: 'CANCELLED' },
+    ];
+    expect(runRerun(7, 50)).toMatchObject({
+      rerun: true,
+      checks: ['Test 1', 'Test 2'],
+    });
+    expect(state().rerunChecks).toEqual([
+      `run:15368:1:pull_request:Test 1@${HEAD}@5`,
+      `run:15368:1:pull_request:Test 2@${HEAD}@6`,
+    ]);
+  });
+
+  it('lets a later run of a held check answer for the deferred one', () => {
+    contexts = [
+      failedRun(5, 'Lint', 50, 1, 'IN_PROGRESS'),
+      failedRun(6, 'Test', 50, 1, 'IN_PROGRESS'),
+    ];
+    expect(runRerun(7, 50)).toMatchObject({ deferred: true });
+    // Run 51 of Lint failed before run 50 ended: it answered the re-run.
+    contexts = [
+      failedRun(5, 'Lint', 50),
+      failedRun(6, 'Test', 50),
+      failedRun(8, 'Lint', 51),
+    ];
+    expect(runRerun(7, 50)).toMatchObject({
+      rerun: false,
+      reason: expect.stringMatching(/Lint was re-run on this head already/),
+    });
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
   it('counts a later run of a deferred check as its re-run', () => {

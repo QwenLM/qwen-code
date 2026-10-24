@@ -431,13 +431,45 @@ type CiFailed = Extract<SnapshotEvent, { type: 'ci_failed' }>;
  * since two workflow files may share a display name.
  */
 function latestContexts(nodes: CheckContext[]): CheckContext[] {
+  // A job a run skipped (its `if:` was false: a review-started workflow
+  // that runs on approvals only, say) did not run. It answers nothing of
+  // the check, and leaves the run before it in place.
+  const skipped = (ctx: CheckContext) =>
+    ctx.__typename === 'CheckRun' && ctx.conclusion === 'SKIPPED';
   const latest = new Map<string, CheckContext>();
   for (const ctx of nodes) {
     const key = checkIdentity(ctx);
     const seen = latest.get(key);
-    if (!seen || attemptOrder(ctx) > attemptOrder(seen)) latest.set(key, ctx);
+    if (
+      !seen ||
+      (skipped(seen) && !skipped(ctx)) ||
+      (skipped(seen) === skipped(ctx) && attemptOrder(ctx) > attemptOrder(seen))
+    ) {
+      latest.set(key, ctx);
+    }
   }
   return [...latest.values()];
+}
+
+/**
+ * A failure the round deferred the re-run of, while its run still goes:
+ * the round's again once the run has ended, and left out until then. Only
+ * the check runs the deferral held are: a job of the run that failed after
+ * it is the round's now, however long the run goes on.
+ */
+function heldByDeferral(
+  failure: FailedCheck,
+  head: string,
+  deferred: Set<number>,
+  held: Map<string, number>,
+): boolean {
+  return (
+    !failure.runDone &&
+    failure.event.runId !== null &&
+    deferred.has(failure.event.runId) &&
+    failure.checkRunId !== undefined &&
+    held.get(`${failure.identity}@${head}`) === failure.checkRunId
+  );
 }
 
 /** What makes two runs attempts of one check (see `latestContexts`). */
@@ -596,20 +628,31 @@ export function checkEvents(
 }
 
 /**
- * Every failed job of a run on the head, by its latest attempt in the run,
- * whether or not a later run of its check took its place on the PR:
- * `gh run rerun --failed` re-runs them all, so each spends its check's
- * re-run.
+ * Every failed or cancelled job of a run on the head, by its latest attempt
+ * in the run, whether or not a later run of its check took its place on the
+ * PR: `gh run rerun --failed` re-runs them all, so each spends its check's
+ * re-run. `floor` is the check run a later run of the check must come
+ * after to be the re-run's answer: this job's, or the latest one of its
+ * check on the PR when a later run is there already.
  */
 export function failedJobsOfRun(
   pr: PrData,
   runId: number,
-): Array<{ check: string; identity: string; checkRunId: number }> {
+): Array<{
+  check: string;
+  identity: string;
+  checkRunId: number;
+  floor: number;
+}> {
   const commit = pr.commits.nodes[0]?.commit;
   if (!commit || commit.oid !== pr.headRefOid) return [];
   const runsPrefix =
     `${pr.url.replace(/\/pull\/\d+\/?$/, '')}/actions/runs/`.toLowerCase();
-  const ofRun = (commit.statusCheckRollup?.contexts.nodes ?? []).filter(
+  const nodes = commit.statusCheckRollup?.contexts.nodes ?? [];
+  const latest = new Map(
+    latestContexts(nodes).map((ctx) => [checkIdentity(ctx), ctx]),
+  );
+  const ofRun = nodes.filter(
     (ctx) =>
       ctx.__typename === 'CheckRun' &&
       runIdFrom(
@@ -618,20 +661,31 @@ export function failedJobsOfRun(
         Boolean(ctx.checkSuite?.workflowRun),
       ) === runId,
   );
-  return latestContexts(ofRun).flatMap((ctx) =>
-    ctx.__typename === 'CheckRun' &&
-    ctx.status === 'COMPLETED' &&
-    ctx.conclusion &&
-    FAILED_CONCLUSIONS.has(ctx.conclusion)
-      ? [
-          {
-            check: ctx.name,
-            identity: checkIdentity(ctx),
-            checkRunId: ctx.databaseId,
-          },
-        ]
-      : [],
-  );
+  return latestContexts(ofRun).flatMap((ctx) => {
+    if (
+      ctx.__typename !== 'CheckRun' ||
+      ctx.status !== 'COMPLETED' ||
+      !ctx.conclusion ||
+      !(
+        FAILED_CONCLUSIONS.has(ctx.conclusion) || ctx.conclusion === 'CANCELLED'
+      )
+    ) {
+      return [];
+    }
+    const identity = checkIdentity(ctx);
+    const last = latest.get(identity);
+    return [
+      {
+        check: ctx.name,
+        identity,
+        checkRunId: ctx.databaseId,
+        floor: Math.max(
+          ctx.databaseId,
+          last?.__typename === 'CheckRun' ? last.databaseId : 0,
+        ),
+      },
+    ];
+  });
 }
 
 /** Events that run a workflow on the PR's code, rather than on a comment. */
@@ -896,10 +950,10 @@ export function buildSnapshot(
   const handledChecks = new Set(state.handledChecks ?? []);
   // A run the round could not re-run yet is offered again once it ended.
   const deferredRuns = new Set(state.deferredRuns ?? []);
-  for (const { event, attempt, runDone } of checks.failed) {
-    if (!runDone && event.runId !== null && deferredRuns.has(event.runId)) {
-      continue;
-    }
+  const held = rerunFrom(state.rerunChecks ?? []);
+  for (const failure of checks.failed) {
+    if (heldByDeferral(failure, pr.headRefOid, deferredRuns, held)) continue;
+    const { event, attempt } = failure;
     const key = checkAttemptKey(event.check, pr.headRefOid, attempt);
     if (!handledChecks.has(key)) events.push({ ...event, key });
   }
@@ -1028,11 +1082,10 @@ export function buildGateSnapshot(
   // run the round could not re-run yet is reported once more, under a key
   // of its own, when that run has ended.
   const checks = checkEvents(pr, watch.rerunChecks ?? []);
-  const reportedChecks = new Set([
-    ...next.reportedChecks,
-    ...(watch.handledChecks ?? []),
-  ]);
+  const cursorChecks = new Set(next.reportedChecks);
+  const handledChecks = new Set(watch.handledChecks ?? []);
   const deferred = new Set(watch.deferredRuns ?? []);
+  const held = rerunFrom(watch.rerunChecks ?? []);
   // A run that did not read every check run keeps the failures it could
   // not see, one cut in the suites the failures to start found there; one
   // that read them all keeps only those still there.
@@ -1044,23 +1097,35 @@ export function buildGateSnapshot(
         : [];
   const checkKeys = new Map<SnapshotEvent, string[]>();
   const candidates: SnapshotEvent[] = [];
-  for (const { event, attempt, runDone } of checks.failed) {
-    // A run deferred while it is going is the round's again once it has
-    // ended, and prepared snapshots leave it out until then: a failure of
-    // it now would wake a round with nothing to do, and keep the key a
-    // later run of the check carries — one a review starts, say.
-    if (!runDone && event.runId !== null && deferred.has(event.runId)) {
-      continue;
-    }
+  for (const failure of checks.failed) {
+    // Prepared snapshots leave it out as well: a report would wake a round
+    // with nothing to do.
+    if (heldByDeferral(failure, pr.headRefOid, deferred, held)) continue;
+    const { event, attempt, runDone, checkRunId } = failure;
     const key = checkAttemptKey(event.check, pr.headRefOid, attempt);
     const keys = [key];
-    if (runDone && event.runId !== null && deferred.has(event.runId)) {
+    // One a round has answered since, through another run of the check,
+    // has nothing left for the round to do.
+    if (
+      runDone &&
+      event.runId !== null &&
+      deferred.has(event.runId) &&
+      !handledChecks.has(key)
+    ) {
       keys.push(`${key}@ended`);
     }
-    const unreported = keys.filter((k) => !reportedChecks.has(k));
-    next.reportedChecks.push(...keys.filter((k) => reportedChecks.has(k)));
+    // A key that names no run (a workflow a review starts) is the same for
+    // every run of its check on the head. The cursor marks the run it was
+    // reported for, so a failure of a later one — a review started it while
+    // a round read the PR — is reported again until a round handles it.
+    const perRun = checkRunId !== undefined && /^#(?:on|rerun):/.test(attempt);
+    const mark = (k: string) => (perRun ? `${k}~${checkRunId}` : k);
+    const reported = (k: string) =>
+      handledChecks.has(k) || cursorChecks.has(mark(k));
+    next.reportedChecks.push(...keys.filter(reported).map(mark));
+    const unreported = keys.filter((k) => !reported(k));
     if (unreported.length > 0) {
-      checkKeys.set(event, unreported);
+      checkKeys.set(event, unreported.map(mark));
       candidates.push(event);
     }
   }

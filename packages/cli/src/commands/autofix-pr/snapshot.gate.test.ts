@@ -269,14 +269,15 @@ describe('buildGateSnapshot', () => {
     expect(quiet.cursor.reportedTruncated).toEqual([]);
   });
 
-  it('leaves a deferred run out until it ends, so a later run of its check is reported', () => {
+  it('leaves out what a deferral holds until its run ends, and reports the rest', () => {
     const job = (
       databaseId: number,
       runId: number,
       status: string,
+      name = 'B',
     ): Contexts[number] => ({
       __typename: 'CheckRun',
-      name: 'B',
+      name,
       status: 'COMPLETED',
       conclusion: 'FAILURE',
       detailsUrl: `https://github.com/o/r/actions/runs/${runId}/job/${databaseId}`,
@@ -290,8 +291,13 @@ describe('buildGateSnapshot', () => {
         },
       },
     });
-    const watch = { knownHeads: [], seenCommentIds: [], deferredRuns: [456] };
-    // B failed after the round deferred its run: quiet, and not kept.
+    // The round deferred run 456's re-run, holding B's check run 5.
+    const watch = {
+      knownHeads: [],
+      seenCommentIds: [],
+      deferredRuns: [456],
+      rerunChecks: [`run:1:9:pull_request_review:B@${HEAD}@5`],
+    };
     const going = buildGateSnapshot(
       pr({}, [job(5, 456, 'IN_PROGRESS')]),
       cursor(),
@@ -299,16 +305,66 @@ describe('buildGateSnapshot', () => {
     );
     expect(going.snapshot).toBeNull();
     expect(going.cursor.reportedChecks).toEqual([]);
-    // A review started the workflow again before the run ended, and B
-    // failed in it under the key a run of B on this head carries.
-    const later = buildGateSnapshot(
-      pr({}, [job(5, 456, 'IN_PROGRESS'), job(8, 457, 'COMPLETED')]),
+    // C failed in the run after the deferral, which held nothing of it.
+    const late = buildGateSnapshot(
+      pr({}, [job(5, 456, 'IN_PROGRESS'), job(6, 456, 'IN_PROGRESS', 'C')]),
       going.cursor,
       watch,
     );
-    expect(later.snapshot).toMatchObject({
-      events: [{ type: 'ci_failed', check: 'B', runId: 457 }],
+    expect(late.snapshot).toMatchObject({
+      events: [{ type: 'ci_failed', check: 'C', runId: 456 }],
     });
+    // A review started the workflow again before the run ended. C failed in
+    // it under the key a run of C on this head carries: a run of its own,
+    // and the round has not answered the key, so it is reported again; B's
+    // later run is the deferral's answer.
+    const later = buildGateSnapshot(
+      pr({}, [
+        job(5, 456, 'IN_PROGRESS'),
+        job(6, 456, 'IN_PROGRESS', 'C'),
+        job(8, 457, 'COMPLETED'),
+        job(9, 457, 'COMPLETED', 'C'),
+      ]),
+      late.cursor,
+      watch,
+    );
+    expect(
+      later.snapshot?.events.map((event) =>
+        event.type === 'ci_failed' ? `${event.check}:${event.runId}` : '',
+      ),
+    ).toEqual(['B:457', 'C:457']);
+    // Answered, C stays quiet in the next run.
+    const answered = buildGateSnapshot(
+      pr({}, [job(10, 458, 'COMPLETED', 'C')]),
+      later.cursor,
+      {
+        ...watch,
+        handledChecks: [`C@${HEAD}@#on:9:pull_request_review`],
+      },
+    );
+    expect(answered.snapshot).toBeNull();
+  });
+
+  it('reports no end of a deferred run whose failure a round has answered', () => {
+    const ended = pr({}, [failed('Test', 1)]);
+    const key = `Test@${HEAD}@#1`;
+    const watch = {
+      knownHeads: [],
+      seenCommentIds: [],
+      deferredRuns: [123],
+      handledChecks: [key],
+    };
+    const result = buildGateSnapshot(ended, cursor(), watch);
+    expect(result.snapshot).toBeNull();
+    // Not answered, its end is reported, once.
+    const open = buildGateSnapshot(ended, cursor({ reportedChecks: [key] }), {
+      ...watch,
+      handledChecks: [],
+    });
+    expect(open.snapshot).toMatchObject({
+      events: [{ type: 'ci_failed', check: 'Test' }],
+    });
+    expect(open.cursor.reportedChecks).toEqual([key, `${key}@ended`]);
   });
 
   it('forgets a check gone green on a run its time budget cut in the threads', () => {
@@ -1935,6 +1991,7 @@ describe('runSnapshot --gate', () => {
       handledChecks: [`Test@${HEAD}@#5`],
       handledConflictSha: HEAD,
       deferredRuns: [456],
+      rerunChecks: [`run:1:2:pull_request:Lint@${HEAD}@6`],
     });
     const lint = (status: string): Contexts[number] => ({
       __typename: 'CheckRun',

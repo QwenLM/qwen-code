@@ -599,6 +599,54 @@ describe('buildSnapshot', () => {
     expect(buildSnapshot(pr({}, [run(5)]), otherHead).action).toBe('fix');
   });
 
+  it('takes no skipped job for the latest run of its check', () => {
+    const gate = (
+      databaseId: number,
+      conclusion: string,
+    ): Contexts[number] => ({
+      __typename: 'CheckRun',
+      databaseId,
+      name: 'Gate',
+      status: 'COMPLETED',
+      conclusion,
+      detailsUrl: `https://github.com/o/r/actions/runs/${databaseId}/job/1`,
+      checkSuite: {
+        status: 'COMPLETED',
+        app: { databaseId: 1 },
+        workflowRun: {
+          event: 'pull_request_review',
+          workflow: { databaseId: 9 },
+        },
+      },
+    });
+    // A comment review started the workflow again; the job runs on
+    // approvals only, so it skipped: the failure before it stands.
+    expect(
+      buildSnapshot(
+        pr({}, [gate(100, 'FAILURE'), gate(101, 'SKIPPED')]),
+        state(),
+      ).events,
+    ).toMatchObject([{ type: 'ci_failed', check: 'Gate', runId: 100 }]);
+    // Whatever order the rollup lists them in.
+    expect(
+      buildSnapshot(
+        pr({}, [gate(101, 'SKIPPED'), gate(100, 'FAILURE')]),
+        state(),
+      ).events,
+    ).toMatchObject([{ type: 'ci_failed', check: 'Gate', runId: 100 }]);
+    // A run that did run answers it.
+    expect(
+      buildSnapshot(
+        pr({}, [
+          gate(100, 'FAILURE'),
+          gate(101, 'SKIPPED'),
+          gate(102, 'SUCCESS'),
+        ]),
+        state(),
+      ).action,
+    ).toBe('wait');
+  });
+
   it('leaves out the failures of a deferred re-run until their run has ended', () => {
     const lint = (status: string): Contexts[number] => ({
       __typename: 'CheckRun',
@@ -613,10 +661,31 @@ describe('buildSnapshot', () => {
         workflowRun: { event: 'pull_request', workflow: { databaseId: 2 } },
       },
     });
-    const deferred = state({ deferredRuns: [123] });
+    // `rerun` deferred it, holding Lint's run 5.
+    const deferred = state({
+      deferredRuns: [123],
+      rerunChecks: [`run:1:2:pull_request:Lint@${HEAD}@5`],
+    });
     expect(
       buildSnapshot(pr({}, [lint('IN_PROGRESS')]), deferred),
     ).toMatchObject({ action: 'wait', events: [] });
+    // A job of the run that failed after the deferral is the round's now.
+    expect(
+      buildSnapshot(
+        pr({}, [
+          lint('IN_PROGRESS'),
+          {
+            ...(lint('IN_PROGRESS') as Extract<
+              Contexts[number],
+              { __typename: 'CheckRun' }
+            >),
+            databaseId: 6,
+            name: 'Test',
+          },
+        ]),
+        deferred,
+      ).events,
+    ).toMatchObject([{ type: 'ci_failed', check: 'Test' }]);
     expect(buildSnapshot(pr({}, [lint('IN_PROGRESS')]), state()).action).toBe(
       'fix',
     );

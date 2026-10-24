@@ -302,7 +302,11 @@ describe('runReply', () => {
       }),
     );
     // The round deferred Build's run: it is answered once the run ends.
-    writeState(paths.statePath, { ...state(), deferredRuns: [70] });
+    writeState(paths.statePath, {
+      ...state(),
+      deferredRuns: [70],
+      rerunChecks: [`run:15368:2:pull_request:Build@${HEAD}@7`],
+    });
     // A stranger's review started Gate again while the round ran; CI
     // started this time; Test ran again (#5).
     const moved = prData();
