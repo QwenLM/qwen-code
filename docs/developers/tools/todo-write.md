@@ -19,6 +19,19 @@ Code:
 }
 ```
 
+To store todo files in the project, add the root-level `todosDirectory` setting next to it:
+
+```json
+{
+  "todosDirectory": "./.qwen/todos",
+  "tools": {
+    "todoWrite": {
+      "enabled": true
+    }
+  }
+}
+```
+
 ### Arguments
 
 `todo_write` takes one argument:
@@ -32,7 +45,11 @@ Code:
 
 When the tool is enabled, the AI assistant may use it for complex, multi-step tasks. You can also ask the assistant to create a todo list if you want to see the planned approach for your request.
 
-The tool stores todo lists in your home directory (`~/.qwen/todos/`) with session-specific files, so each coding session maintains its own task list.
+The tool stores each session's todo list in its own file, named after the session ID, so each coding session maintains its own task list. By default these files live in the `todos/` directory under the runtime output directory: `~/.qwen/todos/` unless the runtime directory is moved (for example with the `QWEN_RUNTIME_DIR` environment variable).
+
+To keep todo files inside a project instead, set the root-level `todosDirectory` setting. Relative paths are resolved from the project root, and the resolved directory must stay within the project root; a value that escapes it is rejected at startup. See [`todosDirectory`](../../users/configuration/settings.md) in the settings reference.
+
+Todo files stay keyed by session ID even in a project-local directory. A new session, on this machine or another one, starts its own file and does not pick up the todo list of an earlier session.
 
 ## When the AI uses this tool
 
