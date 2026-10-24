@@ -31,7 +31,7 @@ Status: implementing with this change.
 3. **安静时零模型 turn。** gate 静默即跳过本次 fire，这正是重点：每次 tick 只花一次 `gh api`，110 分钟的轮次只在 head 真的变了时发生。
 4. **`merged`/`closed` 时停。** 活得比 PR 久的 watch 会一直探一个死端点，还可能白唤醒模型；`stop` 事件删除任务。
 5. **过滤做在包装里，不做在 prompt 里。** gate 的输出决定是否开一轮；等到 prompt 读到它，轮次已经开始。所以 `scripts/verify-pr-watch-gate.mjs` 是可测试的代码，skill 指向它而不是裸探针。
-6. **共存直接拒绝，不假装多路复用。** 探针每个 PR 只有一个游标，而 `autofix-pr prepare` 过的 watch 还会通过 `knownHeads` 抑制 head。要"验证自有状态"需要探针提供当前不存在的开关，因此 watch 先检查、再拒绝：明确说"不支持共存"，好过两个 watcher 静默互相饿死。
+6. **共存直接拒绝，不假装多路复用。** 探针每个 PR 只有一个游标，而 `autofix-pr prepare` 过的 watch 还会通过 `knownHeads` 抑制 head。要"验证自有状态"需要探针提供当前不存在的开关，因此 watch 直接拒绝：明确说"不支持共存"，好过两个 watcher 静默互相饿死。只读检查本身有竞态——两个会话可以在任何探针跑之前都通过——所以安装时用 `wx` 原子地写下 `.qwen/tmp/verify-pr-watch-<n>.owner.json`，停止或建任务失败时释放。已存在的 claim **绝不自动抢占**：用时间戳判定过期本身就是同一类竞态，死掉的安装要用 `--release` 显式释放。
 
 ## 范围边界
 

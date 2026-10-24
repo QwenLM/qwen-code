@@ -5256,6 +5256,8 @@ describe('qwen-triage verify hardening round 2', () => {
     // One cursor serves one consumer; installing over an existing autofix
     // watch would starve this one of head moves and lose `stop`.
     expect(flat).toContain('--check');
+    expect(flat).toContain('--claim');
+    expect(flat).toContain('--release');
     expect(flat).toContain('one cursor serves one consumer');
     expect(flat).toContain('head_moved_externally');
     expect(flat).toContain('verify-pr-watch-');

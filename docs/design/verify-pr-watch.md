@@ -77,8 +77,13 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
 6. **Refuse coexistence instead of pretending to multiplex.** The probe keeps
    one cursor per PR, and a prepared `autofix-pr` watch also suppresses heads
    through `knownHeads`. Verification-owned state would require a probe flag
-   that does not exist, so the watch checks and refuses: saying "unsupported"
-   beats two watchers silently starving each other.
+   that does not exist, so the watch refuses instead: saying "unsupported"
+   beats two watchers silently starving each other. A read-only check is racy —
+   two sessions can both pass it before either probe has run — so setup takes an
+   atomic claim (`.qwen/tmp/verify-pr-watch-<n>.owner.json`, created with `wx`).
+   It is released on stop or a failed task creation; a claim left by a dead
+   setup is released explicitly with `--release` rather than taken over, because
+   judging staleness from a timestamp is itself the same race.
 
 ## Scope boundaries
 

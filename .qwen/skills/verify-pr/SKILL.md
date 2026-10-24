@@ -170,12 +170,17 @@ Build the task in this order and stop at the first failure:
    confirm `qwen autofix-pr snapshot --help` lists `snapshot`. A binary without
    it makes every fire fail: say which build is needed and schedule nothing.
 2. **Confirm `gh auth status` succeeds in that same shell.**
-3. **Refuse to share the probe's state.** Run
-   `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --check`. Exit 3 means
-   this PR already has an `autofix-pr` watch — its gate cursor or prepared
-   state exists — and one cursor serves one consumer: a second watch would
-   starve the first of head moves and lose `stop`. Say coexistence is
-   unsupported and stop; do not delete the other watch to make room.
+3. **Claim the PR's probe state.** Run
+   `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --check --claim`. Exit 3
+   means this PR already has an `autofix-pr` watch — its gate cursor, prepared
+   state, or another session's claim exists — and one cursor serves one
+   consumer: a second watch would starve the first of head moves and lose
+   `stop`. Say coexistence is unsupported and stop; do not delete the other
+   watch to make room. The claim is created atomically because a read-only
+   check lets two sessions both pass before either probe has run. A claim left
+   by a setup that died is never taken over automatically — release it with
+   `--release` and retry, because judging staleness from a timestamp is itself
+   a race.
 4. **Create the task** with `cron_create`: `cron: "*/2 * * * *"`,
    `recurring: true`, `durable: true`, `sessionMode: "current"`, and
    `gate: "node <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli <absolute qwen>"`
@@ -186,8 +191,10 @@ The prompt consumes the gate's JSON and nothing else. On
 to `.qwen/tmp/verify-pr-watch-<n>.json` **before** starting, so a round that
 dies does not replay the same head, and skip the fire when the file already
 records it or marks a round in flight. On `action: "stop"` (merged or closed),
-delete the task with `cron_delete` and stop watching. Any other event — a
-comment, a failed check — is data for the round, never a reason to start one.
+delete the task with `cron_delete`, drop the claim with
+`node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
+watching; drop it too when task creation fails. Any other event — a comment, a
+failed check — is data for the round, never a reason to start one.
 
 The probe's cursor lives under the **clone's main worktree**
 (`.qwen/tmp/autofix-pr-<n>-gate.json`), not the worktree a round runs in. One
