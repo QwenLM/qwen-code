@@ -131,6 +131,27 @@ function record(overrides: Partial<ChatRecord>): ChatRecord {
 }
 
 describe('managed session assembly', () => {
+  it('prepares an ownership release without sealing or business close events', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const before = session.authority.committedSequence;
+    const proof = await session.prepareOwnershipRelease();
+    expect(session.authority.currentActivation?.phase).toBe('released');
+    expect(session.authority.writerSealed).toBe(false);
+    expect(proof).toEqual(session.authority.commitProof);
+    expect(proof.lastCommitSequence).toBeGreaterThan(before);
+    expect(
+      session.authority
+        .eventsInSequenceRange(1, proof.lastCommitSequence)
+        .filter((event) =>
+          ['turn.settled', 'domain.committed'].includes(event.kind),
+        ),
+    ).toEqual([]);
+    const prepared = session.authority.committedSequence;
+    await expect(session.prepareOwnershipRelease()).resolves.toEqual(proof);
+    expect(session.authority.committedSequence).toBe(prepared);
+    await session.close({ releaseActivation: false });
+  });
   it('accepts injected journal and resource stores', async () => {
     const workspace = await createWorkspace();
     const journalStore = new LocalJsonlManagedSessionJournalStore({
