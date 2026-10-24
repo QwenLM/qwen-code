@@ -381,6 +381,7 @@ export class LspServerManager {
     name: string,
     handle: LspServerHandle,
   ): Promise<void> {
+    handle.diagnosticPull = undefined;
     const workspaceTrusted = this.config.isTrustedFolder();
     if (
       (this.requireTrustedWorkspace || handle.config.trustRequired) &&
@@ -484,12 +485,14 @@ export class LspServerManager {
       const startupExit = this.createStartupExitWatcher(name, handle);
       try {
         // Initialize LSP server
-        handle.textDocumentSync = await this.raceStartupAbort(
+        const capabilities = await this.raceStartupAbort(
           this.initializeLspServer(connection, handle.config),
           startupAbortController.signal,
           undefined,
           startupExit?.promise,
         );
+        handle.textDocumentSync = capabilities.textDocumentSync;
+        handle.diagnosticPull = capabilities.diagnosticPull;
       } finally {
         startupExit?.dispose();
       }
@@ -521,6 +524,7 @@ export class LspServerManager {
       }
       handle.connection = undefined;
       handle.process = undefined;
+      handle.diagnosticPull = undefined;
       debugLogger.error(`LSP server ${name} failed to start:`, error);
     }
   }
@@ -543,6 +547,7 @@ export class LspServerManager {
     handle.connection = undefined;
     handle.process = undefined;
     handle.processDiagnostics = undefined;
+    handle.diagnosticPull = undefined;
     handle.status = 'NOT_STARTED';
     handle.warmedUp = false;
     handle.restartAttempts = 0;
@@ -654,6 +659,7 @@ export class LspServerManager {
           `LSP server ${name} exited but restartOnCrash is disabled`,
         );
         handle.error = exitCause();
+        handle.diagnosticPull = undefined;
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -664,6 +670,7 @@ export class LspServerManager {
           `LSP server ${name} exited but maxRestarts is ${maxRestarts}`,
         );
         handle.error = exitCause();
+        handle.diagnosticPull = undefined;
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -674,6 +681,7 @@ export class LspServerManager {
           `LSP server ${name} reached max restart attempts (${maxRestarts}), stopping restarts`,
         );
         handle.error = exitCause();
+        handle.diagnosticPull = undefined;
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -769,6 +777,7 @@ export class LspServerManager {
     handle.connection = undefined;
     handle.process = undefined;
     handle.processDiagnostics = undefined;
+    handle.diagnosticPull = undefined;
     handle.status = 'NOT_STARTED';
     handle.error = undefined;
     handle.warmedUp = false;
@@ -1182,7 +1191,10 @@ export class LspServerManager {
   private async initializeLspServer(
     connection: LspConnectionResult,
     config: LspServerConfig,
-  ): Promise<LspTextDocumentSync | undefined> {
+  ): Promise<{
+    textDocumentSync: LspTextDocumentSync | undefined;
+    diagnosticPull: NonNullable<LspServerHandle['diagnosticPull']>;
+  }> {
     const workspaceFolderPath = config.workspaceFolder ?? this.workspaceRoot;
     const workspaceFolder = {
       name: path.basename(workspaceFolderPath) || workspaceFolderPath,
@@ -1202,16 +1214,23 @@ export class LspServerManager {
           references: { dynamicRegistration: false },
           documentSymbol: { dynamicRegistration: false },
           codeAction: { dynamicRegistration: false },
+          diagnostic: { dynamicRegistration: false },
         },
         workspace: {
           workspaceFolders: true,
+          diagnostics: { refreshSupport: false },
         },
       },
       initializationOptions: config.initializationOptions,
     };
 
     const result = (await connection.initialize(initializeParams)) as
-      | { capabilities?: { textDocumentSync?: LspTextDocumentSync } }
+      | {
+          capabilities?: {
+            textDocumentSync?: LspTextDocumentSync;
+            diagnosticProvider?: boolean | { workspaceDiagnostics?: boolean };
+          };
+        }
       | undefined;
 
     // Send initialized notification and workspace folders change to help servers (e.g. tsserver)
@@ -1242,7 +1261,18 @@ export class LspServerManager {
       });
     }
 
-    return result?.capabilities?.textDocumentSync;
+    const diagnosticProvider = result?.capabilities?.diagnosticProvider;
+    return {
+      textDocumentSync: result?.capabilities?.textDocumentSync,
+      diagnosticPull: {
+        document:
+          diagnosticProvider == null ? undefined : diagnosticProvider !== false,
+        workspace:
+          typeof diagnosticProvider === 'object' &&
+          diagnosticProvider !== null &&
+          diagnosticProvider.workspaceDiagnostics === true,
+      },
+    };
   }
 
   /**
