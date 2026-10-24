@@ -316,10 +316,11 @@ Event rules:
   open PR, and once: the answers are kept in
   `.qwen/tmp/autofix-pr-<n>-replies.json`, which the gate, prepared
   snapshots and `reply` share. A comment deleted meanwhile is no request.
-  The gate asks about 20 at most a fire and stops at the first failure,
-  leaving the rest — neither requests nor seen — for its next fire; a
+  Each answer is kept as it comes. The gate asks about 20 at most a fire,
+  for 30 seconds at most, and stops at the first failure, leaving the rest — neither requests nor seen — for its next fire; a
   round asks about every one and fails when GitHub does not answer, so it
-  never drops a request the gate reported. The gate keeps bot replies
+  never drops a request the gate reported; after eight minutes it stops,
+  the answers kept, and asks to be run again. The gate keeps bot replies
   as seen.
   Otherwise a review bot that answers every reply would keep a
   round going for each, and an untrusted commenter could have a bot speak

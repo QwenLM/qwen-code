@@ -851,7 +851,12 @@ describe('fetchPrData', () => {
     mockGh.mockReset();
     respondWith(
       () => {
-        throw new Error('HTTP 404: Not Found');
+        throw Object.assign(
+          new Error(
+            'Command failed: gh api repos/o/r/pulls/comments/3764221067',
+          ),
+          { stderr: 'gh: Not Found (HTTP 404)\n' },
+        );
       },
       () => 'null\n',
     );
@@ -918,6 +923,99 @@ describe('fetchPrData', () => {
     );
     fetchPrData(target, check());
     expect(mockGh).toHaveBeenCalledTimes(1);
+    rmSync(cacheDir, { recursive: true, force: true });
+  });
+
+  it("keeps each answer as it comes, tells a missing comment by gh's words only, and gives the gate a time budget", () => {
+    const botThread = (id: string, databaseId: number) => ({
+      id: `T${databaseId}`,
+      isResolved: false,
+      isOutdated: false,
+      path: 'src/a.ts',
+      line: 3,
+      root: { nodes: [{ databaseId }] },
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [
+          {
+            ...comment(id, 'review-bot', 'NONE'),
+            author: { __typename: 'Bot', login: 'review-bot' },
+            databaseId,
+            replyTo: null,
+          },
+        ],
+      },
+    });
+    const data = pr({
+      reviewThreads: {
+        pageInfo: { hasNextPage: false },
+        nodes: [botThread('A', 404), botThread('B', 2)],
+      },
+    } as Partial<PrData>);
+    const cacheDir = mkdtempSync(join(tmpdir(), 'autofix-replies-'));
+    const cachePath = join(cacheDir, 'replies.json');
+    const respond = (...answers: Array<() => string>) => {
+      mockGh.mockReset();
+      mockGh.mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: { pullRequest: structuredClone(data) },
+          },
+        }),
+      );
+      for (const answer of answers) mockGh.mockImplementationOnce(answer);
+    };
+    const rateLimited = () => {
+      throw Object.assign(
+        new Error('Command failed: gh api repos/o/404/pulls/comments/404'),
+        { stderr: 'gh: API rate limit exceeded (HTTP 403)\n' },
+      );
+    };
+    // A repository and a comment named 404 do not make a refusal a
+    // deleted comment; what was learned before it stays.
+    respond(() => 'null\n', rateLimited);
+    const strict = { known: () => false, strict: true, cachePath };
+    expect(() =>
+      fetchPrData({ owner: 'o', repo: '404', prNumber: 7 }, strict),
+    ).toThrow(/repos\/o\/404\/pulls\/comments\/404/);
+    expect(JSON.parse(readFileSync(cachePath, 'utf8'))).toEqual({ A: null });
+
+    // A round over its time stops with the answers kept, saying so.
+    rmSync(cachePath);
+    const roundNow = vi.spyOn(Date, 'now');
+    let roundClock = 1_000_000;
+    roundNow.mockImplementation(() => roundClock);
+    respond(() => {
+      roundClock += 9 * 60_000;
+      return 'null\n';
+    });
+    expect(() =>
+      fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 }, strict),
+    ).toThrow(/asked GitHub about 1 bot comments .* run snapshot again/);
+    roundNow.mockRestore();
+    expect(JSON.parse(readFileSync(cachePath, 'utf8'))).toEqual({ A: null });
+
+    // The gate stops asking once its time is spent, and keeps answers
+    // where no `.qwen/tmp` was made yet.
+    rmSync(cacheDir, { recursive: true, force: true });
+    const now = vi.spyOn(Date, 'now');
+    let clock = 1_000_000;
+    now.mockImplementation(() => clock);
+    respond(() => {
+      clock += 31_000;
+      return 'null\n';
+    });
+    const { pr: gated } = fetchPrData(
+      { owner: 'o', repo: 'r', prNumber: 7 },
+      { known: () => false, strict: false, cachePath },
+    );
+    now.mockRestore();
+    expect(mockGh).toHaveBeenCalledTimes(2);
+    expect(
+      gated.reviewThreads.nodes.map((t) => t.comments.nodes[0]!.replyUnknown),
+    ).toEqual([undefined, true]);
+    mockGh.mockReset();
     rmSync(cacheDir, { recursive: true, force: true });
   });
 

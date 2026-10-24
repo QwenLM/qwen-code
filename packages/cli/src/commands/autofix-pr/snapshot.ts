@@ -1127,6 +1127,12 @@ function graphql(query: string, target: PrTarget, extra: string[]): unknown {
 
 /** Bot comments the gate asks about over REST in one fire; the rest wait. */
 const MAX_GATE_REPLY_CHECKS = 20;
+/** How long the gate spends asking, well inside its 60 seconds: `gh`
+ * retries a 5xx for nine seconds before it fails. */
+const GATE_REPLY_CHECK_BUDGET_MS = 30_000;
+/** How long a round spends asking, inside the shell tool's ten minutes;
+ * what it learned is kept, and the next run goes on from there. */
+const ROUND_REPLY_CHECK_BUDGET_MS = 8 * 60_000;
 
 /** How a caller of `fetchPrData` has bot comments checked for replies. */
 export interface ReplyCheck {
@@ -1168,7 +1174,20 @@ function markOrphanReplies(
   check: ReplyCheck,
 ): void {
   const cache = readReplyCache(check.cachePath);
-  const learned: Record<string, string | null> = {};
+  // Kept as each answer comes, so a run that fails or is killed later
+  // keeps what it learned. Read again: another helper may have learned
+  // others meanwhile.
+  const keep = (id: string, parent: string | null) => {
+    // The gate may run before anything prepared `.qwen/tmp`.
+    mkdirSync(dirname(check.cachePath), { recursive: true });
+    atomicWriteFileSync(
+      check.cachePath,
+      `${JSON.stringify({ ...readReplyCache(check.cachePath), [id]: parent })}\n`,
+    );
+  };
+  const deadline =
+    Date.now() +
+    (check.strict ? ROUND_REPLY_CHECK_BUDGET_MS : GATE_REPLY_CHECK_BUDGET_MS);
   let asked = 0;
   let failed = false;
   for (const thread of pr.reviewThreads.nodes) {
@@ -1187,7 +1206,15 @@ function markOrphanReplies(
     let parent: string | null | undefined =
       first.id in cache ? cache[first.id] : undefined;
     if (parent === undefined) {
-      if (!check.strict && (failed || asked >= MAX_GATE_REPLY_CHECKS)) {
+      if (check.strict && Date.now() > deadline) {
+        throw new Error(
+          `asked GitHub about ${asked} bot comments on PR #${target.prNumber} and kept the answers; run snapshot again to go on`,
+        );
+      }
+      if (
+        !check.strict &&
+        (failed || asked >= MAX_GATE_REPLY_CHECKS || Date.now() > deadline)
+      ) {
         first.replyUnknown = true;
         continue;
       }
@@ -1201,7 +1228,10 @@ function markOrphanReplies(
           '.in_reply_to_id',
         ).trim();
       } catch (err) {
-        if (/\b404\b|Not Found/.test(String((err as Error).message))) {
+        // gh's own words for a missing comment, not the command line,
+        // which names the repository and the comment.
+        const stderr = (err as { stderr?: unknown }).stderr;
+        if (/\(HTTP 404\)/.test(typeof stderr === 'string' ? stderr : '')) {
           first.replyUnknown = true;
           continue;
         }
@@ -1211,16 +1241,9 @@ function markOrphanReplies(
         continue;
       }
       parent = answer === '' || answer === 'null' ? null : answer;
-      learned[first.id] = parent;
+      keep(first.id, parent);
     }
     if (parent !== null) first.replyTo = { id: `#${parent}` };
-  }
-  if (Object.keys(learned).length > 0) {
-    // Read again: another helper may have learned others meanwhile.
-    atomicWriteFileSync(
-      check.cachePath,
-      `${JSON.stringify({ ...readReplyCache(check.cachePath), ...learned })}\n`,
-    );
   }
 }
 
