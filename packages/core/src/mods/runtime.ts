@@ -12,7 +12,12 @@ import { pathToFileURL } from 'node:url';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
-import { ModBudget, record, validateResult } from './dispatch.js';
+import {
+  ModBudget,
+  assertModDepth,
+  record,
+  validateResult,
+} from './dispatch.js';
 import type {
   ModToolCallInput,
   ModToolNext,
@@ -27,6 +32,7 @@ import {
   type ModLog,
   type ModReply,
   type ModRequest,
+  type ModSessionFacts,
   type ModWorkerReply,
   type ModSource,
   type ModOptions,
@@ -83,6 +89,7 @@ export class ModRuntime {
 
   private constructor(
     private readonly log: (entry: ModLog, plugin: string) => void,
+    private readonly facts: () => ModSessionFacts,
     private readonly resolveTool?: ModToolResolver,
     private readonly surface: 'terminal' | null = null,
   ) {
@@ -151,14 +158,29 @@ export class ModRuntime {
     resolveTool?: ModToolResolver,
     surface: 'terminal' | null = null,
     version = 'unknown',
+    facts?: () => ModSessionFacts,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
       new Set(plugins.map((p) => p.id)).size !== plugins.length
     )
       throw new Error('Invalid Mod plugin group.');
+    const startedAt = Date.now();
     const runtime = new ModRuntime(
       log,
+      facts ??
+        (() => ({
+          id: '',
+          cwd,
+          root: cwd,
+          model: '',
+          turns: 0,
+          usage: {
+            startedAt,
+            context: { tokens: 0, window: 0 },
+            rateLimits: [],
+          },
+        })),
       plugins.some((plugin) => plugin.toolDialect === 'claude')
         ? resolveTool
         : undefined,
@@ -371,8 +393,10 @@ export class ModRuntime {
 
   private post(request: ModRequest, root: number): void {
     if (this.root?.id !== root) return;
-    if (Buffer.byteLength(JSON.stringify(request)) > MOD_MAX_BYTES + 8192)
+    const json = JSON.stringify(request);
+    if (Buffer.byteLength(json) > MOD_MAX_BYTES + 8192)
       throw new Error('Mod host message is too large.');
+    assertModDepth(json, 'Mod host message');
     this.worker.postMessage({ ...request, root, phase: this.root.phase });
   }
 
@@ -443,11 +467,14 @@ export class ModRuntime {
     signal.throwIfAborted();
     if (this.failure) throw this.failure;
     if (this.pending) throw new Error('A Mod dispatch is already running.');
+    const message = { ...request, facts: this.facts() };
+    const json = JSON.stringify(message);
     if (
-      Buffer.byteLength(JSON.stringify(request)) >
+      Buffer.byteLength(json) >
       (request.type === 'load' ? 32 : 1) * MOD_MAX_BYTES + 8192
     )
       throw new Error('Mod request is too large.');
+    assertModDepth(json, 'Mod request');
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cancelTimer: ReturnType<typeof setTimeout> | undefined;
     let aborted = false;
@@ -508,7 +535,7 @@ export class ModRuntime {
         signal.addEventListener('abort', onAbort, { once: true });
         root.refresh();
         this.worker.postMessage({
-          ...request,
+          ...message,
           root: root.id,
           phase: root.phase,
         });

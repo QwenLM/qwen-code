@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { isolateOperatorReviewSettings } from './lib/test-utils.js';
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   writeFileSync,
@@ -15,6 +16,7 @@ import {
   statSync,
   utimesSync,
 } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -26,6 +28,7 @@ import {
   trimOutput,
   unresolvedWorkspaceDeps,
   buildRunEnv,
+  REAPING_SHELL,
   type CommandResult,
 } from './build-test.js';
 import {
@@ -174,6 +177,125 @@ describe('run (capture-time failing-file measurement)', () => {
     },
   );
 });
+
+describe.skipIf(process.platform === 'win32')(
+  'run (a killed command takes its process tree with it)',
+  () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'bt-reap-'));
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    // A grandchild that outlives a killed shell unless something kills it:
+    // the shape of a test runner's workers, two levels below the spawn. The
+    // shell records its pid at the fork, so a node slow to start on a loaded
+    // machine is still there to be killed when the deadline fires.
+    const grandchild = (pidFile: string): string =>
+      `node -e "setInterval(() => {}, 1000)" & echo $! > ${pidFile}; wait`;
+    const pidIn = async (pidFile: string): Promise<number> => {
+      for (let i = 0; i < 100; i++) {
+        try {
+          const pid = Number(readFileSync(pidFile, 'utf8'));
+          if (pid > 0) return pid;
+        } catch {
+          // not written yet
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      throw new Error(`no pid in ${pidFile}`);
+    };
+    // Dead or a zombie: a reparented process waits for init to reap it.
+    const gone = async (pid: number): Promise<boolean> => {
+      for (let i = 0; i < 40; i++) {
+        try {
+          process.kill(pid, 0);
+        } catch {
+          return true;
+        }
+        const stat = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+          encoding: 'utf8',
+        }).stdout.trim();
+        if (stat === '' || stat.startsWith('Z')) return true;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      process.kill(pid, 'SIGKILL');
+      return false;
+    };
+
+    it('kills what the command started when its deadline fires', async () => {
+      const pidFile = join(dir, 'pid');
+      const r = run(grandchild(pidFile), dir, 1_500);
+      // Still reported as a timeout, exactly as when the shell itself died.
+      expect(r.timedOut).toBe(true);
+      expect(r.exitCode).toBeNull();
+      expect(await gone(await pidIn(pidFile))).toBe(true);
+    });
+
+    it.skipIf(!existsSync('/proc/self/stat'))(
+      'kills the whole tree while older processes exit during the walk',
+      async () => {
+        // awk stops at the first file it cannot open (mawk, gawk and busybox
+        // awk all do), and a process that exits between the glob and the read
+        // leaves exactly that; no file after it is read. With processes
+        // exiting all through the walk, the command's were among those.
+        const churn = spawn(
+          '/bin/sh',
+          ['-c', 'while :; do sleep 1 & sleep 0.002; done'],
+          { stdio: 'ignore', detached: true },
+        );
+        try {
+          // The deadline is shorter than a churn process lives, so what exits
+          // during the walk started before the command did.
+          await new Promise((r) => setTimeout(r, 700));
+          const pidFile = join(dir, 'pid');
+          const r = run(
+            `for n in 1 2 3 4; do sleep 300 & echo $! >> ${pidFile}; done; wait`,
+            dir,
+            600,
+          );
+          expect(r.timedOut).toBe(true);
+          const pids = readFileSync(pidFile, 'utf8')
+            .split('\n')
+            .filter(Boolean)
+            .map(Number);
+          // A loaded machine may reach the deadline before all four start; one
+          // that never started cannot leak, and every one that did is checked.
+          expect(pids.length).toBeGreaterThan(0);
+          // Every one checked, so a miss kills the rest too (see `gone`).
+          const missed: number[] = [];
+          for (const pid of pids) if (!(await gone(pid))) missed.push(pid);
+          expect(missed).toEqual([]);
+        } finally {
+          process.kill(-churn.pid!, 'SIGKILL');
+        }
+      },
+    );
+
+    it("keeps the command's own exit status", () => {
+      expect(run('exit 3', dir, 30_000).exitCode).toBe(3);
+      expect(run('false; true', dir, 30_000).exitCode).toBe(0);
+    });
+
+    it('kills it on an interrupt too, though the job started with SIGINT ignored', async () => {
+      const pidFile = join(dir, 'pid');
+      const shell = spawn(
+        '/bin/sh',
+        ['-c', REAPING_SHELL, 'sh', grandchild(pidFile)],
+        { stdio: 'ignore' },
+      );
+      const pid = await pidIn(pidFile);
+      shell.kill('SIGINT');
+      const [code, signal] = await new Promise<[number | null, string | null]>(
+        (res) => shell.on('exit', (c, sig) => res([c, sig])),
+      );
+      // The re-raised SIGINT kills the wrapper. bash before 5.0, which is
+      // macOS's `/bin/sh` (bash 3.2), exits 130 on it instead.
+      expect(signal ?? code).toBeOneOf(['SIGINT', 130]);
+      expect(await gone(pid)).toBe(true);
+    });
+  },
+);
 
 describe('runBuildTest', () => {
   let root: string;

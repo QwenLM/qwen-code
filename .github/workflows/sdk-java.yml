@@ -38,9 +38,14 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    # One per-host lock wait plus the locked Maven work it guards. A
-    # hold measures 925 s (the sdk-java suite plus the managed-agent H2
-    # suite), so the 5400-second wait covers about 5.8 of them. The
+    # One per-host lock wait plus the locked Maven work it guards. The test
+    # lane runs its whole suite under the lock, so a waiter can queue behind
+    # several sibling holds. The 2026-10-22 run 39754359013 burned the then
+    # 5400-second budget behind the MariaDB lane's verify hold — the shape
+    # #15128 removed (qwen-code#15243) — and the 9600-second wait is headroom
+    # for about ten chained test-lane holds, sized from the hold length
+    # rather than an observed chain (the design doc's Goals restates this);
+    # no constant budget bounds the queue itself (#14566, #15031). The
     # ticketed queue in .github/scripts/sdk-java-lock.sh serves the fast
     # class first: a fast-tier leg waits for the running hold, at most one
     # parked full-tier head and older fast-class tickets, overtaking only
@@ -48,9 +53,9 @@ jobs:
     # longer hold the queue is plain sequence order), while a full-tier leg
     # (the default) keeps its FIFO position among the other rank-1 tickets.
     # The ceiling is that wait plus one hold plus ~11 minutes of uncapped
-    # setup and margin: 150. Hosted lanes never take the lock and inherit
+    # setup and margin: 200. Hosted lanes never take the lock and inherit
     # this ceiling as a bound, not as an expected duration.
-    timeout-minutes: 150
+    timeout-minutes: 200
     strategy:
       fail-fast: false
       matrix:
@@ -243,7 +248,7 @@ jobs:
           # served first — see the sourced helper.
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            sdk_java_lock_acquire 5400 "${TIER}"
+            sdk_java_lock_acquire 9600 "${TIER}"
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
@@ -251,8 +256,8 @@ jobs:
             # before Maven and wedging the release.
             mkdir -p "${HOME}/.cache/qwen-code-ci"
             exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-            if ! flock --wait 5400 9; then
-              echo "::error::sdk-java host lock not acquired within 90 minutes"
+            if ! flock --wait 9600 9; then
+              echo "::error::sdk-java host lock not acquired within 160 minutes"
               exit 1
             fi
           fi
@@ -740,8 +745,9 @@ jobs:
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
-          # fast tier's 90-minute wait expires behind it (run 39627609266
-          # waited 17:38-19:15 behind run 39628985638's integration hold).
+          # fast tier's wait expires behind it (run 39627609266 waited
+          # 17:38-19:15, burning its then-90-minute budget, behind run
+          # 39628985638's integration hold).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
           cd packages/managed-agent-server
           # Keep mysql.url for release runs that check out an older tag.
@@ -897,12 +903,15 @@ jobs:
     # margin (11836 s of fork plus wrap); the FG12e Runtime connection
     # replacement cell adds 28 s, moving the fork to 11264 s and leaving
     # Verify at 198 minutes, wrapping fork + 600 s plus margin (11864 s of
-    # fork plus wrap, 16 s left);
+    # fork plus wrap, 16 s left). The pool fixture provisionally reserves
+    # 180 s (its 120 s method ceiling plus 60 s for process/context cleanup),
+    # pending CI measurement: fork 11444 s, Verify 201 minutes, and 12044 s
+    # of fork plus wrap with the same 16 s left;
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 288 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 301
+    # checks): 291 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 304
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -1002,9 +1011,10 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 11264 s, so the step wraps to fork + 600 s plus margin (198 min,
-        # 16 s left before the step must move).
-        timeout-minutes: 198
+        # 11444 s, so the step wraps to fork + 600 s plus margin (201 min,
+        # 16 s left before the step must move), including the provisional
+        # 180 s pool-fixture reservation pending CI measurement.
+        timeout-minutes: 201
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
