@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mountMemoryImportRoutes } from './memory-import.js';
+
 import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
@@ -2310,11 +2312,14 @@ export function createServeApp(
   );
   app.use(allowOriginCors(originAllowlist));
   if (opts.profile === 'hosted-harness') {
+    const poolEnabled =
+      process.env['QWEN_HOSTED_HARNESS_INSTANCE_ID'] !== undefined;
     app.use((req, res, next) => {
       if (
         req.path === '/health' ||
         req.path === '/capabilities' ||
         req.path === '/session' ||
+        (poolEnabled && req.path.startsWith('/internal/hosted-harness/v1/')) ||
         req.path.startsWith('/session/')
       )
         next();
@@ -3014,6 +3019,7 @@ export function createServeApp(
   });
 
   // Workspace memory + agents CRUD routes.
+  mountMemoryImportRoutes(app, { workspaceRegistry, mutate });
   mountWorkspaceMemoryRoutes(app, {
     bridge: primaryBridge,
     boundWorkspace: primaryBoundWorkspace,

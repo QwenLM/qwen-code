@@ -23,6 +23,7 @@ import {
 } from './paths.js';
 import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
+  isImportedMemoryDocument,
   scanAutoMemoryIndexDocumentsFromRoot,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
@@ -230,8 +231,12 @@ function assembleIndex(
   lines: string[],
   scanNotice = '',
   scanOmitted = 0,
+  priorityPrefixLength = 0,
 ): string {
-  const { content, dropped } = trimIndexToBudgetDetailed(lines);
+  const { content, dropped } = trimIndexToBudgetDetailed(
+    lines,
+    priorityPrefixLength,
+  );
   if (dropped.length === 0 && !scanNotice) {
     return content;
   }
@@ -294,10 +299,16 @@ export function buildManagedAutoMemoryIndex(
   >,
   omitted: readonly ScannedAutoMemoryDocument[] = [],
 ): string {
+  const ordered = [...docs].sort(
+    (a, b) =>
+      Number(isImportedMemoryDocument(a)) - Number(isImportedMemoryDocument(b)),
+  );
+  const firstImported = ordered.findIndex(isImportedMemoryDocument);
   return assembleIndex(
-    docs.map((doc) => docIndexLine(doc)),
-    describeScanOmissions(docs, omitted),
+    ordered.map((doc) => docIndexLine(doc)),
+    describeScanOmissions(ordered, omitted),
     omitted.length,
+    firstImported < 0 ? 0 : firstImported,
   );
 }
 

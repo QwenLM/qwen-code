@@ -111,7 +111,10 @@ async function openAuthority(
   });
   try {
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -749,7 +752,10 @@ describe('managed session authority activation fences', () => {
           sessionKey: sessionKeyFor(fixture),
         });
         const authority = await LocalManagedSessionAuthority.open({
-          lease,
+          journal: LocalJsonlManagedSessionJournalStore.fromLease(
+            lease,
+            sessionKeyFor(fixture),
+          ),
           sessionKey: sessionKeyFor(fixture),
           cwd: '/workspace',
           version: 'test',
@@ -1617,7 +1623,10 @@ describe('managed session authority log integrity', () => {
       transcriptPath: fixture.transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -1822,7 +1831,10 @@ describe('managed session uncommitted tail recovery', () => {
     });
     await expect(
       LocalManagedSessionAuthority.open({
-        lease,
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKeyFor(fixture),
+        ),
         sessionKey: sessionKeyFor(fixture),
         cwd: '/workspace',
         version: 'test',
@@ -1835,7 +1847,10 @@ describe('managed session uncommitted tail recovery', () => {
     expect(recovered.discardedBytes).toBeGreaterThan(0);
 
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -2054,7 +2069,10 @@ describe('managed session first transaction recovery', () => {
     ]);
 
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -2115,7 +2133,10 @@ describe('managed session write barrier at rest', () => {
       transcriptPath: fixture.transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -2157,7 +2178,10 @@ describe('managed session write barrier at rest', () => {
       transcriptPath: fixture.transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -2176,7 +2200,10 @@ describe('managed session write barrier at rest', () => {
       transcriptPath: fixture.transcriptPath,
     });
     const reopened = await LocalManagedSessionAuthority.open({
-      lease: reopenLease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        reopenLease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -2238,7 +2265,10 @@ describe('managed session checkpoints', () => {
       transcriptPath: fixture.transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
