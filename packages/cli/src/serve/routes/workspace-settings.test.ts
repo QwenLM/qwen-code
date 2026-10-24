@@ -915,6 +915,42 @@ describe('POST /workspace/settings', () => {
     },
   );
 
+  it('serves general.outputLanguage read-only for host display', async () => {
+    const { app, persistSetting } = makeApp({
+      userSettings: { general: { outputLanguage: '中文' } },
+    });
+
+    const read = await request(app).get('/workspace/settings');
+    expect(read.status).toBe(200);
+    const descriptor = read.body.settings.find(
+      (setting: { key?: string }) => setting.key === 'general.outputLanguage',
+    );
+    expect(descriptor?.values.effective).toBe('中文');
+    expect(descriptor?.options).toEqual(
+      expect.arrayContaining([
+        { value: 'Chinese', label: '中文 (Chinese)' },
+        { value: 'English', label: 'English' },
+      ]),
+    );
+    // Suggestions carry the full names the command persists, not locale codes.
+    expect(
+      (descriptor?.options ?? []).map(
+        (option: { value: string }) => option.value,
+      ),
+    ).not.toContain('zh');
+
+    // Persisting this key alone would leave output-language.md and running
+    // sessions stale, so the language command stays the only write path.
+    const write = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'general.outputLanguage',
+      value: 'English',
+    });
+    expect(write.status).toBe(400);
+    expect(write.body).toMatchObject({ code: 'disallowed_key' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
   it.each(['ui.brand', 'ui.brand.name', 'ui.brand.logoPath'])(
     'keeps the web shell brand (%s) off the settings surface',
     async (key) => {
@@ -1376,6 +1412,84 @@ describe('web-shell settings alias drift', () => {
     expect(publishWorkspaceEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'settings_changed' }),
     );
+  });
+});
+
+describe('Web Shell loading phrase settings', () => {
+  it('serves the effective value and user/workspace overrides', async () => {
+    const { app } = makeApp({
+      userSettings: { ui: { accessibility: { enableLoadingPhrases: true } } },
+      workspaceSettings: {
+        ui: { accessibility: { enableLoadingPhrases: false } },
+      },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'ui.accessibility.enableLoadingPhrases',
+        type: 'boolean',
+        default: true,
+        values: { effective: false, user: true, workspace: false },
+      }),
+    );
+  });
+
+  it.each(['user', 'workspace'] as const)(
+    'accepts a %s override',
+    async (scope) => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+      const response = await request(app).post('/workspace/settings').send({
+        scope,
+        key: 'ui.accessibility.enableLoadingPhrases',
+        value: false,
+      });
+      expect(response.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+        'ui.accessibility.enableLoadingPhrases',
+        false,
+      );
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'ui.accessibility.enableLoadingPhrases',
+        false,
+        scope,
+        undefined,
+      );
+    },
+  );
+
+  it('reads only the selected runtime on the qualified route', async () => {
+    const { app } = makeQualifiedApp();
+    vi.mocked(loadSettings).mockImplementation(
+      (cwd) =>
+        ({
+          merged: {
+            ui: {
+              accessibility: {
+                enableLoadingPhrases: cwd !== '/selected-workspace',
+              },
+            },
+          },
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+    const response = await request(app).get('/workspaces/secondary/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'ui.accessibility.enableLoadingPhrases',
+        values: { effective: false },
+      }),
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/selected-workspace', {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: false,
+      workspaceTrusted: true,
+    });
   });
 });
 

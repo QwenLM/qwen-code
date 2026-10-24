@@ -567,6 +567,23 @@ The execution budgets described above include a 60-second startup limit for all
 worker initialization, compilation and startup hooks together. The guest memory
 limit does not cover the compiler's host memory.
 
+Values that cross between a Mod and Qwen Code nest at most 512 levels, so walking
+them never exhausts a native stack:
+
+- A hook answer, or a value a hook passes to `next` or a `$` method, that nests
+  deeper fails like a thrown error. The hook is skipped or its `.catch` runs, and
+  the Mod keeps working.
+- A tool input that nests deeper cannot be handed to the Mod's hooks, so the call
+  is refused.
+- A native result that nests deeper than 256 levels reaches the Mod as the
+  omission notice and reference described in
+  [Tool interception](#tool-interception). Returning them unchanged keeps the
+  complete result.
+
+Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
+A hook answer whose getter throws while Qwen Code reads it fails as a whole;
+Claude Code 2.1.299 drops only that key.
+
 The author API is based on Claude Code 2.1.296 declarations, with event names
 recognized from Claude Code 2.1.308, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).
