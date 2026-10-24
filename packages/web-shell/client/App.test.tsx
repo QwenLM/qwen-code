@@ -2270,14 +2270,17 @@ vi.doMock('./components/StreamingStatus', async () => {
     StreamingStatus: ({
       startedAt,
       hasActivePrompt,
+      showPhrase,
     }: {
       startedAt?: number;
       hasActivePrompt?: boolean;
+      showPhrase?: boolean;
     }) =>
       React.createElement('div', {
         'data-testid': 'streaming-status',
         'data-started-at': startedAt,
         'data-has-active-prompt': String(hasActivePrompt === true),
+        'data-show-phrase': String(showPhrase !== false),
       }),
   };
 });
@@ -13924,6 +13927,51 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       },
     );
   });
+
+  it.each([false, true, undefined])(
+    'applies loading phrase visibility (%s) before host customization',
+    async (enabled) => {
+      testState.sessionHasActivePrompt = true;
+      testState.settings =
+        enabled === undefined
+          ? []
+          : [
+              {
+                key: 'ui.accessibility.enableLoadingPhrases',
+                type: 'boolean',
+                label: 'Enable Loading Phrases',
+                category: 'UI',
+                requiresRestart: true,
+                default: true,
+                values: { effective: enabled },
+              },
+            ];
+      const loadingPhrases = () => ['Custom loading phrase'];
+      const { container, rerender } = renderApp({ loadingPhrases });
+      await flush();
+      const status = () =>
+        container.querySelector('[data-testid="streaming-status"]');
+      expect(status()?.getAttribute('data-show-phrase')).toBe(
+        String(enabled !== false),
+      );
+      testState.settings = [
+        {
+          key: 'ui.accessibility.enableLoadingPhrases',
+          type: 'boolean',
+          label: 'Enable Loading Phrases',
+          category: 'UI',
+          requiresRestart: true,
+          default: true,
+          values: { effective: enabled === false },
+        },
+      ];
+      rerender({ loadingPhrases });
+      await flush();
+      expect(status()?.getAttribute('data-show-phrase')).toBe(
+        String(enabled === false),
+      );
+    },
+  );
 
   it('keeps the indicator mounted and composer running through a silent gap', async () => {
     const composerFooterProps: WebShellComposerToolbarRenderInfo[] = [];
@@ -49227,16 +49275,15 @@ describe('Managed home integration', () => {
 
   function managedProvider(): ManagedAgentProvider {
     return {
-      kind: 'java',
       storageKey: 'managed-test',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       listSessions: vi.fn(),
       getSession: vi.fn(),
       getTranscript: vi.fn(),
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },

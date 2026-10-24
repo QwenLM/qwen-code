@@ -1841,6 +1841,7 @@ describe('bootstrap import boundaries', () => {
     const commandNameByIdentifier = new Map([
       ['agentsCommand', 'agents'],
       ['attachCommand', 'attach'],
+      ['autofixPrCommand', 'autofix-pr'],
       ['authCommand', 'auth'],
       ['batchCommand', 'batch'],
       ['boardCommand', 'board'],

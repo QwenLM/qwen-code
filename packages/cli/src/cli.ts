@@ -52,6 +52,10 @@ export const TOP_LEVEL_COMMANDS = [
     'attach --session <session-id>',
     'Attach a terminal to a running daemon session',
   ],
+  [
+    'autofix-pr <command>',
+    'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, cleanup)',
+  ],
   ['auth', 'Configure authentication (removed)'],
   [
     'batch <command>',
