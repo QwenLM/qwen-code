@@ -239,6 +239,7 @@ describe('settings presentation aliases', () => {
       'setting:git-commit-co-author': 'general.gitCoAuthor.commit',
       'setting:git-pr-co-author': 'general.gitCoAuthor.pr',
       'setting:language': 'general.language',
+      'setting:output-language': 'general.outputLanguage',
       'setting:prevent-system-sleep': 'general.preventSystemSleep',
       'setting:review-attribution': 'review.attribution',
       'setting:review-sandbox': 'review.sandbox',
