@@ -5266,6 +5266,19 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('schedule nothing');
   });
 
+  // The TUI renders `argument-hint` beside the command name; without the field
+  // `/verify-pr` looks like it takes no arguments, unlike `/review`.
+  it('declares an argument hint for the command prompt', () => {
+    const hint = /^argument-hint: '([^']+)'/m.exec(verifySkill)?.[1] ?? '';
+
+    expect(hint).toContain('<pr-number>');
+    expect(hint).toContain('--publish');
+    expect(hint).toContain('--watch');
+    expect(hint).toContain('--repo');
+    expect(hint).toContain('--assets-repo');
+    expect(hint).toContain('--assets-branch');
+  });
+
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
   // expected A/B base-cell failures proving the tests are load-bearing"
   // while assertions.json said fail:7 — so the publisher's trust rule

@@ -1,6 +1,7 @@
 ---
 name: verify-pr
 description: This skill should be used to run a sandboxed deep verification of a qwen-code PR — "/verify-pr <n>", "/verify-pr <n> --publish" (local round that also posts the report comment), "深度验证这个 PR", "验证这个 PR 并把报告发到评论", A/B load-bearing proof against the base build, mock-free harnesses with wire oracles, and targeted gates — producing tmp/pr<n>-verify-<ts>/report.md plus a machine-readable verdict. Designed for the token-free CI verify job; also usable locally.
+argument-hint: '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]'
 ---
 
 # PR Deep Verification
