@@ -518,6 +518,10 @@ const listeners = new Set<Server>();
 
 beforeEach(() => {
   wakeDeps.runTurnGate = undefined;
+  vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'resolveCapabilities',
+  ).mockResolvedValue();
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
   vi.spyOn(
