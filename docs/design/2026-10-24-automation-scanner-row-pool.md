@@ -81,8 +81,10 @@ follow-up if probe durations keep saturating `SCAN_LIMIT × scanner-threads`.
   `theLeaseRunsFromTheClaimNotTheTick`,
   `aHolderThatLostItsLeaseMidFireCannotSettleAndTheNewOwnerRedrives`,
   `aBacklogDeeperThanThePoolStillCompletesWithinTheTick`,
+  `aTickJoinsEveryRowBeforeItReportsOneFailure`,
   `theScannerWorksRowsOnItsOwnBoundedPool`,
   `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`,
+  `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`,
   plus binding/startup validation of the new property. The pre-existing lease
   and fence suite runs unchanged through a direct executor, pinning the serial
   shape of the same fan-out and join.

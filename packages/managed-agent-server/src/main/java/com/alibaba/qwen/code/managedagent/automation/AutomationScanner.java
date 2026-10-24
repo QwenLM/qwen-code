@@ -111,30 +111,27 @@ public class AutomationScanner {
     /**
      * Runs every submitted task on the submitting thread, in submit order.
      * Unit tests pin the serial shape of the tick through the same fan-out
-     * and join the production pool takes.
+     * and join the production pool takes. It owns no threads, so its
+     * lifecycle surface is inert and never stopped.
      */
     private static final ExecutorService DIRECT = new AbstractExecutorService() {
-        private volatile boolean stopped;
-
         @Override
         public void shutdown() {
-            stopped = true;
         }
 
         @Override
         public List<Runnable> shutdownNow() {
-            stopped = true;
             return List.of();
         }
 
         @Override
         public boolean isShutdown() {
-            return stopped;
+            return false;
         }
 
         @Override
         public boolean isTerminated() {
-            return stopped;
+            return false;
         }
 
         @Override

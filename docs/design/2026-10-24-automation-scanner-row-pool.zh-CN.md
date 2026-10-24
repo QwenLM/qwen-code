@@ -72,8 +72,10 @@ scanner-threads`，它仍是正确的后续方向。
   `theLeaseRunsFromTheClaimNotTheTick`、
   `aHolderThatLostItsLeaseMidFireCannotSettleAndTheNewOwnerRedrives`、
   `aBacklogDeeperThanThePoolStillCompletesWithinTheTick`、
+  `aTickJoinsEveryRowBeforeItReportsOneFailure`、
   `theScannerWorksRowsOnItsOwnBoundedPool`、
-  `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`，
+  `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`、
+  `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`，
   以及新属性的绑定/启动校验。既有的租约与 fence 回归套件经由直接执行器原样
   运行，钉住同一套分发与 join 的串行形态。
 - MySQL（`AutomationScannerConcurrencyMySqlIT`，`mysql-integration` profile）：
