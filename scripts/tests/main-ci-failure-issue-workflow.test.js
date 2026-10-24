@@ -442,6 +442,8 @@ printf '%s\\n' '${liveAttempt}'
         failBodyRead = false,
         failBodyReadFor = '',
         failCommentOnce = false,
+        failReopenOnce = false,
+        failCreateOnce = false,
         issueBody = '<!-- main-ci-failure-aggregate:1234 -->',
         issueBodies = {},
         signatureTitle = '',
@@ -493,7 +495,18 @@ if [[ "$1 $2" == 'issue list' ]]; then
 elif [[ "$1" == api ]]; then
   [[ "$*" == *'state=open&per_page=100'* && "$*" == *'--paginate'* ]] || exit 2
   ${failMarkerLookup ? 'exit 1' : `cat '${tmp}/marker-issues.json'`}
+elif [[ "$1 $2" == 'issue reopen' ]]; then
+  c=0
+  [[ ! -f "${tmp}/reopen-count" ]] || read -r c < "${tmp}/reopen-count"
+  c=$((c + 1))
+  printf '%s\\n' "$c" > "${tmp}/reopen-count"
+  [[ "\${FAIL_REOPEN_ONCE:-0}" != '1' || "$c" -gt 1 ]] || exit 1
 elif [[ "$1 $2" == 'issue create' ]]; then
+  c=0
+  [[ ! -f "${tmp}/create-count" ]] || read -r c < "${tmp}/create-count"
+  c=$((c + 1))
+  printf '%s\\n' "$c" > "${tmp}/create-count"
+  [[ "\${FAIL_CREATE_ONCE:-0}" != '1' || "$c" -gt 1 ]] || exit 1
   # Label churn must not prevent creation of the failure record.
   [[ "$*" != *'--label'* ]] || exit 1
   echo 'https://github.com/QwenLM/qwen-code/issues/999'
@@ -538,6 +551,8 @@ fi
               RUN_AT: runAt,
               LOOKUP_FAILURES: String(lookupFailures),
               FAIL_COMMENT_ONCE: failCommentOnce ? '1' : '0',
+              FAIL_REOPEN_ONCE: failReopenOnce ? '1' : '0',
+              FAIL_CREATE_ONCE: failCreateOnce ? '1' : '0',
             },
           },
         );
@@ -880,6 +895,29 @@ fi
       expect(result.calls.match(/issue comment 42/g)).toHaveLength(2);
       expect(result.output).toContain(
         'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+      );
+    });
+
+    it('retries a transient reopen failure on the regression path', () => {
+      const tracked = `<!-- qwen-main-ci-failure-test:aaa111bbb222 -->\n<!-- main-ci-failure-scope:1234 -->\n`;
+      const result = run([], {
+        signatureTitle: 'Main CI failed: SDK Java — src/Foo.test > case',
+        testMarkers: 'qwen-main-ci-failure-test:aaa111bbb222',
+        failReopenOnce: true,
+        issueBodies: { 7: tracked },
+        closedIssues: [{ ...botIssue(7, ' — Foo.test'), body: tracked }],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls.match(/issue reopen 7/g)).toHaveLength(2);
+      expect(result.calls).toContain('issue comment 7');
+    });
+
+    it('retries a transient create failure for a fresh aggregate', () => {
+      const result = run([], { failCreateOnce: true });
+      expect(result.status).toBe(0);
+      expect(result.calls.match(/issue create/g)).toHaveLength(2);
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/999',
       );
     });
 
@@ -1278,6 +1316,29 @@ fi
         expect(result.status).toBe(0);
         expect(result.calls).toContain('issue comment 20');
         expect(result.calls).not.toContain('issue edit');
+      });
+
+      it('suppresses accretion when a sibling tracker body cannot be read', () => {
+        // A scan-time read failure leaves nothing reusable: without cleanup
+        // the corpus would consult the truncated leftover file and silently
+        // treat the unreadable sibling as owning no markers at all.
+        const result = run(
+          [botIssue(7, ' — C.test'), botIssue(20, ' — A.test')],
+          {
+            signatureTitle,
+            testMarkers: `${markerA}\n${markerB}`,
+            failBodyReadFor: '7',
+            issueBodies: {
+              20: `<!-- ${markerA} -->\n<!-- main-ci-failure-scope:1234 -->\n`,
+            },
+          },
+        );
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 20');
+        expect(result.calls).not.toContain('issue edit');
+        expect(result.stdout).toContain(
+          'Could not read every sibling tracker body',
+        );
       });
     });
   });

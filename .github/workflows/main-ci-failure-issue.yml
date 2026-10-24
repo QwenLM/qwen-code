@@ -474,6 +474,10 @@ jobs:
               candidate_body="${RUNNER_TEMP}/candidate-${candidate}.md"
               if ! gh issue view "${candidate}" --repo "${REPO}" \
                 --json body --jq '.body // ""' > "${candidate_body}"; then
+                # The truncated file the redirect just made must not linger:
+                # the sibling corpus reuses it with -f and would read the
+                # unreadable candidate as an owned-marker-free empty body.
+                rm -f "${candidate_body}"
                 echo "::warning::Could not read issue #${candidate}; the signature route cannot certify a miss."
                 signature_unresolved=true
                 continue
