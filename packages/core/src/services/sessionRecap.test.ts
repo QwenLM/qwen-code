@@ -69,4 +69,39 @@ describe('generateSessionRecap', () => {
     expect(serialized).toContain('fix session title pollution');
     expect(serialized).toContain('continue with recap coverage');
   });
+
+  it('preserves user text containing unclosed system reminder tag (#12961)', async () => {
+    const history: Content[] = [
+      content('user', {
+        text: 'What is <system-reminder>? Also keep this in recap.',
+      }),
+      { role: 'model', parts: [{ text: 'It injects runtime reminders.' }] },
+    ];
+
+    let captured: Content[] | null = null;
+    const generateText = vi.fn(async (opts: { contents: Content[] }) => {
+      captured = opts.contents;
+      return {
+        text: '<recap>User asked about system-reminder.</recap>',
+        usage: undefined,
+      };
+    });
+    const config = {
+      getFastModel: vi.fn(() => 'qwen-turbo'),
+      getModel: vi.fn(() => 'qwen-plus'),
+      getLlmClient: vi.fn(() => ({
+        getHistoryShallow: () => history,
+      })),
+      getBaseLlmClient: vi.fn(() => ({ generateText })),
+      getOutputLanguageFilePath: vi.fn(() => undefined),
+    } as unknown as Config;
+
+    await generateSessionRecap(config, new AbortController().signal);
+
+    expect(captured).not.toBeNull();
+    const serialized = JSON.stringify(captured);
+    expect(serialized).toContain(
+      'What is <system-reminder>? Also keep this in recap.',
+    );
+  });
 });
