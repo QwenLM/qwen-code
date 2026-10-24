@@ -9,6 +9,7 @@ import {
   getContextLengthExceededInfo,
   isContextLengthExceededError,
 } from './contextLengthError.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('contextLengthError', () => {
   it.each([
@@ -152,6 +153,103 @@ describe('contextLengthError', () => {
     expect(info.isExceeded).toBe(true);
     expect(info.actualTokens).toBeUndefined();
     expect(info.limitTokens).toBe(128000);
+  });
+
+  describe('SGLang context overflow wording', () => {
+    const SGLANG_INPUT_OVERFLOW =
+      "The input (40000 tokens) is longer than the model's context length (32768 tokens).";
+
+    it.each([
+      SGLANG_INPUT_OVERFLOW,
+      // The CLI renders a caught request failure as `[API Error: <status> <message>]`.
+      `[API Error: 400 ${SGLANG_INPUT_OVERFLOW}]`,
+    ])('detects input overflow and parses both token counts: %s', (message) => {
+      const info = getContextLengthExceededInfo(new Error(message));
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(40000);
+      expect(info.limitTokens).toBe(32768);
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('detects the wording nested in an SDK-style error object', () => {
+      const info = getContextLengthExceededInfo({
+        status: 400,
+        error: { message: SGLANG_INPUT_OVERFLOW },
+      });
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(40000);
+      expect(info.limitTokens).toBe(32768);
+    });
+
+    it('detects the wording through a wrapping cause chain', () => {
+      const info = getContextLengthExceededInfo(
+        new Error('request failed', {
+          cause: new Error(SGLANG_INPUT_OVERFLOW),
+        }),
+      );
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(40000);
+    });
+
+    it('does not match an input that fits the context length', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          "The input (4000 tokens) is shorter than the model's context length (32768 tokens).",
+        ),
+      );
+
+      expect(info.isExceeded).toBe(false);
+    });
+
+    // The total also counts the completion budget, so the input count is the
+    // size compaction should start from.
+    it('anchors the total-token wording on the input count', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          "400 Requested token count exceeds the model's maximum context length of 32768 tokens. You requested a total of 40000 tokens: 39000 tokens from the input messages and 1000 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.",
+        ),
+      );
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(39000);
+      expect(info.limitTokens).toBe(32768);
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('reads the limit from the total-token wording when no count follows', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          "Requested token count exceeds the model's maximum context length of 32768 tokens.",
+        ),
+      );
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBeUndefined();
+      expect(info.limitTokens).toBe(32768);
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('scans a long run of digits quickly', () => {
+      const digits = '1'.repeat(60_000);
+      const messages = [
+        `maximum context length of 32768 tokens. You requested a total of 1 tokens: ${digits}`,
+        `maximum context length of ${digits}`,
+        // Long enough that the old uncapped capture took seconds here.
+        `context_length_exceeded: input token count ${digits.repeat(4)}`,
+      ];
+
+      const start = performance.now();
+      for (const message of messages) {
+        getContextLengthExceededInfo(new Error(message));
+      }
+
+      expectWithinLatencyBudget(performance.now() - start, 1000, {
+        poolMultiplier: 10,
+      });
+    });
   });
 
   it('extracts nested JSON error messages from strings', () => {
