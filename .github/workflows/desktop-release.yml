@@ -149,7 +149,6 @@ jobs:
           RELEASE_CLOBBER: '${{ inputs.clobber }}'
           RELEASE_DRAFT: '${{ inputs.draft }}'
           RELEASE_DRY_RUN: '${{ inputs.dry_run }}'
-          RELEASE_ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           RELEASE_PRERELEASE: '${{ inputs.prerelease }}'
           RELEASE_TAG: '${{ steps.version.outputs.tag }}'
           RELEASE_VERSION: '${{ steps.version.outputs.version }}'
@@ -160,30 +159,39 @@ jobs:
             [ "$RELEASE_DRY_RUN" = 'true' ] ||
             [ "$RELEASE_DRAFT" = 'true' ] ||
             [ "$RELEASE_PRERELEASE" = 'true' ] ||
-            [ "$RELEASE_CLOBBER" = 'true' ] ||
-            [ "$RELEASE_ELECTRON_BRIDGE" = 'true' ];
+            [ "$RELEASE_CLOBBER" = 'true' ];
           }; then
             exit 0
           fi
 
-          release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease 2>/dev/null)" || exit 0
+          if ! release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease 2>/dev/null)"; then
+            echo "::notice::Already-published check stopped: release '$RELEASE_TAG' could not be inspected."
+            exit 0
+          fi
           if ! jq -e '.isDraft == false and .isPrerelease == false' <<< "$release" >/dev/null 2>&1; then
+            echo "::notice::Already-published check stopped: release '$RELEASE_TAG' is not a published stable release."
             exit 0
           fi
 
           directory="$(mktemp -d)"
           trap 'rm -rf "$directory"' EXIT
           if ! gh release download "$FEED_TAG" --dir "$directory" --pattern 'desktop-latest.json' >/dev/null 2>&1; then
+            echo "::notice::Already-published check stopped: the GitHub stable feed '$FEED_TAG' has no readable desktop-latest.json."
             exit 0
           fi
-          if ! jq -e --arg version "$RELEASE_VERSION" '.version == $version' "$directory/desktop-latest.json" >/dev/null 2>&1; then
+          github_feed_version="$(jq -r '.version // "(unreadable)"' "$directory/desktop-latest.json" 2>/dev/null || echo '(unreadable)')"
+          if [ "$github_feed_version" != "$RELEASE_VERSION" ]; then
+            echo "::notice::Already-published check stopped: the GitHub stable feed is '$github_feed_version', expected $RELEASE_VERSION."
             exit 0
           fi
 
-          if ! curl -fsSL --connect-timeout 15 --max-time 300 "$ALIYUN_OSS_PUBLIC_BASE_URL/desktop/latest/desktop-latest.json" -o "$directory/oss-desktop-latest.json" >/dev/null 2>&1; then
+          if ! curl -fsSL --retry 2 --retry-delay 2 --retry-all-errors --connect-timeout 15 --max-time 60 "$ALIYUN_OSS_PUBLIC_BASE_URL/desktop/latest/desktop-latest.json" -o "$directory/oss-desktop-latest.json" >/dev/null; then
+            echo '::notice::Already-published check stopped: the OSS mirror feed could not be downloaded.'
             exit 0
           fi
-          if ! jq -e --arg version "$RELEASE_VERSION" '.version == $version' "$directory/oss-desktop-latest.json" >/dev/null 2>&1; then
+          oss_feed_version="$(jq -r '.version // "(unreadable)"' "$directory/oss-desktop-latest.json" 2>/dev/null || echo '(unreadable)')"
+          if [ "$oss_feed_version" != "$RELEASE_VERSION" ]; then
+            echo "::notice::Already-published check stopped: the OSS mirror feed is '$oss_feed_version', expected $RELEASE_VERSION."
             exit 0
           fi
 
