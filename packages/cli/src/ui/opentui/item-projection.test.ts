@@ -668,6 +668,65 @@ describe('model pricing (R1-91/R1-92)', () => {
       },
     }) as unknown as SessionMetrics;
 
+  const reasoningMetrics = (
+    model: string,
+    tokens: {
+      prompt: number;
+      candidates: number;
+      total: number;
+      cached: number;
+      thoughts: number;
+    },
+  ): SessionMetrics =>
+    ({
+      models: {
+        [model]: {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens,
+          bySource: Object.create(null),
+        },
+      },
+    }) as unknown as SessionMetrics;
+
+  it('does not double-count thoughts included in OpenAI candidates', () => {
+    const text = projectModelStats(
+      reasoningMetrics('kimi-k3.1-pro', {
+        prompt: 100000,
+        candidates: 150000,
+        total: 250000,
+        cached: 0,
+        thoughts: 120000,
+      }),
+      {
+        'kimi-k3.1-pro': {
+          inputPerMillionTokens: 0,
+          outputPerMillionTokens: 1,
+        },
+      },
+    );
+    expect(text).toContain('Estimated $0.1500');
+    expect(text).not.toContain('Estimated $0.2700');
+  });
+
+  it('keeps disjoint Gemini thoughts in cost calculation', () => {
+    const text = projectModelStats(
+      reasoningMetrics('gemini-2.5-pro', {
+        prompt: 100000,
+        candidates: 50000,
+        total: 270000,
+        cached: 0,
+        thoughts: 120000,
+      }),
+      {
+        'gemini-2.5-pro': {
+          inputPerMillionTokens: 0,
+          outputPerMillionTokens: 1,
+        },
+      },
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+
   it('looks pricing up under the raw model name, not the normalized label', () => {
     // The display label renders as "qwen3-max" (normalizeModelName strips
     // -001) but the pricing table is keyed by the raw name, exactly like

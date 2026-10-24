@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { calculateCost } from './costCalculator.js';
+import { calculateCost, getCostOutputTokens } from './costCalculator.js';
 
 describe('calculateCost', () => {
   it('calculates cost correctly with both input and output pricing', () => {
@@ -263,4 +263,67 @@ describe('calculateCost', () => {
     // Verify the toFixed(4) formatting that the UI uses
     expect(cost?.toFixed(4)).toBe('0.9839');
   });
+});
+
+describe('getCostOutputTokens', () => {
+  it.each([
+    {
+      name: 'OpenAI reasoning included in candidates',
+      tokens: {
+        prompt: 100000,
+        candidates: 150000,
+        total: 250000,
+        thoughts: 120000,
+      },
+      expected: 150000,
+    },
+    {
+      name: 'Gemini reasoning disjoint from candidates',
+      tokens: {
+        prompt: 100000,
+        candidates: 50000,
+        total: 270000,
+        thoughts: 120000,
+      },
+      expected: 170000,
+    },
+  ])(
+    'derives output from the aggregate total: $name',
+    ({ tokens, expected }) => {
+      expect(getCostOutputTokens(tokens)).toBe(expected);
+    },
+  );
+
+  it.each([
+    {
+      name: 'OpenAI fallback keeps included reasoning only once',
+      tokens: {
+        prompt: 100000,
+        candidates: 150000,
+        total: 0,
+        thoughts: 120000,
+      },
+      expected: 150000,
+    },
+    {
+      name: 'Gemini fallback retains disjoint reasoning',
+      tokens: { prompt: 100000, candidates: 50000, total: 0, thoughts: 120000 },
+      expected: 170000,
+    },
+    {
+      name: 'unusable positive total does not clamp output to zero',
+      tokens: {
+        prompt: 100000,
+        candidates: 200000,
+        total: 100000,
+        thoughts: 50000,
+      },
+      expected: 200000,
+    },
+  ])(
+    'uses the existing fallback when total is unavailable or unusable: $name',
+    ({ tokens, expected }) => {
+      expect(getCostOutputTokens(tokens)).toBe(expected);
+    },
+  );
 });

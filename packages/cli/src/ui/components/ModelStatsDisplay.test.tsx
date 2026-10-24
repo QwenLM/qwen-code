@@ -426,12 +426,13 @@ describe('<ModelStatsDisplay />', () => {
         prompt: number,
         candidates: number,
         thoughts: number,
+        total = prompt + candidates + thoughts,
       ): ModelMetricsCore => ({
         api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
         tokens: {
           prompt,
           candidates,
-          total: prompt + candidates + thoughts,
+          total,
           cached: 0,
           thoughts,
           tool: 0,
@@ -534,6 +535,39 @@ describe('<ModelStatsDisplay />', () => {
         );
         expect(lastFrame()).toContain('Cost');
         expect(lastFrame()).toContain('0.0060');
+      });
+
+      it('should not double-count thoughts included in OpenAI candidates', () => {
+        const { lastFrame } = renderCostTest(
+          {
+            'kimi-k3.1-pro': mainOnly(makeCore(100000, 150000, 120000, 250000)),
+          },
+          {
+            'kimi-k3.1-pro': {
+              inputPerMillionTokens: 0,
+              outputPerMillionTokens: 1,
+            },
+          },
+        );
+        expect(lastFrame()).toContain('Estimated');
+        expect(lastFrame()).toContain('0.1500');
+        expect(lastFrame()).not.toContain('0.2700');
+      });
+
+      it('should keep disjoint Gemini thoughts in cost calculation', () => {
+        const { lastFrame } = renderCostTest(
+          {
+            'gemini-2.5-pro': mainOnly(makeCore(100000, 50000, 120000, 270000)),
+          },
+          {
+            'gemini-2.5-pro': {
+              inputPerMillionTokens: 0,
+              outputPerMillionTokens: 1,
+            },
+          },
+        );
+        expect(lastFrame()).toContain('Estimated');
+        expect(lastFrame()).toContain('0.1700');
       });
 
       it('should use raw model name for pricing with subagent attribution', () => {
