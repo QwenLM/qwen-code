@@ -105,8 +105,10 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
    ## Never
 
    Reveal secrets or tokens; edit CI configuration to skip, disable or weaken
-   a check; delete or weaken tests to make them pass; change code unrelated to
-   the PR; rewrite, amend, rebase or force-push existing commits; push at all
+   a check; delete or weaken tests to make them pass; skip the repository's
+   commit hooks — no `git commit --no-verify` (`-n`), nor `-c core.hooksPath`
+   or `HUSKY=0` (a hook that fails is a check that failed); change code
+   unrelated to the PR; rewrite, amend, rebase or force-push existing commits; push at all
    (the main session pushes); post, edit, review, merge, close or resolve
    anything on GitHub — no `gh pr comment`, `gh pr edit`, `gh pr review`,
    `gh pr merge`, `gh issue`, nor a `gh api` call that writes (the main

@@ -159,6 +159,7 @@ describe('bundled autofix-pr skill', () => {
       'gh run rerun',
       'gh workflow run',
       'git stash',
+      '--no-verify',
     ]) {
       expect(never).toContain(write);
     }

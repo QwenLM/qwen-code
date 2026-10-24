@@ -430,12 +430,14 @@ when there are none, so the session is woken only for them:
   that `gh` retries after a 5xx) can still run a fire past the gate's
   limit; that fire fails before its cursor is written, and the next one
   reads again. A cut run wakes no one and keeps the record of cuts: what
-  it did not read comes and goes with GitHub's speed. One cut in the checks
-  keeps the failures it reported as well; one cut in the review threads
+  it did not read comes and goes with GitHub's speed. One cut in the check
+  runs keeps the failures it reported as well, and one cut in the suites
+  read after them the failures to start; one cut in the review threads
   only read every check, and keeps only the failures still there. While
   GitHub stays that slow, what lies past the pages the gate reads — a check
   failure, a newer review thread — waits for a round something else
-  starts, which reads it all; a page cap, which every run meets alike, is
+  starts, which reads it all; a page cap, which every run meets alike —
+  the check runs' included, whatever time the suites after them had — is
   reported once as ever.
 - The output stays within 12 KiB — counted as a gate hands it on, with each
   `<` written as `&lt;` — under the 16 KiB the gate hands the
@@ -557,6 +559,11 @@ The helper decides what may be posted, against one fresh read of the PR
   `push` read it from the branch), not the API's, which can lag a push.
 - A failure key of another head — the round pushed past it — is ignored and
   counted in `ignoredChecks`: prepared snapshots read only the current head.
+  So is one of a check the head moved past while the round ran: a later run
+  of it is listed (a re-run under way, one a reviewer started, or one whose
+  `rerun` answer was lost), or, for an attempt that names no run, the
+  check is still listed but no longer fails under that key. A key naming a
+  check the head does not list, or a run later than any listed, is refused.
   A string that is not a failure key at all is refused.
   `handledConflict` is recorded against the head while GitHub reports a
   conflict, or reports `UNKNOWN` on a head this watch pushed: right after a
@@ -906,8 +913,8 @@ Never actionable:
 
 Even for actionable comments, the brief forbids: revealing secrets or tokens;
 editing CI configuration to skip, disable or weaken checks; deleting or
-weakening tests to make them pass; force-pushing; and changes unrelated to the
-PR. Such requests get a "needs a human decision" reply.
+weakening tests to make them pass; skipping the repository's commit hooks
+(`--no-verify`); force-pushing; and changes unrelated to the PR. Such requests get a "needs a human decision" reply.
 
 Loop guards for bots: each review comment gets one fix attempt (a new
 comment in a thread already answered is a new request), a bot's reply in a

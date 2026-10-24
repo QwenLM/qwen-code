@@ -229,6 +229,46 @@ describe('buildGateSnapshot', () => {
     expect(slower.cursor.reportedTruncated).toEqual(['checks']);
   });
 
+  it('reports a check run page cap on a run its time budget cut in the suites', () => {
+    const startup = `CI@${HEAD}@#startup:9:pull_request`;
+    const capped = pr({}, [failed('Test', 1)]);
+    const commit = capped.commits.nodes[0]!.commit;
+    commit.statusCheckRollup!.contexts.pageInfo = {
+      hasNextPage: true,
+      endCursor: 'c10',
+    };
+    commit.checkSuites = {
+      pageInfo: { hasPreviousPage: true, startCursor: 's1' },
+      nodes: [],
+    };
+    const watch = {
+      knownHeads: [],
+      seenCommentIds: [],
+      partial: 'suites' as const,
+    };
+    const result = buildGateSnapshot(
+      capped,
+      cursor({ reportedChecks: [`Test@${HEAD}@#1`, startup] }),
+      watch,
+    );
+    expect(result.snapshot).toMatchObject({ action: 'wait', events: [] });
+    expect(result.cursor.reportedTruncated).toEqual(['checks']);
+    // A failure to start on a suite page it did not read stays reported.
+    expect(result.cursor.reportedChecks).toEqual(
+      expect.arrayContaining([`Test@${HEAD}@#1`, startup]),
+    );
+    // With every check run read, the suites' cut is the time's alone.
+    const whole = pr({}, [failed('Test', 1)]);
+    whole.commits.nodes[0]!.commit.checkSuites = commit.checkSuites;
+    const quiet = buildGateSnapshot(
+      whole,
+      cursor({ reportedChecks: [`Test@${HEAD}@#1`] }),
+      watch,
+    );
+    expect(quiet.snapshot).toBeNull();
+    expect(quiet.cursor.reportedTruncated).toEqual([]);
+  });
+
   it('forgets a check gone green on a run its time budget cut in the threads', () => {
     const red = buildGateSnapshot(pr({}, [failed('Test', 1)]), cursor());
     expect(red.cursor.reportedChecks).toHaveLength(1);
@@ -1273,6 +1313,34 @@ describe('fetchPrData', () => {
       expect(Date.now()).toBeGreaterThan(1_009.5);
       expect(checkEvents(capped.pr).truncated).toBe(true);
       expect(capped.partial).toBeUndefined();
+
+      // The same, with suites left to read when the time ran out.
+      clock = 1_000;
+      mockGh.mockClear();
+      const suited: PrData = { ...pr(), ...page([failed('A')], 'c1') };
+      suited.commits.nodes[0]!.commit.checkSuites = {
+        pageInfo: { hasPreviousPage: true, startCursor: 's1' },
+        nodes: [],
+      };
+      const answer = mockGh.getMockImplementation()!;
+      mockGh.mockImplementation((...args: string[]) =>
+        args.some((arg) => arg.startsWith('after='))
+          ? answer(...args)
+          : (clock++,
+            JSON.stringify({
+              data: {
+                viewer: { login: 'me' },
+                repository: { pullRequest: suited },
+              },
+            })),
+      );
+      expect(
+        fetchPrData(
+          { owner: 'o', repo: 'r', prNumber: 7 },
+          undefined,
+          clock + 9.5,
+        ).partial,
+      ).toBe('suites');
     } finally {
       now.mockRestore();
       mockGh.mockReset();

@@ -196,6 +196,29 @@ function keyHead(key: string): string | null {
 }
 
 /**
+ * Whether the head has moved on from a failure snapshot no longer offers:
+ * a later run of the check is listed (a check run's key names its run),
+ * or — for an attempt that names no run, a workflow a review starts or a
+ * status — the check is still listed: it is being re-run, or ended another
+ * way. A key naming a check the head does not list, or a run later than
+ * any listed, is no failure the round saw.
+ */
+function supersededOnHead(pr: PrData, key: string): boolean {
+  const match = /^([\s\S]*)@[0-9a-f]{40,64}@([^@]*)$/.exec(key);
+  const commit = pr.commits.nodes[0]?.commit;
+  if (!match || commit?.oid !== pr.headRefOid) return false;
+  const [, check, attempt] = match;
+  const runs = (commit.statusCheckRollup?.contexts.nodes ?? []).filter((ctx) =>
+    ctx.__typename === 'CheckRun' ? ctx.name === check : ctx.context === check,
+  );
+  const run = /^#(\d+)$/.exec(attempt);
+  if (!run) return runs.length > 0;
+  return runs.some(
+    (ctx) => ctx.__typename === 'CheckRun' && ctx.databaseId > Number(run[1]),
+  );
+}
+
+/**
  * What the PR offers to handle right now, from a fresh prepared snapshot:
  * the trusted comments no round has handled, by thread for replies, and the
  * failed check attempts still reported.
@@ -407,6 +430,12 @@ function replyLocked(
       continue;
     }
     if (knownChecks.has(key)) continue;
+    // A check that moved on while the round ran answers for that failure
+    // itself, like one of another head: its key is history.
+    if (!offer.checks.has(key) && supersededOnHead(pr, key)) {
+      ignoredChecks += 1;
+      continue;
+    }
     if (!offer.checks.has(key)) {
       throw new Error(
         `${key} is not a failure snapshot reports on the PR head; pass the \`key\` of a ci_failed event.`,

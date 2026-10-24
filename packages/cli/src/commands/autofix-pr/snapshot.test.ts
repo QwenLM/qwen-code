@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { bodyLines, buildSnapshot, type PrData } from './snapshot.js';
+import {
+  bodyLines,
+  buildSnapshot,
+  rerunFrom,
+  type PrData,
+} from './snapshot.js';
 import { REPLY_MARKER, type AutofixPrState } from './state.js';
 
 const HEAD = 'a'.repeat(40);
@@ -369,6 +374,13 @@ describe('buildSnapshot', () => {
       action: 'fix',
       events: [{ type: 'conflict' }],
     });
+  });
+
+  it('reads a re-run entry whatever its job name holds', () => {
+    for (const name of ['Build', 'Build\nlinux', 'Build\u2028linux', 'B@12']) {
+      const key = `run:15368:9:pull_request_review:${name}@${HEAD}`;
+      expect(rerunFrom([`${key}@101`])).toEqual(new Map([[key, 101]]));
+    }
   });
 
   it('reports a failure of a workflow a review starts once per head, however many reviews start it', () => {

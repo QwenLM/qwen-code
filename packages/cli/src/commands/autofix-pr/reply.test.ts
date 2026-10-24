@@ -265,9 +265,15 @@ describe('runReply', () => {
     expect(() => reply({ summary: { body: 'x', handled: ['IC_9'] } })).toThrow(
       /not a new comment from a trusted author/,
     );
-    expect(() => reply({ handledChecks: [`Test@${HEAD}@#4`] })).toThrow(
-      /not a failure snapshot reports/,
-    );
+    // A run later than any listed, or a check the head does not list.
+    for (const key of [
+      `Test@${HEAD}@#6`,
+      `Lint@${HEAD}@#on:1:pull_request_review`,
+    ]) {
+      expect(() => reply({ handledChecks: [key] })).toThrow(
+        /not a failure snapshot reports/,
+      );
+    }
     // Not a key at all, rather than one of another head.
     for (const key of ['Test@#5', `Test@${HEAD}@#5@ended`]) {
       expect(() => reply({ handledChecks: [key] })).toThrow(
@@ -276,6 +282,33 @@ describe('runReply', () => {
     }
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
     expect(state().handledChecks).toBeUndefined();
+  });
+
+  it('drops the key of a failure the head moved past while the round ran', () => {
+    // Test ran again (#5) after the round's snapshot saw run #4 fail.
+    expect(reply({ handledChecks: [`Test@${HEAD}@#4`] })).toMatchObject({
+      ignoredChecks: 1,
+      handledChecks: 0,
+    });
+    // A workflow a review starts, re-run and still running: a re-run whose
+    // answer was lost, or one a reviewer started.
+    const rerunning = prData();
+    rerunning.commits.nodes[0]!.commit.statusCheckRollup!.contexts.nodes.push({
+      __typename: 'CheckRun',
+      databaseId: 9,
+      name: 'Gate',
+      status: 'QUEUED',
+      conclusion: null,
+      detailsUrl: 'https://github.com/o/r/actions/runs/90/job/9',
+    });
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: rerunning,
+      viewer: 'me',
+    }));
+    expect(
+      reply({ handledChecks: [`Gate@${HEAD}@#on:9:pull_request_review`] }),
+    ).toMatchObject({ ignoredChecks: 1, handledChecks: 0 });
+    expect(state().handledChecks ?? []).toEqual([]);
   });
 
   it("checks bot threads opened since the snapshot leniently: they are not the plan's", () => {

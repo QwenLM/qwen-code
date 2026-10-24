@@ -419,10 +419,11 @@ function runIdFrom(
 type CiFailed = Extract<SnapshotEvent, { type: 'ci_failed' }>;
 
 /**
- * The rollup lists every run on the head: earlier attempts of a re-run job,
- * and each trigger of a workflow that runs on several events. Only the
- * latest run of a check says whether it is failing now; a failure that a
- * re-run turned green is history.
+ * The rollup can list several runs of one check on the head: each trigger
+ * of a workflow that runs on several events, each run a review starts, an
+ * earlier attempt of a re-run job. Only the latest run of a check says
+ * whether it is failing now; a failure that a re-run turned green is
+ * history.
  *
  * A check run is one check per app, workflow, trigger and name. The app
  * keeps apart two providers that publish the same name, since a branch rule
@@ -488,7 +489,8 @@ function checkRunAttempt(
 export function rerunFrom(rerunChecks: Iterable<string>): Map<string, number> {
   const from = new Map<string, number>();
   for (const entry of rerunChecks) {
-    const match = /^(.*)@(\d+)$/.exec(entry);
+    // A job name may hold a line break.
+    const match = /^([\s\S]*)@(\d+)$/.exec(entry);
     const [key, run] = match ? [match[1], Number(match[2])] : [entry, 0];
     from.set(key, Math.max(from.get(key) ?? 0, run));
   }
@@ -897,10 +899,11 @@ export interface GateWatch {
   seenCommentIds: string[];
   /** Checks a round re-ran, by identity and head. */
   rerunChecks?: string[];
-  /** This run stopped reading at its time budget, in the checks (and so
-   * the threads after them) or in the threads: what it did not read comes
-   * and goes with GitHub's speed. */
-  partial?: 'checks' | 'threads';
+  /** This run stopped reading at its time budget, in the check runs, in
+   * the suites read after them (where failures to start are found) or in
+   * the threads read last: what it did not read, and what came after it,
+   * comes and goes with GitHub's speed. */
+  partial?: 'checks' | 'suites' | 'threads';
   /** Failed attempts a round handled without a push. */
   handledChecks?: string[];
   /** Head whose conflict a round left for a human. */
@@ -990,10 +993,15 @@ export function buildGateSnapshot(
     ...(watch.handledChecks ?? []),
   ]);
   const deferred = new Set(watch.deferredRuns ?? []);
-  // A run that did not read every check keeps the failures it could not
-  // see; one that read them all keeps only those still there.
+  // A run that did not read every check run keeps the failures it could
+  // not see, one cut in the suites the failures to start found there; one
+  // that read them all keeps only those still there.
   next.reportedChecks =
-    watch.partial === 'checks' ? [...next.reportedChecks] : [];
+    watch.partial === 'checks'
+      ? [...next.reportedChecks]
+      : watch.partial === 'suites'
+        ? next.reportedChecks.filter((key) => /@#startup:[^@]*$/.test(key))
+        : [];
   const checkKeys = new Map<SnapshotEvent, string[]>();
   const candidates: SnapshotEvent[] = [];
   for (const { event, attempt, runDone } of checks.failed) {
@@ -1081,14 +1089,20 @@ export function buildGateSnapshot(
   // last page; comments and reviews are read newest first, so a cut there
   // only hides older ones, and is listed without waking the session.
   // A cut of the read budget comes and goes with GitHub's speed: it wakes
-  // no one, and leaves its record of cuts as it was. The checks are read
-  // before the threads, so time that ran out in them cut both.
+  // no one, and leaves its record of cuts as it was. The check runs are
+  // read before the suites, and both before the threads, so time that ran
+  // out in one cut what comes after it. A check run page cap is a cut of
+  // `checks` whatever the suites' time did.
   next.reportedChecks = [...new Set(next.reportedChecks)];
   const reportedTruncated = new Set(cursor.reportedTruncated ?? []);
+  const capped = Boolean(
+    pr.commits.nodes[0]?.commit.statusCheckRollup?.contexts.pageInfo
+      .hasNextPage,
+  );
   const late = new Set(
-    watch.partial === 'checks'
+    watch.partial === 'checks' || (watch.partial === 'suites' && !capped)
       ? ['checks', 'reviewThreads']
-      : watch.partial === 'threads'
+      : watch.partial
         ? ['reviewThreads']
         : [],
   );
@@ -1347,7 +1361,11 @@ export function fetchPrData(
   target: PrTarget,
   replyCheck?: ReplyCheck,
   deadline = Number.POSITIVE_INFINITY,
-): { pr: PrData; viewer: string; partial?: 'checks' | 'threads' } {
+): {
+  pr: PrData;
+  viewer: string;
+  partial?: 'checks' | 'suites' | 'threads';
+} {
   const data = graphql(PR_QUERY, target, []) as {
     data: {
       viewer: { login: string };
@@ -1464,15 +1482,23 @@ export function fetchPrData(
   }
   // A merged or closed PR asks nothing more: its `stop` must get through.
   // Pages left because time ran out, not because a page cap was reached:
-  // the checks' (the threads are read after them) or the threads' alone.
+  // the first read it cut (each is read after the one before).
   const late = Date.now() >= deadline;
-  const checksLate =
-    (rollup?.contexts.pageInfo.hasNextPage && checkPages < MAX_CHECK_PAGES) ||
-    (suites?.pageInfo?.hasPreviousPage && suitePages < MAX_SUITE_PAGES);
+  const runsLate =
+    rollup?.contexts.pageInfo.hasNextPage && checkPages < MAX_CHECK_PAGES;
+  const suitesLate =
+    suites?.pageInfo?.hasPreviousPage && suitePages < MAX_SUITE_PAGES;
   const threadsLate =
     threads.pageInfo.hasNextPage && threadPages < MAX_THREAD_PAGES;
-  const partial =
-    late && checksLate ? 'checks' : late && threadsLate ? 'threads' : undefined;
+  const partial = !late
+    ? undefined
+    : runsLate
+      ? 'checks'
+      : suitesLate
+        ? 'suites'
+        : threadsLate
+          ? 'threads'
+          : undefined;
   if (replyCheck) {
     markOrphanReplies(
       target,
