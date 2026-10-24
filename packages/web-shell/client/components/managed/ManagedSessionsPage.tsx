@@ -63,6 +63,7 @@ import { useManagedCwdChange } from './use-managed-cwd-change';
 import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
+import { ManagedPermissionRulesDialog } from './ManagedPermissionRulesDialog';
 import { useManagedSkills } from './use-managed-skills';
 import { useManagedMcp } from './use-managed-mcp';
 import { ManagedMcpManagerPage } from './ManagedMcpManagerPage';
@@ -2328,6 +2329,7 @@ function ManagedSessionsContent({
                         if (
                           mode === 'default' ||
                           mode === 'auto-edit' ||
+                          mode === 'auto' ||
                           mode === 'yolo'
                         )
                           void approvalChange.submit(mode);
@@ -2476,6 +2478,39 @@ function ManagedSessionsContent({
                             : 'managed.model.failed',
                     )}
                   </p>
+                )}
+              {interactive &&
+                approvalChange.options?.permissionRulesSupported && (
+                  <ManagedPermissionRulesDialog
+                    key={`${provider.storageKey}:${sessionId}`}
+                    rules={approvalChange.options.permissionRules}
+                    revision={approvalChange.options.approvalRevision}
+                    busy={approvalChange.busy}
+                    errorCode={approvalChange.errorCode}
+                    disabled={
+                      !approvalChange.options.supported ||
+                      approvalChange.optionsLoading ||
+                      approvalChange.isBlocked() ||
+                      compression.isBlocked() ||
+                      modelChange.isBlocked() ||
+                      cwd.isBlocked() ||
+                      busy ||
+                      Boolean(active) ||
+                      Boolean(pendingApproval) ||
+                      Boolean(pending) ||
+                      approvalChange.options.approvalRevision !==
+                        (summary?.approvalRevision ?? 0)
+                    }
+                    onSave={(rules) =>
+                      summary?.approvalMode
+                        ? approvalChange.submit(
+                            summary.approvalMode,
+                            undefined,
+                            rules,
+                          )
+                        : Promise.resolve(undefined)
+                    }
+                  />
                 )}
               {interactive &&
                 (approvalChange.busy ||

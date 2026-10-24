@@ -45,10 +45,17 @@ describe('isSlowTestHost', () => {
     expect(isSlowTestHost()).toBe(true);
   });
 
-  it('treats a host loaded exactly to its core count as slow', () => {
+  it('treats a contended shared host as slow without RUNNER_NAME', () => {
     delete process.env['RUNNER_NAME'];
-    vi.mocked(os.availableParallelism).mockReturnValue(4);
-    vi.mocked(os.loadavg).mockReturnValue([4, 0, 0]);
+    vi.mocked(os.loadavg).mockReturnValue([40, 0, 0]);
+    expect(isSlowTestHost()).toBe(true);
+  });
+
+  it('splits at half the available parallelism without RUNNER_NAME', () => {
+    delete process.env['RUNNER_NAME'];
+    vi.mocked(os.loadavg).mockReturnValue([31.9, 0, 0]);
+    expect(isSlowTestHost()).toBe(false);
+    vi.mocked(os.loadavg).mockReturnValue([32, 0, 0]);
     expect(isSlowTestHost()).toBe(true);
   });
 

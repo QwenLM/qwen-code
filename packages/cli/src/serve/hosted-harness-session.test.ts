@@ -1505,6 +1505,8 @@ describe('Hosted Harness no-tool session', () => {
       { toolProfile: 'hosted-workspace-files/1', custom: false },
       { toolProfile: 'hosted-workspace-files/1', custom: true },
       { toolProfile: 'hosted-workspace-shell/1', custom: true },
+      { toolProfile: 'hosted-workspace-files/3', custom: true },
+      { toolProfile: 'hosted-workspace-files/3', custom: false },
     ].flatMap((profile) =>
       [undefined, { mode: 'yolo', revision: 1 }].map((approvalSelection) => ({
         ...profile,
@@ -23485,6 +23487,7 @@ describe('Hosted Harness tool approvals', () => {
   it.each([
     ['hosted-workspace-files/1', true],
     ['hosted-workspace-files/2', false],
+    ['hosted-workspace-files/3', true],
     ['hosted-workspace-shell/1', true],
     ['hosted-workspace-read/1', false],
   ] as const)(
@@ -23564,6 +23567,23 @@ describe('Hosted Harness tool approvals', () => {
     );
   }
 
+  it('accepts the classifier auto mode for a files Session', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: files,
+      approvalMode: 'auto',
+    });
+    expect(created.status).toBe(200);
+    expect(created.body.approvalMode).toBe('auto');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId as string,
+    );
+  });
+
   it('pins a mode that can ask at creation and refuses other modes', async () => {
     const server = await app(true);
     const create = (extra: Record<string, unknown>) =>
@@ -23575,7 +23595,6 @@ describe('Hosted Harness tool approvals', () => {
       });
     for (const extra of [
       { approvalMode: 'plan' },
-      { approvalMode: 'auto' },
       { approvalMode: null },
       { approvalMode: 'default', approvalTimeoutMs: 999 },
     ]) {
