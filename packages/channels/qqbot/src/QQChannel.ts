@@ -77,8 +77,14 @@ import {
   fetchAccessToken,
   fetchGatewayUrl,
   getApiBase,
+  requestQQApi,
   sendQQMessage,
 } from './api.js';
+import type { QQApiMethod } from './api.js';
+import {
+  buildModerationTools,
+  type ModerationApiResult,
+} from './moderation-tools.js';
 
 /** QQ Bot OPENID format: exactly 32 uppercase hex chars (bot and sender OPENIDs). */
 const QQ_OPENID_RE = /^[A-F0-9]{32}$/i;
@@ -380,6 +386,16 @@ export class QQChannel extends ChannelBase {
   private replyMsgId: Map<string, { msgId: string; timestamp: number }> =
     new Map();
   private replyContextByMessageId = new Map<string, QQReplyContext>();
+  /**
+   * Recent inbound messages per chat, newest last, used by the moderation
+   * tools to resolve "that member's last message" into a message id the
+   * platform can recall. The ring is bounded by the per-chat count cap and,
+   * when `moderationRecallWindowMs` is positive, by that age.
+   */
+  private recentInbound = new Map<
+    string,
+    Array<{ messageId: string; senderId: string; at: number }>
+  >();
   private inboundReplyContext = new AsyncLocalStorage<QQReplyContext>();
   /** msg_seq counter per user messageId, for multi-block streaming. */
   private msgSeqMap: Map<string, number> = new Map();
@@ -395,6 +411,16 @@ export class QQChannel extends ChannelBase {
   private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** 5-minute TTL for replyMsgId entries and seenMessages dedup. */
   private static readonly REPLY_MSG_ID_TTL_MS = 300_000;
+  /**
+   * How long the ring keeps an entry, from `moderationRecallWindowMs`: a
+   * positive value is an age in ms, -1 keeps entries until the count cap
+   * evicts them, and 0 disables the ring (and member-targeted recall).
+   */
+  private moderationRecallWindowMs: number;
+  /** Per-chat cap for the recent-inbound ring. */
+  private static readonly MAX_RECENT_INBOUND = 50;
+  /** Sweep idle chats out of the ring once it holds this many. */
+  private static readonly MAX_RECENT_INBOUND_CHATS = 256;
   /** Idle-flush timeout: buffer is sent after this many ms of silence. */
   private static readonly IDLE_FLUSH_MS = 2000;
   /** Max consecutive send failures before the stream is abandoned. */
@@ -670,6 +696,18 @@ export class QQChannel extends ChannelBase {
       );
       this.qqConfig.bufferFlushLength = QQChannel.MAX_BUFFER_LENGTH;
     }
+    const recallWindow = this.qqConfig.moderationRecallWindowMs;
+    if (
+      recallWindow !== undefined &&
+      (!Number.isInteger(recallWindow) || recallWindow < -1)
+    ) {
+      process.stderr.write(
+        `[QQ:${this.name}] WARNING: invalid moderationRecallWindowMs=${recallWindow}, using -1 (no time limit)\n`,
+      );
+      this.moderationRecallWindowMs = -1;
+    } else {
+      this.moderationRecallWindowMs = recallWindow ?? -1;
+    }
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
     // sessions path so the channel owns its own session file.
@@ -693,6 +731,7 @@ export class QQChannel extends ChannelBase {
       this._cronTextHandler = (sid, t) => this.handleCronTextChunk(sid, t);
       this.attachCronHandler();
     }
+    this.registerModerationTools();
     // Seal a stashed head on every bridge boundary, including the ones
     // ChannelBase suppresses while a cancel is pending.
     this.attachBridgeBoundarySeal();
@@ -1002,13 +1041,15 @@ export class QQChannel extends ChannelBase {
   }
   /**
    * Override setBridge to re-attach the permanent `_cronTextHandler`
-   * after bridge crash-recovery.
+   * after bridge crash-recovery, and to re-register the moderation tools:
+   * they live on the bridge instance, so a fresh bridge starts without them.
    */
   override setBridge(bridge: ChannelAgentBridge): void {
     this.detachCronHandler();
     this.detachBridgeBoundarySeal();
     super.setBridge(bridge);
     this.attachCronHandler();
+    this.registerModerationTools();
     this.attachBridgeBoundarySeal();
   }
 
@@ -4895,6 +4936,201 @@ export class QQChannel extends ChannelBase {
     this.saveQQState();
   }
 
+  /**
+   * Track an inbound message for the moderation tools. Kept in memory only:
+   * the ring does not survive a restart, so member-targeted recall only
+   * reaches messages received since the process started.
+   */
+  private recordRecentInbound(
+    chatId: string,
+    senderId: string | undefined,
+    messageId: string,
+  ): void {
+    // Nothing can resolve a member's message when the tools are off or the
+    // window is 0, so do not spend memory recording one.
+    const window = this.moderationRecallWindowMs;
+    if (this.qqConfig.moderationTools !== true || window === 0) return;
+    if (!senderId || !messageId) return;
+    const prior = this.recentInbound.get(chatId) ?? [];
+    // First write wins for one message id. The same platform id is redelivered
+    // on reconnect replay and arrives twice when a message is both
+    // GROUP_AT_MESSAGE_CREATE and GROUP_MESSAGE_CREATE; re-stamping it would
+    // make an older message outrank a newer one and extend its lifetime.
+    if (prior.some((entry) => entry.messageId === messageId)) return;
+    const now = Date.now();
+    const entries =
+      window > 0 ? prior.filter((entry) => now - entry.at < window) : prior;
+    entries.push({ messageId, senderId, at: now });
+    if (entries.length > QQChannel.MAX_RECENT_INBOUND) {
+      entries.splice(0, entries.length - QQChannel.MAX_RECENT_INBOUND);
+    }
+    this.recentInbound.set(chatId, entries);
+    if (this.recentInbound.size > QQChannel.MAX_RECENT_INBOUND_CHATS) {
+      this.sweepRecentInbound(now);
+    }
+  }
+
+  /**
+   * Drop one recalled message from the ring so the next member-targeted recall
+   * resolves the previous message instead of re-targeting the destroyed one.
+   * Splices in place: `recentMemberMessage`'s backward scan relies on the ring
+   * staying ascending by `at`.
+   */
+  private dropRecentMessage(chatId: string, messageId: string): void {
+    const entries = this.recentInbound.get(chatId);
+    if (!entries) return;
+    const index = entries.findIndex((entry) => entry.messageId === messageId);
+    if (index === -1) return;
+    entries.splice(index, 1);
+    if (entries.length === 0) this.recentInbound.delete(chatId);
+  }
+
+  /** Keep the ring's chat keys bounded: stale chats first, then LRU. */
+  private sweepRecentInbound(now: number): void {
+    const window = this.moderationRecallWindowMs;
+    if (window > 0) {
+      for (const [chatId, entries] of this.recentInbound) {
+        if (entries.every((entry) => now - entry.at >= window)) {
+          this.recentInbound.delete(chatId);
+        }
+      }
+    }
+    while (this.recentInbound.size > QQChannel.MAX_RECENT_INBOUND_CHATS) {
+      let oldestChat: string | undefined;
+      let oldestAt = Infinity;
+      for (const [chatId, entries] of this.recentInbound) {
+        const last = entries[entries.length - 1]?.at ?? 0;
+        if (last < oldestAt) {
+          oldestAt = last;
+          oldestChat = chatId;
+        }
+      }
+      if (oldestChat === undefined) return;
+      this.recentInbound.delete(oldestChat);
+    }
+  }
+
+  /** Newest tracked message id from `senderId` in `chatId`. */
+  private recentMemberMessage(
+    chatId: string,
+    senderId: string,
+  ): string | undefined {
+    const now = Date.now();
+    const window = this.moderationRecallWindowMs;
+    const entries = this.recentInbound.get(chatId) ?? [];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i]!;
+      if (window > 0 && now - entry.at >= window) break;
+      if (entry.senderId === senderId) return entry.messageId;
+    }
+    return undefined;
+  }
+
+  /**
+   * Expose the QQ group-management surface to the agent as client MCP tools.
+   * Opt-in: a no-op unless the channel sets moderationTools: true, and also a
+   * no-op when the bridge has no client MCP tool support. Tools are owned by
+   * this channel instance: one bridge can serve several channels, and the
+   * owner is what keeps each channel's sessions on their own credentials.
+   */
+  private registerModerationTools(): void {
+    if (this.qqConfig.moderationTools !== true) return;
+    const register = this.bridge.registerChannelTool?.bind(this.bridge);
+    if (!register) return;
+    for (const tool of buildModerationTools({
+      resolveChat: (sessionId) => {
+        const target = this.router.getTarget(sessionId);
+        // A router shared by several channels resolves every channel's
+        // sessions, so the channel name is the guard that keeps this
+        // instance's token off another channel's chat.
+        if (!target || target.channelName !== this.name) return undefined;
+        return {
+          chatId: target.chatId,
+          isGroup: target.isGroup === true,
+        };
+      },
+      memberRecallDisabled: this.moderationRecallWindowMs === 0,
+      recentMemberMessage: (chatId, senderId) =>
+        this.recentMemberMessage(chatId, senderId),
+      dropRecentMessage: (chatId, messageId) =>
+        this.dropRecentMessage(chatId, messageId),
+      request: (input) => this.requestModerationApi(input),
+      log: (message) =>
+        process.stderr.write(
+          `[QQ:${this.name}] ${sanitizeLogText(message, 200)}\n`,
+        ),
+    })) {
+      register({ ...tool, owner: this.name });
+    }
+  }
+
+  /** Single REST entry point for the moderation tools. */
+  private async requestModerationApi(input: {
+    method: QQApiMethod;
+    path: string;
+    body?: Record<string, unknown>;
+  }): Promise<ModerationApiResult> {
+    if (this.disposed) {
+      return { ok: false, status: 0, message: 'channel disposed' };
+    }
+    if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
+      try {
+        await this.fetchToken();
+      } catch (error) {
+        return {
+          ok: false,
+          status: 0,
+          message: `token refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    if (!this.accessToken) {
+      return { ok: false, status: 0, message: 'no QQ access token' };
+    }
+    try {
+      const response = await requestQQApi(
+        getApiBase(Boolean(this.qqConfig.sandbox)),
+        input.method,
+        input.path,
+        this.accessToken,
+        input.body,
+      );
+      const text = await response.text().catch(() => '');
+      let data: unknown;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
+      }
+      if (!response.ok) {
+        const record = (
+          typeof data === 'object' && data !== null ? data : {}
+        ) as Record<string, unknown>;
+        const rawCode = record['code'] ?? record['err_code'];
+        const code = typeof rawCode === 'number' ? rawCode : undefined;
+        const message =
+          typeof record['message'] === 'string' && record['message']
+            ? record['message']
+            : text || `HTTP ${response.status}`;
+        return {
+          ok: false,
+          status: response.status,
+          ...(code === undefined ? {} : { code }),
+          message,
+        };
+      }
+      return { ok: true, status: response.status, data };
+    } catch (error) {
+      return {
+        ok: false,
+        status: 0,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   private deleteReplyContext(context: QQReplyContext): void {
     this.replyContextByMessageId.delete(context.msgId);
     // Drop the chat-level naming entry BEFORE the reclaim: while it is still
@@ -5891,6 +6127,7 @@ export class QQChannel extends ChannelBase {
     }
     this.chatTypeMap.set(chatId, 'c2c');
     this.setReplyMsgId(chatId, event.id);
+    this.recordRecentInbound(chatId, chatId, event.id);
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
     const cleanText = rawContent.trim();
@@ -6000,6 +6237,7 @@ export class QQChannel extends ChannelBase {
       return;
     }
     this.setReplyMsgId(chatId, event.id);
+    this.recordRecentInbound(chatId, senderId, event.id);
     const envelope: Envelope = {
       channelName: this.name,
       senderId,
@@ -6056,6 +6294,14 @@ export class QQChannel extends ChannelBase {
     const isNewGroup = !this.chatTypeMap.has(chatId);
     this.chatTypeMap.set(chatId, 'group');
     if (isNewGroup) this.saveQQState();
+
+    // Track before the policy gates below: a 'log'-policy message is still a
+    // message the bot received, and its id is what a later recall needs.
+    this.recordRecentInbound(
+      chatId,
+      event.author.user_openid || event.author.id || event.author.member_openid,
+      event.id,
+    );
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
@@ -6248,6 +6494,7 @@ export class QQChannel extends ChannelBase {
     }
     this.botOpenIdByGroup.delete(groupId);
     this._lastKeywordNoMatchLog.delete(groupId);
+    this.recentInbound.delete(groupId);
     // Clean up cron buffers targeting this group (always, regardless of config flag)
     let cleanedCron = 0;
     for (const [sid, entry] of this.cronBuffer) {

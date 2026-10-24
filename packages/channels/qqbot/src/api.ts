@@ -5,6 +5,7 @@
  *  - Access token issuance
  *  - WebSocket Gateway URL resolution
  *  - Message sending (text / markdown)
+ *  - Message recall
  */
 
 const TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken';
@@ -132,13 +133,31 @@ export async function sendQQMessage(
   accessToken: string,
   body: Record<string, unknown>,
 ): Promise<Response> {
+  return requestQQApi(base, 'POST', path, accessToken, body);
+}
+
+/** HTTP methods the QQ Bot REST API uses for group management. */
+export type QQApiMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+/**
+ * Call a QQ Bot REST endpoint. Used for the group-management surface, where
+ * one thin wrapper per endpoint would only restate the path: callers own the
+ * path and interpret the status code and error body themselves.
+ */
+export async function requestQQApi(
+  base: string,
+  method: QQApiMethod,
+  path: string,
+  accessToken: string,
+  body?: Record<string, unknown>,
+): Promise<Response> {
   return fetch(`${base}${path}`, {
-    method: 'POST',
+    method,
     headers: {
-      'Content-Type': 'application/json',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       Authorization: `QQBot ${accessToken}`,
     },
-    body: JSON.stringify(body),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
 }
