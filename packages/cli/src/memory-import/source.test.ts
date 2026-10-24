@@ -129,6 +129,20 @@ describe('Codex source preview', () => {
       expect(preview.warnings).toEqual([]);
     },
   );
+  it('keeps chained peers as separate sections instead of merging later siblings', () => {
+    const preview = previewSource(
+      source(
+        '# Shared\n## Alpha\n### Notes\n#### /beta\nBeta fact\n### Other\nOther fact\n## Later\nLater fact',
+      ),
+    );
+    expect(preview.sections.map((section) => section.title)).toEqual([
+      '/beta',
+      'Other',
+      'Later',
+    ]);
+    expect(preview.sections[1].content).not.toContain('Later fact');
+    expect(preview.sections[2].content).toContain('Later fact');
+  });
   it('splits a memory file at its shallowest heading depth', () => {
     const preview = previewSource(
       source('## Alpha\nAlpha-only fact.\n## Beta\nBeta-only fact.'),

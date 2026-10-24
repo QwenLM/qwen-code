@@ -268,10 +268,24 @@ export function previewSource(input: unknown): ImportPreview {
       ? Math.min(...headings.map((h) => h.depth))
       : 1;
     const depth = file.path === 'memory_summary.md' ? 2 : minDepth;
-    const boundaries = headings.filter(
-      (heading, index) =>
-        heading.depth <= depth || splitParents.has(parents[index]),
+    const roots = new Set(
+      headings.filter(
+        (heading, index) =>
+          heading.depth <= depth || splitParents.has(parents[index]),
+      ),
     );
+    // A split parent can sit deeper than the file's shallowest heading, so the
+    // first peer after a section may not be a root yet. Promote it and keep
+    // walking in document order: a promoted peer has its own peer later on.
+    for (const heading of headings) {
+      if (!roots.has(heading)) continue;
+      const peer = headings.find(
+        (candidate) =>
+          candidate.offset > heading.offset && candidate.depth <= heading.depth,
+      );
+      if (peer) roots.add(peer);
+    }
+    const boundaries = headings.filter((heading) => roots.has(heading));
     if (!boundaries.length || boundaries[0].offset > 0)
       boundaries.unshift({
         offset: 0,
@@ -280,18 +294,6 @@ export function previewSource(input: unknown): ImportPreview {
         depth: 0,
         preface: '',
       });
-    // A split parent can sit deeper than the file's shallowest heading, so the
-    // heading after a split child may not be a boundary yet. Add it as one, or
-    // its facts fall between sections and never reach the preview.
-    for (let i = 0; i < boundaries.length; i++) {
-      const peer = headings.find(
-        (heading) =>
-          heading.offset > boundaries[i].offset &&
-          heading.depth <= boundaries[i].depth,
-      );
-      if (peer && peer.offset < (boundaries[i + 1]?.offset ?? Infinity))
-        boundaries.splice(i + 1, 0, peer);
-    }
     for (let i = 0; i < boundaries.length; i++) {
       const boundary = boundaries[i];
       const own = file.content
