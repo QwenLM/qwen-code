@@ -105,20 +105,20 @@ export function resolveAttachWorkspace(
 async function handleAttach(argv: AttachArgs): Promise<void> {
   ignoreBrokenPipe();
   let shuttingDown = false;
+  const startupAbort = new AbortController();
   const earlyState: { session?: DaemonSessionClient } = {};
   const earlyShutdown = (): void => {
     shuttingDown = true;
     process.exitCode = 130;
     const finish = (): never => process.exit(130);
+    startupAbort.abort();
     if (earlyState.session) {
       void earlyState.session
         .detach()
         .catch(() => {})
         .finally(finish);
-      setTimeout(finish, 500).unref();
-      return;
     }
-    finish();
+    setTimeout(finish, 500).unref();
   };
   process.once('SIGINT', earlyShutdown);
   process.once('SIGTERM', earlyShutdown);
@@ -143,12 +143,12 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   });
   let session: DaemonSessionClient;
   try {
-    session = await DaemonSessionClient.load(
-      client,
-      argv.session,
-      workspaceCwd ? { workspaceCwd } : {},
-    );
+    session = await DaemonSessionClient.load(client, argv.session, {
+      ...(workspaceCwd ? { workspaceCwd } : {}),
+      signal: startupAbort.signal,
+    });
   } catch (error) {
+    if (shuttingDown) return;
     const workspaceHint =
       target.record.workspaces.length > 1 && !workspaceCwd
         ? ' If the session belongs to another workspace, pass --workspace <path>.'
