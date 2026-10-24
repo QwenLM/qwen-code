@@ -665,6 +665,50 @@ describe('modelConfigResolver', () => {
     });
   });
 
+  describe('supportsForcedToolChoice reaches the provider through configuration', () => {
+    // The pipeline reads supportsForcedToolChoice off the resolved
+    // ContentGeneratorConfig. Missing from MODEL_GENERATION_CONFIG_FIELDS, the
+    // resolver would drop it silently and the #13807 opt-out would be
+    // unsettable by a user.
+    const viaOpenAI = (generationConfig?: Partial<ContentGeneratorConfig>) =>
+      resolve({
+        settings: {
+          apiKey: 'key',
+          ...(generationConfig && { generationConfig }),
+        },
+        env: {
+          OPENAI_API_KEY: 'key',
+          OPENAI_BASE_URL: 'http://localhost:1976/v1',
+          OPENAI_MODEL: 'system',
+        },
+      });
+
+    it('carries a settings generationConfig opt-out onto the resolved config', () => {
+      const result = viaOpenAI({ supportsForcedToolChoice: false });
+
+      expect(result.config.supportsForcedToolChoice).toBe(false);
+      expect(result.sources['supportsForcedToolChoice'].kind).toBe('settings');
+    });
+
+    it('lets a modelProvider generationConfig win over settings, like every other field', () => {
+      const result = oauth({
+        settings: { generationConfig: { supportsForcedToolChoice: true } },
+        modelProvider: oauthProvider({ supportsForcedToolChoice: false }),
+      });
+
+      expect(result.config.supportsForcedToolChoice).toBe(false);
+      expect(result.sources['supportsForcedToolChoice'].kind).toBe(
+        'modelProviders',
+      );
+    });
+
+    it('stays undefined when nothing sets it, preserving the default behavior', () => {
+      const result = viaOpenAI();
+
+      expect(result.config.supportsForcedToolChoice).toBeUndefined();
+    });
+  });
+
   describe('[Regression] issue-4219 — env-var-only path must call defaultModalities()', () => {
     it('[Regression] env-var-only path: modalities auto-detected for qwen3.6-35b-a3b', () => {
       // REPRODUCES issue-4219: with the model supplied only via OPENAI_MODEL

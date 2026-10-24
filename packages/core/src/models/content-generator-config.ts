@@ -267,6 +267,7 @@ function buildInheritedAgentContentGeneratorConfig(
 
   if (modelId && modelId !== parentConfig.model) {
     nextConfig.thinkingMandatory = undefined;
+    nextConfig.supportsForcedToolChoice = undefined;
   }
 
   nextConfig.apiKey = resolveCredentialField(
@@ -378,15 +379,17 @@ function applyResolvedModelConfig(
 
   // Cross-provider fields are cleared by buildAgentContentGeneratorConfig.
   // Same-provider fields inherit unless the registry overrides them, except
-  // model capabilities such as thinkingMandatory, which must not leak, and
-  // enableRequestMetadata, which is a per-model decision: an inherited true
-  // would ship the DashScope tracing object to a vendor-forwarded side model.
+  // model capabilities such as thinkingMandatory and supportsForcedToolChoice,
+  // which must not leak, and enableRequestMetadata, which is a per-model
+  // decision: an inherited true would ship the DashScope tracing object to a
+  // vendor-forwarded side model.
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
     const registryValue = resolvedModel.generationConfig[field];
     if (
       registryValue !== undefined ||
       field === 'thinkingMandatory' ||
-      field === 'enableRequestMetadata'
+      field === 'enableRequestMetadata' ||
+      field === 'supportsForcedToolChoice'
     ) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;

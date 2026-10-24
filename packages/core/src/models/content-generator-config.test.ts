@@ -177,6 +177,15 @@ describe('buildAgentContentGeneratorConfig', () => {
       );
       expect(result.thinkingMandatory).toBeUndefined();
     });
+
+    it('does not inherit a forced-tool-choice opt-out from another model', () => {
+      const result = buildOver(
+        'custom-model',
+        { authType: 'openai' },
+        { ...parentConfig, supportsForcedToolChoice: false },
+      );
+      expect(result.supportsForcedToolChoice).toBeUndefined();
+    });
   });
 
   describe('cross-provider, no registry match', () => {
@@ -275,6 +284,18 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.extra_body).toBeUndefined();
     });
 
+    it('should apply a declared forced-tool-choice opt-out from the registry', () => {
+      const result = buildRegistry({
+        ...openaiResolved,
+        generationConfig: {
+          ...openaiResolved.generationConfig,
+          supportsForcedToolChoice: false,
+        },
+      });
+
+      expect(result.supportsForcedToolChoice).toBe(false);
+    });
+
     it('should preserve a zero stream idle timeout from the registry', () => {
       const result = buildRegistry({
         ...resolvedModel,
@@ -322,6 +343,17 @@ describe('buildAgentContentGeneratorConfig', () => {
         { ...parentConfig, thinkingMandatory: true },
       );
       expect(result.thinkingMandatory).toBeUndefined();
+    });
+
+    it('does not inherit a forced-tool-choice opt-out from another same-provider model', () => {
+      // A per-model capability: inheriting false would suppress forced tool
+      // choice for a side model whose endpoint never declared the limitation.
+      const result = buildRegistry(
+        openaiResolved,
+        { authType: 'openai' },
+        { ...parentConfig, supportsForcedToolChoice: false },
+      );
+      expect(result.supportsForcedToolChoice).toBeUndefined();
     });
 
     it('does not inherit enableRequestMetadata from another same-provider model', () => {

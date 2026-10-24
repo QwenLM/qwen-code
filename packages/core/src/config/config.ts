@@ -7549,6 +7549,8 @@ export class Config {
       // per-model override has to travel with the switch like the cache flags.
       this.contentGeneratorConfig.enableRequestMetadata =
         config.enableRequestMetadata;
+      this.contentGeneratorConfig.supportsForcedToolChoice =
+        config.supportsForcedToolChoice;
       this.contentGeneratorConfig.forceGlobalCacheScope =
         config.forceGlobalCacheScope;
       this.contentGeneratorConfig.cacheRetention = config.cacheRetention;
@@ -7580,6 +7582,10 @@ export class Config {
       if ('enableRequestMetadata' in sources) {
         this.contentGeneratorConfigSources['enableRequestMetadata'] =
           sources['enableRequestMetadata'];
+      }
+      if ('supportsForcedToolChoice' in sources) {
+        this.contentGeneratorConfigSources['supportsForcedToolChoice'] =
+          sources['supportsForcedToolChoice'];
       }
       if ('forceGlobalCacheScope' in sources) {
         this.contentGeneratorConfigSources['forceGlobalCacheScope'] =

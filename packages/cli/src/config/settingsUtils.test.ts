@@ -303,6 +303,23 @@ describe('SettingsUtils', () => {
           expect(validateSettingValue(definition, 1)).toBeUndefined();
         }
       });
+
+      it('accepts a boolean supportsForcedToolChoice and rejects other types', async () => {
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const definition =
+          getRealSettingsSchema().model.properties.generationConfig.properties
+            ?.supportsForcedToolChoice;
+
+        expect(definition).toBeDefined();
+        expect(validateSettingValue(definition!, true)).toBeUndefined();
+        expect(validateSettingValue(definition!, false)).toBeUndefined();
+        expect(validateSettingValue(definition!, 'false')).toBe(
+          'Value must be a boolean',
+        );
+      });
     });
 
     describe('requiresRestart', () => {
