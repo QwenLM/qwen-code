@@ -853,6 +853,38 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  verifyPr: {
+    type: 'object',
+    label: 'Verify PR',
+    category: 'General',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Coordinates for a manual /verify-pr publish round. Each value is surfaced at startup as the environment variable the skill already reads, so the host does not have to be repeated per round. Only honored from User, System, and SystemDefaults settings scopes.',
+    showInDialog: false,
+    properties: {
+      assetsRepo: {
+        type: 'string',
+        label: 'Assets repository: verify-pr',
+        category: 'General',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'The `owner/repo` that hosts the screenshots a `--publish` round links from its PR comment, surfaced as `QWEN_VERIFY_ASSETS_REPO`; `--assets-repo` still overrides it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot choose where its own verification evidence is published.',
+        showInDialog: false,
+      },
+      assetsBranch: {
+        type: 'string',
+        label: 'Assets branch: verify-pr',
+        category: 'General',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'The branch inside that repository, surfaced as `QWEN_VERIFY_ASSETS_BRANCH`; without it a round publishes to `assets/pr<n>-validation`. Only honored from User, System, and SystemDefaults settings scopes, for the same reason as `verifyPr.assetsRepo`.',
+        showInDialog: false,
+      },
+    },
+  },
   output: {
     type: 'object',
     label: 'Output',
@@ -1663,6 +1695,12 @@ const SETTINGS_SCHEMA = {
             description:
               'Mod tool input dialect. Defaults to native; claude exposes the supported Bash/Edit/Write input subset.',
           },
+          unsupportedEvents: {
+            type: 'string',
+            enum: ['skip', 'reject'],
+            description:
+              'Hooks for Claude Code events Qwen Code does not support. Defaults to skip, which reports them at startup; reject fails initialization instead.',
+          },
           options: {
             type: 'object',
             additionalProperties: {
@@ -1678,7 +1716,7 @@ const SETTINGS_SCHEMA = {
       },
     },
     description:
-      'Mod options and tool dialect keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
+      'Mod options, tool dialect and unsupported-event policy keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
     showInDialog: false,
   },
 
