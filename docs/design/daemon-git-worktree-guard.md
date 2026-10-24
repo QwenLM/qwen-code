@@ -269,9 +269,17 @@ own design; this one should not grow into it by accretion.
   later in the same chain do not clear an exported GIT\_\* relocation, so such a
   chain can be denied even though the real shell would run it inside the
   session (a fail-closed false positive, not a bypass).
-- No heredoc body analysis: `splitCommands` has no heredoc state, so a
-  heredoc body is scanned as ordinary command lines. Usually that only
-  over-denies (Git-shaped text the shell merely writes to a file), but the
-  direction is not guaranteed — a body can also shift the parse — so treat it
-  as unanalyzed rather than as fail-closed.
+- No heredoc body analysis: `splitCommands` has no heredoc state, so bodies
+  are stripped before parsing (Git-shaped text the shell merely writes to a
+  file can still be denied through the surrounding command, a fail-closed
+  false positive, not a bypass). Only the first top-level `<<[-]WORD` marker
+  per line is located, with the same quote discipline as the separator scan.
+  Because a stripped body would be an invisible program to a receiver that
+  executes stdin, the strip fails closed unless every stage of the pipeline
+  owning the marker resolves to a receiver whose stdin stays data: a known
+  data consumer (`cat`, `tee`, `git commit -F -`, …), or a shell/interpreter
+  whose program positively sits in argv (`-c`, a script file). Wrappers are
+  read through the same scans the `-c` path uses, and anything the guard
+  cannot attribute — an unlisted program, a wrapper option it does not model,
+  a word the command itself defines — denies.
 - No attempt to correlate a denial with a previous tool call.
