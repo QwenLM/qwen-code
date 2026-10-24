@@ -264,8 +264,8 @@ describe('SDK Java self-hosted workflow guards', () => {
     'breaks the resolver tracking files out of the host-cache hardlinks',
     () => {
       const seedLine = 'cp -aln "${HOME}/.m2/repository"';
-      const guardLine =
-        "find \"${RUNNER_TEMP}/m2-repo\" -type f -links +1 \\( -name '_remote.repositories' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' -o -name 'maven-metadata-*.xml' \\) -delete 2>/dev/null || true";
+      const guardSuffix =
+        "-type f -links +1 \\( -name '_remote.repositories' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' -o -name 'maven-metadata-*.xml' \\) -delete 2>/dev/null || true";
       const reference = parse(
         readFileSync(
           '.github/workflows/release-managed-agent-reference.yml',
@@ -287,6 +287,17 @@ describe('SDK Java self-hosted workflow guards', () => {
             const lines = site.run.split('\n');
             const at = lines.findIndex((line) => line.includes(seedLine));
             expect(at, site.name).toBeGreaterThan(-1);
+            // The guard must walk the destination the seed populated:
+            // `${repo}` where the step binds one, the literal
+            // `${RUNNER_TEMP}/m2-repo` at the sdk-java.yml sites. Relating the
+            // two here makes a retargeted seed with an unmoved guard fail
+            // instead of silently walking a directory that does not exist.
+            const destination = lines[at]
+              .trim()
+              .slice(seedLine.length)
+              .trim()
+              .split(/\s+/)[0];
+            const guardLine = `find ${destination} ${guardSuffix}`;
             const guardAt = lines.findIndex(
               (line, index) => index > at && line.trim() === guardLine,
             );
