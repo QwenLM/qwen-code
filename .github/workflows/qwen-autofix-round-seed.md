@@ -141,10 +141,18 @@ cap of 100). When the counter reaches `N`, the loop **releases** the PR:
   "reached its round cap" notice — a finished budget leaves nothing stuck, so
   both would be false.
 
-**Failed rounds count.** A round that errors, times out or crashes writes its
-eval marker with the next round number and a sentinel timestamp, so it consumes
-budget exactly like a productive one. That is the point: N means N attempts,
-not "N successes and however many retries it takes".
+**Every finished attempt counts.** The budget is measured by the round's eval
+marker, one per attempt: a no-op round writes one with its round number
+unchanged, and a round that errors, times out or crashes writes one with the
+next round number and a sentinel timestamp. N therefore means N attempts, not
+"N successes and however many retries it takes", and a PR whose rounds keep
+finding nothing still ends after N.
+
+**A breaker stop is not a spent budget.** When the consecutive-failure, timeout
+or convergence breaker stops the loop early, it stamps a terminal sentinel round
+far past the real attempts and posts no extra marker — so the window is not
+"spent" and the PR lands on the normal paused path with `autofix/needs-human`. A
+breaker asks for a human; the release note would be wrong.
 
 **The budget is window-scoped.** It is read from the comment whose timestamp is
 the window key, so `/retry` or a bare `/takeover` opens a new window with no
@@ -157,6 +165,12 @@ so releasing it would hand them back to standard ten-round management and the
 budget would be a lie. They land on the existing paused path instead: paused
 notice plus `autofix/needs-human`, and the fleet shepherd's auto-release ages the
 label out. The budget still stops them at N.
+
+**A budgeted re-arm also cancels queued work, conflicts included.** A conflict
+round is normally exempt from the superseded-window discard because it stays
+actionable, but a queued job carries the old cap: with a smaller budget it would
+run past the new limit. The next scan re-selects the conflict under the new
+window.
 
 ### Picking N
 

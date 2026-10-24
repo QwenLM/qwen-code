@@ -54,18 +54,22 @@ loop runs at most N rounds and then stops touching the PR.
 | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Budget spent on a human-authored PR                    | One bilingual "budget spent — released" note, then `autofix/takeover` is removed. No `autofix/needs-human`, no paused notice.                                                |
 | Budget spent on a bot-authored PR                      | The label is NOT removed (the bot PR is managed without it), so it lands on the existing paused path: paused notice + `autofix/needs-human`. The budget still stops it at N. |
+| A breaker stops the loop BEFORE the budget is spent    | The existing paused path runs: paused notice + `autofix/needs-human`. A breaker asks for a human, so it is never reported as a finished budget.                              |
 | `/retry` or a bare `/takeover` after a budgeted window | Opens a new window with no budget — unbounded takeover, as today.                                                                                                            |
-| Budget window superseded while a round is queued       | The existing window-key check discards the queued job; the new window's budget applies.                                                                                      |
+| Budget window superseded while a round is queued       | The existing window-key check discards the queued job — conflicts included — so no old-cap work runs past the new limit.                                                     |
 
 ## Key design decisions
 
-1. **The budget counts attempts, not change-producing rounds.** A round that
-   errors, times out or crashes must consume budget, otherwise a failing PR
-   would be retried until the failure sub-caps fire — the opposite of "handle
-   it once". Failed rounds already write
-   `<!-- autofix-eval … round=ROUND+1 -->` with a sentinel timestamp, so the
-   existing `ROUND` derived from those markers is already an attempt counter and
-   no new writer is needed.
+1. **The budget counts attempts, and attempts are counted from eval markers.**
+   A no-op round must consume a turn, or a PR whose rounds keep finding nothing
+   would stay managed forever on a one-round budget. It writes
+   `<!-- autofix-eval … round=ROUND -->` with its round UNCHANGED, so `ROUND`
+   alone under-counts it; counting markers counts it exactly once. The same
+   choice fixes the opposite error: a circuit breaker stamps its terminal
+   marker with `round=MAX_ROUNDS` after far fewer real attempts, and a sentinel
+   jump adds no marker, so five failures inside a twenty-round budget read as
+   five attempts — the breaker's escalation is preserved instead of being
+   mistaken for a finished budget.
 
 2. **The budget is window-scoped through the ack.** It rides as its own marker
    on the comment whose `created_at` is the window key, exactly like
@@ -87,6 +91,13 @@ loop runs at most N rounds and then stops touching the PR.
    forms with different meanings (suggestion budget vs. round budget); a body
    carrying both, a `for 0`, a three-digit value, or any trailing text stays
    "not an exact command" and does nothing.
+
+6. **A queued conflict round is superseded by a budgeted window.** Conflicts are
+   normally exempt from the superseded-window discard because they stay
+   actionable. A budget is different: the queued job carries the old cap and
+   would run past the new engagement limit, so a live window that carries a
+   budget discards it too and the next scan re-selects the conflict under the
+   new window.
 
 ## Files affected
 

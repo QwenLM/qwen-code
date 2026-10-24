@@ -4589,21 +4589,35 @@ watching the run). Neither states "N rounds".
 rather than a field on the ack literal for the same reason the seed is
 (af-016): the ack is matched by substring everywhere.
 
-Three properties make the budget cheap to enforce:
+The budget is enforced in two steps, and the second is why spend is
+counted in eval markers rather than in ROUND:
 
-- It is a CAP, not a counter. The scan lowers EFF_MAX_ROUNDS to N for
-  the window that carries the marker, so the existing cap gate does the
-  arithmetic; nothing else has to know about budgets.
-- Attempts are already counted. A round that errors, times out or
-  crashes still writes its eval marker with round=ROUND+1 and a
-  sentinel timestamp (af-064), so a failed round consumes budget
-  without any new writer. A run cancelled before prepare writes
-  nothing and is free — the error direction is a delayed release,
-  never an early one.
+- The scan lowers EFF_MAX_ROUNDS to N for the window that carries the
+  marker, so the existing cap gate bounds DISPATCH exactly as it always
+  did; nothing else has to know about budgets.
+- Spend is the number of eval markers in the window, not ROUND. A
+  no-op round writes its marker with the round UNCHANGED — that is why
+  a no-op never advanced the cap — but it is still an attempt, and a
+  budget counted in ROUND would never end for a PR whose rounds keep
+  finding nothing. Counting markers charges it exactly once. The same
+  reading fixes the opposite error: a breaker stamps a terminal marker
+  at round=MAX_ROUNDS after far fewer real attempts, and that sentinel
+  jump adds no marker, so five failures in a twenty-round window read
+  as five attempts and land on the existing paused path with
+  needs-human instead of a release. A run cancelled before prepare
+  writes nothing and is free — the error direction is a delayed
+  release, never an early one.
 - It is window-scoped by construction. The marker is read from the
   comment whose created_at IS the window key, so /retry or a bare
   /takeover opens an unbudgeted window (af-104), and re-arming with a
   budget starts a fresh window at round 0.
+
+A budgeted window supersedes queued work INCLUDING a conflict round.
+Conflicts are normally exempt from the superseded-window check because
+they stay actionable, but a queued job runs on the OLD cap and would
+cross the new engagement limit, so the live window's budget makes it
+stale too and the next scan re-selects the conflict under the new
+window.
 
 What happens at the boundary differs by authorship, and that difference
 is the point. A HUMAN-authored PR is simply released: nothing is stuck,

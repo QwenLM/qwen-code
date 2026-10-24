@@ -3650,7 +3650,7 @@ describe('qwen-autofix workflow', () => {
     // (note + label DELETE, no escalation) and never promotes the PR to
     // autofix/needs-human. Replay with a PATH-stubbed gh.
     const release = reviewScanJob.match(
-      /(if \[\[ "\$\{ROUND_BUDGET\}" -gt 0 && "\$\{IS_BOT_AUTHOR\}" != 'true' \]\]; then[\s\S]*?\n {14}fi)/,
+      /(if \[\[ "\$\{BUDGET_SPENT\}" == 'true' && "\$\{IS_BOT_AUTHOR\}" != 'true' \]\]; then[\s\S]*?\n {14}fi)/,
     )?.[1];
     expect(release).toBeTruthy();
     const runRelease = ({
@@ -3697,6 +3697,8 @@ describe('qwen-autofix workflow', () => {
               REARM_KEY: '2026-07-18T10:00:00Z',
               ROUND_BUDGET: '2',
               ROUND: '2',
+              BUDGET_USED: '2',
+              BUDGET_SPENT: 'true',
               DRY_RUN: dryRun,
               IS_BOT_AUTHOR: 'false',
               STUB_ACTOR: actor,
@@ -3749,6 +3751,77 @@ describe('qwen-autofix workflow', () => {
       expect(skipped.writes).toBe('');
       expect(skipped.log).not.toContain('FELLTHROUGH');
     }
+  });
+
+  it('counts no-op attempts for a for-N budget and keeps breaker stops escalated', () => {
+    // A no-op round writes its eval marker with the round UNCHANGED, so a
+    // budget riding on ROUND would never spend on no-ops (P1). The budget
+    // therefore counts markers. The same read fixes the breaker case: its
+    // sentinel jump to MAX_ROUNDS writes no extra marker, so five failures in
+    // a twenty-round window stay an escalation instead of a release (P2).
+    const used = reviewScanJob.match(
+      /(BUDGET_USED="\$\(jq[\s\S]*?BUDGET_SPENT=true)/,
+    )?.[1];
+    expect(used).toBeTruthy();
+    const spent = (markers, budget) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `REARM_KEY='K1'\nROUND_BUDGET='${budget}'\nMARKERS='${JSON.stringify(markers)}'\n${used.replace(/\n {12}/g, '\n')}\nprintf '%s %s' "$BUDGET_USED" "$BUDGET_SPENT"`,
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+    const mk = (win, round) => ({
+      ts: '2026-07-18T10:00:00Z',
+      round,
+      win,
+      at: '',
+    });
+    // One no-op attempt spends a one-round budget…
+    expect(spent([mk('K1', 0)], '1')).toBe('1 true');
+    // …and is only one attempt of two.
+    expect(spent([mk('K1', 0)], '2')).toBe('1 false');
+    // The breaker sentinel (round=20 after five failures) is NOT a spent
+    // twenty-round budget.
+    expect(
+      spent(
+        [mk('K1', 1), mk('K1', 2), mk('K1', 3), mk('K1', 4), mk('K1', 20)],
+        '20',
+      ),
+    ).toBe('5 false');
+    // A previous window's markers never count toward this one.
+    expect(spent([mk('OLD', 1)], '1')).toBe('0 false');
+    // A PR without a budget never spends one.
+    expect(spent([mk('K1', 1)], '0')).toBe('1 false');
+  });
+
+  it('discards a queued conflict round when the live window carries a budget', () => {
+    // Conflicts are exempt from the superseded-window discard because they
+    // stay actionable — but a NEW budgeted window must not admit work that
+    // would run on the old cap, past the new engagement limit (P2).
+    const stale = workflow.match(
+      /(if \[\[ "\$\{STALE\}" != "true" && "\$\{WINDOW:-none\}" != "\$\{LIVE_REARM_KEY\}" && \( "\$\{CONFLICT\}" != "true" \|\| "\$\{LIVE_ROUND_BUDGET\}" -gt 0 \) \]\]; then[\s\S]*?\n {10}fi)/,
+    )?.[1];
+    expect(stale).toBeTruthy();
+    const run = (conflict, budget) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `STALE=false\nWINDOW=old\nLIVE_REARM_KEY=new\nCONFLICT=${conflict}\nLIVE_ROUND_BUDGET=${budget}\n${stale.replace(/\n {10}/g, '\n')}\nprintf '%s' "$STALE"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .at(-1);
+    // Unbudgeted re-arm: the conflict exemption is preserved.
+    expect(run('true', '0')).toBe('false');
+    // Budgeted live window: the queued conflict round is discarded.
+    expect(run('true', '2')).toBe('true');
+    // The non-conflict control was already discarded.
+    expect(run('false', '0')).toBe('true');
   });
 
   it('applies the needs-human escalation label at the cap and removes it on resume/release', () => {
