@@ -272,7 +272,11 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
       name: names[0],
       value: saved,
     });
-    expect(saved.toolCall).toEqual({ name: 'edit', args: editArgs });
+    expect(saved.toolCall).toEqual({
+      callId: 'h11a-edit',
+      name: 'edit',
+      args: editArgs,
+    });
     expect(saved.filePath).toBe(file);
     expect(typeof saved.promptId).toBe('string');
     expect(saved.promptId.length).toBeGreaterThan(0);
