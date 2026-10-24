@@ -5,6 +5,26 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { promises as dns } from 'node:dns';
+import * as undici from 'undici';
+import * as runtimeFetchOptions from './runtimeFetchOptions.js';
+
+const agentOptions = vi.hoisted(() => vi.fn());
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof undici>();
+  return {
+    ...actual,
+    fetch: vi.fn((...args: Parameters<typeof fetch>) =>
+      globalThis.fetch(...args),
+    ),
+    Agent: class extends actual.Agent {
+      constructor(options?: undici.Agent.Options) {
+        super(options);
+        agentOptions(options);
+      }
+    },
+  };
+});
 import {
   CONNECTION_LEVEL_ERROR_CODES,
   FetchError,
@@ -51,6 +71,122 @@ const realFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = realFetch;
+});
+
+describe('public fetch policy', () => {
+  const options: FetchPolicyOptions = {
+    networkPolicy: 'public',
+    timeoutMs: 5_000,
+    maxBytes: 1024,
+    maxRedirects: 3,
+  };
+
+  beforeEach(() => {
+    agentOptions.mockClear();
+    vi.mocked(undici.fetch).mockClear();
+    globalThis.fetch = vi
+      .fn()
+      .mockImplementation(async () => new Response('docs'));
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    'http://example.com',
+    'https://user:secret@example.com',
+    'https://127.0.0.1',
+    'https://169.254.169.254',
+    'https://100.100.100.200',
+    'https://[::1]',
+    'https://[::ffff:7f00:1]',
+  ])('refuses %s before opening a connection', async (url) => {
+    await expect(fetchWithPolicy(url, options)).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses mixed public/private DNS answers', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+      { address: '10.0.0.1', family: 4 },
+    ] as never);
+    await expect(
+      fetchWithPolicy('https://example.com', options),
+    ).rejects.toThrow('blocked address');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses runtimes that cannot enforce the pinned dispatcher', async () => {
+    vi.spyOn(runtimeFetchOptions, 'detectRuntime').mockReturnValue('bun');
+    await expect(fetchWithPolicy('https://8.8.8.8', options)).rejects.toThrow(
+      'require Node.js',
+    );
+    expect(fetch).not.toHaveBeenCalled();
+    expect(agentOptions).not.toHaveBeenCalled();
+  });
+
+  it.each(['redirect', 'retry'])(
+    'rechecks DNS after a %s and refuses rebinding',
+    async (mode) => {
+      const lookup = vi
+        .spyOn(dns, 'lookup')
+        .mockResolvedValueOnce([
+          { address: '93.184.216.34', family: 4 },
+        ] as never)
+        .mockResolvedValue([{ address: '127.0.0.1', family: 4 }] as never);
+      vi.mocked(fetch).mockResolvedValueOnce(
+        mode === 'redirect'
+          ? redirect(302, '/next')
+          : new Response(null, { status: 429 }),
+      );
+      if (mode === 'redirect')
+        await expect(
+          fetchWithPolicy('https://example.com', options),
+        ).rejects.toThrow('blocked address');
+      else
+        expect(
+          (await fetchWithPolicy('https://example.com', options)).kind,
+        ).toBe('response');
+      expect(lookup).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('pins DNS in a dedicated TLS-verified dispatcher and closes it after the body', async () => {
+    const lookup = vi
+      .spyOn(dns, 'lookup')
+      .mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as never);
+    const response = await fetchResponse('https://example.com/docs', options);
+    expect(response.body.toString()).toBe('docs');
+    expect(undici.fetch).toHaveBeenCalledTimes(1);
+    expect(agentOptions).toHaveBeenCalledWith({
+      connect: { lookup: expect.any(Function), rejectUnauthorized: true },
+    });
+    const pinnedLookup = agentOptions.mock.calls[0][0]!.connect as {
+      lookup: NonNullable<import('node:net').LookupFunction>;
+    };
+    const resolved = vi.fn();
+    pinnedLookup.lookup('example.com', {}, resolved);
+    expect(resolved).toHaveBeenCalledWith(null, '93.184.216.34', 4);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit & {
+      dispatcher: undici.Agent;
+    };
+    expect(init.dispatcher).toBeInstanceOf(undici.Agent);
+    expect(init.dispatcher.closed).toBe(true);
+  });
+
+  it('does not follow a cross-host redirect', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      redirect(302, 'https://127.0.0.1/private'),
+    );
+    expect(
+      await fetchWithPolicy('https://8.8.8.8/docs', options),
+    ).toMatchObject({
+      kind: 'cross-host-redirect',
+      redirectUrl: 'https://127.0.0.1/private',
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('formatFetchErrorForUser', () => {

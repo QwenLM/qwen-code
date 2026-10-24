@@ -12,6 +12,7 @@ import type {
 } from './tool-events.js';
 
 export const MOD_MAX_BYTES = 262_144;
+export const MOD_MAX_DEPTH = 512;
 export const MOD_TIMEOUT_MS = 10_000;
 export const MOD_END_TIMEOUT_MS = 1_500;
 
@@ -24,9 +25,14 @@ export interface ModSource {
 export type ModOption = string | number | boolean | string[];
 export type ModOptions = Record<string, ModOption>;
 export type ModToolDialect = 'native' | 'claude';
+export type ModUnsupportedEvents = 'skip' | 'reject';
 export type ModPluginConfigs = Record<
   string,
-  { options?: ModOptions; toolDialect?: ModToolDialect }
+  {
+    options?: ModOptions;
+    toolDialect?: ModToolDialect;
+    unsupportedEvents?: ModUnsupportedEvents;
+  }
 >;
 
 export interface ModDependency {
@@ -57,6 +63,7 @@ export interface ModPlugin {
   source: ModSource;
   options: ModOptions;
   toolDialect?: ModToolDialect;
+  unsupportedEvents?: ModUnsupportedEvents;
 }
 
 export interface ModLog {
@@ -70,6 +77,7 @@ export type ModRequest =
       plugins: ModPlugin[];
       cwd: string;
       surface: 'terminal' | null;
+      version: string;
     }
   | {
       type: 'command';

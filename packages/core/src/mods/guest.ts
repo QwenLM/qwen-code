@@ -4,17 +4,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CLAUDE_CODE_EVENTS } from './claude-events.js';
+import { MOD_MAX_DEPTH } from './types.js';
+
 // Executed only inside QuickJS. The factory's handles stay private to the host.
 export const MOD_GUEST_FACTORY = String.raw`
 ((bridge, status) => {
   const parse = JSON.parse.bind(JSON);
   const stringify = JSON.stringify.bind(JSON);
+  const Depths = Map;
+  const { get: depthOf, set: setDepth } = Depths.prototype;
+  const apply = Reflect.apply;
+  // Stops before nesting deep enough to exhaust the host's native stack. The
+  // Map methods are held here so a Mod that patches them cannot turn it off.
+  const encode = value => {
+    const depths = new Depths();
+    return stringify(value, function (key, item) {
+      if (item !== null && typeof item === 'object') {
+        const depth = (apply(depthOf, depths, [this]) ?? 0) + 1;
+        if (depth > ${MOD_MAX_DEPTH}) throw new Error('Mod value nests deeper than ${MOD_MAX_DEPTH} levels.');
+        apply(setDepth, depths, [item, depth]);
+      }
+      return item;
+    });
+  };
   const keys = Object.keys;
   const freeze = Object.freeze;
   const hasOwn = Object.hasOwn;
   const hooks = [];
   const runs = new Map();
-  const events = ['session.start', 'session.end', 'command.run', 'command.register', 'ui.log', 'tool.call', 'tool.check'];
+  const known = new Set(${JSON.stringify(CLAUDE_CODE_EVENTS)});
+  const knownNamespaces = new Set([...known].map(e => e.slice(0, e.indexOf('.'))));
   let registering = false;
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const frozen = value => {
@@ -61,9 +81,10 @@ export const MOD_GUEST_FACTORY = String.raw`
   const on = (event, matcher, handler) => {
     if (!registering) throw new Error('on() is only available during register()');
     if (typeof matcher === 'function' && handler === undefined) { handler = matcher; matcher = undefined; }
+    const name = typeof event === 'string' ? event.replace(/^!/, '') : '';
+    // A known event Qwen does not run yet registers without ever matching.
     if (typeof event !== 'string' || event === '!*' || event.startsWith('!!') ||
-        !events.some(e => patternMatches(event, e)) ||
-        !events.includes(event.replace(/^!/, '')) && !/^!?([a-z]+\.\*|\*)$/.test(event)) {
+        !known.has(name) && name !== '*' && !(/^[a-z]+\.\*$/.test(name) && knownNamespaces.has(name.slice(0, -2)))) {
       throw new Error('Mod event not supported: ' + event);
     }
     if (typeof handler !== 'function') throw new Error('Mod hook must be a function');
@@ -79,7 +100,7 @@ export const MOD_GUEST_FACTORY = String.raw`
       hook.caught = handler;
     }});
   };
-  const call = (id, frames, kind, value) => bridge(id, kind, stringify({ value, frames })).then(json => {
+  const call = (id, frames, kind, value) => bridge(id, kind, encode({ value, frames })).then(json => {
     const envelope = parse(json);
     return frozen(envelope.voidValue ? {value: undefined} : envelope.value);
   });
@@ -87,6 +108,7 @@ export const MOD_GUEST_FACTORY = String.raw`
     const invoke = (name, value) => call(id, frames, name, value);
     const namespaces = {
       command: { register: spec => invoke('command.register', spec) },
+      session: { version: () => invoke('session.version', {}) },
       ui: { log: (text, options = {}) => {
         if (!object(options) || keys(options).some(k => k !== 'to')) throw new Error('Invalid Mod log');
         void invoke('ui.log', { text: String(text), to: options.to ?? 'transcript' }).catch(() => {});
@@ -146,14 +168,14 @@ export const MOD_GUEST_FACTORY = String.raw`
         if (hook.matcher !== undefined && !matches(hook.matcher, input)) return invoke(index + 1, input, frames);
         const nested = [...frames, hook.id];
         const next = nextFor(run, async e => {
-          status(run.id, 'validate', stringify(e));
+          status(run.id, 'validate', encode(e));
           const result = await invoke(index + 1, frozen(e), nested);
           if (!result) throw new Error('Mod hook returned no result');
           return result;
         });
         return hook.handler(api(run.id, nested), frozen(input), next);
       };
-      return stringify(await invoke(0, run.input, []));
+      return encode(await invoke(0, run.input, []));
     },
     recover: async json => {
       const recovery = parse(json);
@@ -173,7 +195,7 @@ export const MOD_GUEST_FACTORY = String.raw`
         });
         try {
           const answer = await hook.caught(api(run.id, [hook.id]), input, next);
-          if (answer !== undefined || used) return stringify(answer);
+          if (answer !== undefined || used) return encode(answer);
         } catch (caught) {
           if (used) throw caught;
           error = caught;
