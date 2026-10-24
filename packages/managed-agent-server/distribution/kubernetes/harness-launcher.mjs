@@ -33,7 +33,9 @@ try {
     )
   )
     throw new Error('A verified capability digest is required.');
-  const brokerUrl = new URL(process.env.QWEN_HOSTED_HARNESS_BROKER_URL);
+  if (!process.env.QWEN_MANAGED_RUNTIME_BROKER_URL)
+    throw new Error('The pool requires a Broker URL.');
+  const brokerUrl = new URL(process.env.QWEN_MANAGED_RUNTIME_BROKER_URL);
   if (
     brokerUrl.protocol !== 'https:' ||
     brokerUrl.username ||
@@ -71,7 +73,7 @@ try {
         QWEN_HOME: `${runtime}/state`,
         QWEN_CODE_SYSTEM_SETTINGS_PATH: '/etc/qwen/config/settings.json',
         QWEN_SERVER_TOKEN: await secret('harness-token'),
-        QWEN_HOSTED_HARNESS_BROKER_TOKEN: await secret('broker-token'),
+        QWEN_MANAGED_RUNTIME_BROKER_TOKEN: await secret('broker-token'),
         OPENAI_API_KEY: await secret('model-api-key'),
       },
     },

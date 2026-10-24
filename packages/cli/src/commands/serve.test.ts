@@ -997,6 +997,34 @@ describe('serve rate limit env parsing', () => {
     ).rejects.toThrow('process.exit(1) called');
     expect(mockRunQwenServe).not.toHaveBeenCalled();
   });
+
+  it('removes the Broker pair the Kubernetes launcher passes in the environment', async () => {
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'] =
+      'https://runtime-broker.example.internal';
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'] = 'pool-broker-secret';
+    // The runtime snapshots process.env for every process it starts, so the
+    // pair must already be gone when it begins.
+    let brokerEnvAtRuntimeStart: Array<string | undefined> = [];
+    mockRunQwenServe.mockImplementationOnce(async () => {
+      brokerEnvAtRuntimeStart = [
+        process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'],
+        process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'],
+      ];
+      return { url: 'http://127.0.0.1:4170/', webShellMounted: false };
+    });
+
+    await startServeHandlerWithArgs(
+      '--profile hosted-harness --http-bridge --no-web --hostname 127.0.0.1 --port 4170',
+    );
+
+    expect(brokerEnvAtRuntimeStart).toEqual([undefined, undefined]);
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+      managedRuntimeBrokerUrl: 'https://runtime-broker.example.internal',
+      managedRuntimeBrokerToken: 'pool-broker-secret',
+    });
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_URL']).toBeUndefined();
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN']).toBeUndefined();
+  });
 });
 
 describe('maybeOpenWebShellBrowser', () => {

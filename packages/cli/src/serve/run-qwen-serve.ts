@@ -3492,16 +3492,6 @@ async function runQwenServeImpl(
   const hostedCsiSessionStoreUrl =
     optsIn.hostedCsiSessionStoreUrl ??
     process.env[HOSTED_CSI_SESSION_STORE_URL_ENV];
-  const managedRuntimeBrokerUrl =
-    optsIn.managedRuntimeBrokerUrl ??
-    (optsIn.profile === 'hosted-harness'
-      ? process.env['QWEN_HOSTED_HARNESS_BROKER_URL']
-      : undefined);
-  const managedRuntimeBrokerToken =
-    optsIn.managedRuntimeBrokerToken ??
-    (optsIn.profile === 'hosted-harness'
-      ? process.env['QWEN_HOSTED_HARNESS_BROKER_TOKEN']
-      : undefined);
   validateHostedHarnessProfile({
     ...optsIn,
     token,
@@ -3509,8 +3499,6 @@ async function runQwenServeImpl(
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     hostedHarnessCapabilityDigest,
     hostedCsiSessionStoreUrl,
-    managedRuntimeBrokerUrl,
-    managedRuntimeBrokerToken,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
@@ -3648,8 +3636,6 @@ async function runQwenServeImpl(
     token,
     hostedHarnessCapabilityDigest,
     hostedCsiSessionStoreUrl,
-    managedRuntimeBrokerUrl,
-    managedRuntimeBrokerToken,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
