@@ -1,4 +1,11 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+} from 'react';
+import type { WebShellWorkspaceDirectoryPicker } from '../../customization';
 import { useI18n } from '../../i18n';
 import { getShadowAwareActiveElement } from '../../utils/dom';
 import { DialogShell } from './DialogShell';
@@ -68,7 +75,9 @@ interface AddWorkspaceDialogProps {
    * surfaces matching subdirectories in a listbox under the input.
    */
   onSuggest?: (prefix: string) => Promise<WorkspacePathSuggestions>;
-  onPick?: () => Promise<string | undefined>;
+  onPick?: WebShellWorkspaceDirectoryPicker;
+  pickerTarget?: unknown;
+  pickerUsesHostUi?: boolean;
   persistenceSupported?: boolean;
 }
 
@@ -102,6 +111,8 @@ export function AddWorkspaceDialog({
   onLocationChange,
   onSuggest,
   onPick,
+  pickerTarget,
+  pickerUsesHostUi = false,
   persistenceSupported = true,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
@@ -118,6 +129,7 @@ export function AddWorkspaceDialog({
   const [hostSep, setHostSep] = useState('/');
   const [browsing, setBrowsing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const browseButtonRef = useRef<HTMLButtonElement>(null);
   const listOpenRef = useRef(false);
   listOpenRef.current = listOpen && suggestions.length > 0;
   const suggestSeqRef = useRef(0);
@@ -128,6 +140,34 @@ export function AddWorkspaceDialog({
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
+  const pickerRequestRef = useRef<AbortController | undefined>(undefined);
+  const cancelPicker = useCallback(() => {
+    const request = pickerRequestRef.current;
+    pickerRequestRef.current = undefined;
+    request?.abort();
+  }, []);
+  const pickerAvailable = Boolean(onPick);
+
+  // Callback identity may change on ordinary host renders. Only the target,
+  // connection, or picker source invalidates an in-flight selection.
+  useLayoutEffect(() => {
+    setBrowsing(false);
+    suppressNextFetchOpenRef.current = false;
+    return cancelPicker;
+  }, [
+    pickerTarget,
+    selectedLocation,
+    pickerAvailable,
+    pickerUsesHostUi,
+    cancelPicker,
+  ]);
+
+  const handleClose = useCallback(() => {
+    cancelPicker();
+    setBrowsing(false);
+    suppressNextFetchOpenRef.current = false;
+    onClose();
+  }, [cancelPicker, onClose]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -246,6 +286,9 @@ export function AddWorkspaceDialog({
 
   const pickDirectory = useCallback(async () => {
     if (!onPick) return;
+    cancelPicker();
+    const request = new AbortController();
+    pickerRequestRef.current = request;
     inputRef.current?.blur();
     // The blur above scheduled the delayed dismiss; cancel it and apply the
     // close + suppress now so the timer cannot fire after the outcome below.
@@ -256,7 +299,9 @@ export function AddWorkspaceDialog({
     setError(null);
     let pickedPath: string | undefined;
     try {
-      pickedPath = await onPick();
+      pickedPath = await onPick({ signal: request.signal });
+      if (pickerRequestRef.current !== request || request.signal.aborted)
+        return;
       if (pickedPath && pickedPath !== path) {
         // Leave the suppress flag set: the path-change effect consumes it,
         // keeping the pick-triggered lookup closed until the first edit.
@@ -270,13 +315,27 @@ export function AddWorkspaceDialog({
         if (pickedPath) ++suggestSeqRef.current;
         suppressNextFetchOpenRef.current = false;
       }
-    } catch {
+    } catch (error) {
+      if (pickerRequestRef.current !== request || request.signal.aborted)
+        return;
       suppressNextFetchOpenRef.current = false;
-      setError(t('sidebar.addWorkspaceBrowseError'));
+      if (
+        !(
+          typeof error === 'object' &&
+          error !== null &&
+          'name' in error &&
+          error.name === 'AbortError'
+        )
+      ) {
+        setError(t('sidebar.addWorkspaceBrowseError'));
+      }
     } finally {
-      setBrowsing(false);
+      if (pickerRequestRef.current === request) {
+        pickerRequestRef.current = undefined;
+        setBrowsing(false);
+      }
     }
-  }, [onPick, path, closeList, cancelBlurDismiss, t]);
+  }, [onPick, path, closeList, cancelBlurDismiss, cancelPicker, t]);
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -353,6 +412,7 @@ export function AddWorkspaceDialog({
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      if (pickerRequestRef.current) return;
       const trimmed = path.trim();
       if (!trimmed) return;
       if (!isAbsoluteLike(trimmed)) {
@@ -370,7 +430,7 @@ export function AddWorkspaceDialog({
         } else {
           await onAdd(trimmed, effectivePersist);
         }
-        onClose();
+        handleClose();
       } catch (err) {
         setError(
           err instanceof Error ? err.message : t('sidebar.addWorkspaceError'),
@@ -386,7 +446,7 @@ export function AddWorkspaceDialog({
       persist,
       persistenceSupported,
       onAdd,
-      onClose,
+      handleClose,
       closeList,
       t,
     ],
@@ -399,7 +459,10 @@ export function AddWorkspaceDialog({
       title={t('sidebar.addWorkspaceTitle')}
       size="md"
       dismissible={!submitting}
-      onClose={onClose}
+      modal={!(pickerUsesHostUi && browsing)}
+      modalRestoreFocusRef={browseButtonRef}
+      aria-busy={browsing || undefined}
+      onClose={handleClose}
     >
       <form className="flex flex-col gap-6" onSubmit={handleSubmit}>
         <FieldGroup>
@@ -532,6 +595,7 @@ export function AddWorkspaceDialog({
                 )}
                 {onPick && (
                   <Button
+                    ref={browseButtonRef}
                     type="button"
                     variant="outline"
                     onMouseDown={(event) => event.preventDefault()}
@@ -539,7 +603,9 @@ export function AddWorkspaceDialog({
                     disabled={submitting || browsing}
                   >
                     <FolderOpenIcon aria-hidden="true" />
-                    {t('sidebar.addWorkspaceBrowse')}
+                    {browsing
+                      ? t('sidebar.addWorkspaceBrowsing')
+                      : t('sidebar.addWorkspaceBrowse')}
                   </Button>
                 )}
               </div>
@@ -659,7 +725,7 @@ export function AddWorkspaceDialog({
             type="button"
             variant="outline"
             className="flex-1 sm:flex-none"
-            onClick={onClose}
+            onClick={handleClose}
             disabled={submitting}
           >
             {t('sidebar.addWorkspaceCancel')}
@@ -667,7 +733,7 @@ export function AddWorkspaceDialog({
           <Button
             type="submit"
             className="flex-1 sm:flex-none"
-            disabled={submitting || !path.trim()}
+            disabled={submitting || browsing || !path.trim()}
           >
             {submitting
               ? t('sidebar.addWorkspaceAdding')
