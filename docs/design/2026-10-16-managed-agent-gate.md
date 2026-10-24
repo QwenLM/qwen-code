@@ -174,7 +174,9 @@ pre-checkout hygiene steps; fork runs stay hosted.
 ### Failure reporting
 
 `main-ci-failure-issue.yml` also watches `Managed Agent gate`, so a red
-post-merge fast tier is recorded on one open issue per workflow, reopening a
+post-merge fast tier is recorded there: a run that names failing tests reuses
+or files a per-signature issue deduped by the test markers in its body, and a
+run without one comments on the workflow's shared aggregate issue, reopening a
 matching closed issue when found. New aggregates receive `scope/ci-cd` and
 `status/needs-triage` for human triage, with no automatic autofix assignment.
 `qwen-triage-finalize.yml` now lists `Managed Agent gate` in place of `SDK Java`,
