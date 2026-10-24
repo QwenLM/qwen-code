@@ -314,6 +314,21 @@ describe('runReply', () => {
       conclusion: null,
       detailsUrl: 'https://github.com/o/r/actions/runs/90/job/9',
     });
+    const build = (databaseId: number, run: number, suite: string) => ({
+      __typename: 'CheckRun' as const,
+      databaseId,
+      name: 'Build',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl: `https://github.com/o/r/actions/runs/${run}/job/${databaseId}`,
+      checkSuite: {
+        status: suite,
+        app: { databaseId: 15368 },
+        workflowRun: { event: 'pull_request', workflow: { databaseId: 2 } },
+      },
+    });
+    const contexts = moved.commits.nodes[0]!.commit.statusCheckRollup!.contexts;
+    contexts.nodes.push(build(7, 70, 'IN_PROGRESS'));
     mocks.fetchPrData.mockImplementation(() => ({ pr: moved, viewer: 'me' }));
     expect(
       reply({ handledChecks: [gate, startup, earlier, deferred] }),
@@ -323,6 +338,13 @@ describe('runReply', () => {
     });
     // Gate's next failure on this head carries the key: it stays handled.
     expect(state().handledChecks).toEqual([gate, startup, earlier]);
+    // A later run of Build took the place of the deferred one, which the
+    // gate will not report again: the round's answer stands.
+    contexts.nodes.push(build(9, 71, 'IN_PROGRESS'));
+    expect(reply({ handledChecks: [deferred] })).toMatchObject({
+      handledChecks: 1,
+      ignoredChecks: 0,
+    });
     // A failure neither the file nor the head reports is still refused.
     expect(() => reply({ handledChecks: [`Test@${HEAD}@#3`] })).toThrow(
       /not a failure snapshot reports/,

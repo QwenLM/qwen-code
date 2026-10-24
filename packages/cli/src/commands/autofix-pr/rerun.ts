@@ -15,7 +15,12 @@ import {
   ghWithInput,
   setGhHost,
 } from '../review/lib/gh.js';
-import { checkEvents, fetchPrData, rerunFrom } from './snapshot.js';
+import {
+  checkEvents,
+  failedJobsOfRun,
+  fetchPrData,
+  rerunFrom,
+} from './snapshot.js';
 import {
   assertOwnedBySession,
   assertPositiveInteger,
@@ -83,29 +88,30 @@ function rerunLocked(
       `run ${runId} is no failed GitHub Actions run of ${state.owner}/${state.repo} on PR #${prNumber}'s head ${pr.headRefOid.slice(0, 12)}.`,
     );
   }
-  const checks = failed.map(({ event }) => event.check);
+  // `--failed` re-runs every failed job of the run, one a later run of its
+  // check took the place of on the PR included: each spends its re-run.
+  const jobs = failedJobsOfRun(pr, runId);
+  const checks = [...new Set(jobs.map(({ check }) => check))];
   // Keyed by the check's identity, not its name: two workflows may each
   // have a failed job of the same name, and each has its own re-run.
-  const rerunKeys = failed.map(
-    ({ identity }) => `${identity}@${pr.headRefOid}`,
-  );
+  const rerunKeys = jobs.map(({ identity }) => `${identity}@${pr.headRefOid}`);
   const already = rerunFrom(state.rerunChecks ?? []);
   // A run deferred while it was going holds its checks' re-run: the run
   // re-run is that one, and a later run of them — one a review started
   // before it ended, say — answers for it, as a re-run's would.
   const deferredHere = (state.deferredRuns ?? []).includes(runId);
-  const repeated = checks.filter((_, index) => {
-    const from = already.get(rerunKeys[index]);
-    return (
-      from !== undefined && !(deferredHere && from === failed[index].checkRunId)
-    );
-  });
+  const repeated = jobs
+    .filter(({ checkRunId }, index) => {
+      const from = already.get(rerunKeys[index]);
+      return from !== undefined && !(deferredHere && from === checkRunId);
+    })
+    .map(({ check }) => check);
   // Each with the check run re-run: the re-run's runs come after it.
   const reran = [
     ...new Set([
       ...(state.rerunChecks ?? []),
-      ...failed.map(
-        ({ checkRunId }, index) => `${rerunKeys[index]}@${checkRunId ?? 0}`,
+      ...jobs.map(
+        ({ checkRunId }, index) => `${rerunKeys[index]}@${checkRunId}`,
       ),
     ]),
   ];

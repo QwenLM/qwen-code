@@ -254,6 +254,32 @@ describe('runRerun', () => {
     });
   });
 
+  it('counts every failed job the re-run re-runs, one a later run took the place of included', () => {
+    // Run 50 failed Lint and Test; a later run (51) of Test took its place
+    // on the PR. An earlier attempt of Build failed, and its latest passed.
+    contexts = [
+      { ...failedRun(3, 'Build', 50), conclusion: 'FAILURE' },
+      { ...failedRun(4, 'Build', 50), conclusion: 'SUCCESS' },
+      failedRun(5, 'Lint', 50),
+      failedRun(6, 'Test', 50),
+      failedRun(8, 'Test', 51),
+    ];
+    expect(runRerun(7, 50)).toMatchObject({
+      rerun: true,
+      checks: ['Lint', 'Test'],
+    });
+    expect(state().rerunChecks).toEqual([
+      `run:15368:1:pull_request:Lint@${HEAD}@5`,
+      `run:15368:1:pull_request:Test@${HEAD}@6`,
+    ]);
+    // Test was re-run with it: run 51's failure is real.
+    expect(runRerun(7, 51)).toMatchObject({
+      rerun: false,
+      reason: expect.stringMatching(/re-run on this head already/),
+    });
+    expect(mocks.ghWithInput).toHaveBeenCalledTimes(1);
+  });
+
   it('counts a later run of a deferred check as its re-run', () => {
     contexts = [failedRun(5, 'Lint', 50, 1, 'IN_PROGRESS')];
     expect(runRerun(7, 50)).toMatchObject({ deferred: true });

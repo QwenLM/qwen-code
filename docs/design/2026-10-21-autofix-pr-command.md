@@ -560,10 +560,12 @@ The helper decides what may be posted, against one fresh read of the PR
   the round's prepared snapshot file: the head can move on from a failure
   while the round runs (a re-run, a run a review starts), and the round's
   answer still stands, under the key the next failure of a review-started
-  workflow on that head carries. A failure of a run still deferred is not
-  recorded (it counts in `ignoredChecks`): the gate reports it once more
-  when the run has ended, or reports a later run of the check that fails,
-  and the round answers it then; a conflict can
+  workflow on that head carries. A failure of a run deferred and still
+  going is not recorded (it counts in `ignoredChecks`): the gate reports it
+  once more when the run has ended, or reports a later run of the check
+  that fails, and the round answers it then. One whose run has ended, or
+  whose check a later run took the place of, is recorded: the gate does not
+  report it again; a conflict can
   be left for a human only while there is one. The PR must be open.
 - The head the plan is judged by is the one the watch knows (`sync` and
   `push` read it from the branch), not the API's, which can lag a push.
@@ -765,8 +767,10 @@ merged.
 Re-runs the failed jobs of a run the fix agent judged an infrastructure
 failure, with `gh run rerun <run-id> --failed`, on an open PR only. Only a GitHub Actions job of
 the PR's repository counts: a commit status or another app may link any URL,
-and a run id read from it would re-run some unrelated run. Each failed check
-of that run on the head spends its one re-run (`rerunChecks`, keyed by the
+and a run id read from it would re-run some unrelated run. Each failed job
+of the run's latest attempt spends its check's one re-run — one a later run
+of the check took the place of on the PR as well, since `--failed` re-runs
+it too (`rerunChecks`, keyed by the
 check's identity — app, workflow, trigger and job name, as Section 6.2 tells
 checks apart — and the head, so two workflows with a job of the same name
 each keep theirs, with the check run re-run, which Section 6.2 keys the

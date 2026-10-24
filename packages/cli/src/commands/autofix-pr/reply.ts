@@ -22,6 +22,7 @@ import {
 } from '../review/lib/gh.js';
 import {
   buildSnapshot,
+  checkEvents,
   fetchPrData,
   roundReplyCheck,
   isOwnReply,
@@ -424,6 +425,13 @@ function replyLocked(
   const knownChecks = new Set(state.handledChecks ?? []);
   const roundChecks = snapshotChecks(paths.snapshotPath);
   const deferredRuns = new Set(state.deferredRuns ?? []);
+  // The runs still going on the head, by their latest failures.
+  const going = new Set(
+    checkEvents(pr, state.rerunChecks ?? []).failed.flatMap(
+      ({ event, runDone }) =>
+        !runDone && event.runId !== null ? [event.runId] : [],
+    ),
+  );
   const currentChecks: string[] = [];
   let ignoredChecks = 0;
   for (const key of new Set(plan.handledChecks)) {
@@ -445,10 +453,12 @@ function replyLocked(
           `${key} is not a failure snapshot reports on the PR head; pass the \`key\` of a ci_failed event.`,
         );
       }
-      // A failure of a run still deferred is reported again once the run
-      // has ended, and answered then: recorded now, it would be hidden.
+      // A failure of a run deferred and still going is reported again once
+      // the run has ended, and answered then: recorded now, it would be
+      // hidden. One whose run ended, or that a later run of its check took
+      // the place of, is not reported again: the round's answer stands.
       const run = roundChecks.get(key);
-      if (run != null && deferredRuns.has(run)) {
+      if (run != null && deferredRuns.has(run) && going.has(run)) {
         ignoredChecks += 1;
         continue;
       }

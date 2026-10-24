@@ -595,6 +595,45 @@ export function checkEvents(
   };
 }
 
+/**
+ * Every failed job of a run on the head, by its latest attempt in the run,
+ * whether or not a later run of its check took its place on the PR:
+ * `gh run rerun --failed` re-runs them all, so each spends its check's
+ * re-run.
+ */
+export function failedJobsOfRun(
+  pr: PrData,
+  runId: number,
+): Array<{ check: string; identity: string; checkRunId: number }> {
+  const commit = pr.commits.nodes[0]?.commit;
+  if (!commit || commit.oid !== pr.headRefOid) return [];
+  const runsPrefix =
+    `${pr.url.replace(/\/pull\/\d+\/?$/, '')}/actions/runs/`.toLowerCase();
+  const ofRun = (commit.statusCheckRollup?.contexts.nodes ?? []).filter(
+    (ctx) =>
+      ctx.__typename === 'CheckRun' &&
+      runIdFrom(
+        ctx.detailsUrl,
+        runsPrefix,
+        Boolean(ctx.checkSuite?.workflowRun),
+      ) === runId,
+  );
+  return latestContexts(ofRun).flatMap((ctx) =>
+    ctx.__typename === 'CheckRun' &&
+    ctx.status === 'COMPLETED' &&
+    ctx.conclusion &&
+    FAILED_CONCLUSIONS.has(ctx.conclusion)
+      ? [
+          {
+            check: ctx.name,
+            identity: checkIdentity(ctx),
+            checkRunId: ctx.databaseId,
+          },
+        ]
+      : [],
+  );
+}
+
 /** Events that run a workflow on the PR's code, rather than on a comment. */
 const CODE_EVENTS = new Set(['pull_request', 'pull_request_target', 'push']);
 

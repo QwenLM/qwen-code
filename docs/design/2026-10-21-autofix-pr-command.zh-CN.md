@@ -244,7 +244,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 能发什么由辅助命令决定，依据是重新读一次 PR（按 prepared snapshot 的规则）：
 
-- 回复只发到此刻有可信作者新评论的 thread，`handled` 列出的必须是该 thread 的评论。不可信评论不能标记为已处理；check 键必须是 head 上某个 `ci_failed` 事件报告的（prepared 模式会输出它的 `key`）——此刻报告的，或这一轮的 prepared snapshot 文件里报告过的：一轮运行期间 head 可能已越过某个失败（重跑、review 启动的运行），这一轮对它的回答仍然有效，记在由 review 启动的 workflow 在该 head 上下一次失败会带的那个键下。仍在延后中的 run 的失败不记录（计入 `ignoredChecks`）：run 结束时闸门会再报告一次，或报告该检查之后某次失败的运行，那一轮再回答它；冲突只有在确实存在时才能留给人处理。PR 必须仍处于打开状态。
+- 回复只发到此刻有可信作者新评论的 thread，`handled` 列出的必须是该 thread 的评论。不可信评论不能标记为已处理；check 键必须是 head 上某个 `ci_failed` 事件报告的（prepared 模式会输出它的 `key`）——此刻报告的，或这一轮的 prepared snapshot 文件里报告过的：一轮运行期间 head 可能已越过某个失败（重跑、review 启动的运行），这一轮对它的回答仍然有效，记在由 review 启动的 workflow 在该 head 上下一次失败会带的那个键下。被延后且仍在运行的 run 的失败不记录（计入 `ignoredChecks`）：run 结束时闸门会再报告一次，或报告该检查之后某次失败的运行，那一轮再回答它。run 已结束、或其检查已被更晚一次运行取代的，照常记录：闸门不会再报告它；冲突只有在确实存在时才能留给人处理。PR 必须仍处于打开状态。
 - 判断计划所依据的 head 是监视已知的那个（`sync` 和 `push` 从分支读取），而不是 API 的——API 可能比推送滞后。
 - 其他 head 的失败键（这一轮已推送越过了它）被忽略并计入 `ignoredChecks`：prepared snapshot 只读当前 head。根本不是失败键的字符串会被拒绝。`handledConflict` 只在 GitHub 报告冲突时，或者在本监视推送的 head 上报告 `UNKNOWN` 时，才记在当前 head 上：推送刚完成时 GitHub 会报告 `UNKNOWN`，直到重新算完合并。
 - 同一 thread 有两条回复，或同一个评论 id 出现两次的计划会被拒绝。
@@ -290,7 +290,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 ### 6.9 `rerun <pr> <run-id>`
 
-对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job，只针对打开的 PR。只认 PR 所在仓库的 GitHub Actions job：commit status 或其他 app 可以链接任意 URL，从中读出的 run id 会重跑某个无关的 run。该 run 在当前 head 上的每个失败检查都用掉自己唯一的一次重跑（`rerunChecks`，按检查身份——app、workflow、触发事件和 job 名，与第 6.2 节区分检查的方式相同——和 head 记，所以两个 workflow 里同名的 job 各有各的一次，并记下被重跑的 check run，第 6.2 节据此给重跑的回答定键）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。重跑在询问 GitHub 之前就计数，调用本身也不重试，所以响应丢失的重跑不会被再请求一次：最多一次，绝不两次。只有 GitHub 接受了重跑，其失败才记为已处理：被拒绝（gh 的 `run <id> cannot be rerun`，即 403——token 没有 `actions: write`、run 太旧——或其他 HTTP 4xx）会退还这次重跑，而任何错误都会让这一轮把这些失败作为需要人工处理来回答，所以检查不会一直红着却无人报告。
+对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job，只针对打开的 PR。只认 PR 所在仓库的 GitHub Actions job：commit status 或其他 app 可以链接任意 URL，从中读出的 run id 会重跑某个无关的 run。该 run 最新一次 attempt 里的每个失败 job 都用掉它所属检查唯一的一次重跑——在 PR 上已被该检查更晚一次运行取代的 job 也一样，因为 `--failed` 也会重跑它（`rerunChecks`，按检查身份——app、workflow、触发事件和 job 名，与第 6.2 节区分检查的方式相同——和 head 记，所以两个 workflow 里同名的 job 各有各的一次，并记下被重跑的 check run，第 6.2 节据此给重跑的回答定键）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。重跑在询问 GitHub 之前就计数，调用本身也不重试，所以响应丢失的重跑不会被再请求一次：最多一次，绝不两次。只有 GitHub 接受了重跑，其失败才记为已处理：被拒绝（gh 的 `run <id> cannot be rerun`，即 403——token 没有 `actions: write`、run 太旧——或其他 HTTP 4xx）会退还这次重跑，而任何错误都会让这一轮把这些失败作为需要人工处理来回答，所以检查不会一直红着却无人报告。
 
 GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就报告。因此仍在进行的 run 不询问 GitHub，直接回答 `{"rerun": false, "deferred": true}`，并记入 `deferredRuns`：该 run 结束时闸门会再报告一次它的失败（第 6.2 节），届时那一轮再重跑。在那之前 prepared snapshot 也不列出它们，这样别的事件不会把同一个失败再交给这一轮延后一次。延后为它的每个失败检查保留那一次重跑（记在 `rerunChecks` 里，连同被延后的 check run）：该 run 结束时重跑它；而在该 head 上这个检查更晚的一次运行——比如它结束前某次 review 启动的运行——视同重跑的回答，以重跑的键报告（第 6.2 节），并按真实失败处理。同一 workflow 里同名的两个 job 算同一个检查：第二个在延后之后才失败时，那次重跑已由第一个占用，run 结束后第二个按真实失败处理。这是已知限制。
 
