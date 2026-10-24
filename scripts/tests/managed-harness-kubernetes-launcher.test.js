@@ -100,6 +100,16 @@ it('hands qwen serve only Broker variables that serve removes from its environme
   for (const key of brokerKeys) expect(removed).toContain(key);
 });
 
+// A manifest that still sets the old name leaves the launcher without one.
+it('names a missing Broker URL', async () => {
+  delete state.process.env.QWEN_MANAGED_RUNTIME_BROKER_URL;
+  await launch();
+
+  expect(state.process.exitCode).toBe(1);
+  expect(state.spawned).toHaveLength(0);
+  expect(state.errors).toEqual(['The pool requires a Broker URL.']);
+});
+
 it('refuses a plaintext Broker URL', async () => {
   state.process.env.QWEN_MANAGED_RUNTIME_BROKER_URL =
     'http://runtime-broker.example.internal';

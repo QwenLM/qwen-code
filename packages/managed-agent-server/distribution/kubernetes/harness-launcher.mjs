@@ -33,6 +33,8 @@ try {
     )
   )
     throw new Error('A verified capability digest is required.');
+  if (!process.env.QWEN_MANAGED_RUNTIME_BROKER_URL)
+    throw new Error('The pool requires a Broker URL.');
   const brokerUrl = new URL(process.env.QWEN_MANAGED_RUNTIME_BROKER_URL);
   if (
     brokerUrl.protocol !== 'https:' ||
