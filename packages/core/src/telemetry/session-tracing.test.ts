@@ -1061,6 +1061,18 @@ describe('session-tracing', () => {
       });
     });
 
+    it('emits positive cache-creation token counts in the OTel attribute', () => {
+      const llm = runLLM({
+        success: true,
+        inputTokens: 373,
+        outputTokens: 112,
+        cacheCreationInputTokens: 256,
+      });
+      expect(llm.attributes).toMatchObject({
+        'gen_ai.usage.cache_creation.input_tokens': 256,
+      });
+    });
+
     it('endLLMRequestSpan omits ttft_ms when undefined (non-streaming or aborted before first chunk)', () => {
       expectAttrs(runLLM({ success: true, durationMs: 500 }).attributes, {
         ttft_ms: undefined,
