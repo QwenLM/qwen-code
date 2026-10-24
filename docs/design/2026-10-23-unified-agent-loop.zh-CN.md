@@ -262,15 +262,16 @@ if (config.isUnifiedAgentLoopEnabled()) {
 - 设置关闭时，任何入口都不变。唯一改动的共享代码是 scheduler 新增的可选项 `beforeToolLaunch`，不传入时它不起作用。
 - 设置开启时，headless 与现在相比有以下有意的差异。其中大多数源于把一批调用作为一个整体调度，这也是 TUI 现在的做法：
   - 在 stream-json 中，超过 `--max-session-turns` 的消息会在会话轮数上限处结束运行，与 `-p` 相同（错误写到 stderr，退出码 53），而不是返回一个重复上一条回答的成功结果（#15325）；
+  - 通知轮次（cron、monitor 等排队条目）的每一轮模型调用都计入 `--max-session-turns`，与主轮次相同，而不是整个条目只计一轮，因此通知轮次中调用工具的运行可能更早到达上限；
   - 一批调用的 PreToolUse hook 和审批（stream-json 的 `can_use_tool`）会在这一批的任何调用启动之前为所有调用执行，而不是一次一个调用；在 `--max-tool-calls` 下，超出预算的调用可能先被审批通过，然后在执行前被停下；
   - PostToolBatch hook 每批触发一次，带上这一批的所有调用，批次输出预算也按整批计算；现在每个调用都是单独的一批；
   - 遥测按整批记录，与 TUI 一致：进入 plan mode 那个调用的同批调用记为失败的工具调用（JSON 输出的 `stats` 也计入），启动前被拦下的调用仍有工具 span；带 Mod 工具 hook 时调用仍逐个调度，这两点都不适用；
   - 一批中有多个串行调用时，它们的结果在整批完成时输出，而不是每个调用完成后输出；
   - 配置了 PreToolUse 或 PermissionRequest hook 时，只读的 shell 调用可以并行执行，按 hook 处理后的输入判断，而不是总是单独执行；
   - 同批中排在前面的 skill 注册了 PreToolUse hook 时，后面的调用会被拦下，需要模型重新发起，而不是由新的 hook 检查；
-  - 在 `--json-schema` 下，同一次回复中重复 call id 的 `structured_output` 调用按重复调用作答而不执行，因此有效的第二次提交要等到下一轮。
+  - 在 `--json-schema` 下，同一次回复中重复 call id 的 `structured_output` 调用按重复调用作答而不执行，因此有效的第二次提交要等到下一轮；之后的轮次以相同的 call id 和相同的参数重新提交时，也按重复调用作答，再提交一次则以 provider 重复循环结束运行，而不是每次都执行。
 
-  对拍测试覆盖了保持不变的常见场景，并对前两条差异做了断言。
+  对拍测试覆盖了保持不变的常见场景，并对 #15325 的停止和 `--max-tool-calls` 下被审批的调用做了断言。headless 单测在两份 loop 上运行通知轮次的计数和重新提交的 `structured_output`。
 
 - 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 

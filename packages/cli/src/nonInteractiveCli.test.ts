@@ -7625,6 +7625,93 @@ describe('runNonInteractive', () => {
     );
   });
 
+  // Intended difference: headless charges a drain item one turn, while the
+  // client counts each of its rounds, and only the shared loop honours the
+  // client's limit.
+  it.each(bothLoops)(
+    'handles the client session turn limit inside a drain item ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+
+      const notificationXml =
+        '<task-notification>\n' +
+        '<task-id>mon_1</task-id>\n' +
+        '<kind>monitor</kind>\n' +
+        '<status>running</status>\n' +
+        '<summary>Monitor emitted event #1.</summary>\n' +
+        '<result>ready</result>\n' +
+        '</task-notification>';
+      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+        if (!cb) return;
+        cb('Monitor "logs" event #1: ready', notificationXml, {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'running',
+          eventCount: 1,
+        });
+      });
+
+      const drainToolCallEvent: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-drain',
+          name: 'testTool',
+          args: { arg1: 'value1' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-drain-turn-cap',
+        },
+      };
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'Tool response' }],
+      });
+
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Monitor launched.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 2 },
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents([drainToolCallEvent]))
+        .mockReturnValueOnce(
+          createStreamFromEvents([{ type: LlmEventType.MaxSessionTurns }]),
+        );
+
+      // A drain item runs detached from the run's promise, so a throwing exit
+      // would surface as an unhandled rejection; hold the exit open instead,
+      // as the real process ends there.
+      if (shared) {
+        vi.mocked(process.exit).mockImplementation(
+          () => new Promise<never>(() => {}) as never,
+        );
+      }
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Watch the logs',
+        'prompt-id-drain-turn-cap',
+      );
+
+      if (shared) {
+        await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(53));
+        expect(processStderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Reached max session turns'),
+        );
+      } else {
+        await expect(run).resolves.toBe(0);
+      }
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.skip('should emit a single user envelope when userEnvelope is provided', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
@@ -9719,6 +9806,89 @@ describe('runNonInteractive', () => {
       // — the failed first attempt did not short-circuit the run.
       expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     });
+
+    // Intended difference: the shared loop keys structured_output by its call
+    // id like any other call, so a resubmission under a reused id is a replay.
+    it.each(bothLoops)(
+      'handles a structured_output resubmitted under a reused call id ($loop)',
+      async ({ shared }) => {
+        if (shared) useSharedLoopWithModToolHooks();
+        (mockConfig.getJsonSchema as Mock).mockReturnValue({
+          type: 'object',
+          properties: { summary: { type: 'string' } },
+          required: ['summary'],
+        });
+        (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+        setupMetricsMock();
+
+        const reusedStructured: ServerLlmStreamEvent = {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'tool-structured-reused',
+            name: 'structured_output',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-reused',
+          },
+        };
+        const validStructured: ServerLlmStreamEvent = {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'tool-structured-valid',
+            name: 'structured_output',
+            args: { summary: 'fourth try' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-reused',
+          },
+        };
+
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(createStreamFromEvents([reusedStructured]))
+          .mockReturnValueOnce(createStreamFromEvents([reusedStructured]))
+          .mockReturnValueOnce(createStreamFromEvents([reusedStructured]))
+          .mockReturnValueOnce(createStreamFromEvents([validStructured]));
+
+        const invalid = {
+          error: new Error('args failed schema validation'),
+          errorType: 'TOOL_INVALID_ARGUMENTS',
+          responseParts: [
+            { text: 'Tool error: args failed schema validation' },
+          ],
+        };
+        mockCoreExecuteToolCall
+          .mockResolvedValueOnce(invalid)
+          .mockResolvedValueOnce(invalid)
+          .mockResolvedValueOnce(invalid)
+          .mockResolvedValueOnce({ responseParts: [{ text: 'ok' }] });
+
+        const exitCode = await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Emit structured output',
+          'prompt-id-reused',
+        );
+
+        if (shared) {
+          // Round 2 is answered as a duplicate; round 3 repeats it and ends
+          // the run as a provider duplicate loop.
+          expect(exitCode).toBe(1);
+          expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+          const duplicateParts = mockLlmClient.sendMessageStream.mock
+            .calls[2][0] as Part[];
+          expect(
+            duplicateParts[0].functionResponse?.response?.['error'],
+          ).toContain(
+            'Duplicate provider tool call id "tool-structured-reused"',
+          );
+        } else {
+          // Today every resubmission runs again until a valid one lands.
+          expect(exitCode).toBe(0);
+          expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(4);
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(4);
+        }
+      },
+    );
 
     it('errors with non-zero exit when model emits plain text instead of structured_output', async () => {
       (mockConfig.getJsonSchema as Mock).mockReturnValue({
