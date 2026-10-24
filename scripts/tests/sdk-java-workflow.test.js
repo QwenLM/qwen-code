@@ -951,10 +951,19 @@ echo REACHED_END`,
     for (const command of maven) {
       expect(command).toContain('|| suite_status=$?');
     }
+    const selfHosted = parse(workflow).jobs.test.steps.find(
+      (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+    );
     // The full tier narrows the H2 suite to the Broker packages; without
     // this argument the leg runs the whole unit suite the mysql job owns.
-    expect(block).toContain(
-      `'-Dtest=${brokerTestPattern}' clean test || suite_status=$?`,
+    // Pin the if/else itself: a substring pin stays green when the branches
+    // swap, which would run the narrowed suite on the fast tier instead.
+    expect(selfHosted.run).toContain(
+      'if [ "${TIER}" = "fast" ]; then\n' +
+        '      mvn --batch-mode --no-transfer-progress clean test || suite_status=$?\n' +
+        '    else\n' +
+        `      mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test || suite_status=$?\n` +
+        '    fi',
     );
   });
 
