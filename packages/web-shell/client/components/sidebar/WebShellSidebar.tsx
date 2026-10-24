@@ -1,3 +1,4 @@
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
   Fragment,
   useCallback,
@@ -1324,6 +1325,7 @@ export function WebShellSidebar({
       ? sessionSource
       : 'default'
     : undefined;
+  const daemonAvailable = useDaemonAvailability() === 'available';
   const channelManagementEnabled = Boolean(
     workspace.capabilities?.features.includes('channel_management'),
   );
@@ -2830,7 +2832,7 @@ export function WebShellSidebar({
   // without a source switch.
   const channelCatalogPollInFlightRef = useRef(false);
   useEffect(() => {
-    if (!channelGroupingEnabled) return;
+    if (!daemonAvailable || !channelGroupingEnabled) return;
     // Back off on the channels hook's OWN failures too — a persistently
     // failing channels endpoint must not be re-requested every 2s.
     const pollInterval =
@@ -2846,6 +2848,7 @@ export function WebShellSidebar({
     }, pollInterval);
     return () => window.clearInterval(intervalId);
   }, [
+    daemonAvailable,
     channelCatalogError,
     channelGroupingEnabled,
     error,

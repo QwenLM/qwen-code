@@ -10,6 +10,30 @@ import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const availabilityMock = vi.hoisted(() => ({
+  enabled: false,
+  available: true,
+  listener: undefined as (() => void) | undefined,
+  controller: {
+    getSnapshot: () =>
+      availabilityMock.available ? 'available' : 'unavailable',
+    assertAvailable: () => {
+      if (!availabilityMock.available) throw new Error('Daemon unavailable');
+    },
+    check: vi.fn(async () => {}),
+    subscribe: (listener: () => void) => {
+      availabilityMock.listener = listener;
+      return () => {
+        availabilityMock.listener = undefined;
+      };
+    },
+  },
+}));
+vi.mock('../daemon/availability-context', () => ({
+  useDaemonAvailabilityController: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
+}));
+
 import {
   useLiveBrowserHost,
   type UseLiveBrowserHostResult,
@@ -239,6 +263,9 @@ function speak(samples: number[] = [0.5, -0.5]): void {
 }
 
 beforeEach(() => {
+  availabilityMock.enabled = false;
+  availabilityMock.available = true;
+  availabilityMock.listener = undefined;
   host = undefined;
   token = undefined;
   onStatus.mockReset();
@@ -298,6 +325,29 @@ afterEach(async () => {
 });
 
 describe('useLiveBrowserHost', () => {
+  it('blocks capture while unavailable and ends an active host without restarting on recovery', async () => {
+    availabilityMock.enabled = true;
+    availabilityMock.available = false;
+    await render();
+    await act(async () => host!.connect());
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(MockWebSocket.instances).toHaveLength(0);
+    availabilityMock.available = true;
+    await connected();
+    await act(async () => {
+      availabilityMock.available = false;
+      availabilityMock.listener?.();
+    });
+    expect(track.stop).toHaveBeenCalled();
+    expect(host!.phase).toBe('error');
+    await act(async () => {
+      availabilityMock.available = true;
+      availabilityMock.listener?.();
+    });
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
   it('takes the lease on /live/web with the reduced browser hello', async () => {
     token = 'secret-token';
     await render();

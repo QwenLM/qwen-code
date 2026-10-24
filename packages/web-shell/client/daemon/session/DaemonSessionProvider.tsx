@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDaemonClient, findDaemonAvailability } from '../availability.js';
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../availability-context.js';
 import {
   restoreLocalDeletionBlocks,
   removeDeletedMessageBlocks,
@@ -22,7 +27,7 @@ import {
 } from 'react';
 import {
   DAEMON_APPROVAL_MODES,
-  DaemonClient,
+  type DaemonClient,
   DaemonCapabilityMissingError,
   DaemonHttpError,
   DaemonSessionClient,
@@ -898,6 +903,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     children,
   } = props;
   const workspace = useOptionalDaemonWorkspace();
+  const availability = useDaemonAvailability();
+  const availabilityController = useDaemonAvailabilityController();
+  const availabilityRef = useRef(availabilityController);
+  availabilityRef.current = availabilityController;
   const resolvedBaseUrl = baseUrl ?? workspace?.baseUrl;
   const resolvedToken = token ?? workspace?.token;
   const sessionContextResolution = useMemo(() => {
@@ -1734,7 +1743,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       const client =
         workspaceClientRef.current ??
-        new DaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
+        createDaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
       let session: DaemonSessionClient | undefined;
       let capabilities:
         | Awaited<ReturnType<DaemonClient['capabilities']>>
@@ -1807,6 +1816,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let stopPersistenceUnconfirmed = false;
 
       while (!disposed && !abort.signal.aborted) {
+        try {
+          if (availabilityRef.current) {
+            await availabilityRef.current.waitUntilAvailable(abort.signal);
+          }
+        } catch {
+          return;
+        }
+        if (disposed || abort.signal.aborted) return;
+        const availabilityGeneration = availabilityRef.current?.getGeneration();
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
         let loadingRequestedSession = false;
@@ -4234,6 +4252,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
+            void availabilityRef.current?.check();
             nextSseConnectReason = 'stream_end';
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
@@ -4285,6 +4304,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             continue;
           }
           if (disposed || abort.signal.aborted) return;
+          availabilityRef.current?.reportFailure(
+            error,
+            undefined,
+            availabilityGeneration,
+          );
           // The loop threw, so the in-try post-loop flush was skipped. Apply
           // buffered transcript events now: leaving them with a scheduled timer
           // would let it fire after a reconnect reset and dispatch stale events.
@@ -4720,9 +4744,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           token: resolvedToken,
           sessionId: session.sessionId,
           clientId: session.clientId,
-        }).catch((err) =>
-          console.warn('[DaemonSessionProvider] detach failed:', err),
-        );
+        }).catch((err) => {
+          const state = findDaemonAvailability(
+            resolvedBaseUrl!,
+            resolvedToken,
+          )?.getSnapshot();
+          if (state === undefined || state === 'available') {
+            console.warn('[DaemonSessionProvider] detach failed:', err);
+          }
+        });
       }
       if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         sessionRef.current = undefined;
@@ -4763,6 +4793,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   useEffect(() => {
     if (
+      availability !== 'available' ||
       !heartbeatSupportedRef.current ||
       connection.status !== 'connected' ||
       heartbeatIntervalMs <= 0 ||
@@ -4920,6 +4951,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     heartbeatFailureThreshold,
     heartbeatIntervalMs,
     trajectoryLiveStore,
+    availability,
   ]);
 
   const settleAdmittedPrompt = useCallback(
@@ -5003,7 +5035,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         ) => {
           const client =
             workspaceClientRef.current ??
-            new DaemonClient({
+            createDaemonClient({
               baseUrl: resolvedBaseUrl!,
               token: resolvedToken,
             });
@@ -5044,7 +5076,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         createDetachedStandaloneSession: (overrides) => {
           const client =
             workspaceClientRef.current ??
-            new DaemonClient({
+            createDaemonClient({
               baseUrl: resolvedBaseUrl!,
               token: resolvedToken,
             });

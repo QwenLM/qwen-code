@@ -1,3 +1,7 @@
+import {
+  DaemonUnavailableError,
+  isDaemonUnavailableError,
+} from '../daemon/availability.js';
 import type {
   DaemonClient,
   DaemonSessionLiveState,
@@ -233,8 +237,35 @@ export class SessionCatalogStore {
   private activeBackgroundRequests = 0;
   private queueSequence = 0;
   private visibilityListening = false;
+  private paused = false;
 
   constructor(private readonly client: DaemonClient) {}
+
+  setPaused(paused: boolean): void {
+    if (this.paused === paused) return;
+    this.paused = paused;
+    if (paused) {
+      for (const timer of this.trailingRefreshTimers.values())
+        clearTimeout(timer);
+      this.trailingRefreshTimers.clear();
+    }
+    for (const entry of this.entries.values()) {
+      this.clearPollTimer(entry);
+      if (paused || entry.subscribers.size === 0) continue;
+      entry.retryAt = undefined;
+      if (this.isWorkspaceLiveStateEnabled(entry.query.workspaceCwd)) {
+        this.requestLiveStateRefresh(entry.query.workspaceCwd, 'interactive');
+      } else if (
+        hasAutoLoadSubscriber(entry) ||
+        getPollInterval(entry) !== undefined
+      ) {
+        // Recovery must not reuse a read started before the outage.
+        if (entry.runningRevision !== undefined) entry.desiredRevision += 1;
+        this.requestBackground(entry, 'initial');
+      }
+    }
+    if (!paused) this.drainQueue();
+  }
 
   getSnapshot(query: SessionCatalogQuery): SessionCatalogSnapshot {
     return this.getOrCreateEntry(query).snapshot;
@@ -485,6 +516,7 @@ export class SessionCatalogStore {
     ) {
       return entry.snapshot.page;
     }
+    if (this.paused) throw new DaemonUnavailableError();
     let request: Promise<DaemonSessionListPage>;
     const reusableRunningRequest =
       entry.runningRevision !== undefined &&
@@ -885,6 +917,7 @@ export class SessionCatalogStore {
   async stageWorkspaceRefresh(
     workspaceCwd: string,
   ): Promise<StagedWorkspaceSessionCatalog> {
+    if (this.paused) throw new DaemonUnavailableError();
     const workspaceEntries = [...this.entries.values()].filter(
       (entry) => entry.query.workspaceCwd === workspaceCwd,
     );
@@ -968,6 +1001,14 @@ export class SessionCatalogStore {
       if ('superseded' in result) continue;
       firstFailure ??= result.error;
       if (result.entry.desiredRevision !== result.revision) continue;
+      if (this.paused || isDaemonUnavailableError(result.error)) {
+        this.setSnapshot(result.entry, {
+          ...result.entry.snapshot,
+          loading: false,
+        });
+        this.rejectWaiters(result.entry, result.revision, result.error);
+        continue;
+      }
       // Scope the failure to the entry whose own fetch rejected; entries
       // that already staged successfully keep their old page and commit on
       // the next reconcile.
@@ -1032,6 +1073,7 @@ export class SessionCatalogStore {
     workspaceCwd: string,
     delayMs = SESSION_CATALOG_TRAILING_REFRESH_MS,
   ): void {
+    if (this.paused) return;
     const current = this.trailingRefreshTimers.get(workspaceCwd);
     if (current !== undefined) clearTimeout(current);
     const timer = setTimeout(() => {
@@ -1093,6 +1135,7 @@ export class SessionCatalogStore {
     entry: CatalogEntry,
     bypassRetry = false,
   ): Promise<DaemonSessionListPage> {
+    if (this.paused) return Promise.reject(new DaemonUnavailableError());
     entry.desiredRevision += 1;
     const revision = entry.desiredRevision;
     this.setSnapshot(entry, { ...entry.snapshot, stale: true });
@@ -1134,6 +1177,7 @@ export class SessionCatalogStore {
     entry: CatalogEntry,
     priority: 'initial' | 'poll',
   ): void {
+    if (this.paused) return;
     if (this.isWorkspaceLiveStateEnabled(entry.query.workspaceCwd)) return;
     if (this.isHidden()) {
       entry.nextPollAt = Date.now();
@@ -1221,6 +1265,7 @@ export class SessionCatalogStore {
   }
 
   private drainQueue(): void {
+    if (this.paused) return;
     while (this.activeRequests < 2) {
       const index = this.queue.findIndex(
         (job) => !job.background || this.activeBackgroundRequests < 1,
@@ -1290,6 +1335,11 @@ export class SessionCatalogStore {
             if (entry.desiredRevision !== revision) return;
             if (stagedOwnsRevision()) return;
             const normalized = normalizeError(error);
+            if (this.paused || isDaemonUnavailableError(error)) {
+              this.setSnapshot(entry, { ...entry.snapshot, loading: false });
+              this.rejectWaiters(entry, revision, normalized);
+              return;
+            }
             entry.retryAt = Date.now() + SESSION_CATALOG_ERROR_RETRY_MS;
             this.setSnapshot(entry, {
               ...entry.snapshot,
@@ -1431,6 +1481,7 @@ export class SessionCatalogStore {
 
   private schedulePollFromNow(entry: CatalogEntry): void {
     this.clearPollTimer(entry);
+    if (this.paused) return;
     const now = Date.now();
     if (this.isHidden() && entry.invalidated) {
       entry.nextPollAt = Math.min(entry.nextPollAt ?? now, now);
@@ -1533,6 +1584,7 @@ export class SessionCatalogStore {
   }
 
   private readonly onVisibilityChange = (): void => {
+    if (this.paused) return;
     if (this.isHidden()) {
       for (const entry of this.entries.values()) {
         this.clearPollTimer(entry);
