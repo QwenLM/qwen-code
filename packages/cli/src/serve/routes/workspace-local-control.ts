@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { networkInterfaces } from 'node:os';
 import type { Application, Request, Response, RequestHandler } from 'express';
 import {
   AmbiguousLanInterfaceError,
+  findExplicitCandidate,
+  isRefusedExplicitAddress,
   listLanCandidates,
   NoLanInterfaceError,
+  ReservedLanAddressError,
   UnknownLanInterfaceError,
 } from '../local-control/lan-interfaces.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
@@ -40,7 +44,10 @@ export interface RegisterWorkspaceLocalControlRoutesDeps {
   trustedLoopbackMode?: boolean;
 }
 
-async function withUiData(status: LocalControlStatus) {
+async function withUiData(
+  status: LocalControlStatus,
+  service: LocalControlService,
+) {
   let qrText: string | undefined;
   if (status.url) {
     // QR rendering is best-effort and must never fail the request. The pairing
@@ -61,7 +68,30 @@ async function withUiData(status: LocalControlStatus) {
       qrText = undefined;
     }
   }
-  return { ...status, qrText, interfaces: listLanCandidates() };
+  // Surface the operator's CLI-granted explicit address (#14136) as its own
+  // field — never inside `interfaces`, which is the automatic-candidate list
+  // the QR button resolves against listLanCandidates(). The card renders it
+  // as a labelled row and re-posts it on re-enable. `explicitCandidate` is a
+  // liveness view, present only while the host holds the address, so it
+  // cannot tell a stale pick from a VPN/DHCP flap; `grantedAddress` reports
+  // the recorded grant. A pick that is truly gone is dropped by the card on
+  // the daemon's refusal to bind it, which returns the fresh candidate list.
+  const grant = service.grantedExplicitCandidate;
+  const explicitCandidate = grant
+    ? findExplicitCandidate(grant.address, networkInterfaces())
+    : undefined;
+  return {
+    ...status,
+    qrText,
+    interfaces: listLanCandidates(),
+    explicitCandidate,
+    // Provenance, not liveness: the host can stop holding a granted address
+    // (VPN down, DHCP move) while the listener stays bound to it, and the
+    // grant survives until a successful enable elsewhere supersedes it.
+    // `explicitCandidate` alone therefore cannot tell the card whether a
+    // retained pick is stale.
+    grantedAddress: grant?.address,
+  };
 }
 
 /**
@@ -116,7 +146,7 @@ export function registerWorkspaceLocalControlRoutes(
       .json(
         presentStatus(
           req,
-          await withUiData(deps.service.status()),
+          await withUiData(deps.service.status(), deps.service),
           trustedLoopbackMode,
         ),
       );
@@ -159,6 +189,38 @@ export function registerWorkspaceLocalControlRoutes(
         address?: unknown;
         target?: unknown;
       };
+      // The explicit opt-in is granted by provenance, not by the shape of a
+      // caller-supplied string: an HTTP-posted address must be a current
+      // automatic candidate or the address the operator granted with
+      // `--local-control-address` (recorded on the service). Anything else
+      // keeps failing closed — otherwise any local process could move the
+      // listener onto an address the operator never named and walk away with
+      // the pairing credential. A re-post of the address the daemon is
+      // currently serving skips the gate: the service no-ops an enable while
+      // active, and that address may legitimately have left the candidate
+      // list (DHCP reassignment) while the listener stays bound. The refusal
+      // distinguishes an address the host holds but never granted (the
+      // remedy is the CLI flag) from one the host no longer has.
+      if (typeof body.address === 'string') {
+        const live = deps.service.status();
+        if (!live.active || live.address !== body.address) {
+          if (
+            !listLanCandidates().some((c) => c.address === body.address) &&
+            body.address !== deps.service.grantedExplicitCandidate?.address
+          ) {
+            sendEnableError(
+              res,
+              isRefusedExplicitAddress(body.address)
+                ? new ReservedLanAddressError(body.address)
+                : findExplicitCandidate(body.address, networkInterfaces())
+                  ? new LocalControlAddressNotGrantedError(body.address)
+                  : new UnknownLanInterfaceError(body.address),
+              deps.daemonLog,
+            );
+            return;
+          }
+        }
+      }
       try {
         const ui = await withUiData(
           await deps.service.enable({
@@ -166,6 +228,7 @@ export function registerWorkspaceLocalControlRoutes(
               typeof body.address === 'string' ? body.address : undefined,
             target: typeof body.target === 'string' ? body.target : undefined,
           }),
+          deps.service,
         );
         if (!requestHasOperatorAuthority(req, trustedLoopbackMode) && ui.url) {
           // The response below has the secret removed; the operator still
@@ -203,12 +266,31 @@ export function registerWorkspaceLocalControlRoutes(
         .json(
           presentStatus(
             req,
-            await withUiData(await deps.service.disable()),
+            await withUiData(await deps.service.disable(), deps.service),
             trustedLoopbackMode,
           ),
         );
     },
   );
+}
+
+/**
+ * The enable gate's provenance refusal: the host holds the address, but it is
+ * neither a current automatic candidate nor the operator's
+ * `--local-control-address` grant. Distinct from UnknownLanInterfaceError —
+ * which asserts the host does NOT have the address — because the remedy
+ * differs, and the card renders this message verbatim.
+ */
+class LocalControlAddressNotGrantedError extends Error {
+  readonly code = 'local_control_address_not_granted';
+  constructor(requested: string) {
+    super(
+      `${requested} is neither a current automatic candidate nor the address ` +
+        'granted with --local-control-address. To expose it, restart the ' +
+        `daemon with --local-control-address ${requested}.`,
+    );
+    this.name = 'LocalControlAddressNotGrantedError';
+  }
 }
 
 function sendEnableError(
@@ -233,6 +315,22 @@ function sendEnableError(
     return;
   }
   if (error instanceof UnknownLanInterfaceError) {
+    res.status(409).json({
+      error: error.message,
+      code: error.code,
+      interfaces: listLanCandidates(),
+    });
+    return;
+  }
+  if (error instanceof ReservedLanAddressError) {
+    res.status(409).json({
+      error: error.message,
+      code: error.code,
+      interfaces: listLanCandidates(),
+    });
+    return;
+  }
+  if (error instanceof LocalControlAddressNotGrantedError) {
     res.status(409).json({
       error: error.message,
       code: error.code,
