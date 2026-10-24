@@ -200,6 +200,7 @@ function createTurn(
     timeoutMs?: number;
     readSettings?: () => Promise<HostedApprovalSettings>;
     isBlocked?: () => boolean;
+    permissionRules?: HostedApprovalSettings['permissionRules'];
   },
   hooks?: HostedHookSession,
   skills?: HostedSkillCatalog,
@@ -220,6 +221,9 @@ function createTurn(
       settings: {
         mode: approval.mode,
         timeoutMs: approval.timeoutMs ?? 60_000,
+        ...(approval.permissionRules
+          ? { permissionRules: approval.permissionRules }
+          : {}),
       },
       waiters,
       readSettings: approval.readSettings,
@@ -3929,6 +3933,141 @@ async function toolResultErrors() {
     .map((part) => part.functionResponse?.response?.['error']);
 }
 
+it('evaluates the actual rewritten WebFetch destination before Full Access dispatch', async () => {
+  turn = createTurn(false, {
+    mode: 'yolo',
+    permissionRules: {
+      allow: [],
+      ask: [],
+      deny: ['WebFetch(domain:raw.githubusercontent.com)'],
+    },
+  });
+  const call = {
+    ...calls[0],
+    name: 'web_fetch',
+    args: {
+      url: 'https://github.com/QwenLM/qwen-code/blob/main/README.md',
+      prompt: 'Read',
+    },
+  };
+  const result = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(JSON.stringify(result)).toContain('permission rules denied');
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it.each(['default', 'auto-edit', 'auto', 'yolo'] as const)(
+  'honors an explicit deny before mode %s and does not run the classifier',
+  async (mode) => {
+    turn = createTurn(false, {
+      mode,
+      permissionRules: { allow: ['Edit'], ask: ['Edit'], deny: ['Edit'] },
+    });
+    const classify = vi.fn();
+    turn.setPermissionClassifier(classify);
+    const result = await turn.execute(
+      [calls[1]],
+      [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(result)).toContain('permission rules denied');
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(classify).not.toHaveBeenCalled();
+    expect(actionIds()).toEqual([]);
+  },
+);
+
+it('does not dispatch when cancellation arrives during auto classification', async () => {
+  turn = createTurn(false, { mode: 'auto' });
+  const abort = new AbortController();
+  turn.setPermissionClassifier(async () => {
+    abort.abort();
+    return {
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    };
+  });
+  await expect(
+    turn.execute([calls[1]], [parts[1]], 'model', abort.signal),
+  ).rejects.toThrow();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+});
+
+it('keeps an explicit ask human-only when live mode changes to Full Access', async () => {
+  let mode: HostedApprovalMode = 'auto';
+  const permissionRules = { allow: ['Edit'], ask: ['Edit'], deny: [] };
+  turn = createTurn(false, {
+    mode,
+    permissionRules,
+    readSettings: async () => ({ mode, timeoutMs: 60_000, permissionRules }),
+  });
+  const classify = vi.fn();
+  turn.setPermissionClassifier(classify);
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const options = JSON.parse(
+    (
+      await session.resources.read(
+        session.authority.action(requestId)!.optionsRef!,
+      )
+    ).toString(),
+  );
+  expect(options.requiresHumanDecision).toBe(true);
+  mode = 'yolo';
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(classify).not.toHaveBeenCalled();
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  await running;
+});
+
+it.each(['allow', 'block', 'unavailable', 'absent'] as const)(
+  'handles auto classifier %s through native execution or durable approval',
+  async (outcome) => {
+    turn = createTurn(false, { mode: 'auto' });
+    const classify = vi.fn().mockResolvedValue({
+      shouldBlock: outcome !== 'allow',
+      reason: 'policy refusal',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+      ...(outcome === 'unavailable' ? { unavailable: true } : {}),
+    });
+    if (outcome !== 'absent') turn.setPermissionClassifier(classify);
+    const running = turn.execute(
+      [calls[1]],
+      [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    if (outcome === 'unavailable' || outcome === 'absent') {
+      const requestId = await requested();
+      expect(broker.execute).not.toHaveBeenCalled();
+      await resolveHostedAction(session, waiters, requestId, answer('allow'));
+    }
+    const result = await running;
+    expect(broker.execute).toHaveBeenCalledTimes(outcome === 'block' ? 0 : 1);
+    if (outcome === 'block')
+      expect(JSON.stringify(result)).toContain('Auto approval blocked');
+    expect(classify).toHaveBeenCalledTimes(outcome === 'absent' ? 0 : 1);
+  },
+);
+
 it.each(['auto-edit', 'yolo'] as const)(
   'durably allows a pending ordinary edit after changing to %s in the current Turn',
   async (mode) => {
@@ -6706,6 +6845,15 @@ it.each(['allow', 'deny'] as const)(
       new AbortController().signal,
     );
     const approval = await requested();
+    expect(
+      JSON.parse(
+        (
+          await session.resources.read(
+            session.authority.action(approval)!.optionsRef!,
+          )
+        ).toString(),
+      ).requiresHumanDecision,
+    ).toBe(true);
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
     await resolveHostedAction(session, waiters, approval, answer(decision));
