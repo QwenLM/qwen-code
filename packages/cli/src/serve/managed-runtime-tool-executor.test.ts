@@ -2440,8 +2440,8 @@ describe('original CSI worker synchronous ACK confirmation', () => {
 });
 
 // #15076: `todo_write` runs in the Worker as per-Session bookkeeping under
-// the Worker's own runtime directory. The native fetch half is held by a
-// recorded maintainer decision, so the Worker admits no fetch.
+// the Worker's own runtime directory. `web_fetch` is admitted as well, since
+// it ships on `main`; this block covers only the todo tool.
 describe('todo_write in the Worker', () => {
   let workspace: string;
   let runtimeDir: string;

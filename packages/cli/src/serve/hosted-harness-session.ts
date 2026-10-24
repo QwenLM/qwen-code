@@ -322,6 +322,7 @@ import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/service
 import {
   hostedShellLaneAttachesChildAgents,
   isHostedWorkspaceReadProfile,
+  HOSTED_WORKSPACE_FILE_PROFILE_V3,
 } from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
@@ -5470,6 +5471,7 @@ export function registerHostedHarnessSessionRoutes(
                         approval,
                         !agentDefinition &&
                           (toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
+                            toolProfile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
                             isHostedWorkspaceShellProfile(toolProfile)),
                       )
                     : {}),

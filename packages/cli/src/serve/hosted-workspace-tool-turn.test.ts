@@ -1912,32 +1912,34 @@ function createV3Turn(profile = 'hosted-workspace-files/3') {
   );
 }
 
-it.each([['hosted-workspace-files/3', false]])(
-  'declares todo_write on %s',
-  async (profile, shell) => {
-    turn = new HostedWorkspaceToolTurn(
-      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-      session,
-      harness,
-      'prompt',
-      commit,
-      messageFitsInline,
-      shell
-        ? { resources: session.resources, assertWritable: async () => {} }
-        : undefined,
-      undefined,
-      undefined,
-      { profile },
-    );
-    const declarations = await turn.declarations(new AbortController().signal);
-    const names = declarations.map((tool) => tool.name);
-    expect(names).toContain('todo_write');
-    expect(names).toContain('glob');
-    // files/3 keeps everything files/2 declares, including the shipped fetch.
-    expect(names).toContain('web_fetch');
-    if (!shell) expect(names).not.toContain('run_shell_command');
-  },
-);
+it('declares todo_write on hosted-workspace-files/3', async () => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-files/3' },
+  );
+  const declarations = await turn.declarations(new AbortController().signal);
+  const names = declarations.map((tool) => tool.name);
+  expect(names).toContain('todo_write');
+  expect(names).toContain('glob');
+  // files/3 keeps everything files/2 declares, including the shipped fetch.
+  expect(names).toContain('web_fetch');
+  expect(names).not.toContain('run_shell_command');
+  // The byte budget is enforced, so the declaration has to expose it too.
+  expect(
+    JSON.stringify(
+      declarations.find((tool) => tool.name === 'todo_write')
+        ?.parametersJsonSchema,
+    ),
+  ).toContain('16,000 bytes');
+});
 
 it.each(['hosted-workspace-files/1', 'hosted-workspace-files/2'])(
   'never offers todo_write on %s',

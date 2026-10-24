@@ -33,6 +33,12 @@ describe('checkHostedTodoWriteInput', () => {
   });
 
   it('accepts an explicit empty blockedBy and a list at every limit', () => {
+    const emptyDependencies = { todos: [item({ blockedBy: [] })] };
+    const empty = checkHostedTodoWriteInput(emptyDependencies);
+    expect(empty.error).toBeUndefined();
+    expect(
+      (empty.input['todos'] as Array<Record<string, unknown>>)[0]['blockedBy'],
+    ).toEqual([]);
     const atLimits = {
       todos: [
         item({
@@ -45,6 +51,35 @@ describe('checkHostedTodoWriteInput', () => {
       ],
     };
     expect(checkHostedTodoWriteInput(atLimits).error).toBeUndefined();
+    const atItems = {
+      todos: Array.from({ length: HOSTED_TODO_MAX_ITEMS }, (_, index) =>
+        item({ id: `i${index}` }),
+      ),
+    };
+    expect(checkHostedTodoWriteInput(atItems).error).toBeUndefined();
+    expect(
+      checkHostedTodoWriteInput({ todos: [item({ id: 'x'.repeat(500) })] })
+        .error,
+    ).toBeUndefined();
+  });
+
+  it('counts content in code points so astral characters fit the declared ceiling', () => {
+    const content = 'x'.repeat(990) + '😀'.repeat(10);
+    expect([...content].length).toBe(HOSTED_TODO_CONTENT_MAX_CHARS);
+    expect(content.length).toBe(1010);
+    expect(
+      checkHostedTodoWriteInput({ todos: [item({ content })] }).error,
+    ).toBeUndefined();
+  });
+
+  it('treats a null blockedBy as omitted without rewriting the caller input', () => {
+    const args = { todos: [item({ blockedBy: null })] };
+    const check = checkHostedTodoWriteInput(args);
+    expect(check.error).toBeUndefined();
+    expect(
+      (check.input['todos'] as Array<Record<string, unknown>>)[0],
+    ).not.toHaveProperty('blockedBy');
+    expect((args.todos[0] as Record<string, unknown>)['blockedBy']).toBeNull();
   });
 
   const refusals: Array<[string, Record<string, unknown>, string]> = [

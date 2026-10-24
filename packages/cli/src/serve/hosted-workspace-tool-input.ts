@@ -68,6 +68,8 @@ export function checkHostedTodoWriteInput(
       input,
       error: `Hosted todo_write accepts at most ${HOSTED_TODO_MAX_ITEMS} todos per call (received ${todos.length}). Send a shorter list and retry.`,
     };
+  const cleaned: Array<Record<string, unknown>> = [];
+  let strippedNullDependency = false;
   for (const [index, todo] of todos.entries()) {
     if (!todo || typeof todo !== 'object' || Array.isArray(todo))
       return { input, error: todoItemError(index, 'an object') };
@@ -95,12 +97,18 @@ export function checkHostedTodoWriteInput(
     const content = item['content'];
     if (typeof content !== 'string' || content.trim() === '')
       return { input, error: todoItemError(index, 'a nonempty content') };
-    if (content.length > HOSTED_TODO_CONTENT_MAX_CHARS)
+    // The declaration advertises this ceiling as `maxLength`, which JSON Schema
+    // counts in code points; `String.length` counts UTF-16 code units, so it
+    // would refuse a schema-valid 1000-code-point string that carries astral
+    // characters. The `id` ceiling stays in UTF-16 units because core's own
+    // `todo.id.length > 500` counts that way.
+    const contentChars = [...content].length;
+    if (contentChars > HOSTED_TODO_CONTENT_MAX_CHARS)
       return {
         input,
         error: todoItemError(
           index,
-          `content of at most ${HOSTED_TODO_CONTENT_MAX_CHARS} characters (received ${content.length})`,
+          `content of at most ${HOSTED_TODO_CONTENT_MAX_CHARS} characters (received ${contentChars})`,
         ),
       };
     if (!TODO_STATUSES.has(item['status'] as string))
@@ -112,8 +120,13 @@ export function checkHostedTodoWriteInput(
         ),
       };
     const blockedBy = item['blockedBy'];
+    // `null` is the omitted case, as the glob arm treats a null path: a hosted
+    // refusal is batch-wide, so refusing it would drop every valid sibling
+    // call. The key is removed by rebuilding the item, because `input` is a
+    // shallow copy whose items are shared with `call.args`.
     if (
       blockedBy !== undefined &&
+      blockedBy !== null &&
       (!Array.isArray(blockedBy) || !blockedBy.every(isTodoId))
     )
       return {
@@ -134,14 +147,25 @@ export function checkHostedTodoWriteInput(
           `blockedBy of at most ${HOSTED_TODO_MAX_DEPENDENCIES} ids (received ${blockedBy.length})`,
         ),
       };
+    if (blockedBy === null) {
+      const rest = { ...item };
+      delete rest['blockedBy'];
+      cleaned.push(rest);
+      strippedNullDependency = true;
+    } else {
+      cleaned.push(item);
+    }
   }
-  const serializedBytes = Buffer.byteLength(JSON.stringify(todos), 'utf8');
+  const list = strippedNullDependency ? cleaned : todos;
+  const serializedBytes = Buffer.byteLength(JSON.stringify(list), 'utf8');
   if (serializedBytes > HOSTED_TODO_MAX_SERIALIZED_BYTES)
     return {
       input,
       error: `Hosted todo_write accepts a list of at most ${HOSTED_TODO_MAX_SERIALIZED_BYTES} serialized bytes (received ${serializedBytes}). Shorten the list and retry.`,
     };
-  return { input };
+  return strippedNullDependency
+    ? { input: { ...input, todos: cleaned } }
+    : { input };
 }
 
 function isTodoId(value: unknown): boolean {

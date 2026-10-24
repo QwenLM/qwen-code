@@ -685,9 +685,9 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
   },
 };
 // #15076: `todo_write`, declared only on `files/3`. The Worker keeps the
-// list, which writes no Workspace file. The `web_fetch` half is held: a
-// maintainer ruling on the issue defers it, and a files-profile Session has no
-// shell, so a fetch there would open a new outbound path rather than reuse one.
+// list, which writes no Workspace file. `web_fetch` is not part of this
+// declaration: `main` adds it to the same files lane under its own argument
+// and destination checks, so this array appends only the todo tool.
 export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
   name: 'todo_write',
   description:
@@ -697,7 +697,8 @@ export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
     properties: {
       todos: {
         type: 'array',
-        description: 'The complete updated task list.',
+        description:
+          'The complete updated task list. Keep the whole list under about 16,000 bytes of JSON; prefer fewer, shorter items.',
         maxItems: HOSTED_TODO_MAX_ITEMS,
         items: {
           type: 'object',
