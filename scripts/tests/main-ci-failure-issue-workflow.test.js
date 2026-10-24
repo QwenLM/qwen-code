@@ -18,7 +18,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
-import { renderFailureComment } from '../../.github/scripts/ci/main-failure-signature.mjs';
+import {
+  renderFailureComment,
+  testKey,
+} from '../../.github/scripts/ci/main-failure-signature.mjs';
 
 describe('main CI failure issue workflow', () => {
   const workflow = readFileSync(
@@ -438,14 +441,24 @@ printf '%s\\n' '${liveAttempt}'
         failEdit = false,
         failBodyRead = false,
         issueBody = '<!-- main-ci-failure-aggregate:1234 -->',
+        issueBodies = {},
+        signatureTitle = '',
+        testMarkers = '',
+        runAt = '2026-10-24T01:02:03Z',
         markerIssues = [],
         closedIssues = [],
       } = opts;
       const tmp = mkdtempSync(join(tmpdir(), 'ci-issue-reuse-'));
       try {
-        writeFileSync(join(tmp, 'issues.json'), JSON.stringify(issues));
+        writeFileSync(
+          join(tmp, 'issues.json'),
+          typeof issues === 'string' ? issues : JSON.stringify(issues),
+        );
         writeFileSync(join(tmp, 'closed.json'), JSON.stringify(closedIssues));
         writeFileSync(join(tmp, 'current-body.md'), issueBody + '\n');
+        for (const [number, body] of Object.entries(issueBodies)) {
+          writeFileSync(join(tmp, `body-${number}.md`), `${body}\n`);
+        }
         writeFileSync(
           join(tmp, 'marker-issues.json'),
           typeof markerIssues === 'string'
@@ -484,7 +497,8 @@ elif [[ "$1 $2" == 'issue create' ]]; then
   echo 'https://github.com/QwenLM/qwen-code/issues/999'
 elif [[ "$1 $2" == 'issue view' ]]; then
   [[ "$*" == *'--json body'* ]] || exit 2
-  ${failBodyRead ? 'exit 1' : `cat '${tmp}/current-body.md'`}
+  ${failBodyRead ? 'exit 1' : ':'}
+  if [[ -f "${tmp}/body-$3.md" ]]; then cat "${tmp}/body-$3.md"; else cat '${tmp}/current-body.md'; fi
 elif [[ "$1 $2" == 'issue edit' ]]; then
   ${failEdit ? 'exit 1' : ':'}
   if [[ "$*" == *'--body-file'* ]]; then
@@ -510,6 +524,9 @@ fi
               BOT_LOGIN: 'qwen-code-dev-bot',
               ISSUE_BODY: 'Run 123 failed at commit abcdef123456',
               RUN_ATTEMPT: '2',
+              SIGNATURE_TITLE: signatureTitle,
+              TEST_MARKERS: testMarkers,
+              RUN_AT: runAt,
               LOOKUP_FAILURES: String(lookupFailures),
             },
           },
@@ -520,12 +537,17 @@ fi
           migratedBody: existsSync(join(tmp, 'migrated-body.md'))
             ? readFileSync(join(tmp, 'migrated-body.md'), 'utf8')
             : null,
-          calls: readFileSync(join(tmp, 'calls'), 'utf8'),
+          calls: existsSync(join(tmp, 'calls'))
+            ? readFileSync(join(tmp, 'calls'), 'utf8')
+            : '',
           output: existsSync(join(tmp, 'output'))
             ? readFileSync(join(tmp, 'output'), 'utf8')
             : '',
           body: existsSync(join(tmp, 'issue-body.md'))
             ? readFileSync(join(tmp, 'issue-body.md'), 'utf8')
+            : '',
+          commentBody: existsSync(join(tmp, 'issue-comment.md'))
+            ? readFileSync(join(tmp, 'issue-comment.md'), 'utf8')
             : '',
         };
       } finally {
@@ -543,14 +565,13 @@ fi
           'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
         );
         expect(result.calls).not.toContain('issue create');
-        if (suffix) {
-          expect(result.calls).toContain(
-            'issue edit 42 --repo QwenLM/qwen-code --remove-label status/ready-for-agent --remove-label autofix/approved',
-          );
-        } else {
-          expect(result.calls).not.toContain('issue edit');
-          expect(result.calls).not.toContain('--remove-label');
-        }
+        // The dated retitle keeps the shared issue fresh in the issue list,
+        // whatever shape its machine title had; the body already carries the
+        // workflow marker, so a legacy-shaped title is not re-adopted.
+        expect(result.calls).toContain(
+          'issue edit 42 --repo QwenLM/qwen-code --title Main CI failed: SDK Java — no test identified (latest: 2026-10-24)',
+        );
+        expect(result.calls).not.toContain('--remove-label');
         expect(result.calls).not.toMatch(
           /--add-label|--add-assignee|--remove-assignee|autofix\/in-progress/,
         );
@@ -558,6 +579,106 @@ fi
         expect(result.body).toContain('Run attempt: 2');
       },
     );
+
+    it('retires the autofix route when adopting a legacy issue without the workflow marker', () => {
+      const result = run([botIssue(42, ' on abc123')], {
+        issueBody:
+          'Main CI failed at commit abc123.\n\n<!-- qwen-main-ci-failure:abc123 -->',
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).toContain(
+        'issue edit 42 --repo QwenLM/qwen-code --remove-label status/ready-for-agent --remove-label autofix/approved',
+      );
+      expect(result.calls).toContain(
+        'issue edit 42 --repo QwenLM/qwen-code --title Main CI failed: SDK Java — no test identified (latest: 2026-10-24)',
+      );
+    });
+
+    it('never adopts a per-signature issue as the workflow aggregate', () => {
+      // The per-signature issue sorts first: its title rides the same " — "
+      // family arm, and only the body check keeps the no-test occurrence off
+      // it — the hijack from the review round, where adoption rewrote the
+      // per-signature title into the generic dated one.
+      const result = run([botIssue(7, ' — Foo.test'), botIssue(42)], {
+        issueBodies: {
+          7: 'Tracked failure.\n\n<!-- qwen-main-ci-failure-test:aaa111bbb222 -->\n',
+        },
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toContain('issue comment 7');
+      expect(result.calls).not.toContain('issue edit 7');
+    });
+
+    it('reopens the closed aggregate instead of hijacking the only open per-signature issue', () => {
+      const result = run([botIssue(7, ' — Foo.test')], {
+        issueBodies: {
+          7: '<!-- qwen-main-ci-failure-test:aaa111bbb222 -->\n',
+        },
+        closedIssues: [
+          { ...botIssue(42), body: '<!-- main-ci-failure-aggregate:1234 -->' },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue reopen 42');
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toContain('issue comment 7');
+      expect(result.calls).not.toContain('issue edit 7');
+    });
+
+    it('still selects a migrated aggregate whose body carries both marker classes', () => {
+      const both =
+        '<!-- qwen-main-ci-failure-test:aaa111bbb222 -->\n<!-- main-ci-failure-aggregate:1234 -->\n';
+      const result = run([botIssue(42, ' — Foo.test')], {
+        issueBodies: { 42: both },
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).toContain(
+        'issue edit 42 --repo QwenLM/qwen-code --title Main CI failed: SDK Java — no test identified (latest: 2026-10-24)',
+      );
+      expect(result.calls).not.toContain('--remove-label');
+    });
+
+    it('never reopens a resolved per-signature issue as the aggregate', () => {
+      const result = run([], {
+        closedIssues: [
+          {
+            ...botIssue(7, ' — Foo.test'),
+            body: '<!-- qwen-main-ci-failure-test:aaa111bbb222 -->',
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).not.toContain('issue reopen 7');
+      expect(result.calls).toContain('issue create');
+    });
+
+    it('refuses to write when the open-issue listing cannot be parsed', () => {
+      // jq exiting non-zero must not read as an empty family: the signature
+      // route would certify a false miss and file a duplicate issue.
+      const result = run('this is not json{', {
+        signatureTitle: 'Main CI failed: SDK Java — src/Foo.test > case',
+        testMarkers: 'qwen-main-ci-failure-test:aaa111bbb222',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.calls).not.toMatch(/issue (comment|create)/);
+    });
+
+    it('leaves labels alone when the body of a reopened legacy issue cannot be read', () => {
+      const result = run([], {
+        failBodyRead: true,
+        closedIssues: [
+          { ...botIssue(42, ' on abc123'), body: 'no markers here' },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue reopen 42');
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toContain('--remove-label');
+      expect(result.stdout).toContain('::warning::');
+    });
 
     it('creates a fixed-title triage issue when only other workflow issues exist', () => {
       const result = run([
@@ -619,8 +740,10 @@ fi
       expect(adopted.migratedBody).toBe(
         `${originalBody}\n\n<!-- main-ci-failure-aggregate:1234 -->\n`,
       );
+      // The occurrence is published before any edit touches the issue; the
+      // body reads that route the record may legitimately precede the comment.
       expect(adopted.calls.indexOf('issue comment 42')).toBeLessThan(
-        adopted.calls.indexOf('issue view 42'),
+        adopted.calls.indexOf('issue edit 42'),
       );
       expect(adopted.calls).toMatch(/issue edit 42 .*--body-file/);
 
@@ -683,7 +806,10 @@ fi
     );
 
     it('publishes the issue url and recurrence comment before a failed legacy label retirement', () => {
-      const result = run([botIssue(42, ' on abc123')], { failEdit: true });
+      const result = run([botIssue(42, ' on abc123')], {
+        failEdit: true,
+        issueBody: 'An adopted legacy body without the workflow marker',
+      });
       expect(result.status).not.toBe(0);
       expect(result.output).toContain(
         'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
@@ -722,6 +848,7 @@ fi
       'reopens a closed bot issue before commenting, with suffix %s',
       (suffix) => {
         const result = run([], {
+          issueBody: 'A closed legacy body without the workflow marker',
           closedIssues: [
             { ...botIssue(7), author: { login: 'not-the-bot' } },
             botIssue(42, suffix),
@@ -763,6 +890,214 @@ fi
         '${{ steps.summary.outputs.body }}',
       );
       expect(workflow).not.toContain('apply_autofix_route');
+    });
+
+    it('wires the signature route from the analysis through to the writer', () => {
+      // The writer branches on SIGNATURE_TITLE, so a rename or a retyped
+      // binding anywhere in the chain silently downgrades every run to the
+      // aggregate. Pin every hop.
+      expect(jobs.analyze.outputs.signature_title).toBe(
+        '${{ steps.summary.outputs.signature_title }}',
+      );
+      expect(jobs.analyze.outputs.test_markers).toBe(
+        '${{ steps.summary.outputs.test_markers }}',
+      );
+      expect(writer.env.SIGNATURE_TITLE).toBe(
+        '${{ needs.analyze.outputs.signature_title }}',
+      );
+      expect(writer.env.TEST_MARKERS).toBe(
+        '${{ needs.analyze.outputs.test_markers }}',
+      );
+      expect(writer.env.RUN_AT).toBe(
+        '${{ github.event.workflow_run.updated_at }}',
+      );
+      const summary = oneLine(
+        jobs.analyze.steps.find((step) => step.id === 'summary').run,
+      );
+      // Both values come from the same analysis the comment was rendered
+      // from; a separate extraction could disagree with the reported tests.
+      expect(summary).toContain(
+        'echo "signature_title=$(jq -r \'.title // ""\' "${RUNNER_TEMP}/analysis.json")"',
+      );
+      expect(summary).toContain(
+        'jq -r \'.searchMarkers[]?\' "${RUNNER_TEMP}/analysis.json"',
+      );
+    });
+    describe('per-signature routing', () => {
+      const signatureTitle =
+        'Main CI failed: SDK Java — src/Foo.test > Suite … > case bar';
+      const markerA = 'qwen-main-ci-failure-test:aaa111bbb222';
+      const markerB = 'qwen-main-ci-failure-test:ccc333ddd444';
+
+      it('files a new triaged issue when no open issue carries the test marker', () => {
+        // The aggregate exists and is consulted first; its body carries only the
+        // workflow marker, so a named regression never collapses into it.
+        const result = run([botIssue(42)], {
+          signatureTitle,
+          testMarkers: `${markerA}\n${markerB}`,
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain(
+          `issue create --repo QwenLM/qwen-code --title ${signatureTitle} --body-file`,
+        );
+        expect(result.calls).not.toContain('issue comment');
+        expect(result.calls).toContain(
+          'issue edit 999 --repo QwenLM/qwen-code --add-label type/bug --add-label status/needs-triage',
+        );
+        expect(result.output).toContain(
+          'issue_url=https://github.com/QwenLM/qwen-code/issues/999',
+        );
+        expect(result.body).toContain('Run 123 failed at commit abcdef123456');
+        expect(result.body).toContain(`<!-- ${markerA} -->`);
+        expect(result.body).toContain(`<!-- ${markerB} -->`);
+        expect(result.body).not.toContain('main-ci-failure-aggregate');
+        expect(result.calls).not.toMatch(/ready-for-agent|autofix|assignee/);
+      });
+
+      it('comments on the issue whose body carries the test marker and accretes new ones', () => {
+        const tracked =
+          'Earlier report.\n\n<!-- qwen-main-ci-failure-test:aaa111bbb222 -->\n';
+        const result = run([botIssue(7, ' — Foo.test'), botIssue(42)], {
+          signatureTitle,
+          testMarkers: `${markerA}\n${markerB}`,
+          issueBodies: { 7: tracked },
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 7');
+        expect(result.calls).not.toContain('issue create');
+        expect(result.output).toContain(
+          'issue_url=https://github.com/QwenLM/qwen-code/issues/7',
+        );
+        // The recurrence is recorded before the marker accretion edit, and a
+        // per-signature match never retires the issue's labels.
+        expect(result.calls.indexOf('issue comment 7')).toBeLessThan(
+          result.calls.indexOf('issue edit 7'),
+        );
+        expect(result.calls).not.toContain('--remove-label');
+        expect(result.calls).not.toContain('--title');
+        expect(result.migratedBody).toContain(`<!-- ${markerA} -->`);
+        expect(result.migratedBody).toContain(`<!-- ${markerB} -->`);
+        expect(result.commentBody).toContain(
+          'Run 123 failed at commit abcdef123456',
+        );
+        expect(result.commentBody).toContain('Run attempt: 2');
+      });
+
+      it('does not edit the body when every marker is already recorded', () => {
+        const tracked = `<!-- ${markerA} -->\n<!-- ${markerB} -->\n`;
+        const result = run([botIssue(7, ' — Foo.test')], {
+          signatureTitle,
+          testMarkers: `${markerA}\n${markerB}`,
+          issueBodies: { 7: tracked },
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 7');
+        expect(result.calls).not.toContain('issue edit');
+      });
+
+      it('keeps the recorded recurrence when the accretion edit fails', () => {
+        const result = run([botIssue(7, ' — Foo.test')], {
+          signatureTitle,
+          testMarkers: `${markerA}\n${markerB}`,
+          // The known marker matches; the joined one is what accretion drops.
+          issueBodies: { 7: `<!-- ${markerA} -->\n` },
+          failEdit: true,
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 7');
+        expect(result.output).toContain(
+          'issue_url=https://github.com/QwenLM/qwen-code/issues/7',
+        );
+        expect(result.stdout).toContain('::warning::');
+      });
+
+      it('falls back to the workflow aggregate when a candidate body cannot be read', () => {
+        // A miss cannot be certified against an unreadable body, so the run is
+        // recorded on the aggregate the way an unidentified failure is — losing
+        // precision, never the record.
+        const result = run([botIssue(42)], {
+          signatureTitle,
+          testMarkers: markerA,
+          failBodyRead: true,
+        });
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain(
+          'Falling back to the workflow aggregate',
+        );
+        expect(result.calls).toContain('issue comment 42');
+        expect(result.calls).not.toContain('issue create');
+      });
+
+      it('keeps the aggregate route when the marker list is empty', () => {
+        const result = run([botIssue(42)], {
+          signatureTitle,
+          testMarkers: '',
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 42');
+        expect(result.calls).not.toContain('issue create');
+      });
+
+      it('never scans issues owned by someone other than the reporting bot', () => {
+        const result = run(
+          [{ ...botIssue(7), author: { login: 'not-the-bot' } }],
+          {
+            signatureTitle,
+            testMarkers: markerA,
+            issueBodies: { 7: `<!-- ${markerA} -->\n` },
+          },
+        );
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue create');
+        expect(result.calls).not.toContain('issue comment 7');
+      });
+
+      it('finds a human-retitled per-signature issue by the test markers in its body', () => {
+        // The retitle drops the issue out of the title family, so the miss is
+        // certified only after the open bot issues' bodies are scanned — the
+        // same fallback the aggregate route has always had.
+        const retitled = {
+          number: 9,
+          title: 'Investigating the peer-messaging flake',
+          user: { login: 'qwen-code-dev-bot' },
+          body: `<!-- ${markerA} -->\n<!-- ${markerB} -->\n`,
+        };
+        const result = run(
+          [
+            {
+              number: 9,
+              title: 'Investigating the peer-messaging flake',
+              author: { login: 'qwen-code-dev-bot' },
+            },
+          ],
+          {
+            signatureTitle,
+            testMarkers: `${markerA}\n${markerB}`,
+            markerIssues: [retitled],
+          },
+        );
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 9');
+        expect(result.calls).not.toContain('issue create');
+        expect(result.calls).not.toContain('issue edit');
+        expect(result.output).toContain(
+          'issue_url=https://github.com/QwenLM/qwen-code/issues/9',
+        );
+      });
+
+      it('falls back to the aggregate when the retitled-issue scan fails', () => {
+        const result = run([botIssue(42)], {
+          signatureTitle,
+          testMarkers: markerA,
+          failMarkerLookup: true,
+        });
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain(
+          'Falling back to the workflow aggregate',
+        );
+        expect(result.calls).toContain('issue comment 42');
+        expect(result.calls).not.toContain('issue create');
+      });
     });
   });
 
@@ -1339,7 +1674,14 @@ printf '%s\\n' '{"jobs":[]}'
       expect(prepared.status, prepared.stderr).toBe(0);
       const body = readFileSync(output, 'utf8');
       const delimiter = body.split('\n')[0].slice('body<<'.length);
-      expect(body.endsWith(`${delimiter}\n`)).toBe(true);
+      // The body heredoc is followed by the signature-routing outputs; its
+      // closing delimiter must still land on its own line, and a run with no
+      // identified test emits an empty title and an empty marker list.
+      expect(body).toContain(`\n${delimiter}\n`);
+      expect(body).toContain('\nsignature_title=\n');
+      expect(body).toMatch(
+        /test_markers<<QWEN_TEST_MARKERS_[0-9a-f]+\nQWEN_TEST_MARKERS_[0-9a-f]+\n$/,
+      );
       expect(body).toContain('### `Managed Agent gate` failed');
       expect(body).toContain('GitHub runner infrastructure failed');
       // A certified job list must not carry the degradation sentence.
@@ -1365,6 +1707,56 @@ printf '%s\\n' '{"jobs":[]}'
       expect(readFileSync(degradedOut, 'utf8')).toContain(
         'The job list could not be read in full',
       );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('emits the signature title and markers from the analysis', () => {
+    // The writer routes on these two outputs, so pin them against a log that
+    // actually names a failing test: the title is the helper's issue title,
+    // the markers are the body's dedupe keys.
+    const summary = jobs.analyze.steps.find((step) => step.id === 'summary');
+    const tmp = mkdtempSync(join(tmpdir(), 'java-ci-summary-sig-'));
+    try {
+      writeFileSync(join(tmp, 'gh'), '#!/bin/sh\nexit 1\n');
+      chmodSync(join(tmp, 'gh'), 0o755);
+      writeFileSync(join(tmp, 'failed-jobs.tsv'), 'Lane\tRun tests\n');
+      writeFileSync(join(tmp, 'run-jobs.json'), JSON.stringify({ jobs: [] }));
+      mkdirSync(join(tmp, 'failed-logs'));
+      writeFileSync(
+        join(tmp, 'failed-logs', 'job.log'),
+        '2026-10-24T00:00:00.0000000Z  FAIL src/foo.test.ts > suite > case fails\n',
+      );
+      const output = join(tmp, 'output');
+      const prepared = spawnSync(
+        'bash',
+        ['-eo', 'pipefail', '-c', summary.run],
+        {
+          env: {
+            ...process.env,
+            PATH: `${tmp}:${process.env.PATH}`,
+            RUNNER_TEMP: tmp,
+            GITHUB_OUTPUT: output,
+            REPO: 'QwenLM/qwen-code',
+            INFRA_ONLY: 'false',
+            JOBS_COMPLETE: 'true',
+            WORKFLOW_NAME: 'Managed Agent gate',
+            WORKFLOW_RUN_ID: '39045740099',
+            WORKFLOW_RUN_URL:
+              'https://github.com/QwenLM/qwen-code/actions/runs/39045740099',
+            HEAD_SHA: 'abc123456789',
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(prepared.status, prepared.stderr).toBe(0);
+      const out = readFileSync(output, 'utf8');
+      expect(out).toContain(
+        'signature_title=Main CI failed: Managed Agent gate — src/foo.test.ts > … > case fails\n',
+      );
+      const key = testKey('src/foo.test.ts > suite > case fails');
+      expect(out).toContain(`qwen-main-ci-failure-test:${key}\n`);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
