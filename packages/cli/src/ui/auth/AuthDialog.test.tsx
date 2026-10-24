@@ -1546,7 +1546,9 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
       try {
-        await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+        // Under zh the first top-level entry paints its translation, so waiting
+        // on the English constant would time out here.
+        await waitForSelectedOption(lastFrame, '千问AI平台');
         stdin.write('\r');
         await waitForSelectedOption(lastFrame, 'Token Plan');
         // The sub-menu heading comes from VIEW_TITLES, unlike the flowTitle path
@@ -2110,4 +2112,65 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       unmount();
     },
   );
+});
+
+/**
+ * A module-scope `t()` freezes the string it returns at the moment the module
+ * body evaluates, so a locale change made afterwards never reaches it. Both
+ * dialogs load behind dynamic imports that run *after* `initializeI18n()` has
+ * resolved, so a cold start was already correct; the repro is a runtime
+ * `/language` switch. After one, `/auth` painted a mixed-language dialog: the
+ * sub-menu titles followed the locale (they call `t()` while rendering) while
+ * the main-menu labels stayed in the locale in force when the module was first
+ * imported.
+ *
+ * These pins are deliberately keystroke-free and ungated: the keystroke
+ * assertions elsewhere in this file sit behind `itWhenTuiInputReliable`, which
+ * skips under `CI=true`, so a gated pin would never run where it matters.
+ */
+describe('AuthDialog locale resolution', { timeout: 15000 }, () => {
+  const buildSettings = (): LoadedSettings =>
+    new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+  afterEach(async () => {
+    await setLanguageAsync('en');
+  });
+
+  // The view title is asserted by the ungated `(T1)` case above; what this diff
+  // actually unfroze are the main-menu labels and their descriptions, so this
+  // is the case that has to redden if `getMainItems()` is hoisted back to a
+  // module-scope `MAIN_ITEMS` array.
+  it('resolves the main menu entries at render time, not at import time', async () => {
+    await setLanguageAsync('zh');
+    const { lastFrame, unmount } = renderAuthDialog(buildSettings());
+    const frame = lastFrame();
+    expect(frame).toContain('连接服务商');
+    expect(frame).toContain('千问AI平台');
+    expect(frame).toContain('官方推荐配置：Token Plan 或 Standard API Key');
+    expect(frame).not.toContain('Connect a Provider');
+    unmount();
+  });
 });
