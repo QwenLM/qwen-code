@@ -5,8 +5,10 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { expandHomeDir } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -32,13 +34,31 @@ interface DirectoriesResult {
 
 const SSH_WORKSPACE_PREFIX = 'ssh://';
 
+/** Resolve a persisted entry the way runtime configuration reads it. */
+function resolveWorkspaceDirectory(
+  workspaceCwd: string,
+  entry: string,
+): string {
+  const expanded = expandHomeDir(entry);
+  const absolute = path.isAbsolute(expanded)
+    ? expanded
+    : path.resolve(workspaceCwd, expanded);
+  try {
+    return fs.realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
 /** Extra directories persisted at workspace scope. */
 function readWorkspaceDirectories(workspaceCwd: string): string[] {
   const settings = loadSettings(workspaceCwd, { skipLoadEnvironment: true });
   const configured =
     settings.workspace.originalSettings.context?.includeDirectories;
   return Array.isArray(configured)
-    ? configured.filter((entry): entry is string => typeof entry === 'string')
+    ? configured
+        .filter((entry): entry is string => typeof entry === 'string')
+        .map((entry) => resolveWorkspaceDirectory(workspaceCwd, entry))
     : [];
 }
 
@@ -140,6 +160,17 @@ function readAbsolutePath(value: unknown): string | null {
   return value;
 }
 
+/**
+ * Removal accepts the spelling GET returned or a relative/`~` entry persisted
+ * by settings; the runtime resolves it against the workspace root.
+ */
+function readRemovalPath(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
+    return null;
+  }
+  return value;
+}
+
 export function registerWorkspaceDirectoriesRoutes(
   app: Application,
   deps: WorkspaceDirectoriesRouteDeps,
@@ -201,10 +232,10 @@ export function registerWorkspaceDirectoriesRoutes(
     async (req: Request, res: Response) => {
       const runtime = resolveTarget(deps, req, res);
       if (!runtime) return;
-      const target = readAbsolutePath(req.query['path']);
+      const target = readRemovalPath(req.query['path']);
       if (!target) {
         res.status(400).json({
-          error: 'path must be an absolute directory path',
+          error: 'path is required',
           code: 'invalid_path',
         });
         return;

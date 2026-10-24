@@ -96,6 +96,18 @@ describe('GET /workspaces/:workspace/directories', () => {
     expect(res.body.directories).toEqual([]);
   });
 
+  it('resolves a relative persisted entry for display', async () => {
+    const extra = path.join(scratch, 'extra');
+    await fsp.mkdir(extra);
+    await writeWorkspaceSettings([path.relative(workspace, extra)]);
+    const { app } = makeApp();
+
+    const res = await request(app).get('/workspaces/ws-1/directories');
+
+    expect(res.status).toBe(200);
+    expect(res.body.directories).toEqual([extra]);
+  });
+
   it('refuses an untrusted workspace', async () => {
     const { app } = makeApp({ trusted: false });
     const res = await request(app).get('/workspaces/ws-1/directories');
@@ -204,6 +216,26 @@ describe('DELETE /workspaces/:workspace/directories', () => {
     expect(invoke).toHaveBeenCalledWith(
       expect.stringContaining('workspace/directories'),
       { action: 'remove', path: extra },
+    );
+  });
+
+  it('forwards a relative removal path', async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      primaryDirectory: workspace,
+      directories: [],
+      changed: true,
+      warnings: [],
+    });
+    const { app } = makeApp({ invoke });
+
+    const res = await request(app)
+      .delete('/workspaces/ws-1/directories')
+      .query({ path: '../extra' });
+
+    expect(res.status).toBe(200);
+    expect(invoke).toHaveBeenCalledWith(
+      expect.stringContaining('workspace/directories'),
+      { action: 'remove', path: '../extra' },
     );
   });
 

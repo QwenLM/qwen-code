@@ -37187,6 +37187,7 @@ describe('sessionLanguage multi-session propagation', () => {
         merged: {},
         workspaceSettingsActive: true,
         workspace: { originalSettings: {} },
+        reloadScopeFromDisk: vi.fn().mockReturnValue(true),
         setValue: vi.fn((scope: SettingScope, key: string, value: unknown) => {
           expect(scope).toBe(SettingScope.Workspace);
           expect(key).toBe('context.includeDirectories');
@@ -37245,15 +37246,34 @@ describe('sessionLanguage multi-session propagation', () => {
         SettingScope.Workspace,
         'context.includeDirectories',
         [extra],
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(settings.reloadScopeFromDisk).toHaveBeenCalledWith(
+        SettingScope.Workspace,
       );
       expect(addDirectoryContext).toHaveBeenCalled();
 
+      // A settings file written by another owner may store a relative entry.
+      // The resolved spelling GET returns must still remove it.
+      settings.workspace.originalSettings = {
+        context: {
+          includeDirectories: [path.relative(workspaceRoot, extra)],
+        },
+      };
       await expect(
         agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {
           action: 'remove',
           path: extra,
         }),
       ).resolves.toMatchObject({ directories: [], changed: true });
+      expect(settings.setValue).toHaveBeenLastCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [],
+        undefined,
+        { throwOnWriteFailure: true },
+      );
       expect(workspaceContext.getDirectories()).not.toContain(extra);
       expect(sessionContext.getDirectories()).not.toContain(extra);
 

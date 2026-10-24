@@ -245,6 +245,7 @@ import {
 } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import { readBackgroundShellOutputTail } from '@qwen-code/qwen-code-core/services/backgroundShellRegistry.js';
 import { sampleProcessTreeRssBytes } from '@qwen-code/qwen-code-core/utils/process-resources.js';
+import { expandHomeDir } from '@qwen-code/qwen-code-core/utils/paths.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -15675,6 +15676,24 @@ class QwenAgent implements Agent {
           });
         }
 
+        // Resolve an entry the same way runtime configuration does: expand
+        // `~`, resolve relative entries against the workspace root, then
+        // canonicalize. A missing path keeps its resolved absolute form so a
+        // stale entry can still be matched and removed.
+        const resolveDirectoryEntry = async (
+          entry: string,
+        ): Promise<string> => {
+          const expanded = expandHomeDir(entry);
+          const absolute = path.isAbsolute(expanded)
+            ? expanded
+            : path.resolve(this.config.getTargetDir(), expanded);
+          try {
+            return await fs.realpath(absolute);
+          } catch {
+            return absolute;
+          }
+        };
+
         let canonicalPath: string;
         if (action === 'add') {
           try {
@@ -15690,13 +15709,10 @@ class QwenAgent implements Agent {
             });
           }
         } else {
-          // Removal must still work after the directory disappears from disk;
-          // otherwise a stale entry could never leave the workspace list.
-          try {
-            canonicalPath = await fs.realpath(rawPath);
-          } catch {
-            canonicalPath = path.resolve(rawPath);
-          }
+          // Removal must still work for relative or `~` entries and after the
+          // directory disappears from disk; otherwise a supported entry could
+          // never leave the workspace list.
+          canonicalPath = await resolveDirectoryEntry(rawPath);
         }
 
         const configs: Config[] = [this.config];
@@ -15707,13 +15723,9 @@ class QwenAgent implements Agent {
           }
         }
 
-        let canonicalPrimary = this.config.getTargetDir();
-        try {
-          canonicalPrimary = await fs.realpath(canonicalPrimary);
-        } catch {
-          // A missing primary keeps its configured form; comparisons below
-          // still match the canonicalized request where possible.
-        }
+        const canonicalPrimary = await resolveDirectoryEntry(
+          this.config.getTargetDir(),
+        );
         if (action === 'remove' && canonicalPath === canonicalPrimary) {
           throw new RequestError(
             -32602,
@@ -15722,6 +15734,19 @@ class QwenAgent implements Agent {
           );
         }
 
+        // The child's LoadedSettings snapshot can lag a write made by another
+        // owner (for example a session's `/directory add`). Re-read the
+        // workspace layer before deriving the next list so an add or remove
+        // does not overwrite or miss entries already saved on disk.
+        if (
+          !this.workspaceSettings.reloadScopeFromDisk(SettingScope.Workspace)
+        ) {
+          throw new RequestError(
+            -32603,
+            'Failed to reload workspace settings',
+            { errorKind: 'settings_reload_failed' },
+          );
+        }
         const workspaceFile = this.workspaceSettings.workspace;
         const configured =
           workspaceFile.originalSettings.context?.includeDirectories;
@@ -15730,18 +15755,14 @@ class QwenAgent implements Agent {
               (entry): entry is string => typeof entry === 'string',
             )
           : [];
-        // Existing entries may be non-canonical or already deleted; compare on
-        // the canonical form so a symlinked duplicate is not listed twice.
+        // Existing entries may be relative, use `~`, be non-canonical, or
+        // already be deleted; resolve them the same way runtime configuration
+        // does so a displayed entry can always be matched and removed.
         const entries = await Promise.all(
-          existing.map(async (entry) => {
-            let canonical = entry;
-            try {
-              canonical = await fs.realpath(entry);
-            } catch {
-              // Keep the raw entry: removal must still be able to drop it.
-            }
-            return { entry, canonical };
-          }),
+          existing.map(async (entry) => ({
+            entry,
+            canonical: await resolveDirectoryEntry(entry),
+          })),
         );
         const normalizedRawPath = path.resolve(rawPath);
         const next =
@@ -15752,7 +15773,9 @@ class QwenAgent implements Agent {
             : entries
                 .filter(
                   ({ entry, canonical }) =>
-                    canonical !== canonicalPath && entry !== normalizedRawPath,
+                    canonical !== canonicalPath &&
+                    entry !== rawPath &&
+                    entry !== normalizedRawPath,
                 )
                 .map(({ entry }) => entry);
         const listChanged =
@@ -15764,6 +15787,8 @@ class QwenAgent implements Agent {
             SettingScope.Workspace,
             'context.includeDirectories',
             next,
+            undefined,
+            { throwOnWriteFailure: true },
           );
         }
 
@@ -15813,7 +15838,7 @@ class QwenAgent implements Agent {
 
         return {
           primaryDirectory: this.config.getTargetDir(),
-          directories: next,
+          directories: await Promise.all(next.map(resolveDirectoryEntry)),
           changed: listChanged,
           warnings,
         };
