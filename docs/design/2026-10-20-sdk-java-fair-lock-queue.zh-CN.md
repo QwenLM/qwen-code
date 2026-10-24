@@ -87,6 +87,30 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 只量一次复制，而不是一整套测试，fast 通道的 90 分钟预算又远大于一次
 持锁时长。
 
+test job 也是同样的形状、同样的失败：它把锁持在 sdk-java 套件和
+managed-agent H2 套件（925 s）之上。2026-10-22 的 run 39811435705 中，
+fast job 两次尝试分别以票据 258 和 271 停在队首整整 5400 s，在 Maven 启动前失败。
+现在该 job 先从宿主缓存播种 job 本地仓库，三次 Maven 运行都不持锁，只在
+写回时取锁。写回取锁超时会发出警告并跳过复制，而不是让一个套件已经通过
+的 step 失败；`lock not acquired within` 子串、5400 s 预算与 fd 9 关闭
+逻辑都保持不变。
+
+套件失败时仍会走到写回，并以套件自身的状态退出，因此失败 PR 下载的构件不会
+丢失。925 s 套件因此不再与该宿主上的其他 leg 串行：本 job 唯一受锁保护的
+工作就是写回复制。播种使用 `cp -aln`，因此播种文件与宿主缓存共享 inode；
+套件不持锁运行之所以安全，只是因为被 pin 住的 Maven 以「临时文件 + rename」
+替换本地仓库文件，而非原地写入。一个原地写入的 resolver 会把不持锁的
+`mvn install` 变成对宿主共享字节的不持锁写入者，而除了 `MAVEN_VERSION`
+的取值之外，没有任何东西强制这一耦合。
+
+test job 中所有可能在池上运行的 Checkstyle 与发布构件 step 也从同一个
+job 本地仓库解析（托管 leg 在套件之后播种它），因此池宿主上没有任何
+Maven 运行会在写回之外修改宿主缓存。fast 档的写回取锁失败是刻意的
+非致命行为：fast 档会完全跳过 `mysql-integration`，因此 full 档 MariaDB
+通道现在是唯一会因锁饥饿而变红的通道。该 step 把辅助脚本的 `::error::`
+超时行降级为 `::warning::`，并把票据行写入 `$GITHUB_STEP_SUMMARY`，
+使跳过在绿色运行中无需翻日志即可看到。
+
 ### fast 档优先
 
 FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍然排在所有
@@ -177,8 +201,8 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   也不会被超过。
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
   pin 的是 source 该辅助脚本和两处 `sdk_java_lock_acquire 5400` 预算、
-  MariaDB 通道的 Maven 运行在取锁之前、写回子进程关闭 fd 9，以及
-  `.size-baseline` 记录的工作流新尺寸。
+  每次 Maven 运行都在取锁之前、两处写回都关闭 fd 9、test job 拿不到
+  写回锁时跳过复制，以及 `.size-baseline` 记录的工作流新尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 
@@ -186,6 +210,8 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
 
 - `sdk-java.yml` 的两处取锁点都以 5400 秒通过该辅助脚本获取；
   test job 传入自己的 tier，MariaDB 站点默认 normal。
+- 每次 Maven 运行都从 job 本地仓库解析、位于取锁之前；test job 写回
+  取锁失败时跳过复制，但不让 step 失败。
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。

@@ -101,6 +101,36 @@ drop fd 9 so a survivor
 cannot retain the lock. A hold now measures the copy instead of the suite, and
 the fast tier's 90-minute budget is again far above one hold.
 
+The test job had the same shape and the same failure: it held the lock across
+the sdk-java suite and the managed-agent H2 suite (925 s). On 2026-10-22 run
+39811435705's fast job stayed head of the queue for the full 5400 s as tickets
+258 and 271 on the two attempts and failed before Maven ran. It now seeds a job-local
+repository from the host cache, runs all three Maven commands unlocked, and
+takes the lock only for its write-back. A write-back acquisition that times
+out warns and skips the copy instead of failing a step whose suite already
+passed; the `lock not acquired within` substring, the 5400 s budget, and the
+fd 9 closures are unchanged.
+
+A failed suite still reaches the write-back and exits with its own status, so
+a failing PR's downloads are not lost. The 925 s suite therefore no longer
+serializes against other legs on the host: the only lock-covered work in this
+job is the write-back copy. The seed is `cp -aln`, so seeded files share
+inodes with the host cache; running the suite unlocked is safe only because
+the pinned Maven replaces a local-repository file by temp-file + rename
+rather than writing in place. A resolver that writes in place would turn an
+unlocked `mvn install` into an unlocked writer of host-shared bytes, and
+nothing but `MAVEN_VERSION`'s value enforces that coupling.
+
+The test job's pool-reachable Checkstyle and release-artifact steps resolve
+from the same job-local repository (the hosted legs seed it after their suite),
+so no Maven run on a pool host mutates the host cache outside the write-back.
+A missed write-back acquisition on the fast tier is deliberately non-fatal:
+`mysql-integration` is skipped there, so the full-tier MariaDB lane is the
+only lane that reddens on lock starvation. The step demotes the helper's
+`::error::` timeout line to `::warning::` and copies the ticket line into
+`$GITHUB_STEP_SUMMARY`, so the skip is visible on a green run without opening
+the log.
+
 ### Fast-tier priority
 
 The FIFO queue bounds a waiter by its position, but it still puts a fast-tier
@@ -209,9 +239,10 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
-  `sdk_java_lock_acquire 5400` budget at each acquisition site, the MariaDB
-  lane's Maven runs above its acquisition and its write-back children's fd 9
-  close, and the `.size-baseline` records the workflow's new size.
+  `sdk_java_lock_acquire 5400` budget at each acquisition site, every Maven
+  run above its acquisition, both write-backs' fd 9 closes, the test job's
+  skip when the write-back lock is unavailable, and the `.size-baseline`
+  records the workflow's new size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -219,6 +250,9 @@ order this section exists to prevent.
 
 - Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
   the test job passes its tier and the MariaDB site defaults to normal.
+- Every Maven run resolves from a job-local repository above its acquisition,
+  and the test job's failed write-back acquisition skips the copy without
+  failing the step.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
