@@ -10,6 +10,7 @@ import {
   compositionOverlaysSoftwareCursor,
   getSoftwareCursorBackground,
   renderSoftwareCursor,
+  shouldRenderSoftwareCursor,
 } from './software-cursor.js';
 import { themeManager } from '../themes/theme-manager.js';
 
@@ -150,6 +151,44 @@ describe('compositionOverlaysSoftwareCursor', () => {
         'darwin',
       ),
     ).toBe(false);
+  });
+});
+
+describe('shouldRenderSoftwareCursor', () => {
+  it('suppresses the software cursor on Windows when the native cursor is positioned', () => {
+    expect(shouldRenderSoftwareCursor(true, {}, 'win32')).toBe(false);
+  });
+
+  it('keeps the software cursor on Windows when the native cursor is not positioned', () => {
+    expect(shouldRenderSoftwareCursor(false, {}, 'win32')).toBe(true);
+  });
+
+  it('always keeps the block cursor outside underline environments', () => {
+    expect(shouldRenderSoftwareCursor(true, {}, 'darwin')).toBe(true);
+    expect(shouldRenderSoftwareCursor(true, {}, 'linux')).toBe(true);
+  });
+
+  it('suppresses inside tmux sessions when the native cursor is positioned', () => {
+    expect(
+      shouldRenderSoftwareCursor(
+        true,
+        { TMUX: '/tmp/tmux-1000/default,4242,0' },
+        'linux',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps the block cursor under tmux when synchronized output is forced on', () => {
+    expect(
+      shouldRenderSoftwareCursor(
+        true,
+        {
+          TMUX: '/tmp/tmux-1000/default,4242,0',
+          QWEN_CODE_SYNCHRONIZED_OUTPUT: '1',
+        },
+        'darwin',
+      ),
+    ).toBe(true);
   });
 });
 
