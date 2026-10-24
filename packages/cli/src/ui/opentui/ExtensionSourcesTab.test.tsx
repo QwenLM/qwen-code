@@ -62,11 +62,12 @@ const marketplace = {
   plugins: [],
 };
 
-async function press(name: string, sequence = name.length === 1 ? name : '') {
-  await act(async () => {
-    const event = catalogKey(name, sequence);
-    for (const handler of [...mocks.state.keyboard]) handler(event);
-  });
+async function press(...names: string[]) {
+  for (const name of names)
+    await act(async () => {
+      const event = catalogKey(name, name.length === 1 ? name : '');
+      for (const handler of [...mocks.state.keyboard]) handler(event);
+    });
 }
 async function paste(text: string) {
   await act(async () => {
@@ -163,8 +164,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
     );
     expect(f.props.install).not.toHaveBeenCalled();
     // Reload must not silently reset selection to Install or skip the new row.
-    await press('down');
-    await press('return');
+    await press('down', 'return');
     expect(f.methods.loadSource).toHaveBeenCalledExactlyOnceWith(
       '/owned/added',
       { cwd: '/owned/workspace' },
@@ -207,12 +207,16 @@ describe('OpenTuiExtensionSourcesTab', () => {
   });
 
   it('R retries loading without stamping an update, including a null result', async () => {
-    const f = fixture([source('alpha')]);
+    const sourcePath =
+      '/owned/' + 'long-marketplace-directory/'.repeat(8) + 'alpha';
+    const f = fixture([{ ...source('alpha'), source: sourcePath }]);
     f.methods.loadSource
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null);
     await mount(f.props);
+    expect.soft(screen.queryByText(/\(local\)/)).not.toBeNull();
     await openSource();
+    expect.soft(screen.queryByText(sourcePath)).not.toBeNull();
     expect(screen.getByText('Could not load this marketplace.')).toBeTruthy();
     await press('r');
     expect(screen.getByText('Could not load this marketplace.')).toBeTruthy();
@@ -231,23 +235,18 @@ describe('OpenTuiExtensionSourcesTab', () => {
       .mockResolvedValueOnce(null);
     await mount(f.props);
     await openSource();
-    await press('down');
-    await press('return');
+    await press('down', 'return');
     expect(f.methods.markSourceUpdated).not.toHaveBeenCalled();
     expect(f.props.onStatus).toHaveBeenLastCalledWith({
       type: 'error',
       text: 'Could not update marketplace "alpha".',
     });
-    await press('r');
-    await press('escape');
-    await press('return');
+    await press('r', 'escape', 'return');
     // Detail re-entry selects Browse, rather than retaining the old Update row.
     await press('return');
     expect(f.props.onBrowse).toHaveBeenCalledExactlyOnceWith('alpha');
     expect(f.methods.markSourceUpdated).not.toHaveBeenCalled();
-    await press('return');
-    await press('down');
-    await press('return');
+    await press('return', 'down', 'return');
     expect(f.methods.markSourceUpdated).toHaveBeenCalledExactlyOnceWith(
       'alpha',
     );
@@ -260,10 +259,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
       throw new Error('Read-only registry');
     });
     await mount(f.props);
-    await press('down');
-    await press('down');
-    await press('d');
-    await press('y');
+    await press('down', 'down', 'd', 'y');
     expect(f.methods.removeSource).toHaveBeenCalledExactlyOnceWith('alpha');
     expect(f.props.onStatus).toHaveBeenLastCalledWith({
       type: 'error',
@@ -335,9 +331,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
   it('follows the source key across a reordered reload', async () => {
     const f = fixture([source('alpha'), source('beta')]);
     const ui = await mount(f.props);
-    await press('down');
-    await press('down');
-    await press('down');
+    await press('down', 'down', 'down');
     f.replaceSources([source('beta'), source('alpha')]);
     ui.rerender(<OpenTuiExtensionSourcesTab {...f.props} reloadSignal={1} />);
     await act(async () => {});
@@ -351,8 +345,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
   it('does not submit a hidden input or confirm a hidden removal', async () => {
     const f = fixture([source('alpha')]);
     const ui = await mount(f.props);
-    await press('down');
-    await press('return');
+    await press('down', 'return');
     await paste('./visible');
     ui.rerender(
       <OpenTuiExtensionSourcesTab {...f.props} availableTerminalHeight={10} />,
@@ -365,8 +358,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
     expect(f.methods.addSource).toHaveBeenCalledExactlyOnceWith('./visible', {
       cwd: '/owned/workspace',
     });
-    await press('down');
-    await press('d');
+    await press('down', 'd');
     ui.rerender(
       <OpenTuiExtensionSourcesTab {...f.props} availableTerminalHeight={9} />,
     );
@@ -381,8 +373,7 @@ describe('OpenTuiExtensionSourcesTab', () => {
     mocks.state.width = 42;
     const f = fixture();
     const ui = await mount(f.props);
-    await press('down');
-    await press('return');
+    await press('down', 'return');
     const value =
       '/owned/very-long-marketplace-directory/child/TAIL-9876543210';
     await paste(value);

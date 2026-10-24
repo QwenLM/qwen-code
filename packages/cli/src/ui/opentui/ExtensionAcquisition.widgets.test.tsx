@@ -96,6 +96,9 @@ async function key(
       fn(catalogKey(name, sequence, eventType));
   });
 }
+async function keys(...names: string[]) {
+  for (const name of names) await key(name);
+}
 async function paste(text: string) {
   await act(async () => {
     for (const fn of [...native.pastes])
@@ -113,14 +116,10 @@ it('edits pasted setting text in the middle and submits its exact bytes once', a
   const p = setting();
   const ui = render(widget(p));
   await paste('abcd');
-  await key('left');
-  await key('left');
-  await key('X');
+  await keys('left', 'left', 'X');
   expect(ui.container.textContent).toContain('abXcd');
   expect(ui.container.querySelector('[data-caret]')?.textContent).toBe('c');
-  await key('return');
-  await key('return');
-  await key('escape');
+  await keys('return', 'return', 'escape');
   expect(p.resolve).toHaveBeenCalledExactlyOnceWith('abXcd');
   expect(p.cancel).not.toHaveBeenCalled();
 });
@@ -129,8 +128,7 @@ it('masks sensitive pasted and typed input while retaining the actual edited val
   const p = setting(true);
   const ui = render(widget(p));
   await paste('secret-value');
-  await key('left');
-  await key('X');
+  await keys('left', 'X');
   expect(ui.container.textContent).not.toContain('secret');
   expect(ui.container.textContent).not.toContain('valu');
   expect(ui.container.textContent).not.toContain('X');
@@ -160,8 +158,7 @@ it('cancels setting on Escape once and ignores later input/Enter', async () => {
   const p = setting();
   render(widget(p));
   await paste('not-accepted');
-  await key('escape');
-  await key('escape');
+  await keys('escape', 'escape');
   await paste('later');
   await key('return');
   expect(p.cancel).toHaveBeenCalledTimes(1);
@@ -188,9 +185,7 @@ it('cannot select an invisible choice, then selects the visible nondefault plugi
   await key('return');
   expect(p.resolve).not.toHaveBeenCalled();
   ui.rerender(widget(p));
-  await key('down');
-  await key('return');
-  await key('return');
+  await keys('down', 'return', 'return');
   expect(p.resolve).toHaveBeenCalledExactlyOnceWith('chosen');
   expect(p.cancel).not.toHaveBeenCalled();
 });
@@ -200,9 +195,7 @@ it('Escape cancels a plugin choice once, without selecting a fallback plugin', a
   render(widget(p));
   await key('escape', '', 'release');
   expect(p.cancel).not.toHaveBeenCalled();
-  await key('escape');
-  await key('escape');
-  await key('return');
+  await keys('escape', 'escape', 'return');
   expect(p.cancel).toHaveBeenCalledTimes(1);
   expect(p.resolve).not.toHaveBeenCalled();
 });

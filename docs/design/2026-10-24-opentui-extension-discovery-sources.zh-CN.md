@@ -4,7 +4,7 @@
 
 ## 状态与证据
 
-已在本地实现，验证进行中，日期 2026-10-24。有限的历史 global 0.22.0 UI dry-run 已真实抵达 Installed、Discover、Sources 页面，返回输入区后自然退出，模型请求为零；它不证明当前代码的获取流程或 native 验收。两个 native tab 与操作局部权限已接线；正常门禁及真实 native 安装验收尚未完成。当前 2c79 的 Node+Ink 来源获取完整正控已通过：真实来源添加、授权拒绝无提交、批准后 manifest/命令原字节及 user 启用策略、冷重开、命令补全、两次自然退出0、模型请求0。它不代表 native、project scope、setting 或 plugin-choice 已通过。保留此前默认 idle 时间预算和来源列表名称折行两次脚本失败；修正通过完整来源详情验证身份，没有删除业务断言。本完整功能叠在 #15396 的已提交 2c79c2a63503da8a4c88ad8966149df0594c502e 上；其父 B 为 e2e80ab46423a918e1b7f504a5369074e62bc360（#15389）；acceptance union e7ac 只是参照，不能成为未说明的 PR 依赖。源码审计确认 B、e7ac 与选定 main5a0 的相关 Ink tabs、marketplace manager、consent 代码相同。实现前须重新确认远端/main 与 stack 祖先；历史测试收据不能验收未来功能。
+已在本地实现，验证进行中，日期 2026-10-24。历史 global 0.22.0 UI 导航及 2c79 Node+Ink 来源获取只是有限正控，不能验收当前候选。历史 005e 的三个完整 native 用例通过来源获取、普通 setting、非默认插件选择，合计六次自然退出0、模型请求0；保留原始失败，不代表敏感 setting、project scope 或最终安装产物/平台验收。来源用例遗漏可见类型断言，并暴露十一项 keypress 监听警告，因此其业务 PASS 不证明完整 Ink 一致性。当前改动修正焦点订阅，恢复来源类型可见及详情完整路径访问。真实 test-only 回归同时复现两处信息缺失；修复后 Sources 整文件测试通过，新的自建 bundle native 验证仍待执行。本完整功能叠在 0cedc015424835c25bf111b5ea37200018e3b327（#15396）之上，其父 B 为 e2e80ab46423a918e1b7f504a5369074e62bc360（#15389）。验收 union 只是参照，不是隐含依赖。确认验收证据前重新核对 main、stack 祖先及候选实际字节；历史收据不能验收后续源码变更。
 
 ## 问题与现有行为
 
@@ -33,7 +33,7 @@ Core 值从定义模块直接导入，适当使用 type-only import。不把 Ink
 
 ## 用户流程与持久化
 
-Sources 列出直接安装、添加 marketplace 和已配置来源。添加必须是真实 marketplace；单扩展使用既有提示引导直接安装。详情加载配置与已安装预览；Browse 通过已清理的 marketplace filter 打开 Discover。R 键仅重新读取来源视图，不更改 lastUpdatedAt；显式 Update 动作只有在真实非 null 加载后才更新它。移除需要确认，只移除来源，不删除已安装产物。持久化错误显示为错误，不能使 TUI 崩溃。
+Sources 列出直接安装、添加 marketplace 和已配置来源。添加必须是真实 marketplace；单扩展使用既有提示引导直接安装。列表保留每个来源的类型，仅将路径缩短到所在列。详情加载配置与已安装预览，并在有界滚动区域折行显示完整脱敏路径；PageUp/PageDown 访问溢出内容，同时为动作保留空间。Browse 通过已清理的 marketplace filter 打开 Discover。R 键仅重新读取来源视图，不更改 lastUpdatedAt；显式 Update 动作只有在真实非 null 加载后才更新它。移除需要确认，只移除来源，不删除已安装产物。持久化错误显示为错误，不能使 TUI 崩溃。
 
 Discover 提供查询/过滤、光标/窗口、未安装项多选、详情和 user/project scope。Discover 的可输入 j/k 按 Ink 保留为搜索字符，Sources 则用来导航。批量部分失败保留每个真实结果，按 Ink 清除 selection 并回到列表；重试需要明确重新选择，不能自动重试旧项。主页仅允许安全 http(s)。Tab 先清除当前 marketplace filter，再切换。
 

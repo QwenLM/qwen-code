@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { decodePasteBytes } from '@opentui/core';
+import { decodePasteBytes, type ScrollBoxRenderable } from '@opentui/core';
 import { usePaste, useTerminalDimensions } from '@opentui/react';
 import type { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
@@ -17,7 +17,11 @@ import { getErrorMessage } from '../../utils/errors.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { stripUnsafeCharacters, truncateToWidth } from '../utils/textUtils.js';
 import type { ExtensionsStatusMessage } from './dialogs-extensions.js';
-import { findNextEnabledIndex, regionListWindow } from './dialogs-core.js';
+import {
+  findNextEnabledIndex,
+  regionListWindow,
+  wrappedRows,
+} from './dialogs-core.js';
 import {
   DialogSelect,
   dialogContentWidth,
@@ -86,6 +90,7 @@ export function OpenTuiExtensionSourcesTab({
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [detailSource, setDetailSource] = useState<Source | null>(null);
+  const sourceScroll = useRef<ScrollBoxRenderable>(null);
   const [detailConfig, setDetailConfig] = useState<Marketplace>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const detailLoadingRef = useRef(false);
@@ -112,6 +117,7 @@ export function OpenTuiExtensionSourcesTab({
   );
   const { width, height } = useTerminalDimensions();
   const contentWidth = Math.max(1, dialogContentWidth(width));
+  const rightWidth = Math.max(0, Math.floor((contentWidth - 3) / 2));
   // Parent frame, tabs, margins, footer and a single bounded status row.
   const bodyRows = Math.max(
     0,
@@ -348,14 +354,14 @@ export function OpenTuiExtensionSourcesTab({
             ),
             ...sources.map((source) =>
               row('source:' + source.name, source.name, 'source', {
-                right: `${redactUrlCredentials(source.source)} (${source.type})`,
+                right: `${truncateToWidth(clean(source.source), Math.max(0, rightWidth - String(source.type).length - 3))} (${source.type})`,
                 source,
               }),
             ),
           ]
         : [heading('heading:empty', t('No marketplaces added yet.'))]),
     ];
-  }, [sources]);
+  }, [sources, rightWidth]);
   const listWindow = regionListWindow(
     bodyRows,
     { fixed: 0 },
@@ -438,9 +444,14 @@ export function OpenTuiExtensionSourcesTab({
     ? 3 +
       (installed.length ? 1 + preview.length + (hiddenInstalled ? 1 : 0) : 0)
     : 4;
+  const sourceText = clean(detailSource?.source ?? '');
+  const sourceRows = Math.min(
+    wrappedRows(sourceText, contentWidth),
+    Math.max(0, bodyRows - detailChrome + 1 - Math.min(1, actions.length)),
+  );
   const actionWindow = regionListWindow(
     bodyRows,
-    { fixed: detailChrome },
+    { fixed: detailChrome - 1 + sourceRows },
     actions.length,
     3,
   );
@@ -452,6 +463,7 @@ export function OpenTuiExtensionSourcesTab({
       detailLoadingRef.current ||
       viewRef.current !== 'detail' ||
       !detailSource ||
+      sourceRows < 1 ||
       actionWindow.maxItemsToShow < 1
     )
       return;
@@ -471,6 +483,7 @@ export function OpenTuiExtensionSourcesTab({
       view === 'detail' &&
       !detailLoading &&
       !busy &&
+      sourceRows > 0 &&
       actionWindow.maxItemsToShow > 0,
     maxItemsToShow: actionWindow.maxItemsToShow,
     onSelect: chooseAction,
@@ -505,7 +518,10 @@ export function OpenTuiExtensionSourcesTab({
       } else if (!line.handleKey(key) && isPrintableKeyInput(event))
         line.insert(event.sequence);
     } else if (activeView === 'detail') {
-      if (key.name === 'escape' && !busyRef.current) goToList();
+      if (key.name === 'pageup') sourceScroll.current?.scrollBy(-sourceRows);
+      else if (key.name === 'pagedown')
+        sourceScroll.current?.scrollBy(sourceRows);
+      else if (key.name === 'escape' && !busyRef.current) goToList();
       else if (
         (key.name === 'r' || key.sequence === 'r') &&
         !key.ctrl &&
@@ -679,7 +695,15 @@ export function OpenTuiExtensionSourcesTab({
         <text fg={C.text} attributes={1}>
           {drawn(detailSource.name)}
         </text>
-        <text fg={C.dim}>{drawn(detailSource.source)}</text>
+        <scrollbox
+          ref={sourceScroll}
+          key={detailSource.source}
+          height={sourceRows}
+          flexShrink={0}
+          stickyScroll={false}
+        >
+          <text fg={C.dim}>{sourceText}</text>
+        </scrollbox>
         {detailLoading ? (
           <text fg={C.dim}>{t('Loading...')}</text>
         ) : (
@@ -734,7 +758,7 @@ export function OpenTuiExtensionSourcesTab({
               maxItemsToShow={actionWindow.maxItemsToShow}
               showNumbers={false}
               showScrollArrows={actionWindow.showScrollArrows}
-              focused={isActive && !busy}
+              focused={isActive && !busy && sourceRows > 0}
               {...mouseProps(detailSelect)}
               renderLabel={(item, context) => (
                 <text fg={context.titleColor}>
@@ -765,18 +789,12 @@ export function OpenTuiExtensionSourcesTab({
             >
               {drawn(
                 item.label,
-                item.right
-                  ? Math.max(1, Math.floor((contentWidth - 3) / 2))
-                  : contentWidth - 2,
+                item.right ? Math.max(1, rightWidth) : contentWidth - 2,
               )}
             </text>
             {item.right ? (
               <text fg={context.titleColor}>
-                {' ' +
-                  drawn(
-                    item.right,
-                    Math.max(0, Math.floor((contentWidth - 3) / 2)),
-                  )}
+                {' ' + drawn(item.right, rightWidth)}
               </text>
             ) : null}
           </box>
