@@ -59,6 +59,10 @@ const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
  */
 interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
+  prompt_tokens_details?: OpenAI.CompletionUsage.PromptTokensDetails & {
+    // Standard upstream from openai v7; declared locally for the current SDK pin.
+    cache_write_tokens?: number;
+  };
 }
 
 export interface ExtendedChatCompletionAssistantMessageParam
@@ -1492,6 +1496,11 @@ export function convertOpenAIResponseToLlm(
     const cachedInputTokensReported =
       typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
       typeof extendedUsage.cached_tokens === 'number';
+    const cacheCreationInputTokens =
+      typeof extendedUsage.prompt_tokens_details?.cache_write_tokens ===
+      'number'
+        ? extendedUsage.prompt_tokens_details.cache_write_tokens
+        : undefined;
     const providerReasoningTokens =
       usage.completion_tokens_details?.reasoning_tokens;
     let thinkingTokens = providerReasoningTokens;
@@ -1524,6 +1533,7 @@ export function convertOpenAIResponseToLlm(
     };
     setGenAiUsageProvenance(response.usageMetadata, {
       cachedInputTokensReported,
+      cacheCreationInputTokens,
     });
   }
 
@@ -2114,6 +2124,11 @@ export function convertOpenAIChunkToLlm(
     const cachedInputTokensReported =
       typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
       typeof extendedUsage.cached_tokens === 'number';
+    const cacheCreationInputTokens =
+      typeof extendedUsage.prompt_tokens_details?.cache_write_tokens ===
+      'number'
+        ? extendedUsage.prompt_tokens_details.cache_write_tokens
+        : undefined;
 
     const hasTokenBreakdown =
       totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
@@ -2131,6 +2146,7 @@ export function convertOpenAIChunkToLlm(
     };
     setGenAiUsageProvenance(response.usageMetadata, {
       cachedInputTokensReported,
+      cacheCreationInputTokens,
     });
   }
 

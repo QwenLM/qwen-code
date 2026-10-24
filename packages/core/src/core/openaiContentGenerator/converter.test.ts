@@ -2248,6 +2248,46 @@ describe('OpenAIContentConverter', () => {
 
     it.each([
       [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(3, 1, 4, extra) }),
+      ],
+      [
+        'streaming usage-only',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(3, 1, 4, extra)),
+      ],
+    ])('preserves cache-write provenance for %s usage', (_title, convert) => {
+      const response = convert({
+        prompt_tokens_details: { cache_write_tokens: 256 },
+      });
+
+      expect(response.usageMetadata?.promptTokenCount).toBe(3);
+      expect(response.usageMetadata?.candidatesTokenCount).toBe(1);
+      expect(
+        getGenAiUsageProvenance(response.usageMetadata)
+          ?.cacheCreationInputTokens,
+      ).toBe(256);
+    });
+
+    it('distinguishes an absent cache-write field from an explicitly reported zero', () => {
+      const absent = toLlm([], { usage: usage(3, 1, 4) });
+      const zero = toLlm([], {
+        usage: usage(3, 1, 4, {
+          prompt_tokens_details: { cache_write_tokens: 0 },
+        }),
+      });
+
+      expect(
+        getGenAiUsageProvenance(absent.usageMetadata)?.cacheCreationInputTokens,
+      ).toBeUndefined();
+      expect(
+        getGenAiUsageProvenance(zero.usageMetadata)?.cacheCreationInputTokens,
+      ).toBe(0);
+    });
+
+    it.each([
+      [
         'estimates missing reasoning tokens from non-streaming content',
         { reasoning_content: '先仔细想' },
         usage(1, 10, 11),
