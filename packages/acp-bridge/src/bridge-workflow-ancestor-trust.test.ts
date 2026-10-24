@@ -66,6 +66,7 @@ describe('workflow ancestor trust bridge dispatch', () => {
           throw new Error('Unexpected permission request');
         },
         cancelForPrompt: () => undefined,
+        vote: vi.fn(),
       },
       0,
       Infinity,
