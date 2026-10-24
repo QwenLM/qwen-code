@@ -244,8 +244,10 @@ cat "\${RUNNER_TEMP}/pulls.json"
     it('does not file for a rerun of a merged PR workflow', () => {
       // Run 39768204855's attempt 2 re-ran the PR's pre-merge workflow; the
       // lock timeout it hit could not describe main, and filing it created
-      // #15239. Main's own push and nightly runs carry that signal.
+      // #15239. Main's own push and nightly runs carry that signal. That
+      // rerun carried `pull_request`, not the harness's approval default.
       const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
+        EVENT_NAME: 'pull_request',
         RUN_ATTEMPT: '2',
       });
       expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
@@ -2632,6 +2634,10 @@ fi
               true,
             );
           }
+        } else {
+          // A lookup-exhausted run must not publish, or every failed lookup
+          // duplicates the bot comment.
+          expect(existsSync(published)).toBe(false);
         }
         expect(JSON.stringify(jobs.report_pr)).not.toContain(
           'actions/checkout',
