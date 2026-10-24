@@ -308,6 +308,7 @@ test('opens the workspace menu with management entries on the primary workspace 
     'Copy path',
     'New session',
     'New worktree session',
+    'Move up',
     'Reload runtime',
     'Remove workspace',
   ]);
@@ -329,6 +330,7 @@ test('opens the workspace menu with management entries on the primary workspace 
     'Copy path',
     'New session',
     'New worktree session',
+    'Move down',
     'MCP1/2',
     'Skills1',
     'Extensions0',
