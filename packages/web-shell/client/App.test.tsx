@@ -25604,6 +25604,95 @@ describe('App session callbacks', () => {
     expect(visibleRecapTexts()).toEqual([]);
   });
 
+  it('does not show an automatic recap when the Show Session Recap setting is absent', async () => {
+    // No descriptors at all (the beforeEach default): a Web Shell paired with
+    // a daemon that predates the setting, or a filtered settings list. The
+    // jump exceeds the 5-minute default threshold, so only the fail-closed
+    // gate can explain the recap not firing.
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 6 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+    expect(visibleRecapTexts()).toEqual([]);
+  });
+
+  it('keeps the away window across a transient settings-reload failure', async () => {
+    testState.settings = [
+      showSessionRecapSetting(true),
+      recapAwayThresholdSetting(3),
+    ];
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    const { rerender } = renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    // A background reload fails while the tab is hidden. The resolved setting
+    // is still on, so the in-progress away window must survive the error.
+    testState.settingsError = new Error('settings unavailable');
+    rerender();
+    await flush();
+    testState.settingsError = undefined;
+    rerender();
+    await flush();
+    now += 3 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+
+    expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
+  });
+
+  it('does not retroactively arm a recap when the setting is turned on mid-window', async () => {
+    testState.settings = [
+      showSessionRecapSetting(false),
+      recapAwayThresholdSetting(3),
+    ];
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    const { rerender } = renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    // Turn the setting on while the tab is still hidden.
+    testState.settings = [
+      showSessionRecapSetting(true),
+      recapAwayThresholdSetting(3),
+    ];
+    rerender();
+    await flush();
+    now += 3 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+    expect(visibleRecapTexts()).toEqual([]);
+  });
+
   it('keeps manual /recap working when the Show Session Recap setting is off', async () => {
     testState.settings = [showSessionRecapSetting(false)];
     const manual = deferred<{ sessionId: string; recap: string | null }>();

@@ -14707,6 +14707,14 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'general.showSessionRecap',
     )?.values.effective === true;
+  // The user's resolved opt-out: only an explicit effective `false` counts.
+  // Kept distinct from `autoRecapEnabled` so resource failure states (a
+  // transient settings-reload error that keeps stale data) cannot masquerade
+  // as the user turning the feature off.
+  const recapSettingOff =
+    workspaceSettings.find(
+      (setting) => setting.key === 'general.showSessionRecap',
+    )?.values.effective === false;
   const recapAwayThresholdEffective = workspaceSettings.find(
     (setting) => setting.key === 'general.sessionRecapAwayThresholdMinutes',
   )?.values.effective;
@@ -14724,11 +14732,14 @@ export function App({
   // the *current* toggle state, not the one captured when the call was made.
   const autoRecapEnabledRef = useRef(autoRecapEnabled);
   autoRecapEnabledRef.current = autoRecapEnabled;
-  // Clear the away clock when the feature is disabled so a stale timestamp
-  // cannot trigger a recap for a window the user never opted into.
+  // Clear the away clock when the user opts out so a stale timestamp cannot
+  // trigger a recap for a window the user never opted into. Keyed on the
+  // resolved opt-out rather than `autoRecapEnabled`, because a transient
+  // settings-reload failure flips the latter without any user action and
+  // would destroy an in-progress away window.
   useEffect(() => {
-    if (!autoRecapEnabled) hiddenAtRef.current = null;
-  }, [autoRecapEnabled]);
+    if (recapSettingOff) hiddenAtRef.current = null;
+  }, [recapSettingOff]);
   useEffect(() => {
     lastRecapBlockCountRef.current = 0;
     autoRecapVersionRef.current += 1;
@@ -14738,7 +14749,11 @@ export function App({
     const MIN_NEW_BLOCKS = 4;
     function onVisibilityChange() {
       if (document.hidden) {
-        if (hiddenAtRef.current === null) hiddenAtRef.current = Date.now();
+        // Only arm the clock while the feature is enabled, so an away window
+        // that began while recap was off never fires retroactively if the
+        // setting is turned on mid-window.
+        if (autoRecapEnabled && hiddenAtRef.current === null)
+          hiddenAtRef.current = Date.now();
         return;
       }
       const hiddenAt = hiddenAtRef.current;
