@@ -154,10 +154,23 @@ describe('SDK Java self-hosted workflow guards', () => {
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
     // A lock wait that does not acquire is demoted: it skips the best-effort
-    // write-back without failing a step whose suite already ran, and records
-    // the skip in the step summary.
+    // write-back without failing a step whose suite already ran, records the
+    // skip in the step summary, and drops the pinned infrastructure line so
+    // the classifiers cannot mistake a code failure for an infra one.
     expect(block).toMatch(
-      /if ! sdk_java_lock_acquire 1800 "\$\{TIER\}"; then\n\s+echo "::warning::Maven cache write-back skipped;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n\s+fi\n/,
+      /if ! sdk_java_lock_acquire 1800 "\$\{TIER\}" > >\(grep --line-buffered -v 'lock not acquired within'\); then\n\s+echo "::warning::sdk-java host lock wait exhausted after 30 minutes;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n\s+fi\n/,
+    );
+    expect(block).not.toContain(
+      '::error::sdk-java host lock not acquired within',
+    );
+    expect(block).toContain(
+      'mkdir -p "${HOME}/.cache/qwen-code-ci" || { echo "::warning::Maven cache write-back skipped (lock directory unusable)',
+    );
+    expect(block).toContain(
+      'mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable)',
+    );
+    expect(block).toContain(
+      'cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped;',
     );
     const acquireAt = block.indexOf('sdk_java_lock_acquire 1800 "${TIER}"');
     const writeBackAt = block.indexOf('mkdir -p "${HOME}/.m2/repository" 9>&-');
@@ -168,9 +181,8 @@ describe('SDK Java self-hosted workflow guards', () => {
     // fallback keeps acquisition independent of the checkout's ref and
     // demotes a wait timeout the same way.
     expect(block).toMatch(
-      /if ! flock --wait 1800 9; then\n\s+echo "::error::sdk-java host lock not acquired within 30 minutes"\n\s+echo "::warning::Maven cache write-back skipped;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n/,
+      /if ! flock --wait 1800 9; then\n\s+echo "::warning::sdk-java host lock wait exhausted after 30 minutes;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n/,
     );
-    expect(block).toContain('::error::sdk-java host lock not acquired within');
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
@@ -256,10 +268,19 @@ describe('SDK Java self-hosted workflow guards', () => {
       const home = join(dir, 'home');
       const runnerTemp = join(dir, 'temp');
       const seeded = join(home, '.m2', 'repository', 'marker.txt');
+      const trackingFiles = [
+        join('com', 'example', 'resolver-status.properties'),
+        join('com', 'example', 'artifact.pom.lastUpdated'),
+      ];
       mkdirSync(join(home, '.cache', 'qwen-code-ci'), { recursive: true });
       mkdirSync(dirname(seeded), { recursive: true });
       mkdirSync(runnerTemp, { recursive: true });
       writeFileSync(seeded, 'seeded\n');
+      for (const relative of trackingFiles) {
+        const host = join(home, '.m2', 'repository', relative);
+        mkdirSync(dirname(host), { recursive: true });
+        writeFileSync(host, 'poisoned\n');
+      }
       try {
         const result = spawnSync(
           'bash',
@@ -289,6 +310,17 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(result.status, suite + result.stderr).toBe(0);
         const copied = join(runnerTemp, 'm2-repo', 'marker.txt');
         expect(statSync(copied).ino).toBe(statSync(seeded).ino);
+        // Maven rewrites resolver tracking files in place while the suite is
+        // unlocked; they must not keep the host inode, or a transient
+        // resolution failure poisons the host cache every later job seeds.
+        for (const relative of trackingFiles) {
+          const host = join(home, '.m2', 'repository', relative);
+          expect(
+            existsSync(join(runnerTemp, 'm2-repo', relative)),
+            relative,
+          ).toBe(false);
+          expect(statSync(host).nlink, relative).toBe(1);
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -399,9 +431,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
-  it.skipIf(process.platform !== 'linux')(
-    'demotes a helper lock wait to the suite status',
-    () => {
+  it.skipIf(process.platform !== 'linux').each([0, 1])(
+    'demotes a helper lock wait to the suite status (suite exit %i)',
+    (suiteStatus) => {
       const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
       const body = run.slice(
         run.indexOf('if [ -d "${HOME}/.m2/repository" ]; then'),
@@ -416,12 +448,12 @@ describe('SDK Java self-hosted workflow guards', () => {
       writeFileSync(summary, '');
       writeFileSync(
         join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
-        'sdk_java_lock_acquire() { return 1; }\n',
+        'sdk_java_lock_acquire() { echo "::error::sdk-java host lock not acquired within 0 minutes"; return 1; }\n',
       );
       try {
         const result = spawnSync(
           'bash',
-          ['-e', '-c', `mvn() { :; }\n${body}`],
+          ['-e', '-c', `mvn() { return ${suiteStatus}; }\n${body}`],
           {
             encoding: 'utf8',
             timeout: 5000,
@@ -438,13 +470,113 @@ describe('SDK Java self-hosted workflow guards', () => {
           },
         );
         expect(result.error, body).toBeUndefined();
-        expect(result.status, body + result.stderr).toBe(0);
+        expect(result.status, body + result.stderr).toBe(suiteStatus);
         expect(result.stdout).toContain(
-          '::warning::Maven cache write-back skipped',
+          '::warning::sdk-java host lock wait exhausted after 30 minutes; Maven cache write-back skipped',
         );
-        // The skip must survive on a green run without opening the log.
+        // A non-fatal wait must not leave the pinned infrastructure line:
+        // both classifiers match it without a level filter, so a red suite
+        // on a contended host would be rerun as infrastructure instead.
+        expect(result.stdout).not.toContain('lock not acquired within');
+        const signatures = readFileSync(
+          '.github/workflows/main-ci-failure-issue.yml',
+          'utf8',
+        ).match(/INFRA_FAILURE_SIGNATURES: '([^']+)'/)[1];
+        const annotations = `${result.stdout}\nAssertionError: expected the suite to pass`;
+        expect(new RegExp(signatures, 'i').test(annotations)).toBe(false);
+        // The skip must survive on a green or red run without opening the log.
         expect(readFileSync(summary, 'utf8')).toContain(
           'Maven cache write-back skipped after a lock wait on test-host',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() === 0)(
+    'demotes an unusable host cache to the suite status',
+    () => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(
+        run.indexOf('if [ -d "${HOME}/.m2/repository" ]; then'),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-cache-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const summary = join(dir, 'summary.md');
+      mkdirSync(join(home, '.m2'), { recursive: true });
+      mkdirSync(runnerTemp, { recursive: true });
+      writeFileSync(summary, '');
+      chmodSync(join(home, '.m2'), 0o500);
+      try {
+        const result = spawnSync(
+          'bash',
+          ['-e', '-c', `mvn() { :; }\n${body}`],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: process.cwd(),
+              GITHUB_STEP_SUMMARY: summary,
+              RUNNER_NAME: 'test-host',
+              MATRIX_JAVA: '11',
+              TIER: 'fast',
+            },
+          },
+        );
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back skipped (host cache unusable)',
+        );
+      } finally {
+        chmodSync(join(home, '.m2'), 0o700);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'demotes a missing job-local repository to the suite status',
+    () => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(
+        run.indexOf('if [ -d "${HOME}/.m2/repository" ]; then'),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-no-repo-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const summary = join(dir, 'summary.md');
+      mkdirSync(home, { recursive: true });
+      mkdirSync(runnerTemp, { recursive: true });
+      writeFileSync(summary, '');
+      try {
+        const result = spawnSync(
+          'bash',
+          ['-e', '-c', `mvn() { :; }\n${body}`],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: process.cwd(),
+              GITHUB_STEP_SUMMARY: summary,
+              RUNNER_NAME: 'test-host',
+              MATRIX_JAVA: '11',
+              TIER: 'fast',
+            },
+          },
+        );
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back skipped; the suite result above is unaffected',
         );
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -1517,6 +1649,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // predate the helper, so this site must also keep the bare-lock arm.
     expect(step.run).toContain('flock --wait 1800 9');
     expect(step.run).toContain(
+      '::warning::sdk-java host lock wait exhausted after 30 minutes',
+    );
+    expect(step.run).not.toContain(
       '::error::sdk-java host lock not acquired within',
     );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
@@ -1530,20 +1665,31 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // that does not acquire only skips the best-effort write-back after the
     // suite already ran, and leaves the suite's own status as the exit code.
     expect(step.run).toMatch(
-      /if ! sdk_java_lock_acquire 1800; then\n\s+echo "::warning::Maven cache write-back skipped;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n\s+fi\n/,
+      /if ! sdk_java_lock_acquire 1800 > >\(grep --line-buffered -v 'lock not acquired within'\); then\n\s+echo "::warning::sdk-java host lock wait exhausted after 30 minutes;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n\s+fi\n/,
     );
     expect(step.run).toMatch(
-      /if ! flock --wait 1800 9; then\n\s+echo "::error::sdk-java host lock not acquired within 30 minutes"\n\s+echo "::warning::Maven cache write-back skipped;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n/,
+      /if ! flock --wait 1800 9; then\n\s+echo "::warning::sdk-java host lock wait exhausted after 30 minutes;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n/,
     );
     // Promotion must fire strictly inside the acquisition budget; at or
     // above it the rename lands in the iteration whose timeout arm deletes
     // the ticket, and no test would see the anti-starvation arm go dead.
     const helper = readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8');
     const promoteAfter = Number(
-      helper.match(/SDK_JAVA_LOCK_PROMOTE_AFTER:-(\d+)/)?.[1],
+      step.env?.SDK_JAVA_LOCK_PROMOTE_AFTER ??
+        helper.match(/SDK_JAVA_LOCK_PROMOTE_AFTER:-(\d+)/)?.[1],
     );
-    expect(promoteAfter).toBeGreaterThan(0);
-    expect(promoteAfter).toBeLessThan(seconds);
+    const writeBackBound = Number(
+      step.run.match(/timeout (\d+) find \. /)?.[1],
+    );
+    // Re-derived from the 1800 s budget: four 300 s write-back holds must
+    // still fit after promotion, so 600 s, not the helper's 1200 s default.
+    expect(promoteAfter).toBe(600);
+    expect(writeBackBound).toBe(300);
+    expect(seconds - promoteAfter).toBeGreaterThanOrEqual(4 * writeBackBound);
+    const testStep = parsed.jobs.test.steps.find((s) =>
+      s.run?.includes('sdk_java_lock_acquire 1800 "${TIER}"'),
+    );
+    expect(testStep.env?.SDK_JAVA_LOCK_PROMOTE_AFTER).toBe('600');
     const lockWait = step.run.match(/sdk_java_lock_acquire \d+/)?.[0];
     expect(lockWait).toBeDefined();
     const lockAt = step.run.indexOf(lockWait);
@@ -1565,10 +1711,6 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // Each ceiling is re-derived from the shorter wait: one full wait, the
     // ~3-hour Maven run, the write-back backstop and ~30 minutes of uncapped
     // setup, plus the same few minutes of margin the 5400 s wait left.
-    const writeBackBound = Number(
-      step.run.match(/timeout (\d+) find \. /)?.[1],
-    );
-    expect(writeBackBound).toBe(300);
     const mysqlCeiling = seconds + 3 * 60 * 60 + writeBackBound + 30 * 60;
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
@@ -1579,7 +1721,8 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait, its unlocked suite (the sdk-java suite plus the
     // managed-agent H2 suite, 925 s), the bounded write-back and ~11 minutes
-    // of setup, with the same 1715 s of margin the 5400 s wait left.
+    // of setup, leaving 1715 s — 300 s less than the 5400 s wait left,
+    // because the write-back term is new.
     const testCeiling = seconds + 925 + writeBackBound + 11 * 60;
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
       testCeiling,
@@ -1612,6 +1755,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // warning arms keep a copy failure from reddening the gate after mvn
     // has already passed.
     expect(step.run).toContain('mkdir -p "${HOME}/.m2/repository"');
+    expect(step.run).toContain(
+      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' \\) -links +1 -delete",
+    );
     // Run 39563394993 spent 60 minutes streaming the whole seeded tree and
     // was cancelled at the job ceiling. Only the nlink == 1 delta Maven
     // fetched in this job is published, by per-file hardlinks that never

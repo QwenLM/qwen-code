@@ -429,6 +429,14 @@ public final class HostedHarnessClient implements AutoCloseable {
                 && !capabilities().getFeatures().contains("plan-mode/1")) {
             throw new DaemonException("Hosted Plan mode is unavailable");
         }
+        if (request.getApprovalSelection() != null && "auto".equals(request.getApprovalSelection().get("mode"))
+                && !capabilities().getFeatures().contains("auto-approval/1")) {
+            throw new DaemonException("Hosted classifier approval is unavailable");
+        }
+        if (request.getApprovalSelection() != null && request.getApprovalSelection().containsKey("permissionRules")
+                && !capabilities().getFeatures().contains("permission-rules/1")) {
+            throw new DaemonException("Hosted permission rules are unavailable");
+        }
         if (request.getPromptContent().stream().anyMatch(block -> List.of("image", "resource").contains(block.get("type")))
                 && !capabilities().getFeatures().contains("input-attachments/1")) {
             throw new DaemonException("Hosted input attachments are unavailable");
