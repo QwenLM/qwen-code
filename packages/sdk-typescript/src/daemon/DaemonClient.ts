@@ -134,6 +134,8 @@ import type {
   DaemonGitHubPullRequestList,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
   DaemonWorkspaceMcpConfigStatus,
   DaemonMcpConfigMutationResult,
   DaemonWorkspaceMcpInitializeResult,
@@ -7249,6 +7251,28 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
+  }
+
+  directories(): Promise<DaemonWorkspaceDirectories> {
+    return this.get('/directories', 'GET /workspaces/:workspace/directories');
+  }
+
+  addDirectory(path: string): Promise<DaemonWorkspaceDirectoriesMutation> {
+    return this.post(
+      '/directories',
+      'POST /workspaces/:workspace/directories',
+      { path },
+    );
+  }
+
+  removeDirectory(path: string): Promise<DaemonWorkspaceDirectoriesMutation> {
+    const query = new URLSearchParams({ path });
+    return this.client.workspaceJsonRequest<DaemonWorkspaceDirectoriesMutation>(
+      this.workspaceSelector,
+      `/directories?${query.toString()}`,
+      'DELETE /workspaces/:workspace/directories',
+      { method: 'DELETE', mode: 'rest' },
+    );
   }
 
   mcpConfig(): Promise<DaemonWorkspaceMcpConfigStatus> {

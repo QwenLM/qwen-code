@@ -2145,6 +2145,23 @@ const EN: Messages = {
   'workspaceHost.loadingFolders': 'Loading folders from this computer…',
   'workspaceHost.connectionError':
     'Could not load workspace capabilities from this computer.',
+  'workspaceDirectories.title': 'Workspace directories',
+  'workspaceDirectories.description':
+    'Tools can read and edit these directories in addition to the workspace root. New sessions inherit this list.',
+  'workspaceDirectories.warning':
+    'Adding a directory widens file access beyond the workspace root. Only add directories you trust.',
+  'workspaceDirectories.primary': 'Primary',
+  'workspaceDirectories.empty': 'No extra directories.',
+  'workspaceDirectories.add': 'Add directory',
+  'workspaceDirectories.addTitle': 'Add directory to workspace',
+  'workspaceDirectories.addSubmit': 'Add directory',
+  'workspaceDirectories.pathHint':
+    'Enter an absolute path on the machine running this workspace.',
+  'workspaceDirectories.remove': 'Remove directory',
+  'workspaceDirectories.loading': 'Loading directories…',
+  'workspaceDirectories.loadFailed':
+    'Could not load the workspace directories.',
+  'workspaceDirectories.removeFailed': 'Could not remove the directory',
   'sidebar.removeWorkspace': 'Remove workspace',
   'sidebar.workspaceActions': 'Workspace actions',
   'sidebar.renameWorkspace': 'Rename…',
@@ -6543,6 +6560,21 @@ const ZH: Messages = {
   'workspaceHost.unsupported': '这台计算机不支持添加工作区。',
   'workspaceHost.loadingFolders': '正在从这台计算机加载目录…',
   'workspaceHost.connectionError': '无法从这台计算机加载工作区能力。',
+  'workspaceDirectories.title': '工作区目录',
+  'workspaceDirectories.description':
+    '除工作区根目录外，工具还可以读写这些目录。新建会话会继承该列表。',
+  'workspaceDirectories.warning':
+    '添加目录会扩大工具在工作区根目录之外的文件访问范围，请只添加你信任的目录。',
+  'workspaceDirectories.primary': '主目录',
+  'workspaceDirectories.empty': '暂无额外目录。',
+  'workspaceDirectories.add': '添加目录',
+  'workspaceDirectories.addTitle': '向工作区添加目录',
+  'workspaceDirectories.addSubmit': '添加目录',
+  'workspaceDirectories.pathHint': '请输入运行此工作区的机器上的绝对路径。',
+  'workspaceDirectories.remove': '移除目录',
+  'workspaceDirectories.loading': '正在加载目录…',
+  'workspaceDirectories.loadFailed': '无法加载工作区目录。',
+  'workspaceDirectories.removeFailed': '无法移除该目录',
   'sidebar.removeWorkspace': '移除工作区',
   'sidebar.workspaceActions': '工作区操作',
   'sidebar.renameWorkspace': '重命名…',

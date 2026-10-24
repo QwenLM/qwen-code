@@ -1255,4 +1255,22 @@ describe('AddWorkspaceDialog', () => {
     });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('uses the caller-supplied title and submit label', () => {
+    mount(
+      <AddWorkspaceDialog
+        title="Add directory to workspace"
+        submitLabel="Add directory"
+        browseDirectories
+        persistenceSupported={false}
+        displayNameEnabled={false}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+      />,
+    );
+    expect(document.body.textContent).toContain('Add directory to workspace');
+    expect(submitButton().textContent).toBe('Add directory');
+    expect(document.querySelector('#add-workspace-persist')).toBeNull();
+    expect(document.querySelector('#add-workspace-display-name')).toBeNull();
+  });
 });

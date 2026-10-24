@@ -948,6 +948,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'native_directory_picker',
   'workspace_runtime',
   'workspace_runtime_stop',
+  'workspace_directories',
   'workspace_local_open',
   'workspace_local_terminal',
   'workspace_qualified_rest_core',
@@ -4310,6 +4311,22 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               agentCollaborationEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_directories') {
+          expect(predicate({ workspaceDirectoriesAvailable: true })).toBe(true);
+          expect(predicate({ workspaceDirectoriesAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceDirectoriesAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(

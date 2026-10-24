@@ -61,6 +61,7 @@ interface CreateServeFeaturesDeps {
   standaloneSessionsAvailable?: () => boolean;
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  workspaceDirectoriesAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable: () => boolean;
   workspaceRuntimeStopAvailable?: () => boolean;
@@ -104,6 +105,7 @@ export function createServeFeatures(
     standaloneSessionsAvailable,
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
+    workspaceDirectoriesAvailable,
     nativeDirectoryPickerAvailable,
     workspaceRuntimeAvailable,
     workspaceRuntimeStopAvailable,
@@ -164,6 +166,7 @@ export function createServeFeatures(
         scratchWorkspaceRegistrationAvailable:
           scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
+        workspaceDirectoriesAvailable,
         nativeDirectoryPickerAvailable,
         workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
         workspaceRuntimeStopAvailable:
