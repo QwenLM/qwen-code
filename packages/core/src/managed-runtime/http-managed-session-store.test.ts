@@ -90,6 +90,11 @@ describe('HTTP Managed Session store', () => {
   it.each([
     { mode: 'default', revision: 0 },
     { mode: 'auto-edit', revision: 2 },
+    {
+      mode: 'auto',
+      revision: 4,
+      permissionRules: { allow: ['Read'], ask: ['Bash(git push*)'], deny: [] },
+    },
     { mode: 'yolo', revision: 3 },
     null,
   ])(
@@ -133,7 +138,18 @@ describe('HTTP Managed Session store', () => {
 
   it.each([
     {},
-    { mode: 'auto', revision: 1 },
+    { mode: 'AUTO', revision: 1 },
+    { mode: 'auto', revision: 0 },
+    {
+      mode: 'default',
+      revision: 1,
+      permissionRules: { allow: ['Read(./secret)'], ask: [], deny: [] },
+    },
+    {
+      mode: 'default',
+      revision: 0,
+      permissionRules: { allow: ['Read'], ask: [], deny: [] },
+    },
     { mode: 'yolo', revision: -1 },
     { mode: 'yolo', revision: '1' },
     { mode: 'yolo', revision: Number.MAX_SAFE_INTEGER + 1 },

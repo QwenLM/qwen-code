@@ -348,7 +348,7 @@ public class WebShellAgentController {
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
         return service.changeWebShellSessionApproval(tenant.tenantId(), tenant.actorId(), request.sessionId(),
-                request.idempotencyKey(), request.approvalMode(), request.expectedRevision(), request.planMode());
+                request.idempotencyKey(), request.approvalMode(), request.expectedRevision(), request.planMode(), request.permissionRules());
     }
 
     @PostMapping("/session-models/query")
