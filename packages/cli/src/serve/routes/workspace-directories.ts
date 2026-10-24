@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { expandHomeDir } from '@qwen-code/qwen-code-core/utils/paths.js';
-import { loadSettings } from '../../config/settings.js';
+import { readSettingsSnapshot } from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -51,10 +51,20 @@ function resolveWorkspaceDirectory(
 }
 
 /** Extra directories persisted at workspace scope. */
-function readWorkspaceDirectories(workspaceCwd: string): string[] {
-  const settings = loadSettings(workspaceCwd, { skipLoadEnvironment: true });
-  // `settings` is the layer with environment variables resolved by normal
-  // settings loading, matching what sessions and the mutation handler use.
+function readWorkspaceDirectories(
+  workspaceCwd: string,
+  environment: Readonly<NodeJS.ProcessEnv>,
+  workspaceTrusted: boolean,
+): string[] {
+  // Read through the selected runtime's environment, not the daemon's: a
+  // variable defined only in the workspace's `.env` reaches the ACP child and
+  // its settings but not the daemon process, so resolving against `process.env`
+  // would list the unresolved placeholder while live sessions use the real
+  // directory.
+  const settings = readSettingsSnapshot(workspaceCwd, {
+    environment,
+    workspaceTrusted,
+  });
   const configured = settings.workspace.settings.context?.includeDirectories;
   return Array.isArray(configured)
     ? configured
@@ -190,7 +200,13 @@ export function registerWorkspaceDirectoriesRoutes(
       res.status(200).json({
         v: 1,
         primaryDirectory: runtime.workspaceCwd,
-        directories: readWorkspaceDirectories(runtime.workspaceCwd),
+        directories: readWorkspaceDirectories(
+          runtime.workspaceCwd,
+          runtime.env.mode === 'runtime-overlay'
+            ? (runtime.env.effectiveEnv ?? {})
+            : (runtime.env.effectiveEnv ?? process.env),
+          runtime.trusted,
+        ),
       });
     } catch (error) {
       writeStderrLine(

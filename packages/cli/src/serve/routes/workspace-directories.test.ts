@@ -34,6 +34,8 @@ function makeApp(
     trusted?: boolean;
     workspaceCwd?: string;
     invoke?: ReturnType<typeof vi.fn>;
+    runtimeEnv?: Readonly<Record<string, string | undefined>>;
+    envMode?: 'parent-process' | 'runtime-overlay';
   } = {},
 ) {
   const invoke = options.invoke ?? vi.fn();
@@ -42,6 +44,11 @@ function makeApp(
     workspaceCwd,
     trusted: options.trusted ?? true,
     bridge: { invokeWorkspaceCommand: invoke },
+    env: {
+      mode: options.envMode ?? 'runtime-overlay',
+      overlayKeys: Object.keys(options.runtimeEnv ?? {}),
+      effectiveEnv: options.runtimeEnv ?? process.env,
+    },
   };
   const entry = {
     workspaceId: 'ws-1',
@@ -110,6 +117,26 @@ describe('GET /workspaces/:workspace/directories', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.directories).toEqual([extra]);
+  });
+
+  it('resolves a variable that only the selected runtime environment defines', async () => {
+    const outside = path.join(scratch, 'outside');
+    await fsp.mkdir(outside);
+    await writeWorkspaceSettings(['${QWEN_TEST_EXTRA_DIR}']);
+    // The daemon process must not carry the variable: only the runtime
+    // overlay (a workspace `.env`) defines it for the sessions.
+    expect(process.env['QWEN_TEST_EXTRA_DIR']).toBeUndefined();
+    const { app } = makeApp({
+      runtimeEnv: {
+        ...process.env,
+        QWEN_TEST_EXTRA_DIR: outside,
+      } as NodeJS.ProcessEnv,
+    });
+
+    const res = await request(app).get('/workspaces/ws-1/directories');
+
+    expect(res.status).toBe(200);
+    expect(res.body.directories).toEqual([outside]);
   });
 
   it('refuses an untrusted workspace', async () => {
