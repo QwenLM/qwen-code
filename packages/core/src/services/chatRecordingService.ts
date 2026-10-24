@@ -2647,6 +2647,11 @@ export class ChatRecordingService {
     return this.displayProjectionForTitle;
   }
 
+  /** User turns in the active transcript: the boundaries `/rewind` uses. */
+  getUserTurnCount(): number {
+    return this.turnParentUuids.length;
+  }
+
   recordGoalRuntimeMessage(
     message: PartListUnion,
     goalContext: GoalTurnPermit,

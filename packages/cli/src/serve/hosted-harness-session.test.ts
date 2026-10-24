@@ -1505,6 +1505,8 @@ describe('Hosted Harness no-tool session', () => {
       { toolProfile: 'hosted-workspace-files/1', custom: false },
       { toolProfile: 'hosted-workspace-files/1', custom: true },
       { toolProfile: 'hosted-workspace-shell/1', custom: true },
+      { toolProfile: 'hosted-workspace-files/3', custom: true },
+      { toolProfile: 'hosted-workspace-files/3', custom: false },
     ].flatMap((profile) =>
       [undefined, { mode: 'yolo', revision: 1 }].map((approvalSelection) => ({
         ...profile,
@@ -23488,6 +23490,7 @@ describe('Hosted Harness tool approvals', () => {
   it.each([
     ['hosted-workspace-files/1', true],
     ['hosted-workspace-files/2', false],
+    ['hosted-workspace-files/3', true],
     ['hosted-workspace-shell/1', true],
     ['hosted-workspace-read/1', false],
   ] as const)(
