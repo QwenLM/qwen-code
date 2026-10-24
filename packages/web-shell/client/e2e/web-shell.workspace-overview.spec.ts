@@ -306,15 +306,16 @@ test('opens the workspace menu with management entries on the primary workspace 
   const secondaryMenu = page.getByRole('menu');
   await expect(secondaryMenu.getByRole('menuitem')).toHaveText([
     'Copy path',
-    'New task',
-    'New worktree task',
+    'New session',
+    'New worktree session',
+    'Move up',
     'Reload runtime',
     'Remove workspace',
   ]);
-  // "New worktree task" opens a draft in that workspace with the composer's
+  // "New worktree session" opens a draft in that workspace with the composer's
   // git mode armed for a worktree.
   await secondaryMenu
-    .getByRole('menuitem', { name: 'New worktree task' })
+    .getByRole('menuitem', { name: 'New worktree session' })
     .click();
   await expect(secondaryMenu).toBeHidden();
   await expect(page.getByRole('button', { name: 'Worktree' })).toBeVisible();
@@ -327,8 +328,9 @@ test('opens the workspace menu with management entries on the primary workspace 
   const menu = page.getByRole('menu');
   await expect(menu.getByRole('menuitem')).toHaveText([
     'Copy path',
-    'New task',
-    'New worktree task',
+    'New session',
+    'New worktree session',
+    'Move down',
     'MCP1/2',
     'Skills1',
     'Extensions0',
