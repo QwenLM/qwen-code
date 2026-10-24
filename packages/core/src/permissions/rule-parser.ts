@@ -1000,7 +1000,31 @@ export function splitCompoundCommandSegments(
         ...findOperatorBoundaries(command, 'escape-everywhere'),
       ].sort((a, b) => a.start - b.start)
     : findOperatorBoundaries(command, 'bash');
+  return assembleSegments(command, boundaries);
+}
 
+/**
+ * Split under one backslash reading only.
+ *
+ * The union split above is the safe default for finding boundaries, but a
+ * boundary only one reading sees can sit inside what bash treats as one
+ * quoted word, and the phantom segments then misattribute a `cd`'s effect on
+ * the write path (#12246). When the command contains a backslash the shell
+ * semantics walker replaces the union with one walk per reading and merges
+ * (dedupes) the two operation sets; the union split remains the boundary
+ * source for `splitCompoundCommand`, i.e. `Bash(...)` rule matching.
+ */
+export function splitCompoundCommandSegmentsForReading(
+  command: string,
+  reading: BackslashReading,
+): CompoundCommandSegment[] {
+  return assembleSegments(command, findOperatorBoundaries(command, reading));
+}
+
+function assembleSegments(
+  command: string,
+  boundaries: OperatorBoundary[],
+): CompoundCommandSegment[] {
   const segments: CompoundCommandSegment[] = [];
   let lastSplit = 0;
   for (const { start, end, operator } of boundaries) {
@@ -1037,12 +1061,43 @@ interface OperatorBoundary {
   operator: string;
 }
 
-type BackslashReading = 'bash' | 'escape-everywhere';
+export type BackslashReading = 'bash' | 'escape-everywhere';
+
+interface OperatorScan {
+  boundaries: OperatorBoundary[];
+  /**
+   * The scan ran out of input still inside a quote: a `#` comment (not
+   * modelled here, #11882) or a trailing fragment hid the closing quote, so
+   * the tail of the command sits in a quoted blob this reading treats as one
+   * word.
+   */
+  endsInOpenQuote: boolean;
+}
+
+/**
+ * Whether one backslash reading's scan of `command` runs out of input still
+ * inside a quote. Callers that walk per-reading splits use this to tell a
+ * reading whose tail was quoted away (worth a second look under the other
+ * reading) from one that saw the whole command.
+ */
+export function readingEndsInOpenQuote(
+  command: string,
+  reading: BackslashReading,
+): boolean {
+  return scanOperators(command, reading).endsInOpenQuote;
+}
 
 function findOperatorBoundaries(
   command: string,
   reading: BackslashReading,
 ): OperatorBoundary[] {
+  return scanOperators(command, reading).boundaries;
+}
+
+function scanOperators(
+  command: string,
+  reading: BackslashReading,
+): OperatorScan {
   const boundaries: OperatorBoundary[] = [];
   let inSingle = false;
   let inDouble = false;
@@ -1123,7 +1178,7 @@ function findOperatorBoundaries(
     }
   }
 
-  return boundaries;
+  return { boundaries, endsInOpenQuote: inSingle || inDouble };
 }
 
 /**
