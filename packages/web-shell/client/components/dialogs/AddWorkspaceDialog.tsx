@@ -480,11 +480,12 @@ export function AddWorkspaceDialog({
   }, [cloneJob, gitClone, pollCloneJob]);
 
   const backToForm = useCallback(() => {
+    if (submitting) return;
     cloneJobIdRef.current = undefined;
     setCloneJob(undefined);
     setCloneUnknown(false);
     setSubmitting(false);
-  }, []);
+  }, [submitting]);
 
   const pickGitTargetParent = useCallback(async () => {
     if (!onPick) return;
@@ -577,6 +578,7 @@ export function AddWorkspaceDialog({
 
   const handleGitTargetKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.nativeEvent.isComposing) return;
       const open = gitSuggestOpen && gitSuggestions.length > 0;
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -726,6 +728,8 @@ export function AddWorkspaceDialog({
         }
         setError(null);
         setCloneUnknown(false);
+        setGitSuggestOpen(false);
+        setGitSuggestHighlight(-1);
         setSubmitting(true);
         try {
           const { jobId } = await gitClone.start({
@@ -865,6 +869,7 @@ export function AddWorkspaceDialog({
                   type="button"
                   className="flex-1 sm:flex-none"
                   onClick={backToForm}
+                  disabled={submitting}
                 >
                   {t('sidebar.gitCloneBack')}
                 </Button>
