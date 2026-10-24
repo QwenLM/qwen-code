@@ -2068,6 +2068,9 @@ const EN: Messages = {
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
+  'sidebar.recentSessions': 'Recent sessions',
+  'sidebar.standalonePinUnavailable':
+    'Pinning no-workspace sessions is not supported yet.',
   'sidebar.workspaceSelectLabel': 'Workspace',
   'sidebar.noWorkspace': 'No workspace',
   'sidebar.noWorkspaceSessions': 'No-workspace sessions',
@@ -6457,6 +6460,8 @@ const ZH: Messages = {
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
+  'sidebar.recentSessions': '最近会话',
+  'sidebar.standalonePinUnavailable': '暂不支持置顶无工作区会话。',
   'sidebar.workspaceSelectLabel': '工作区',
   'sidebar.noWorkspace': '无工作区',
   'sidebar.noWorkspaceSessions': '无工作区会话',

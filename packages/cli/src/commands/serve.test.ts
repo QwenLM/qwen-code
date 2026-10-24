@@ -140,9 +140,14 @@ describe('serve command args', () => {
     expect(parsed['enable-session-shell']).toBe(false);
   });
 
-  it('defaults max sessions to 32', () => {
+  it('leaves max sessions unset when the flag is omitted', () => {
     const parsed = buildParser().parseSync('');
-    expect(parsed['max-sessions']).toBe(32);
+    expect(parsed['max-sessions']).toBeUndefined();
+  });
+
+  it('parses --max-sessions as a number', () => {
+    const parsed = buildParser().parseSync('--max-sessions 64');
+    expect(parsed['max-sessions']).toBe(64);
   });
 
   it('accepts --experimental-lsp in strict parser mode', () => {
