@@ -166,7 +166,7 @@ worktree included:
    scheduled task goes on, so `prepare --take-over` moves the watch — its
    history and budgets kept — to the session that asks, when the user says
    so; the helpers of the session it was taken from refuse from then on,
-   and its scheduled task stops at its next fire: until then its gate moves no cursor — it asks again whose the watch is before it writes one — and only wakes it (`watched_elsewhere`).
+   and its scheduled task stops at its next fire: its gate names the session that made it (`--session`, the `sessionId` `prepare` reports), and until then moves no cursor — it asks again whose the watch is before it writes one — and only wakes it (`watched_elsewhere`).
 6. Fetch `refs/pull/<n>/head` into local branch `qwen-autofix/pr-<n>` and
    create the worktree on it. `prepare` never discards earlier work: a
    leftover worktree, or a leftover branch that may hold commits beyond the
@@ -332,6 +332,11 @@ Event rules:
   app's check may link any run, and `ci-log` would read it.
 - A merged or closed PR is read with the first call alone: its answer is a
   stop, which needs no further page of checks, suites or threads.
+- A watch belongs to a CLI session, whose id stays put. A Managed Session
+  runs each turn, and each gate, as a Runtime Session of its own, so the
+  helpers' session check refuses its next turn: the probe serves as a
+  Managed automation's gate — one that names no `--session` makes no owner
+  check — and the watch itself is not for Managed Sessions yet.
 - Checks and suites belong to the commit, not to the PR: another PR of the
   same head commit shares them. That is a known limit.
 - Prepared mode writes the whole snapshot, indented, to

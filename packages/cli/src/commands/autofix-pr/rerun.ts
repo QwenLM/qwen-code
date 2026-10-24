@@ -75,7 +75,7 @@ function rerunLocked(
   // rerun`: a commit status or another app may link any URL. `checkEvents`
   // gives a run id to such a job only, read against the PR's own URL — the
   // repository's current name, whatever name the watch was prepared under.
-  const failed = checkEvents(pr).failed.filter(
+  const failed = checkEvents(pr, state.rerunChecks ?? []).failed.filter(
     ({ event, actions }) => actions && event.runId === runId,
   );
   if (failed.length === 0) {

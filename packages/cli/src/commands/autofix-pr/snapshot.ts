@@ -38,7 +38,6 @@ import {
   assertOwnedBySession,
   autofixPrPaths,
   checkAttemptKey,
-  currentSessionId,
   readGateCursor,
   readState,
   repoRoot,
@@ -463,10 +462,16 @@ function checkIdentity(ctx: CheckContext): string {
  */
 function checkRunAttempt(
   ctx: Extract<CheckContext, { __typename: 'CheckRun' }>,
+  head: string,
+  rerun: Set<string>,
 ): string {
   const run = ctx.checkSuite?.workflowRun;
   if (run && !CODE_EVENTS.has(run.event)) {
-    return `#on:${run.workflow?.databaseId ?? ''}:${run.event}`;
+    // Once re-run on the head, a failure of it is the one the re-run
+    // answered with: reported once more, under a key of its own, so it is
+    // answered as real rather than taken for the one already handled.
+    const again = rerun.has(`${checkIdentity(ctx)}@${head}`) ? 'rerun' : 'on';
+    return `#${again}:${run.workflow?.databaseId ?? ''}:${run.event}`;
   }
   return `#${ctx.databaseId}`;
 }
@@ -491,7 +496,10 @@ export interface FailedCheck {
 }
 
 /** The failed checks of the head, each with the identity of its attempt. */
-export function checkEvents(pr: PrData): {
+export function checkEvents(
+  pr: PrData,
+  rerunChecks: Iterable<string> = [],
+): {
   failed: FailedCheck[];
   pending: string[];
   truncated: boolean;
@@ -509,6 +517,7 @@ export function checkEvents(pr: PrData): {
   };
   const failed: FailedCheck[] = [];
   const pending: string[] = [];
+  const rerun = new Set(rerunChecks);
   const runsPrefix =
     `${pr.url.replace(/\/pull\/\d+\/?$/, '')}/actions/runs/`.toLowerCase();
   for (const ctx of latestContexts(contexts.nodes)) {
@@ -526,7 +535,7 @@ export function checkEvents(pr: PrData): {
               Boolean(ctx.checkSuite?.workflowRun),
             ),
           },
-          attempt: checkRunAttempt(ctx),
+          attempt: checkRunAttempt(ctx, pr.headRefOid, rerun),
           identity: checkIdentity(ctx),
           actions: Boolean(ctx.checkSuite?.workflowRun),
           runDone:
@@ -816,7 +825,7 @@ export function buildSnapshot(
 
   const checks = lagging
     ? { failed: [], pending: [], truncated: false }
-    : checkEvents(pr);
+    : checkEvents(pr, state.rerunChecks ?? []);
   // A failure handled without a push (declined, left for a human, re-run)
   // stays on the head, so it is skipped by its attempt; a re-run that fails
   // again is a new attempt. `key` is what `reply` and `rerun` record.
@@ -863,6 +872,11 @@ export function buildSnapshot(
 export interface GateWatch {
   knownHeads: string[];
   seenCommentIds: string[];
+  /** Checks a round re-ran, by identity and head. */
+  rerunChecks?: string[];
+  /** This run stopped reading at its time budget: what it did not read
+   * comes and goes with GitHub's speed. */
+  partial?: boolean;
   /** Failed attempts a round handled without a push. */
   handledChecks?: string[];
   /** Head whose conflict a round left for a human. */
@@ -946,13 +960,14 @@ export function buildGateSnapshot(
   // A failure a round handled without a push counts as reported; one of a
   // run the round could not re-run yet is reported once more, under a key
   // of its own, when that run has ended.
-  const checks = checkEvents(pr);
+  const checks = checkEvents(pr, watch.rerunChecks ?? []);
   const reportedChecks = new Set([
     ...next.reportedChecks,
     ...(watch.handledChecks ?? []),
   ]);
   const deferred = new Set(watch.deferredRuns ?? []);
-  next.reportedChecks = [];
+  // A run that did not read every page keeps what it could not see.
+  next.reportedChecks = watch.partial ? [...next.reportedChecks] : [];
   const checkKeys = new Map<SnapshotEvent, string[]>();
   const candidates: SnapshotEvent[] = [];
   for (const { event, attempt, runDone } of checks.failed) {
@@ -1039,11 +1054,18 @@ export function buildGateSnapshot(
   // from the front can hide something new — checks and threads past the
   // last page; comments and reviews are read newest first, so a cut there
   // only hides older ones, and is listed without waking the session.
+  // A cut of the read budget comes and goes with GitHub's speed: it wakes
+  // no one, and leaves the record of cuts as it was.
+  next.reportedChecks = [...new Set(next.reportedChecks)];
   const reportedTruncated = new Set(cursor.reportedTruncated ?? []);
-  const newlyCut = truncated.some(
-    (name) => FRONT_READ.has(name) && !reportedTruncated.has(name),
-  );
-  next.reportedTruncated = truncated;
+  const newlyCut =
+    !watch.partial &&
+    truncated.some(
+      (name) => FRONT_READ.has(name) && !reportedTruncated.has(name),
+    );
+  next.reportedTruncated = watch.partial
+    ? (cursor.reportedTruncated ?? [])
+    : truncated;
 
   if (events.length === 0 && !newlyCut) {
     return { snapshot: null, cursor: next };
@@ -1291,7 +1313,7 @@ export function fetchPrData(
   target: PrTarget,
   replyCheck?: ReplyCheck,
   deadline = Number.POSITIVE_INFINITY,
-): { pr: PrData; viewer: string } {
+): { pr: PrData; viewer: string; partial?: true } {
   const data = graphql(PR_QUERY, target, []) as {
     data: {
       viewer: { login: string };
@@ -1402,6 +1424,14 @@ export function fetchPrData(
     threads.pageInfo = more.pageInfo;
   }
   // A merged or closed PR asks nothing more: its `stop` must get through.
+  // Pages left because time ran out, not because a page cap was reached.
+  const partial =
+    Date.now() >= deadline &&
+    Boolean(
+      rollup?.contexts.pageInfo.hasNextPage ||
+        suites?.pageInfo?.hasPreviousPage ||
+        threads.pageInfo.hasNextPage,
+    );
   if (replyCheck) {
     markOrphanReplies(
       target,
@@ -1410,7 +1440,11 @@ export function fetchPrData(
       Math.min(deadline, Date.now() + GATE_READ_BUDGET_MS),
     );
   }
-  return { pr, viewer: data.data.viewer.login };
+  return {
+    pr,
+    viewer: data.data.viewer.login,
+    ...(partial ? { partial: true as const } : {}),
+  };
 }
 
 export interface SnapshotArgs {
@@ -1418,6 +1452,9 @@ export interface SnapshotArgs {
   repo?: string;
   host?: string;
   gate?: boolean;
+  /** With `--gate`: the session whose scheduled task runs this gate, as
+   * `prepare` reported it. */
+  session?: string;
 }
 
 function runGate(args: SnapshotArgs): void {
@@ -1476,14 +1513,17 @@ function runGate(args: SnapshotArgs): void {
           handledChecks: state.handledChecks ?? [],
           handledConflictSha: state.handledConflictSha ?? null,
           deferredRuns: state.deferredRuns ?? [],
+          rerunChecks: state.rerunChecks ?? [],
         }
       : { knownHeads: [], seenCommentIds: [] };
 
   // After a take-over, the session the watch was taken from fires its task
   // until one of its rounds runs. Its gate must not move the cursor the new
   // owner's gate reads, or what it reported would reach a session that no
-  // longer acts on it: it wakes that session, whose round then stops.
-  const session = currentSessionId();
+  // longer acts on it: it wakes that session, whose round then stops. The
+  // task names its session: the environment cannot, as a Managed
+  // automation runs its gate as a session of its own.
+  const session = args.session ?? '';
   if (
     state &&
     sameRepository(state, target) &&
@@ -1507,7 +1547,7 @@ function runGate(args: SnapshotArgs): void {
   ]);
   // The gate goes on without an answer: the comment is asked about again
   // at the next fire.
-  const { pr, viewer } = fetchPrData(
+  const { pr, viewer, partial } = fetchPrData(
     { ...target, prNumber: args.pr },
     {
       known: (id) => reportedBefore.has(id),
@@ -1531,7 +1571,10 @@ function runGate(args: SnapshotArgs): void {
     viewer,
     prAuthor: pr.author?.login ?? existing?.prAuthor ?? '',
   };
-  const result = buildGateSnapshot(pr, cursor, watch);
+  const result = buildGateSnapshot(pr, cursor, {
+    ...watch,
+    ...(partial ? { partial } : {}),
+  });
   // A take-over while GitHub was asked: what this gate saw is the new
   // owner's to report.
   const owner = readState(paths.statePath);
@@ -1664,6 +1707,11 @@ export const snapshotCommand: CommandModule = {
         default: false,
         describe:
           'Probe mode for a scheduled task gate: no worktree, a cursor in .qwen/tmp, only transitions since the last run on stdout and nothing when there are none',
+      })
+      .option('session', {
+        type: 'string',
+        describe:
+          "With --gate: the session whose scheduled task runs the gate (prepare's sessionId); a watch another session took over answers stop",
       }),
   handler: (argv) => {
     runSnapshot({
@@ -1671,6 +1719,7 @@ export const snapshotCommand: CommandModule = {
       repo: argv['repo'] as string | undefined,
       host: argv['host'] as string | undefined,
       gate: Boolean(argv['gate']),
+      session: argv['session'] as string | undefined,
     });
   },
 };

@@ -174,6 +174,35 @@ describe('buildGateSnapshot', () => {
     expect(result.snapshot).toBeNull();
   });
 
+  it('neither wakes nor forgets on a run its time budget cut short', () => {
+    const cut = pr({}, [failed('Test', 1)]);
+    cut.commits.nodes[0]!.commit.statusCheckRollup!.contexts.pageInfo = {
+      hasNextPage: true,
+      endCursor: 'c1',
+    };
+    const full = buildGateSnapshot(
+      pr({}, [failed('Test', 1), failed('Lint', 2)]),
+      cursor(),
+    );
+    expect(full.cursor.reportedChecks).toHaveLength(2);
+    // GitHub was slow: the run read the first page only.
+    const partial = buildGateSnapshot(cut, full.cursor, {
+      knownHeads: [],
+      seenCommentIds: [],
+      partial: true,
+    });
+    expect(partial.snapshot).toBeNull();
+    expect(partial.cursor.reportedChecks).toEqual(full.cursor.reportedChecks);
+    expect(partial.cursor.reportedTruncated).toEqual([]);
+    // The next run reads it all, and has nothing new.
+    expect(
+      buildGateSnapshot(
+        pr({}, [failed('Test', 1), failed('Lint', 2)]),
+        partial.cursor,
+      ).snapshot,
+    ).toBeNull();
+  });
+
   it('reports a failed check once per head and again after it was re-run', () => {
     const first = buildGateSnapshot(pr({}, [failed('Test')]), cursor());
     expect(first.snapshot).toMatchObject({
@@ -1612,20 +1641,28 @@ describe('runSnapshot --gate', () => {
       handledCommentIds: [],
       postedCommentIds: [],
     });
-    const saved = process.env['QWEN_CODE_SESSION_ID'];
-    process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
-    try {
-      runSnapshot({ pr: 7, repo: 'o/r', gate: true });
-    } finally {
-      if (saved === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
-      else process.env['QWEN_CODE_SESSION_ID'] = saved;
-    }
+    // The task of session-a names its session; the watch is session-b's.
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true, session: 'session-a' });
     expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toEqual({
       action: 'stop',
       events: [{ type: 'watched_elsewhere', session: 'session-b' }],
     });
     expect(mockGh).not.toHaveBeenCalled();
     expect(existsSync(gatePath())).toBe(false);
+
+    // A gate that names no session — a Managed automation's, run as a
+    // session of its own — asks nothing of the owner.
+    const saved = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'derived-runtime-session';
+    try {
+      respond(pr());
+      runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    } finally {
+      if (saved === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = saved;
+    }
+    expect(mocks.stdout).toHaveBeenCalledTimes(1);
+    expect(existsSync(gatePath())).toBe(true);
   });
 
   it('writes no cursor when the watch is taken over while GitHub is asked', () => {
@@ -1661,14 +1698,7 @@ describe('runSnapshot --gate', () => {
         },
       });
     });
-    const saved = process.env['QWEN_CODE_SESSION_ID'];
-    process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
-    try {
-      runSnapshot({ pr: 7, repo: 'o/r', gate: true });
-    } finally {
-      if (saved === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
-      else process.env['QWEN_CODE_SESSION_ID'] = saved;
-    }
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true, session: 'session-a' });
     expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toMatchObject({
       events: [{ type: 'watched_elsewhere', session: 'session-b' }],
     });

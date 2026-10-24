@@ -24,18 +24,13 @@ import {
 
 const FAILED_JOB_CONCLUSIONS = new Set(['failure', 'timed_out']);
 
-interface JobLog {
-  name: string;
-  log: string;
-}
-
 /**
- * Keep the last `limit` lines of every job up to its last `##[error]` line,
- * each prefixed with its job name. A job's log runs on through the post-job
- * cleanup steps; the failure is at the end of the step that failed.
+ * The lines the log file keeps of one job's log: its last `limit` lines up
+ * to its last `##[error]` line, each prefixed with the job's name. A job's
+ * log runs on through the post-job cleanup steps; the failure is at the end
+ * of the step that failed.
  */
-/** The lines the log file keeps of one job's log. */
-function tailJob(name: string, log: string, limit: number): string[] {
+export function tailJob(name: string, log: string, limit: number): string[] {
   const parts: string[] = [];
   let lines = log.split('\n').filter((line) => line !== '');
   const lastError = lines.findLastIndex((line) => line.includes('##[error]'));
@@ -48,17 +43,6 @@ function tailJob(name: string, log: string, limit: number): string[] {
   for (const line of lines.slice(-limit)) parts.push(`${name}\t${line}`);
   if (later > 0) parts.push(`${name}\t… ${later} later lines omitted`);
   return parts;
-}
-
-export function tailPerJob(
-  jobs: JobLog[],
-  limit: number,
-): { text: string; jobs: string[] } {
-  const parts: string[] = [];
-  for (const { name, log } of jobs) {
-    for (const line of tailJob(name, log, limit)) parts.push(line);
-  }
-  return { text: `${parts.join('\n')}\n`, jobs: jobs.map((job) => job.name) };
 }
 
 /**

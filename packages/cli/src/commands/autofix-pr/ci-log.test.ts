@@ -39,27 +39,24 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: () => {},
 }));
 
-import { runCiLog, tailPerJob } from './ci-log.js';
+import { runCiLog, tailJob } from './ci-log.js';
 
-describe('tailPerJob', () => {
-  it('keeps the last lines of each job and says how many were dropped', () => {
-    const jobs = [
-      { name: 'build', log: 'one\ntwo\nthree\n' },
-      { name: 'test', log: 'alpha' },
-    ];
-    expect(tailPerJob(jobs, 2)).toEqual({
-      text: [
+describe('tailJob', () => {
+  const file = (lines: string[]) => `${lines.join('\n')}\n`;
+
+  it('keeps the last lines of a job and says how many were dropped', () => {
+    expect(file(tailJob('build', 'one\ntwo\nthree\n', 2))).toBe(
+      [
         'build\t… 1 earlier lines omitted',
         'build\ttwo',
         'build\tthree',
-        'test\talpha',
         '',
       ].join('\n'),
-      jobs: ['build', 'test'],
-    });
+    );
+    expect(file(tailJob('test', 'alpha', 2))).toBe('test\talpha\n');
   });
 
-  it('ends each job at its last error, before the post-job steps', () => {
+  it('ends a job at its last error, before the post-job steps', () => {
     const log = [
       'Run npm test',
       'FAIL a.test.ts',
@@ -67,7 +64,7 @@ describe('tailPerJob', () => {
       'Post job cleanup.',
       'Cleaning up orphan processes',
     ].join('\n');
-    expect(tailPerJob([{ name: 'test', log }], 2).text).toBe(
+    expect(file(tailJob('test', log, 2))).toBe(
       [
         'test\t… 1 earlier lines omitted',
         'test\tFAIL a.test.ts',
@@ -79,17 +76,14 @@ describe('tailPerJob', () => {
   });
 
   it('keeps a short log whole', () => {
-    expect(tailPerJob([{ name: 'test', log: 'ok' }], 200)).toEqual({
-      text: 'test\tok\n',
-      jobs: ['test'],
-    });
+    expect(file(tailJob('test', 'ok', 200))).toBe('test\tok\n');
   });
 
   it('keeps a tail longer than the engine takes as arguments', () => {
     const log = Array.from({ length: 200_000 }, (_, i) => `line ${i}`).join(
       '\n',
     );
-    const { text } = tailPerJob([{ name: 'test', log }], 200_000);
+    const text = file(tailJob('test', log, 200_000));
     expect(text.endsWith('test\tline 199999\n')).toBe(true);
     expect(text.split('\n')).toHaveLength(200_001);
   });

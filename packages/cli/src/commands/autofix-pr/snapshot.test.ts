@@ -402,6 +402,20 @@ describe('buildSnapshot', () => {
         handled,
       ).action,
     ).toBe('wait');
+    // Re-run on this head, its next failure is the re-run's answer:
+    // reported once more, then quiet like the first.
+    const identity = `run:15368:9:pull_request_review:Gate@${HEAD}`;
+    const again = `Gate@${HEAD}@#rerun:9:pull_request_review`;
+    const rerun = state({ handledChecks: [key], rerunChecks: [identity] });
+    expect(
+      buildSnapshot(pr({}, [run(102, 'pull_request_review')]), rerun).events,
+    ).toMatchObject([{ type: 'ci_failed', key: again }]);
+    expect(
+      buildSnapshot(
+        pr({}, [run(103, 'pull_request_review')]),
+        state({ handledChecks: [key, again], rerunChecks: [identity] }),
+      ).action,
+    ).toBe('wait');
     // A run the code started is still a new attempt each time.
     expect(
       buildSnapshot(

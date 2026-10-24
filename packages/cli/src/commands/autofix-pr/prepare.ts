@@ -211,6 +211,7 @@ function report(state: AutofixPrState, extra: Record<string, unknown>): void {
       pushTarget: state.pushTarget,
       viewer: state.viewer,
       prAuthor: state.prAuthor,
+      sessionId: state.sessionId,
       authorCanPush: state.authorCanPush ?? false,
       ...extra,
     }),
@@ -303,131 +304,141 @@ export function runPrepare(args: PrepareArgs): void {
   }
   const pushTarget = pushTargetFor(remoteV, host, headOwner, headName);
 
-  // Never discard what an earlier watch left: only `cleanup` knows when that
-  // is safe. The one exception is a branch whose worktree was removed and
-  // that holds nothing beyond the PR head it was cut from.
-  const leftover = `Run \`qwen autofix-pr cleanup ${args.pr}\` first.`;
-  if (existsSync(paths.worktreePath)) {
-    throw new Error(
-      `${paths.worktreePath} is left over from an earlier watch. ${leftover}`,
-    );
-  }
-  // A worktree deleted with `rm -rf` stays registered and pins its branch.
-  gitOpt('worktree', 'prune');
-  if (refExists(`refs/heads/${paths.branch}`)) {
-    const ahead = existing
-      ? gitOpt(
-          'rev-list',
-          '--count',
-          `refs/heads/${paths.branch}`,
-          '--not',
-          existing.lastKnownHeadSha,
-        )
-      : null;
-    if (ahead !== '0') {
-      throw new Error(
-        `branch ${paths.branch} is left over from an earlier watch and may hold unpushed work. ${leftover}`,
-      );
-    }
-    git('branch', '-D', paths.branch);
-  }
-
+  // One start at a time: two sessions starting the same PR would both pass
+  // the leftover checks, and the one whose `worktree add` failed would roll
+  // back the worktree and branch the other just made.
+  // Before anything is made under `.qwen/tmp`, the lock's directory included.
   const redirected = redirectedAncestor(dirname(paths.worktreePath), root);
   if (redirected !== null) {
     throw new Error(
       `refusing to create ${paths.worktreePath}: ${redirected} is a symlink.`,
     );
   }
-  // Not into submodules: a submodule commit the PR records but no remote
-  // has must not fail the PR's own fetch, which would leave the branch
-  // behind with no state file to account for it.
-  networkGit([
-    'fetch',
-    '--quiet',
-    '--no-recurse-submodules',
-    remote,
-    `+refs/pull/${args.pr}/head:refs/heads/${paths.branch}`,
-  ]);
-  const headSha = git('rev-parse', `refs/heads/${paths.branch}`);
-  mkdirSync(dirname(paths.worktreePath), { recursive: true });
-  // Submodules stay unpopulated whatever `submodule.recurse` says: a fix
-  // that needs one checks it out itself.
-  try {
-    git(
-      '-c',
-      'submodule.recurse=false',
-      'worktree',
-      'add',
-      '--quiet',
-      paths.worktreePath,
-      paths.branch,
-    );
-  } catch (err) {
-    // A post-checkout hook that fails leaves the worktree made: with no
-    // state file to account for it, neither a new `prepare` nor `cleanup`
-    // could take it away. Nothing was done in it yet.
-    gitOpt('worktree', 'remove', '--force', paths.worktreePath);
+  mkdirSync(dirname(paths.lockPath), { recursive: true });
+  const state = withWatchLock(paths, args.pr, () => {
+    // Never discard what an earlier watch left: only `cleanup` knows when that
+    // is safe. The one exception is a branch whose worktree was removed and
+    // that holds nothing beyond the PR head it was cut from.
+    const leftover = `Run \`qwen autofix-pr cleanup ${args.pr}\` first.`;
+    if (existsSync(paths.worktreePath)) {
+      throw new Error(
+        `${paths.worktreePath} is left over from an earlier watch. ${leftover}`,
+      );
+    }
+    // A worktree deleted with `rm -rf` stays registered and pins its branch.
     gitOpt('worktree', 'prune');
-    gitOpt('branch', '-D', paths.branch);
-    throw err;
-  }
+    if (refExists(`refs/heads/${paths.branch}`)) {
+      const ahead = existing
+        ? gitOpt(
+            'rev-list',
+            '--count',
+            `refs/heads/${paths.branch}`,
+            '--not',
+            existing.lastKnownHeadSha,
+          )
+        : null;
+      if (ahead !== '0') {
+        throw new Error(
+          `branch ${paths.branch} is left over from an earlier watch and may hold unpushed work. ${leftover}`,
+        );
+      }
+      git('branch', '-D', paths.branch);
+    }
 
-  let history: AutofixPrHistory | null = null;
-  try {
-    history = readHistory(historyPath(paths, { host, owner, repo: repoName }));
-  } catch {
-    // An unreadable history is ignored; cleanup replaces it.
-  }
-  if (history && !sameRepository(history, { host, owner, repo: repoName })) {
-    history = null;
-  }
-  const state: AutofixPrState = {
-    version: 1,
-    sessionId: currentSessionId(),
-    host,
-    owner,
-    repo: repoName,
-    prNumber: args.pr,
-    remote,
-    pushTarget,
-    headRefName: pr.headRefName,
-    baseRefName: pr.baseRefName,
-    branch: paths.branch,
-    worktreePath: paths.worktreePath,
-    viewer,
-    prAuthor: pr.author?.login ?? '',
-    authorCanPush: authorCanPush(args.repo, pr.author?.login ?? '', viewer),
-    lastKnownHeadSha: headSha,
-    // A watch whose worktree was removed keeps its history, so it does not
-    // answer the same comments again, and keeps its budgets. A new watch of
-    // a PR watched before starts from what that one posted and handled.
-    pushedShas: existing?.pushedShas ?? [],
-    handledCommentIds:
-      existing?.handledCommentIds ?? history?.handledCommentIds ?? [],
-    postedCommentIds:
-      existing?.postedCommentIds ?? history?.postedCommentIds ?? [],
-    ...(history && !existing
-      ? {
-          handledChecks: history.handledChecks,
-          rerunChecks: history.rerunChecks,
-          handledConflictSha: history.handledConflictSha ?? null,
-          pendingPosts: history.pendingPosts ?? [],
-          deferredRuns: history.deferredRuns ?? [],
-        }
-      : {}),
-    ...(existing
-      ? {
-          handledChecks: existing.handledChecks,
-          rerunChecks: existing.rerunChecks,
-          handledConflictSha: existing.handledConflictSha,
-          pushCount: existing.pushCount,
-          summarizedSha: existing.summarizedSha,
-          pendingPosts: existing.pendingPosts,
-          deferredRuns: existing.deferredRuns,
-        }
-      : {}),
-  };
-  writeState(paths.statePath, state);
+    // Not into submodules: a submodule commit the PR records but no remote
+    // has must not fail the PR's own fetch, which would leave the branch
+    // behind with no state file to account for it.
+    networkGit([
+      'fetch',
+      '--quiet',
+      '--no-recurse-submodules',
+      remote,
+      `+refs/pull/${args.pr}/head:refs/heads/${paths.branch}`,
+    ]);
+    const headSha = git('rev-parse', `refs/heads/${paths.branch}`);
+    mkdirSync(dirname(paths.worktreePath), { recursive: true });
+    // Submodules stay unpopulated whatever `submodule.recurse` says: a fix
+    // that needs one checks it out itself.
+    try {
+      git(
+        '-c',
+        'submodule.recurse=false',
+        'worktree',
+        'add',
+        '--quiet',
+        paths.worktreePath,
+        paths.branch,
+      );
+    } catch (err) {
+      // A post-checkout hook that fails leaves the worktree made: with no
+      // state file to account for it, neither a new `prepare` nor `cleanup`
+      // could take it away. Nothing was done in it yet.
+      gitOpt('worktree', 'remove', '--force', paths.worktreePath);
+      gitOpt('worktree', 'prune');
+      gitOpt('branch', '-D', paths.branch);
+      throw err;
+    }
+
+    let history: AutofixPrHistory | null = null;
+    try {
+      history = readHistory(
+        historyPath(paths, { host, owner, repo: repoName }),
+      );
+    } catch {
+      // An unreadable history is ignored; cleanup replaces it.
+    }
+    if (history && !sameRepository(history, { host, owner, repo: repoName })) {
+      history = null;
+    }
+    const state: AutofixPrState = {
+      version: 1,
+      sessionId: currentSessionId(),
+      host,
+      owner,
+      repo: repoName,
+      prNumber: args.pr,
+      remote,
+      pushTarget,
+      headRefName: pr.headRefName,
+      baseRefName: pr.baseRefName,
+      branch: paths.branch,
+      worktreePath: paths.worktreePath,
+      viewer,
+      prAuthor: pr.author?.login ?? '',
+      authorCanPush: authorCanPush(args.repo, pr.author?.login ?? '', viewer),
+      lastKnownHeadSha: headSha,
+      // A watch whose worktree was removed keeps its history, so it does not
+      // answer the same comments again, and keeps its budgets. A new watch of
+      // a PR watched before starts from what that one posted and handled.
+      pushedShas: existing?.pushedShas ?? [],
+      handledCommentIds:
+        existing?.handledCommentIds ?? history?.handledCommentIds ?? [],
+      postedCommentIds:
+        existing?.postedCommentIds ?? history?.postedCommentIds ?? [],
+      ...(history && !existing
+        ? {
+            handledChecks: history.handledChecks,
+            rerunChecks: history.rerunChecks,
+            handledConflictSha: history.handledConflictSha ?? null,
+            pendingPosts: history.pendingPosts ?? [],
+            deferredRuns: history.deferredRuns ?? [],
+          }
+        : {}),
+      ...(existing
+        ? {
+            handledChecks: existing.handledChecks,
+            rerunChecks: existing.rerunChecks,
+            handledConflictSha: existing.handledConflictSha,
+            pushCount: existing.pushCount,
+            summarizedSha: existing.summarizedSha,
+            pendingPosts: existing.pendingPosts,
+            deferredRuns: existing.deferredRuns,
+          }
+        : {}),
+    };
+    writeState(paths.statePath, state);
+    return state;
+  });
 
   // Commits on the user's own copy of the branch that the PR does not have
   // yet: the worktree starts from the PR head and never sees them. Only a
@@ -445,7 +456,7 @@ export function runPrepare(args: PrepareArgs): void {
           '--count',
           `refs/heads/${pr.headRefName}`,
           '--not',
-          headSha,
+          state.lastKnownHeadSha,
         )
       : null;
   report(state, {

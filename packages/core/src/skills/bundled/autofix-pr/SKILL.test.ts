@@ -139,7 +139,7 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('Never list an `untrusted_comment` id');
     // The scheduled task runs the probe as its gate, outside the model.
     expect(body).toContain(
-      '`gate`: `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>`',
+      '`gate`: `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>`',
     );
     expect(body).toContain(
       '`prompt`: `Run /autofix-pr tick <owner>/<repo>#<n>`',

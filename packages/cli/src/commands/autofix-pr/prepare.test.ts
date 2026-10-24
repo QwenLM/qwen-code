@@ -69,7 +69,13 @@ import {
   runPrepare,
   type PrView,
 } from './prepare.js';
-import { autofixPrPaths, historyPath, readState, writeState } from './state.js';
+import {
+  autofixPrPaths,
+  historyPath,
+  readState,
+  withWatchLock,
+  writeState,
+} from './state.js';
 
 function prView(overrides: Partial<PrView> = {}): PrView {
   return {
@@ -256,6 +262,20 @@ describe('runPrepare (real git)', () => {
       /cannot be named in a command as it is/,
     );
     expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
+  });
+
+  it('starts one watch at a time: a second start waits for the lock', () => {
+    const paths = autofixPrPaths(clone, 7);
+    mkdirSync(dirname(paths.lockPath), { recursive: true });
+    withWatchLock(paths, 7, () => {
+      expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+        /another autofix-pr helper is working on PR #7/,
+      );
+    });
+    expect(existsSync(paths.worktreePath)).toBe(false);
+    expect(run(clone, 'branch', '--list', paths.branch)).toBe('');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(existsSync(paths.worktreePath)).toBe(true);
   });
 
   it('takes the worktree and branch back when a hook fails the worktree add', () => {
