@@ -14,7 +14,9 @@ on:
     # files or reuses a per-signature issue — deduped by the test markers in
     # its body — so a new regression is a visible, triageable unit instead of
     # a comment nobody sees; only a run with no test identity shares the
-    # workflow's aggregate issue, one comment per occurrence.
+    # workflow's aggregate issue, one comment per occurrence. A newer push run
+    # that already owns main's tip supersedes this report; see 'Skip a
+    # superseded attempt'.
     # Daily Java and Desktop checks report main regressions through the same
     # routing as the nightly CLI checks.
     # The Managed Agent gate's post-merge fast tier rides the push arm.
@@ -87,6 +89,10 @@ jobs:
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+          WORKFLOW_ID: '${{ github.event.workflow_run.workflow_id }}'
+          EVENT_NAME: '${{ github.event.workflow_run.event }}'
+          HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
+          HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
         run: |-
           set -euo pipefail
           superseded=false
@@ -101,6 +107,64 @@ jobs:
             fi
           else
             echo "::warning::Could not read run ${WORKFLOW_RUN_ID}; assuming this attempt-${RUN_ATTEMPT} event is current and reporting."
+          fi
+          # A post-merge push run reports the commit that was main when it
+          # started. When main has since advanced, a newer run of the same
+          # workflow at that tip owns the result: filing here would open a
+          # repair issue for a head main has already replaced, which is how
+          # #15259 was filed after #15128 fixed its host-lock timeout.
+          #
+          # The successor must also be able to report the result. The job gate
+          # above admits only `failure` conclusions, so a run that ends
+          # cancelled, timed_out, skipped or startup_failure never re-enters
+          # this workflow; crediting its mere existence would drop the only
+          # report of a real regression. A failed successor reports itself, and
+          # a queued or in-progress one is a genuine deferral. A path-filtered
+          # push arm (SDK Python) or a `[skip ci]` commit leaves no run at the
+          # new tip at all, and that also reports here. Read failures keep the
+          # old fail-open reporting.
+          #
+          # Every attempt is compared, not just the first: #15259 itself was
+          # filed by such an attempt-2 recovery run. The successor check is
+          # what keeps a lone recovery attempt reporting when main moved while
+          # it queued.
+          if [[ "${superseded}" != 'true' &&
+            "${EVENT_NAME}" == 'push' && "${HEAD_BRANCH}" == 'main' &&
+            -n "${HEAD_SHA}" ]]; then
+            if tip="$(gh api "repos/${REPO}/commits/main" --jq '.sha')"; then
+              if [[ -n "${tip}" && "${tip}" != "${HEAD_SHA}" ]]; then
+                if successor="$(
+                  gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?event=push&branch=main&head_sha=${tip}&per_page=1" \
+                    --jq '.workflow_runs[0] // {} | if (.status // "") == "" then "none" else "\(.status) \(.conclusion // "")" end'
+                )"; then
+                  read -r successor_status successor_conclusion <<< "${successor}"
+                  successor_owns=false
+                  case "${successor_status}" in
+                    queued | in_progress)
+                      successor_owns=true
+                      ;;
+                    completed)
+                      case "${successor_conclusion}" in
+                        success | failure) successor_owns=true ;;
+                      esac
+                      ;;
+                  esac
+                  if [[ "${successor_owns}" == 'true' ]]; then
+                    superseded=true
+                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA}, but main is now ${tip}; the newer push run owns its result."
+                    echo "Superseded main-CI failure: run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA}, but main is now ${tip}; the newer push run owns the result." >> "${GITHUB_STEP_SUMMARY}"
+                  elif [[ "${successor_status}" == 'none' ]]; then
+                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but workflow ${WORKFLOW_ID} has no newer push run there; reporting this run."
+                  else
+                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but its newer push run is ${successor_status}${successor_conclusion:+ ${successor_conclusion}}, which this workflow does not report; reporting this run."
+                  fi
+                else
+                  echo "::warning::Could not list the newer runs of workflow ${WORKFLOW_ID}; reporting this run as though it had no successor."
+                fi
+              fi
+            else
+              echo "::warning::Could not read the tip of main; reporting this run as though it were still current."
+            fi
           fi
           echo "superseded=${superseded}" >> "${GITHUB_OUTPUT}"
 

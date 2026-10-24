@@ -508,7 +508,7 @@ const TRUNCATION_PARAM_GUIDANCE =
   'first write_file with a skeleton/partial content, ' +
   'then use edit to add the remaining sections incrementally.';
 
-const TRUNCATION_EDIT_REJECTION =
+export const TRUNCATION_EDIT_REJECTION =
   'Your previous response was truncated due to max_tokens limit, ' +
   'which produced incomplete file content. ' +
   'The tool call has been rejected to prevent writing ' +
@@ -534,7 +534,7 @@ const INCOMPLETE_ARGS_PARAM_GUIDANCE =
   "particular, do not nest one call's argument object inside another's.";
 
 /** Edit rejection when the output limit was *not* the cause. */
-const INCOMPLETE_ARGS_EDIT_REJECTION =
+export const INCOMPLETE_ARGS_EDIT_REJECTION =
   "This tool call's arguments arrived incomplete, so the file content would " +
   'have been partial. The response did not come close to the max_tokens limit, ' +
   'so this was malformed generation rather than truncation. The tool call has ' +
@@ -1201,13 +1201,13 @@ const RETRY_LOOP_STOP_DIRECTIVE =
   'instead of retrying.';
 
 /** Directive injected when a truncated file-modifying call repeats. */
-const TRUNCATION_RETRY_LOOP_DIRECTIVE =
+export const TRUNCATION_RETRY_LOOP_DIRECTIVE =
   '\n\n⚠ RETRY LOOP DETECTED: The same truncated file write has been rejected multiple times. ' +
   'STOP resending the same large content. Either split it into smaller write_file + incremental edit calls, ' +
   'or explain to the user that the content is too large to write safely in one call.';
 
 /** Directive injected when an incomplete-args file-modifying call repeats. */
-const INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE =
+export const INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE =
   '\n\n⚠ RETRY LOOP DETECTED: The same incomplete file write has been rejected multiple times. ' +
   'STOP resending the entire content in a single call. Write a skeleton first and fill in the rest with ' +
   'incremental edit calls, or explain to the user why the content cannot be written safely.';
