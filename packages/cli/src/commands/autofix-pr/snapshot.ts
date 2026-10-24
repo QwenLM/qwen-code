@@ -688,6 +688,49 @@ export function failedJobsOfRun(
   });
 }
 
+/**
+ * The keys of the failures a deferral holds while their run goes (see
+ * `heldByDeferral`): the gate reports them again once the run has ended,
+ * and the round answers them then.
+ */
+export function heldKeys(
+  pr: PrData,
+  rerunChecks: string[],
+  deferredRuns: number[],
+): Set<string> {
+  const deferred = new Set(deferredRuns);
+  const held = rerunFrom(rerunChecks);
+  return new Set(
+    checkEvents(pr, rerunChecks)
+      .failed.filter((failure) =>
+        heldByDeferral(failure, pr.headRefOid, deferred, held),
+      )
+      .map(({ event, attempt }) =>
+        checkAttemptKey(event.check, pr.headRefOid, attempt),
+      ),
+  );
+}
+
+/** The latest check run of each Actions run on the head, by run id. */
+function latestOfRuns(pr: PrData): Map<number, number> {
+  const commit = pr.commits.nodes[0]?.commit;
+  const runsPrefix =
+    `${pr.url.replace(/\/pull\/\d+\/?$/, '')}/actions/runs/`.toLowerCase();
+  const latest = new Map<number, number>();
+  for (const ctx of commit?.statusCheckRollup?.contexts.nodes ?? []) {
+    if (ctx.__typename !== 'CheckRun') continue;
+    const run = runIdFrom(
+      ctx.detailsUrl,
+      runsPrefix,
+      Boolean(ctx.checkSuite?.workflowRun),
+    );
+    if (run !== null) {
+      latest.set(run, Math.max(latest.get(run) ?? 0, ctx.databaseId));
+    }
+  }
+  return latest;
+}
+
 /** Events that run a workflow on the PR's code, rather than on a comment. */
 const CODE_EVENTS = new Set(['pull_request', 'pull_request_target', 'push']);
 
@@ -1083,9 +1126,18 @@ export function buildGateSnapshot(
   // of its own, when that run has ended.
   const checks = checkEvents(pr, watch.rerunChecks ?? []);
   const cursorChecks = new Set(next.reportedChecks);
+  // A marked key (`<key>~<check run>`) was reported up to that check run.
+  const marked = new Map<string, number>();
+  for (const entry of cursorChecks) {
+    const match = /^([\s\S]*)~(\d+)$/.exec(entry);
+    if (match) {
+      marked.set(match[1], Math.max(marked.get(match[1]) ?? 0, +match[2]));
+    }
+  }
   const handledChecks = new Set(watch.handledChecks ?? []);
   const deferred = new Set(watch.deferredRuns ?? []);
   const held = rerunFrom(watch.rerunChecks ?? []);
+  const runsLatest = latestOfRuns(pr);
   // A run that did not read every check run keeps the failures it could
   // not see, one cut in the suites the failures to start found there; one
   // that read them all keeps only those still there.
@@ -1117,11 +1169,30 @@ export function buildGateSnapshot(
     // A key that names no run (a workflow a review starts) is the same for
     // every run of its check on the head. The cursor marks the run it was
     // reported for, so a failure of a later one — a review started it while
-    // a round read the PR — is reported again until a round handles it.
+    // a round read the PR — is reported again until a round handles it; an
+    // earlier one (a partial read listed only it) is not. A run's end is
+    // marked with the run's latest check run: a job re-run in it makes the
+    // run go again, and a deferral of it again ends once more.
     const perRun = checkRunId !== undefined && /^#(?:on|rerun):/.test(attempt);
-    const mark = (k: string) => (perRun ? `${k}~${checkRunId}` : k);
-    const reported = (k: string) =>
-      handledChecks.has(k) || cursorChecks.has(mark(k));
+    const upTo = (k: string): number | undefined =>
+      k.endsWith('@ended')
+        ? (runsLatest.get(event.runId ?? -1) ?? checkRunId)
+        : perRun
+          ? checkRunId
+          : undefined;
+    const reported = (k: string) => {
+      if (handledChecks.has(k)) return true;
+      const run = upTo(k);
+      return run === undefined
+        ? cursorChecks.has(k)
+        : (marked.get(k) ?? -1) >= run;
+    };
+    const mark = (k: string) => {
+      const run = upTo(k);
+      return run === undefined
+        ? k
+        : `${k}~${Math.max(run, marked.get(k) ?? 0)}`;
+    };
     next.reportedChecks.push(...keys.filter(reported).map(mark));
     const unreported = keys.filter((k) => !reported(k));
     if (unreported.length > 0) {

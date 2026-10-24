@@ -342,6 +342,39 @@ describe('runReply', () => {
     });
     // Gate's next failure on this head carries the key: it stays handled.
     expect(state().handledChecks).toEqual([gate, startup, earlier]);
+    // Lint failed in run 70 after the deferral, which held nothing of it:
+    // the round answered it, and a review started its workflow again since.
+    const lint = `Lint@${HEAD}@#on:3:pull_request_review`;
+    writeFileSync(
+      paths.snapshotPath,
+      JSON.stringify({
+        events: [
+          { type: 'ci_failed', check: 'Lint', key: lint, runId: 70 },
+          { type: 'ci_failed', check: 'Build', key: deferred, runId: 70 },
+        ],
+      }),
+    );
+    const job = (databaseId: number, run: number, status: string) => ({
+      __typename: 'CheckRun' as const,
+      databaseId,
+      name: 'Lint',
+      status,
+      conclusion: status === 'COMPLETED' ? 'FAILURE' : null,
+      detailsUrl: `https://github.com/o/r/actions/runs/${run}/job/${databaseId}`,
+      checkSuite: {
+        status: 'IN_PROGRESS',
+        app: { databaseId: 15368 },
+        workflowRun: {
+          event: 'pull_request_review',
+          workflow: { databaseId: 3 },
+        },
+      },
+    });
+    contexts.nodes.push(job(8, 70, 'COMPLETED'), job(12, 90, 'QUEUED'));
+    expect(reply({ handledChecks: [lint] })).toMatchObject({
+      handledChecks: 1,
+      ignoredChecks: 0,
+    });
     // A later run of Build took the place of the deferred one, which the
     // gate will not report again: the round's answer stands.
     contexts.nodes.push(build(9, 71, 'IN_PROGRESS'));

@@ -400,7 +400,10 @@ when there are none, so the session is woken only for them:
   (`#on:`, `#rerun:`) is the same for every run of its check on the head:
   the cursor marks the run it was reported for, so a later run's failure
   (a review started the run while a round read the PR) is reported again
-  until a round handles the key. A job a run skipped (an `if:` that was
+  until a round handles the key, and an earlier run's (a partial read
+  listed only it) is not. A run's end is marked with the run's latest
+  check run: a job re-run in it makes the run go again, and a second
+  deferral of it ends once more. A job a run skipped (an `if:` that was
   false) did not run: it never takes the place of the run before it.
 - Pending checks are never reported; `ci_pending` does not appear.
 - A conflict is reported once per head; `mergeable` clears the mark,
@@ -565,12 +568,12 @@ The helper decides what may be posted, against one fresh read of the PR
   the round's prepared snapshot file: the head can move on from a failure
   while the round runs (a re-run, a run a review starts), and the round's
   answer still stands, under the key the next failure of a review-started
-  workflow on that head carries. A failure of a run deferred and still
-  going is not recorded (it counts in `ignoredChecks`): the gate reports it
-  once more when the run has ended, or reports a later run of the check
-  that fails, and the round answers it then. One whose run has ended, or
-  whose check a later run took the place of, is recorded: the gate does not
-  report it again; a conflict can
+  workflow on that head carries. A failure a deferral holds while its run
+  goes (Section 6.9) is not recorded (it counts in `ignoredChecks`): the
+  gate reports it once more when the run has ended, or reports a later run
+  of the check that fails, and the round answers it then. Any other the
+  round saw is recorded, a job of the deferred run that failed after the
+  deferral included: the gate does not report it again; a conflict can
   be left for a human only while there is one. The PR must be open.
 - The head the plan is judged by is the one the watch knows (`sync` and
   `push` read it from the branch), not the API's, which can lag a push.

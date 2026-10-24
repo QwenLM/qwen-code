@@ -364,7 +364,59 @@ describe('buildGateSnapshot', () => {
     expect(open.snapshot).toMatchObject({
       events: [{ type: 'ci_failed', check: 'Test' }],
     });
-    expect(open.cursor.reportedChecks).toEqual([key, `${key}@ended`]);
+    expect(open.cursor.reportedChecks).toEqual([key, `${key}@ended~1`]);
+    // A job of the run re-run in it (check run 7): the run went again, the
+    // round deferred it again, and its end is reported once more.
+    const rerunJob = {
+      ...(failed('Build', 7) as Extract<
+        Contexts[number],
+        { __typename: 'CheckRun' }
+      >),
+      conclusion: 'SUCCESS',
+    };
+    const again = buildGateSnapshot(
+      pr({}, [failed('Test', 1), rerunJob]),
+      open.cursor,
+      { ...watch, handledChecks: [] },
+    );
+    expect(again.snapshot).toMatchObject({
+      events: [{ type: 'ci_failed', check: 'Test' }],
+    });
+    expect(again.cursor.reportedChecks).toEqual([key, `${key}@ended~7`]);
+  });
+
+  it('takes a read that lists only an earlier run of a check for no new failure', () => {
+    const gate = (databaseId: number): Contexts[number] => ({
+      __typename: 'CheckRun',
+      name: 'Gate',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl: `https://github.com/o/r/actions/runs/${databaseId}/job/1`,
+      databaseId,
+      checkSuite: {
+        status: 'COMPLETED',
+        app: { databaseId: 1 },
+        workflowRun: {
+          event: 'pull_request_review',
+          workflow: { databaseId: 9 },
+        },
+      },
+    });
+    const watch = { knownHeads: [], seenCommentIds: [] };
+    const whole = buildGateSnapshot(
+      pr({}, [gate(1), gate(5)]),
+      cursor(),
+      watch,
+    );
+    expect(whole.cursor.reportedChecks).toEqual([
+      `Gate@${HEAD}@#on:9:pull_request_review~5`,
+    ]);
+    // GitHub was slow: the read listed run 1 only.
+    const cut = buildGateSnapshot(pr({}, [gate(1)]), whole.cursor, {
+      ...watch,
+      partial: 'checks',
+    });
+    expect(cut.snapshot).toBeNull();
   });
 
   it('forgets a check gone green on a run its time budget cut in the threads', () => {
