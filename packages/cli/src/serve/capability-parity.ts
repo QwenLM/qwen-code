@@ -454,6 +454,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:WORKSPACE_CREATE',
   },
+  git_workspace_clone: NO_MANAGED_EQUIVALENT(
+    'the Managed workspace creation surface only creates empty directories',
+  ),
   workspace_runtime_removal: NO_MANAGED_EQUIVALENT(
     'no Managed Workspace removal route',
   ),

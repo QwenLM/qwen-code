@@ -4232,6 +4232,8 @@ export function App({
     workspace.capabilities?.features?.includes(
       'scratch_workspace_registration',
     ) === true;
+  const gitWorkspaceCloneSupported =
+    workspace.capabilities?.features?.includes('git_workspace_clone') === true;
   const workspaceDisplayNameSupported =
     workspace.capabilities?.features?.includes('workspace_display_name') ===
     true;
@@ -15597,6 +15599,24 @@ export function App({
     workspaceActions,
   ]);
 
+  const gitCloneControls = useMemo(() => {
+    if (!gitWorkspaceCloneSupported || !workspaceAddLocationIsConnected) {
+      return undefined;
+    }
+    return {
+      start: (input: { url: string; target: string }) =>
+        workspaceActions.startGitWorkspaceClone(input),
+      poll: (jobId: string) => workspaceActions.getGitWorkspaceCloneJob(jobId),
+      cancel: async (jobId: string) => {
+        await workspaceActions.cancelGitWorkspaceClone(jobId);
+      },
+    };
+  }, [
+    gitWorkspaceCloneSupported,
+    workspaceAddLocationIsConnected,
+    workspaceActions,
+  ]);
+
   const handleAddRemoteWorkspace = useCallback(
     async (cwd: string, persist: boolean, displayName?: string) => {
       const currentOrigin = workspace.baseUrl || window.location.origin;
@@ -21812,6 +21832,7 @@ export function App({
                     : handleAddWorkspace
                 }
                 onSuggest={suggestWorkspacePathsForLocation}
+                gitClone={gitCloneControls}
                 onPick={
                   workspaceAddLocationIsConnected &&
                   nativeDirectoryPickerSupported &&

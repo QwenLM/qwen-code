@@ -76,6 +76,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/workspace-git-clone.ts',
+    {
+      reason:
+        'Git clone spawning strips repository-locating variables from a copy of the process environment and resolves the Windows taskkill path from the process-scoped OS root.',
+      accesses: { whole: 1, 'key:SystemRoot': 1 },
+    },
+  ],
+  [
     'packages/acp-bridge/src/session-control-plane.ts',
     {
       reason: 'The ACP bridge debug switch is process-scoped.',
