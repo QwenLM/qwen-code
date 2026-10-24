@@ -58,6 +58,8 @@ export interface ItemProjectionContext {
 }
 
 function fmtTokensShort(n: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (n >= 999_950) return `${(n / 1_000_000).toFixed(1)}m`;
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 

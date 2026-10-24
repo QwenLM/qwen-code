@@ -57,6 +57,10 @@ function truncateName(name: string, maxLen: number): string {
  * Format token count for display (e.g. 1234 -> "1.2k", 123456 -> "123.5k")
  */
 function formatTokens(tokens: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (tokens >= 999_950) {
+    return `${(tokens / 1_000_000).toFixed(1)}m`;
+  }
   if (tokens >= 1000) {
     return `${(tokens / 1000).toFixed(1)}k`;
   }
