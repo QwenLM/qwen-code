@@ -260,6 +260,15 @@ describe('runRerun', () => {
     expect(runRerun(7, 50)).toMatchObject({ rerun: true });
   });
 
+  it('re-runs nothing on a PR that was merged or closed', () => {
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: { ...prData(), state: 'MERGED' },
+      viewer: 'me',
+    }));
+    expect(() => runRerun(7, 50)).toThrow(/is merged; nothing is re-run/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
   it('asks for a resync when the PR head moved, and re-runs nothing', () => {
     mocks.fetchPrData.mockImplementation(() => ({
       pr: prData('b'.repeat(40)),

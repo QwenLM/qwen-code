@@ -57,6 +57,11 @@ function rerunLocked(
   setGhHost(state.host);
   ensureAuthenticated();
   const { pr } = fetchPrData(state);
+  if (pr.state !== 'OPEN') {
+    throw new Error(
+      `PR #${prNumber} is ${pr.state.toLowerCase()}; nothing is re-run on it.`,
+    );
+  }
   if (pr.headRefOid !== state.lastKnownHeadSha) {
     return {
       rerun: false,

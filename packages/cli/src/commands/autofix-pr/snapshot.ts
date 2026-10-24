@@ -401,8 +401,19 @@ export function classify(
   return 'untrusted';
 }
 
-function runIdFrom(url: string | null): number | null {
-  const match = url?.match(/\/actions\/runs\/(\d+)/);
+/**
+ * The run id of a GitHub Actions job of the PR's repository, read from its
+ * URL. Anything else — a commit status, another app's check, a URL of
+ * another repository — may link any run, and `ci-log` would hand the fix
+ * agent the log of a run that is not the PR's.
+ */
+function runIdFrom(
+  url: string | null,
+  runsPrefix: string,
+  actions: boolean,
+): number | null {
+  if (!actions || !url?.toLowerCase().startsWith(runsPrefix)) return null;
+  const match = /^(\d+)(?:[/?#]|$)/.exec(url.slice(runsPrefix.length));
   return match ? Number(match[1]) : null;
 }
 
@@ -481,6 +492,8 @@ export function checkEvents(pr: PrData): {
   };
   const failed: FailedCheck[] = [];
   const pending: string[] = [];
+  const runsPrefix =
+    `${pr.url.replace(/\/pull\/\d+\/?$/, '')}/actions/runs/`.toLowerCase();
   for (const ctx of latestContexts(contexts.nodes)) {
     if (ctx.__typename === 'CheckRun') {
       if (ctx.status !== 'COMPLETED') pending.push(ctx.name);
@@ -490,7 +503,11 @@ export function checkEvents(pr: PrData): {
             type: 'ci_failed',
             check: ctx.name,
             url: ctx.detailsUrl,
-            runId: runIdFrom(ctx.detailsUrl),
+            runId: runIdFrom(
+              ctx.detailsUrl,
+              runsPrefix,
+              Boolean(ctx.checkSuite?.workflowRun),
+            ),
           },
           attempt: `#${ctx.databaseId}`,
           identity: checkIdentity(ctx),
@@ -508,7 +525,7 @@ export function checkEvents(pr: PrData): {
           type: 'ci_failed',
           check: ctx.context,
           url: ctx.targetUrl,
-          runId: runIdFrom(ctx.targetUrl),
+          runId: null,
         },
         attempt: ctx.createdAt,
         identity: checkIdentity(ctx),
@@ -1263,6 +1280,10 @@ export function fetchPrData(
       `PR #${target.prNumber} not found in ${target.owner}/${target.repo}`,
     );
   }
+  // A merged or closed PR is a stop, which needs nothing past the first
+  // page: on a busy head the paging took most of a gate's time, on every
+  // fire after the stop as well.
+  if (pr.state !== 'OPEN') return { pr, viewer: data.data.viewer.login };
   const head = pr.commits.nodes[0]?.commit;
   const rollup = head?.statusCheckRollup;
   for (
@@ -1354,9 +1375,7 @@ export function fetchPrData(
     threads.pageInfo = more.pageInfo;
   }
   // A merged or closed PR asks nothing more: its `stop` must get through.
-  if (replyCheck && pr.state === 'OPEN') {
-    markOrphanReplies(target, pr, replyCheck);
-  }
+  if (replyCheck) markOrphanReplies(target, pr, replyCheck);
   return { pr, viewer: data.data.viewer.login };
 }
 
@@ -1571,11 +1590,14 @@ export function bodyLines(body: string): Array<string | string[]> {
 }
 
 /** How a round has bot comments checked: strictly, past what it handled. */
-export function roundReplyCheck(state: AutofixPrState): ReplyCheck {
+export function roundReplyCheck(
+  state: AutofixPrState,
+  strict = true,
+): ReplyCheck {
   const seen = new Set([...state.handledCommentIds, ...state.postedCommentIds]);
   return {
     known: (id) => seen.has(id),
-    strict: true,
+    strict,
     cachePath: autofixPrPaths(repoRoot(), state.prNumber).repliesPath,
   };
 }

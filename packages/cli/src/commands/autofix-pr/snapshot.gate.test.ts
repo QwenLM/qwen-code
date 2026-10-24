@@ -113,6 +113,11 @@ function failed(name: string, attempt = 1): Contexts[number] {
     conclusion: 'FAILURE',
     detailsUrl: `https://github.com/o/r/actions/runs/123/job/${attempt}`,
     databaseId: attempt,
+    checkSuite: {
+      status: 'COMPLETED',
+      app: { databaseId: 15368 },
+      workflowRun: { event: 'pull_request', workflow: { databaseId: 2 } },
+    },
   };
 }
 
@@ -191,6 +196,11 @@ describe('buildGateSnapshot', () => {
           conclusion: null,
           detailsUrl: null,
           databaseId: 2,
+          checkSuite: {
+            status: 'IN_PROGRESS',
+            app: { databaseId: 15368 },
+            workflowRun: { event: 'pull_request', workflow: { databaseId: 2 } },
+          },
         },
       ]),
       second.cursor,
@@ -1092,6 +1102,37 @@ describe('fetchPrData', () => {
     ).toHaveLength(0);
     mockGh.mockReset();
     rmSync(cacheDir, { recursive: true, force: true });
+  });
+
+  it('reads a merged or closed PR with one call, however much its first page leaves', () => {
+    const merged = pr({ state: 'MERGED' });
+    merged.commits.nodes[0]!.commit.statusCheckRollup!.contexts.pageInfo = {
+      hasNextPage: true,
+      endCursor: 'c1',
+    };
+    merged.commits.nodes[0]!.commit.checkSuites = {
+      pageInfo: { hasPreviousPage: true, startCursor: 's1' },
+      nodes: [],
+    };
+    merged.reviewThreads = {
+      pageInfo: { hasNextPage: true, endCursor: 't1' },
+      nodes: [],
+    };
+    for (const state of ['MERGED', 'CLOSED'] as const) {
+      mockGh.mockReset();
+      mockGh.mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: { pullRequest: { ...structuredClone(merged), state } },
+          },
+        }),
+      );
+      const { pr: data } = fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 });
+      expect(data.state).toBe(state);
+      expect(mockGh).toHaveBeenCalledTimes(1);
+    }
+    mockGh.mockReset();
   });
 
   it('pages check suites back to the oldest, where a push put the code triggered ones', () => {

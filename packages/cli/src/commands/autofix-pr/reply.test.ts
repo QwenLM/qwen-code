@@ -278,6 +278,13 @@ describe('runReply', () => {
     expect(state().handledChecks).toBeUndefined();
   });
 
+  it("checks bot threads opened since the snapshot leniently: they are not the plan's", () => {
+    reply({ handled: ['IC_1'] });
+    expect(mocks.fetchPrData.mock.calls[0]![1]).toMatchObject({
+      strict: false,
+    });
+  });
+
   it('records the comments a plan handled without a reply of their own, once', () => {
     expect(reply({ handled: ['IC_1'] })).toMatchObject({
       posted: [],

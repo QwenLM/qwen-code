@@ -293,7 +293,10 @@ function replyLocked(
   assertOwnedBySession(state);
   setGhHost(state.host);
   ensureAuthenticated();
-  const { pr } = fetchPrData(state, roundReplyCheck(state));
+  // Every bot thread the plan may name was asked about by the round's
+  // snapshot; one opened since is not the plan's, so it waits for the gate
+  // rather than fail the replies to the rest.
+  const { pr } = fetchPrData(state, roundReplyCheck(state, false));
   if (pr.state !== 'OPEN') {
     throw new Error(
       `PR #${args.pr} is ${pr.state.toLowerCase()}; nothing is posted on it.`,

@@ -371,6 +371,56 @@ describe('buildSnapshot', () => {
     });
   });
 
+  it("gives a run id only to a GitHub Actions job of the PR's repository", () => {
+    const check = (
+      detailsUrl: string,
+      workflowRun: boolean,
+      databaseId: number,
+    ): Contexts[number] => ({
+      __typename: 'CheckRun',
+      databaseId,
+      name: `C${databaseId}`,
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl,
+      checkSuite: {
+        status: 'COMPLETED',
+        app: { databaseId: workflowRun ? 15368 : 99 },
+        workflowRun: workflowRun
+          ? { event: 'pull_request', workflow: { databaseId: 2 } }
+          : null,
+      },
+    });
+    const snap = buildSnapshot(
+      pr({}, [
+        check('https://github.com/o/r/actions/runs/1/job/9', true, 1),
+        // Another app's check, another repository's run, a lookalike.
+        check('https://github.com/o/r/actions/runs/2/job/9', false, 2),
+        check('https://github.com/x/r/actions/runs/3/job/9', true, 3),
+        check('https://ci.example/o/r/actions/runs/4/job/9', true, 4),
+        {
+          __typename: 'StatusContext',
+          createdAt: '2026-10-21T00:00:06Z',
+          context: 'ci/spoof',
+          state: 'FAILURE',
+          targetUrl: 'https://github.com/o/r/actions/runs/5/details',
+        },
+      ]),
+      state(),
+    );
+    expect(
+      snap.events.flatMap((event) =>
+        event.type === 'ci_failed' ? [[event.check, event.runId]] : [],
+      ),
+    ).toEqual([
+      ['C1', 1],
+      ['C2', null],
+      ['C3', null],
+      ['C4', null],
+      ['ci/spoof', null],
+    ]);
+  });
+
   it('reports failed checks with their run id and waits on pending ones', () => {
     const snap = buildSnapshot(
       pr({}, [
@@ -381,6 +431,11 @@ describe('buildSnapshot', () => {
           status: 'COMPLETED',
           conclusion: 'FAILURE',
           detailsUrl: 'https://github.com/o/r/actions/runs/123/job/456',
+          checkSuite: {
+            status: 'COMPLETED',
+            app: { databaseId: 15368 },
+            workflowRun: { event: 'pull_request', workflow: { databaseId: 2 } },
+          },
         },
         {
           __typename: 'CheckRun',
@@ -443,6 +498,11 @@ describe('buildSnapshot', () => {
       status: 'COMPLETED',
       conclusion: 'FAILURE',
       detailsUrl: `https://github.com/o/r/actions/runs/${databaseId}/job/1`,
+      checkSuite: {
+        status: 'COMPLETED',
+        app: { databaseId: 15368 },
+        workflowRun: { event: 'pull_request', workflow: { databaseId: 2 } },
+      },
     });
     const handled = state({ handledChecks: [`Test ubuntu@${HEAD}@#5`] });
     expect(buildSnapshot(pr({}, [run(5)]), handled)).toMatchObject({

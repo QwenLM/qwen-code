@@ -325,6 +325,12 @@ Event rules:
   Otherwise a review bot that answers every reply would keep a
   round going for each, and an untrusted commenter could have a bot speak
   for them, even after deleting their own comment.
+- A failed check carries a `runId` only when it is a GitHub Actions job of
+  the PR's repository (its suite has a workflow run, and its URL is under
+  `https://<host>/<owner>/<repo>/actions/runs/`): a commit status or another
+  app's check may link any run, and `ci-log` would read it.
+- A merged or closed PR is read with the first call alone: its answer is a
+  stop, which needs no further page of checks, suites or threads.
 - Checks and suites belong to the commit, not to the PR: another PR of the
   same head commit shares them. That is a known limit.
 - Prepared mode writes the whole snapshot, indented, to
