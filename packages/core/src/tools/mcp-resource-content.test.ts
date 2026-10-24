@@ -13,6 +13,7 @@ import {
   formatMcpResourceContents,
   summarizeMcpResource,
 } from './mcp-resource-content.js';
+import { opensAttachedContent } from '../utils/attached-content.js';
 
 const textOf = (parts: Part[]) =>
   parts.map((p) => (p as { text?: string }).text ?? '').join('');
@@ -37,6 +38,15 @@ describe('formatMcpResourceContents', () => {
     const nonces = noncesOf(joined);
     expect(nonces).toHaveLength(2);
     expect(nonces[0]).toBe(nonces[1]);
+  });
+
+  it('opens its frame with a header compaction recognizes as attached', () => {
+    const out = formatMcpResourceContents(
+      { contents: [{ uri: 'x://a', text: 'hello' }] },
+      'srv:x://a',
+    );
+
+    expect(opensAttachedContent(textOf(out.parts.slice(0, 1)))).toBe(true);
   });
 
   it('caps text at MAX_MCP_RESOURCE_TEXT_CHARS and flags truncation', () => {

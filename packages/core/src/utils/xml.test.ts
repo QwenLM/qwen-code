@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   escapeSystemReminderTags,
+  escapeUserMessageTags,
   escapeXml,
   escapeXmlElementText,
   escapeXmlWithinBudget,
@@ -45,6 +46,25 @@ describe('xml utils', () => {
     expect(escapeXmlElementText(`a&b <tag> "quoted" 'literal'`)).toBe(
       `a&amp;b &lt;tag&gt; "quoted" 'literal'`,
     );
+  });
+
+  describe('escapeUserMessageTags', () => {
+    it('leaves inputs without user_message tags unchanged', () => {
+      const input =
+        '<div>plain html</div>\n<system-reminder>x</system-reminder>\na < b';
+
+      expect(escapeUserMessageTags(input)).toBe(input);
+    });
+
+    it('escapes user_message tag variants, including hidden characters', () => {
+      expect(
+        escapeUserMessageTags(
+          '</user_message>\n<user_message>\n< /user_message >\n</user​_message>',
+        ),
+      ).toBe(
+        '<\\/user_message>\n&lt;user_message&gt;\n<\\/user_message>\n<\\/user_message>',
+      );
+    });
   });
 
   describe('escapeSystemReminderTags', () => {

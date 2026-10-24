@@ -8,6 +8,13 @@ import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { stripSystemReminderBlocks } from '../core/environmentContext.js';
+import { escapeUserMessageTags } from '../utils/xml.js';
+import {
+  MCP_RESOURCE_HEADER_PREFIX,
+  opensAttachedContent,
+  REFERENCED_SESSION_HEADER_PREFIX,
+} from '../utils/attached-content.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -215,7 +222,7 @@ export function estimatePartChars(
     return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
   }
   if (typeof part.text === 'string') {
-    return part.text.length;
+    return part.text.length + (part.thoughtSignature?.length ?? 0);
   }
   // Tool results in qwen-code carry media on `functionResponse.parts`
   // (an extension to the @google/genai schema; see
@@ -290,7 +297,24 @@ export interface SlimOptions {
    * nothing and keep text intact.
    */
   maxTextChars?: number;
+  /**
+   * Leaves the text the user typed out of `maxTextChars`, up to
+   * PRESERVED_USER_TEXT_MAX_CHARS, so a compaction side-query reduced to fit
+   * its window still shows the summarizer what the user asked for. Tool
+   * results ride user turns as `functionResponse` parts and are still
+   * truncated, as is content attached on the user's behalf (@-mentioned
+   * files, MCP resources, referenced sessions): everything from the first
+   * part that opens such content to the end of the turn.
+   */
+  preserveUserText?: boolean;
 }
+
+/**
+ * Longest text the user typed that `preserveUserText` keeps whole. Past it,
+ * a single pasted message could outgrow the window, and no reduction would
+ * ever bring the side-query under it.
+ */
+export const PRESERVED_USER_TEXT_MAX_CHARS = 32_000;
 
 interface SlimStats {
   imagesStripped: number;
@@ -317,15 +341,17 @@ export function slimCompactionInput(
 
   const slimmed = history.map((content) => {
     if (!content.parts || content.parts.length === 0) return content;
+    const typedParts =
+      options?.preserveUserText === true && content.role === 'user'
+        ? attachedContentStart(content.parts)
+        : 0;
 
     let touched = false;
-    const newParts: Part[] = content.parts.map((part) => {
-      const replacement = transformPart(
-        part,
-        stats,
-        supportedModalities,
-        options,
-      );
+    const newParts: Part[] = content.parts.map((part, index) => {
+      const replacement =
+        index < typedParts && isUserTextPart(part)
+          ? capTypedText(part, stats)
+          : transformPart(part, stats, supportedModalities, options);
       if (replacement !== part) {
         touched = true;
         return replacement;
@@ -494,6 +520,366 @@ function truncateTextForSlimming(value: string, maxTextChars: number): string {
     end--;
   }
   return value.slice(0, end) + SLIM_TEXT_TRUNCATION_MARKER;
+}
+
+/** Longest quote of a single user message in a condensed side-query. */
+export const CONDENSED_USER_MESSAGE_MAX_CHARS = 8_000;
+/**
+ * Longest quote of the oldest user message. After an earlier compaction it
+ * holds that compaction's summary, the densest record of everything before.
+ */
+export const CONDENSED_FIRST_MESSAGE_MAX_CHARS = 32_000;
+/** Longest quote of all user messages together in a condensed side-query. */
+export const CONDENSED_USER_MESSAGES_MAX_CHARS = 64_000;
+/**
+ * Least of the oldest and of the newest user message a condensed block
+ * quotes, or the whole message when shorter. A block that cannot hold that
+ * much no longer says what the conversation set out to do or what the user
+ * asked last, so the reduction is refused instead (#9455).
+ */
+export const CONDENSED_MESSAGE_MIN_CHARS = 2_000;
+/** Room first set aside for the condensed block's leading note. */
+const CONDENSED_NOTE_RESERVE_CHARS = 512;
+/**
+ * Text cap for the kept turns when they would leave the quotes less than
+ * their minimum. Files and images those turns touched are restored after
+ * compaction, so their tool output is the cheapest thing to give up.
+ */
+const KEPT_TURN_TEXT_CAP_CHARS = 500;
+const QUOTE_OPEN = '<user_message>\n';
+const QUOTE_CLOSE = '\n</user_message>';
+const QUOTE_WRAPPER_CHARS = QUOTE_OPEN.length + QUOTE_CLOSE.length;
+const QUOTE_SEPARATOR = '\n\n';
+const QUOTE_ELISION = `${SLIM_TEXT_TRUNCATION_MARKER}\n`;
+
+/**
+ * Shrinks a compaction side-query that cannot fit its window to at most
+ * `maxChars`: the newest turns stay, and everything older becomes one user
+ * message quoting what the user said there. Assistant replies and tool
+ * traffic are dropped first because the user's words are the only record of
+ * what was asked. The oldest and the newest of those messages are always
+ * quoted, shortened in the middle when long, and the kept turns' text is
+ * capped before either falls below CONDENSED_MESSAGE_MIN_CHARS. The kept
+ * turns start on a model turn, so no function call is separated from its
+ * response and the roles keep alternating after the quote block. Undefined
+ * when no model turn can start the kept turns, or when `maxChars` cannot hold
+ * the quotes' minimum.
+ */
+export function condenseToUserMessages(
+  history: Content[],
+  maxChars: number,
+  imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+): Content[] | undefined {
+  // The kept turns are first chosen to leave the quotes a quarter of the room
+  // (a share of characters, not a chars-to-tokens conversion), up to the total
+  // cap; the quotes then take whatever the kept turns actually leave.
+  const quoteBudget = Math.min(
+    CONDENSED_USER_MESSAGES_MAX_CHARS,
+    Math.floor(maxChars / 4),
+    userMessageTexts(history).reduce(
+      (sum, text, index) =>
+        sum +
+        quoteCost(
+          quotedLength(
+            text,
+            index === 0
+              ? CONDENSED_FIRST_MESSAGE_MAX_CHARS
+              : CONDENSED_USER_MESSAGE_MAX_CHARS,
+          ),
+        ),
+      0,
+    ),
+  );
+  const keptBudget = maxChars - quoteBudget - CONDENSED_NOTE_RESERVE_CHARS;
+  const cut = keptTurnsStart(history, keptBudget, imageTokenEstimate);
+  if (cut < 1) return undefined;
+
+  const texts = userMessageTexts(history.slice(0, cut));
+  const condenseBeside = (kept: Content[]): Content[] | undefined => {
+    const block = condensedBlock(
+      texts,
+      cut - texts.length,
+      maxChars - contentChars(kept, imageTokenEstimate),
+    );
+    return block === undefined
+      ? undefined
+      : [{ role: 'user', parts: [{ text: block }] }, ...kept];
+  };
+  const kept = history.slice(cut);
+  return (
+    (contentChars(kept, imageTokenEstimate) <= keptBudget
+      ? condenseBeside(kept)
+      : undefined) ??
+    condenseBeside(
+      slimCompactionInput(kept, undefined, {
+        maxTextChars: KEPT_TURN_TEXT_CAP_CHARS,
+        preserveUserText: true,
+      }).slimmedHistory,
+    )
+  );
+}
+
+/**
+ * The condensed block for `texts`, within `room` characters: a note, then
+ * the oldest message, the middle ones that fit (newest first), and the
+ * newest. Undefined when `room` cannot hold the oldest and the newest at
+ * their minimum.
+ */
+function condensedBlock(
+  texts: string[],
+  omittedTurns: number,
+  room: number,
+): string | undefined {
+  const note = (omittedQuotes: number, shortened: boolean) =>
+    `[Earlier conversation condensed for compaction: ${omittedTurns} ` +
+    `assistant and tool messages were omitted to fit the context window; ` +
+    `the user's messages from that part are quoted ` +
+    (shortened
+      ? 'below, long ones shortened in the middle'
+      : 'verbatim below') +
+    (omittedQuotes
+      ? `, except ${omittedQuotes} from the middle, omitted for length`
+      : '') +
+    `.]`;
+  const [oldest, ...newer] = texts;
+  if (oldest === undefined) {
+    return note(0, false).length <= room ? note(0, false) : undefined;
+  }
+  const newest = newer.length > 0 ? newer[newer.length - 1] : undefined;
+  const middle = newer.slice(0, -1);
+  // The note is sized for its longest form: every middle quote omitted, and
+  // a quote shortened.
+  const available = Math.min(
+    CONDENSED_USER_MESSAGES_MAX_CHARS,
+    room - note(middle.length, true).length,
+  );
+  const minimum = (text: string) =>
+    quotedLength(text, CONDENSED_MESSAGE_MIN_CHARS);
+  const oldestFloor = quoteCost(minimum(oldest));
+  if (
+    available <
+    oldestFloor + (newest === undefined ? 0 : quoteCost(minimum(newest)))
+  ) {
+    return undefined;
+  }
+  const newestQuote =
+    newest === undefined
+      ? undefined
+      : quoteUserMessage(
+          newest,
+          Math.min(
+            quotedLength(newest, CONDENSED_USER_MESSAGE_MAX_CHARS),
+            available - oldestFloor - QUOTE_SEPARATOR.length,
+          ),
+        );
+  const afterNewest =
+    available - (newestQuote === undefined ? 0 : quoteCost(newestQuote.length));
+  // The oldest message may use whatever the middle ones leave, and at least
+  // half of what remains when they need more.
+  const middleWants = middle.reduce(
+    (sum, text) =>
+      sum + quoteCost(quotedLength(text, CONDENSED_USER_MESSAGE_MAX_CHARS)),
+    0,
+  );
+  const oldestQuote = quoteUserMessage(
+    oldest,
+    Math.min(
+      quotedLength(oldest, CONDENSED_FIRST_MESSAGE_MAX_CHARS),
+      Math.max(
+        minimum(oldest),
+        Math.max(Math.floor(afterNewest / 2), afterNewest - middleWants) -
+          QUOTE_SEPARATOR.length,
+      ),
+    ),
+  );
+  const isShortened = (quote: string, text: string) =>
+    quote.length < QUOTE_WRAPPER_CHARS + text.length;
+  let shortened =
+    isShortened(oldestQuote, oldest) ||
+    (newestQuote !== undefined && isShortened(newestQuote, newest!));
+  let left = afterNewest - quoteCost(oldestQuote.length);
+  const keptMiddle: string[] = [];
+  for (let i = middle.length - 1; i >= 0; i--) {
+    const quote = quoteUserMessage(
+      middle[i]!,
+      quotedLength(middle[i]!, CONDENSED_USER_MESSAGE_MAX_CHARS),
+    );
+    if (quoteCost(quote.length) > left) break;
+    keptMiddle.unshift(quote);
+    left -= quoteCost(quote.length);
+    shortened ||= isShortened(quote, middle[i]!);
+  }
+  return [
+    note(middle.length - keptMiddle.length, shortened),
+    oldestQuote,
+    ...keptMiddle,
+    ...(newestQuote === undefined ? [] : [newestQuote]),
+  ].join(QUOTE_SEPARATOR);
+}
+
+function keptTurnsStart(
+  history: Content[],
+  budgetChars: number,
+  imageTokenEstimate: number,
+): number {
+  let used = 0;
+  let start = -1;
+  for (let i = history.length - 1; i >= 1; i--) {
+    used += estimateContentChars(history[i]!, imageTokenEstimate);
+    if (used > budgetChars) break;
+    if (history[i]!.role === 'model') start = i;
+  }
+  if (start !== -1) return start;
+  return history.findLastIndex(
+    (content, index) => index >= 1 && content.role === 'model',
+  );
+}
+
+// Tool results are `functionResponse` parts, not text, so a user turn that
+// carries both (input steered in while tools ran) still contributes its text.
+// Injected `<system-reminder>` blocks ride user turns too but are not the
+// user's words; left in, they can fill a capped quote ahead of the prompt.
+// Attached content is named, not quoted: it is not what the user said. Tags
+// that would close a quote's envelope or open another are escaped here, before
+// any quote is measured, so the budgets count the escaped text.
+function userMessageTexts(history: Content[]): string[] {
+  const texts: string[] = [];
+  for (const content of history) {
+    if (content.role !== 'user') continue;
+    const parts = content.parts ?? [];
+    const attachedFrom = attachedContentStart(parts);
+    const typed = stripSystemReminderBlocks(
+      parts
+        .slice(0, attachedFrom)
+        .filter(isUserTextPart)
+        .map((part) => part.text)
+        .join('\n'),
+    ).trim();
+    const text = escapeUserMessageTags(
+      [typed, attachedContentNote(parts.slice(attachedFrom))]
+        .filter(Boolean)
+        .join('\n'),
+    );
+    if (text) texts.push(text);
+  }
+  return texts;
+}
+
+/**
+ * Index of the first part that opens content attached on the user's behalf,
+ * or `parts.length`. What the user typed is a turn's first part, so it is
+ * never taken for attached content even when it starts like a header, and
+ * everything after the opening header is attached: closing markers are not
+ * trusted, since `--- End of content ---` carries no nonce and a file can
+ * contain it.
+ */
+function attachedContentStart(parts: Part[]): number {
+  const index = parts.findIndex(
+    (part, i) =>
+      i > 0 && typeof part.text === 'string' && opensAttachedContent(part.text),
+  );
+  return index === -1 ? parts.length : index;
+}
+
+/** The text the user typed, kept whole up to PRESERVED_USER_TEXT_MAX_CHARS. */
+function capTypedText(part: Part, stats: SlimStats): Part {
+  if (part.text!.length <= PRESERVED_USER_TEXT_MAX_CHARS) return part;
+  stats.textPartsTruncated++;
+  return {
+    ...part,
+    text: elideMiddle(part.text!, PRESERVED_USER_TEXT_MAX_CHARS),
+  };
+}
+
+/**
+ * Bounds on the names an attached-content note lists. The names come from
+ * text an attached file can itself contain.
+ */
+const ATTACHED_NAMES_MAX = 8;
+const ATTACHED_NAME_MAX_CHARS = 120;
+
+/** One line naming the attached content in `parts`, or '' when none. */
+function attachedContentNote(parts: Part[]): string {
+  if (parts.length === 0) return '';
+  const names = parts.flatMap((part) => {
+    const line = part.text?.trim() ?? '';
+    const file = /^Content from (.+):$/.exec(line);
+    if (file) return [file[1]!];
+    if (line.startsWith(MCP_RESOURCE_HEADER_PREFIX)) {
+      return [
+        line
+          .slice(MCP_RESOURCE_HEADER_PREFIX.length)
+          .replace(/\s*\[[^\]]*\]\s*---$/, ''),
+      ];
+    }
+    if (line.startsWith(REFERENCED_SESSION_HEADER_PREFIX)) {
+      return [line.split('\n', 1)[0]!.replace(/^-+\s*|\s*-+$/g, '')];
+    }
+    return [];
+  });
+  if (names.length === 0) return '[Attached content, not quoted]';
+  const listed = names
+    .slice(0, ATTACHED_NAMES_MAX)
+    .map((name) => name.slice(0, ATTACHED_NAME_MAX_CHARS));
+  const more = names.length - listed.length;
+  return (
+    `[Attached, not quoted: ${listed.join(', ')}` +
+    (more > 0 ? ` and ${more} more` : '') +
+    ']'
+  );
+}
+
+/** A quote of `text`, tags included, at most `maxQuoteChars` long. */
+function quoteUserMessage(text: string, maxQuoteChars: number): string {
+  return (
+    QUOTE_OPEN +
+    elideMiddle(text, maxQuoteChars - QUOTE_WRAPPER_CHARS) +
+    QUOTE_CLOSE
+  );
+}
+
+/** Length of the quote of `text` whose own text is capped at `cap`. */
+function quotedLength(text: string, cap: number): number {
+  return QUOTE_WRAPPER_CHARS + Math.min(text.length, cap);
+}
+
+/** A quote's share of the block: itself and the separator before it. */
+function quoteCost(quoteChars: number): number {
+  return quoteChars + QUOTE_SEPARATOR.length;
+}
+
+/**
+ * `text` within `maxChars`, keeping its start and its end: a long request
+ * often ends with the question being asked.
+ */
+function elideMiddle(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const kept = Math.max(0, maxChars - QUOTE_ELISION.length);
+  let headEnd = Math.ceil(kept / 2);
+  let tailStart = text.length - (kept - headEnd);
+  // Never split a surrogate pair at either cut.
+  if (isHighSurrogate(text.charCodeAt(headEnd - 1))) headEnd--;
+  if (isLowSurrogate(text.charCodeAt(tailStart))) tailStart++;
+  return text.slice(0, headEnd) + QUOTE_ELISION + text.slice(tailStart);
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+function contentChars(contents: Content[], imageTokenEstimate: number): number {
+  return contents.reduce(
+    (sum, content) => sum + estimateContentChars(content, imageTokenEstimate),
+    0,
+  );
+}
+
+function isUserTextPart(part: Part): boolean {
+  return typeof part.text === 'string' && !part.thought;
 }
 
 function supportsMimeType(

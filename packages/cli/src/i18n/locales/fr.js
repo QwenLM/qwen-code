@@ -1217,6 +1217,8 @@ export default {
     "Impossible de compresser l'historique du chat, car le résumé de compression a été tronqué.",
   'Could not compress chat history due to an API error.':
     "Impossible de compresser l'historique du chat en raison d'une erreur d'API.",
+  'Could not compress chat history because it is too large for the context window.':
+    "Impossible de compresser l'historique du chat : il est trop volumineux pour la fenêtre de contexte.",
   // ============================================================================
   // Commandes - Répertoire
   // ============================================================================

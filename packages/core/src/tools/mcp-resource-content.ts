@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+import { MCP_RESOURCE_HEADER_PREFIX } from '../utils/attached-content.js';
 
 /**
  * Cap injected resource text so a misbehaving/hostile MCP server can't blow the
@@ -120,7 +121,7 @@ export function formatMcpResourceContents(
   const parts: Part[] =
     contentParts.length > 0
       ? [
-          { text: `\n--- Content from MCP resource ${label} [${nonce}] ---\n` },
+          { text: `\n${MCP_RESOURCE_HEADER_PREFIX}${label} [${nonce}] ---\n` },
           ...contentParts,
           {
             text: `${truncationNotice}\n--- End of MCP resource ${label} [${nonce}] ---\n`,

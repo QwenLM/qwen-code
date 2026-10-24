@@ -9,6 +9,7 @@ import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { estimateContentTokens } from './tokenEstimation.js';
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
+import { REFERENCED_SESSION_HEADER_PREFIX } from '../utils/attached-content.js';
 
 /** Default token budget for an injected slimmed session reference. */
 export const SESSION_REF_TOKEN_BUDGET = 8000;
@@ -76,7 +77,7 @@ export class SessionReferenceService {
     const budget = opts.budgetTokens ?? SESSION_REF_TOKEN_BUDGET;
 
     const title = opts.title ?? this.deriveTitle(records) ?? sessionId;
-    const header = `--- Referenced session "${title}" (slimmed, read-only) ---`;
+    const header = `${REFERENCED_SESSION_HEADER_PREFIX}"${title}" (slimmed, read-only) ---`;
     const headerCost = this.estimate([header]);
 
     // Single-pass tail-retention: estimate each line once, then accumulate
