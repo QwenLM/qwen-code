@@ -514,6 +514,7 @@ function toSummary(item: {
   mtime: number;
   prompt: string;
   customTitle?: string;
+  goalObjective?: string;
   titleSource?: 'manual' | 'auto';
   parentSessionId?: string;
   sourceType?: string;
@@ -525,7 +526,7 @@ function toSummary(item: {
     workspaceCwd: item.cwd,
     createdAt: item.startTime,
     updatedAt: new Date(item.mtime).toISOString(),
-    displayName: item.customTitle || item.prompt,
+    displayName: item.customTitle || item.prompt || item.goalObjective || '',
     ...(item.customTitle && item.titleSource
       ? { titleSource: item.titleSource }
       : {}),
