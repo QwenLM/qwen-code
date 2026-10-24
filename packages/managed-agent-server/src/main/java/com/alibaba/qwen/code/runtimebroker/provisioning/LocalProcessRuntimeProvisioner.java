@@ -727,12 +727,12 @@ public final class LocalProcessRuntimeProvisioner
     private RuntimeLease adoptDurable(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             Map<String, Object> document, LocalRuntimeStore.Resource resource,
             LocalRuntimeStore.Registration registration) throws IOException {
+        if (registration.processAbsent()) {
+            resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+            throw LocalRuntimeStore.blocked();
+        }
         ProcessHandle process = registration.process();
         if (process == null) {
-            if (registration.processAbsent()) {
-                resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
-                throw LocalRuntimeStore.blocked();
-            }
             return null;
         }
         RuntimeLease lease;

@@ -41,18 +41,23 @@ jobs:
     # One per-host lock wait plus the bounded write-back it guards, and the
     # unlocked Maven work the job runs outside it. The only hold is the
     # 300-second write-back: the suite runs before the acquisition and holds
-    # nothing, so the 5400-second wait spans a long queue of holds. The
-    # full-tier Java 21 leg of run 39754414693 ran 89 minutes before this
-    # split. The ticketed queue in .github/scripts/sdk-java-lock.sh serves
-    # the fast class first: a fast-tier leg waits for the running hold, at
-    # most one parked full-tier head and older fast-class tickets, overtaking
-    # only full-tier tickets younger than SDK_JAVA_LOCK_PROMOTE_AFTER (under
-    # a longer hold the queue is plain sequence order), while a full-tier leg
-    # (the default) keeps its FIFO position among the other rank-1 tickets.
-    # The ceiling is that wait plus one measured suite, one write-back and
-    # ~11 minutes of setup and margin: 150. Hosted lanes never take the lock
+    # nothing. The 9600-second wait is carried from the pre-split topology
+    # where a test lane could queue behind several suite holds; with the
+    # suite unlocked it is a conservative bound (about 32 queued copies),
+    # not a measured need, and no constant budget bounds the queue itself
+    # (#14566, #15031). The 2026-10-22 run 39754359013 burned the then
+    # 5400-second budget behind the MariaDB lane's verify hold — the shape
+    # #15128 removed (qwen-code#15243). The ticketed queue in
+    # .github/scripts/sdk-java-lock.sh serves the fast class first: a
+    # fast-tier leg waits for the running hold, at most one parked full-tier
+    # head and older fast-class tickets, overtaking only full-tier tickets
+    # younger than SDK_JAVA_LOCK_PROMOTE_AFTER (under a longer hold the
+    # queue is plain sequence order), while a full-tier leg (the default)
+    # keeps its FIFO position among the other rank-1 tickets.
+    # The ceiling is that wait plus the measured suite, the write-back and
+    # ~11 minutes of setup and margin: 200. Hosted lanes never take the lock
     # and inherit this ceiling as a bound, not as an expected duration.
-    timeout-minutes: 150
+    timeout-minutes: 200
     strategy:
       fail-fast: false
       matrix:
@@ -296,11 +301,11 @@ jobs:
             exec 7> >(sed -u -e 's/^::error::/::warning::/' -e 's/lock not acquired within/lock wait exhausted/I')
             lock_filter=$!
             lock_rc=0
-            sdk_java_lock_acquire 5400 "${TIER}" >&7 2>&1 || lock_rc=$?
+            sdk_java_lock_acquire 9600 "${TIER}" >&7 2>&1 || lock_rc=$?
             exec 7>&-
             wait "${lock_filter}" 2>/dev/null || true
             if [ "${lock_rc}" -ne 0 ]; then
-              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full 90-minute budget; the gate result above is unaffected"
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
               exit 0
             fi
           else
@@ -314,9 +319,9 @@ jobs:
               lock_setup_fault "${cache_dir} is not writable"
             exec 9>"${cache_dir}/sdk-java-tests.lock"
             lock_rc=0
-            flock --wait 5400 9 || lock_rc=$?
+            flock --wait 9600 9 || lock_rc=$?
             if [ "${lock_rc}" -eq 1 ]; then
-              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full 90-minute budget; the gate result above is unaffected"
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
               exit 0
             elif [ "${lock_rc}" -ne 0 ]; then
               echo "::error::Maven cache write-back setup failed: flock exited ${lock_rc}"
@@ -816,8 +821,9 @@ jobs:
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
-          # fast tier's 90-minute wait expires behind it (run 39627609266
-          # waited 17:38-19:15 behind run 39628985638's integration hold).
+          # fast tier's wait expires behind it (run 39627609266 waited
+          # 17:38-19:15, burning its then-90-minute budget, behind run
+          # 39628985638's integration hold).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
           cd packages/managed-agent-server
           # Keep mysql.url for release runs that check out an older tag.
@@ -865,7 +871,7 @@ jobs:
             exec 7>&-
             wait "${lock_filter}" 2>/dev/null || true
             if [ "${lock_rc}" -ne 0 ]; then
-              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full 90-minute budget; the gate result above is unaffected"
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
               exit 0
             fi
           else
@@ -881,7 +887,7 @@ jobs:
             lock_rc=0
             flock --wait 5400 9 || lock_rc=$?
             if [ "${lock_rc}" -eq 1 ]; then
-              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full 90-minute budget; the gate result above is unaffected"
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
               exit 0
             elif [ "${lock_rc}" -ne 0 ]; then
               echo "::error::Maven cache write-back setup failed: flock exited ${lock_rc}"

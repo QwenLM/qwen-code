@@ -2845,6 +2845,82 @@ describe('Managed Workspace execution activation', () => {
     );
   });
 
+  it.each([
+    { name: 'protocolVersion 2', change: { protocolVersion: 2 } },
+    { name: 'protocolVersion "1"', change: { protocolVersion: '1' } },
+    {
+      name: 'a forged contextConfigRef with a valid digest',
+      change: { contextConfigRef: `sha256:${'f'.repeat(64)}` },
+    },
+  ])('refuses activation with $name', async ({ change }) => {
+    const root = workspace([]);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('refused-activation');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    const activate = activation(request);
+    const refused = await post(origin, ACTIVATION, { ...activate, ...change });
+
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({
+      code: 'managed_activation_conflict',
+    });
+    const call = shell(
+      request.sessionId,
+      'write',
+      'echo activated > proof.txt',
+    );
+    expect((await post(origin, EXECUTE, call)).status).toBe(409);
+    expect(fs.existsSync(path.join(root, 'proof.txt'))).toBe(false);
+
+    const accepted = await post(origin, ACTIVATION, activate);
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({ ...activate, active: true });
+    expect(
+      (await (await post(origin, EXECUTE, call)).json()).result.executionStatus,
+    ).toBe('success');
+    expect(fs.readFileSync(path.join(root, 'proof.txt'), 'utf8').trim()).toBe(
+      'activated',
+    );
+  });
+
+  it('refuses activation before a Session is installed', async () => {
+    const root = workspace([]);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('never-installed');
+    const refused = await post(origin, ACTIVATION, activation(request));
+
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({
+      code: 'managed_activation_conflict',
+    });
+    const call = shell(
+      request.sessionId,
+      'write',
+      'echo installed > proof.txt',
+    );
+    expect((await post(origin, EXECUTE, call)).status).toBe(409);
+    expect(fs.existsSync(path.join(root, 'proof.txt'))).toBe(false);
+
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      200,
+    );
+    expect(
+      (await (await post(origin, EXECUTE, call)).json()).result.executionStatus,
+    ).toBe('success');
+    expect(fs.readFileSync(path.join(root, 'proof.txt'), 'utf8').trim()).toBe(
+      'installed',
+    );
+  });
+
   it('requires activation, writes from a subdirectory, and permanently closes on release', async () => {
     const root = workspace();
     fs.mkdirSync(path.join(root, 'child'));

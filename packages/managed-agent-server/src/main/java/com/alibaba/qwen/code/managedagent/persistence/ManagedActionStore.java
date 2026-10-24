@@ -226,6 +226,10 @@ public class ManagedActionStore {
             if (options.path("v").asLong() == 3) {
                 optionFields.add("continuationRef");
             }
+            if (options.has("requiresHumanDecision")) {
+                optionFields.add("requiresHumanDecision");
+                require(options.path("requiresHumanDecision").isBoolean() && options.path("requiresHumanDecision").booleanValue());
+            }
             closed(options, optionFields.toArray(String[]::new));
             require(
                     safeNumber(options.path("v"))
