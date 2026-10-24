@@ -165,6 +165,7 @@ export function AddWorkspaceDialog({
     undefined,
   );
   const cloneJobIdRef = useRef<string | undefined>(undefined);
+  const cloneRegisteredJobRef = useRef<string | undefined>(undefined);
   const cloneUnmountedRef = useRef(false);
   const autoGitTargetRef = useRef<string | undefined>(undefined);
   const [gitSuggestions, setGitSuggestions] = useState<
@@ -413,6 +414,10 @@ export function AddWorkspaceDialog({
   const pollCloneJob = useCallback(
     async (jobId: string) => {
       if (!gitClone) return;
+      if (clonePollTimerRef.current !== undefined) {
+        clearTimeout(clonePollTimerRef.current);
+        clonePollTimerRef.current = undefined;
+      }
       try {
         const job = await gitClone.poll(jobId);
         if (cloneUnmountedRef.current || cloneJobIdRef.current !== jobId)
@@ -425,11 +430,14 @@ export function AddWorkspaceDialog({
           return;
         }
         if (job.status === 'succeeded' && job.cwd) {
+          if (cloneRegisteredJobRef.current === jobId) return;
+          cloneRegisteredJobRef.current = jobId;
           setClonedCwd(job.cwd);
           try {
             await registerClonedWorkspace(job.cwd);
             onClose();
           } catch (err) {
+            cloneRegisteredJobRef.current = undefined;
             setError(
               err instanceof Error
                 ? err.message
@@ -460,6 +468,10 @@ export function AddWorkspaceDialog({
     const jobId = cloneJob?.jobId;
     if (!gitClone || !jobId) return;
     setCancelling(true);
+    if (clonePollTimerRef.current !== undefined) {
+      clearTimeout(clonePollTimerRef.current);
+      clonePollTimerRef.current = undefined;
+    }
     try {
       await gitClone.cancel(jobId);
       await pollCloneJob(jobId);
@@ -842,8 +854,14 @@ export function AddWorkspaceDialog({
                 type="button"
                 variant="outline"
                 className="flex-1 sm:flex-none"
-                onClick={onClose}
-                disabled={cancelling}
+                onClick={
+                  cloneJob?.status === 'running'
+                    ? () => void cancelClone()
+                    : onClose
+                }
+                disabled={
+                  cloneJob?.status === 'running' ? cancelling : submitting
+                }
               >
                 {t('sidebar.addWorkspaceCancel')}
               </Button>
