@@ -24,7 +24,7 @@
   overflow-wrap: anywhere;
 }
 
-.feedback[role='alert'] {
+.feedback[data-tone='error'] {
   color: var(--error-color);
 }
 
