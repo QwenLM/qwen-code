@@ -203,8 +203,7 @@ reads:
   come oldest first, so a new one is on the last page), each with its first
   comment's `databaseId` and its last 100 comments (`id`, `databaseId`,
   `author { __typename login }`, `authorAssociation`, `body`, `url`,
-  `state`, and `replyTo`, which still marks a reply once the comment it
-  answered is deleted)
+  `state` and `replyTo`)
 - the last 100 `reviews` and the last 100 issue comments
 
 The rollup lists every run on the head: earlier attempts of a re-run job,
@@ -298,7 +297,7 @@ Event rules:
 - `title` is the PR's title, the language the round's summary is written in.
 - A workflow GitHub could not start (`STARTUP_FAILURE`, often an invalid
   workflow file) leaves no check run in the rollup — no rollup at all when
-  it is the only one — only its check suite. Of the newest 100 suites, the
+  it is the only one — only its check suite. Of the suites read (paged back, above), the
   latest run of each workflow and trigger counts, and only for a trigger
   of the PR's code (`pull_request`, `pull_request_target`, `push`): a run
   for each review comment fails to start whenever GitHub has trouble, and
@@ -309,8 +308,11 @@ Event rules:
 - A comment of a review not submitted yet (`PENDING`) is a draft only its
   author sees, and is skipped. A bot asks in the comment that opens a
   thread (and in a review); its replies answer someone and are not
-  requests — the gate keeps them as seen, so a deleted parent does not make
-  one new: a review bot that answers every reply would otherwise keep a
+  requests. Once the comment a reply answered is deleted, GraphQL drops its
+  `replyTo` and lists it first in the thread, so a bot comment that looks
+  as if it opened one, and is not known yet, is asked about once over REST
+  (`in_reply_to_id`, which stays); the gate also keeps bot replies as seen.
+  Otherwise a review bot that answers every reply would otherwise keep a
   round going for each, and an untrusted commenter could have a bot speak
   for them, even after deleting their own comment.
 - Checks and suites belong to the commit, not to the PR: another PR of the
@@ -320,7 +322,10 @@ Event rules:
   without its events, the number of events and their types, and the file's
   path (`snapshot`). On a PR with any history the comments' bodies run far
   past what one line of tool output shows; the round reads the file, and the
-  brief points the fix agent to it.
+  brief lists the items the fix agent handles, pointing to the file for
+  their text. A body is written as its lines, a line past 2,000 characters
+  folded across several, since `read_file` pages a file by lines and cuts
+  one past 25,000.
 - `truncated` names the connections (`checks`, `reviewThreadComments`,
   `reviewThreads`, `reviews`, `comments`) that had more entries than the
   query reads.

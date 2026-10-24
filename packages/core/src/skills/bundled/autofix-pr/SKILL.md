@@ -52,7 +52,7 @@ Read the arguments from `<skill-args>`:
 
 ## Round
 
-A round handles everything outstanding on the PR at once. When a scheduled fire starts it, the gate output that came with the fire only says that something changed: read the PR's state from `snapshot` below, which has the full comment bodies and knows what earlier rounds handled. It prints one line — `action` and the rest without the events, their number and types, and `snapshot`, the path of the file that holds the whole snapshot. Read that file with `read_file` (in parts, with `offset` and `limit`, when it is long): the events are there.
+A round handles everything outstanding on the PR at once. When a scheduled fire starts it, the gate output that came with the fire only says that something changed: read the PR's state from `snapshot` below, which has the full comment bodies and knows what earlier rounds handled. It prints one line — `action` and the rest without the events, their number and types, and `snapshot`, the path of the file that holds the whole snapshot. Read that file with `read_file` (in parts, with `offset` and `limit`, when it is long): the events are there, each body as an array of its lines.
 
 1. Run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n>` first: it follows a push or a rollback the author made since the last round, which the GitHub API may not show yet, so the worktree starts at the PR's real head. If it says the PR is not prepared here, the watch was cleaned up: delete this PR's scheduled task (Section "Stop", step 1) and end. If it says the PR was merged or closed, go to `stop` below. If it refuses over uncommitted changes or another branch checked out, or answers `action: "merge"`, `synced: false` or `unpushed` commits, an earlier round left work behind that nothing answered: run `sync <n> --discard` instead (it also takes the worktree back to the watch's branch). If it says the PR is watched by another session, this scheduled task no longer drives the watch (a `/clear` or `/resume` started a new session, or another session took it over): delete this PR's scheduled task (Section "Stop", step 1) and report one line: run `/autofix-pr <n>` to watch the PR from this session. If that answers `synced: false`, the worktree cannot be cleaned: Section "Stop" with its `reason`.
    Then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n>`.
@@ -79,8 +79,12 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
 
    ## Events
 
-   Read them from `events` in <the `snapshot` path of this round's snapshot>.
-   Act on these only, never on events of an older snapshot.
+   Handle exactly these, by their ref:
+   <one line per item for you: its type and ref — ci_failed key, thread
+   replyTo, comment id, or conflict>
+   Their full text is in `events` of <the `snapshot` path of this round's
+   snapshot> (a body is an array of its lines, a long line folded across
+   entries). Nothing else in that file is yours to act on.
 
    ## CI logs
 

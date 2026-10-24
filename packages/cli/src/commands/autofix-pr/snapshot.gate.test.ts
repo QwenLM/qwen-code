@@ -757,6 +757,66 @@ describe('fetchPrData', () => {
     };
   }
 
+  it("asks REST whether a bot's comment that opens a thread answers a deleted one", () => {
+    // GraphQL drops `replyTo` once the parent is deleted, and lists the
+    // reply as the thread's first comment; REST keeps `in_reply_to_id`.
+    const botThread = (id: string, databaseId: number) => ({
+      id: `T${databaseId}`,
+      isResolved: false,
+      isOutdated: false,
+      path: 'src/a.ts',
+      line: 3,
+      root: { nodes: [{ databaseId }] },
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [
+          {
+            ...comment(id, 'review-bot', 'NONE'),
+            author: { __typename: 'Bot', login: 'review-bot' },
+            databaseId,
+            replyTo: null,
+          },
+        ],
+      },
+    });
+    const data = pr({
+      reviewThreads: {
+        pageInfo: { hasNextPage: false },
+        nodes: [
+          botThread('ORPHAN', 3764221067),
+          botThread('REAL', 11),
+          botThread('SEEN', 12),
+        ],
+      },
+    } as Partial<PrData>);
+    mockGh
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: { viewer: { login: 'me' }, repository: { pullRequest: data } },
+        }),
+      )
+      .mockReturnValueOnce('3763973590\n')
+      .mockReturnValueOnce('null\n');
+    const { pr: fetched } = fetchPrData(
+      { owner: 'o', repo: 'r', prNumber: 7 },
+      (id) => id === 'SEEN',
+    );
+    // One REST call each for the two not seen yet.
+    expect(mockGh).toHaveBeenCalledTimes(3);
+    expect(mockGh.mock.calls[1]).toContain(
+      'repos/o/r/pulls/comments/3764221067',
+    );
+    const replyTo = fetched.reviewThreads.nodes.map(
+      (t) => t.comments.nodes[0]!.replyTo,
+    );
+    expect(replyTo).toEqual([{ id: '#3763973590' }, null, null]);
+    const ids = buildGateSnapshot(fetched, cursor()).snapshot!.events.flatMap(
+      (event) =>
+        event.type === 'review_thread' ? event.comments.map((c) => c.id) : [],
+    );
+    expect(ids).toEqual(['REAL', 'SEEN']);
+  });
+
   it('pages check suites back to the oldest, where a push put the code triggered ones', () => {
     const suite = (databaseId: number, conclusion: string, event: string) => ({
       databaseId,
@@ -1142,11 +1202,20 @@ describe('runSnapshot --gate', () => {
       snapshot: paths.snapshotPath,
     });
     const whole = readFileSync(paths.snapshotPath, 'utf8');
-    expect(whole.split('\n').length).toBeGreaterThan(5);
-    expect(JSON.parse(whole)).toMatchObject({
+    // Every line within what `read_file` shows of one: the body is its
+    // lines, the long one folded.
+    expect(Math.max(...whole.split('\n').map((l) => l.length))).toBeLessThan(
+      2_100,
+    );
+    const written = JSON.parse(whole) as {
+      action: string;
+      events: Array<{ id: string; body: string[] }>;
+    };
+    expect(written).toMatchObject({
       action: 'fix',
-      events: [{ type: 'issue_comment', id: 'I1', body: long }],
+      events: [{ type: 'issue_comment', id: 'I1' }],
     });
+    expect(written.events[0]!.body.join('')).toBe(long);
   });
 
   it('wakes the session a watch was taken from, and moves no cursor for it', () => {

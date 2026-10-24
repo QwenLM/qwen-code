@@ -127,8 +127,6 @@ const PR_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
   }
 }`;
 
-// A head on a busy repository carries well over 100 check contexts, and a
-// failure past the first page must not read as "all green".
 const SUITES_PAGE_QUERY = `query($owner: String!, $name: String!, $number: Int!, $before: String!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
@@ -148,6 +146,8 @@ const SUITES_PAGE_QUERY = `query($owner: String!, $name: String!, $number: Int!,
 
 const MAX_SUITE_PAGES = 5;
 
+// A head on a busy repository carries well over 100 check contexts, and a
+// failure past the first page must not read as "all green".
 const CHECKS_PAGE_QUERY = `query($owner: String!, $name: String!, $number: Int!, $after: String!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
@@ -1122,7 +1122,46 @@ function graphql(query: string, target: PrTarget, extra: string[]): unknown {
   );
 }
 
-export function fetchPrData(target: PrTarget): { pr: PrData; viewer: string } {
+/**
+ * Marks the bot comments that look as if they opened a thread but answer
+ * a comment since deleted: GraphQL drops `replyTo` along with the parent,
+ * while REST keeps `in_reply_to_id`. Each one is asked about once — until
+ * `known` (what the caller has reported or handled) holds it — so a quiet
+ * PR asks nothing.
+ */
+function markOrphanReplies(
+  target: PrTarget,
+  pr: PrData,
+  known: (id: string) => boolean,
+): void {
+  for (const thread of pr.reviewThreads.nodes) {
+    const first = thread.comments.nodes[0];
+    if (
+      !first ||
+      first.replyTo ||
+      first.author?.__typename !== 'Bot' ||
+      first.databaseId === undefined ||
+      first.databaseId !== thread.root.nodes[0]?.databaseId ||
+      known(first.id)
+    ) {
+      continue;
+    }
+    const parent = gh(
+      'api',
+      `repos/${target.owner}/${target.repo}/pulls/comments/${first.databaseId}`,
+      '--jq',
+      '.in_reply_to_id',
+    ).trim();
+    if (parent !== '' && parent !== 'null') {
+      first.replyTo = { id: `#${parent}` };
+    }
+  }
+}
+
+export function fetchPrData(
+  target: PrTarget,
+  known?: (id: string) => boolean,
+): { pr: PrData; viewer: string } {
   const data = graphql(PR_QUERY, target, []) as {
     data: {
       viewer: { login: string };
@@ -1225,6 +1264,7 @@ export function fetchPrData(target: PrTarget): { pr: PrData; viewer: string } {
     threads.nodes.push(...more.nodes);
     threads.pageInfo = more.pageInfo;
   }
+  if (known) markOrphanReplies(target, pr, known);
   return { pr, viewer: data.data.viewer.login };
 }
 
@@ -1315,7 +1355,13 @@ function runGate(args: SnapshotArgs): void {
 
   setGhHost(target.host);
   ensureAuthenticated();
-  const { pr, viewer } = fetchPrData({ ...target, prNumber: args.pr });
+  const reportedBefore = new Set([
+    ...(existing?.reportedCommentIds ?? []),
+    ...watch.seenCommentIds,
+  ]);
+  const { pr, viewer } = fetchPrData({ ...target, prNumber: args.pr }, (id) =>
+    reportedBefore.has(id),
+  );
   const cursor: AutofixPrGateCursor = {
     ...(existing ?? {
       version: 1,
@@ -1370,7 +1416,7 @@ export function runSnapshot(args: SnapshotArgs): void {
   assertOwnedBySession(state);
   setGhHost(state.host);
   ensureAuthenticated();
-  const { pr } = fetchPrData(state);
+  const { pr } = fetchPrData(state, handledBy(state));
   // Asked only when the API disagrees with the watch: whether the branch
   // moved, or the API has yet to see the head `sync` or `push` recorded.
   let branchHead: string | null | undefined;
@@ -1382,9 +1428,17 @@ export function runSnapshot(args: SnapshotArgs): void {
   // line says what to do and where it is.
   const snapshot = buildSnapshot(pr, state, branchHead);
   const paths = autofixPrPaths(repoRoot(), args.pr);
+  // A body is written as its lines, and a long line folded: `read_file`
+  // pages a file by lines and cuts one past 25,000 characters, and GitHub
+  // takes bodies of 65,536.
   atomicWriteFileSync(
     paths.snapshotPath,
-    `${JSON.stringify(snapshot, null, 2)}\n`,
+    `${JSON.stringify(
+      snapshot,
+      (key, value: unknown) =>
+        key === 'body' && typeof value === 'string' ? bodyLines(value) : value,
+      2,
+    )}\n`,
   );
   const { events, ...rest } = snapshot;
   writeStdoutLine(
@@ -1395,6 +1449,30 @@ export function runSnapshot(args: SnapshotArgs): void {
       snapshot: paths.snapshotPath,
     }),
   );
+}
+
+/** The longest line a body keeps in the snapshot file; longer ones fold. */
+const BODY_LINE_MAX = 2_000;
+
+/** A body as the snapshot file holds it: its lines, long ones folded. */
+export function bodyLines(body: string): string[] {
+  const lines: string[] = [];
+  for (const line of body.split('\n')) {
+    if (line.length <= BODY_LINE_MAX) {
+      lines.push(line);
+      continue;
+    }
+    for (let at = 0; at < line.length; at += BODY_LINE_MAX) {
+      lines.push(line.slice(at, at + BODY_LINE_MAX));
+    }
+  }
+  return lines;
+}
+
+/** What a watch has handled or posted: no comment to ask GitHub about. */
+export function handledBy(state: AutofixPrState): (id: string) => boolean {
+  const seen = new Set([...state.handledCommentIds, ...state.postedCommentIds]);
+  return (id) => seen.has(id);
 }
 
 export const snapshotCommand: CommandModule = {

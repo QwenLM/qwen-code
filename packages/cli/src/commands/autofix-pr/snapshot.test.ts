@@ -220,9 +220,9 @@ describe('buildSnapshot', () => {
     ]);
   });
 
-  it("takes a bot's comment for a reply when GitHub says it answers one, even with that one deleted", () => {
-    // An untrusted commenter opened the thread and deleted their comment:
-    // the bot's answer is all the thread shows.
+  it("takes a bot's comment that answers another for a reply, even as a thread's first", () => {
+    // `replyTo` as GraphQL gives it while the parent exists, or as
+    // `fetchPrData` sets it from REST once the parent is deleted.
     const reply = {
       ...comment('PRRC_9', 'review-bot', 'NONE', { bot: true, databaseId: 9 }),
       replyTo: { id: 'PRRC_gone' },
