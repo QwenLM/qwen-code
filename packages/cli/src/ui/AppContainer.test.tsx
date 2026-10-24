@@ -7688,6 +7688,11 @@ describe('AppContainer State Management', () => {
           },
           setPresentation: vi.fn(),
         } as unknown as interactiveMods.InteractiveModSession;
+        // Scope the mock to this test's own Config: mount effects from
+        // earlier tests can still be in flight (they run the real
+        // config.initialize()), and an unscoped mockReturnValue lets those
+        // stale effects call this test's initialize(), inflating the
+        // exact-once assertion below.
         const owner = vi
           .spyOn(interactiveMods, 'getInteractiveModSession')
           .mockImplementation((config) =>
