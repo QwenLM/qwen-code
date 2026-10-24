@@ -8,7 +8,8 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { DaemonSession } from '@qwen-code/sdk';
+import { DaemonClient, type DaemonSession } from '@qwen-code/sdk';
+import { AcpHttpTransport } from '@qwen-code/sdk/daemon/transports';
 import {
   startFakeOpenAIServer,
   type FakeOpenAIServer,
@@ -192,19 +193,70 @@ describe.skipIf(process.platform === 'win32')(
         ).toBe(expected === 'on');
         expect(current).not.toContain("The user's message includes the");
       }
-      await daemon.client.setSessionConfigOption(
-        secondary.sessionId,
-        'workflow_mode',
-        'off',
-        secondary.clientId,
-      );
-      const context = await daemon.client.sessionContext(
-        secondary.sessionId,
-        secondary.clientId,
-      );
-      expect(context.state.configOptions).toContainEqual(
-        expect.objectContaining({ id: 'workflow_mode', currentValue: 'off' }),
-      );
+      const transport = new AcpHttpTransport(daemon.base, daemon.token, fetch);
+      const httpClient = new DaemonClient({
+        baseUrl: daemon.base,
+        token: daemon.token,
+        transport,
+      });
+      try {
+        // The ACP connection obtains its own live-owner attachment.
+        await httpClient.resumeSession(secondary.sessionId, {
+          workspaceCwd: path.join(root, 'b'),
+        });
+        const disabled = await httpClient.setSessionConfigOption(
+          secondary.sessionId,
+          'workflow_mode',
+          'off',
+        );
+        expect(disabled.persisted).toBe(true);
+        expect(disabled.configOptions).toContainEqual(
+          expect.objectContaining({
+            id: 'workflow_mode',
+            currentValue: 'off',
+            _meta: {
+              'qwen.workflowMode': {
+                available: true,
+                effective: false,
+              },
+            },
+          }),
+        );
+        await expect(
+          httpClient.setSessionConfigOption(
+            secondary.sessionId,
+            'reasoning_effort',
+            'high',
+          ),
+        ).rejects.toThrow('ConfigId not supported by this transport');
+        const context = await daemon.client.sessionContext(
+          secondary.sessionId,
+          secondary.clientId,
+        );
+        expect(context.state.configOptions).toContainEqual(
+          expect.objectContaining({ id: 'workflow_mode', currentValue: 'off' }),
+        );
+        const from = server.requests.length;
+        const marker = 'DW04_HTTP_DISABLED';
+        const result = await httpClient.prompt(
+          secondary.sessionId,
+          { prompt: [{ type: 'text', text: marker }] },
+          AbortSignal.timeout(45_000),
+        );
+        expect(result.stopReason).toBe('end_turn');
+        const requests = server.requests
+          .slice(from)
+          .filter(({ body }) => body['stream'] === true);
+        expect(requests).toHaveLength(1);
+        const current = currentTurnText(requests[0].body, marker);
+        expect(current).toContain(marker);
+        expect(current).toContain('Workflow mode is off for this session.');
+        expect(current).not.toContain(
+          'Workflow mode is enabled for this session.',
+        );
+      } finally {
+        transport.dispose();
+      }
     }, 120_000);
   },
 );

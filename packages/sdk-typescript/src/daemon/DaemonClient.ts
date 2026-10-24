@@ -6324,7 +6324,7 @@ export class DaemonClient {
         'Workflow mode requires on/off and does not accept persist',
       );
     }
-    return await this.jsonRequest<DaemonSessionConfigOptionResult>(
+    const result = await this.jsonRequest<DaemonSessionConfigOptionResult>(
       `/session/${urlEncode(sessionId)}/config-option`,
       'POST /session/:id/config-option',
       {
@@ -6339,6 +6339,11 @@ export class DaemonClient {
         clientId: options?.clientId,
       },
     );
+    // ACP returns configOptions only; a successful Workflow mode write has
+    // already committed the session state before acknowledging the request.
+    return configId === 'workflow_mode' && this.transport.type !== 'rest'
+      ? { ...result, persisted: result.persisted ?? true }
+      : result;
   }
 
   async setSessionLanguage(

@@ -90,7 +90,16 @@ export class SystemController extends BaseController {
           throw new Error('Session Workflow mode is unsupported');
         }
         if (payload.subtype === 'set_workflow_mode') {
-          await this.context.config.setWorkflowMode(payload.enabled);
+          const committed = await this.context.config.setWorkflowMode(
+            payload.enabled,
+          );
+          if (
+            signal.aborted ||
+            this.context.config.getSessionId() !== sessionId
+          ) {
+            throw new Error('Session changed or request aborted');
+          }
+          return { ...committed };
         }
         return { ...this.context.config.getWorkflowMode() };
       }
