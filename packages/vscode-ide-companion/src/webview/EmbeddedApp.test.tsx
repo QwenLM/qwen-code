@@ -64,6 +64,15 @@ const sdkMocks = vi.hoisted(() => ({
       opts?: { clientId?: string; rewindFiles?: boolean },
     ) => Promise<unknown>
   >(async () => ({})),
+  // Mirrors the real class from `@qwen-code/sdk/daemon`: the edit branch
+  // branches on `status` to tell a transient daemon failure from a refusal.
+  DaemonHttpError: class DaemonHttpError extends Error {
+    readonly status: number;
+    constructor(status: number) {
+      super(`HTTP ${status}`);
+      this.status = status;
+    }
+  },
 }));
 
 vi.mock('@qwen-code/sdk/daemon', () => ({
@@ -78,6 +87,7 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
     getRewindSnapshots = sdkMocks.getRewindSnapshots;
     rewindSession = sdkMocks.rewindSession;
   },
+  DaemonHttpError: sdkMocks.DaemonHttpError,
 }));
 
 vi.mock('@qwen-code/web-shell', async () => {
@@ -1690,6 +1700,30 @@ describe('EmbeddedApp message edit rewind', () => {
     });
   }
 
+  // Mirrors the shell's `prepareSubmitRef.current = prepareSubmit`: a real send
+  // invokes the latest closure, so assertions must not reuse one captured
+  // before the state change they are checking.
+  async function expectNextSubmitIsOrdinary(
+    sessionId = 'session-1',
+  ): Promise<void> {
+    sdkMocks.getRewindSnapshots.mockClear();
+    sdkMocks.rewindSession.mockClear();
+    const nextSubmit = callback<
+      (submission: PrepareSubmission) => Promise<unknown>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+    await act(async () => {
+      await expect(
+        nextSubmit({
+          sessionId,
+          prompt: 'unrelated',
+          inputAnnotations: [],
+        }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.getRewindSnapshots).not.toHaveBeenCalled();
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+  }
+
   // The daemon-backed edit/rewind shipped with the cutover but nothing ever
   // exercised it: getRewindSnapshots and rewindSession appeared in this file
   // only as mock stubs (#9911).
@@ -1795,13 +1829,15 @@ describe('EmbeddedApp message edit rewind', () => {
     });
     const prepareSubmit = await startEditing(props, 7);
 
-    await expect(
-      prepareSubmit({
-        sessionId: 'session-1',
-        prompt: 'edited text',
-        inputAnnotations: [],
-      }),
-    ).rejects.toThrow('The original message can no longer be edited.');
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('The original message can no longer be edited.');
+    });
 
     // The rejection is what the web shell now surfaces to the user; rewinding
     // to some other turn would silently discard different work.
@@ -1841,6 +1877,146 @@ describe('EmbeddedApp message edit rewind', () => {
     expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
   });
 
+  // The localized toast says "Please try again", so a transient daemon failure
+  // must leave the edit armed: a retry that skipped the rewind would append
+  // the edited text as a new turn instead of replacing the original.
+  it('re-arms the edit after a transient snapshot failure so the retry rewinds', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockRejectedValueOnce(
+      new sdkMocks.DaemonHttpError(503),
+    );
+    const prepareSubmit = await startEditing(props, 3);
+
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('Failed to edit the message. Please try again.');
+    });
+
+    sdkMocks.getRewindSnapshots.mockClear();
+    sdkMocks.rewindSession.mockClear();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({ snapshots: [snapshot(3)] });
+    // The shell always invokes the latest closure, so the retry has to come
+    // from the re-rendered props, not the one captured before the failure.
+    const retry = callback<(submission: PrepareSubmission) => Promise<unknown>>(
+      mocks.embeddedProps.current as CapturedProps,
+      'prepareSubmit',
+    );
+    await act(async () => {
+      await expect(
+        retry({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledWith('session-1');
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-3',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+  });
+
+  // The 400 `invalid_client_id` documented above is a permanent refusal: if it
+  // re-armed the edit, every later send would retry a rewind that can never
+  // succeed — the wedged composer this change exists to remove.
+  it('keeps edit mode cleared when the rewind is refused permanently', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(3)],
+    });
+    sdkMocks.rewindSession.mockRejectedValueOnce(
+      new sdkMocks.DaemonHttpError(400),
+    );
+    const prepareSubmit = await startEditing(props, 3);
+
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('Failed to edit the message. Please try again.');
+    });
+
+    await expectNextSubmitIsOrdinary();
+  });
+
+  // A failure that lands after the user switched sessions must not re-arm the
+  // edit: the retry would rewind the session they are now looking at back to a
+  // turn index that belongs to the one they left.
+  it('does not re-arm the edit when the session switched during the failed fetch', async () => {
+    const props = await renderApp();
+    let rejectSnapshots!: (error: unknown) => void;
+    sdkMocks.getRewindSnapshots.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSnapshots = reject;
+        }),
+    );
+    const prepareSubmit = await startEditing(props, 3);
+    let submission!: Promise<unknown>;
+    await act(async () => {
+      submission = prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      });
+    });
+
+    await act(async () => {
+      callback<(sessionId: string | undefined) => void>(
+        props,
+        'onSessionIdChange',
+      )('session-2');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      rejectSnapshots(new Error('network down'));
+      await expect(submission).rejects.toThrow(
+        'Failed to edit the message. Please try again.',
+      );
+    });
+
+    await expectNextSubmitIsOrdinary('session-2');
+  });
+
+  // The other half of the invariant: a successful edit must not leave the next
+  // send inside the branch, or every later prompt would rewind the session.
+  it('treats the send after a successful edit as an ordinary prompt', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(0)],
+    });
+    const prepareSubmit = await startEditing(props, 0);
+
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-0',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+
+    await expectNextSubmitIsOrdinary();
+  });
+
   it('rewinds the session captured before the snapshot fetch, not the one navigated to', async () => {
     const props = await renderApp();
 
@@ -1855,10 +2031,13 @@ describe('EmbeddedApp message edit rewind', () => {
     );
 
     const prepareSubmit = await startEditing(props, 3);
-    const submission = prepareSubmit({
-      sessionId: 'session-1',
-      prompt: 'edited text',
-      inputAnnotations: [],
+    let submission!: Promise<unknown>;
+    await act(async () => {
+      submission = prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      });
     });
 
     // The user navigates to another session before the fetch resolves; the
@@ -1903,12 +2082,15 @@ describe('EmbeddedApp message edit rewind', () => {
     const prepareSubmit = await startEditing(props, 3);
 
     let settled = false;
-    const submission = prepareSubmit({
-      sessionId: 'session-1',
-      prompt: 'edited text',
-      inputAnnotations: [],
-    }).then(() => {
-      settled = true;
+    let submission!: Promise<void>;
+    await act(async () => {
+      submission = prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      }).then(() => {
+        settled = true;
+      });
     });
 
     await act(async () => {
@@ -1946,12 +2128,15 @@ describe('EmbeddedApp message edit rewind', () => {
     vi.useFakeTimers();
     try {
       let rejection: unknown;
-      const submission = prepareSubmit({
-        sessionId: 'session-1',
-        prompt: 'edited text',
-        inputAnnotations: [],
-      }).catch((error) => {
-        rejection = error;
+      let submission!: Promise<unknown>;
+      await act(async () => {
+        submission = prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }).catch((error) => {
+          rejection = error;
+        });
       });
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2100);
@@ -1989,9 +2174,35 @@ describe('EmbeddedApp rewind preflight localization', () => {
       }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
     >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
 
-    await expect(
-      prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
-    ).rejects.toThrow('Failed to edit the message. Please try again.');
+    await act(async () => {
+      await expect(
+        prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
+      ).rejects.toThrow('Failed to edit the message. Please try again.');
+    });
+
+    // A failure without an HTTP status is a network blip, not a refusal: the
+    // edit stays armed, so the retry re-enters the branch and rewinds instead
+    // of appending the edited text as a new turn.
+    sdkMocks.getRewindSnapshots.mockClear();
+    sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
+      snapshots: [{ turnIndex: 0, promptId: 'p-1' }],
+    });
+    const retry = callback<
+      (submission: {
+        prompt: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+    await act(async () => {
+      await expect(
+        retry({ prompt: 'edited text', inputAnnotations: [] }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'p-1',
+      expect.objectContaining({ rewindFiles: false }),
+    );
   });
 
   it('rethrows a localized error when rewindSession rejects', async () => {
@@ -2018,9 +2229,35 @@ describe('EmbeddedApp rewind preflight localization', () => {
       }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
     >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
 
-    await expect(
-      prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
-    ).rejects.toThrow('Failed to edit the message. Please try again.');
+    await act(async () => {
+      await expect(
+        prepareSubmit({ prompt: 'edited text', inputAnnotations: [] }),
+      ).rejects.toThrow('Failed to edit the message. Please try again.');
+    });
+
+    // Same transient contract at the rewind call site: the retry must rewind
+    // again rather than send the edited text as a new prompt.
+    sdkMocks.getRewindSnapshots.mockClear();
+    sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
+      snapshots: [{ turnIndex: 0, promptId: 'p-1' }],
+    });
+    const retry = callback<
+      (submission: {
+        prompt: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+    await act(async () => {
+      await expect(
+        retry({ prompt: 'edited text', inputAnnotations: [] }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledOnce();
+    expect(sdkMocks.rewindSession).toHaveBeenLastCalledWith(
+      'session-1',
+      'p-1',
+      expect.objectContaining({ rewindFiles: false }),
+    );
   });
 });
 

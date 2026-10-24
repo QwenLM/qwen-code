@@ -16,6 +16,7 @@ import {
 } from '@qwen-code/web-shell';
 import {
   DaemonClient,
+  DaemonHttpError,
   type DaemonSessionSummary,
   type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
@@ -1655,6 +1656,21 @@ export function EmbeddedApp() {
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
+              // The clear above is unconditional so no refusal can wedge the
+              // next send, but a transient daemon failure has to re-arm the
+              // edit: the message says "Please try again", and a retry that
+              // skipped the rewind would append the edited text as a new turn
+              // instead of replacing the original. Only permanent 4xx refusals
+              // stay cleared, so a rewind that can never succeed cannot wedge
+              // the composer again. Never `cancelMessageEditing` here — it
+              // wipes the composer text the retry needs.
+              const rearmOnTransientFailure = (error: unknown) => {
+                if (runtimeRef.current?.sessionId !== sessionId) return;
+                if (error instanceof DaemonHttpError && error.status < 500) {
+                  return;
+                }
+                setEditingMessage({ turnIndex });
+              };
               let snapshots: Awaited<
                 ReturnType<typeof daemonClient.getRewindSnapshots>
               >['snapshots'];
@@ -1662,6 +1678,7 @@ export function EmbeddedApp() {
                 ({ snapshots } =
                   await daemonClient.getRewindSnapshots(sessionId));
               } catch (err) {
+                rearmOnTransientFailure(err);
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
               const snapshot =
@@ -1689,6 +1706,7 @@ export function EmbeddedApp() {
                   rewindFiles: false,
                 });
               } catch (err) {
+                rearmOnTransientFailure(err);
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
               clearInsight();
