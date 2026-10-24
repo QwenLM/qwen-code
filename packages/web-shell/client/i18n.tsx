@@ -2068,6 +2068,9 @@ const EN: Messages = {
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
+  'sidebar.recentSessions': 'Recent sessions',
+  'sidebar.standalonePinUnavailable':
+    'Pinning no-workspace sessions is not supported yet.',
   'sidebar.workspaceSelectLabel': 'Workspace',
   'sidebar.noWorkspace': 'No workspace',
   'sidebar.noWorkspaceSessions': 'No-workspace sessions',
@@ -2585,6 +2588,8 @@ const EN: Messages = {
   'local.summary': 'Generate a project summary file',
   'local.workflows':
     'List workflow runs or cooperatively pause/resume a live run',
+  'skilldesc.autofixPr':
+    'Watch a pull request and fix its CI, review feedback and conflicts',
   'skilldesc.batch': 'Run batch operations across many files in parallel',
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
@@ -6457,6 +6462,8 @@ const ZH: Messages = {
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
+  'sidebar.recentSessions': '最近会话',
+  'sidebar.standalonePinUnavailable': '暂不支持置顶无工作区会话。',
   'sidebar.workspaceSelectLabel': '工作区',
   'sidebar.noWorkspace': '无工作区',
   'sidebar.noWorkspaceSessions': '无工作区会话',
@@ -6929,6 +6936,7 @@ const ZH: Messages = {
   'local.remember': '将持久记忆保存到记忆系统',
   'local.summary': '生成项目摘要文件',
   'local.workflows': '列出工作流运行，或协作式暂停/恢复运行中的任务',
+  'skilldesc.autofixPr': '盯住一个 PR，修复其 CI、评审意见和冲突',
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
