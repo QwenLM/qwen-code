@@ -363,6 +363,17 @@ const SETTINGS_SCHEMA = {
           "Print the token-bearing QR even when stdout is captured and the bearer is an operator-supplied (stable) token. Honored from user, system, and system-defaults settings only — a workspace settings file must not be able to push the operator's credential into logs; qwen serve --no-token-qr suppresses the QR for that run. Same effect as qwen serve --token-qr.",
         showInDialog: false,
       },
+      maxSessions: {
+        type: 'integer',
+        label: 'Max Sessions',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 32,
+        minimum: 0,
+        description:
+          'Per-workspace cap on concurrent live sessions. New spawn requests beyond this return 503; attaching to an existing session still works. Set to 0 to disable. Honored from user, system, and system-defaults settings only — a workspace settings file must not raise a daemon-wide resource cap; qwen serve --max-sessions wins when passed.',
+        showInDialog: false,
+      },
       maxConcurrentSubSessionsPerCaller: {
         type: 'integer',
         label: 'Max Concurrent Sub-Sessions Per Caller',

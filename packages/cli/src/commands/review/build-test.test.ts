@@ -572,9 +572,17 @@ describe.skipIf(process.platform === 'win32')(
         // awk all do), and a process that exits between the glob and the read
         // leaves exactly that; no file after it is read. With processes
         // exiting all through the walk, the command's were among those.
+        // Bounded (~11 s): it runs in a session of its own, so a run that
+        // dies without reaching `finally` — a Ctrl+C, a cancelled job — would
+        // otherwise leave it forking on the host. That covers the 1.3 s the
+        // walk needs and the polls of a failing one. `$SECONDS` is not POSIX
+        // (dash has none), hence the counter.
         const churn = spawn(
           '/bin/sh',
-          ['-c', 'while :; do sleep 1 & sleep 0.002; done'],
+          [
+            '-c',
+            'i=0; while [ "$i" -lt 4000 ]; do i=$((i+1)); sleep 1 & sleep 0.002; done',
+          ],
           { stdio: 'ignore', detached: true },
         );
         try {
@@ -637,10 +645,30 @@ describe.skipIf(process.platform === 'win32')(
       const [code, signal] = await new Promise<[number | null, string | null]>(
         (res) => shell.on('exit', (c, sig) => res([c, sig])),
       );
-      // The re-raised SIGINT kills the wrapper. bash before 5.0, which is
-      // macOS's `/bin/sh` (bash 3.2), exits 130 on it instead.
-      expect(signal ?? code).toBeOneOf(['SIGINT', 130]);
+      // The re-raised SIGINT kills the wrapper. bash before 5.0 exits 130 on
+      // it instead — macOS's `/bin/sh` is bash 3.2, and an image that links
+      // `sh` to bash 4 (CentOS 7's 4.2) does the same — so only there is 130
+      // accepted; dash, busybox and bash 5 are held to dying of the signal.
+      const shBash = spawnSync('/bin/sh', ['-c', 'echo "${BASH_VERSINFO:-}"'], {
+        encoding: 'utf8',
+      }).stdout.trim();
+      const oldBash = /^[1-4]$/.test(shBash);
+      expect(signal ?? code).toBeOneOf(oldBash ? ['SIGINT', 130] : ['SIGINT']);
       expect(await gone(pid)).toBe(true);
+    });
+
+    it('installs its traps before it starts the command, and reads `$c`, never `$!`', () => {
+      // A signal between the job's start and the traps would kill only the
+      // shell and leave the job running. And zsh expands `$!` to 0 before
+      // any job: a trap reading it could walk from pid 0, which is every
+      // process on the machine.
+      const lines = REAPING_SHELL.split('\n');
+      const job = lines.indexOf('( eval "$cmd" ) &');
+      const traps = lines.flatMap((l, i) => (l.startsWith('trap ') ? [i] : []));
+      expect(job).toBeGreaterThan(-1);
+      expect(traps).toHaveLength(2);
+      for (const i of traps) expect(i).toBeLessThan(job);
+      expect(REAPING_SHELL).not.toContain('"$!"');
     });
   },
 );

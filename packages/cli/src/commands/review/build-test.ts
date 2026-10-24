@@ -553,8 +553,10 @@ function directRunEnv(
  * between the job's start and the traps and kill only the shell. What is left
  * is the step between the fork and `c=$!`; a signal there finds `c` empty and
  * reaps nothing. Reading `$!` in the trap instead would close that too, but
- * zsh, which macOS can install as `/bin/sh`, expands `$!` to 0 before any job,
- * and the walk from pid 0 is every process on the machine.
+ * zsh expands `$!` to 0 before any job, and the walk from pid 0 is every
+ * process on the machine. macOS's `/bin/sh` runs zsh when
+ * `/private/var/select/sh` points at it (see sh(1)); it points at bash by
+ * default.
  */
 export const REAPING_SHELL = `cmd=$1
 shift

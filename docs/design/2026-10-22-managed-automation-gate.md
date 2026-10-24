@@ -3,9 +3,12 @@
 [English](2026-10-22-managed-automation-gate.md) | [简体中文](2026-10-22-managed-automation-gate.zh-CN.md)
 
 - **Status**: 2026-10-22, implemented in this change on top of the
-  [scheduled-task gate](2026-10-21-scheduled-task-gate.md) (PR #15069),
-  whose runner and text builders it shares. Delivery step 5 of that design:
-  the same gate for managed automations.
+  [scheduled-task gate](2026-10-21-scheduled-task-gate.md) (PR #15069), whose
+  runner and text builders it shares. Delivery step 5 of that design: the same
+  gate for managed automations. §4.4 and the scanner-capacity figures in §10
+  were added on 2026-10-24; their timings come from a rig run with the PR
+  watch probes and from local runs of the same probes. The §2 Policy bullet
+  and the §10 scanner-capacity item were corrected the same day.
 - **Related**: [managed automation (H6)](2026-10-04-managed-automation.md),
   [managed automation runtime (H6b)](2026-10-07-managed-automation-runtime.md),
   [managed runtime tool contract](2026-09-24-managed-runtime-tool-contract.md),
@@ -66,10 +69,13 @@ The facts below are from `main` at `13a4fea516` plus PR #15069.
   otherwise. No Harness code runs a command outside a model turn today;
   hooks run Runtime-side manifest commands under an operation grant.
 - **Policy.** A Session's tool profile decides which tools exist:
-  `run_shell_command` belongs to `hosted-workspace-shell/1`, `/2` and
-  `team-lead/1`; a no-tool Session refuses every tool call. Under `default`
-  and `auto-edit` the Harness opens an approval Action for a shell call,
-  which an automation turn inherits from the Session's pinned settings.
+  `run_shell_command` belongs to `hosted-workspace-shell/1` (and `/2` until
+  #15330) and `hosted-workspace-team-lead/1`; a no-tool Session refuses every
+  tool call. Under `default` and `auto-edit` the Harness opens an approval
+  Action for a shell call. An automation turn starts from the Session's pinned
+  settings; on a `hosted-workspace-files/1` or `hosted-workspace-shell/1` (and
+  `/2` until #15330) Session that is not a child, it reads the Session's
+  current approval selection at each check.
 - **Relay.** `HostedHarnessClient.runAutomationOperation` requires a `202`
   with `state: settled` and the same `operationId`; anything else, including
   the client's 30 s request timeout, raises `MutationOutcomeUnknownException`,
@@ -164,6 +170,172 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 with the output sanitized line by line (control and tag characters stripped,
 every `<` written `&lt;`) and cut at 16 KiB with the cut noted.
+
+### 4.4 Gating on the PR watch probes
+
+The pull-request watch probes from the [`/autofix-pr`
+design](2026-10-21-autofix-pr-command.md) are gate commands: `qwen autofix-pr
+snapshot <n> --gate --repo <owner>/<repo>` watches one PR, and `qwen review
+watch-repo --repo <owner>/<repo>` watches a repository. Each keeps a cursor
+and prints only what changed since the cursor was last written, so a managed
+definition can use them unchanged:
+
+```
+POST /v1/agent-automations
+Content-Type: application/json
+Idempotency-Key: watch-pr-123
+
+{"session_id": "<session>", "goal": "Watch PR 123", "cron": "*/2 * * * *",
+ "timezone": "UTC", "prompt": "Handle the pull-request events below.",
+ "gate": "qwen autofix-pr snapshot 123 --gate --repo acme/app"}
+```
+
+Authentication and tenant headers are left out of the example.
+
+The deployment has to enable automations
+(`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`) and Workspace files
+(`QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED`, which has prerequisites of its
+own), both off by default, and the Session has to have the Shell profile. A
+built-in `qwen-code` Workspace Session gets it when created while Workspace
+Shell is enabled (`QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED`, off by
+default, which needs `QWEN_MANAGED_AGENT_APPROVAL_MODE` set to `default` or
+`auto-edit`); the server README's [Shell admission
+section](../../packages/managed-agent-server/README.md#public-foreground-shell-admission)
+covers that switch and the approval mode. A stored AgentDefinition Session has
+it when its definition selects `hosted-workspace-shell/1` and
+`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` allows it. Gates go by the
+Session's profile, not by the Shell switch, so turning the switch off does not
+stop them. The Session also has to admit gates (§4.1); a gate on another
+Session is refused with `409 automation_gate_unsupported`.
+
+The Session's approval mode also governs the turn a gate wakes. Under
+`default` and `auto-edit` its shell calls open approval Actions (§2, Policy),
+and an Action nobody answers is refused after the approval timeout (10 minutes
+by default). While such a turn waits, the default `skip` overlap skips later
+slots without probing. So under those modes a watch wakes the Session
+unattended, but the commands the turn runs wait for someone to approve them.
+If they are refused, the probe does not report those events again: its cursor
+moved when it printed them. The README's "Shell always asks permission"
+describes Sessions that take the deployment's approval mode, which Shell
+requires to be `default` or `auto-edit`. Through WebShell, where the Harness
+supports approval selection, a built-in Shell Session can also be created in
+Full Access (`yolo`), and its owner can switch a Session to it later while
+Workspace Shell is enabled ([approval selection
+design](managed-approval-selection.md)). A turn the gate wakes then runs its
+commands without asking, steered in part by PR text that others wrote.
+
+A gate on these probes then needs:
+
+- **A git repository.** Both probes keep their cursors under the main worktree
+  of the repository containing the Session's directory (`<main
+worktree>/.qwen/tmp/`), which they find with `git worktree list`. An empty
+  `git init` is enough. Outside a repository the probe exits 1 and every fire
+  settles `gate_failed`.
+- **A cursor that outlives fires, one watch per cursor.** The cursor is how
+  the next fire knows what is new. If that main worktree is recreated,
+  `snapshot` reports everything outstanding again and `watch-repo` records
+  silently again. Cursors are files in the main worktree, not per Session:
+  `snapshot`'s is named by the PR number alone, and `watch-repo`'s by the
+  watched repository and its filters. Two definitions on Sessions that share a
+  directory (or a main worktree) therefore each get part of the events if they
+  watch the same PR, or the same repository with the same filters. In one main
+  worktree, a `snapshot` gate for another repository's PR of the same number
+  fails (`gate_failed`) on every fire, while the gate that wrote the cursor
+  first keeps it.
+- **`git`, `gh`, `node` and `qwen` where the probe runs.** Workspace Shell
+  needs a Broker configured with the `local-process` provisioner. Its workers
+  run on the server's host, or, for an SSH Workspace, on the SSH node through
+  the Broker's `ssh-process` provisioner; the probe reads GitHub through `gh
+api graphql` with the worker's environment.
+  - On the server's host, the worker inherits the server's environment minus
+    the control-plane variables (`QWEN_MANAGED_AGENT_*`,
+    `QWEN_MANAGEDAGENT_*`, `SPRING_*`, `OSS_*`). So `gh` signs in as it would
+    for the server's user. It reads `GH_TOKEN` or `GITHUB_TOKEN`
+    (`GH_ENTERPRISE_TOKEN` for an Enterprise host), or its configuration under
+    `GH_CONFIG_DIR`, `XDG_CONFIG_HOME` or `HOME`. A token kept only in a
+    desktop keyring may be out of a service's reach. Whatever credential `gh`
+    finds there, every model-directed shell call on that host can read as
+    well: the server's environment reaches every worker the Broker starts on
+    that host (server README, [Broker
+    deployment](../../packages/managed-agent-server/README.md#broker-deployment)).
+    So give it a read-only token limited to the watched repositories. The turn
+    the gate wakes sees the same credential, so with a read-only token it
+    cannot push or reply through it either; any other credential the service
+    account holds (an SSH key, a git credential helper) still reaches the
+    turn. A worker copies the environment once, at launch, so rotating
+    `GH_TOKEN` takes a server restart and reaches only workers started after
+    it; a durable worker the Broker adopts keeps its launch-time value.
+  - On an SSH node, the worker keeps only `PATH`, `HOME`, `USER`, `LOGNAME`,
+    `SHELL`, `LANG`, `LC_ALL`, `TMPDIR`, `TMP`, `TEMP` and `TZ` from the node.
+    Its `PATH` is that of a non-interactive SSH command, without what a login
+    shell adds. So `gh` must be logged in under that `HOME`; no `GH_*`
+    variable, `GITHUB_TOKEN` or `XDG_CONFIG_HOME` passes.
+  - In both cases `git` and `gh` must be on that `PATH`, because the probes
+    run them by name. So must `qwen`, and for an npm install the `node` it
+    starts with, unless the gate names them by absolute path (`/path/to/node
+/path/to/cli.js …`).
+- **The target on the command line.** `watch-repo` always takes `--repo`.
+  `snapshot` needs it too: with no prepared watch in the repository, its first
+  fire has no cursor to take the target from. Both take `--host` for an
+  instance other than github.com; `GH_HOST` works only where the worker's
+  environment carries it.
+- **20 seconds.** A probe must finish within the Managed gate's 20 s limit
+  (§5.2), a third of the scheduled-task gate's 60 s. The first GraphQL query
+  takes about 3 s and each further page about 1.5 s. `snapshot` reads up to
+  ten pages each of check contexts and review threads, all before it writes
+  its cursor, so a PR too big to read in 20 s fails every slot the same way (a
+  `gate_failed` streak) without losing events. These times depend on the
+  Runtime host's path to GitHub: a separate check from a workstation measured
+  a quiet run on the merged PR below at 9–10 s through a proxy and 21–29 s
+  over a direct connection, past the limit.
+- **Output that drains over several fires.** A probe holds a run to a 12 KiB
+  budget, inside the 16 KiB cap (§4.3), and leaves what does not fit for the
+  next fire. Each of those fires is a turn. The first fire on a PR reports
+  what is outstanding as far as the probe can tell: failed checks, a conflict,
+  and other people's comments on unresolved threads, their review bodies and
+  recent conversation comments, answered or not. For the open PR below that
+  comes to about 35 fires in all, an estimate from `deferred` falling by about
+  13 a fire. The Managed cap is applied after sanitizing (§5.5), which writes
+  each `<` as four bytes, while the probes' budget counts raw bytes. So output
+  dense with `<` can pass 16 KiB and be cut after the cursor has moved.
+- **A definition to stop.** After `stop` (the PR merged or closed) the
+  definition keeps probing every slot until it is disabled (a revision with
+  `"enabled": false`) or retired (`DELETE /v1/agent-automations/{id}`); both
+  take an `Idempotency-Key`. The probing is quiet but not free: after its
+  `stop`, the merged PR below still read every page of its checks each slot,
+  10.6–11.5 s on the scanner thread.
+
+#15385, unmerged on 2026-10-24, changes several of these; its version of the
+`/autofix-pr` design describes the probes as they will be. For a Managed gate
+the main changes are these:
+
+- It reads a merged or closed PR with one GraphQL call.
+- For an open PR it adds check-suite pages and REST lookups of bot comments
+  (up to 20 a fire), but starts no new read after 15 s. A PR too big for 20 s
+  is then watched in part instead of failing, though a read already under way
+  can still carry the run past 20 s.
+- It counts each `<` as four bytes.
+- Its prepared watch belongs to one CLI session and is not for Managed
+  Sessions, where each turn and each gate run is a Runtime Session of its own.
+  On a Managed Session the probe serves as the gate alone.
+
+Measured on a local hosted rig on 2026-10-24: main `9e16932bee`, one Session
+and one definition per probe, all due every minute, four slots, with the rig's
+`scan-delay` of 1 s:
+
+| Probe                                       | Each slot                                                               | Gate run    |
+| ------------------------------------------- | ----------------------------------------------------------------------- | ----------- |
+| `snapshot`, merged PR                       | fired once with `stop`, then quiet                                      | 10.6–12.7 s |
+| `snapshot`, open PR with 437 review threads | fired every slot with 11.4–11.9 KiB; `deferred` 459, 446, 433, 419      | 9.5–10.4 s  |
+| `watch-repo`                                | quiet: the first run records silently, and no watched PR moved after it | 2.5–2.9 s   |
+
+The gates ran one after another in each slot, so each time is the gap between
+its execution's settle time and the previous one's (for the first, the tick's
+start). So each after the first also includes the previous gate's release and
+settle, and each includes its own Runtime Session acquire. The merged PR's
+probe read every page of its head's 569 check contexts. Every probe holds its
+node's scanner thread while it runs, which bounds how many watches one node
+serves (§10, scanner capacity).
 
 ## 5. Design
 
@@ -551,14 +723,49 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   about an expired credential without polling `gate_status`.
 - The `per_run` arm, once H4 gives it a child intent: the probe would run
   before the child Session is created, in the parent's Runtime.
-- Scanner capacity. A gated `fire_run` now holds the scanner thread for the
-  probe (up to 20 s, inside the relay's 30 s), and the scanner works its
-  rows one after another. Enough slow gates due in the same minute push a
-  tick past the late tolerance, and later slots of every definition on the
-  node are then recorded `missed`. Rows are leased one by one, so working
-  them on a bounded pool (or answering a gated fire asynchronously) is the
-  natural fix; it changes the scanner's threading and is left to its own
-  change. The Harness side has the same shape: a probe runs inside the
-  automation funnel's serial queue, so a slow gate also delays the
+- Scanner capacity. A gated `fire_run` now holds the scanner thread while the
+  probe runs, for up to the relay's 30 s, and the scanner works its rows one
+  after another. The `automation.concurrency` setting (4 by default) does not
+  change this: it caps the non-terminal runs of one `allow` definition and
+  bounds how many blocking runs one decision reconciles (concurrency + 1, at
+  least 2), one at a time on the same thread; it is not a scanner thread
+  count. Enough slow gates make ticks run late, until later slots of every
+  definition on the node are recorded `missed`. Rows are leased one by one, so
+  working them on a bounded pool (or answering a gated fire asynchronously) is
+  the natural fix; it changes the scanner's threading and is left to its own
+  change (#15418). The Harness side has the same shape: a probe runs inside
+  the automation funnel's serial queue, so a slow gate also delays the
   Session's other automation operations (define, cancel, the settle of a
   finished automation turn) for its duration.
+
+  Measured with the PR watch probes (§4.4), with the rig's `scan-delay` of 1
+  s: in the first of the four slots, the three gates finished their probes
+  13.0, 23.1 and 25.7 s after the slot, one after another. A tick judges
+  lateness from its own start, gives each admitted slot due since a
+  definition's last tick its own gate run, then waits `scan-delay` (10 s by
+  default, `QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY`) before the next tick.
+  So the probes due at one slot, plus `scan-delay`, have to fit before the
+  next slot. With gate runs of 10–13 s, as on PRs that take five or six
+  GraphQL calls to read, that is about four PR watches due every minute (five
+  at 10 s, three at 13 s), or about nine due every two minutes. On `main`, a
+  whole run on a PR read in one call takes about 4 s, process start and `gh
+auth status` included (estimated from the call trace), which allows about
+  twelve a minute. #15385 adds reads for open PRs and stops starting them
+  after 15 s, so a large open PR's run can still take 15 s or more, which
+  brings the per-minute count to two or three. Within the bound, a slot fires
+  within about a minute of its time (about two when two-minute watches all
+  fall due together).
+
+  Past the bound, ticks grow longer and fires land minutes after their slots.
+  Once one slot's probes take the whole period, slots pass the 5-minute late
+  tolerance and are recorded `missed`, for every definition alike, unless a
+  definition's catch-up policy fires them late. These effects are worked out
+  from the scanner's code, not observed. The bound is per scanner thread: each
+  control-plane node runs one. Any fire, gated or not, can hold the thread
+  longer when the Harness first has to load the Session, before the relay's 30
+  s starts: up to 30 s for an ordinary load, up to `load-timeout` (120 s) for
+  a takeover load, which a node runs when it holds no attachment for a Session
+  that a Harness has already served (after a control-plane or Harness restart,
+  for example). And a tick longer than the 60 s `lease` hands out leases that
+  have already expired, since they run from the tick's start, so another node
+  can take those rows (#15418).
