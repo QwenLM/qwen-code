@@ -1913,29 +1913,18 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       '[data-web-shell-collapsed-session-switcher]',
     );
     expect(switcher).not.toBeNull();
-    const moreActions = Array.from(
+    const renameButton = Array.from(
       switcher!.querySelectorAll<HTMLButtonElement>(
-        'button[aria-label="More actions"]',
+        'button[aria-label="Rename"]',
       ),
     ).find((button) =>
       button
         .closest<HTMLElement>('[role="button"]')
         ?.textContent?.includes('API review'),
     );
-    expect(moreActions).not.toBeNull();
+    expect(renameButton).toBeDefined();
     act(() => {
-      moreActions!.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-    });
-    await flushSidebar();
-
-    const renameItem = Array.from(
-      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-    ).find((item) => item.textContent?.includes('Rename'));
-    expect(renameItem).toBeDefined();
-    act(() => {
-      click(renameItem!, true);
+      click(renameButton!, true);
     });
     await flushSidebar();
 

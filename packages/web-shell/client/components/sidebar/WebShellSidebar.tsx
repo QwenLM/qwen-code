@@ -362,7 +362,7 @@ export interface WebShellSidebarSessionActionsOptions {
   /** Session action items to show. Defaults to all. */
   items?: readonly WebShellSidebarSessionActionItem[];
   /**
-   * Which items appear as inline buttons (on hover). Defaults to ['pin'];
+   * Which items appear as inline buttons (on hover). Defaults to ['pin', 'rename'];
    * archive stays in the dropdown so a stray click on the hover slot cannot
    * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
@@ -376,7 +376,7 @@ export const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionAction
   ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive'];
 
 const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
-  ['pin'];
+  ['pin', 'rename'];
 
 /**
  * Palette order for the quick color-grouping buckets. Mirrors core's
@@ -5022,6 +5022,18 @@ export function WebShellSidebar({
             if (event.key === 'Enter') {
               if (standalone) standalone.onOpen();
               else handleLoadSession(session.sessionId, session.workspaceCwd);
+            } else if (
+              event.key === 'F2' &&
+              !event.ctrlKey &&
+              !event.metaKey &&
+              !event.altKey &&
+              event.target === event.currentTarget &&
+              showRename &&
+              !busy
+            ) {
+              event.preventDefault();
+              if (standalone) standalone.onRename();
+              else startRename(session);
             }
           }}
         >
