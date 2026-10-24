@@ -27,9 +27,9 @@ export interface ModerationChat {
 export interface ModerationToolDeps {
   /** Chat bound to the agent session that invoked the tool. */
   resolveChat(sessionId: string): ModerationChat | undefined;
-  /** Message id of the turn that is invoking the tool, when there is one. */
-  currentMessageId(sessionId: string): string | undefined;
-  /** Newest still-recallable message from a member in the chat. */
+  /** True when the channel is configured not to resolve targets by member. */
+  memberRecallDisabled: boolean;
+  /** Newest still-tracked message from a member in the chat. */
   recentMemberMessage(chatId: string, senderId: string): string | undefined;
   /** Forget a message that was just recalled, so a later call resolves the previous one. */
   dropRecentMessage(chatId: string, messageId: string): void;
@@ -46,7 +46,7 @@ interface RecallTarget {
   chatId: string;
   messageId: string;
   /** Which argument resolved the target. */
-  source: 'message_id' | 'member_openid' | 'turn';
+  source: 'message_id' | 'member_openid';
 }
 
 interface ToolRequest {
@@ -63,46 +63,34 @@ interface ToolSpec {
   build(
     args: Record<string, unknown>,
     deps: ModerationToolDeps,
-    chat: ModerationChat | undefined,
-    sessionId: string,
+    chat: ModerationChat,
   ): ToolRequest;
   format?(data: unknown, target: RecallTarget): string;
-}
-
-/** The recall tool acts inside a group, so it needs the bound chat. */
-function requireGroup(chat: ModerationChat | undefined): ModerationChat {
-  if (!chat || !chat.isGroup) {
-    throw new ToolInputError(
-      'This tool only applies to a QQ group chat session.',
-    );
-  }
-  return chat;
 }
 
 const RECALL_TOOL: ToolSpec = {
   name: 'qq_recall_message',
   description:
-    "Recall a message in the current QQ chat. With no arguments it recalls the message that triggered your current turn — the inbound message the bot is answering, not the bot's own reply; with member_openid it recalls that member's most recent message. Within 2 minutes only, and only for messages this channel received: ordinary non-@ group messages arrive only when groupAllPolicy is 'keyword', 'all' or 'log'. Recalling another member's message requires the bot to be a group admin; in a direct chat the platform only recalls messages the bot sent itself, so pass message_id explicitly there.",
+    "Recall a message in the current QQ group chat. The call requires a target: pass member_openid to recall that member's most recent message the channel still remembers from this chat, or message_id for an explicit platform message id. There is no implicit target, and the tool never recalls the bot's own messages. Member-targeted recall only reaches messages the channel actually received and still tracks: ordinary non-@ group messages arrive only when groupAllPolicy is 'keyword', 'all' or 'log'. Recalling another member's message requires the bot to be a group admin. Direct chats are unsupported, because the platform only recalls the bot's own messages there.",
   inputSchema: {
     type: 'object',
     properties: {
       message_id: {
         type: 'string',
-        description:
-          'Explicit message id. Normally omit in a group chat and let the tool resolve the target; required in a direct chat.',
+        description: 'Explicit id of a message in this group chat.',
       },
       member_openid: {
         type: 'string',
         description:
-          "The member's openid whose most recent message should be recalled.",
+          "The member's openid whose most recent recorded message should be recalled.",
       },
     },
     additionalProperties: false,
   },
-  build(args, deps, chat, sessionId) {
+  build(args, deps, chat) {
     // The schema declares additionalProperties: false, but the model can still
-    // send a renamed key. Silently ignoring it would fall through to the
-    // destructive implicit target, so reject the call instead.
+    // send a renamed key. Silently ignoring it would recall something other
+    // than what the model named, so reject the call instead.
     const unknown = Object.keys(args).filter(
       (key) => key !== 'message_id' && key !== 'member_openid',
     );
@@ -111,42 +99,44 @@ const RECALL_TOOL: ToolSpec = {
         `Unrecognized argument${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}. qq_recall_message accepts only message_id and member_openid.`,
       );
     }
-    const explicit = readOptionalString(args, 'message_id');
-    const member = readOptionalString(args, 'member_openid');
-    const resolvedChat = chat ?? requireGroup(chat);
-    // The C2C endpoint only recalls the bot's own messages, and this turn's
-    // id belongs to the user, so resolving it would send a guaranteed failure.
-    if (!resolvedChat.isGroup && !explicit) {
+    // The platform recalls only the bot's own messages in a direct chat, and
+    // this tool never recalls those, so every direct-chat call is unsupported.
+    if (!chat.isGroup) {
       throw new ToolInputError(
-        "A direct chat can only recall the bot's own messages, and this turn carries no such message id — pass message_id explicitly (group chats can recall a member's message with member_openid).",
+        "qq_recall_message does not support direct chats: the platform only recalls the bot's own messages there, and this tool never recalls a message the bot sent.",
       );
     }
-    // A named member never falls back to "this turn's message": that id may
-    // belong to someone else, and recalling the wrong message is worse than
-    // reporting that the target cannot be resolved.
+    const explicit = readOptionalString(args, 'message_id');
+    const member = readOptionalString(args, 'member_openid');
     let messageId = explicit;
-    if (!messageId && member) {
-      messageId = deps.recentMemberMessage(resolvedChat.chatId, member);
+    if (!messageId) {
+      // There is no implicit target: a call that names neither cannot say
+      // which message it meant, and guessing would sooner or later destroy
+      // the wrong one.
+      if (!member) {
+        throw new ToolInputError(
+          "qq_recall_message needs a target: pass member_openid to recall that member's most recent message the channel still remembers, or message_id for an explicit platform message id. There is no implicit target.",
+        );
+      }
+      if (deps.memberRecallDisabled) {
+        throw new ToolInputError(
+          'Member-targeted recall is disabled for this channel (moderationRecallWindowMs is 0); pass message_id explicitly instead.',
+        );
+      }
+      messageId = deps.recentMemberMessage(chat.chatId, member);
       if (!messageId) {
         throw new ToolInputError(
-          `No message from ${member} is still tracked for recall in this chat — it may be outside the 2-minute recall window, evicted from the per-chat ring, or never delivered to the bot (ordinary group messages need groupAllPolicy 'keyword', 'all' or 'log').`,
+          `No message from ${member} is still tracked for recall in this chat — it may have fallen out of the per-chat history the channel keeps, or was never delivered to the bot (ordinary group messages need groupAllPolicy 'keyword', 'all' or 'log').`,
         );
       }
     }
-    messageId ??= deps.currentMessageId(sessionId);
-    if (!messageId) {
-      throw new ToolInputError(
-        'No message id could be resolved for this turn; pass message_id explicitly.',
-      );
-    }
-    const scope = resolvedChat.isGroup ? 'groups' : 'users';
     return {
       method: 'DELETE',
-      path: `/v2/${scope}/${encodePart(resolvedChat.chatId)}/messages/${encodePart(messageId)}`,
+      path: `/v2/groups/${encodePart(chat.chatId)}/messages/${encodePart(messageId)}`,
       target: {
-        chatId: resolvedChat.chatId,
+        chatId: chat.chatId,
         messageId,
-        source: explicit ? 'message_id' : member ? 'member_openid' : 'turn',
+        source: explicit ? 'message_id' : 'member_openid',
       },
     };
   },
@@ -178,7 +168,7 @@ export function buildModerationTools(
       }
       let request: ToolRequest;
       try {
-        request = spec.build(args, deps, chat, context.sessionId);
+        request = spec.build(args, deps, chat);
       } catch (error) {
         if (error instanceof ToolInputError) return fail(error.message);
         throw error;
@@ -222,7 +212,7 @@ function describeFailure(
     case 40062003:
       return `${tool}: the platform refused (40062003 ${result.message}) — no permission for this operation: the bot must be a group admin.`;
     case 40064004:
-      return `${tool}: the platform refused (40064004 ${result.message}) — the message is older than the 2-minute recall window.`;
+      return `${tool}: the platform refused (40064004 ${result.message}) — the message can no longer be recalled.`;
     case 50065001:
       return `${tool}: the platform failed to recall the message (50065001 ${result.message}); it is safe to retry with message_id="${target.messageId}" so the same message is recalled.`;
     case 40061001:

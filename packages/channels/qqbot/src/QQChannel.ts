@@ -389,8 +389,8 @@ export class QQChannel extends ChannelBase {
   /**
    * Recent inbound messages per chat, newest last, used by the moderation
    * tools to resolve "that member's last message" into a message id the
-   * platform can recall. Entries older than the platform's 2-minute recall
-   * window are useless, so the ring is TTL- and length-bounded.
+   * platform can recall. The ring is bounded by the per-chat count cap and,
+   * when `moderationRecallWindowMs` is positive, by that age.
    */
   private recentInbound = new Map<
     string,
@@ -411,8 +411,12 @@ export class QQChannel extends ChannelBase {
   private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** 5-minute TTL for replyMsgId entries and seenMessages dedup. */
   private static readonly REPLY_MSG_ID_TTL_MS = 300_000;
-  /** Platform recall window: a message older than this cannot be recalled. */
-  private static readonly RECALL_WINDOW_MS = 120_000;
+  /**
+   * How long the ring keeps an entry, from `moderationRecallWindowMs`: a
+   * positive value is an age in ms, -1 keeps entries until the count cap
+   * evicts them, and 0 disables the ring (and member-targeted recall).
+   */
+  private moderationRecallWindowMs: number;
   /** Per-chat cap for the recent-inbound ring. */
   private static readonly MAX_RECENT_INBOUND = 50;
   /** Sweep idle chats out of the ring once it holds this many. */
@@ -691,6 +695,18 @@ export class QQChannel extends ChannelBase {
         `[QQ:${this.name}] WARNING: invalid bufferFlushLength=${raw}, using default ${QQChannel.MAX_BUFFER_LENGTH}\n`,
       );
       this.qqConfig.bufferFlushLength = QQChannel.MAX_BUFFER_LENGTH;
+    }
+    const recallWindow = this.qqConfig.moderationRecallWindowMs;
+    if (
+      recallWindow !== undefined &&
+      (!Number.isInteger(recallWindow) || recallWindow < -1)
+    ) {
+      process.stderr.write(
+        `[QQ:${this.name}] WARNING: invalid moderationRecallWindowMs=${recallWindow}, using -1 (no time limit)\n`,
+      );
+      this.moderationRecallWindowMs = -1;
+    } else {
+      this.moderationRecallWindowMs = recallWindow ?? -1;
     }
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
@@ -4922,25 +4938,28 @@ export class QQChannel extends ChannelBase {
 
   /**
    * Track an inbound message for the moderation tools. Kept in memory only:
-   * the platform forgets a message's recallability after 2 minutes, so the
-   * ring is useless across a restart.
+   * the ring does not survive a restart, so member-targeted recall only
+   * reaches messages received since the process started.
    */
   private recordRecentInbound(
     chatId: string,
     senderId: string | undefined,
     messageId: string,
   ): void {
+    // Nothing can resolve a member's message when the tools are off or the
+    // window is 0, so do not spend memory recording one.
+    const window = this.moderationRecallWindowMs;
+    if (this.qqConfig.moderationTools !== true || window === 0) return;
     if (!senderId || !messageId) return;
     const prior = this.recentInbound.get(chatId) ?? [];
     // First write wins for one message id. The same platform id is redelivered
     // on reconnect replay and arrives twice when a message is both
     // GROUP_AT_MESSAGE_CREATE and GROUP_MESSAGE_CREATE; re-stamping it would
-    // make an older message outrank a newer one and extend its recall window.
+    // make an older message outrank a newer one and extend its lifetime.
     if (prior.some((entry) => entry.messageId === messageId)) return;
     const now = Date.now();
-    const entries = prior.filter(
-      (entry) => now - entry.at < QQChannel.RECALL_WINDOW_MS,
-    );
+    const entries =
+      window > 0 ? prior.filter((entry) => now - entry.at < window) : prior;
     entries.push({ messageId, senderId, at: now });
     if (entries.length > QQChannel.MAX_RECENT_INBOUND) {
       entries.splice(0, entries.length - QQChannel.MAX_RECENT_INBOUND);
@@ -4968,11 +4987,12 @@ export class QQChannel extends ChannelBase {
 
   /** Keep the ring's chat keys bounded: stale chats first, then LRU. */
   private sweepRecentInbound(now: number): void {
-    for (const [chatId, entries] of this.recentInbound) {
-      if (
-        entries.every((entry) => now - entry.at >= QQChannel.RECALL_WINDOW_MS)
-      ) {
-        this.recentInbound.delete(chatId);
+    const window = this.moderationRecallWindowMs;
+    if (window > 0) {
+      for (const [chatId, entries] of this.recentInbound) {
+        if (entries.every((entry) => now - entry.at >= window)) {
+          this.recentInbound.delete(chatId);
+        }
       }
     }
     while (this.recentInbound.size > QQChannel.MAX_RECENT_INBOUND_CHATS) {
@@ -4990,16 +5010,17 @@ export class QQChannel extends ChannelBase {
     }
   }
 
-  /** Newest still-recallable message id from `senderId` in `chatId`. */
+  /** Newest tracked message id from `senderId` in `chatId`. */
   private recentMemberMessage(
     chatId: string,
     senderId: string,
   ): string | undefined {
     const now = Date.now();
+    const window = this.moderationRecallWindowMs;
     const entries = this.recentInbound.get(chatId) ?? [];
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i]!;
-      if (now - entry.at >= QQChannel.RECALL_WINDOW_MS) break;
+      if (window > 0 && now - entry.at >= window) break;
       if (entry.senderId === senderId) return entry.messageId;
     }
     return undefined;
@@ -5028,7 +5049,7 @@ export class QQChannel extends ChannelBase {
           isGroup: target.isGroup === true,
         };
       },
-      currentMessageId: (sessionId) => this.getResponseMessageId(sessionId),
+      memberRecallDisabled: this.moderationRecallWindowMs === 0,
       recentMemberMessage: (chatId, senderId) =>
         this.recentMemberMessage(chatId, senderId),
       dropRecentMessage: (chatId, messageId) =>

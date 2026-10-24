@@ -1531,7 +1531,7 @@ describe('群管理事件', () => {
     });
 
     it('drops the group from the recent-inbound ring', () => {
-      const ch = makeChannel();
+      const ch = makeChannel({ moderationTools: true });
       const pvt = ch as unknown as QQChannelRaw;
       const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
         .recentInbound;
@@ -3905,8 +3905,8 @@ describe('qqbot moderation tools', () => {
     expect(() => makeChannel({ moderationTools: true })).not.toThrow();
   });
 
-  it('resolves the newest still-recallable message per sender', () => {
-    const ch = makeChannel();
+  it('resolves the newest tracked message per sender', () => {
+    const ch = makeChannel({ moderationTools: true });
     const raw = ch as unknown as QQChannelRaw;
     raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
     raw['recordRecentInbound']('group-1', 'bob', 'msg-2');
@@ -3919,17 +3919,20 @@ describe('qqbot moderation tools', () => {
   });
 
   it('ignores messages without an id or sender', () => {
-    const ch = makeChannel();
+    const ch = makeChannel({ moderationTools: true });
     const raw = ch as unknown as QQChannelRaw;
     raw['recordRecentInbound']('group-1', undefined, 'msg-1');
     raw['recordRecentInbound']('group-1', 'alice', '');
     expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
   });
 
-  it('drops messages past the 2-minute recall window', () => {
+  it('drops messages past the configured recall window', () => {
     vi.useFakeTimers();
     try {
-      const ch = makeChannel();
+      const ch = makeChannel({
+        moderationTools: true,
+        moderationRecallWindowMs: RECALL_WINDOW_MS,
+      });
       const raw = ch as unknown as QQChannelRaw;
       raw['recordRecentInbound']('group-1', 'alice', 'msg-old');
       vi.advanceTimersByTime(RECALL_WINDOW_MS + 1);
@@ -3942,8 +3945,102 @@ describe('qqbot moderation tools', () => {
     }
   });
 
-  it('caps the per-chat ring at 50 entries', () => {
+  it('keeps an old message when no window is configured', () => {
+    const ch = makeChannel({ moderationTools: true });
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-old');
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-old');
+  });
+
+  it('records nothing when moderationTools is false', () => {
     const ch = makeChannel();
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+      .recentInbound;
+    expect(ring.size).toBe(0);
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
+  });
+
+  it('records nothing and rejects member targets when the window is 0', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    const ch = makeChannel(
+      { moderationTools: true, moderationRecallWindowMs: 0 },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          getTarget: () => ({
+            channelName: 'test-bot',
+            chatId: 'G1',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('G1', 'alice', 'msg-1');
+    const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+      .recentInbound;
+    expect(ring.size).toBe(0);
+
+    const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+    const rejected = (await recall?.handler(
+      { member_openid: 'alice' },
+      { sessionId: 's-1' },
+    )) as { text: string; isError?: boolean };
+    expect(rejected.isError).toBe(true);
+    expect(rejected.text).toContain('disabled');
+
+    const internals = ch as unknown as {
+      accessToken: string;
+      tokenExpiresAt: number;
+    };
+    internals.accessToken = 'tok';
+    internals.tokenExpiresAt = Date.now() + 3_600_000;
+    mockRequestQQApi.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '{}',
+    });
+    const recalled = await recall?.handler(
+      { message_id: 'msg-1' },
+      { sessionId: 's-1' },
+    );
+    expect(recalled).toBe('Message recalled (msg-1).');
+  });
+
+  it('warns and falls back to no time limit for an invalid window', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let written = '';
+    try {
+      const ch = makeChannel({
+        moderationTools: true,
+        moderationRecallWindowMs: 1.5,
+      });
+      written = stderr.mock.calls.map((call) => String(call[0])).join('');
+      const raw = ch as unknown as QQChannelRaw;
+      raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+      vi.advanceTimersByTime(10 * 60_000);
+      expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-1');
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written).toContain('invalid moderationRecallWindowMs=1.5');
+    expect(written.split('\n').filter(Boolean)).toHaveLength(1);
+  });
+
+  it('caps the per-chat ring at 50 entries', () => {
+    const ch = makeChannel({ moderationTools: true });
     const raw = ch as unknown as QQChannelRaw;
     const ring = (
       ch as unknown as {
@@ -3960,7 +4057,7 @@ describe('qqbot moderation tools', () => {
   });
 
   it('does not duplicate a replayed message id', () => {
-    const ch = makeChannel();
+    const ch = makeChannel({ moderationTools: true });
     const raw = ch as unknown as QQChannelRaw;
     const ring = (
       ch as unknown as {
@@ -3973,7 +4070,7 @@ describe('qqbot moderation tools', () => {
   });
 
   it('keeps the first arrival order when a replayed id arrives again', () => {
-    const ch = makeChannel();
+    const ch = makeChannel({ moderationTools: true });
     const raw = ch as unknown as QQChannelRaw;
     raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
     raw['recordRecentInbound']('group-1', 'alice', 'msg-b');
@@ -3984,7 +4081,10 @@ describe('qqbot moderation tools', () => {
   });
 
   it('does not extend the recall window when a message is replayed', () => {
-    const ch = makeChannel();
+    const ch = makeChannel({
+      moderationTools: true,
+      moderationRecallWindowMs: RECALL_WINDOW_MS,
+    });
     const raw = ch as unknown as QQChannelRaw;
     raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
     vi.advanceTimersByTime(RECALL_WINDOW_MS - 10_000);
@@ -3995,7 +4095,7 @@ describe('qqbot moderation tools', () => {
   });
 
   it('drops a recalled message from the ring, leaving the older target reachable', () => {
-    const ch = makeChannel();
+    const ch = makeChannel({ moderationTools: true });
     const raw = ch as unknown as QQChannelRaw;
     raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
     raw['recordRecentInbound']('group-1', 'alice', 'msg-2');
@@ -4007,7 +4107,7 @@ describe('qqbot moderation tools', () => {
   });
 
   it('leaves the ring untouched when the recalled id is not tracked', () => {
-    const ch = makeChannel();
+    const ch = makeChannel({ moderationTools: true });
     const raw = ch as unknown as QQChannelRaw;
     const ring = (
       ch as unknown as {
@@ -4285,7 +4385,7 @@ describe('qqbot moderation tool ownership and recovery', () => {
 
 describe('qqbot recent-inbound ring bounds', () => {
   it('keeps the per-chat ring bounded and evicts the least recently active chat', () => {
-    const ch = makeChannel();
+    const ch = makeChannel({ moderationTools: true });
     const raw = ch as unknown as QQChannelRaw;
     const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
       .recentInbound;

@@ -20,7 +20,7 @@ function harness(
   const dropped: Array<{ chatId: string; messageId: string }> = [];
   const deps: ModerationToolDeps = {
     resolveChat: () => ({ chatId: 'G123', isGroup: true }),
-    currentMessageId: () => 'M-CURRENT',
+    memberRecallDisabled: false,
     recentMemberMessage: () => undefined,
     dropRecentMessage: (chatId, messageId) => {
       dropped.push({ chatId, messageId });
@@ -84,17 +84,26 @@ describe('buildModerationTools', () => {
     expect(properties).toHaveProperty('member_openid');
     expect(tool!.inputSchema).toMatchObject({ additionalProperties: false });
   });
+
+  it('tells the model a target is required and never claims a time limit', () => {
+    const description = harness().tools[0]!.description;
+    expect(description).toContain('requires a target');
+    expect(description).toContain('There is no implicit target');
+    expect(description).toContain("never recalls the bot's own messages");
+    expect(description).not.toMatch(/2.minute|two.minute/i);
+  });
 });
 
 describe('qq_recall_message', () => {
-  it('recalls the message that triggered the turn', async () => {
+  it('rejects a call that names no target', async () => {
     const { call, calls } = harness();
     const result = await call('qq_recall_message');
-    expect(textOf(result)).toBe('Message recalled (M-CURRENT).');
-    expect(calls[0]).toEqual({
-      method: 'DELETE',
-      path: '/v2/groups/G123/messages/M-CURRENT',
-    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('needs a target');
+    expect(textOf(result)).toContain('member_openid');
+    expect(textOf(result)).toContain('message_id');
+    expect(textOf(result)).toContain('no implicit target');
+    expect(calls).toHaveLength(0);
   });
 
   it("recalls a member's most recent tracked message", async () => {
@@ -119,18 +128,18 @@ describe('qq_recall_message', () => {
     });
   });
 
-  it('uses the C2C path outside groups with an explicit id', async () => {
+  it('rejects every direct-chat call, even with an explicit id', async () => {
     const { call, calls } = harness({
       resolveChat: () => ({ chatId: 'U9', isGroup: false }),
     });
-    await call('qq_recall_message', { message_id: 'M-DM' });
-    expect(calls[0]).toEqual({
-      method: 'DELETE',
-      path: '/v2/users/U9/messages/M-DM',
-    });
+    const result = await call('qq_recall_message', { message_id: 'M-DM' });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('does not support direct chats');
+    expect(textOf(result)).toContain("bot's own messages");
+    expect(calls).toHaveLength(0);
   });
 
-  it('refuses an implicit target in a direct chat', async () => {
+  it('rejects a direct-chat call that names no target', async () => {
     const { call, calls } = harness({
       resolveChat: () => ({ chatId: 'U9', isGroup: false }),
     });
@@ -140,27 +149,45 @@ describe('qq_recall_message', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('reports the recall window when a member has no tracked message', async () => {
+  it('reports when a member has no tracked message', async () => {
     const { call, calls } = harness();
     const result = await call('qq_recall_message', {
       member_openid: 'A'.repeat(32),
     });
     expect(isError(result)).toBe(true);
-    expect(textOf(result)).toContain('2-minute recall window');
+    expect(textOf(result)).toContain('still tracked');
+    expect(textOf(result)).toContain('per-chat history');
+    expect(textOf(result)).toContain('never delivered to the bot');
+    expect(textOf(result)).not.toMatch(/2.minute/i);
     expect(calls).toHaveLength(0);
   });
 
-  it('reports when no message id can be resolved at all', async () => {
-    const { call } = harness({ currentMessageId: () => undefined });
-    const result = await call('qq_recall_message');
+  it('rejects member_openid when member-targeted recall is disabled', async () => {
+    const { call, calls } = harness({ memberRecallDisabled: true });
+    const result = await call('qq_recall_message', {
+      member_openid: 'A'.repeat(32),
+    });
     expect(isError(result)).toBe(true);
-    expect(textOf(result)).toContain('pass message_id explicitly');
+    expect(textOf(result)).toContain('disabled');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('still recalls an explicit id when member-targeted recall is disabled', async () => {
+    const { call, calls } = harness({ memberRecallDisabled: true });
+    const result = await call('qq_recall_message', {
+      message_id: 'M-EXPLICIT',
+    });
+    expect(isError(result)).toBe(false);
+    expect(calls[0]).toEqual({
+      method: 'DELETE',
+      path: '/v2/groups/G123/messages/M-EXPLICIT',
+    });
   });
 
   it('resolves the chat bound to the calling session', async () => {
     const resolveChat = vi.fn(() => ({ chatId: 'G123', isGroup: true }));
     const { call } = harness({ resolveChat });
-    await call('qq_recall_message');
+    await call('qq_recall_message', { message_id: 'M1' });
     expect(resolveChat).toHaveBeenCalledWith('S1');
   });
 
@@ -228,11 +255,11 @@ describe('platform failure mapping', () => {
         message: '无操作权限',
       },
     );
-    const result = await call('qq_recall_message');
+    const result = await call('qq_recall_message', { message_id: 'M1' });
     expect(textOf(result)).toContain('group admin');
   });
 
-  it('maps 40064004 to the recall window explanation', async () => {
+  it('maps 40064004 to a no-longer-recallable explanation', async () => {
     const { call } = harness(
       {},
       {
@@ -242,9 +269,11 @@ describe('platform failure mapping', () => {
         message: '已超出消息撤回时限',
       },
     );
-    expect(textOf(await call('qq_recall_message'))).toContain(
-      '2-minute recall window',
+    const result = textOf(
+      await call('qq_recall_message', { message_id: 'M1' }),
     );
+    expect(result).toContain('can no longer be recalled');
+    expect(result).not.toMatch(/2.minute/i);
   });
 
   it('keeps the raw status and message for unknown failures', async () => {
@@ -256,7 +285,9 @@ describe('platform failure mapping', () => {
         message: 'boom',
       },
     );
-    const result = textOf(await call('qq_recall_message'));
+    const result = textOf(
+      await call('qq_recall_message', { message_id: 'M1' }),
+    );
     expect(result).toContain('HTTP 500');
     expect(result).toContain('boom');
   });
@@ -271,10 +302,12 @@ describe('platform failure mapping', () => {
         message: '撤回失败',
       },
     );
-    const result = textOf(await call('qq_recall_message'));
+    const result = textOf(
+      await call('qq_recall_message', { message_id: 'M1' }),
+    );
     expect(result).toContain('50065001');
     expect(result).toContain('safe to retry');
-    expect(result).toContain('M-CURRENT');
+    expect(result).toContain('M1');
   });
 
   it('reports a call that never reached the platform without a status', async () => {
@@ -286,7 +319,9 @@ describe('platform failure mapping', () => {
         message: 'connection reset',
       },
     );
-    const result = textOf(await call('qq_recall_message'));
+    const result = textOf(
+      await call('qq_recall_message', { message_id: 'M1' }),
+    );
     expect(result).toContain('did not complete');
     expect(result).toContain('connection reset');
   });
@@ -301,8 +336,8 @@ describe('request shapes', () => {
 
   it('logs each call outcome with the tool name and the resolved target', async () => {
     const { call, logs } = harness();
-    await call('qq_recall_message');
+    await call('qq_recall_message', { message_id: 'M1' });
     expect(logs.join('\n')).toContain('qq_recall_message ok');
-    expect(logs.join('\n')).toContain('target=G123/M-CURRENT via=turn');
+    expect(logs.join('\n')).toContain('target=G123/M1 via=message_id');
   });
 });
