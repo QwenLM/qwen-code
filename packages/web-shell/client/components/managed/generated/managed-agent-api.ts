@@ -2028,6 +2028,7 @@ export interface components {
             revision: number;
             supported: boolean;
             availableServers: components["schemas"]["ManagedMcpPublishedServer"][];
+            /** @description The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server selection capacity. */
             servers: components["schemas"]["ManagedMcpManagementServer"][];
             operation?: components["schemas"]["ManagedMcpManagementOperation"];
         };
