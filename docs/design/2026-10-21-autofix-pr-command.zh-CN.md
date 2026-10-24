@@ -95,6 +95,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - worktree：`.qwen/tmp/autofix-pr-<n>/`
 - 状态：`.qwen/tmp/autofix-pr-<n>-state.json`
 - 闸门游标：`.qwen/tmp/autofix-pr-<n>-gate.json`
+- 最近一次已准备快照：`.qwen/tmp/autofix-pr-<n>-snapshot.json`
 - 日志、修复说明和回复计划：`.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
 - 评审者游标：`.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
 
@@ -115,9 +116,10 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 一次 GraphQL 调用（检查或 review thread 每多一页再加一次）读取：
 
-- PR 字段：`state`、`isDraft`、`url`、`headRefOid`、`mergeable`、作者和当前用户
+- PR 字段：`state`、`isDraft`、`title`、`url`、`headRefOid`、`mergeable`、作者和当前用户
+- head 提交的 check suite，从最新的读起，向前翻页直到最早的（最多五页，每页 100 个：推送创建的 suite 是一个 head 上最早的，之后每条 review 评论都可能再添一个）
 - head 提交的 status check 汇总，翻页读到前 100 个 context 之后（最多十页；繁忙仓库上一个 head 远超 100 个，后面页上的失败绝不能被读成全绿）
-- `reviewThreads`，翻页读到前 100 个之后（最多十页：thread 按创建先后排列，新 thread 在最后一页），每个 thread 带第一条评论的 `databaseId` 和最后 100 条评论（`id`、`databaseId`、`author { __typename login }`、`authorAssociation`、`body`、`url`）
+- `reviewThreads`，翻页读到前 100 个之后（最多十页：thread 按创建先后排列，新 thread 在最后一页），每个 thread 带第一条评论的 `databaseId` 和最后 100 条评论（`id`、`databaseId`、`author { __typename login }`、`authorAssociation`、`body`、`url`、`state`，以及 `replyTo`——被回复的评论删除后，它仍然标明这是一条回复）
 - 最后 100 条 `reviews` 和最后 100 条 issue 评论
 
 汇总列出 head 上的每一次运行：被重跑的 job 的早先 attempt，以及在多个事件上触发的 workflow 的每一次触发。每个检查只看最新一次运行——check run 由 app、workflow（按 id 区分：两个 workflow 文件可能同名）、触发事件和 job 名确定，按运行 id 排序；commit status 由 context 确定，按创建时间排序——所以被重跑转绿的失败不会被报告。两个 app 发布同名的检查时算两个检查：分支规则可以要求其中任一个 app 的检查，所以一个的成功不会抵消另一个的失败。
@@ -177,7 +179,9 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - head SHA 和 `lastKnownHeadSha` 不同时，如果分支本身（对推送目标执行 `git ls-remote`）也已离开已知 head——包括回退到本监视早先推送过的 head——记为 `head_moved_externally`；分支仍在已知 head 上时，是 API 滞后（上文的 `lagging`）。读不到分支时，`pushedShas` 里的 head 视为本监视自己的。
 - `title` 是 PR 的标题，这一轮的总结使用它的语言。
 - GitHub 没能启动的 workflow（`STARTUP_FAILURE`，常见原因是 workflow 文件无效）在 rollup 里没有任何 check run——它是唯一的 workflow 时根本没有 rollup——只留下它的 check suite。在最新的 100 个 suite 里，每个 workflow 和触发事件只看最近一次运行，而且只看由 PR 代码触发的（`pull_request`、`pull_request_target`、`push`）：为每条 review 评论触发的运行在 GitHub 出问题时也会启动失败，与代码无关。它被报告为带 `startupFailure: true` 和 run id 的 `ci_failed`，每个 head 只报一次（`<workflow>@<head>@#startup:<workflow id>:<event>`），没有日志也没有可重跑的 job，所以 skill 把它答复为需要人工处理。
-- 尚未提交的 review 里的评论（`PENDING`）是只有作者能看到的草稿，会被跳过。bot 在开启 thread 的评论（以及 review）里提要求；它在 thread 里的回复是在回答某人，不算请求：否则会回复每条回复的评审 bot 会让每次都多跑一轮，不受信任的评论者也能借 bot 之口提要求，删掉自己的评论之后也一样。
+- 尚未提交的 review 里的评论（`PENDING`）是只有作者能看到的草稿，会被跳过。bot 在开启 thread 的评论（以及 review）里提要求；它在 thread 里的回复是在回答某人，不算请求——闸门把它们记为已看过，被回复的评论删除后也不会变成新的请求：否则会回复每条回复的评审 bot 会让每次都多跑一轮，不受信任的评论者也能借 bot 之口提要求，删掉自己的评论之后也一样。
+- check 和 suite 属于提交而不属于 PR：同一个 head 提交的另一个 PR 会共用它们。这是已知的局限。
+- 已准备模式把整个快照缩进后写到 `.qwen/tmp/autofix-pr-<n>-snapshot.json`，只输出一行：去掉事件的快照、事件数量和类型，以及文件路径（`snapshot`）。有一点历史的 PR 上，评论正文远远超出一行工具输出能显示的长度；这一轮读取该文件，修复说明也让修复 agent 去读它。
 - `truncated` 列出条目数超过查询读取范围的连接（`checks`、`reviewThreadComments`、`reviewThreads`、`reviews`、`comments`）。
 
 动作优先级：`stop`（已合并或已关闭）→ `resync`（head 被别人移动）→ `fix`（冲突、失败的检查或可信评论）→ `wait`。循环会再加两个输入：预算用完时为 `stop`，修复进行中（状态文件里有 `inFlight`）时为 `wait`，直到这次尝试结束（第 7 节）。
@@ -374,7 +378,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 | 连续被别人移动 head 的次数           | 2      | 停止循环                 |
 | 一次修复尝试可运行的分钟数           | 30     | 记为失败并清除           |
 
-停止条件：PR 已合并或关闭；执行 `/autofix-pr stop`；上表中某项预算要求停止；cron 任务过期。除了定时任务过期（默认 7 天，`cronRecurringMaxAgeDays`）会不经过任何一轮就结束监视之外，每次停止都会执行 `cleanup`，并输出原因、已做的推送和所有 `needsHuman` 项。
+停止条件：PR 已合并或关闭；执行 `/autofix-pr stop`；上表中某项预算要求停止；cron 任务过期。除了定时任务过期（默认 7 天：`experimental.cronRecurringMaxAgeDays` 或 `QWEN_CODE_CRON_MAX_AGE_DAYS`）会不经过任何一轮就结束监视之外，每次停止都会执行 `cleanup`，并输出原因、已做的推送和所有 `needsHuman` 项。
 
 开销：一轮无事发生的检查只是一次探针运行——一次 GraphQL 调用，检查或 review thread 每多一页再加一次——没有模型回合。只有带事件的检查才到达模型，所以两分钟的节奏在 PR 安静时不花任何开销。
 

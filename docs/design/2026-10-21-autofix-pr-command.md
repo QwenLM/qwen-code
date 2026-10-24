@@ -137,6 +137,7 @@ worktree included:
 - worktree: `.qwen/tmp/autofix-pr-<n>/`
 - state: `.qwen/tmp/autofix-pr-<n>-state.json`
 - gate cursor: `.qwen/tmp/autofix-pr-<n>-gate.json`
+- latest prepared snapshot: `.qwen/tmp/autofix-pr-<n>-snapshot.json`
 - logs, briefs and reply plans: `.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
 - reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
 
@@ -190,15 +191,20 @@ worktree included:
 One GraphQL call, plus one per further page of checks or review threads,
 reads:
 
-- PR fields: `state`, `isDraft`, `url`, `headRefOid`, `mergeable`, the author
-  and the viewer
+- PR fields: `state`, `isDraft`, `title`, `url`, `headRefOid`, `mergeable`,
+  the author and the viewer
+- the head commit's check suites, newest first and paged back to the oldest
+  (up to five pages of 100: the suites a push created are the oldest of a
+  head, and every review comment can add one after them)
 - the status check rollup of the head commit, paged past the first 100
   contexts (up to ten pages; a head on a busy repository carries well over
   100, and a failure on a later page must not read as all green)
 - the `reviewThreads`, paged past the first 100 (up to ten pages: threads
   come oldest first, so a new one is on the last page), each with its first
   comment's `databaseId` and its last 100 comments (`id`, `databaseId`,
-  `author { __typename login }`, `authorAssociation`, `body`, `url`)
+  `author { __typename login }`, `authorAssociation`, `body`, `url`,
+  `state`, and `replyTo`, which still marks a reply once the comment it
+  answered is deleted)
 - the last 100 `reviews` and the last 100 issue comments
 
 The rollup lists every run on the head: earlier attempts of a re-run job,
@@ -303,9 +309,18 @@ Event rules:
 - A comment of a review not submitted yet (`PENDING`) is a draft only its
   author sees, and is skipped. A bot asks in the comment that opens a
   thread (and in a review); its replies answer someone and are not
-  requests: a review bot that answers every reply would otherwise keep a
+  requests — the gate keeps them as seen, so a deleted parent does not make
+  one new: a review bot that answers every reply would otherwise keep a
   round going for each, and an untrusted commenter could have a bot speak
   for them, even after deleting their own comment.
+- Checks and suites belong to the commit, not to the PR: another PR of the
+  same head commit shares them. That is a known limit.
+- Prepared mode writes the whole snapshot, indented, to
+  `.qwen/tmp/autofix-pr-<n>-snapshot.json` and prints one line: the snapshot
+  without its events, the number of events and their types, and the file's
+  path (`snapshot`). On a PR with any history the comments' bodies run far
+  past what one line of tool output shows; the round reads the file, and the
+  brief points the fix agent to it.
 - `truncated` names the connections (`checks`, `reviewThreadComments`,
   `reviewThreads`, `reviews`, `comments`) that had more entries than the
   query reads.
@@ -890,7 +905,7 @@ Budgets, stored in the state file:
 | Minutes one fix attempt may run                      | 30      | count it failed, clear it      |
 
 Stop conditions: the PR is merged or closed; `/autofix-pr stop`; a budget in
-the table says stop; the cron job expires. Every stop but the scheduled task's expiry (7 days by default, `cronRecurringMaxAgeDays`), which ends the watch without a round, runs `cleanup` and
+the table says stop; the cron job expires. Every stop but the scheduled task's expiry (7 days by default: `experimental.cronRecurringMaxAgeDays`, or `QWEN_CODE_CRON_MAX_AGE_DAYS`), which ends the watch without a round, runs `cleanup` and
 prints the reason, the pushes made and any `needsHuman` items.
 
 Cost: a quiet check is one probe run — one GraphQL call, plus one per extra

@@ -41,7 +41,7 @@ Read the arguments from `<skill-args>`:
    - it will push commits to `<headRefName>` at `<pushTarget>` and post replies on the PR (not with `--no-reply`), under the user's own git and `gh` identity;
    - fixes are made and verified in a separate worktree, running the repository's own build and test commands;
    - in the default approval mode every helper call (the push included) and every command of a fix asks first, so a watch runs unattended only in a mode that lets commands run;
-   - it stops by itself when the PR is merged or closed, after 10 pushes, or with `/autofix-pr stop`; and a scheduled task expires after 7 days (the `cronRecurringMaxAgeDays` setting), when the watch ends without a report — start it again then.
+   - it stops by itself when the PR is merged or closed, after 10 pushes, or with `/autofix-pr stop`; and a scheduled task expires — after 7 days by default (`experimental.cronRecurringMaxAgeDays`, or `QWEN_CODE_CRON_MAX_AGE_DAYS`) — when the watch ends without a report: start it again then.
 6. **Run one round now** (Section "Round"), with the arguments of this start.
 7. **Unless `--once`, schedule the watch** with `cron_create` — one gate per PR. When `cron_list` already has a task whose gate contains `autofix-pr snapshot <n> --gate` (a start that `prepare` answered with `resumed: true`), keep it if its schedule and prompt are the ones below; otherwise delete it (`cron_delete`) and create the new one, so a new `--every`, `--no-reply` or instructions take effect. The gate runs at each fire without the model and prints only what changed, so a quiet PR costs no turn; the user confirms the gate command once, when the task is created.
    - `cron`: `*/<every> * * * *`, or `0 * * * *` for 60;
@@ -52,7 +52,7 @@ Read the arguments from `<skill-args>`:
 
 ## Round
 
-A round handles everything outstanding on the PR at once. When a scheduled fire starts it, the gate output that came with the fire only says that something changed: read the PR's state from `snapshot` below, which has the full comment bodies and knows what earlier rounds handled.
+A round handles everything outstanding on the PR at once. When a scheduled fire starts it, the gate output that came with the fire only says that something changed: read the PR's state from `snapshot` below, which has the full comment bodies and knows what earlier rounds handled. It prints one line — `action` and the rest without the events, their number and types, and `snapshot`, the path of the file that holds the whole snapshot. Read that file with `read_file` (in parts, with `offset` and `limit`, when it is long): the events are there.
 
 1. Run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n>` first: it follows a push or a rollback the author made since the last round, which the GitHub API may not show yet, so the worktree starts at the PR's real head. If it says the PR is not prepared here, the watch was cleaned up: delete this PR's scheduled task (Section "Stop", step 1) and end. If it says the PR was merged or closed, go to `stop` below. If it refuses over uncommitted changes or another branch checked out, or answers `action: "merge"`, `synced: false` or `unpushed` commits, an earlier round left work behind that nothing answered: run `sync <n> --discard` instead (it also takes the worktree back to the watch's branch). If it says the PR is watched by another session, this scheduled task no longer drives the watch (a `/clear` or `/resume` started a new session, or another session took it over): delete this PR's scheduled task (Section "Stop", step 1) and report one line: run `/autofix-pr <n>` to watch the PR from this session. If that answers `synced: false`, the worktree cannot be cleaned: Section "Stop" with its `reason`.
    Then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n>`.
@@ -79,7 +79,8 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
 
    ## Events
 
-   <the snapshot's events, as JSON>
+   Read them from `events` in <the `snapshot` path of this round's snapshot>.
+   Act on these only, never on events of an older snapshot.
 
    ## CI logs
 

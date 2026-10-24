@@ -58,7 +58,7 @@ Comments are acted on when their author is an owner, member or collaborator of t
 
 ## Stopping and files
 
-`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; `qwen autofix-pr cleanup <n> --force` discards it. A scheduled task expires after 7 days (the `cronRecurringMaxAgeDays` setting), and the watch then ends without a report; start it again to go on. The watch also ends when the session exits; its state file stays, owned by that session. Starting `/autofix-pr <n>` in a new session — or after `/clear` or `/resume` — offers to take the watch over, its pushes and budgets kept.
+`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; `qwen autofix-pr cleanup <n> --force` discards it. A scheduled task expires after 7 days by default (the `experimental.cronRecurringMaxAgeDays` setting, or `QWEN_CODE_CRON_MAX_AGE_DAYS`), and the watch then ends without a report; start it again to go on. The watch also ends when the session exits; its state file stays, owned by that session. Starting `/autofix-pr <n>` in a new session — or after `/clear` or `/resume` — offers to take the watch over, its pushes and budgets kept.
 
 Files live under `.qwen/tmp/` of the clone's main worktree:
 
@@ -67,6 +67,7 @@ Files live under `.qwen/tmp/` of the clone's main worktree:
 | `autofix-pr-<n>/`                        | the PR worktree                                                   |
 | `autofix-pr-<n>-state.json`              | the watch: known head, pushes, handled ids                        |
 | `autofix-pr-<n>-gate.json`               | the gate probe's cursor                                           |
+| `autofix-pr-<n>-snapshot.json`           | the latest round's snapshot of the PR, read by the round          |
 | `autofix-pr-<n>-history-*.json`          | what earlier watches of the PR posted and handled, kept by `stop` |
 | `autofix-pr-<n>-*.log`, `*.md`, `*.json` | CI logs, fix briefs and reply plans                               |
 

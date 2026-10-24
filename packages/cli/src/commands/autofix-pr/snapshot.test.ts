@@ -220,6 +220,17 @@ describe('buildSnapshot', () => {
     ]);
   });
 
+  it("takes a bot's comment for a reply when GitHub says it answers one, even with that one deleted", () => {
+    // An untrusted commenter opened the thread and deleted their comment:
+    // the bot's answer is all the thread shows.
+    const reply = {
+      ...comment('PRRC_9', 'review-bot', 'NONE', { bot: true, databaseId: 9 }),
+      replyTo: { id: 'PRRC_gone' },
+    };
+    const snap = buildSnapshot(pr(threads(thread('T9', [reply]))), state());
+    expect(snap).toMatchObject({ action: 'wait', events: [] });
+  });
+
   it('leaves out draft review comments, and every reply of a bot in a thread', () => {
     const own = {
       ...comment('PRRC_2', 'me', 'OWNER', { databaseId: 2 }),

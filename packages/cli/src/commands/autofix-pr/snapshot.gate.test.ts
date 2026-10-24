@@ -19,6 +19,7 @@ import { GATE_OUTPUT_BUDGET_BYTES } from '../review/lib/gate-budget.js';
 import { getGhHost, setGhHost } from '../review/lib/gh.js';
 import {
   buildGateSnapshot,
+  checkEvents,
   fetchPrData,
   runSnapshot,
   type PrData,
@@ -436,6 +437,42 @@ describe('buildGateSnapshot', () => {
     expect(quiet.snapshot).toBeNull();
   });
 
+  it("keeps a bot's reply as seen, so it never turns into a request", () => {
+    const thread9 = (nodes: unknown[]) =>
+      pr({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            {
+              id: 'T9',
+              isResolved: false,
+              isOutdated: false,
+              path: 'src/a.ts',
+              line: 3,
+              root: {
+                nodes: [
+                  {
+                    databaseId: (nodes[0] as { databaseId: number }).databaseId,
+                  },
+                ],
+              },
+              comments: { pageInfo: { hasPreviousPage: false }, nodes },
+            },
+          ],
+        },
+      } as Partial<PrData>);
+    const stranger = { ...comment('C1', 'mallory'), databaseId: 1 };
+    const bot = {
+      ...comment('C2', 'review-bot', 'NONE'),
+      author: { __typename: 'Bot', login: 'review-bot' },
+      databaseId: 2,
+    };
+    const first = buildGateSnapshot(thread9([stranger, bot]), cursor());
+    expect(first.cursor.reportedCommentIds).toContain('C2');
+    // The stranger deletes their comment; the bot's reply is not new.
+    expect(buildGateSnapshot(thread9([bot]), first.cursor).snapshot).toBeNull();
+  });
+
   it('does not report a dismissed review', () => {
     const data = pr({
       reviews: {
@@ -720,6 +757,70 @@ describe('fetchPrData', () => {
     };
   }
 
+  it('pages check suites back to the oldest, where a push put the code triggered ones', () => {
+    const suite = (databaseId: number, conclusion: string, event: string) => ({
+      databaseId,
+      conclusion,
+      app: { databaseId: 15368 },
+      workflowRun: {
+        databaseId,
+        url: `https://github.com/o/r/actions/runs/${databaseId}`,
+        event,
+        workflow: { databaseId: 9, name: 'CI' },
+      },
+    });
+    const firstPage = pr();
+    firstPage.commits.nodes[0]!.commit.checkSuites = {
+      pageInfo: { hasPreviousPage: true, startCursor: 's1' },
+      // The newest: one per review comment.
+      nodes: [suite(200, 'SUCCESS', 'pull_request_review_comment')],
+    };
+    mockGh
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: { pullRequest: firstPage },
+          },
+        }),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                commits: {
+                  nodes: [
+                    {
+                      commit: {
+                        oid: HEAD,
+                        checkSuites: {
+                          pageInfo: {
+                            hasPreviousPage: false,
+                            startCursor: null,
+                          },
+                          nodes: [suite(1, 'STARTUP_FAILURE', 'pull_request')],
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+      );
+    const { pr: data } = fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 });
+    expect(mockGh.mock.calls[1]).toContain('before=s1');
+    expect(
+      data.commits.nodes[0]!.commit.checkSuites!.nodes.map((n) => n.databaseId),
+    ).toEqual([1, 200]);
+    expect(checkEvents(data)).toMatchObject({
+      failed: [{ event: { check: 'CI', startupFailure: true } }],
+      truncated: false,
+    });
+  });
+
   it('pages the check rollup past the first 100 contexts', () => {
     const firstPage = {
       ...pr(),
@@ -992,6 +1093,60 @@ describe('runSnapshot --gate', () => {
   it('asks for --repo on a first run with nothing prepared', () => {
     expect(() => runSnapshot({ pr: 7, gate: true })).toThrow(/pass --repo/);
     expect(mockGh).not.toHaveBeenCalled();
+  });
+
+  it('writes a prepared snapshot whole to a file, and prints a line without the bodies', () => {
+    const paths = autofixPrPaths(mocks.root, 7);
+    mkdirSync(dirname(paths.statePath), { recursive: true });
+    writeState(paths.statePath, {
+      version: 1,
+      sessionId: '',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: 'qwen-autofix/pr-7',
+      worktreePath: paths.worktreePath,
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+    });
+    const long = 'x'.repeat(40_000);
+    const data = pr({
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [{ ...comment('I1', 'alice', 'MEMBER'), body: long }],
+      },
+    });
+    respond(data);
+    const saved = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    try {
+      runSnapshot({ pr: 7 });
+    } finally {
+      if (saved !== undefined) process.env['QWEN_CODE_SESSION_ID'] = saved;
+    }
+    const line = mocks.stdout.mock.calls[0]![0] as string;
+    expect(line.length).toBeLessThan(1_000);
+    expect(JSON.parse(line)).toMatchObject({
+      action: 'fix',
+      events: 1,
+      eventTypes: ['issue_comment'],
+      snapshot: paths.snapshotPath,
+    });
+    const whole = readFileSync(paths.snapshotPath, 'utf8');
+    expect(whole.split('\n').length).toBeGreaterThan(5);
+    expect(JSON.parse(whole)).toMatchObject({
+      action: 'fix',
+      events: [{ type: 'issue_comment', id: 'I1', body: long }],
+    });
   });
 
   it('wakes the session a watch was taken from, and moves no cursor for it', () => {

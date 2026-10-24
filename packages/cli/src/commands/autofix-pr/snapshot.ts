@@ -18,6 +18,7 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync } from 'node:fs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
@@ -58,6 +59,16 @@ const CHECK_CONTEXT_FIELDS = `nodes {
   ... on StatusContext { context state targetUrl createdAt }
 }`;
 
+// Suites are listed oldest first, and those a push created are the oldest
+// of a head: every review comment can add one after them.
+const CHECK_SUITE_FIELDS = `pageInfo { hasPreviousPage startCursor }
+nodes {
+  databaseId
+  conclusion
+  app { databaseId }
+  workflowRun { databaseId url event workflow { databaseId name } }
+}`;
+
 // `last: 100`: a thread's newest replies are the ones that can be new; the
 // root stays reachable for `replyTo`.
 const REVIEW_THREAD_FIELDS = `pageInfo { hasNextPage endCursor }
@@ -70,7 +81,7 @@ nodes {
   root: comments(first: 1) { nodes { databaseId } }
   comments(last: 100) {
     pageInfo { hasPreviousPage }
-    nodes { id databaseId author { __typename login } authorAssociation body url state }
+    nodes { id databaseId author { __typename login } authorAssociation body url state replyTo { id } }
   }
 }`;
 
@@ -96,13 +107,7 @@ const PR_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
               }
             }
             checkSuites(last: 100) {
-              pageInfo { hasPreviousPage }
-              nodes {
-                databaseId
-                conclusion
-                app { databaseId }
-                workflowRun { databaseId url event workflow { databaseId name } }
-              }
+              ${CHECK_SUITE_FIELDS}
             }
           }
         }
@@ -124,6 +129,25 @@ const PR_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
 
 // A head on a busy repository carries well over 100 check contexts, and a
 // failure past the first page must not read as "all green".
+const SUITES_PAGE_QUERY = `query($owner: String!, $name: String!, $number: Int!, $before: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      commits(last: 1) {
+        nodes {
+          commit {
+            oid
+            checkSuites(last: 100, before: $before) {
+              ${CHECK_SUITE_FIELDS}
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const MAX_SUITE_PAGES = 5;
+
 const CHECKS_PAGE_QUERY = `query($owner: String!, $name: String!, $number: Int!, $after: String!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
@@ -172,6 +196,8 @@ export interface CommentNode {
   body: string;
   url: string;
   state?: string;
+  /** Thread comments: the comment this one answers, when it is a reply. */
+  replyTo?: { id: string } | null;
 }
 
 type CheckContext =
@@ -206,6 +232,11 @@ interface CheckRollup {
     pageInfo: { hasNextPage: boolean; endCursor?: string | null };
     nodes: CheckContext[];
   };
+}
+
+interface CheckSuites {
+  pageInfo?: { hasPreviousPage: boolean; startCursor?: string | null };
+  nodes: CheckSuite[];
 }
 
 /** A check suite: what is left of a workflow GitHub could not start. */
@@ -251,10 +282,7 @@ export interface PrData {
       commit: {
         oid: string;
         statusCheckRollup: CheckRollup | null;
-        checkSuites?: {
-          pageInfo?: { hasPreviousPage: boolean };
-          nodes: CheckSuite[];
-        };
+        checkSuites?: CheckSuites;
       };
     }>;
   };
@@ -488,7 +516,13 @@ export function checkEvents(pr: PrData): {
     }
   }
   failed.push(...startupFailures(commit.checkSuites?.nodes ?? []));
-  return { failed, pending, truncated: contexts.pageInfo.hasNextPage };
+  return {
+    failed,
+    pending,
+    truncated:
+      contexts.pageInfo.hasNextPage ||
+      Boolean(commit.checkSuites?.pageInfo?.hasPreviousPage),
+  };
 }
 
 /** Events that run a workflow on the PR's code, rather than on a comment. */
@@ -549,7 +583,13 @@ function commentEvents(
   pr: PrData,
   prAuthor: string,
   isNew: (node: CommentNode) => boolean,
-): { events: SnapshotEvent[]; ids: string[]; truncated: string[] } {
+): {
+  events: SnapshotEvent[];
+  ids: string[];
+  /** Bot replies, which are never requests: the gate keeps them as seen. */
+  skipped: string[];
+  truncated: string[];
+} {
   const ref = (node: CommentNode, trust: Trust): CommentRef => ({
     id: node.id,
     author: node.author!.login,
@@ -565,6 +605,7 @@ function commentEvents(
   });
   const events: SnapshotEvent[] = [];
   const ids: string[] = [];
+  const skipped: string[] = [];
   const truncated: string[] = [];
 
   for (const thread of pr.reviewThreads.nodes) {
@@ -585,11 +626,14 @@ function commentEvents(
       // A bot asks in the comment that opens a thread; a reply of one
       // answers someone — the tool, which a bot answering every reply
       // would keep a round going for, or an untrusted commenter, who could
-      // have a bot speak for them, even once their own comment is gone.
+      // have a bot speak for them. A reply stays one when the comment it
+      // answered is deleted, and the gate keeps it as seen, so it never
+      // turns into a new request.
       if (
         trust === 'bot' &&
-        node.databaseId !== thread.root.nodes[0]?.databaseId
+        (node.replyTo || node.databaseId !== thread.root.nodes[0]?.databaseId)
       ) {
+        skipped.push(node.id);
         continue;
       }
       ids.push(node.id);
@@ -641,7 +685,7 @@ function commentEvents(
   if (pr.reviewThreads.pageInfo.hasNextPage) truncated.push('reviewThreads');
   if (pr.reviews.pageInfo.hasPreviousPage) truncated.push('reviews');
   if (pr.comments.pageInfo.hasPreviousPage) truncated.push('comments');
-  return { events, ids, truncated };
+  return { events, ids, skipped, truncated };
 }
 
 /** The id of every comment, review and thread comment the query returned. */
@@ -942,11 +986,15 @@ export function buildGateSnapshot(
   const adopted = new Set(
     watch.seenCommentIds.filter((id) => onPage.has(id) && !known.has(id)),
   );
+  const printed = new Set(printedIds);
   next.reportedCommentIds = [
     ...gone.slice(-MAX_OFF_PAGE_COMMENT_IDS),
     ...kept,
     ...adopted,
     ...printedIds,
+    ...comments.skipped.filter(
+      (id) => !known.has(id) && !adopted.has(id) && !printed.has(id),
+    ),
   ];
 
   // A cut that hides what a later poll will not see is a transition itself:
@@ -1122,6 +1170,36 @@ export function fetchPrData(target: PrTarget): { pr: PrData; viewer: string } {
     if (!more?.statusCheckRollup || more.oid !== head!.oid) break;
     rollup.contexts.nodes.push(...more.statusCheckRollup.contexts.nodes);
     rollup.contexts.pageInfo = more.statusCheckRollup.contexts.pageInfo;
+  }
+  const suites = head?.checkSuites;
+  for (
+    let page = 1;
+    suites?.pageInfo?.hasPreviousPage &&
+    suites.pageInfo.startCursor &&
+    page < MAX_SUITE_PAGES;
+    page++
+  ) {
+    const more = (
+      graphql(SUITES_PAGE_QUERY, target, [
+        '-f',
+        `before=${suites.pageInfo.startCursor}`,
+      ]) as {
+        data: {
+          repository: {
+            pullRequest: {
+              commits: {
+                nodes: Array<{
+                  commit: { oid: string; checkSuites: CheckSuites | null };
+                }>;
+              };
+            } | null;
+          } | null;
+        };
+      }
+    ).data.repository?.pullRequest?.commits.nodes[0]?.commit;
+    if (!more?.checkSuites || more.oid !== head!.oid) break;
+    suites.nodes.unshift(...more.checkSuites.nodes);
+    suites.pageInfo = more.checkSuites.pageInfo;
   }
   const threads = pr.reviewThreads;
   for (
@@ -1299,7 +1377,24 @@ export function runSnapshot(args: SnapshotArgs): void {
   if (pr.state === 'OPEN' && pr.headRefOid !== state.lastKnownHeadSha) {
     branchHead = remoteRef(state.pushTarget, `refs/heads/${state.headRefName}`);
   }
-  writeStdoutLine(JSON.stringify(buildSnapshot(pr, state, branchHead)));
+  // The comments' bodies run past what a line of tool output shows on a PR
+  // with any history: the snapshot goes to a file the round reads, and the
+  // line says what to do and where it is.
+  const snapshot = buildSnapshot(pr, state, branchHead);
+  const paths = autofixPrPaths(repoRoot(), args.pr);
+  atomicWriteFileSync(
+    paths.snapshotPath,
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+  );
+  const { events, ...rest } = snapshot;
+  writeStdoutLine(
+    JSON.stringify({
+      ...rest,
+      events: events.length,
+      eventTypes: [...new Set(events.map((event) => event.type))],
+      snapshot: paths.snapshotPath,
+    }),
+  );
 }
 
 export const snapshotCommand: CommandModule = {
