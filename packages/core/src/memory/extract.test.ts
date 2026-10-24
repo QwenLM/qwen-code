@@ -132,6 +132,86 @@ describe('auto-memory extraction', () => {
     expect(cursor.processedOffset).toBe(2);
   });
 
+  it('forwards skipped context while keeping the cursor in raw-history offsets', async () => {
+    const skippedHistory = [
+      { role: 'user', parts: [{ text: 'Prefer Chinese reviews.' }] },
+    ];
+    const history = Array.from({ length: 60 }, () => ({
+      role: 'user',
+      parts: [{ text: 'next' }],
+    }));
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history,
+      skippedHistory,
+    });
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
+      mockConfig,
+      projectRoot,
+      skippedHistory,
+      undefined,
+    );
+    const cursor = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ) as { processedOffset: number };
+    expect(cursor.processedOffset).toBe(60);
+  });
+
+  // Regression (#13004): an image-only unprocessed tail must not let the
+  // no-new-user-message early return swallow a parked supplement — the turns
+  // it holds are owed to the extractor, so the fork still runs over them and
+  // the cursor only advances after a real run.
+  it('forks over an image-only unprocessed tail when skippedHistory is parked', async () => {
+    await fs.writeFile(
+      getAutoMemoryExtractCursorPath(projectRoot),
+      JSON.stringify({
+        sessionId: 'session-1',
+        processedOffset: 3,
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+    const skippedHistory = [
+      { role: 'user', parts: [{ text: 'skipped-but-real-content' }] },
+    ];
+    const history = [
+      { role: 'user', parts: [{ text: 'a' }] },
+      { role: 'user', parts: [{ text: 'b' }] },
+      { role: 'user', parts: [{ text: 'c' }] },
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'AAA' } }],
+      },
+    ];
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: true,
+      systemMessage: undefined,
+    });
+
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history,
+      skippedHistory,
+    });
+
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
+      mockConfig,
+      projectRoot,
+      skippedHistory,
+      undefined,
+    );
+    const cursor = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ) as { processedOffset: number };
+    expect(cursor.processedOffset).toBe(4);
+  });
+
   it('skips a session mismatch without advancing the cursor', async () => {
     vi.mocked(getCacheSafeParamsSessionId)
       .mockReturnValueOnce('session-1')

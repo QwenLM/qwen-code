@@ -245,6 +245,28 @@ export function computeThresholds(
   return { warn, auto, hard, effectiveWindow };
 }
 
+/**
+ * Whether a prompt of `promptTokens` sits below the compaction warning tier
+ * for this config's window. Memory extraction cadence (#13004) only *arms* a
+ * skip below this tier: a skip armed on an earlier turn can still be pending
+ * when compaction fires, and compaction does not flush it.
+ */
+export function isBelowCompactionWarn(
+  config: Config,
+  promptTokens: number,
+): boolean {
+  // A count of 0 means the chat has no report for this route yet (or the read
+  // crossed routes), not an empty prompt: fail closed so no turn is skipped.
+  if (promptTokens <= 0) return false;
+  const window =
+    config.getContentGeneratorConfig()?.contextWindowSize ??
+    DEFAULT_TOKEN_LIMIT;
+  return (
+    promptTokens <
+    computeThresholds(window, config.getAutoCompactThreshold()).warn
+  );
+}
+
 export type CompactTrigger = 'manual' | 'auto';
 
 /**
@@ -1471,6 +1493,16 @@ export class ChatCompressionService {
       // takeover resumes that exact summary instead of generating another one.
       await opts.onPreparedCompaction?.(candidate);
       await firePostCompact(config, candidate, signal, compactTrigger);
+
+      // #13004: this shrink lands below whatever a parked cadence snapshot
+      // holds, and a turn that ends without reaching scheduleExtract (e.g.
+      // cancelled) lets no shrink guard observe it — the flush would replay
+      // the stale snapshot into a cursor no live history matches. Drop it
+      // here, at the point the shrink is decided.
+      config
+        .getMemoryManager?.()
+        ?.invalidatePendingExtract(config.getSessionId());
+
       return { newHistory: candidate.newHistory, info: candidate.info };
     }
   }

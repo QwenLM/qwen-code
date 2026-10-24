@@ -4954,6 +4954,13 @@ class QwenAgent implements Agent {
        * unset and keep their force semantics.
        */
       onlyIfUnheld?: boolean;
+      /**
+       * Skip the #13004 memory flush — process teardown, where the design
+       * record already counts skipped turns as lost. The generation aborts
+       * below make the gate and drain return at once, so the flush would
+       * otherwise spend almost the whole drain budget and hold exit open for it.
+       */
+      skipMemoryFlush?: boolean;
       cancelReason?: 'user';
     },
   ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
@@ -4968,6 +4975,9 @@ class QwenAgent implements Agent {
     const requireFlush = opts?.requireFlush === true;
     if (requireFlush) await recorder?.flush();
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
+    // The memory flush below spends only what the close budget has left: the
+    // bridge sizes drainTimeoutMs under its own outer wait.
+    const closeDeadline = Date.now() + drainTimeoutMs;
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : opts?.cancelReason === 'user'
@@ -5038,6 +5048,17 @@ class QwenAgent implements Agent {
         // oncall grepping for a timeout setting that does not exist.
         drainTimeoutMs,
       );
+
+      // Turns are settled; extract any the #13004 cadence skipped before the
+      // session (and its cache-safe params) goes away, within what remains of
+      // the close budget. No-op unless pending.
+      const flushBudgetMs = closeDeadline - Date.now();
+      if (!opts?.skipMemoryFlush && flushBudgetMs > 0) {
+        const closingConfig = session.getConfig();
+        await closingConfig
+          .getMemoryManager?.()
+          ?.flushPendingExtract?.(closingConfig.getSessionId(), flushBudgetMs);
+      }
 
       const blockedByHolds = await this.runExclusiveHistoryMutation(
         sessionId,
@@ -5131,6 +5152,7 @@ class QwenAgent implements Agent {
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
+      skipMemoryFlush?: boolean;
     },
   ): Promise<void> {
     if (this.sessions.get(sessionId) !== session) {
@@ -5323,6 +5345,9 @@ class QwenAgent implements Agent {
       [...this.sessions.entries()].map(([sessionId, session]) =>
         this.discardStoredSessionIfCurrent(sessionId, session, {
           waitForCloseGate: true,
+          // SIGTERM/SIGINT and IDE disconnect both land here: no outer bridge
+          // timeout bounds this drain, so the flush must not size it.
+          skipMemoryFlush: true,
         }),
       ),
     );

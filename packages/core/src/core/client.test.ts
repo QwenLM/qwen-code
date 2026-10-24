@@ -645,6 +645,7 @@ describe('Gemini Client (client.ts)', () => {
     scheduleSkillReview: ReturnType<typeof vi.fn>;
     resetMemoryBodyStateForSession: ReturnType<typeof vi.fn>;
     resetExhaustedBodyRefsForCurrentTurn: ReturnType<typeof vi.fn>;
+    invalidatePendingExtract: ReturnType<typeof vi.fn>;
     restoreMemoryBodiesPresentInHistory: ReturnType<typeof vi.fn>;
     reconcileMemoryBodiesPresentInHistory: ReturnType<typeof vi.fn>;
     markMemoryBodiesEvictedFromHistory: ReturnType<typeof vi.fn>;
@@ -824,6 +825,7 @@ describe('Gemini Client (client.ts)', () => {
       }),
       resetMemoryBodyStateForSession: vi.fn(),
       resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
+      invalidatePendingExtract: vi.fn(),
       restoreMemoryBodiesPresentInHistory: vi.fn(),
       reconcileMemoryBodiesPresentInHistory: vi.fn(),
       markMemoryBodiesEvictedFromHistory: vi.fn(),
@@ -4126,6 +4128,23 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(cacheClear).toHaveBeenCalled();
       expect(client.getTrustedUserAnswers()).toEqual([]);
+    });
+
+    it('drops the parked cadence snapshot when a rewrite discards its timeline', () => {
+      setChat({ setHistory: vi.fn() });
+      client.setHistory([userText('replaced')]);
+      expect(mockMemoryManager.invalidatePendingExtract).toHaveBeenCalled();
+
+      mockMemoryManager.invalidatePendingExtract.mockClear();
+      client['chat'] = mockChatWithLengths(3, 2);
+      client.truncateHistory(2);
+      expect(mockMemoryManager.invalidatePendingExtract).toHaveBeenCalled();
+
+      // A no-op truncate keeps the timeline the snapshot was cut from.
+      mockMemoryManager.invalidatePendingExtract.mockClear();
+      client['chat'] = mockChatWithLengths(2, 2);
+      client.truncateHistory(99);
+      expect(mockMemoryManager.invalidatePendingExtract).not.toHaveBeenCalled();
     });
 
     /**
