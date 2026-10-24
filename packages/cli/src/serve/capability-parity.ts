@@ -121,14 +121,16 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_attachment_list: NO_MANAGED_EQUIVALENT(
     'no Managed attachment listing',
   ),
-  session_mid_turn_message_mutation: NO_MANAGED_EQUIVALENT(
-    'no Managed mid-turn message queue',
-  ),
-  session_mid_turn_message_query: NO_MANAGED_EQUIVALENT(
-    'no Managed mid-turn message queue',
-  ),
+  session_mid_turn_message_mutation: {
+    standing: 'managed',
+    evidence: 'surface:USER_MESSAGE_COMMAND',
+  },
+  session_mid_turn_message_query: {
+    standing: 'managed',
+    evidence: 'surface:USER_MESSAGE_QUERY',
+  },
   session_mid_turn_send_now: NO_MANAGED_EQUIVALENT(
-    'no Managed mid-turn message queue',
+    'Managed consumes queued guidance automatically at safe model boundaries',
   ),
   session_cancel: { standing: 'managed', evidence: 'surface:TURN_CANCEL' },
   session_events: { standing: 'managed', evidence: 'surface:TAIL_EVENTS' },
@@ -589,6 +591,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'PUB_STREAM_PREFIX',
   'PUB_STREAM_SEAL',
   'STORE_APPROVAL_QUERY',
+  'STORE_USER_MESSAGE_CLAIM',
   'STORE_EXECUTION_AUTHORIZE',
   'STORE_LIFECYCLE_AUTHORIZE',
   'STORE_RECOVERY_BLOCK',
