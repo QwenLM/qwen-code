@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -165,6 +166,32 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
+    // The suite step's write-back republishes its job-local delta into the
+    // host cache as hardlinks. A later step that runs Maven against that
+    // repository must unlink the resolver bookkeeping first, or it rewrites
+    // the host inodes outside the lock (issue #15281).
+    const steps = parse(workflow).jobs.test.steps;
+    const lockAt = steps.findIndex((candidate) =>
+      candidate.run?.includes('sdk-java-tests.lock'),
+    );
+    expect(lockAt, 'test').toBeGreaterThan(-1);
+    const localMaven = steps
+      .slice(lockAt + 1)
+      .filter((candidate) =>
+        candidate.run?.includes('-Dmaven.repo.local=${RUNNER_TEMP}/m2-repo'),
+      );
+    expect(localMaven.map((candidate) => candidate.name)).toEqual([
+      'Run Managed Agent Server Checkstyle',
+    ]);
+    for (const candidate of localMaven) {
+      const unlinkAt = candidate.run.indexOf(seedUnlink);
+      expect(unlinkAt, candidate.name).toBeGreaterThan(-1);
+      for (const command of candidate.run.match(/^\s*mvn .+$/gm) ?? []) {
+        expect(candidate.run.indexOf(command), candidate.name).toBeGreaterThan(
+          unlinkAt,
+        );
+      }
+    }
   });
 
   it('keeps the host lock out of every locked child', () => {
@@ -385,6 +412,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-prune-'));
         const repo = join(dir, 'm2-repo');
         const home = join(dir, 'home');
+        const host = join(home, '.m2', 'repository');
         try {
           for (const [path, body] of [
             ['com/alibaba/qwencode-sdk/0.1.0-alpha/flat.jar', 'flat'],
@@ -397,7 +425,38 @@ describe('SDK Java self-hosted workflow guards', () => {
             mkdirSync(dirname(join(repo, path)), { recursive: true });
             writeFileSync(join(repo, path), body);
           }
-          mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+          // A seeded artifact is already a host inode. Asserting on the end
+          // state cannot see the delta filter: `cp -n` skips an nlink-2 seed
+          // because its host path exists. The candidate set can.
+          mkdirSync(dirname(join(host, 'org/example/lib/seeded.jar')), {
+            recursive: true,
+          });
+          writeFileSync(join(host, 'org/example/lib/seeded.jar'), 'seeded');
+          linkSync(
+            join(host, 'org/example/lib/seeded.jar'),
+            join(repo, 'org/example/lib/seeded.jar'),
+          );
+          const candidates = findLine
+            .trim()
+            .replace(/^timeout 300 /, '')
+            .replace(/ -exec .*$/, ' -print');
+          const printed = spawnSync(
+            'bash',
+            ['-e', '-c', `cd "${repo}"\n${candidates}`],
+            {
+              encoding: 'utf8',
+              timeout: 5000,
+              env: { ...process.env, HOME: home },
+            },
+          );
+          expect(printed.status, locked.name + printed.stderr).toBe(0);
+          const candidatePaths = printed.stdout.trim().split('\n');
+          expect(candidatePaths, locked.name).toContain(
+            './org/example/lib/kept.jar',
+          );
+          expect(candidatePaths, locked.name).not.toContain(
+            './org/example/lib/seeded.jar',
+          );
           const result = spawnSync(
             'bash',
             ['-e', '-c', `cd "${repo}"\n${findLine.trim()}`],
@@ -556,6 +615,8 @@ describe('SDK Java self-hosted workflow guards', () => {
           candidate.run?.includes('sdk-java-tests.lock'),
         );
         const lockAt = locked.run.indexOf('sdk_java_lock_acquire 5400');
+        const start = locked.run.indexOf('write_back=0');
+        expect(start, locked.name).toBeGreaterThan(lockAt);
         const rmLine = locked.run
           .split('\n')
           .find((line) =>
@@ -569,9 +630,9 @@ describe('SDK Java self-hosted workflow guards', () => {
         const rmAt = locked.run.indexOf(rmLine);
         expect(rmAt, locked.name).toBeGreaterThan(lockAt);
         const writeBack = locked.run
-          .slice(rmAt)
+          .slice(start)
           .match(
-            /^rm -rf -- [\s\S]*?cache write-back failed; the gate result above is unaffected"\n\s*fi/,
+            /^write_back=0[\s\S]*?cache write-back failed; the gate result above is unaffected"\n\s*fi/,
           )?.[0];
         expect(writeBack, locked.name).toBeTruthy();
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-host-prune-'));
@@ -599,6 +660,12 @@ describe('SDK Java self-hosted workflow guards', () => {
             env: { ...process.env, HOME: home, RUNNER_TEMP: runnerTemp },
           });
           expect(result.status, locked.name + result.stderr).toBe(0);
+          // The stanza starts at write_back=0; without that initialization
+          // both status checks compare an empty string and pass on the `[`
+          // error rather than on a clean write-back.
+          expect(result.stderr, locked.name).not.toContain(
+            'integer expression expected',
+          );
           expect(
             existsSync(join(host, 'com/alibaba/qwencode-sdk')),
             locked.name,
@@ -622,6 +689,71 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
+  const lockTimeoutShim =
+    'sdk_java_lock_acquire() {\n' +
+    '  echo "::error::sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast)"\n' +
+    '  return 1\n' +
+    '}\n';
+
+  const runSelfHostedSuite = ({
+    failAt = 1,
+    exitCode = 1,
+    lockScript = 'sdk_java_lock_acquire() { :; }\n',
+  } = {}) => {
+    const suite = parse(workflow).jobs.test.steps.find(
+      (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'sdk-java-suite-status-'));
+    const home = join(dir, 'home');
+    const runnerTemp = join(dir, 'runner-temp');
+    const workspace = join(dir, 'workspace');
+    const bin = join(dir, 'bin');
+    mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+    mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+    writeFileSync(join(runnerTemp, 'm2-repo', 'downloaded.jar'), 'new');
+    mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+    writeFileSync(
+      join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+      lockScript,
+    );
+    mkdirSync(bin, { recursive: true });
+    // Fail exactly one invocation: with every call failing, a later
+    // `|| suite_status=$?` re-sets the status after the first guard is
+    // removed, so the case would pass without pinning the guard.
+    const mvnCount = join(dir, 'mvn-count');
+    writeFileSync(
+      join(bin, 'mvn'),
+      '#!/bin/sh\n' +
+        `count=$(cat "${mvnCount}" 2>/dev/null || echo 0)\n` +
+        'count=$((count + 1))\n' +
+        `echo "$count" > "${mvnCount}"\n` +
+        `[ "$count" -eq ${failAt} ] && exit ${exitCode}\n` +
+        'exit 0\n',
+      { mode: 0o755 },
+    );
+    const result = spawnSync('bash', ['-e', '-c', suite.run], {
+      encoding: 'utf8',
+      timeout: 15000,
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: home,
+        RUNNER_TEMP: runnerTemp,
+        GITHUB_WORKSPACE: workspace,
+        MATRIX_JAVA: '21',
+        TIER: 'fast',
+      },
+    });
+    return {
+      suite,
+      result,
+      mvnCount,
+      published: () =>
+        existsSync(join(home, '.m2', 'repository', 'downloaded.jar')),
+      cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    };
+  };
+
   it.skipIf(process.platform !== 'linux')(
     "keeps the suite's exit status so the write-back still runs",
     () => {
@@ -629,59 +761,70 @@ describe('SDK Java self-hosted workflow guards', () => {
       // abort before the lock and the write-back, throwing away the whole
       // resolved dependency tree. The step must retain the first failure,
       // publish what it downloaded, and re-raise the failure afterwards.
-      const suite = parse(workflow).jobs.test.steps.find(
-        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
-      );
-      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-suite-status-'));
-      const home = join(dir, 'home');
-      const runnerTemp = join(dir, 'runner-temp');
-      const workspace = join(dir, 'workspace');
-      const bin = join(dir, 'bin');
+      const run = runSelfHostedSuite();
       try {
-        mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
-        mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
-        writeFileSync(join(runnerTemp, 'm2-repo', 'downloaded.jar'), 'new');
-        mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
-        writeFileSync(
-          join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
-          'sdk_java_lock_acquire() { :; }\n',
+        expect(run.result.status, run.suite.name + run.result.stderr).toBe(1);
+        expect(readFileSync(run.mvnCount, 'utf8').trim(), run.suite.name).toBe(
+          '1',
         );
-        mkdirSync(bin, { recursive: true });
-        // Fail only the first invocation: with every call failing, a later
-        // step restores the exit status after the first `|| suite_status=$?`
-        // is removed, so the test would not pin that guard.
-        const mvnCount = join(dir, 'mvn-count');
-        writeFileSync(
-          join(bin, 'mvn'),
-          '#!/bin/sh\n' +
-            `count=$(cat "${mvnCount}" 2>/dev/null || echo 0)\n` +
-            'count=$((count + 1))\n' +
-            `echo "$count" > "${mvnCount}"\n` +
-            '[ "$count" -eq 1 ] && exit 1\n' +
-            'exit 0\n',
-          { mode: 0o755 },
-        );
-        const result = spawnSync('bash', ['-e', '-c', suite.run], {
-          encoding: 'utf8',
-          timeout: 15000,
-          env: {
-            ...process.env,
-            PATH: `${bin}:${process.env.PATH}`,
-            HOME: home,
-            RUNNER_TEMP: runnerTemp,
-            GITHUB_WORKSPACE: workspace,
-            MATRIX_JAVA: '21',
-            TIER: 'fast',
-          },
-        });
-        expect(result.status, suite.name + result.stderr).toBe(1);
-        expect(readFileSync(mvnCount, 'utf8').trim(), suite.name).toBe('1');
-        expect(
-          existsSync(join(home, '.m2', 'repository', 'downloaded.jar')),
-          suite.name,
-        ).toBe(true);
+        expect(run.published(), run.suite.name).toBe(true);
       } finally {
-        rmSync(dir, { recursive: true, force: true });
+        run.cleanup();
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'stops the Java 21 lane after a failed SDK install',
+    () => {
+      // The inner suite_status gate stops the managed-agent suite after the
+      // SDK install fails. Without it the step still exits 1 but runs one
+      // more `mvn`, so pin the invocation count, not only the status.
+      const run = runSelfHostedSuite({ failAt: 2 });
+      try {
+        expect(run.result.status, run.suite.name + run.result.stderr).toBe(1);
+        expect(readFileSync(run.mvnCount, 'utf8').trim(), run.suite.name).toBe(
+          '2',
+        );
+      } finally {
+        run.cleanup();
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    're-raises the suite verdict after a write-back lock timeout',
+    () => {
+      // A contended host must not turn a completed product failure into the
+      // pinned infrastructure signature: the step exits with the suite's
+      // status and skips the write-back it could not lock.
+      const run = runSelfHostedSuite({
+        exitCode: 3,
+        lockScript: lockTimeoutShim,
+      });
+      try {
+        expect(run.result.status, run.suite.name + run.result.stderr).toBe(3);
+        expect(run.published(), run.suite.name).toBe(false);
+      } finally {
+        run.cleanup();
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'fails the step when the write-back lock times out after a passing suite',
+    () => {
+      // Without the final exit the `if` falls through with 0, so a passing
+      // suite would mask the timeout and report success with no write-back.
+      const run = runSelfHostedSuite({
+        failAt: 0,
+        lockScript: lockTimeoutShim,
+      });
+      try {
+        expect(run.result.status, run.suite.name + run.result.stderr).toBe(1);
+        expect(run.published(), run.suite.name).toBe(false);
+      } finally {
+        run.cleanup();
       }
     },
   );
@@ -853,6 +996,12 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       '          if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then\n' +
         '            export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${RUNNER_TEMP}/m2-repo"\n' +
+        "            # The suite step's write-back published this repository's\n" +
+        '            # resolver bookkeeping into the host cache as hardlinks; unlink\n' +
+        '            # those names so this run cannot rewrite the shared inodes.\n' +
+        '            ' +
+        seedUnlink +
+        '\n' +
         '          fi\n' +
         '          mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle',
     );

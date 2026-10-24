@@ -274,10 +274,13 @@ jobs:
           # Only the write-back mutates the host-shared cache, so only it
           # takes the lock. Ticketed queue, not a bare flock: only the head
           # ticket — lowest class, then oldest — retries the lock, and the
-          # fast class is served first — see the sourced helper.
+          # fast class is served first — see the sourced helper. Capture a
+          # timeout instead of letting errexit abort: the suite verdict below
+          # must still reach the classifier.
+          lock_status=0
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            sdk_java_lock_acquire 5400 "${TIER}"
+            sdk_java_lock_acquire 5400 "${TIER}" || lock_status=$?
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
@@ -287,26 +290,29 @@ jobs:
             exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
             if ! flock --wait 5400 9; then
               echo "::error::sdk-java host lock not acquired within 90 minutes"
-              exit 1
+              lock_status=1
             fi
           fi
-          # No write-back child inherits fd 9, or a cancelled job's survivor
-          # would hold the host lock until it exits. The in-house coordinates
-          # are never published, so drop any pre-PR copies from the host cache
-          # in the same locked stanza.
-          write_back=0
-          rm -rf -- "${HOME}/.m2/repository/com/alibaba/qwencode-sdk" "${HOME}/.m2/repository/com/alibaba/qwen-managed-agent-server" 9>&- || write_back=$?
-          mkdir -p "${HOME}/.m2/repository" 9>&- || write_back=$?
-          cd "${RUNNER_TEMP}/m2-repo"
-          timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
-          if [ "${write_back}" -eq 124 ]; then
-            echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
-          elif [ "${write_back}" -ne 0 ]; then
-            echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+          if [ "${lock_status}" -eq 0 ]; then
+            # No write-back child inherits fd 9, or a cancelled job's survivor
+            # would hold the host lock until it exits. The in-house coordinates
+            # are never published, so drop any pre-PR copies from the host cache
+            # in the same locked stanza.
+            write_back=0
+            rm -rf -- "${HOME}/.m2/repository/com/alibaba/qwencode-sdk" "${HOME}/.m2/repository/com/alibaba/qwen-managed-agent-server" 9>&- || write_back=$?
+            mkdir -p "${HOME}/.m2/repository" 9>&- || write_back=$?
+            cd "${RUNNER_TEMP}/m2-repo"
+            timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+            if [ "${write_back}" -eq 124 ]; then
+              echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
+            elif [ "${write_back}" -ne 0 ]; then
+              echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+            fi
           fi
           if [ "${suite_status}" -ne 0 ]; then
             exit "${suite_status}"
           fi
+          exit "${lock_status}"
 
       - name: 'Run Java SDK tests (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -348,6 +354,10 @@ jobs:
           # from the default repository the state-test step populated.
           if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then
             export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${RUNNER_TEMP}/m2-repo"
+            # The suite step's write-back published this repository's
+            # resolver bookkeeping into the host cache as hardlinks; unlink
+            # those names so this run cannot rewrite the shared inodes.
+            find "${RUNNER_TEMP}/m2-repo" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' \) -delete 2>/dev/null || true
           fi
           mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle
 
