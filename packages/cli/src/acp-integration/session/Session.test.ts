@@ -4273,6 +4273,105 @@ describe('Session', () => {
         ),
       );
     });
+
+    it('starts the count again after the model recovers', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      const full = (id: string) =>
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: { functionCalls: [call(id)] },
+          },
+        ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-1'))]),
+        )
+        .mockResolvedValueOnce(full('call-full-1'))
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-2'))]),
+        )
+        .mockResolvedValueOnce(full('call-full-2'))
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-3'))]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(6);
+      const last = JSON.stringify(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[5][1].message,
+      );
+      expect(last).toContain('truncated due to max_tokens limit');
+      expect(last).not.toContain('RETRY LOOP DETECTED');
+    });
+
+    it('starts the count again when the cause changes', async () => {
+      useTool(core.Kind.Edit, 'write_file');
+      const incomplete = call('call-incomplete');
+      markToolCallArgumentsIncomplete([{ functionCall: incomplete }]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: { functionCalls: [incomplete] },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut'))]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      const second = JSON.stringify(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[2][1].message,
+      );
+      expect(second).toContain('truncated due to max_tokens limit');
+      expect(second).not.toContain('RETRY LOOP DETECTED');
+    });
+
+    it('logs repeated refusals as observed when loop protection is off', async () => {
+      useTool(core.Kind.Edit, 'write_file');
+      mockConfig.getLoopProtection = vi.fn().mockReturnValue('off');
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-1'))]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-2'))]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-3'))]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+      expect(
+        logLoopProtectionSpy.mock.calls.map(([, event]) => [
+          event.loop_type,
+          event.decision,
+        ]),
+      ).toEqual([[core.LoopType.INVALID_TOOL_PARAMS_STAGNATION, 'observed']]);
+    });
   });
 
   describe('Managed Runtime batch close', () => {

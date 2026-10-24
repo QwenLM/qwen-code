@@ -906,8 +906,11 @@ export type DaemonToolLoopState = {
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
   explorationBudget?: ToolExplorationBudget;
-  /** Per-tool counts of refused partial edits, one per model response. */
-  partialEditRefusals?: Map<string, number>;
+  /**
+   * Per-tool count of refused partial edits, one per model response, for the
+   * rejection the tool last got.
+   */
+  partialEditRefusals?: Map<string, { cause: string; count: number }>;
 };
 
 /** What the send wrapper knows about one model response, for its calls. */
@@ -1463,19 +1466,24 @@ function recordDaemonInvalidToolParams(
 
 // Counted apart from schema errors and once per response and tool, as the
 // scheduler counts per batch: a response cut off mid-batch refuses every edit
-// in it before the model has seen a single refusal.
+// in it before the model has seen a single refusal. As in the scheduler, a
+// change of cause restarts the count, and a call from the tool that builds
+// clears it, so only refusals the model has not recovered from add up.
 function recordDaemonPartialEditRefusal(
   loopState: DaemonToolLoopState,
   toolName: string,
+  cause: string,
   response: ModelResponseFacts | undefined,
 ): number {
   const counts = (loopState.partialEditRefusals ??= new Map());
-  if (response?.refusedPartialEdits.has(toolName)) {
-    return counts.get(toolName) ?? 0;
+  const previous = counts.get(toolName);
+  const sameCause = previous?.cause === cause;
+  if (sameCause && response?.refusedPartialEdits.has(toolName)) {
+    return previous.count;
   }
   response?.refusedPartialEdits.add(toolName);
-  const count = (counts.get(toolName) ?? 0) + 1;
-  counts.set(toolName, count);
+  const count = (sameCause ? previous.count : 0) + 1;
+  counts.set(toolName, { cause, count });
   return count;
 }
 
@@ -15387,6 +15395,9 @@ export class Session implements SessionContext {
           (outputTruncated || toolCallArgumentsWereIncomplete(fc)) &&
           tool.kind === Kind.Edit
         ) {
+          const rejection = outputTruncated
+            ? TRUNCATION_EDIT_REJECTION
+            : INCOMPLETE_ARGS_EDIT_REJECTION;
           // A model cut off on every attempt sends different partial content
           // each time, so only this count can stop the turn.
           const count =
@@ -15394,13 +15405,12 @@ export class Session implements SessionContext {
               ? recordDaemonPartialEditRefusal(
                   toolLoopState,
                   toolName,
+                  rejection,
                   response,
                 )
               : 0;
-          const stops = this.config.getLoopProtection() === 'stop';
-          const rejection = outputTruncated
-            ? TRUNCATION_EDIT_REJECTION
-            : INCOMPLETE_ARGS_EDIT_REJECTION;
+          const loopProtection = this.config.getLoopProtection();
+          const stops = loopProtection === 'stop';
           const refusal = await earlyErrorResponse(
             new Error(
               count >= INVALID_PARAMS_REMINDER_AT
@@ -15420,10 +15430,11 @@ export class Session implements SessionContext {
               executionStatus: 'not_started',
             },
           );
-          // Only `stop` goes through the stop point: under `warn` it would
-          // queue the schema reminder, which misreads a cut-off write.
+          // `warn` skips the stop point, which would queue the schema reminder
+          // and misread a cut-off write; the refusal already carries the
+          // directive. `off` still logs the loop as observed.
           const loopDetected =
-            stops &&
+            loopProtection !== 'warn' &&
             toolLoopState !== undefined &&
             count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD &&
             onDaemonLoopStopPoint(
@@ -15595,6 +15606,9 @@ export class Session implements SessionContext {
           let invocation = buildInvocation(args);
           builtInvocation = invocation;
           toolBuildSucceeded = true;
+          // A complete call that builds is the model's recovery, as when the
+          // scheduler clears a tool's retry counts on passing validation.
+          toolLoopState?.partialEditRefusals?.delete(toolName);
 
           if (this.config.getSessionSourceType?.() === 'agent-host') {
             // Keep upstream authority at the final execution boundary.
