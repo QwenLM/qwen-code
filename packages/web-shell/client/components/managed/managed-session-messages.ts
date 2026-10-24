@@ -226,13 +226,9 @@ function appendManagedEvents(
       if (event.type !== 'tool_result_updated') settle();
       const callId = data['toolCallId'];
       const itemId = data['itemId'];
-      const identity = typeof itemId === 'string' ? itemId : callId;
-      if (typeof identity !== 'string') continue;
-      const key = `${event.turnId}:${identity}`;
-      const legacyKey =
-        typeof callId === 'string' ? `${event.turnId}:${callId}` : undefined;
-      let tool =
-        tools.get(key) ?? (legacyKey ? tools.get(legacyKey) : undefined);
+      if (typeof itemId !== 'string' || !itemId) continue;
+      const key = `${event.turnId}:${itemId}`;
+      let tool = tools.get(key);
       const result = readResult(data['result'], event);
       if (!tool) {
         if (event.turnId === currentTurnId) settle();
@@ -243,7 +239,7 @@ function appendManagedEvents(
               ? data['toolName']
               : result
                 ? 'run_shell_command'
-                : identity,
+                : itemId,
           status: 'pending',
         };
         const message: Message = {
@@ -269,8 +265,6 @@ function appendManagedEvents(
         else messages.push(message);
       }
       tools.set(key, tool);
-      if (legacyKey) tools.set(legacyKey, tool);
-      if (typeof itemId === 'string') tool.callId = key;
       if (typeof callId === 'string') tool.toolCallId = callId;
       if (Number.isSafeInteger(data['sourceSequence'])) {
         tool.toolDetailsRevision = Number(data['sourceSequence']);

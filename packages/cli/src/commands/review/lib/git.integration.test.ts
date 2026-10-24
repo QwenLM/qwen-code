@@ -25,6 +25,7 @@ import {
   gitProbe,
   gitRawTolerateDiff,
   releaseWorktree,
+  repoRoot,
 } from './git.js';
 import { NULL_DEVICE } from './diff-flags.js';
 import { isolateHostGitConfig } from './test-utils.js';
@@ -43,7 +44,15 @@ function git(...args: string[]): string {
 const fwd = (value: string): string => value.replace(/\\/g, '/');
 
 beforeEach(() => {
-  repo = mkdtempSync(join(tmpdir(), 'review-wt-'));
+  // Canonical: `tmpdir()` can sit behind a symlink — on macOS `/var` →
+  // `/private/var` — while git prints canonical paths and `process.cwd()`
+  // answers canonically after a `chdir`. R32-2's release runs from the
+  // launch worktree, so its ancestor walk never meets the raw fixture root
+  // and stops at that symlink before the remove it stages around. Where the
+  // canonical path does not contain the raw spelling (macOS's happens to),
+  // the `not.toContain(join(repo, …))` checks below would also pass
+  // vacuously.
+  repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-wt-')));
 
   // Isolate the fixture from the developer's git environment (shared
   // helper — see isolateHostGitConfig for the incident class). Without it,
@@ -667,5 +676,15 @@ describe('gitProbe — the exit status the anchor taxonomy rests on', () => {
     } finally {
       process.chdir(cwd);
     }
+  });
+});
+
+describe('repoRoot', () => {
+  it('names the main worktree from a linked worktree', () => {
+    git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+    const main = fwd(realpathSync(repo));
+    expect(fwd(realpathSync(repoRoot()))).toBe(main);
+    process.chdir(join(repo, 'wt'));
+    expect(fwd(realpathSync(repoRoot()))).toBe(main);
   });
 });

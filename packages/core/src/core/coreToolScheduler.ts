@@ -508,7 +508,7 @@ const TRUNCATION_PARAM_GUIDANCE =
   'first write_file with a skeleton/partial content, ' +
   'then use edit to add the remaining sections incrementally.';
 
-const TRUNCATION_EDIT_REJECTION =
+export const TRUNCATION_EDIT_REJECTION =
   'Your previous response was truncated due to max_tokens limit, ' +
   'which produced incomplete file content. ' +
   'The tool call has been rejected to prevent writing ' +
@@ -534,7 +534,7 @@ const INCOMPLETE_ARGS_PARAM_GUIDANCE =
   "particular, do not nest one call's argument object inside another's.";
 
 /** Edit rejection when the output limit was *not* the cause. */
-const INCOMPLETE_ARGS_EDIT_REJECTION =
+export const INCOMPLETE_ARGS_EDIT_REJECTION =
   "This tool call's arguments arrived incomplete, so the file content would " +
   'have been partial. The response did not come close to the max_tokens limit, ' +
   'so this was malformed generation rather than truncation. The tool call has ' +
@@ -1201,13 +1201,13 @@ const RETRY_LOOP_STOP_DIRECTIVE =
   'instead of retrying.';
 
 /** Directive injected when a truncated file-modifying call repeats. */
-const TRUNCATION_RETRY_LOOP_DIRECTIVE =
+export const TRUNCATION_RETRY_LOOP_DIRECTIVE =
   '\n\n⚠ RETRY LOOP DETECTED: The same truncated file write has been rejected multiple times. ' +
   'STOP resending the same large content. Either split it into smaller write_file + incremental edit calls, ' +
   'or explain to the user that the content is too large to write safely in one call.';
 
 /** Directive injected when an incomplete-args file-modifying call repeats. */
-const INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE =
+export const INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE =
   '\n\n⚠ RETRY LOOP DETECTED: The same incomplete file write has been rejected multiple times. ' +
   'STOP resending the entire content in a single call. Write a skeleton first and fill in the rest with ' +
   'incremental edit calls, or explain to the user why the content cannot be written safely.';
@@ -3736,9 +3736,11 @@ export class CoreToolScheduler {
         const { request: reqInfo, invocation } = toolCall;
         const canonicalName = canonicalToolName(reqInfo.name);
         const toolSpan = this.openToolSpan(reqInfo, toolCall.tool, batchState);
-        // The user must confirm a PreToolUse 'ask'; no permission rule,
-        // approval mode or PermissionRequest hook may approve it instead.
-        const preToolUseAsk = this.preToolUseAsks.get(reqInfo.callId);
+        // The user must confirm a PreToolUse 'ask' or a Mod's own ask; no
+        // permission rule, approval mode or PermissionRequest hook may approve
+        // it instead.
+        let preToolUseAsk = this.preToolUseAsks.get(reqInfo.callId);
+        let modAsk: string | undefined;
 
         try {
           if (
@@ -3785,12 +3787,24 @@ export class CoreToolScheduler {
           }
           const modToolCheck = this.schedulerOptions.modToolCheck;
           if (modToolCheck) {
+            const isReadOnly =
+              canonicalName === ToolNames.SHELL
+                ? flowResult.defaultPermission === 'allow'
+                : CONCURRENCY_SAFE_KINDS.has(toolCall.tool.kind);
+            const approver = !this.canPromptForPreToolUseAsk()
+              ? undefined
+              : this.config.isInteractive() ||
+                  this.config.getExperimentalZedIntegration()
+                ? 'person'
+                : 'host';
             const decision = await runInRequestGoalContext(reqInfo, () =>
               modToolCheck(
                 {
                   tool: canonicalName,
                   input: structuredClone(toolParams),
                   tool_use_id: reqInfo.callId,
+                  ...(approver && { approver }),
+                  ...(isReadOnly && { isReadOnly: true as const }),
                 },
                 {
                   decision:
@@ -3818,11 +3832,15 @@ export class CoreToolScheduler {
                 flowResult.denyMessage =
                   decision.reason?.trim() ||
                   `Tool "${reqInfo.name}" is denied by a Mod.`;
-              } else if (
-                decision.decision === 'ask' &&
-                flowResult.finalPermission === 'allow'
-              ) {
-                flowResult.finalPermission = 'ask';
+              } else if (decision.decision === 'ask') {
+                if (flowResult.finalPermission === 'allow')
+                  flowResult.finalPermission = 'ask';
+                if (decision.plugin !== undefined && !preToolUseAsk) {
+                  modAsk = preToolUseAsk = decision.reason?.trim()
+                    ? `Mod ${decision.plugin}: ${decision.reason.trim()}`
+                    : `Mod ${decision.plugin} requested confirmation before running ${reqInfo.name}.`;
+                  this.preToolUseAsks.set(reqInfo.callId, preToolUseAsk);
+                }
               }
             }
           }
@@ -4386,7 +4404,9 @@ export class CoreToolScheduler {
               const errorMessage =
                 planShellDecision.classification === 'unknown'
                   ? planShellDecision.noApprovalMessage
-                  : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
+                  : modAsk
+                    ? `Qwen Code could not ask the user to confirm "${reqInfo.name}" in non-interactive mode, so it was not run. ${modAsk}`
+                    : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
               if (planShellDecision.classification === 'unknown') {
                 rejectPlanShell(errorMessage);
                 continue;
@@ -4398,7 +4418,8 @@ export class CoreToolScheduler {
                   ToolErrorType.EXECUTION_DENIED,
                   'not_started',
                 ),
-                approvalRequired: true,
+                // No approval mode answers for a hook or Mod that asked a person.
+                ...(!preToolUseAsk && { approvalRequired: true as const }),
               });
               setToolSpanFailure(
                 toolSpan,

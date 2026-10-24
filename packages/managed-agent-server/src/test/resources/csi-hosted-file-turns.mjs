@@ -177,7 +177,7 @@ export async function runHostedFileTurn({
           request,
           actor,
         ) => {
-          const state = JSON.parse(request.state.toString());
+          const state = request.state;
           if (
             state.continuation.phase === 'results_ready' &&
             state.tools?.items.length &&
@@ -223,7 +223,10 @@ export async function runHostedFileTurn({
             prompt,
             new AbortController(),
           ),
-          /recovery|receipt|complete-output/i,
+          (error) => {
+            if (!interrupted) throw error;
+            return /recovery|receipt|complete-output/i.test(String(error));
+          },
         );
       } finally {
         session.sink.write = write;

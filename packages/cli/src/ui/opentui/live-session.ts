@@ -24,13 +24,18 @@ import { observeInteractiveModTool } from '../../services/interactive-mod-tool-o
 import {
   InteractiveModToolScheduler,
   type InteractiveCompletedToolCall,
+  type InteractiveToolCall,
 } from '../../services/interactive-mod-tool-scheduler.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { appendFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
+import { buildPermissionSuggestions } from '../../nonInteractive/permission-suggestions.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
   AgentResultDisplay,
   Config,
+  SteerInput,
   ToolCallConfirmationDetails,
   ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
@@ -70,9 +75,17 @@ import {
 import { isAtCommand } from '../utils/commandUtils.js';
 import { handleAtCommand } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
+import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import type { OpenTuiInputSubmission } from './input-submission.js';
+
+export interface OpenTuiSteeringSubmission extends OpenTuiInputSubmission {
+  content: PartListUnion;
+}
 
 /** Options the backend passes through to the live turn. */
 export interface LivePromptOptions {
+  dualOutput?: DualOutputBridge | null;
+  isCurrentTurn?: () => boolean;
   /** Per-turn model override (submit_prompt's modelOverride parity). */
   modelOverride?: string;
   /**
@@ -84,14 +97,14 @@ export interface LivePromptOptions {
    * boundary drain). Skipped when the turn is aborted (messages then stay
    * queued).
    */
-  drainSteering?: () => string[];
+  drainSteering?: () => OpenTuiSteeringSubmission[];
   /**
    * Puts drained steering texts back at the front of the queue (ink's
    * `midTurnRestoreRef`). Resolution is all-or-nothing — an abort anywhere in
    * it sends nothing to the model, so every text that left `drainSteering`
    * comes back here rather than vanishing with the turn.
    */
-  restoreSteering?: (texts: readonly string[]) => void;
+  restoreSteering?: (submissions: readonly OpenTuiSteeringSubmission[]) => void;
   /**
    * Scheduler-level confirmation requests the permission flow did not
    * auto-approve (ask_user_question in every mode; edit/exec in DEFAULT).
@@ -304,6 +317,17 @@ async function expandAtMentions(
   return { parts: result.processedQuery, events, declined: false };
 }
 
+function retainAttachments(
+  expanded: PartListUnion,
+  original: PartListUnion,
+): PartListUnion {
+  if (typeof original === 'string') return expanded;
+  return [
+    ...normalizeParts(expanded),
+    ...normalizeParts(original).filter((part) => part.text === undefined),
+  ];
+}
+
 /**
  * The per-turn model override as the vision bridge sees it — ink's two coupled
  * refs. A trailing NUL on `current` marks the bridge's own full-turn pick;
@@ -431,6 +455,7 @@ function abortRejection(signal: AbortSignal): Promise<never> {
 const MID_TURN_STEER_READ_TIMEOUT_MS = 10_000;
 
 interface SteeredPromptResolution {
+  declinedEvents: OpenTuiStreamEvent[];
   /** User content for the model, segments joined by a blank line as ink joins them. */
   parts: Part[];
   /**
@@ -451,7 +476,8 @@ interface SteeredPromptResolution {
    * discards the resolved parts when an abort lands, so nothing can go out
    * twice.
    */
-  restore: string[];
+  restore: OpenTuiSteeringSubmission[];
+  accepted: OpenTuiSteeringSubmission[];
 }
 
 interface SteeredMessageRecording {
@@ -464,31 +490,35 @@ interface SteeredMessageRecording {
  * resolved the same way an idle submission is — `@path` expansion, then the
  * prompt-side vision bridge — before it rides to the model as steering.
  *
- * Not ported, on purpose: ink's slash interception at this boundary (its goal
- * command has no OpenTUI counterpart, and with it the goal-permit recording
- * argument) and its two-phase card deferral — ink defers the read cards until
- * the messages are committed; here the cards go out as they are produced, and
- * an abort drops the whole hop instead.
+ * Slash interception and goal-permit recording stay with their command owner.
+ * Successful read cards and echoes commit with core's history acceptance.
+ * Explicit declines publish their notices when resolution consumes them.
  */
 async function resolveSteeredPromptParts(
   config: Config,
-  texts: readonly string[],
+  submissions: readonly OpenTuiSteeringSubmission[],
   signal: AbortSignal,
   turnModel: TurnModelOverride,
 ): Promise<SteeredPromptResolution> {
   const restore = (): SteeredPromptResolution => ({
     parts: [],
     events: [],
+    declinedEvents: [],
     recordings: [],
-    restore: [...texts],
+    restore: [...submissions],
+    accepted: [],
   });
   const events: OpenTuiStreamEvent[] = [];
+  const declinedEvents: OpenTuiStreamEvent[] = [];
   const segments: Part[][] = [];
   const recordings: SteeredMessageRecording[] = [];
+  const accepted: OpenTuiSteeringSubmission[] = [];
 
-  for (const message of texts) {
+  for (const submission of submissions) {
+    const message = submission.text;
+    const messageEvents: OpenTuiStreamEvent[] = [];
     if (signal.aborted) return restore();
-    let resolved: PartListUnion = [{ text: message }];
+    let resolved: PartListUnion = submission.content;
     if (isAtCommand(message)) {
       const deadline = new AbortController();
       const readSignal = AbortSignal.any([signal, deadline.signal]);
@@ -505,7 +535,7 @@ async function resolveSteeredPromptParts(
         const reason = getErrorMessage(error);
         config.getDebugLogger().debug(`Mid-turn @ command failed: ${reason}`);
         if (signal.aborted) return restore();
-        events.push({
+        declinedEvents.push({
           type: 'warning',
           text: `Could not attach file: ${reason}`,
         });
@@ -513,12 +543,13 @@ async function resolveSteeredPromptParts(
       } finally {
         clearTimeout(timer);
       }
-      events.push(...expanded.events);
+      messageEvents.push(...expanded.events);
       if (expanded.declined) {
         if (signal.aborted) return restore();
+        declinedEvents.push(...messageEvents);
         continue;
       }
-      resolved = expanded.parts;
+      resolved = retainAttachments(expanded.parts, submission.content);
     }
 
     const bridged = await applyPromptVisionBridge(
@@ -527,17 +558,20 @@ async function resolveSteeredPromptParts(
       signal,
       turnModel,
     );
-    events.push(...bridged.events);
+    messageEvents.push(...bridged.events);
     if (bridged.parts === null) {
       if (signal.aborted) return restore();
+      declinedEvents.push(...messageEvents);
       continue;
     }
+    events.push(...messageEvents);
     const messageParts = normalizeParts(bridged.parts);
     // U-27 (ink :3313-3327): the steering hop checks the resolved parts too.
     if (hasUnsupportedImageFormat(messageParts)) {
       events.push(imageFormatWarningEvent());
     }
     if (messageParts.length > 0) segments.push(messageParts);
+    accepted.push(submission);
     recordings.push({ message, parts: messageParts });
     // U-12 (ink accept() :3359-3367): `sentToModel: false` — the steer rides
     // the tool boundary, not a standalone user turn. Not coupled to this
@@ -552,7 +586,7 @@ async function resolveSteeredPromptParts(
     if (parts.length > 0) parts.push({ text: '\n\n' });
     parts.push(...segment);
   }
-  return { parts, events, recordings, restore: [] };
+  return { parts, events, declinedEvents, recordings, restore: [], accepted };
 }
 
 /**
@@ -654,6 +688,8 @@ export async function* livePromptEvents(
       `Timed out after ${STARTUP_CHAT_WAIT_MS}ms waiting for the startup chat to become ready`,
     );
   }
+  const current = () => options?.isCurrentTurn?.() !== false;
+  const dualOutput = options?.dualOutput;
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
   // Read per boundary rather than once: the vision bridge can pick a full-turn
@@ -691,17 +727,15 @@ export async function* livePromptEvents(
   // turn built from the mid-turn queue both carry it. A slash command's
   // generated `submit_prompt` payload does not, and ink never expands that
   // one (processQuery returns it before its own isAtCommand check).
-  if (
-    typeof prompt === 'string' &&
-    options?.submittedPrompt !== undefined &&
-    isAtCommand(prompt)
-  ) {
-    const expanded = await expandAtMentions(config, prompt, abort);
+  const typedText =
+    typeof prompt === 'string' ? prompt : collectText(normalizeParts(prompt));
+  if (options?.submittedPrompt !== undefined && isAtCommand(typedText)) {
+    const expanded = await expandAtMentions(config, typedText, abort);
     for (const ev of expanded.events) yield ev;
     // A failed read reports itself on the card above; ink drops the
     // submission rather than sending the unexpanded text to the model.
     if (expanded.declined) return;
-    nextPrompt = expanded.parts;
+    nextPrompt = retainAttachments(expanded.parts, prompt);
   }
   // ink runs the bridge on every query it hands the model
   // (`prepareQueryForLlm`), so an image attached at the composer converts here.
@@ -714,36 +748,27 @@ export async function* livePromptEvents(
   for (const ev of bridged.events) yield ev;
   if (bridged.parts === null) return;
   nextPrompt = bridged.parts;
+  abort.throwIfAborted();
   // U-27 (ink :3834-3850): the fresh hop checks the user-query parts once,
   // before the send loop — tool-result continuations are never checked.
   if (hasUnsupportedImageFormat(nextPrompt)) {
     yield imageFormatWarningEvent();
   }
-  // R6-7: U-32 recordings are stashed at the sampling boundary and written
-  // only once the continuation send is delivered (ink records from
-  // onDelivered) — a send that throws must not persist a mid-turn user
-  // message the model never saw, and the drained texts go back to the queue
-  // raw so the retried turn re-expands them.
-  let stashedSteeredTexts: readonly string[] | undefined;
-  let stashedRecordings: SteeredMessageRecording[] = [];
-  const flushSteeredStash = (): void => {
-    if (!stashedSteeredTexts) return;
-    const recorder = config.getChatRecordingService?.();
-    for (const recording of stashedRecordings) {
-      recorder?.recordMidTurnUserMessage(recording.parts, recording.message);
-    }
-    stashedRecordings = [];
-    stashedSteeredTexts = undefined;
-  };
-  const restoreSteeredStash = (): void => {
-    if (!stashedSteeredTexts) return;
-    options?.restoreSteering?.(stashedSteeredTexts);
-    stashedRecordings = [];
-    stashedSteeredTexts = undefined;
-  };
+  if (!current() || abort.aborted) return;
+  dualOutput?.emitUserMessage(normalizeParts(nextPrompt));
+  // Core settles this carrier at its request-local history push. Neither a
+  // stream event nor a normal empty stream proves that this input was pushed.
+  let pendingSteer: SteerInput | undefined;
+  const acceptedSteerEvents: OpenTuiStreamEvent[] = [];
   let first = true;
   const waitingSeen = new Set<string>();
   for (;;) {
+    if (!current() || abort.aborted) {
+      pendingSteer?.restore();
+      return;
+    }
+    const steerInput = pendingSteer;
+    pendingSteer = undefined;
     const sendOptions = first
       ? {
           type: SendMessageType.UserQuery,
@@ -756,20 +781,22 @@ export async function* livePromptEvents(
       : {
           type: SendMessageType.ToolResult,
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
+          ...(steerInput ? { steerInput } : {}),
         };
     first = false;
     const pending: Array<{ callId: string; name: string; args?: unknown }> = [];
-    const stream = client.sendMessageStream(
-      nextPrompt,
-      abort,
-      promptId,
-      sendOptions,
-    );
+    dualOutput?.startAssistantMessage();
     try {
+      const stream = client.sendMessageStream(
+        nextPrompt,
+        abort,
+        promptId,
+        sendOptions,
+      );
       for await (const ev of stream) {
-        // First event from this send: the request is out, so a stashed
-        // mid-turn steer is delivered (R6-7).
-        flushSteeredStash();
+        if (!current() || abort.aborted) return;
+        dualOutput?.processEvent(ev);
+        for (const event of acceptedSteerEvents.splice(0)) yield event;
         if (dbg) {
           try {
             appendFileSync(
@@ -789,17 +816,15 @@ export async function* livePromptEvents(
         for (const neutral of map(ev)) yield neutral;
       }
     } catch (error) {
-      // The send died before delivering a stashed steer: no recording for
-      // content the model never saw, and the raw texts go back to the queue.
-      restoreSteeredStash();
+      for (const event of acceptedSteerEvents.splice(0)) yield event;
       throw error;
+    } finally {
+      // Covers a synchronous call failure or an unsettled early exit. A
+      // carrier already accepted/restored by core makes this a no-op.
+      steerInput?.restore();
+      if (current()) dualOutput?.finalizeAssistantMessage();
     }
-    // A zero-event stream still delivered the request unless it ended on a
-    // dead signal before the request went out.
-    if (stashedSteeredTexts) {
-      if (abort.aborted) restoreSteeredStash();
-      else flushSteeredStash();
-    }
+    for (const event of acceptedSteerEvents.splice(0)) yield event;
     if (pending.length === 0 || abort.aborted) return;
 
     // Live output bridge (ink outputUpdateHandler parity): scheduler output
@@ -870,6 +895,49 @@ export async function* livePromptEvents(
     // Calls last seen in the scheduler's queued state, so a status only goes
     // out when it changes.
     const queuedSeen = new Set<string>();
+    const permissionRequests = new Map<string, string>();
+    const emitPermissionTransitions = (
+      calls: readonly InteractiveToolCall[],
+    ) => {
+      if (!current() || !dualOutput?.isConnected) return;
+      for (const call of calls) {
+        const { callId } = call.request;
+        const requestId = permissionRequests.get(callId);
+        // MOD hides a completed native attempt behind this placeholder until
+        // middleware settles. It carries no permission decision.
+        if (
+          call.status === 'scheduled' &&
+          call.nativeAttemptsObserved &&
+          !call.invocation
+        )
+          continue;
+        if (call.status === 'awaiting_approval') {
+          if (requestId) continue;
+          const id = randomUUID();
+          permissionRequests.set(callId, id);
+          dualOutput.emitPermissionRequest(
+            id,
+            call.request.name,
+            callId,
+            call.request.args,
+            null,
+            buildPermissionSuggestions(call.confirmationDetails),
+          );
+        } else if (
+          requestId &&
+          (!abort.aborted ||
+            call.status === 'success' ||
+            call.status === 'error' ||
+            call.status === 'cancelled')
+        ) {
+          dualOutput.emitControlResponse(
+            requestId,
+            call.status !== 'cancelled' && call.status !== 'error',
+          );
+          permissionRequests.delete(callId);
+        }
+      }
+    };
     const scheduler = new InteractiveModToolScheduler({
       config,
       onNativeAttempt: (call) =>
@@ -884,6 +952,7 @@ export async function* livePromptEvents(
         for (const ev of mapOutputChunk(callId, chunk)) live.push(ev);
       },
       onToolCallsUpdate: (calls) => {
+        emitPermissionTransitions(calls);
         // Real invocation descriptions (ink mapToDisplay): the card title is
         // the tool's own getDescription() off the tracked call's invocation,
         // not a hand-rolled args guess. Pushed once per callId, as soon as
@@ -973,6 +1042,7 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
+        emitPermissionTransitions(calls);
         completed = calls.filter(
           (call): call is InteractiveCompletedToolCall =>
             call.status === 'success' ||
@@ -1075,10 +1145,18 @@ export async function* livePromptEvents(
       }
       return;
     }
+    if (!abort.aborted && current()) {
+      for (const [index, call] of completed.entries()) {
+        dualOutput?.emitToolResult(call.request, {
+          ...call.response,
+          ...finalResponses[index],
+        });
+      }
+    }
     // Sampling boundary: drained steering rides after the tool responses as
     // genuine user content (original useGeminiStream mid-turn drain).
     if (!abort.aborted) {
-      const texts = (options?.drainSteering?.() ?? []).filter((text) => text);
+      const texts = options?.drainSteering?.() ?? [];
       if (texts.length > 0) {
         const steered = await resolveSteeredPromptParts(
           config,
@@ -1106,15 +1184,34 @@ export async function* livePromptEvents(
         if (steered.restore.length > 0) {
           options?.restoreSteering?.(steered.restore);
         }
-        // U-32 (ink accept() :3352-3358): record each surviving message so a
-        // steer survives /resume as a mid-turn user message. The write is
-        // gated on delivery of the continuation send (R6-7, ink records from
-        // onDelivered): the stash flushes once that send yields or completes
-        // cleanly, and restores the texts when it dies first.
-        stashedRecordings = steered.recordings;
-        stashedSteeredTexts = texts;
-        // Carries the per-message USER echoes too (U-12), in ink accept() order.
-        for (const ev of steered.events) yield ev;
+        for (const event of steered.declinedEvents) yield event;
+        let settled = false;
+        pendingSteer = {
+          parts: steered.parts,
+          accept: () => {
+            if (settled) return;
+            settled = true;
+            if (options?.isCurrentTurn?.() === false) return;
+            acceptedSteerEvents.push(...steered.events);
+            const recorder = config.getChatRecordingService?.();
+            for (const recording of steered.recordings) {
+              dualOutput?.emitUserMessage(recording.parts);
+              recorder?.recordMidTurnUserMessage(
+                recording.parts,
+                recording.message,
+              );
+            }
+          },
+          restore: () => {
+            if (settled) return;
+            settled = true;
+            if (steered.accepted.length > 0) {
+              options?.restoreSteering?.(steered.accepted);
+            }
+          },
+        };
+        // An attached carrier settles content already in the request; core
+        // does not append its parts a second time.
         responseParts.push(...steered.parts);
       }
     }
@@ -1136,10 +1233,16 @@ export async function* livePromptEvents(
       if (didWriteProjectContextFile(candidates, config.getProjectRoot())) {
         await refreshMemoryInstruction(config, {
           logContext: 'opentui context-file memory tool batch',
+        }).catch((error: unknown) => {
+          pendingSteer?.restore();
+          throw error;
         });
       }
     }
-    if (responseParts.length === 0) return;
+    if (responseParts.length === 0) {
+      pendingSteer?.restore();
+      return;
+    }
     nextPrompt = responseParts;
   }
 }

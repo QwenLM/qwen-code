@@ -118,6 +118,9 @@ const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
 // append loop share it so the two cannot drift.
 const APPENDED_METADATA_SEPARATOR = '\n\n';
 
+export const SHELL_RECORD_ARTIFACT_REMINDER =
+  'If this command created or rewrote a deliverable file (csv, html, sql, py, md, json, notebook, image, pdf, or an office document), call record_artifact for each one. workspacePath is relative to the current execution directory, and title is required. Do not call it for files already recorded by write_file, edit, or notebook_edit.';
+
 function getShellOutputThreshold(config: Config): number {
   return config.isTruncateToolOutputThresholdExplicit()
     ? config.getTruncateToolOutputThreshold()
@@ -3179,15 +3182,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // below (deliberately outside the truncation envelope — see the append
     // loop), so their size comes out of the body budget here: the marker
     // asserts the ASSEMBLED string fits the declared budget, and a body that
-    // fits whole must still fit once they land. The reservation and the
-    // append loop both iterate this one list, so the two cannot disagree.
+    // fits whole must still fit once they land. The reservation counts every
+    // model-facing notice; the record-artifact reminder is not shown in the TUI.
     const longRunHint = shouldAppendLongRunHint
       ? buildLongRunningForegroundHint(elapsedMs)
+      : null;
+    const recordArtifactReminder = (await this.shouldRemindToRecordArtifact(
+      result,
+    ))
+      ? SHELL_RECORD_ARTIFACT_REMINDER
       : null;
     const appendedMetadata = [longRunHint, attributionWarning].filter(
       (s): s is string => s !== null,
     );
-    const appendedMetadataChars = appendedMetadata.reduce(
+    const modelNotices = [...appendedMetadata, recordArtifactReminder].filter(
+      (s): s is string => s !== null,
+    );
+    const appendedMetadataChars = modelNotices.reduce(
       (total, s) => total + APPENDED_METADATA_SEPARATOR.length + s.length,
       0,
     );
@@ -3345,6 +3356,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
             }
           : {};
 
+    // Shell cannot see which files the command wrote. Ask only the model,
+    // after truncation, and not on a failure the scheduler reports via error.message.
+    if (recordArtifactReminder && typeof llmContent === 'string') {
+      llmContent += `${APPENDED_METADATA_SEPARATOR}${recordArtifactReminder}`;
+    }
+
     return {
       llmContent,
       rawOutputSize,
@@ -3390,6 +3407,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
+   * The model only sees this after a command that may have written a file.
+   * Disabled sessions have no record_artifact tool. Commands the AST proves
+   * read-only did not create one.
+   */
+  private async shouldRemindToRecordArtifact(
+    result: ShellExecutionResult,
+  ): Promise<boolean> {
+    if (this.config.isRecordArtifactEnabled?.() !== true) return false;
+    if (
+      result.aborted ||
+      result.error ||
+      isSignalTermination(result.signal) ||
+      isShellExitError(this.params.command, result.exitCode)
+    ) {
+      return false;
+    }
+    try {
+      const readOnly = await isShellCommandReadOnlyASTInDirectory(
+        stripShellWrapper(this.params.command),
+        this.params.directory || this.config.getTargetDir(),
+      );
+      return !readOnly;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * Best-effort PR binding for agents that create PRs via `gh pr create` in
    * the shell (the GitDialog binds at creation; this covers the shell path).
    * Writes the session's PR sidecar directly, mirroring the worktree sidecar
@@ -3431,13 +3476,29 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // An ERRORED pre-run fetch proved nothing about the branch's prior
         // PRs — decline instead of failing open, or a branch whose snapshot
         // flaked would bind its existing PR as this session's creation.
-        if (preRunPrSnapshot?.status === 'error') return;
+        if (preRunPrSnapshot?.status === 'error') {
+          debugLogger.debug(
+            'gh pr create not bound: pre-run PR snapshot unavailable',
+          );
+          return;
+        }
         // The launch directory (`directory` param, else target dir), not a
         // repo the command may have `cd`'d into: gh resolves THIS repo's
         // branch, so an internal-`cd` create binds only when this branch's
         // PR URL is what the output carries — backfill recovers the rest.
         const created = await fetchCurrentBranchPullRequest(cwd, ghCreateEnv);
-        if (created.status !== 'pr' || created.state !== 'open') return;
+        if (created.status !== 'pr' || created.state !== 'open') {
+          // Keep the facts distinct: `none` is gh's proved absence for this
+          // branch; `error` means gh could not answer at all; a merged/closed
+          // PR arrives as status `pr` with a non-open state. A paraphrase that
+          // names only one cause sends the operator hunting for a PR this gate
+          // already ruled on.
+          debugLogger.debug('gh pr create not bound: post-run gh resolution', {
+            status: created.status,
+            ...(created.status === 'pr' ? { state: created.state } : {}),
+          });
+          return;
+        }
         // The run resolved the branch's EXISTING PR — nothing was created
         // (a retry's view segment exits 0 and prints the existing URL).
         // Binding would stamp this session as creator of a PR it did not
@@ -3447,6 +3508,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
           preRunPrSnapshot?.status === 'pr' &&
           created.number === preRunPrSnapshot.number
         ) {
+          debugLogger.debug(
+            'gh pr create not bound: PR already existed before the run',
+            { number: created.number },
+          );
           return;
         }
         // Repo identity lives in on-disk state an in-command
@@ -3463,6 +3528,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
           (createdRepoKey !== preRunRepoKeys.resolved &&
             createdRepoKey !== preRunRepoKeys.parent)
         ) {
+          debugLogger.debug('gh pr create not bound: repo identity mismatch', {
+            created: createdRepoKey ?? 'unknown',
+            expected: preRunRepoKeys?.resolved ?? 'unknown',
+            parent: preRunRepoKeys?.parent ?? 'unknown',
+          });
           return;
         }
         // Branch identity: a command that switched branches mid-run
@@ -3475,9 +3545,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
           preRunBranch === undefined ||
           created.headRefName !== preRunBranch
         ) {
+          debugLogger.debug('gh pr create not bound: branch mismatch', {
+            created: created.headRefName ?? 'unknown',
+            expected: preRunBranch ?? 'unknown',
+          });
           return;
         }
-        if (!output.includes(created.url)) return;
+        if (!output.includes(created.url)) {
+          debugLogger.debug(
+            'gh pr create not bound: URL absent from the command output',
+          );
+          return;
+        }
         const sessionService = this.config.getSessionService();
         // Re-resolve the session's archive location immediately before the
         // locked mutation: an archive transition landing during the gh
@@ -3511,15 +3590,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
         const applied = await upsertSessionPrs(prPath, [
           { ...createdPr, source: 'create' },
         ]);
-        if (!applied.added.includes(created.number)) return;
+        if (!applied.added.includes(created.number)) {
+          debugLogger.debug('gh pr create not bound: already bound', {
+            number: created.number,
+          });
+          return;
+        }
         // The daemon never sees this write; the notification carries the
         // catalog mark so live-state clients refetch it (~2s) instead of
         // waiting for unrelated catalog churn.
         this.config
           .getSessionService()
           .emitSessionPrBound(this.config.getSessionId(), createdPr);
-      } catch {
-        /* best-effort binding */
+      } catch (error) {
+        // Best-effort binding; name the swallowed cause so silence reads as a
+        // failure, not as "the gate never ran".
+        debugLogger.debug('gh pr create binding failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     })();
   }
