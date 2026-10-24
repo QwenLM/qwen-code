@@ -339,6 +339,10 @@ Implementation scope.
   request and Web Shell action currently time out after 30 s. A slow
   install may finish on the daemon after the client reports a timeout;
   cancellation and timeout changes are follow-up work.
+- Git fallback keeps the existing Git environment and credential helpers. The
+  configured API token is not injected into Git subprocesses. Dedicated private
+  repository fallback authentication is deferred: it needs host scoping,
+  inherited configuration preservation, and lazy-fetch coverage.
 - Web Shell and the CLI do not share a module for this constant. The two
   literals must be kept equal by review.
 - ZIP compression ratio is not limited separately. The archive and

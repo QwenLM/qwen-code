@@ -387,7 +387,6 @@ async function downloadGitHubDirectoryWithGit(
   directory: string,
   staging: string,
   state: PackageState,
-  githubToken?: string,
   assertGenerationOpen?: () => void,
 ): Promise<void> {
   assertGenerationOpen?.();
@@ -406,22 +405,7 @@ async function downloadGitHubDirectoryWithGit(
         `https://github.com/${owner}/${repo}.git`,
         checkout,
       ],
-      {
-        timeout: 60_000,
-        maxBuffer: 1024 * 1024,
-        ...(githubToken
-          ? {
-              // Keep the credential out of argv (visible in `ps`); git reads
-              // these environment entries as configuration.
-              env: {
-                ...process.env,
-                GIT_CONFIG_COUNT: '1',
-                GIT_CONFIG_KEY_0: 'http.extraHeader',
-                GIT_CONFIG_VALUE_0: `Authorization: Bearer ${githubToken}`,
-              },
-            }
-          : {}),
-      },
+      { timeout: 60_000, maxBuffer: 1024 * 1024 },
     );
     if (directory) {
       await execFileAsync(
@@ -597,7 +581,6 @@ async function downloadGitHubSkill(
       plan.directory,
       staging,
       state,
-      githubToken,
       assertGenerationOpen,
     );
   }

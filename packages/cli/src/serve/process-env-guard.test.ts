@@ -516,16 +516,6 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
-    'packages/cli/src/serve/workspace-skill-management.ts',
-    {
-      reason:
-        'The git fallback runs as a child process and must inherit the ' +
-        'daemon environment (PATH, HOME, proxy settings) while adding the ' +
-        'configured GitHub token through git configuration instead of argv.',
-      accesses: { whole: 1 },
-    },
-  ],
-  [
     'packages/cli/src/serve/server/fs-factory.ts',
     {
       reason:

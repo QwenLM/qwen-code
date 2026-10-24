@@ -435,7 +435,7 @@ describe('workspace Skill install recovery', () => {
     ).rejects.toMatchObject({ name: 'WorkspaceGenerationClosedError' });
   });
 
-  it('passes the configured token to the git fallback without argv exposure', async () => {
+  it('keeps public git fallback independent of a rejected API token', async () => {
     const workspace = await temporary();
     const fixture = await temporary();
     await fs.mkdir(path.join(fixture, 'skills/foo'), { recursive: true });
@@ -462,7 +462,7 @@ describe('workspace Skill install recovery', () => {
     );
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response('denied', { status: 429 })),
+      vi.fn(async () => new Response('denied', { status: 401 })),
     );
     const token = 'ghp_TEST_TOKEN';
     await installWorkspaceSkill(
@@ -477,20 +477,16 @@ describe('workspace Skill install recovery', () => {
       },
       token,
     );
-    const clone = execFileMock.mock.calls.find(
-      ([, args]) => (args as string[])[0] === 'clone',
-    );
-    expect(clone).toBeDefined();
-    const [, argv, options] = clone as [
-      string,
-      string[],
-      { env?: Record<string, string> },
-    ];
-    expect(argv.join(' ')).not.toContain(token);
-    expect(options.env).toMatchObject({
-      GIT_CONFIG_COUNT: '1',
-      GIT_CONFIG_KEY_0: 'http.extraHeader',
-      GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}`,
-    });
+    expect(
+      await fs.readFile(
+        path.join(workspace, '.qwen/skills/foo/SKILL.md'),
+        'utf8',
+      ),
+    ).toBe(markdown('foo'));
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+    for (const [, argv, options] of execFileMock.mock.calls) {
+      expect(JSON.stringify([argv, options])).not.toContain(token);
+      expect(options).not.toHaveProperty('env');
+    }
   });
 });
