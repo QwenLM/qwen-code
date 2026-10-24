@@ -457,6 +457,35 @@ describe('ContentGenerationPipeline', () => {
     (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(response);
 
   /**
+   * Runs `body` with the non-streaming response conversion assigning
+   * `contextFields()` onto the request context (as the real converter does when
+   * it strips a trailing orphan tag) and returning `response`, then puts the
+   * factory default back.
+   *
+   * That stub is shared with every later test in this file and the top-level
+   * `vi.clearAllMocks()` clears calls without uninstalling implementations, so
+   * the explicit restore is what keeps the suite order-independent — the same
+   * convention `withRealChunkConverter` follows for the chunk stub.
+   */
+  async function withResponseConverter(
+    contextFields: () => Record<string, unknown>,
+    response: GenerateContentResponse,
+    body: () => Promise<void>,
+  ) {
+    (mockConverter.convertOpenAIResponseToLlm as Mock).mockImplementation(
+      (_openaiResponse, context) => {
+        Object.assign(context, contextFields());
+        return response;
+      },
+    );
+    try {
+      await body();
+    } finally {
+      vi.mocked(OpenAIContentConverter.convertOpenAIResponseToLlm).mockReset();
+    }
+  }
+
+  /**
    * Runs `body` with the real chunk converter installed on the module-level
    * stub, then puts the factory default back. That stub is shared with every
    * later test in this file and the top-level `vi.clearAllMocks()` clears
@@ -2550,6 +2579,55 @@ describe('ContentGenerationPipeline', () => {
 
       await pipeline.execute(abortable(abortController.signal), 'test-id');
       expect(sentSignal().aborted).toBe(true);
+    });
+
+    it('logs protocol-tag sanitization on the non-streaming route', async () => {
+      const llmResponse = new GenerateContentResponse();
+      llmResponse.responseId = 'nonstream-response';
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      createMock().mockResolvedValue({
+        id: 'nonstream-response',
+        choices: [{ message: { content: 'Answer.' }, finish_reason: 'stop' }],
+      });
+      // The real converter stamps this when the trailing-tag filter strips an
+      // orphan closer; the pipeline is the only reader that turns it into an
+      // event, and it must do so on this route too (QwenLM/qwen-code#13660).
+      // Non-zero on purpose: a stub and an assertion that are both 0 cannot
+      // tell a pass-through from a lost or re-stamped count.
+      await withResponseConverter(
+        () => ({
+          protocolTagSanitized: { tagName: 'thinking', toolCallCount: 2 },
+        }),
+        llmResponse,
+        async () => {
+          const result = await pipeline.execute(
+            userRequest(),
+            'test-prompt-id',
+          );
+
+          expect(result).toBe(llmResponse);
+          expect(logProtocolTagSanitized).toHaveBeenCalledTimes(1);
+          expect(logProtocolTagSanitized).toHaveBeenCalledWith(
+            mockCliConfig,
+            expect.objectContaining({
+              response_id: 'nonstream-response',
+              tag_name: 'thinking',
+              tool_call_count: 2,
+            }),
+          );
+        },
+      );
+    });
+
+    it('leaves the response-converter stub unimplemented for later tests', () => {
+      // Placed after the case above, which is the only one that installs an
+      // implementation on the module-level response stub: a leaked one would
+      // hand every later test in this file this test's canned response.
+      expect(
+        vi
+          .mocked(OpenAIContentConverter.convertOpenAIResponseToLlm)
+          .getMockImplementation(),
+      ).toBeUndefined();
     });
   });
 

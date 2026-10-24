@@ -572,12 +572,58 @@ export class ContentGenerationPipeline {
             context,
           );
 
+          // The converter stamps `protocolTagSanitized` when it strips a
+          // trailing orphan tag on this route too (it is not streaming-gated),
+          // so emit the same event and log line the streaming route does, then
+          // clear the field (QwenLM/qwen-code#13660).
+          this.emitProtocolTagSanitized(
+            context,
+            userPromptId,
+            llmResponse,
+            context.protocolTagSanitized,
+          );
+          context.protocolTagSanitized = undefined;
+
           return llmResponse;
         } finally {
           perRequestAc?.abort();
         }
       },
     );
+  }
+
+  /**
+   * Emits the `ProtocolTagSanitizedEvent` and its debug log line for a
+   * trailing orphan tag the converter stripped. The converter stamps
+   * `context.protocolTagSanitized` on both the streaming and the non-streaming
+   * route, and this is its only reader; the caller clears the field after the
+   * read. `response` supplies the optional `response_id` — absent when the
+   * stripped response carries no id of its own.
+   */
+  private emitProtocolTagSanitized(
+    context: RequestContext,
+    userPromptId: string,
+    response: GenerateContentResponse | undefined,
+    sanitization:
+      | NonNullable<RequestContext['protocolTagSanitized']>
+      | undefined,
+  ): void {
+    if (!sanitization) return;
+    const event = new ProtocolTagSanitizedEvent({
+      model: context.model,
+      promptId: userPromptId,
+      responseId: response?.responseId,
+      tagName: sanitization.tagName,
+      toolCallCount: sanitization.toolCallCount,
+    });
+    debugLogger.warn('Sanitized a model protocol tag', {
+      model: event.model,
+      promptId: event.prompt_id,
+      responseId: event.response_id,
+      tagName: event.tag_name,
+      toolCallCount: event.tool_call_count,
+    });
+    logProtocolTagSanitized(this.config.cliConfig, event);
   }
 
   async executeStream(
@@ -761,24 +807,13 @@ export class ContentGenerationPipeline {
       sanitization:
         | NonNullable<RequestContext['protocolTagSanitized']>
         | undefined,
-    ) => {
-      if (!sanitization) return;
-      const event = new ProtocolTagSanitizedEvent({
-        model: context.model,
-        promptId: userPromptId,
-        responseId: response?.responseId,
-        tagName: sanitization.tagName,
-        toolCallCount: sanitization.toolCallCount,
-      });
-      debugLogger.warn('Sanitized a model protocol tag', {
-        model: event.model,
-        promptId: event.prompt_id,
-        responseId: event.response_id,
-        tagName: event.tag_name,
-        toolCallCount: event.tool_call_count,
-      });
-      logProtocolTagSanitized(this.config.cliConfig, event);
-    };
+    ) =>
+      this.emitProtocolTagSanitized(
+        context,
+        userPromptId,
+        response,
+        sanitization,
+      );
 
     /**
      * Reports an end-of-stream flush and returns the response it released, if

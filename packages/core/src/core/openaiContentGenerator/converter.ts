@@ -1450,6 +1450,23 @@ export function convertOpenAIResponseToLlm(
       }
     }
 
+    // The trailing-tag filter stamps `protocolTagSanitized` from inside
+    // `convertOpenAITextToParts`, which runs before the tool calls are read,
+    // so it records only the tag name. Fill the count in here, as
+    // `convertOpenAIChunkToLlm` does, so the emitted event never reports a
+    // count that contradicts the response's own `functionCall` parts.
+    //
+    // No `finish_reason` conjunct: the strip-and-stamp it corrects is not
+    // gated on one either — `completedNormally()` maps an absent reason to
+    // STOP — so gating the fill on a truthy reason left a gateway response
+    // with no `finish_reason` reporting 0 tool calls beside a candidate that
+    // carries two `functionCall` parts.
+    if (requestContext.protocolTagSanitized) {
+      requestContext.protocolTagSanitized.toolCallCount = parts.filter(
+        (part) => part.functionCall !== undefined,
+      ).length;
+    }
+
     response.candidates = [
       {
         content: {
