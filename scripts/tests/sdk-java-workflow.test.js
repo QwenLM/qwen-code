@@ -206,6 +206,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     ['test', 'helper-ok', 0],
     ['test', 'fallback', 0],
     ['test', 'fallback-ok', 0],
+    // A helper edit may put any suffix after the pinned prefix; the strip
+    // must consume exactly what the glob matched, not a second spelling.
+    ['test', 'helper-nonspace', 0],
     // A failed suite must stay red when the lock is missed. `gate_status`
     // supersedes the mysql lane's old `exit 0`: reaching the guard no longer
     // proves the gate passed, because its Maven runs now capture failure.
@@ -215,6 +218,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     ['mysql-integration', 'helper-ok', 0],
     ['mysql-integration', 'fallback', 0],
     ['mysql-integration', 'fallback-ok', 0],
+    ['mysql-integration', 'helper-nonspace', 0],
     ['mysql-integration', 'helper', 1],
     ['mysql-integration', 'fallback', 1],
     // The probe's exists branch and its documented unknown fallback.
@@ -268,7 +272,7 @@ describe('SDK Java self-hosted workflow guards', () => {
               ? 'sdk_java_lock_acquire() { return 0; }\n'
               : 'sdk_java_lock_acquire() {\n' +
                   '  echo "helper: waiting for the host lock"\n' +
-                  '  echo "::error::sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued)"\n' +
+                  `  echo "::error::sdk-java host lock not acquired within${mode === 'helper-nonspace' ? ':' : ''} 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued)"\n` +
                   '  return 1\n' +
                   '}\n',
           );
@@ -307,6 +311,7 @@ echo REACHED_END`,
         // A succeeding step must not carry the fatal infrastructure
         // signature: a later failure in the same job would be misclassified.
         expect(result.stdout).not.toMatch(/^::error::/m);
+        expect(result.stdout).not.toContain('lock not acquired within');
         if (mode.endsWith('-ok')) {
           expect(result.stdout).not.toContain('write-back skipped');
           expect(result.stdout).toContain('REACHED_END');
@@ -321,7 +326,7 @@ echo REACHED_END`,
             // The fatal prefix becomes a warning, and the ticket, class and
             // queue head survive for diagnosing a starved write-back.
             expect(result.stdout).toContain(
-              '::warning::sdk-java host lock wait exhausted after 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued)',
+              `::warning::sdk-java host lock wait exhausted after${mode === 'helper-nonspace' ? ':' : ''} 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued)`,
             );
           } else {
             expect(result.stdout).toContain(
@@ -330,7 +335,7 @@ echo REACHED_END`,
           }
           expect(readFileSync(summary, 'utf8')).toContain(
             mode.startsWith('helper')
-              ? `sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted after 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued); host cache present at seed: ${seed}`
+              ? `sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted after${mode === 'helper-nonspace' ? ':' : ''} 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued); host cache present at seed: ${seed}`
               : `sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted in the bare-flock fallback; host cache present at seed: ${seed}`,
           );
           // The guard must stop before the copy; a warning alone would still
@@ -452,7 +457,11 @@ echo REACHED_END`,
         ).run;
         const seed = run
           .split('\n')
-          .filter((line) => line.includes('cp -aln "${HOME}/.m2/repository/."'))
+          .filter(
+            (line) =>
+              line.includes('cp -aln "${HOME}/.m2/repository/."') ||
+              line.includes('find "${RUNNER_TEMP}/m2-repo"'),
+          )
           .join('\n');
         expect(seed, jobName).toContain(
           'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/"',
@@ -468,6 +477,19 @@ echo REACHED_END`,
             join(home, '.m2', 'repository', 'com', 'example', 'a.jar'),
             'jar',
           );
+          // The resolver rewrites these tracking files in place. A seeded
+          // hardlink would carry that write into the host cache unlocked.
+          const tracking = [
+            '_remote.repositories',
+            'b.pom.lastUpdated',
+            'resolver-status.properties',
+          ];
+          for (const name of tracking) {
+            writeFileSync(
+              join(home, '.m2', 'repository', 'com', 'example', name),
+              'host-bytes',
+            );
+          }
           // A pool host can already hold a job-local repository nested by
           // the old spelling; the seed must publish at its root, not one
           // level down.
@@ -487,6 +509,18 @@ echo REACHED_END`,
           expect(existsSync(join(runnerTemp, 'm2-repo', 'repository'))).toBe(
             false,
           );
+          for (const name of tracking) {
+            const jobPath = join(runnerTemp, 'm2-repo', 'com', 'example', name);
+            writeFileSync(jobPath, 'job-bytes');
+            expect(readFileSync(jobPath, 'utf8'), name).toBe('job-bytes');
+            expect(
+              readFileSync(
+                join(home, '.m2', 'repository', 'com', 'example', name),
+                'utf8',
+              ),
+              name,
+            ).toBe('host-bytes');
+          }
         } finally {
           rmSync(dir, { recursive: true, force: true });
         }
@@ -654,6 +688,7 @@ echo REACHED_END`,
       const home = join(dir, 'home');
       const runnerTemp = join(dir, 'runner-temp');
       const workspace = join(dir, 'workspace');
+      const summary = join(dir, 'summary.md');
       const working = join(workspace, 'packages', 'sdk-java', 'qwencode');
       mkdirSync(shims);
       mkdirSync(home);
@@ -695,6 +730,8 @@ echo REACHED_END`,
               HOME: home,
               RUNNER_TEMP: runnerTemp,
               GITHUB_WORKSPACE: workspace,
+              GITHUB_STEP_SUMMARY: summary,
+              RUNNER_NAME: 'ecs-runner-7',
               MATRIX_JAVA: '21',
               TIER: 'fast',
             },
@@ -705,6 +742,69 @@ echo REACHED_END`,
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).toContain(
           '::warning::Maven cache write-back failed; the test result above is unaffected',
+        );
+        // A permanently unwritable host cache must leave a machine-readable
+        // record; the warning alone lives only in each job's own log.
+        expect(readFileSync(summary, 'utf8')).toContain(
+          'sdk-java cache write-back failed on ecs-runner-7: status 1; host cache present at seed: 0',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'records a timed-out cache write-back in the step summary',
+    () => {
+      const locked = parse(workflow).jobs.test.steps.find((candidate) =>
+        candidate.run?.includes('sdk-java-tests.lock'),
+      ).run;
+      const start = locked.indexOf('write_back=0');
+      expect(start).toBeGreaterThan(-1);
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-write-back-timeout-'));
+      const shims = join(dir, 'bin');
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const summary = join(dir, 'summary.md');
+      mkdirSync(shims);
+      mkdirSync(home);
+      mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+      // The 300 s backstop is the only writer of the 124 arm.
+      writeFileSync(join(shims, 'timeout'), '#!/bin/sh\nexit 124\n', {
+        mode: 0o755,
+      });
+      try {
+        const result = spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-e',
+            '-c',
+            `suite_status=0\n${locked.slice(start)}`,
+          ],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              PATH: `${shims}:${process.env.PATH}`,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_STEP_SUMMARY: summary,
+              RUNNER_NAME: 'ecs-runner-7',
+              SDK_JAVA_M2_SEED_EXISTED: '0',
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back stopped after 300 s; the test result above is unaffected',
+        );
+        expect(readFileSync(summary, 'utf8')).toContain(
+          'sdk-java cache write-back failed on ecs-runner-7: status 124; host cache present at seed: 0',
         );
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -788,6 +888,11 @@ echo REACHED_END`,
     for (const command of maven) {
       expect(command).toContain('|| suite_status=$?');
     }
+    // The full tier narrows the H2 suite to the Broker packages; without
+    // this argument the leg runs the whole unit suite the mysql job owns.
+    expect(block).toContain(
+      `'-Dtest=${brokerTestPattern}' clean test || suite_status=$?`,
+    );
   });
 
   it('runs the Broker suite on hosted Java 21 after installing its SDK dependency', () => {

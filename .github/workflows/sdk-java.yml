@@ -248,6 +248,10 @@ jobs:
           if [ -d "${HOME}/.m2/repository" ]; then SDK_JAVA_M2_SEED_EXISTED=1; else SDK_JAVA_M2_SEED_EXISTED=0; fi
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          # Maven rewrites its tracking files in place; copy them to private
+          # inodes so a seeded hardlink cannot carry that write into the host
+          # cache without the lock.
+          find "${RUNNER_TEMP}/m2-repo" -type f \( -name '_remote.repositories' -o -name '*.lastUpdated' -o -name 'resolver-status.properties' \) -exec sh -c 'for f; do cp -p "$f" "$f.$$.tmp" && mv -f "$f.$$.tmp" "$f"; done' sh {} + || true
           # Capture the suite result instead of letting errexit skip the
           # write-back: a failed suite on a fresh host must still publish what
           # it downloaded, and the step must still redden.
@@ -282,10 +286,10 @@ jobs:
             # line passes through unchanged.
             echo() {
               if [[ ${1:-} == '::error::sdk-java host lock not acquired within'* ]]; then
-                local attribution="${1#'::error::sdk-java host lock not acquired within '}"
-                builtin echo "::warning::sdk-java host lock wait exhausted after ${attribution}"
+                local attribution="${1#'::error::sdk-java host lock not acquired within'}"
+                builtin echo "::warning::sdk-java host lock wait exhausted after${attribution}"
                 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-                  printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after %s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+                  printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after%s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
                 fi
               else
                 builtin echo "$@"
@@ -332,6 +336,9 @@ jobs:
             echo "::warning::Maven cache write-back stopped after 300 s; the test result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
             echo "::warning::Maven cache write-back failed; the test result above is unaffected"
+          fi
+          if [ "${write_back}" -ne 0 ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            printf -- '- sdk-java cache write-back failed on %s: status %s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${write_back}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
           fi
           exit "${suite_status}"
 
@@ -805,6 +812,10 @@ jobs:
           if [ -d "${HOME}/.m2/repository" ]; then SDK_JAVA_M2_SEED_EXISTED=1; else SDK_JAVA_M2_SEED_EXISTED=0; fi
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          # Maven rewrites its tracking files in place; copy them to private
+          # inodes so a seeded hardlink cannot carry that write into the host
+          # cache without the lock.
+          find "${RUNNER_TEMP}/m2-repo" -type f \( -name '_remote.repositories' -o -name '*.lastUpdated' -o -name 'resolver-status.properties' \) -exec sh -c 'for f; do cp -p "$f" "$f.$$.tmp" && mv -f "$f.$$.tmp" "$f"; done' sh {} + || true
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
@@ -841,10 +852,10 @@ jobs:
             # line passes through unchanged.
             echo() {
               if [[ ${1:-} == '::error::sdk-java host lock not acquired within'* ]]; then
-                local attribution="${1#'::error::sdk-java host lock not acquired within '}"
-                builtin echo "::warning::sdk-java host lock wait exhausted after ${attribution}"
+                local attribution="${1#'::error::sdk-java host lock not acquired within'}"
+                builtin echo "::warning::sdk-java host lock wait exhausted after${attribution}"
                 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-                  printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after %s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+                  printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after%s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
                 fi
               else
                 builtin echo "$@"
@@ -900,6 +911,9 @@ jobs:
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
             echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+          fi
+          if [ "${write_back}" -ne 0 ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            printf -- '- sdk-java cache write-back failed on %s: status %s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${write_back}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
           fi
           exit "${gate_status}"
 
@@ -1551,6 +1565,10 @@ jobs:
           # Seed from the host-shared repo (cache-restored on hosted runners).
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          # Maven rewrites its tracking files in place; copy them to private
+          # inodes so a seeded hardlink cannot carry that write into the host
+          # cache without the lock.
+          find "${RUNNER_TEMP}/m2-repo" -type f \( -name '_remote.repositories' -o -name '*.lastUpdated' -o -name 'resolver-status.properties' \) -exec sh -c 'for f; do cp -p "$f" "$f.$$.tmp" && mv -f "$f.$$.tmp" "$f"; done' sh {} + || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Cache the RocketMQ distribution'
         uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
@@ -1790,6 +1808,10 @@ jobs:
           # Seed from the host-shared repo (cache-restored on hosted runners).
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          # Maven rewrites its tracking files in place; copy them to private
+          # inodes so a seeded hardlink cannot carry that write into the host
+          # cache without the lock.
+          find "${RUNNER_TEMP}/m2-repo" -type f \( -name '_remote.repositories' -o -name '*.lastUpdated' -o -name 'resolver-status.properties' \) -exec sh -c 'for f; do cp -p "$f" "$f.$$.tmp" && mv -f "$f.$$.tmp" "$f"; done' sh {} + || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host

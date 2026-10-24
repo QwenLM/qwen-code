@@ -101,12 +101,15 @@ failed at 19:15 without starting Maven — the hold, not the queue order, was
 the bound.
 
 Both Maven runs already resolve from a job-local repository, so they touch no
-host-shared state. Only the cache write-back mutates `~/.m2`, so only the
-write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
-and runs before the acquisition; the Maven runs run unlocked; the write-back
-holds one acquisition, and its `mkdir` and bounded `find`/`cp` children
-drop fd 9 so a survivor
-cannot retain the lock. A hold now measures the copy instead of the suite, and
+host-shared state: Maven 3.9's resolver installs and downloads by replacing
+the directory entry, and the seed gives the tracking files Maven rewrites in
+place (`_remote.repositories`, `*.lastUpdated`, `resolver-status.properties`)
+private inodes instead of leaving them hardlinked to the host cache. Only the
+cache write-back mutates `~/.m2`, so only the write-back takes the lock. The
+seed (`cp -aln`) is read-only and best-effort and runs before the acquisition;
+the Maven runs run unlocked; the write-back holds one acquisition, and its
+`mkdir` and bounded `find`/`cp` children drop fd 9 so a survivor cannot
+retain the lock. A hold now measures the copy instead of the suite, and
 the fast tier's 90-minute budget is again far above one hold.
 
 The test job had the same shape and the same failure: the Java 21 leg held
@@ -132,9 +135,13 @@ the helper's fatal line to a distinct `sdk-java host lock wait exhausted`
 warning with the same ticket/class/queue-head attribution and appends a
 step-summary line, instead of leaving the pinned `lock not acquired within`
 error, so a succeeding step cannot leave the infrastructure signature on a
-job where a later genuine failure would be misclassified. The helper's
-default mode and the docker-lock callers keep the substring. The 5400 s
-budget and the fd 9 closures are unchanged.
+job where a later genuine failure would be misclassified. The write-back's own
+failure arms — the 300 s backstop and any mkdir or copy error — append the
+same host-attributed record with the failure status, so a permanently
+unwritable or cross-filesystem host cache accumulates evidence instead of
+repeating an identical warning in every job log. The helper's default mode
+and the docker-lock callers keep the substring. The 5400 s budget and the fd 9
+closures are unchanged.
 
 ### Fast-tier priority
 
