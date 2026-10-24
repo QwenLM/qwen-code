@@ -137,13 +137,14 @@ jobs:
             file_issue="$(jq -r '.merged_at != null' <<< "${pr}")"
             # A rerun re-executes the PR's pre-merge workflow against a head
             # main has already replaced; run 39768204855's attempt 2 filed
-            # #15239 that way. A fresh dispatch or approval is attempt 1 and
-            # still files. A missing attempt fails open, like the
-            # supersession guard above.
+            # #15239 that way. A dispatch's attempt counts its own manual
+            # runs, not a rerun of the PR's workflow, so it files at any
+            # attempt. A missing attempt fails open, like the supersession
+            # guard above.
             if [[ "${file_issue}" == 'true' ]]; then
               if [[ -z "${RUN_ATTEMPT}" ]]; then
                 echo "::warning::No run_attempt in the workflow_run payload for PR #${pr_number}; failing open and filing."
-              elif [[ "${RUN_ATTEMPT}" != '1' ]]; then
+              elif [[ "${RUN_ATTEMPT}" != '1' && "${EVENT_NAME}" != 'workflow_dispatch' ]]; then
                 file_issue=false
                 echo "::warning::Attempt ${RUN_ATTEMPT} of the PR's pre-merge workflow; not filing a main-regression issue for an already-merged head."
               fi

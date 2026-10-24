@@ -260,6 +260,19 @@ cat "\${RUNNER_TEMP}/pulls.json"
         }).output,
       ).toBe('pr_number=14472\nfile_issue=true\n');
     });
+
+    it('files a rerun of a fresh dispatch on a merged PR branch', () => {
+      // A dispatch's attempt counts its own manual runs, not a rerun of the
+      // PR's pre-merge workflow; suppressing it would drop a real failure of
+      // the tree the merged branch now carries.
+      expect(
+        resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
+          EVENT_NAME: 'workflow_dispatch',
+          HEAD_BRANCH: 'ci/java',
+          RUN_ATTEMPT: '2',
+        }).output,
+      ).toBe('pr_number=14472\nfile_issue=true\n');
+    });
     it('falls back to filing when the attempt is unreadable', () => {
       // The guard must not turn a missing payload field into silence: before
       // this change every merged-PR failure filed, and an unreadable attempt
@@ -1578,16 +1591,22 @@ fi
         });
         expect(result.status, result.stderr).toBe(method ? 0 : 1);
         const published = join(tmp, 'published-args');
-        if (method)
-          expect(readFileSync(published, 'utf8')).toContain(
+        if (method) {
+          const publishedArgs = readFileSync(published, 'utf8');
+          expect(publishedArgs).toContain(
             `${method}\nrepos/QwenLM/qwen-code/${endpoint}\n`,
           );
-        else expect(existsSync(published)).toBe(false);
-        if (method) {
+          // Tie the body assertions to the publish call itself: a repointed
+          // body argument would ship a linkless comment while the assembly
+          // file this test inspects still looked right.
+          expect(publishedArgs).toContain(
+            `-F\nbody=@${join(tmp, 'pr-comment.md')}\n`,
+          );
           const publishedBody = readFileSync(
             join(tmp, 'pr-comment.md'),
             'utf8',
           );
+          expect(publishedBody).toContain(comment);
           const expectedTracking =
             issueUrl ||
             (existingTracking
@@ -1606,7 +1625,8 @@ fi
           // The emitter's line must stay the one the recovery grep accepts;
           // decorating it would silently drop the link on a suppressed rerun.
           if (issueUrl) {
-            expect(/^\[Tracking issue\]\([^)]*\)$/m.test(publishedBody)).toBe(
+            const recoveryPattern = step.run.match(/grep -m1 -E '([^']*)'/)[1];
+            expect(new RegExp(recoveryPattern, 'm').test(publishedBody)).toBe(
               true,
             );
           }
