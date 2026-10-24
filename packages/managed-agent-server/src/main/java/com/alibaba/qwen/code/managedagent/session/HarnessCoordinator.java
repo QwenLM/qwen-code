@@ -2,11 +2,13 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.DaemonProtocolException;
+import com.alibaba.qwen.code.daemon.DaemonTransportException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
@@ -25,6 +27,7 @@ import jakarta.annotation.PreDestroy;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -65,6 +68,11 @@ public class HarnessCoordinator {
     // anyway, so an entry could never change an outcome.
     private static final Set<String> LEASE_BOUNDED_409_CODES =
             Set.of("managed_session_writer_conflict");
+    // Capacity discovery and ownership handoff postpone execution; a
+    // waiting Turn has no failed execution attempt to charge.
+    private static final Set<String> POOL_OWNERSHIP_WAIT_CODES = Set.of(
+            "harness_owner_still_live", "harness_placement_changed",
+            "harness_placement_quiescing", "harness_placement_released");
     // `hosted_turn_recovery_in_progress` is the ONLY refusal the daemon
     // provably clears under its own recovery channel: the wake pump
     // settles the park the prompt route still sees. A user Turn arriving
@@ -440,6 +448,10 @@ public class HarnessCoordinator {
             AtomicBoolean recoveryPath) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
+        if (!"CANCELLING".equals(claimed.status())
+                && AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(claimed.errorCode())) {
+            return observeBlockedHarness(claimed, session, leaseLost);
+        }
         // A bound Session re-attaches through the takeover load: failures
         // here wait on the prior generation's lease, a wait bounded by that
         // lease itself rather than by the pre-admission retry budget.
@@ -848,6 +860,32 @@ public class HarnessCoordinator {
         }
     }
 
+    private boolean observeBlockedHarness(TurnRecord turn, SessionRecord session,
+            AtomicBoolean leaseLost) {
+        long lastEventId = turn.harnessLastEventId() == null ? 0 : turn.harnessLastEventId();
+        try (SourceStream stream = harness.observeStream(turn.tenantId(), turn.sessionId(),
+                session.harnessBootId(), lastEventId, turn.harnessEventEpoch())) {
+            requireLease(leaseLost);
+            if (!Objects.equals(turn.harnessEventEpoch(), stream.eventEpoch())) {
+                throw new IllegalStateException("Hosted Harness event epoch changed");
+            }
+            if (!stream.recoveryBlocked(lastEventId)) {
+                return consumeStream(turn, session.harnessBootId(), stream, leaseLost);
+            }
+        } catch (RuntimeException error) {
+            LOG.warn("Managed Harness recovery observation deferred tenant={} session={} turn={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(), error);
+        }
+        // No execution takeover, submit or continuation belongs to this
+        // lane. Unavailable evidence retains the original unsettled park.
+        if (leaseLost.get()) {
+            return false;
+        }
+        return store.markTurnRecoveryBlocked(turn.tenantId(), turn.sessionId(),
+                turn.turnId(), owner, AgentStateStore.HARNESS_RECOVERY_BLOCKED,
+                "The Hosted Harness outcome remains unconfirmed; awaiting its journal.");
+    }
+
     private boolean consumeStream(TurnRecord turn, String bootId,
             SourceStream stream, AtomicBoolean leaseLost) {
         int capacity = Math.max(128, batchMaxEvents * 2);
@@ -858,10 +896,43 @@ public class HarnessCoordinator {
         List<HarnessEvent> batch = new ArrayList<>();
         int batchBytes = 0;
         long flushAt = 0;
+        long statusAt = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        long lastEventId = turn.harnessLastEventId() == null ? 0 : turn.harnessLastEventId();
         boolean flushFirstVisibleText = true;
         try {
             while (true) {
-                StreamItem item = take(incoming, batch, flushAt);
+                if (System.nanoTime() >= statusAt) {
+                    flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    batchBytes = 0;
+                    flushAt = 0;
+                    // An unavailable advisory read must not replace the stream's
+                    // authoritative terminal event or its bounded idle failure.
+                    boolean recoveryBlocked = false;
+                    try {
+                        recoveryBlocked = incoming.isEmpty() && stream.recoveryBlocked(lastEventId);
+                    } catch (DaemonTransportException error) {
+                        LOG.warn("Managed Harness recovery probe is unavailable"
+                                        + " tenant={} session={} turn={} failure={}",
+                                turn.tenantId(), turn.sessionId(), turn.turnId(),
+                                error.getClass().getSimpleName());
+                    }
+                    if (recoveryBlocked && incoming.isEmpty()) {
+                        requireLease(leaseLost);
+                        boolean parked = store.markTurnRecoveryBlocked(turn.tenantId(),
+                                turn.sessionId(), turn.turnId(), owner,
+                                AgentStateStore.HARNESS_RECOVERY_BLOCKED,
+                                "The Hosted Harness stopped with recovery blocked;"
+                                        + " reconcile its saved execution before continuing.");
+                        if (!parked) {
+                            LOG.warn("Managed Harness recovery-blocked mark lost to a lease CAS"
+                                            + " tenant={} session={} turn={}",
+                                    turn.tenantId(), turn.sessionId(), turn.turnId());
+                        }
+                        return parked;
+                    }
+                    statusAt = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+                }
+                StreamItem item = take(incoming, batch, flushAt, statusAt);
                 if (item == null) {
                     flush(turn, stream.eventEpoch(), batch, leaseLost);
                     batchBytes = 0;
@@ -879,6 +950,9 @@ public class HarnessCoordinator {
                 }
                 SourceEvent source = item.event();
                 requireLease(leaseLost);
+                if (source.id() != null) {
+                    lastEventId = Math.max(lastEventId, source.id());
+                }
                 if (source.id() == null
                         || source.promptId() != null
                         && !turn.promptId().equals(source.promptId())) {
@@ -973,12 +1047,10 @@ public class HarnessCoordinator {
     }
 
     private StreamItem take(BlockingQueue<StreamItem> incoming,
-            List<HarnessEvent> batch, long flushAt) {
+            List<HarnessEvent> batch, long flushAt, long statusAt) {
         try {
-            if (batch.isEmpty()) {
-                return incoming.take();
-            }
-            long remaining = Math.max(1, flushAt - System.nanoTime());
+            long deadline = batch.isEmpty() ? statusAt : Math.min(flushAt, statusAt);
+            long remaining = Math.max(1, deadline - System.nanoTime());
             return incoming.poll(remaining, TimeUnit.NANOSECONDS);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
@@ -1489,7 +1561,7 @@ public class HarnessCoordinator {
                 && current.consecutiveFailures()
                         >= (long) Math.max(1, budget)
                                 * GENERATION_CHURN_BUDGET_FACTOR;
-        boolean exempt = exemptFromRetryBudget && !generationChurn;
+        boolean exempt = (exemptFromRetryBudget || isPoolWait(error)) && !generationChurn;
         if (!submissionAttempted
                 && !exempt
                 && (chargedFailures >= maxPreAdmissionRetries
@@ -1604,6 +1676,17 @@ public class HarnessCoordinator {
 
     private static boolean isHarnessDisabled(RuntimeException error) {
         return error instanceof HarnessDisabledException;
+    }
+
+    static boolean isPoolWait(RuntimeException error) {
+        if (error instanceof ManagedAgentException managed) {
+            return managed.getStatus() == HttpStatus.SERVICE_UNAVAILABLE
+                            && "harness_pool_unavailable".equals(managed.getCode())
+                    || managed.getStatus() == HttpStatus.CONFLICT && managed.getCode() != null
+                            && POOL_OWNERSHIP_WAIT_CODES.contains(managed.getCode());
+        }
+        return error instanceof DaemonHttpException http && http.getStatusCode() == 409
+                && "hosted_harness_quiescing".equals(http.getErrorCode());
     }
 
     // #14387: refuse the workflow Turn's unwitnessed re-execution — mark

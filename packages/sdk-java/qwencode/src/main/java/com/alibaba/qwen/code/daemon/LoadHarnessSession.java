@@ -8,6 +8,7 @@ import java.util.stream.Collectors;
 /** Input for attaching Java to an existing Hosted Harness session. */
 public final class LoadHarnessSession {
     private final String harnessSessionId;
+    private HostedHarnessPlacement harnessPlacement;
     private final ManagedSessionStoreConnection managedSessionStore;
     private final boolean passiveManagedRuntimeRecovery;
     private final String toolProfile;
@@ -20,6 +21,8 @@ public final class LoadHarnessSession {
     private Map<String, Object> sessionSkillsRef;
     private List<Map<String, Object>> mcpServers;
     private Map<String, Object> hookCatalog;
+    private int publicChildAgentsVersion;
+    private Map<String, Object> publicChildModelRoute;
     private boolean stopMessages;
     private boolean foregroundOnly;
     private String recoveryCleanupPromptId;
@@ -61,6 +64,24 @@ public final class LoadHarnessSession {
     /** #13753 I3: with child Workspaces, the control plane serves snapshots too. */
     private boolean childSnapshots;
 
+    public LoadHarnessSession withPublicChildModelRoute(Map<String, Object> value) {
+        this.publicChildModelRoute = value == null ? null : Map.copyOf(value);
+        return this;
+    }
+
+    public LoadHarnessSession withPublicChildAgentsVersion(int value) {
+        if (value != 0 && value != 1) {
+            throw new IllegalArgumentException("Invalid public child agents version");
+        }
+        this.publicChildAgentsVersion = value;
+        return this;
+    }
+
+    public LoadHarnessSession withHarnessPlacement(HostedHarnessPlacement value) {
+        this.harnessPlacement = value;
+        return this;
+    }
+
     public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
         this.agentDefinition = value == null ? null : Map.copyOf(value);
         return this;
@@ -98,6 +119,7 @@ public final class LoadHarnessSession {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
+        copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
@@ -110,6 +132,8 @@ public final class LoadHarnessSession {
         copy.foregroundOnly = foregroundOnly;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -118,6 +142,7 @@ public final class LoadHarnessSession {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
+        copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
@@ -130,6 +155,8 @@ public final class LoadHarnessSession {
         copy.foregroundOnly = value;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -150,6 +177,7 @@ public final class LoadHarnessSession {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
+        copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
@@ -162,6 +190,8 @@ public final class LoadHarnessSession {
         copy.foregroundOnly = foregroundOnly;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -171,6 +201,7 @@ public final class LoadHarnessSession {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
+        copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
@@ -183,6 +214,8 @@ public final class LoadHarnessSession {
         copy.foregroundOnly = foregroundOnly;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -255,6 +288,9 @@ public final class LoadHarnessSession {
 
     Map<String, Object> toJson() {
         Map<String, Object> result = new LinkedHashMap<>();
+        if (harnessPlacement != null) {
+            result.put("harnessPlacement", harnessPlacement.toJson());
+        }
         if (recoveryCleanupPromptId != null) {
             result.put("recoveryCleanupPromptId", recoveryCleanupPromptId);
         }
@@ -269,6 +305,12 @@ public final class LoadHarnessSession {
         }
         if (toolProfile != null) {
             result.put("toolProfile", toolProfile);
+        }
+        if (publicChildModelRoute != null) {
+            result.put("publicChildModelRoute", publicChildModelRoute);
+        }
+        if (publicChildAgentsVersion != 0) {
+            result.put("publicChildAgentsVersion", publicChildAgentsVersion);
         }
         if (suppressChildAgents) {
             result.put("suppressChildAgents", true);

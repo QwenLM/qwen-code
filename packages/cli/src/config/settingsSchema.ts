@@ -853,6 +853,38 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  verifyPr: {
+    type: 'object',
+    label: 'Verify PR',
+    category: 'General',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Coordinates for a manual /verify-pr publish round. Each value is surfaced at startup as the environment variable the skill already reads, so the host does not have to be repeated per round. Only honored from User, System, and SystemDefaults settings scopes.',
+    showInDialog: false,
+    properties: {
+      assetsRepo: {
+        type: 'string',
+        label: 'Assets repository: verify-pr',
+        category: 'General',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'The `owner/repo` that hosts the screenshots a `--publish` round links from its PR comment, surfaced as `QWEN_VERIFY_ASSETS_REPO`; `--assets-repo` still overrides it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot choose where its own verification evidence is published.',
+        showInDialog: false,
+      },
+      assetsBranch: {
+        type: 'string',
+        label: 'Assets branch: verify-pr',
+        category: 'General',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'The branch inside that repository, surfaced as `QWEN_VERIFY_ASSETS_BRANCH`; without it a round publishes to `assets/pr<n>-validation`. Only honored from User, System, and SystemDefaults settings scopes, for the same reason as `verifyPr.assetsRepo`.',
+        showInDialog: false,
+      },
+    },
+  },
   output: {
     type: 'object',
     label: 'Output',
@@ -1663,6 +1695,12 @@ const SETTINGS_SCHEMA = {
             description:
               'Mod tool input dialect. Defaults to native; claude exposes the supported Bash/Edit/Write input subset.',
           },
+          unsupportedEvents: {
+            type: 'string',
+            enum: ['skip', 'reject'],
+            description:
+              'Hooks for Claude Code events Qwen Code does not support. Defaults to skip, which reports them at startup; reject fails initialization instead.',
+          },
           options: {
             type: 'object',
             additionalProperties: {
@@ -1678,7 +1716,7 @@ const SETTINGS_SCHEMA = {
       },
     },
     description:
-      'Mod options and tool dialect keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
+      'Mod options, tool dialect and unsupported-event policy keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
     showInDialog: false,
   },
 
@@ -2098,7 +2136,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: false,
             description:
-              "Force scope:'global' on Anthropic cache_control entries even when the base URL is not an Anthropic-native origin (e.g. proxy providers like Routify, OpenRouter). Requires the proxy to forward cache_control fields and the prompt-caching-scope-2026-01-05 beta.",
+              "Opt in to scope:'global' on Anthropic cache_control entries. Off by default for every base URL, api.anthropic.com included: the API only accepts a global breakpoint when every preceding block is globally scoped too, which a real tool list cannot satisfy within the four-breakpoint cap. Turn on only for a backend whose validation differs and that forwards cache_control fields plus the prompt-caching-scope-2026-01-05 beta.",
             parentKey: 'generationConfig',
             showInDialog: false,
           },

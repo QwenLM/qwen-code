@@ -317,6 +317,12 @@ public class SessionLifecycleCoordinator {
                             ? httpError.getErrorCode() : "workspace_lifecycle_hooks_unsettled";
                 }
             }
+            if (claimed.kind() != OperationKind.CWD_CHANGE && cause instanceof RuntimeException wait
+                    && HarnessCoordinator.isPoolWait(wait)) {
+                blocked = null;
+                daemonWaitCode = wait instanceof com.alibaba.qwen.code.managedagent.exception.ManagedAgentException apiError
+                        ? apiError.getCode() : ((DaemonHttpException) wait).getErrorCode();
+            }
             if (blocked != null) {
                 failureCode = blocked;
             }
@@ -750,9 +756,14 @@ public class SessionLifecycleCoordinator {
                 try {
                     harness.prepareLifecycleResources(operation);
                     if (com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.SHELL.equals(profile)) {
-                        runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
-                                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.authority(operation))
-                                .toCompletableFuture().join();
+                        var authority = com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.authority(operation);
+                        if (store.hasMcpServers(session)) {
+                            runtimeWarmer.prepareWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
+                                    .toCompletableFuture().join();
+                        } else {
+                            runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
+                                    .toCompletableFuture().join();
+                        }
                     }
                     harness.settleLifecycleResources(operation);
                     runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
@@ -803,8 +814,7 @@ public class SessionLifecycleCoordinator {
             String holder = store.requireSession(operation.tenantId(),
                     operation.sessionId()).harnessBootId();
             if (harness.isAvailable()) {
-                String answered = harness.closeSession(operation.tenantId(),
-                        operation.sessionId());
+                String answered = harness.closeSession(operation);
                 // The Harness was asked and answered: even when another
                 // server's Harness replied (confirming nothing about the
                 // Session), the close was delivered — a later failure of
@@ -1261,8 +1271,11 @@ public class SessionLifecycleCoordinator {
                     "kind", parent.kind() == OperationKind.CLOSE
                             ? "close" : "delete"));
         }
-        harness.runChildOperation(parent.tenantId(), parent.sessionId(),
-                childBody);
+        if (operationIsLifecycle(parent)) {
+            harness.runLifecycleChildOperation(parent, childBody);
+        } else {
+            harness.runChildOperation(parent.tenantId(), parent.sessionId(), childBody);
+        }
     }
 
     /** The newest binding row proving a child's dispatch identity, in
