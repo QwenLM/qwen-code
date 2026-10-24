@@ -36,6 +36,7 @@ const NATIVE_TOOLS = new Set([
   'write_file',
   'edit',
   'glob',
+  'todo_write',
   'web_fetch',
 ]);
 
