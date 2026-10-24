@@ -288,6 +288,7 @@ function setupGoalClient() {
     getStopHookBlockingCap: vi.fn(() => 8),
     isManagedMemoryAvailable: vi.fn(() => false),
     getManagedAutoMemoryEnabled: vi.fn(() => false),
+    getConditionalRulesRegistry: vi.fn(() => undefined),
     getMemoryManager: vi.fn(() => ({
       resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
       reconcileMemoryBodiesPresentInHistory: vi.fn(),
