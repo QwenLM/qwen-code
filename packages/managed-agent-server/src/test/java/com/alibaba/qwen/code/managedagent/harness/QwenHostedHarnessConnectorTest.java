@@ -846,6 +846,25 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @Test
+    void extendedApprovalPoliciesRequireTheirOwnFeaturesAndTheBaseProtocol() {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        var connector = connector(client);
+        when(capabilities.getFeatures()).thenReturn(List.of("auto-approval/1", "permission-rules/1"));
+        assertThat(connector.supportsAutoApproval()).isFalse();
+        assertThat(connector.supportsPermissionRules()).isFalse();
+        when(capabilities.getFeatures()).thenReturn(List.of("approval-selection/1", "auto-approval/1", "permission-rules/1"));
+        assertThat(connector.supportsAutoApproval()).isTrue();
+        assertThat(connector.supportsPermissionRules()).isTrue();
+        when(client.capabilities()).thenThrow(new IllegalStateException("unavailable"));
+        assertThat(connector.supportsAutoApproval()).isFalse();
+        assertThat(connector.supportsPermissionRules()).isFalse();
+        verify(client, never()).loadSession(any());
+        verify(client, never()).createSession(any());
+    }
+
+    @Test
     void titleCapabilityPreflightDoesNotAttachOrSendAMutation() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities unsupported = mock(HostedHarnessCapabilities.class);

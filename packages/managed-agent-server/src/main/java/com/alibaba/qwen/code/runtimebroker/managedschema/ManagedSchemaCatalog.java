@@ -493,7 +493,8 @@ final class ManagedSchemaCatalog {
         List<String> tokens = new ArrayList<>();
         while (matcher.find()) {
             String token = matcher.group();
-            tokens.add(token.startsWith("'") ? token : lower(token));
+            String normalized = token.startsWith("'") ? token : lower(token);
+            tokens.add("octet_length".equals(normalized) ? "length" : normalized);
         }
         return booleanShape(numericBooleans(tokens));
     }

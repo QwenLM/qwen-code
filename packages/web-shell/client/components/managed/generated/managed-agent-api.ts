@@ -527,7 +527,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. */
+        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads. */
         post: operations["changeWebShellSessionApproval"];
         delete?: never;
         options?: never;
@@ -1038,7 +1038,7 @@ export interface components {
              * @description Current effective approval policy; initialApprovalMode retains the immutable creation policy.
              * @enum {string}
              */
-            approvalMode?: "default" | "auto-edit" | "yolo";
+            approvalMode?: "default" | "auto" | "auto-edit" | "yolo";
             modelContext?: components["schemas"]["WebShellModelContext"];
             modelSelection?: components["schemas"]["WebShellModelSelection"];
             /** Format: int64 */
@@ -1748,15 +1748,19 @@ export interface components {
             /** @description Execution approval can change during a Turn when true. Missing means idle-only; Plan changes remain idle-only. */
             liveSupported?: boolean;
             /** @enum {string} */
-            approvalMode: "default" | "auto-edit" | "yolo";
+            approvalMode: "default" | "auto" | "auto-edit" | "yolo";
             /** Format: int64 */
             approvalRevision: number;
-            availableApprovalModes: ("default" | "auto-edit" | "yolo")[];
+            availableApprovalModes: ("default" | "auto" | "auto-edit" | "yolo")[];
             supported: boolean;
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
             /** @description Optional deployment capability; missing means false. */
             planModeSupported?: boolean;
+            /** @description Persisted rules, including when execution capability is unavailable. Omitted when empty. */
+            permissionRules?: components["schemas"]["ManagedPermissionRules"];
+            /** @description Owner-authorized Session rule editing is available only with Harness permission-rules/1 support. Missing means false. Rule changes require an idle Session. */
+            permissionRulesSupported?: boolean;
         };
         WebShellChangeApprovalRequest: {
             sessionId: string;
@@ -1765,19 +1769,23 @@ export interface components {
             idempotencyKey: string;
             requestId?: string;
             /** @enum {string} */
-            approvalMode: "default" | "auto-edit" | "yolo";
+            approvalMode: "default" | "auto" | "auto-edit" | "yolo";
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
+            /** @description Omission preserves the persisted rules. Supplying three empty arrays clears them. Rule edits require an idle Session, and share the approval revision and idempotency receipt with mode changes. */
+            permissionRules?: components["schemas"]["ManagedPermissionRules"];
         };
         WebShellApprovalChangeResult: {
             sessionId: string;
             /** @enum {string} */
-            approvalMode: "default" | "auto-edit" | "yolo";
+            approvalMode: "default" | "auto" | "auto-edit" | "yolo";
             /** Format: int64 */
             approvalRevision: number;
             replayed: boolean;
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
+            /** @description Committed rules; omitted when empty. Replayed requests return their original policy receipt. */
+            permissionRules?: components["schemas"]["ManagedPermissionRules"];
         };
         WebShellRuntimeNode: {
             nodeId: string;
@@ -2108,6 +2116,12 @@ export interface components {
              * @enum {string}
              */
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
+        };
+        /** @description Session-scoped portable permission-rules/1. Each rule must be trimmed, nonempty, free of control characters, and at most 512 UTF-8 bytes. At most 32 unique strings per list, 64 across all lists and 8192 UTF-8 bytes of compact JSON. Tool names and aliases match whole tools; MCP names may end with a wildcard. Bash/Shell/run_shell_command/monitor command globs and WebFetch/web_fetch(domain:host) are supported; file-path specifiers and arbitrary tool predicates are rejected. Deny takes precedence over ask, then allow, in every mode. Rules do not provide filesystem or process isolation. */
+        ManagedPermissionRules: {
+            allow: string[];
+            ask: string[];
+            deny: string[];
         };
     };
     responses: {
