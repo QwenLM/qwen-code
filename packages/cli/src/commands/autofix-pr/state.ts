@@ -57,8 +57,9 @@ export interface AutofixPrState {
   /** `<check>@<headSha>@<attempt>` of failures handled without a push (declined,
    * left for a human, or re-run), keyed like the gate cursor's checks. */
   handledChecks?: string[];
-  /** `<check>@<headSha>` of checks re-run once already; the next failure on
-   * that head is treated as real. */
+  /** `<identity>@<headSha>@<check run id>` of checks re-run once already,
+   * with the check run that was re-run; the failure of a later run on that
+   * head is treated as real. */
   rerunChecks?: string[];
   /** Head SHA whose merge conflict was left for a human. */
   handledConflictSha?: string | null;

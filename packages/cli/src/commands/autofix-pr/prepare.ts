@@ -235,18 +235,21 @@ export function runPrepare(args: PrepareArgs): void {
   const root = repoRoot();
   const paths = autofixPrPaths(root, args.pr);
 
-  let existing = readState(paths.statePath);
-  let tookOver = false;
-  if (existing) {
-    // State is keyed by PR number alone, and one clone can reach several
-    // repositories with a PR of that number.
-    const watched = `${existing.host}/${existing.owner}/${existing.repo}`;
-    if (!sameRepository(existing, { host, owner, repo: repoName })) {
+  // State is keyed by PR number alone, and one clone can reach several
+  // repositories with a PR of that number.
+  const sameWatch = (state: AutofixPrState) => {
+    if (!sameRepository(state, { host, owner, repo: repoName })) {
+      const watched = `${state.host}/${state.owner}/${state.repo}`;
       throw new Error(
         `PR #${args.pr} here is a watch of ${watched}, not ${host}/${args.repo}. ` +
           `Run \`qwen autofix-pr cleanup ${args.pr}\` first.`,
       );
     }
+  };
+  let existing = readState(paths.statePath);
+  let tookOver = false;
+  if (existing) {
+    sameWatch(existing);
     // A /clear or /resume gives the session a new id while its scheduled
     // task goes on: the user hands the watch, history and budgets kept, to
     // the session that asks. The other session's helpers refuse from then on.
@@ -316,6 +319,13 @@ export function runPrepare(args: PrepareArgs): void {
   }
   mkdirSync(dirname(paths.lockPath), { recursive: true });
   const state = withWatchLock(paths, args.pr, () => {
+    // What was read before the lock may have moved since: another session
+    // took the watch over, or a helper recorded more. Read it again.
+    existing = readState(paths.statePath);
+    if (existing) {
+      sameWatch(existing);
+      assertOwnedBySession(existing);
+    }
     // Never discard what an earlier watch left: only `cleanup` knows when that
     // is safe. The one exception is a branch whose worktree was removed and
     // that holds nothing beyond the PR head it was cut from.

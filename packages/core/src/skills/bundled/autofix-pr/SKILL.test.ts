@@ -137,6 +137,8 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('**Only the start asks the user anything.**');
     expect(body).toContain('merge, never rebase');
     expect(body).toContain('Never list an `untrusted_comment` id');
+    // A task kept from before a take-over would name the other session.
+    expect(body).toContain('keep it if its schedule, gate and prompt are');
     // The scheduled task runs the probe as its gate, outside the model.
     expect(body).toContain(
       '`gate`: `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>`',

@@ -760,6 +760,31 @@ describe('runPrepare (real git)', () => {
     );
   });
 
+  it('reads the watch again under its lock, so a take-over meanwhile stands', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    // The worktree is gone, so prepare goes on to make it again.
+    run(clone, 'worktree', 'remove', '--force', paths.worktreePath);
+    const answer = mocks.gh.getMockImplementation()!;
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        // Another session takes the watch over while this one reads the PR.
+        writeState(paths.statePath, {
+          ...readState(paths.statePath)!,
+          sessionId: 'session-b',
+        });
+      }
+      return answer(...args);
+    });
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      /watched by another session \(session-b\)/,
+    );
+    expect(readState(paths.statePath)).toMatchObject({
+      sessionId: 'session-b',
+    });
+    expect(existsSync(paths.worktreePath)).toBe(false);
+  });
+
   it('refuses when no single remote serves the repository', () => {
     mocks.matched.mockImplementation(() => []);
     expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(

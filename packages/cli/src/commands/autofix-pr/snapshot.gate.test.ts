@@ -189,7 +189,7 @@ describe('buildGateSnapshot', () => {
     const partial = buildGateSnapshot(cut, full.cursor, {
       knownHeads: [],
       seenCommentIds: [],
-      partial: true,
+      partial: 'checks',
     });
     expect(partial.snapshot).toBeNull();
     expect(partial.cursor.reportedChecks).toEqual(full.cursor.reportedChecks);
@@ -201,6 +201,45 @@ describe('buildGateSnapshot', () => {
         partial.cursor,
       ).snapshot,
     ).toBeNull();
+  });
+
+  it('reports a page cap on a run its time budget cut in the threads', () => {
+    const capped = pr({}, [failed('Test', 1)]);
+    capped.commits.nodes[0]!.commit.statusCheckRollup!.contexts.pageInfo = {
+      hasNextPage: true,
+      endCursor: 'c10',
+    };
+    // Test was reported: the cap is all there is to wake for.
+    const before = cursor({ reportedChecks: [`Test@${HEAD}@#1`] });
+    const result = buildGateSnapshot(capped, before, {
+      knownHeads: [],
+      seenCommentIds: [],
+      partial: 'threads',
+    });
+    expect(result.snapshot).toMatchObject({ action: 'wait', events: [] });
+    expect(result.snapshot?.truncated).toContain('checks');
+    expect(result.cursor.reportedTruncated).toEqual(['checks']);
+    // Its cut is kept by the next run the time cuts in the checks.
+    const slower = buildGateSnapshot(capped, result.cursor, {
+      knownHeads: [],
+      seenCommentIds: [],
+      partial: 'checks',
+    });
+    expect(slower.snapshot).toBeNull();
+    expect(slower.cursor.reportedTruncated).toEqual(['checks']);
+  });
+
+  it('forgets a check gone green on a run its time budget cut in the threads', () => {
+    const red = buildGateSnapshot(pr({}, [failed('Test', 1)]), cursor());
+    expect(red.cursor.reportedChecks).toHaveLength(1);
+    // Every check was read, and Test is green: only the threads were cut.
+    const green = buildGateSnapshot(pr(), red.cursor, {
+      knownHeads: [],
+      seenCommentIds: [],
+      partial: 'threads',
+    });
+    expect(green.snapshot).toBeNull();
+    expect(green.cursor.reportedChecks).toEqual([]);
   });
 
   it('reports a failed check once per head and again after it was re-run', () => {
@@ -1173,15 +1212,71 @@ describe('fetchPrData', () => {
         data: { viewer: { login: 'me' }, repository: { pullRequest: open } },
       }),
     );
-    const { pr: data } = fetchPrData(
+    const { pr: data, partial } = fetchPrData(
       { owner: 'o', repo: 'r', prNumber: 7 },
       undefined,
       Date.now() - 1,
     );
     expect(mockGh).toHaveBeenCalledTimes(1);
     expect(checkEvents(data).truncated).toBe(true);
+    expect(partial).toBe('checks');
     expect(GATE_READ_BUDGET_MS).toBeLessThan(20_000);
     mockGh.mockReset();
+  });
+
+  it('tells time that ran out in the threads, or a page cap, from time that ran out in the checks', () => {
+    const threaded = pr();
+    threaded.reviewThreads = {
+      pageInfo: { hasNextPage: true, endCursor: 't1' },
+      nodes: [],
+    };
+    mockGh.mockReset();
+    mockGh.mockReturnValueOnce(
+      JSON.stringify({
+        data: {
+          viewer: { login: 'me' },
+          repository: { pullRequest: threaded },
+        },
+      }),
+    );
+    expect(
+      fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 }, undefined, 0).partial,
+    ).toBe('threads');
+
+    // Every page the cap allows was read before the time ran out: the cut
+    // is the cap's, which every run meets alike.
+    const now = vi.spyOn(Date, 'now');
+    let clock = 1_000;
+    now.mockImplementation(() => clock);
+    mockGh.mockReset();
+    mockGh.mockImplementation((...args: string[]) => {
+      clock += 1;
+      const first = !args.some((arg) => arg.startsWith('after='));
+      return JSON.stringify({
+        data: first
+          ? {
+              viewer: { login: 'me' },
+              repository: {
+                pullRequest: { ...pr(), ...page([failed('A')], 'c1') },
+              },
+            }
+          : { repository: { pullRequest: page([failed('B')], 'cN') } },
+      });
+    });
+    try {
+      const capped = fetchPrData(
+        { owner: 'o', repo: 'r', prNumber: 7 },
+        undefined,
+        clock + 9.5,
+      );
+      expect(mockGh).toHaveBeenCalledTimes(10);
+      expect(Date.now()).toBeGreaterThan(1_009.5);
+      expect(checkEvents(capped.pr).truncated).toBe(true);
+      expect(capped.partial).toBeUndefined();
+    } finally {
+      now.mockRestore();
+      mockGh.mockReset();
+    }
   });
 
   it('reads a merged or closed PR with one call, however much its first page leaves', () => {

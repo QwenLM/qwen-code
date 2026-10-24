@@ -15,7 +15,7 @@ import {
   ghWithInput,
   setGhHost,
 } from '../review/lib/gh.js';
-import { checkEvents, fetchPrData } from './snapshot.js';
+import { checkEvents, fetchPrData, rerunFrom } from './snapshot.js';
 import {
   assertOwnedBySession,
   assertPositiveInteger,
@@ -89,8 +89,15 @@ function rerunLocked(
   const rerunKeys = failed.map(
     ({ identity }) => `${identity}@${pr.headRefOid}`,
   );
-  const already = new Set(state.rerunChecks ?? []);
+  const already = rerunFrom(state.rerunChecks ?? []);
   const repeated = checks.filter((_, index) => already.has(rerunKeys[index]));
+  // Each with the check run re-run: the re-run's runs come after it.
+  const reran = [
+    ...(state.rerunChecks ?? []),
+    ...failed.map(
+      ({ checkRunId }, index) => `${rerunKeys[index]}@${checkRunId ?? 0}`,
+    ),
+  ];
   if (repeated.length > 0) {
     return {
       rerun: false,
@@ -121,7 +128,7 @@ function rerunLocked(
   // leaves them for a human instead of hiding them.
   writeState(paths.statePath, {
     ...state,
-    rerunChecks: [...already, ...rerunKeys],
+    rerunChecks: reran,
     deferredRuns: (state.deferredRuns ?? []).filter((id) => id !== runId),
   });
   try {
@@ -150,7 +157,7 @@ function rerunLocked(
   }
   writeState(paths.statePath, {
     ...state,
-    rerunChecks: [...already, ...rerunKeys],
+    rerunChecks: reran,
     handledChecks: [...(state.handledChecks ?? []), ...attempts],
     deferredRuns: (state.deferredRuns ?? []).filter((id) => id !== runId),
   });

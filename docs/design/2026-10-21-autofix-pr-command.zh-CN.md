@@ -83,7 +83,7 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
   ├─ qwen autofix-pr rerun     re-run an infrastructure failure, once per check and head
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
   └─ cron_create               session-only, recurring, gate:
-                               "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>";
+                               "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>";
                                the prompt says how to handle the events the gate printed
 
 qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marked
@@ -113,7 +113,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 7. 在拥有这次监视的会话里重新运行 `prepare`，且 worktree 还在时，直接报告现有状态并带上 `resumed: true`，不再调用其他任何东西。如果 worktree 已被删除（包括用 `rm -rf` 删除，`git worktree prune` 会清掉它的登记），就重新创建它，并保留已记录的 `pushedShas`、`handledCommentIds` 和 `postedCommentIds`。状态文件属于另一个仓库的同号 PR 时直接拒绝。仓库按 GitHub 的方式比较：owner 和仓库名不区分大小写；host 不区分大小写、忽略默认端口，但保留其他端口，因为不同端口可能是不同的实例。
 8. 输出 JSON 报告：worktree 路径、分支、head SHA、base/head ref、推送目标、当前用户和 PR 作者的 login、draft 和 fork 标志，以及 `localUnpushedCommits`，即用户自己那份 head 分支上 PR 还没有的提交数。worktree 看不到这些提交。只有 upstream 是推送 remote 上 head 分支的本地分支才算这份副本，因此 fork 的 `main` 永远不会和用户自己的 `main` 比较。
 
-### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate]`
+### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>]`
 
 一次 GraphQL 调用（检查或 review thread 每多一页再加一次）读取：
 
@@ -183,7 +183,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - 尚未提交的 review 里的评论（`PENDING`）是只有作者能看到的草稿，会被跳过。bot 在开启 thread 的评论（以及 review）里提要求；它在 thread 里的回复是在回答某人，不算请求。被回复的评论删除后，GraphQL 会丢掉回复的 `replyTo`，并把它列为 thread 的第一条，所以看起来像是开启了 thread、又尚未见过的 bot 评论，会通过 REST 逐条查询（`in_reply_to_id` 仍保留在这条评论上），只针对打开的 PR 上未解决的 thread，而且每条只问一次：答案保存在 `.qwen/tmp/autofix-pr-<n>-replies.json`，闸门、已准备快照和 `reply` 共用。期间被删除的评论不算请求。每条答案一拿到就保存。闸门每次触发最多问 20 条、不超出闸门的读取时限，遇到第一次失败就停，剩下的留到下一次触发，这次既不算请求也不记为已看过；一轮的快照则问完所有条目，GitHub 没有回应时直接失败，绝不丢掉闸门已经报告过的请求（`reply` 按闸门的方式询问：它的计划只会点名快照问过的 thread）；问了八分钟仍未问完时就停下，保留已有答案，并提示再运行一次。闸门也把 bot 的回复记为已看过。否则，会回复每条回复的评审 bot 会让每次都多跑一轮，不受信任的评论者也能借 bot 之口提要求，删掉自己的评论之后也一样。
 - 失败的检查只有在它是 PR 所在仓库的 GitHub Actions job 时才带 `runId`（它的 suite 有 workflow run，URL 位于 `https://<host>/<owner>/<repo>/actions/runs/` 之下）：commit status 或其他应用的检查可以链接任意 run，`ci-log` 会去读它。
 - 已合并或已关闭的 PR 只读第一次调用：它的结果就是停止，不需要再翻检查、suite 或 thread 的后续页。
-- 监视属于 CLI 会话，其 id 保持不变。Managed Session 把每一轮、每一次闸门都作为各自的 Runtime Session 运行，所以辅助命令的会话检查会拒绝它的下一轮：探针可以充当 Managed 自动化的闸门——不写 `--session` 的闸门不做所有者检查——而监视本身暂不适用于 Managed Session。
+- 监视属于 CLI 会话，其 id 保持不变。Managed Session 把每一轮、每一次闸门都作为各自的 Runtime Session 运行，所以辅助命令的会话检查会拒绝它的下一轮：探针可以充当 Managed 自动化的闸门——不写 `--session` 的闸门不做所有者检查——而监视本身暂不适用于 Managed Session。这样的闸门和同一 clone 里对同一 PR 的 CLI 监视共用闸门游标，先触发的一方会拿走另一方的迁移：请各用一个 clone。
 - check 和 suite 属于提交而不属于 PR：同一个 head 提交的另一个 PR 会共用它们。这是已知的局限。
 - 已准备模式把整个快照缩进后写到 `.qwen/tmp/autofix-pr-<n>-snapshot.json`，只输出一行：去掉事件的快照、事件数量和类型，以及文件路径（`snapshot`）。有一点历史的 PR 上，评论正文远远超出一行工具输出能显示的长度；这一轮读取该文件，修复说明列出修复 agent 要处理的条目，正文从该文件读取。正文写成按行的数组，超过 2,000 字符的行写成由若干片段组成的数组（绝不在一个字符中间切开），因为 `read_file` 按行分页，一次读取返回的内容超过 25,000 字符就截断；被这样截断的读取要从它最后显示的那一行重新读。
 - `truncated` 列出条目数超过查询读取范围的连接（`checks`、`reviewThreadComments`、`reviewThreads`、`reviews`、`comments`）。
@@ -194,14 +194,14 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 `snapshot <n> --gate` 是定时任务闸门背后的那条命令。它不需要 worktree，也不需要状态文件：首次运行用 `--repo` 指定 PR 所在的仓库（或由已准备好的状态提供），它自己的游标 `.qwen/tmp/autofix-pr-<n>-gate.json` 记录已经报告过的内容。没有 `--host`（或 `GH_HOST`）时，先用该 PR 已在监视的 host——游标里的，或已准备状态里的——最后才回落到 github.com；空白的 `--host` 会被拒绝。游标属于另一个仓库的同号 PR 时直接拒绝，比较方式与 `prepare` 比较状态文件相同。它输出同样的 JSON，但只包含自上次运行以来的迁移，没有迁移时什么都不输出，因此会话只会为迁移被唤醒：
 
-- 失败的检查按（检查，head，attempt）报告一次；由 review 或评论启动的 workflow，其 attempt 是 workflow 加触发事件（`#on:<workflow id>:<event>`）：任何人每提交一次 review 它都会再跑一次，而已处理过的失败再跑一次，对代码没有新信息：游标键带上运行 id（commit status 则是它的创建时间），所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。同一 PR 的已准备监视不靠推送处理掉的失败（`handledChecks`）视为已报告。因为 run 仍在进行而延后重跑的失败（`deferredRuns`，第 6.9 节）会在该 run 结束时再报告一次，以便监视那时重跑它。
+- 失败的检查按（检查，head，attempt）报告一次；由 review 或评论启动的 workflow，其 attempt 是 workflow 加触发事件（`#on:<workflow id>:<event>`）：任何人每提交一次 review 它都会再跑一次，而已处理过的失败再跑一次，对代码没有新信息。一轮在这个 head 上重跑过它之后（`rerunChecks` 记下被重跑的 check run），之后那次运行的失败就是重跑的回答，以 `#rerun:<workflow id>:<event>` 再报告一次；被重跑的那次运行保留原来的键，所以 GitHub 还没列出的重跑、或回答丢失的重跑，都不会被当成它。游标键带上运行 id（commit status 则是它的创建时间），所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。同一 PR 的已准备监视不靠推送处理掉的失败（`handledChecks`）视为已报告。因为 run 仍在进行而延后重跑的失败（`deferredRuns`，第 6.9 节）会在该 run 结束时再报告一次，以便监视那时重跑它。
 - 进行中的检查从不报告；不会出现 `ci_pending`。
 - 冲突按 head 报告一次；`mergeable` 清除标记，`UNKNOWN` 保留标记。已准备监视在该 head 上留给人处理的冲突（`handledConflictSha`）不报告。
 - 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。工具自己的回复（当前用户发的、以回复标记结尾的评论）永远不是事件，同一 PR 的已准备监视处理过的评论（`handledCommentIds`、`postedCommentIds`）也不是；其中查询结果里还在的会被并入游标，所以 `cleanup` 删掉状态文件之后它们仍然保持安静。只有不可信评论时作为提醒报告（`wait`）。查询结果里仍然出现的已报告 id 全部保留在游标里，不论多少；只有已经离开页面的 id 才有上限，所以内容相同的轮询是安静的。正文截到前 1,000 个字符（`bodyTruncated: true`）；完整内容见事件的 `url`。
 - head 与上次运行不同时记为 `head_moved_externally`（`resync`），除非同一 PR 的已准备监视记录过或推送过它（`lastKnownHeadSha`、`pushedShas`）；首次运行只记录 head，不报告。
 - 合并或关闭报告一次（`stop`）；之后探针保持安静，重新打开的 PR 会再次被监视。
 - 从头读取的连接（`checks`、`reviewThreads`）开始被截断时报告一次，没有其他事件时动作为 `wait`：超出最后一页的新 thread 不会留下别的痕迹。持续的截断保持安静。评论、review 和 thread 评论从最新的读起，那里的截断只会藏住更早的内容：它列在 `truncated` 里，但不唤醒会话。例外是刷屏：两次检查之间到达超过 100 条时，会把一条还没被任何检查读到的挤出去。这是已知的局限；该轮在报告里会写明截断。
-- 一次闸门运行读取 GitHub 最多 15 秒，在 Managed 自动化 20 秒的闸门之内（定时任务允许 60 秒）：超时后停止翻页，没读到的部分保持截断。时限在每次调用之前检查，所以临近时限才发出、而 GitHub 回答得慢（或 `gh` 在 5xx 后重试）的那次调用，仍可能让这次触发超出闸门的限制；这次触发会在写游标之前失败，下一次重新读取。
+- 一次闸门运行读取 GitHub 最多 15 秒，在 Managed 自动化 20 秒的闸门之内（定时任务允许 60 秒）：超时后停止翻页，没读到的部分保持截断。时限在每次调用之前检查，所以临近时限才发出、而 GitHub 回答得慢（或 `gh` 在 5xx 后重试）的那次调用，仍可能让这次触发超出闸门的限制；这次触发会在写游标之前失败，下一次重新读取。被截断的运行不唤醒任何人，也不改动截断记录：没读到的部分随 GitHub 的快慢时有时无。截断在检查里的，还保留已报告过的失败；只截断在 review thread 里的，检查已全部读到，只保留仍然存在的失败。GitHub 一直这么慢时，闸门读到的页之外的内容——检查失败、较新的 review thread——要等别的事项启动一轮才会被看到，那一轮会全部读取；页数上限对每次运行都一样，照旧报告一次。
 - 输出不超过 12 KiB——按闸门转交时的形式计算，每个 `<` 写成 `&lt;`——低于闸门交给会话的 16 KiB（超出部分会被闸门截掉）。事件按顺序排列——head 移动、冲突、失败、评论——放不下的事件，或放不下整体的 thread 里靠后的评论，会被留下，计入 `deferred`，且不记为已报告，所以下一次运行会报告它们。每次至少输出一个事件或一条评论，所以每次运行都有进展。
 - 首次运行报告所有尚未处理的事项：失败的检查、冲突，以及没人处理过的评论。
 
@@ -290,11 +290,11 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 ### 6.9 `rerun <pr> <run-id>`
 
-对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job，只针对打开的 PR。只认 PR 所在仓库的 GitHub Actions job：commit status 或其他 app 可以链接任意 URL，从中读出的 run id 会重跑某个无关的 run。该 run 在当前 head 上的每个失败检查都用掉自己唯一的一次重跑（`rerunChecks`，按检查身份——app、workflow、触发事件和 job 名，与第 6.2 节区分检查的方式相同——和 head 记，所以两个 workflow 里同名的 job 各有各的一次）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。重跑在询问 GitHub 之前就计数，调用本身也不重试，所以响应丢失的重跑不会被再请求一次：最多一次，绝不两次。只有 GitHub 接受了重跑，其失败才记为已处理：被拒绝（gh 的 `run <id> cannot be rerun`，即 403——token 没有 `actions: write`、run 太旧——或其他 HTTP 4xx）会退还这次重跑，而任何错误都会让这一轮把这些失败作为需要人工处理来回答，所以检查不会一直红着却无人报告。
+对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job，只针对打开的 PR。只认 PR 所在仓库的 GitHub Actions job：commit status 或其他 app 可以链接任意 URL，从中读出的 run id 会重跑某个无关的 run。该 run 在当前 head 上的每个失败检查都用掉自己唯一的一次重跑（`rerunChecks`，按检查身份——app、workflow、触发事件和 job 名，与第 6.2 节区分检查的方式相同——和 head 记，所以两个 workflow 里同名的 job 各有各的一次，并记下被重跑的 check run，第 6.2 节据此给重跑的回答定键）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。重跑在询问 GitHub 之前就计数，调用本身也不重试，所以响应丢失的重跑不会被再请求一次：最多一次，绝不两次。只有 GitHub 接受了重跑，其失败才记为已处理：被拒绝（gh 的 `run <id> cannot be rerun`，即 403——token 没有 `actions: write`、run 太旧——或其他 HTTP 4xx）会退还这次重跑，而任何错误都会让这一轮把这些失败作为需要人工处理来回答，所以检查不会一直红着却无人报告。
 
 GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就报告。因此仍在进行的 run 不询问 GitHub，直接回答 `{"rerun": false, "deferred": true}`，并记入 `deferredRuns`：该 run 结束时闸门会再报告一次它的失败（第 6.2 节），届时那一轮再重跑。在那之前 prepared snapshot 也不列出它们，这样别的事件不会把同一个失败再交给这一轮延后一次。
 
-`push`、`sync`、`reply` 和 `rerun` 在读写状态文件期间都持有这次监视的锁（`.qwen/tmp/autofix-pr-<n>.lock`）：否则模型同时发出的两个辅助命令调用会各自写回自己读到的内容，抹掉对方关于推送、回复或重跑的记录。锁以硬链接的方式整体创建（链接到一个已写好令牌的文件），并且只在仍持有自己令牌时才删除。沙箱可能让每条命令运行在独立的 pid 命名空间里，pid 会重复，所以只在同一命名空间里才检查持有者的 pid；其他锁在存在时间超过任何辅助命令的运行时长（十五分钟）后被接管，`cleanup --force` 则会立即删除它。过期锁一次只由一个辅助命令打破，在独占的 `<lock>.break` 文件保护下进行（被杀掉的辅助命令留下的 `.break` 在一分钟后清除，不论时钟偏前还是偏后）；此时锁里仍是过期令牌，就用一次 rename 把它替换成打破者自己的令牌，所以锁路径从不出现空档让别的辅助命令趁机拿到，新的锁也永远不会被动到。
+`push`、`sync`、`reply` 和 `rerun` 在读写状态文件期间都持有这次监视的锁（`.qwen/tmp/autofix-pr-<n>.lock`）：否则模型同时发出的两个辅助命令调用会各自写回自己读到的内容，抹掉对方关于推送、回复或重跑的记录。`prepare` 在创建 worktree 和状态文件期间也持有它，所以同时进行的两次启动不会回滚或接管对方的 worktree。锁以硬链接的方式整体创建（链接到一个已写好令牌的文件），并且只在仍持有自己令牌时才删除。沙箱可能让每条命令运行在独立的 pid 命名空间里，pid 会重复，所以只在同一命名空间里才检查持有者的 pid；其他锁在存在时间超过任何辅助命令的运行时长（十五分钟）后被接管，`cleanup --force` 则会立即删除它。过期锁一次只由一个辅助命令打破，在独占的 `<lock>.break` 文件保护下进行（被杀掉的辅助命令留下的 `.break` 在一分钟后清除，不论时钟偏前还是偏后）；此时锁里仍是过期令牌，就用一次 rename 把它替换成打破者自己的令牌，所以锁路径从不出现空档让别的辅助命令趁机拿到，新的锁也永远不会被动到。
 
 ## 7. 一轮检查（`tick`）
 
@@ -367,7 +367,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 
 ## 10. 调度、预算与生命周期
 
-- 启动时立即跑第一轮检查——已准备模式的 `snapshot <n>`，它读状态文件而不读闸门游标，所以新的监视能看到所有未处理的事项，不论旧闸门报告过什么——然后调用 `cron_create` 创建会话级循环任务，cron 为 `*/<every> * * * *`（默认 `*/2`），闸门为 `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>`（即传给 `prepare` 的 host），prompt 告诉模型如何处理闸门输出中的事件（`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`）。闸门在创建任务时像 Monitor 命令一样确认一次。
+- 启动时立即跑第一轮检查——已准备模式的 `snapshot <n>`，它读状态文件而不读闸门游标，所以新的监视能看到所有未处理的事项，不论旧闸门报告过什么——然后调用 `cron_create` 创建会话级循环任务，cron 为 `*/<every> * * * *`（默认 `*/2`），闸门为 `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>`（即传给 `prepare` 的 host 和 `prepare` 报告的会话），prompt 告诉模型如何处理闸门输出中的事件（`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`）。闸门在创建任务时像 Monitor 命令一样确认一次。
 - 会话忙时到达的触发会在通知队列里等待；会话空闲后探针运行一次，输出自上次运行以来的全部新内容。
 - 任务随进程结束。状态文件保留，归写下它的会话所有，新会话的 `prepare` 会拒绝它（第 6.1 节）。之后的会话在用户同意后用 `prepare --take-over` 接管监视，推送和预算都保留（第 6.1 节第 5 步）。监视发出和处理过的内容保存在 PR 的历史文件里（第 6.6 节），所以新的监视不会再回复同样的评论。已经停止的监视已经运行过 `cleanup`。
 - cron 最长存活时间的设置（`QWEN_CODE_CRON_MAX_AGE_DAYS`）仍然生效。

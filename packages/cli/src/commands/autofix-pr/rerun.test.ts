@@ -166,8 +166,8 @@ describe('runRerun', () => {
     );
     expect(state()).toMatchObject({
       rerunChecks: [
-        `run:15368:1:pull_request:Test ubuntu@${HEAD}`,
-        `run:15368:1:pull_request:Test macos@${HEAD}`,
+        `run:15368:1:pull_request:Test ubuntu@${HEAD}@5`,
+        `run:15368:1:pull_request:Test macos@${HEAD}@6`,
       ],
       handledChecks: [`Test ubuntu@${HEAD}@#5`, `Test macos@${HEAD}@#6`],
     });

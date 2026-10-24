@@ -402,20 +402,33 @@ describe('buildSnapshot', () => {
         handled,
       ).action,
     ).toBe('wait');
-    // Re-run on this head, its next failure is the re-run's answer:
-    // reported once more, then quiet like the first.
-    const identity = `run:15368:9:pull_request_review:Gate@${HEAD}`;
+    // Re-run on this head from run 101: a failure of a later run is the
+    // re-run's answer, reported once more, then quiet like the first.
+    const reran = [`run:15368:9:pull_request_review:Gate@${HEAD}@101`];
     const again = `Gate@${HEAD}@#rerun:9:pull_request_review`;
-    const rerun = state({ handledChecks: [key], rerunChecks: [identity] });
+    const rerun = state({ handledChecks: [key], rerunChecks: reran });
     expect(
       buildSnapshot(pr({}, [run(102, 'pull_request_review')]), rerun).events,
     ).toMatchObject([{ type: 'ci_failed', key: again }]);
     expect(
       buildSnapshot(
         pr({}, [run(103, 'pull_request_review')]),
-        state({ handledChecks: [key, again], rerunChecks: [identity] }),
+        state({ handledChecks: [key, again], rerunChecks: reran }),
       ).action,
     ).toBe('wait');
+    // The run re-run keeps its key until GitHub lists the re-run: it is
+    // neither reported again nor taken for the re-run's answer.
+    expect(
+      buildSnapshot(pr({}, [run(101, 'pull_request_review')]), rerun).action,
+    ).toBe('wait');
+    // A re-run whose answer was lost leaves it unhandled, under the key
+    // the round answers it by.
+    expect(
+      buildSnapshot(
+        pr({}, [run(101, 'pull_request_review')]),
+        state({ rerunChecks: reran }),
+      ).events,
+    ).toMatchObject([{ type: 'ci_failed', key }]);
     // A run the code started is still a new attempt each time.
     expect(
       buildSnapshot(

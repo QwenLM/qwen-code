@@ -120,7 +120,7 @@ with unit tests; judgment stays in the skill.
   ├─ qwen autofix-pr rerun     re-run an infrastructure failure, once per check and head
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
   └─ cron_create               session-only, recurring, gate:
-                               "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>";
+                               "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>";
                                the prompt says how to handle the events the gate printed
 
 qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marked
@@ -187,7 +187,7 @@ worktree included:
    local branch whose upstream is the head branch on the push remote counts as
    that copy, so a fork's `main` is never compared with the user's `main`.
 
-### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate]`
+### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>]`
 
 One GraphQL call, plus one per further page of checks or review threads,
 reads:
@@ -336,7 +336,10 @@ Event rules:
   runs each turn, and each gate, as a Runtime Session of its own, so the
   helpers' session check refuses its next turn: the probe serves as a
   Managed automation's gate — one that names no `--session` makes no owner
-  check — and the watch itself is not for Managed Sessions yet.
+  check — and the watch itself is not for Managed Sessions yet. Such a gate
+  and a CLI watch of the same PR in one clone share the gate cursor, so
+  whichever fires first takes a transition from the other: give each a
+  clone of its own.
 - Checks and suites belong to the commit, not to the PR: another PR of the
   same head commit shares them. That is a known limit.
 - Prepared mode writes the whole snapshot, indented, to
@@ -378,7 +381,11 @@ when there are none, so the session is woken only for them:
   attempt of a workflow a review or a comment starts is the workflow and its
   trigger (`#on:<workflow id>:<event>`): it runs again for every review
   anyone submits, and a new run of a handled failure says nothing new of
-  the code. The cursor key
+  the code. Once a round re-ran it on the head (`rerunChecks` records the
+  check run re-run), a failure of a later run is the re-run's answer,
+  reported once more under `#rerun:<workflow id>:<event>`; the run re-run
+  keeps its key, so a re-run GitHub has not listed yet, or one whose
+  answer was lost, is not taken for it. The cursor key
   carries the run's id (a commit status: its creation time), so a re-run
   that fails again is reported again even when no poll saw it in progress.
   The cursor keeps only the failures still present, and a new head starts
@@ -422,7 +429,14 @@ when there are none, so the session is woken only for them:
   call, so a call started just before it that GitHub answers slowly (or
   that `gh` retries after a 5xx) can still run a fire past the gate's
   limit; that fire fails before its cursor is written, and the next one
-  reads again.
+  reads again. A cut run wakes no one and keeps the record of cuts: what
+  it did not read comes and goes with GitHub's speed. One cut in the checks
+  keeps the failures it reported as well; one cut in the review threads
+  only read every check, and keeps only the failures still there. While
+  GitHub stays that slow, what lies past the pages the gate reads — a check
+  failure, a newer review thread — waits for a round something else
+  starts, which reads it all; a page cap, which every run meets alike, is
+  reported once as ever.
 - The output stays within 12 KiB — counted as a gate hands it on, with each
   `<` written as `&lt;` — under the 16 KiB the gate hands the
   session (and cuts beyond). Events go in order — head move, conflict,
@@ -743,7 +757,8 @@ and a run id read from it would re-run some unrelated run. Each failed check
 of that run on the head spends its one re-run (`rerunChecks`, keyed by the
 check's identity — app, workflow, trigger and job name, as Section 6.2 tells
 checks apart — and the head, so two workflows with a job of the same name
-each keep theirs);
+each keep theirs, with the check run re-run, which Section 6.2 keys the
+re-run's answer by);
 a run with a check that was re-run on this head already answers
 `{"rerun": false}`, and the failure is treated as real. The attempts it
 re-ran are recorded in `handledChecks`, so the prepared snapshot does not
@@ -769,6 +784,8 @@ the same failure to defer again.
 (`.qwen/tmp/autofix-pr-<n>.lock`) while they read and write the state file:
 two helper calls the model issues at once would otherwise each write back
 what they read, undoing the other's record of a push, a reply or a re-run.
+`prepare` holds it while it creates the worktree and the state file, so two
+starts at once cannot roll back or take over each other's worktree.
 The lock is created whole, as a hard link to a file already holding its
 token, and removed only while it still holds that token. A sandbox may run
 each command in a pid namespace of its own, where pids repeat, so the
@@ -917,8 +934,8 @@ Replies are on by default; `--no-reply` turns them off.
   everything outstanding whatever an older gate reported — then calls
   `cron_create` with a
   session-only recurring job, cron `*/<every> * * * *` (default `*/2`), the
-  gate `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>`
-  (the host it passed to `prepare`), and a
+  gate `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>`
+  (the host it passed to `prepare`, the session `prepare` reported), and a
   prompt that tells the model how to handle the events in the gate output
   (`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`). The gate
   is confirmed once, like a Monitor command, when the task is created.
