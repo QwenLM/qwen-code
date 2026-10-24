@@ -71,6 +71,112 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
   return Number(new Function(`return (${expr});`)());
 };
 
+describe('raw JUnit report retention', () => {
+  const steps = ci.jobs.test.steps;
+  const upload = steps.find(
+    (step) => step.name === 'Upload Test Results Artifact',
+  );
+  // The rule `gateRunsOn` states for itself applies here too: a context term
+  // these stubs do not model must throw rather than read as `undefined`,
+  // where an inequality such as `x != true` would silently evaluate true.
+  const loud = (value, path) =>
+    typeof value !== 'object' || value === null
+      ? value
+      : new Proxy(value, {
+          get: (target, key) => {
+            if (typeof key === 'symbol' || key in target) {
+              return loud(target[key], `${path}${String(key)}.`);
+            }
+            throw new Error(
+              `gate carries a term this guard does not model: ${path}${String(key)}`,
+            );
+          },
+        });
+
+  const evaluate = (expression, event, headRepo, skipCi, profile) =>
+    new Function(
+      'github',
+      'needs',
+      'steps',
+      'always',
+      `return (${expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '')});`,
+    )(
+      loud(
+        {
+          event_name: event,
+          repository: 'QwenLM/qwen-code',
+          event: { pull_request: { head: { repo: { full_name: headRepo } } } },
+        },
+        'github.',
+      ),
+      loud({ classify_pr: { outputs: { skip_ci: skipCi } } }, 'needs.'),
+      loud({ ci_profile: { outputs: { ci_profile: profile } } }, 'steps.'),
+      () => true,
+    );
+
+  it.each([
+    [
+      'pull_request',
+      'contributor/qwen-code',
+      'test-results-fork-22.x-ubuntu-latest',
+    ],
+    ['pull_request', 'QwenLM/qwen-code', 'test-results-22.x-ubuntu-latest'],
+    ['push', '', 'test-results-22.x-ubuntu-latest'],
+  ])(
+    'retains reports for %s from %s, including failed runs',
+    (event, repo, name) => {
+      expect(upload.if).toContain('always()');
+      expect(evaluate(upload.if, event, repo, 'false', 'full')).toBe(true);
+      expect(evaluate(upload.with.name, event, repo, 'false', 'full')).toBe(
+        name,
+      );
+      expect(evaluate(upload.if, event, repo, 'true', 'full')).toBe(false);
+      expect(evaluate(upload.if, event, repo, 'false', 'web-shell-only')).toBe(
+        false,
+      );
+      expect(evaluate(upload.if, event, repo, 'false', '')).toBe(false);
+    },
+  );
+
+  it('uploads raw XML for seven days without requiring a report to exist', () => {
+    // Pinned to the 40-hex SHA, not the bare action name: this step now runs
+    // on every full-profile lane inside a job holding `checks: write`, so a
+    // relaxation to a mutable tag must not pass unnoticed.
+    expect(upload.uses).toMatch(/^actions\/upload-artifact@[0-9a-f]{40}$/);
+    expect(upload.with.path).toBe('packages/*/junit.xml');
+    expect(upload.with['retention-days']).toBe(7);
+    expect(upload.with['if-no-files-found']).toBe('ignore');
+  });
+
+  it('throws on a context term the stubs do not model', () => {
+    // An inequality over an unmodelled term would otherwise read `undefined`
+    // and pass: `undefined != true` is true, so all three rows above would
+    // stay green while asserting nothing about the new term.
+    expect(() =>
+      evaluate(
+        '${{ github.event.pull_request.draft != true }}',
+        'push',
+        '',
+        'false',
+        'full',
+      ),
+    ).toThrow(/does not model/);
+  });
+
+  it('keeps report publication advisory and unit-test failures blocking', () => {
+    const publisher = steps.find(
+      (step) => step.name === 'Publish Test Report (for non-forks)',
+    );
+    const unitTests = steps.find((step) => step.id === 'unit_tests');
+    expect(publisher['continue-on-error']).toBe(true);
+    expect(publisher.with['fail-on-error']).toBe('false');
+    expect(upload['continue-on-error']).toBe(true);
+    expect(unitTests['continue-on-error']).not.toBe(true);
+    expect(unitTests.run).toContain('exit "$RC"');
+    expect(steps.indexOf(upload)).toBeGreaterThan(steps.indexOf(publisher));
+  });
+});
+
 // The smoke lane keeps the classifier's trust decision and hosted overrides
 // but picks its own architecture, so its `runs-on` cannot be compared with
 // another lane's. Evaluate the real expression the way
@@ -181,7 +287,7 @@ const gateRunsOn = (cond, event) => {
     // evaluates here at the pin and may mis-report its reachability —
     // re-derive this helper's verdict before adding such a gate.
     [/needs\.classify_pr\.outputs\.skip_ci/g, '"false"'],
-    [/needs\.test\.outputs\.ci_profile/g, '"full"'],
+    [/needs\.classify_pr\.outputs\.ci_profile/g, '"full"'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name/g,
       event === 'pull_request' ? '"QwenLM/qwen-code"' : '""',

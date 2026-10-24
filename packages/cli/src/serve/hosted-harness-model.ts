@@ -19,6 +19,7 @@ import type { PublicChildModelRoute } from '@qwen-code/qwen-code-core/managed-ru
 import { HOSTED_MODEL_REQUEST_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
 
 import type { Content, Part } from '@google/genai';
+import { classifyAction } from '@qwen-code/qwen-code-core/permissions/classifier.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   runWithRuntimeContentGenerator,
@@ -254,6 +255,7 @@ export async function runHostedHarnessTextTurn(input: {
   cwd: string;
   history: readonly ChatRecord[];
   excludedPromptIds?: ReadonlySet<string>;
+  classifierUserText?: () => Promise<ReadonlyMap<string, string>>;
   commitCompression?: (payload: ChatCompressionRecordPayload) => Promise<void>;
   prompt: string;
   attachmentParts?: readonly Part[];
@@ -282,6 +284,7 @@ export async function runHostedHarnessTextTurn(input: {
       Pick<
         HostedWorkspaceToolTurn,
         | 'setPromptHookRunner'
+        | 'setPermissionClassifier'
         | 'resumeHookResults'
         | 'hookStopReason'
         | 'setModelRound'
@@ -699,6 +702,74 @@ async function runPreparedHostedHarnessTextTurn(
     if (registry.getFunctionDeclarations().length !== 0) {
       throw new Error('Hosted Harness cannot advertise local tools.');
     }
+    let originalUserText: Promise<ReadonlyMap<string, string>> | undefined;
+    const classifierActions: Content[] = [];
+    input.toolTurn?.setPermissionClassifier?.(async (call, signal) => {
+      originalUserText ??=
+        input.classifierUserText?.() ??
+        Promise.resolve(new Map([[input.promptId, input.prompt]]));
+      let userText: ReadonlyMap<string, string>;
+      try {
+        userText = await originalUserText;
+      } catch (cause) {
+        if (signal.aborted) throw cause;
+        return {
+          shouldBlock: true,
+          reason: '',
+          unavailable: true,
+          model: config.getModel(),
+          stage: 'fast',
+          durationMs: 0,
+        };
+      }
+      if (!userText.has(input.promptId))
+        return {
+          shouldBlock: true,
+          reason: '',
+          unavailable: true,
+          model: config.getModel(),
+          stage: 'fast',
+          durationMs: 0,
+        };
+      const messages: Content[] = input.history.flatMap((record) => {
+        if (record.type !== 'user' && record.type !== 'assistant') return [];
+        if (input.excludedPromptIds?.has(record.daemonPromptId ?? ''))
+          return [];
+        if (record.type === 'user') {
+          if (
+            (record.provenance !== undefined &&
+              record.provenance !== 'real_user') ||
+            record.subtype === 'agent_message' ||
+            record.subtype === 'agent_mention'
+          )
+            return [];
+          const text = userText.get(record.daemonPromptId ?? '');
+          return text ? [{ role: 'user', parts: [{ text }] }] : [];
+        }
+        const parts =
+          record.message?.parts?.filter((part) => !!part.functionCall) ?? [];
+        return parts.length ? [{ role: 'model', parts }] : [];
+      });
+      const prompt = userText.get(input.promptId);
+      if (!input.resumeFromToolResults && !input.resumeModel && prompt)
+        messages.push({ role: 'user', parts: [{ text: prompt }] });
+      const result = await classifyAction({
+        toolName: call.name,
+        toolParams: call.args,
+        messages: [...messages, ...classifierActions],
+        config,
+        signal,
+      });
+      classifierActions.push({
+        role: 'model',
+        parts: [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+      });
+      return result;
+    });
     // Safe mode stays on; the Session's Workspace instructions arrive through
     // the context slot instead of the Harness host's filesystem. The loop below
     // injects them before the first request too.

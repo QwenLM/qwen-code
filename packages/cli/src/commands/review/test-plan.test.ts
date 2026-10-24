@@ -47,6 +47,23 @@ vi.mock('./lib/platform/aone.js', async (importOriginal) => {
   };
 });
 
+// The gh seam — `gh` is the one export that reaches a real `gh pr view`, and
+// it is a plain function on a frozen ESM namespace, so observing it needs a
+// module mock rather than a spy. `...actual` is load-bearing: the handler
+// harness below saves and restores the host through the REAL getGhHost /
+// setGhHost, so mocking those would break it (and asserting on them would be
+// a false red — the harness itself calls them).
+const { ghCallMock } = vi.hoisted(() => ({
+  ghCallMock: vi.fn(() => ''),
+}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghCallMock,
+  };
+});
+
 import {
   testPlanCommand,
   extractTestPlanSection,
@@ -1349,6 +1366,14 @@ describe('the handler wiring — the integration point of the Aone fix', () => {
       29295886,
       'maxcompute/odps_src',
     );
+    // The "never touches gh" half of this pin's title. The two assertions
+    // above are satisfied by the reader alone, so an added `gh pr view`
+    // fallback (a dropped args.host, a handler reverted to runTestPlan)
+    // would still leave them green — only this one observes the gh seam.
+    // Targeted at `gh` itself, NOT getGhHost/setGhHost: the harness in this
+    // describe calls the real getGhHost/setGhHost to save and restore the
+    // host, so asserting on those would fail on the harness's own call.
+    expect(ghCallMock).not.toHaveBeenCalled();
   });
 
   it('a refused gate fails the command (exit 1) with the actionable message, before any fetch', async () => {

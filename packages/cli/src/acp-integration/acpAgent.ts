@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  proposeMemoryImport,
+  type MemoryImportModelInput,
+} from '@qwen-code/qwen-code-core/memory/import-model.js';
+
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   findSessionAgentBinding,
@@ -10850,6 +10855,23 @@ class QwenAgent implements Agent {
         return this.buildWorkspaceExtensionsStatus(
           this.config,
         ) as unknown as Record<string, unknown>;
+      case SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan: {
+        if (
+          !this.config.isManagedMemoryAvailable() ||
+          !this.config.isTrustedFolder()
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Managed memory import is unavailable.',
+          );
+        }
+        const proposal = await proposeMemoryImport(
+          this.config,
+          params as unknown as MemoryImportModelInput,
+          AbortSignal.timeout(120_000),
+        );
+        return proposal as unknown as Record<string, unknown>;
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceChange: {
         const revision = params['revision'];
         const kind = params['kind'];
