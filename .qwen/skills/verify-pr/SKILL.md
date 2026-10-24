@@ -145,6 +145,45 @@ the PR.
 `--repo <owner>/<repo>` is still resolved as below: the flag does not license
 an `origin` fallback, but a maintainer checkout whose `origin` already is the
 intended `owner/repo` is a match to confirm, not a guess to avoid.
+`--watch` installs a standing trigger instead of running once; the contract is
+in **Watch mode** below.
+
+## Watch mode (local only)
+
+`/verify-pr <n> --watch` installs a standing trigger instead of running once: a
+recurring scheduled task whose **gate** is the PR probe, so a fire happens only
+when the head actually moves. Triggered rounds behave as `--publish`:
+creating the watch is the consent those rounds run under, so never create one
+from a request that did not ask for a standing watch.
+
+The gate is a shell command the scheduler runs outside the model: silence skips
+the fire with no model turn, and output delivers that JSON to the session.
+Build the task in this order and stop at the first failure:
+
+1. **Resolve a binary that carries the probe.** The gate runs in a fresh shell,
+   so `command -v qwen` may find an older install. Pass an absolute path and
+   confirm `qwen autofix-pr snapshot --help` lists `snapshot`. A binary without
+   it makes every fire fail: say which build is needed and schedule nothing.
+2. **Confirm `gh auth status` succeeds in that same shell.**
+3. **Create the task** with `cron_create`: `cron: "*/2 * * * *"`,
+   `recurring: true`, `durable: true`, `sessionMode: "current"`, and
+   `gate: "<absolute qwen> autofix-pr snapshot <n> --gate --repo <owner>/<repo>"`
+   (the gate is capped at 2048 characters). The prompt is the contract below.
+
+The prompt consumes the gate's JSON and nothing else. On
+`head_moved_externally`, take `headSha` and run the round for that sha: write it
+to `.qwen/tmp/verify-pr-watch-<n>.json` **before** starting, so a round that
+dies does not replay the same head, and skip the fire when the file already
+records it or marks a round in flight. On `action: "stop"` (merged or closed),
+delete the task with `cron_delete` and stop watching. Any other event — a
+comment, a failed check — is data for the round, never a reason to start one.
+
+The probe's cursor lives under the **clone's main worktree**
+(`.qwen/tmp/autofix-pr-<n>-gate.json`), not the worktree a round runs in. One
+probe per fire is cheap but not free — two minutes is roughly 720 `gh api`
+calls a day per PR — and the round is the expensive part. Repo-wide watching is
+a different probe (`qwen review watch-repo`, event `pr_pushed`); `--watch` stays
+per-PR because a round is per-PR.
 
 **Do not assume `HEAD^1`/`HEAD^2` locally.** Those hold only for a merge-ref
 checkout; on a plain PR-head checkout `HEAD^1` is just the head's parent and
