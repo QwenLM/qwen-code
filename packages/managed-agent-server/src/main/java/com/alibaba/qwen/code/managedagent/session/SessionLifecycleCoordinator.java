@@ -234,16 +234,30 @@ public class SessionLifecycleCoordinator {
         }
         var valid = new java.util.concurrent.atomic.AtomicBoolean(true);
         long period = Math.max(1, leaseDuration.toMillis() / 3);
-        var renewal = renewals.scheduleWithFixedDelay(() -> {
-            try {
-                if (!store.renewLifecycleOperation(tenantId, sessionId, operationId, owner,
-                        claimed.claimGeneration(), leaseDuration)) {
+        java.util.concurrent.ScheduledFuture<?> renewal;
+        try {
+            renewal = renewals.scheduleWithFixedDelay(() -> {
+                try {
+                    if (!store.renewLifecycleOperation(tenantId, sessionId, operationId, owner,
+                            claimed.claimGeneration(), leaseDuration)) {
+                        valid.set(false);
+                    }
+                } catch (RuntimeException error) {
                     valid.set(false);
                 }
-            } catch (RuntimeException error) {
-                valid.set(false);
-            }
-        }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException stopped) {
+            // The coordinator is shutting down; the claim's lease lets the
+            // recovery scan re-drive this operation after restart, once a
+            // scan tick has room under its page limit.
+            LOG.warn("Managed Session operation abandoned at shutdown;"
+                            + " the lease re-drives it when a recovery scan"
+                            + " tick has room under its page limit"
+                            + " tenant={} session={} operation={} leaseMs={}",
+                    tenantId, sessionId, operationId,
+                    leaseDuration.toMillis());
+            return;
+        }
         Boolean harnessConfirmed = null;
         // settle() reports its irreversible Harness-facing step out of band:
         // a settle that asked the Harness to stop but threw later must not
