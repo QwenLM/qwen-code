@@ -21,19 +21,19 @@ import {
   type ListWorkspaceSessionsResult,
 } from '../server/session-list.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
-import type {
-  WorkspaceEntry,
-  WorkspaceRegistry,
-} from '../workspace-registry.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
+  captureWorkspaceEntryCurrency,
+  failedBatchMember,
   isGenerationClosedError,
+  MAX_BATCH_WORKSPACES,
+  MAX_MEMBER_BYTES,
+  MAX_SELECTOR_CHARS,
   resolveWorkspaceEntryBySelector,
 } from '../workspace-route-runtime.js';
 import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 
-const MAX_WORKSPACES = 20;
 const READ_CONCURRENCY = 4;
-const MAX_MEMBER_BYTES = 512 * 1024;
 
 const catalogRequestSchema = z
   .object({
@@ -43,13 +43,13 @@ const catalogRequestSchema = z
         .array(
           z
             .object({
-              workspace: z.string().min(1).max(4096),
+              workspace: z.string().min(1).max(MAX_SELECTOR_CHARS),
               cursor: z.string().max(16384).optional(),
             })
             .strict(),
         )
         .min(1)
-        .max(MAX_WORKSPACES),
+        .max(MAX_BATCH_WORKSPACES),
     ]),
     options: z
       .object({
@@ -78,22 +78,6 @@ type CatalogMember = CatalogMemberIdentity &
     | (ListWorkspaceSessionsResult & { groups?: SessionGroupCatalog })
     | { error: { code: string; message: string; status: number } }
   );
-
-function failedMember(
-  workspace: string,
-  entry: WorkspaceEntry | undefined,
-  status: number,
-  code: string,
-  message: string,
-): CatalogMember {
-  return {
-    workspace,
-    ...(entry
-      ? { workspaceId: entry.workspaceId, cwd: entry.workspaceCwd }
-      : {}),
-    error: { code, message, status },
-  };
-}
 
 export function registerSessionCatalogRoutes(
   app: Application,
@@ -131,10 +115,10 @@ export function registerSessionCatalogRoutes(
             cursor: undefined,
           }))
         : parsed.data.workspaces;
-    if (selections.length > MAX_WORKSPACES) {
+    if (selections.length > MAX_BATCH_WORKSPACES) {
       res.status(400).json({
         code: 'too_many_workspaces',
-        error: `Select at most ${MAX_WORKSPACES} workspaces per request.`,
+        error: `Select at most ${MAX_BATCH_WORKSPACES} workspaces per request.`,
       });
       return;
     }
@@ -157,7 +141,7 @@ export function registerSessionCatalogRoutes(
         workspace,
       );
       if (!entry) {
-        return failedMember(
+        return failedBatchMember(
           workspace,
           undefined,
           404,
@@ -166,24 +150,21 @@ export function registerSessionCatalogRoutes(
         );
       }
       const unavailable = () =>
-        failedMember(
+        failedBatchMember(
           workspace,
           entry,
           503,
           'workspace_runtime_unavailable',
           'Workspace runtime is not active.',
         );
-      const generation = entry.current;
-      const isCurrent = () =>
-        workspaceRegistry.getEntryByWorkspaceId(entry.workspaceId) === entry &&
-        entry.state === 'active' &&
-        entry.current?.generationId === generation?.generationId &&
-        generation !== undefined &&
-        !generation.guard.closed;
+      const { generation, isCurrent } = captureWorkspaceEntryCurrency(
+        workspaceRegistry,
+        entry,
+      );
       if (!generation || !isCurrent()) return unavailable();
       const runtime = generation.runtime;
       if (runtime.primary && !runtime.trusted) {
-        return failedMember(
+        return failedBatchMember(
           workspace,
           entry,
           403,
@@ -240,7 +221,7 @@ export function registerSessionCatalogRoutes(
           })),
         };
         if (Buffer.byteLength(JSON.stringify(result)) > MAX_MEMBER_BYTES) {
-          return failedMember(
+          return failedBatchMember(
             workspace,
             entry,
             413,
@@ -267,7 +248,7 @@ export function registerSessionCatalogRoutes(
             : known && code !== 'session_organization_store_unreadable'
               ? 400
               : 500;
-        return failedMember(
+        return failedBatchMember(
           workspace,
           entry,
           status,
