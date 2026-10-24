@@ -8612,6 +8612,95 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  // #14976: the warning was the last context-reporting path still on char/4.
+  it('estimates CJK-heavy context with the same estimator as /context', () => {
+    const config = makeConfig({
+      userMemory: '规则'.repeat(2_000), // 4,000 CJK characters
+      generationConfig: { contextWindowSize: 1_000 },
+    });
+
+    // char/4 would report 1,000 tokens; the CJK-aware estimator charges
+    // non-ASCII characters 1.5 tokens each, the number /context reports.
+    expectWarning(config, 'uses about 6,000 tokens');
+    const warning = config
+      .getWarnings()
+      .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+    expect(warning).toContain('6,000 tokens of context files');
+    expect(warning).not.toContain('auto-memory policy');
+    expect(warning).not.toContain('auto-memory catalog');
+  });
+
+  it.each([
+    ['context files only', {}],
+    ['bare mode', { bareMode: true }],
+    ['safe mode', { safeMode: true }],
+  ])(
+    'does not suggest pruning memories for %s without a catalog',
+    (_, mode) => {
+      const config = makeConfig({
+        userMemory: 'a'.repeat(4_000),
+        ...smallWindow(),
+        ...mode,
+      });
+
+      const warning = config
+        .getWarnings()
+        .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+
+      expect(config.getAutoMemoryContext()).toBe('');
+      expect(warning).toContain(
+        'Consider trimming context files or moving details into on-demand files.',
+      );
+      expect(warning).not.toContain('pruning stale memories');
+    },
+  );
+
+  it('does not suggest pruning memories when structured recall omits the catalog', () => {
+    const config = makeConfig({
+      userMemory: 'a'.repeat(4_000),
+      ...smallWindow(),
+    });
+    Object.assign(config, {
+      memoryRecallMode: 'structured',
+      autoMemoryPrompt: 'b'.repeat(400),
+      autoMemoryContext: 'c'.repeat(20_000),
+    });
+
+    const warning = config
+      .getWarnings()
+      .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+
+    expect(config.getAutoMemoryContext()).toBe('');
+    expect(warning).toContain('uses about 1,100 tokens');
+    expect(warning).toContain('100 tokens of auto-memory policy');
+    expect(warning).not.toContain('auto-memory catalog');
+    expect(warning).not.toContain('pruning stale memories');
+  });
+
+  // #14976: the memory catalog drove the breach while the advice pointed at
+  // QWEN.md, so the warning now names each contributor.
+  it('names the context-file, auto-memory policy, and catalog split in the warning', () => {
+    const config = makeConfig({
+      userMemory: 'a'.repeat(4_000), // 1,000 tokens
+      generationConfig: { contextWindowSize: 1_000 },
+    });
+    vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('b'.repeat(400));
+    vi.spyOn(config, 'getAutoMemoryContext').mockReturnValue(
+      'c'.repeat(20_000),
+    );
+
+    const warning = config
+      .getWarnings()
+      .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+
+    expect(warning).toContain('uses about 6,100 tokens');
+    expect(warning).toContain(
+      'Of those, there are 1,000 tokens of context files, ' +
+        '100 tokens of auto-memory policy, and 5,000 tokens of auto-memory catalog.',
+    );
+    expect(warning).toContain('pruning stale memories');
+  });
+
   it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
     const config = makeConfig({ bareMode: true, ...smallWindow() });
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce(
