@@ -419,6 +419,89 @@ describe('buildGateSnapshot', () => {
     expect(cut.snapshot).toBeNull();
   });
 
+  it('takes no earlier run a read the time cut lists for a new failure', () => {
+    const gate = (
+      databaseId: number,
+      conclusion: string,
+    ): Contexts[number] => ({
+      __typename: 'CheckRun',
+      name: 'Gate',
+      status: 'COMPLETED',
+      conclusion,
+      detailsUrl: `https://github.com/o/r/actions/runs/${databaseId}/job/1`,
+      databaseId,
+      checkSuite: {
+        status: 'COMPLETED',
+        app: { databaseId: 1 },
+        workflowRun: { event: 'pull_request', workflow: { databaseId: 9 } },
+      },
+    });
+    const watch = { knownHeads: [], seenCommentIds: [] };
+    const red = buildGateSnapshot(
+      pr({}, [gate(100, 'FAILURE')]),
+      cursor(),
+      watch,
+    );
+    expect(red.snapshot).not.toBeNull();
+    // The author re-ran it, green: a whole read forgets the failure.
+    const green = buildGateSnapshot(
+      pr({}, [gate(100, 'FAILURE'), gate(105, 'SUCCESS')]),
+      red.cursor,
+      watch,
+    );
+    expect(green.snapshot).toBeNull();
+    // GitHub was slow: the read listed the old run only.
+    for (let fire = 0; fire < 3; fire++) {
+      const cut = buildGateSnapshot(
+        pr({}, [gate(100, 'FAILURE')]),
+        green.cursor,
+        {
+          ...watch,
+          partial: 'checks',
+        },
+      );
+      expect(cut.snapshot).toBeNull();
+    }
+  });
+
+  it('waits for a whole read to report the end of a deferred run', () => {
+    const watch = {
+      knownHeads: [],
+      seenCommentIds: [],
+      deferredRuns: [123],
+    };
+    const key = `Test@${HEAD}@#1`;
+    const before = cursor({ reportedChecks: [key] });
+    // The read the time cut lists Test, not the run's later job.
+    const cut = buildGateSnapshot(pr({}, [failed('Test', 1)]), before, {
+      ...watch,
+      partial: 'checks',
+    });
+    expect(cut.snapshot).toBeNull();
+    const laterJob = {
+      ...(failed('Slow', 5) as Extract<
+        Contexts[number],
+        { __typename: 'CheckRun' }
+      >),
+      conclusion: 'SUCCESS',
+    };
+    const whole = buildGateSnapshot(
+      pr({}, [failed('Test', 1), laterJob]),
+      cut.cursor,
+      watch,
+    );
+    expect(whole.snapshot).toMatchObject({
+      events: [{ type: 'ci_failed', check: 'Test' }],
+    });
+    expect(
+      buildGateSnapshot(
+        pr({}, [failed('Test', 1), laterJob]),
+        whole.cursor,
+        watch,
+      ).snapshot,
+    ).toBeNull();
+  });
+
   it('forgets a check gone green on a run its time budget cut in the threads', () => {
     const red = buildGateSnapshot(pr({}, [failed('Test', 1)]), cursor());
     expect(red.cursor.reportedChecks).toHaveLength(1);

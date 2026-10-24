@@ -356,6 +356,20 @@ describe('runRerun', () => {
     expect(runRerun(7, 50)).toMatchObject({ rerun: true });
   });
 
+  it('gives back the re-run a deferral held when GitHub refuses it', () => {
+    contexts = [failedRun(5, 'Lint', 50, 1, 'IN_PROGRESS')];
+    expect(runRerun(7, 50)).toMatchObject({ deferred: true });
+    contexts = [failedRun(5, 'Lint', 50)];
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('HTTP 403: Resource not accessible by integration');
+    });
+    expect(() => runRerun(7, 50)).toThrow(/GitHub did not re-run run 50: /);
+    expect(state().rerunChecks).toEqual([]);
+    // Lint fails again on the head: its re-run was never spent.
+    contexts = [failedRun(5, 'Lint', 50), failedRun(9, 'Lint', 52)];
+    expect(runRerun(7, 52)).toMatchObject({ rerun: true });
+  });
+
   it('re-runs nothing on a PR that was merged or closed', () => {
     mocks.fetchPrData.mockImplementation(() => ({
       pr: { ...prData(), state: 'MERGED' },

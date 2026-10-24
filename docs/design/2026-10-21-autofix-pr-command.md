@@ -444,7 +444,12 @@ when there are none, so the session is woken only for them:
   it did not read comes and goes with GitHub's speed. One cut in the check
   runs keeps the failures it reported as well, and one cut in the suites
   read after them the failures to start; one cut in the review threads
-  only read every check, and keeps only the failures still there. While
+  only read every check, and keeps only the failures still there. The
+  rollup lists a check's runs oldest first, so a read cut in the check runs
+  can list an earlier run of a check and not its latest: the cursor keeps
+  the latest run of each check the last whole read saw (`latestChecks`),
+  and a cut read reports no failure of an earlier one, nor a deferred
+  run's end, which waits for a whole read. While
   GitHub stays that slow, what lies past the pages the gate reads — a check
   failure, a newer review thread — waits for a round something else
   starts, which reads it all; a page cap, which every run meets alike —
@@ -794,7 +799,7 @@ is counted before GitHub is asked and the call is not retried, so a re-run
 whose answer was lost is not asked for a second time: at most once, never
 twice. Its failures are marked handled only once GitHub took the re-run: a
 refusal (gh's `run <id> cannot be rerun`, a 403 — a token without
-`actions: write`, a run too old — or another HTTP 4xx) gives the re-run back, and every error tells the round to answer those failures
+`actions: write`, a run too old — or another HTTP 4xx) gives the re-run back, one a deferral held included, and every error tells the round to answer those failures
 as needing a human, so a check is never left red and unreported.
 
 GitHub re-runs a run only once it has ended, while `snapshot` reports a

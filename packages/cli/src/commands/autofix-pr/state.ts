@@ -150,6 +150,10 @@ export interface AutofixPrGateCursor {
   stopped: 'merged' | 'closed' | null;
   /** Connections the previous run found cut; a new cut is reported once. */
   reportedTruncated: string[];
+  /** `<identity>@<headSha>~<check run id>`: the latest run of each check the
+   * last read of every check run listed. A read the time cut keeps it, and
+   * reports no failure of an earlier run. */
+  latestChecks?: string[];
 }
 
 export interface AutofixPrPaths {

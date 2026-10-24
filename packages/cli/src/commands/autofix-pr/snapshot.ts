@@ -711,6 +711,20 @@ export function heldKeys(
   );
 }
 
+/** The latest check run of each check on the head, by identity and head. */
+function latestCheckRuns(pr: PrData): Map<string, number> {
+  const commit = pr.commits.nodes[0]?.commit;
+  const latest = new Map<string, number>();
+  for (const ctx of latestContexts(
+    commit?.statusCheckRollup?.contexts.nodes ?? [],
+  )) {
+    if (ctx.__typename === 'CheckRun') {
+      latest.set(`${checkIdentity(ctx)}@${pr.headRefOid}`, ctx.databaseId);
+    }
+  }
+  return latest;
+}
+
 /** The latest check run of each Actions run on the head, by run id. */
 function latestOfRuns(pr: PrData): Map<number, number> {
   const commit = pr.commits.nodes[0]?.commit;
@@ -1138,6 +1152,21 @@ export function buildGateSnapshot(
   const deferred = new Set(watch.deferredRuns ?? []);
   const held = rerunFrom(watch.rerunChecks ?? []);
   const runsLatest = latestOfRuns(pr);
+  // A read the time cut in the check runs lists a check's earlier runs and
+  // not always its latest (the rollup lists them oldest first): it keeps
+  // what the last whole read saw, and takes no earlier run for a failure.
+  const cutInRuns = watch.partial === 'checks';
+  const seenLatest = cutInRuns
+    ? rerunFrom(
+        (cursor.latestChecks ?? []).map((entry) =>
+          entry.replace(/~(\d+)$/, '@$1'),
+        ),
+      )
+    : latestCheckRuns(pr);
+  const latestChecks = [...seenLatest].map(([check, run]) => `${check}~${run}`);
+  if (latestChecks.length > 0 || cursor.latestChecks) {
+    next.latestChecks = latestChecks;
+  }
   // A run that did not read every check run keeps the failures it could
   // not see, one cut in the suites the failures to start found there; one
   // that read them all keeps only those still there.
@@ -1153,16 +1182,25 @@ export function buildGateSnapshot(
     // Prepared snapshots leave it out as well: a report would wake a round
     // with nothing to do.
     if (heldByDeferral(failure, pr.headRefOid, deferred, held)) continue;
-    const { event, attempt, runDone, checkRunId } = failure;
+    const { event, attempt, runDone, checkRunId, identity } = failure;
+    if (
+      cutInRuns &&
+      checkRunId !== undefined &&
+      (seenLatest.get(`${identity}@${pr.headRefOid}`) ?? 0) > checkRunId
+    ) {
+      continue;
+    }
     const key = checkAttemptKey(event.check, pr.headRefOid, attempt);
     const keys = [key];
     // One a round has answered since, through another run of the check,
-    // has nothing left for the round to do.
+    // has nothing left for the round to do. A read cut in the check runs
+    // may not list the run's latest one: its end waits for a whole read.
     if (
       runDone &&
       event.runId !== null &&
       deferred.has(event.runId) &&
-      !handledChecks.has(key)
+      !handledChecks.has(key) &&
+      !cutInRuns
     ) {
       keys.push(`${key}@ended`);
     }

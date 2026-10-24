@@ -100,6 +100,14 @@ function rerunLocked(
   // re-run is that one, and a later run of them — one a review started
   // before it ended, say — answers for it, as a re-run's would.
   const deferredHere = (state.deferredRuns ?? []).includes(runId);
+  // The re-runs the run's deferral held, which a refusal gives back.
+  const heldHere = new Set(
+    jobs.flatMap(({ floor }, index) =>
+      deferredHere && already.get(rerunKeys[index]) === floor
+        ? [`${rerunKeys[index]}@${floor}`]
+        : [],
+    ),
+  );
   const repeated = jobs
     .filter(({ floor }, index) => {
       const from = already.get(rerunKeys[index]);
@@ -166,7 +174,18 @@ function rerunLocked(
     // gh words a 403 as "run <id> cannot be rerun; <reason>" (a token
     // without `actions: write`, a run too old), other 4xx as "HTTP 4xx".
     const refused = /\bHTTP 4\d\d\b|\bcannot be rerun\b/.test(message);
-    if (refused) writeState(paths.statePath, { ...state });
+    if (refused) {
+      writeState(paths.statePath, {
+        ...state,
+        ...(state.rerunChecks
+          ? {
+              rerunChecks: state.rerunChecks.filter(
+                (entry) => !heldHere.has(entry),
+              ),
+            }
+          : {}),
+      });
+    }
     throw new Error(
       `GitHub did not re-run run ${runId}${refused ? '' : ' (or its answer was lost; the re-run is counted)'}: ${message.trim().split('\n').slice(-3).join(' ')} — answer its failures as needing a human.`,
     );
