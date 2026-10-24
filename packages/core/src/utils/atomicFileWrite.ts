@@ -129,10 +129,15 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
 /**
  * Atomically write content to a file (write-to-temp + rename).
  *
- * Falls back to in-place write when the existing file's uid differs
- * from the process's euid — POSIX rename would reset ownership.
- * Also falls back on EXDEV (cross-device). Both fallbacks lose crash
- * atomicity but preserve the existing inode's uid.
+ * Rejects with EACCES when the target exists and is not writable: rename
+ * only requires directory permissions, so without this check an atomic
+ * replace would silently overwrite a read-only file.
+ *
+ * Falls back to in-place write when the existing file's uid differs from
+ * the process's euid (POSIX rename would reset ownership) or when the file
+ * has multiple hard links (rename would split them). Also falls back on
+ * EXDEV (cross-device). These fallbacks lose crash atomicity but preserve
+ * the existing inode.
  *
  * The parent directory of `filePath` must already exist.
  */
@@ -239,13 +244,38 @@ export async function atomicWriteFile(
     }
   };
 
-  // Detect when atomic rename would silently change ownership. POSIX
-  // rename creates a new inode owned by the process's euid:egid; if the
-  // existing file has a different uid, fall back to in-place write which
-  // preserves the inode and therefore uid. Only uid is compared — gid
-  // is intentionally skipped because macOS inherits the parent
-  // directory's GID for new files, making egid !== file.gid a
-  // false positive on the most common dev platform.
+  // A rename is governed by the directory's permissions alone, so without
+  // this check an atomic replace would silently overwrite a read-only file
+  // that a plain write refuses with EACCES. noFollow replaces a symlink
+  // entry instead of writing through it, so only regular files apply.
+  if (existingStat?.isFile()) {
+    try {
+      await fs.access(targetPath, fsSync.constants.W_OK);
+    } catch (error) {
+      // libuv reports a read-only file as EPERM on Windows, whereas opening
+      // it for writing fails with EACCES everywhere else.
+      if (
+        process.platform === 'win32' &&
+        isNodeError(error) &&
+        error.code === 'EPERM'
+      ) {
+        throw Object.assign(
+          new Error(`EACCES: permission denied, access '${targetPath}'`),
+          { code: 'EACCES', path: targetPath, syscall: 'access' },
+        );
+      }
+      throw error;
+    }
+  }
+
+  // Detect when atomic rename would silently change ownership or split hard
+  // links. POSIX rename creates a new inode owned by the process's
+  // euid:egid: a differing uid loses ownership, and every other name of a
+  // hard-linked inode keeps the old content. Fall back to in-place write,
+  // trading atomicity for preserving the inode. Only uid is compared — gid
+  // is intentionally skipped because macOS inherits the parent directory's
+  // GID for new files, making egid !== file.gid a false positive on the most
+  // common dev platform.
   const ownershipWouldChange = (): boolean => {
     if (existingStat === undefined) return false;
     if (process.platform === 'win32') return false;
@@ -254,11 +284,12 @@ export async function atomicWriteFile(
     return existingStat.uid !== euid;
   };
 
-  if (
+  const mustWriteInPlace =
     existingStat !== undefined &&
     existingStat.isFile() &&
-    ownershipWouldChange()
-  ) {
+    (ownershipWouldChange() || existingStat.nlink > 1);
+
+  if (mustWriteInPlace) {
     options?.assertCanCommit?.();
     await fs.writeFile(targetPath, data, writeOptions);
     await tryChmod(targetPath);
@@ -537,6 +568,18 @@ export function atomicWriteFileSync(
   }
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
+  // See atomicWriteFile for the read-only and hard-link rationale.
+  let existingStat: Stats | undefined;
+  try {
+    existingStat = options?.noFollow
+      ? fsSync.lstatSync(targetPath)
+      : fsSync.statSync(targetPath);
+  } catch (err) {
+    if (!isNodeError(err) || err.code !== 'ENOENT') {
+      throw err;
+    }
+  }
+
   // forceMode without mode falls back to permission preservation — otherwise
   // we'd silently downgrade an existing file's perms to the process umask.
   let existingMode: number | undefined;
@@ -576,6 +619,31 @@ export function atomicWriteFileSync(
       }
     }
   };
+
+  if (existingStat?.isFile()) {
+    try {
+      fsSync.accessSync(targetPath, fsSync.constants.W_OK);
+    } catch (error) {
+      if (
+        process.platform === 'win32' &&
+        isNodeError(error) &&
+        error.code === 'EPERM'
+      ) {
+        throw Object.assign(
+          new Error(`EACCES: permission denied, access '${targetPath}'`),
+          { code: 'EACCES', path: targetPath, syscall: 'access' },
+        );
+      }
+      throw error;
+    }
+  }
+
+  if (existingStat?.isFile() && existingStat.nlink > 1) {
+    options?.assertCanCommit?.();
+    writeFileImpl(targetPath, data, writeOptions);
+    tryChmodSync(targetPath);
+    return;
+  }
 
   try {
     writeFileImpl(tmpPath, data, writeOptions);
