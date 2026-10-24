@@ -922,7 +922,6 @@ export class ChatCompressionService {
     const sharedDirectiveTokenCount = Math.ceil(
       sharedRequestText.length / CHARS_PER_TOKEN,
     );
-    const usesMainModel = effectiveCompactionModel === config.getModel();
     const providerSupportsCacheSharing =
       supportsCompressionCacheSharing(config);
     // The anchor must be provider-reported, not merely non-zero: an
@@ -943,7 +942,7 @@ export class ChatCompressionService {
         COMPACT_MAX_OUTPUT_TOKENS <=
       reactiveContextCeiling;
     const canShareCache =
-      usesMainModel &&
+      sideQueryOnMainRoute &&
       providerSupportsCacheSharing &&
       hasProviderTokenCount &&
       sharedRequestFits &&
@@ -955,7 +954,7 @@ export class ChatCompressionService {
       // slimmed cold path exclusively (#10380).
       !opts.requestPayloadTooLarge;
     if (!canShareCache) {
-      const reason = !usesMainModel
+      const reason = !sideQueryOnMainRoute
         ? 'distinct compaction model'
         : !providerSupportsCacheSharing
           ? 'provider does not support cache sharing'
