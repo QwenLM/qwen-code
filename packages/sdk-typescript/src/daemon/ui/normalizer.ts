@@ -34,6 +34,7 @@ import {
   getFiniteNumber,
   isRecord,
   redactSensitiveFields,
+  sanitizeTerminalText,
   stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
@@ -228,7 +229,10 @@ export function normalizeDaemonEvent(
       // most once per overflow episode (daemon-side hysteresis).
       if (typeof console !== 'undefined') {
         // eslint-disable-next-line no-console -- intentional diagnostic for subscriber backpressure
-        console.warn?.('[daemon-ui] SSE stream is lagging', event.data);
+        console.warn?.(
+          '[daemon-ui] SSE stream is lagging',
+          sanitizeTerminalText(stringifyJson(event.data)),
+        );
       }
       return [];
     case 'stream_error': {

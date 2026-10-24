@@ -19,7 +19,15 @@ import {
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { LEADER_NAME } from '@qwen-code/qwen-code-core/agents/team/types.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
-import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import {
+  INCOMPLETE_ARGS_EDIT_REJECTION,
+  INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE,
+  isToolCallConcurrencySafe,
+  TRUNCATION_EDIT_REJECTION,
+  TRUNCATION_RETRY_LOOP_DIRECTIVE,
+} from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
+import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
@@ -903,6 +911,18 @@ export type DaemonToolLoopState = {
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
   explorationBudget?: ToolExplorationBudget;
+  /**
+   * Per-tool count of refused partial edits, one per model response, for the
+   * rejection the tool last got.
+   */
+  partialEditRefusals?: Map<string, { cause: string; count: number }>;
+};
+
+/** What the send wrapper knows about one model response, for its calls. */
+type ModelResponseFacts = {
+  outputTruncated: boolean;
+  /** Tools whose refused partial edit this response already counted. */
+  refusedPartialEdits: Set<string>;
 };
 
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
@@ -1447,6 +1467,29 @@ function recordDaemonInvalidToolParams(
     {},
     `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
   );
+}
+
+// Counted apart from schema errors and once per response and tool, as the
+// scheduler counts per batch: a response cut off mid-batch refuses every edit
+// in it before the model has seen a single refusal. As in the scheduler, a
+// change of cause restarts the count, and a call from the tool that builds
+// clears it, so only refusals the model has not recovered from add up.
+function recordDaemonPartialEditRefusal(
+  loopState: DaemonToolLoopState,
+  toolName: string,
+  cause: string,
+  response: ModelResponseFacts | undefined,
+): number {
+  const counts = (loopState.partialEditRefusals ??= new Map());
+  const previous = counts.get(toolName);
+  const sameCause = previous?.cause === cause;
+  if (sameCause && response?.refusedPartialEdits.has(toolName)) {
+    return previous.count;
+  }
+  response?.refusedPartialEdits.add(toolName);
+  const count = (sameCause ? previous.count : 0) + 1;
+  counts.set(toolName, { cause, count });
+  return count;
 }
 
 // The drain is served from an in-memory queue, so a conforming client answers
@@ -2791,6 +2834,15 @@ export class Session implements SessionContext {
     string,
     Promise<{ recordId: string; created: boolean; deferred?: boolean }>
   >();
+
+  /**
+   * The model response each call came from, with whether the output limit cut
+   * it off — the fact `turn.ts` puts on `wasOutputTruncated`. This executor
+   * bypasses the scheduler, so `runTool` applies the scheduler's partial-edit
+   * guard itself. Keyed by identity: the call `runTool` gets must be the object
+   * the stream emitted.
+   */
+  readonly #callResponses = new WeakMap<FunctionCall, ModelResponseFacts>();
 
   /**
    * Call ids of the ask_user_question being re-hung by the current restore
@@ -9887,10 +9939,17 @@ export class Session implements SessionContext {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       return { responseStream: null, stopReason: 'end_turn' };
     }
+    const callResponses = this.#callResponses;
     const responseStream = (async function* () {
       let committed = false;
       let receivedChunk = false;
       let memoryDeliveryStateInvalidated = false;
+      // As in `turn.ts`: a max-tokens finish marks the calls of the current
+      // attempt, and a retry or fallback starts a new attempt.
+      let attempt: ModelResponseFacts = {
+        outputTruncated: false,
+        refusedPartialEdits: new Set(),
+      };
       const commitMemoryDelivery = () => {
         llmClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
         if (memoryDeliveryStateInvalidated) {
@@ -9902,6 +9961,15 @@ export class Session implements SessionContext {
         for await (const event of sourceStream) {
           if (event.type === StreamEventType.CHUNK) {
             receivedChunk = true;
+            for (const call of event.value.functionCalls ?? []) {
+              callResponses.set(call, attempt);
+            }
+            if (
+              event.value.candidates?.[0]?.finishReason ===
+              FinishReason.MAX_TOKENS
+            ) {
+              attempt.outputTruncated = true;
+            }
           } else if (event.type === StreamEventType.COMPRESSED) {
             llmClient.resetManagedAutoMemoryAfterCompression();
             memoryDeliveryStateInvalidated = true;
@@ -9910,6 +9978,10 @@ export class Session implements SessionContext {
             event.type === StreamEventType.MODEL_FALLBACK
           ) {
             receivedChunk = false;
+            attempt = {
+              outputTruncated: false,
+              refusedPartialEdits: new Set(),
+            };
           }
           yield event;
         }
@@ -15668,6 +15740,73 @@ export class Session implements SessionContext {
           );
         }
 
+        // ---- Partial edit: the scheduler's guard, at the scheduler's step ----
+        // Repaired arguments can be schema-valid and still hold only part of
+        // the content, so an Edit-kind call is refused instead of written.
+        const response = this.#callResponses.get(fc);
+        const outputTruncated = response?.outputTruncated === true;
+        if (
+          (outputTruncated || toolCallArgumentsWereIncomplete(fc)) &&
+          tool.kind === Kind.Edit
+        ) {
+          const rejection = outputTruncated
+            ? TRUNCATION_EDIT_REJECTION
+            : INCOMPLETE_ARGS_EDIT_REJECTION;
+          // A model cut off on every attempt sends different partial content
+          // each time, so only this count can stop the turn.
+          const count =
+            toolLoopState && !activeToolAbortSignal.aborted
+              ? recordDaemonPartialEditRefusal(
+                  toolLoopState,
+                  toolName,
+                  rejection,
+                  response,
+                )
+              : 0;
+          const loopProtection = this.config.getLoopProtection();
+          const stops = loopProtection === 'stop';
+          const refusal = await earlyErrorResponse(
+            new Error(
+              count >= INVALID_PARAMS_REMINDER_AT
+                ? `${rejection}${
+                    outputTruncated
+                      ? TRUNCATION_RETRY_LOOP_DIRECTIVE
+                      : INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE
+                  }${stops ? ' Another refused write stops this turn.' : ''}`
+                : rejection,
+            ),
+            toolName,
+            {
+              status: 'error',
+              errorType: outputTruncated
+                ? ToolErrorType.OUTPUT_TRUNCATED
+                : ToolErrorType.INVALID_TOOL_PARAMS,
+              executionStatus: 'not_started',
+            },
+          );
+          // `warn` skips the stop point, which would queue the schema reminder
+          // and misread a cut-off write; the refusal already carries the
+          // directive. `off` still logs the loop as observed.
+          const loopDetected =
+            loopProtection !== 'warn' &&
+            toolLoopState !== undefined &&
+            count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD &&
+            onDaemonLoopStopPoint(
+              this.config,
+              promptId,
+              toolLoopState,
+              `partial-edit:${toolName}`,
+              {
+                loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+                toolName,
+                count,
+              },
+              {},
+              `Stopping ACP turn after repeated refused partial edits from ${toolName}`,
+            );
+          return loopDetected ? { ...refusal, loopDetected } : refusal;
+        }
+
         // ---- PreToolUse: once, before every input-dependent check ----
         // A replacement input then goes through the same gates, validation,
         // permission and approval as the model's input; the checks above fix
@@ -15821,6 +15960,9 @@ export class Session implements SessionContext {
           let invocation = buildInvocation(args);
           builtInvocation = invocation;
           toolBuildSucceeded = true;
+          // A complete call that builds is the model's recovery, as when the
+          // scheduler clears a tool's retry counts on passing validation.
+          toolLoopState?.partialEditRefusals?.delete(toolName);
 
           if (this.config.getSessionSourceType?.() === 'agent-host') {
             // Keep upstream authority at the final execution boundary.
