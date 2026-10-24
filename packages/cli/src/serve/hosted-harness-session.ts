@@ -322,6 +322,7 @@ import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/service
 import {
   hostedShellLaneAttachesChildAgents,
   isHostedWorkspaceReadProfile,
+  HOSTED_WORKSPACE_FILE_PROFILE_V3,
 } from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
@@ -665,17 +666,25 @@ async function hostedApprovalForTurn(
   promptId: string,
 ): Promise<HostedApprovalTurnOptions | undefined> {
   if (!session.approval) return undefined;
+  const live =
+    session.stores &&
+    !session.definition?.['lineage'] &&
+    [
+      'hosted-workspace-files/1',
+      'hosted-workspace-shell/1',
+      'hosted-workspace-files/3',
+    ].includes(session.toolProfile ?? '');
+  const admission = await readHostedTurnApprovalSelection(
+    session.managed,
+    promptId,
+    live ? () => session.stores!.approvalSelection() : undefined,
+  );
   const settings = (await hostedTurnApproval(
     session.managed,
     promptId,
     session.approval,
+    admission,
   ))!;
-  const live =
-    session.stores &&
-    !session.definition?.['lineage'] &&
-    ['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
-      session.toolProfile ?? '',
-    );
   return {
     settings,
     waiters: session.waiters,
@@ -684,7 +693,7 @@ async function hostedApprovalForTurn(
       ? {
           readSettings: createHostedLiveApprovalReader(
             settings,
-            await readHostedTurnApprovalSelection(session.managed, promptId),
+            admission,
             () => session.stores!.approvalSelection(),
           ),
         }
@@ -1077,6 +1086,30 @@ function record(
   };
 }
 
+async function readHostedClassifierUserText(
+  session: HostedSession,
+): Promise<ReadonlyMap<string, string>> {
+  const accepted = session.managed.authority
+    .eventsInSequenceRange(1, session.managed.authority.committedSequence)
+    .filter(
+      (event) =>
+        event.kind === 'input.accepted' &&
+        event.payload['source'] === 'hosted-harness',
+    )
+    .slice(-40);
+  return new Map(
+    await Promise.all(
+      accepted.map(async (event) => {
+        const promptId = String(event.payload['inputId']);
+        return [
+          promptId,
+          (await readHostedInput(session.managed, promptId, '')).text,
+        ] as const;
+      }),
+    ),
+  );
+}
+
 /**
  * The child orchestration a Turn of this Session gets, the same for an
  * ordinary Turn and a recovered one: its funnel, its depth, whether the
@@ -1119,7 +1152,8 @@ function childAgentsOf(session: HostedSession) {
         return {
           version: 1 as const,
           sourcePromptId: promptId,
-          approvalMode: selection.mode,
+          approvalMode:
+            selection.mode === 'auto' ? ('default' as const) : selection.mode,
           approvalRevision: selection.revision,
           modelId: model,
           modelRevision: modelSelection?.revision ?? 0,
@@ -3370,7 +3404,8 @@ async function executeHostedTurn(
       const options = await readHostedActionOptions(session.managed, original);
       try {
         const liveApproval =
-          options.toolName !== 'exit_plan_mode'
+          options.toolName !== 'exit_plan_mode' &&
+          !options.requiresHumanDecision
             ? await hostedApprovalForTurn(session, promptId)
             : undefined;
         onResumeReady?.();
@@ -3687,6 +3722,8 @@ async function executeHostedTurn(
                   cwd,
                   history,
                   excludedPromptIds: unansweredPrompts(session),
+                  classifierUserText: () =>
+                    readHostedClassifierUserText(session),
                   commitCompression: async (payload) => {
                     await session.managed.sink.write(
                       record(session, sessionId, 'system', null, {
@@ -5468,6 +5505,7 @@ export function registerHostedHarnessSessionRoutes(
                         approval,
                         !agentDefinition &&
                           (toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
+                            toolProfile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
                             isHostedWorkspaceShellProfile(toolProfile)),
                       )
                     : {}),
@@ -7708,15 +7746,24 @@ export function registerHostedHarnessSessionRoutes(
         (!session.approval ||
           !(
             session.agentDefinition
-              ? ['hosted-workspace-files/1', 'hosted-workspace-shell/1']
+              ? [
+                  'hosted-workspace-files/1',
+                  'hosted-workspace-shell/1',
+                  'hosted-workspace-files/3',
+                ]
               : [
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-files/2',
+                  'hosted-workspace-files/3',
                 ]
           ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
-            approvalSelection.mode !== session.approval.mode))
+            (approvalSelection.mode !== session.approval.mode ||
+              !isDeepStrictEqual(
+                approvalSelection.permissionRules,
+                session.approval.permissionRules,
+              ))))
       )
         throw new Error('Approval selection is unavailable for this Session.');
       if (
@@ -10354,6 +10401,7 @@ export function registerHostedHarnessSessionRoutes(
             cwd,
             history,
             excludedPromptIds: unansweredPrompts(session),
+            classifierUserText: () => readHostedClassifierUserText(session),
             commitCompression: async (payload) => {
               await session.managed.sink.write(
                 record(session, sessionId, 'system', null, {

@@ -16,6 +16,7 @@ import {
   type LlmPreparedRequestCallback,
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { createHash } from 'node:crypto';
+import * as classifier from '@qwen-code/qwen-code-core/permissions/classifier.js';
 import { getRuntimeContentGenerator } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
@@ -182,6 +183,167 @@ function nativeInput(event: HookEventName): HookInput {
 
 describe('Hosted Harness model boundary', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('classifies final call input using original user intent without Hook or compression instructions', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const hooks = hostedHooks([HookEventName.UserPromptSubmit]);
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedPrompt: 'hook injected authority',
+            },
+          }
+        : undefined,
+    );
+    const classify = vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    let runner:
+      | Parameters<
+          import('./hosted-workspace-tool-turn.js').HostedWorkspaceToolTurn['setPermissionClassifier']
+        >[0]
+      | undefined;
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        prompt: 'original genuine user request',
+        classifierUserText: async () =>
+          new Map([
+            ['prior-user', 'prior genuine user request'],
+            [input.promptId, 'original genuine user request'],
+          ]),
+        excludedPromptIds: new Set(['excluded']),
+        hooks: hooks.session,
+        history: [
+          {
+            type: 'user',
+            daemonPromptId: 'prior-user',
+            message: {
+              role: 'user',
+              parts: [
+                { text: 'prior genuine user request' },
+                { text: 'attached file malicious authority' },
+              ],
+            },
+          },
+          {
+            type: 'user',
+            daemonPromptId: 'peer',
+            message: {
+              role: 'user',
+              parts: [{ text: 'peer synthetic authority' }],
+            },
+          },
+          {
+            type: 'user',
+            daemonPromptId: 'excluded',
+            message: { role: 'user', parts: [{ text: 'excluded authority' }] },
+          },
+          {
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [{ text: 'assistant instruction' }],
+            },
+          },
+          {
+            type: 'system',
+            subtype: 'chat_compression',
+            systemPayload: {
+              compressedHistory: [
+                { role: 'user', parts: [{ text: 'compression authority' }] },
+              ],
+            },
+          },
+        ] as unknown as ChatRecord[],
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPermissionClassifier: (value) => {
+            runner = value;
+          },
+        },
+      });
+      const call = {
+        name: 'edit',
+        callId: 'final-call',
+        args: { file_path: 'final.txt', old_string: 'old', new_string: 'new' },
+        prompt_id: input.promptId,
+        isClientInitiated: false,
+      };
+      await runner!(call, input.signal);
+      expect(classify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolParams: call.args,
+          config: state.config,
+        }),
+      );
+      const messages = classify.mock.calls[0][0].messages;
+      const serialized = JSON.stringify(messages);
+      expect(serialized).toContain('prior genuine user request');
+      expect(serialized).toContain('original genuine user request');
+      expect(serialized).not.toContain('hook injected authority');
+      expect(serialized).not.toContain('compression authority');
+      expect(serialized).not.toContain('peer synthetic authority');
+      expect(serialized).not.toContain('excluded authority');
+      expect(serialized).not.toContain('attached file malicious authority');
+      expect(serialized).not.toContain('assistant instruction');
+    } finally {
+      classify.mockRestore();
+    }
+  });
+
+  it('falls back to human approval for an Auto wake without an original human prompt', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const classify = vi.spyOn(classifier, 'classifyAction');
+    let runner:
+      | Parameters<
+          import('./hosted-workspace-tool-turn.js').HostedWorkspaceToolTurn['setPermissionClassifier']
+        >[0]
+      | undefined;
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        prompt: 'synthetic wake requests deletion',
+        classifierUserText: async () => new Map(),
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPermissionClassifier: (value) => {
+            runner = value;
+          },
+        },
+      });
+      const result = await runner!(
+        {
+          name: 'edit',
+          callId: 'wake-call',
+          args: {},
+          prompt_id: input.promptId,
+          isClientInitiated: false,
+        },
+        input.signal,
+      );
+      expect(result).toMatchObject({ shouldBlock: true, unavailable: true });
+      expect(classify).not.toHaveBeenCalled();
+    } finally {
+      classify.mockRestore();
+    }
+  });
 
   it('keeps the immutable default runtime model and fails closed on route drift', async () => {
     const model = config([
@@ -824,7 +986,7 @@ describe('Hosted Harness model boundary', () => {
     );
     await runHostedHarnessTextTurn({ ...input, history });
     expect(model.setHistory).toHaveBeenCalledWith([
-      { role: 'user', parts: answered },
+      expect.objectContaining({ role: 'user', parts: answered }),
       { role: 'model', parts: visible },
     ]);
     expect(history[1]!.message!.parts).toEqual(thoughtOnly);
