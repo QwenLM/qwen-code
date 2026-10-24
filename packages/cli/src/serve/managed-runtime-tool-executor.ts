@@ -21,12 +21,15 @@ import {
   type ManagedWorkspaceContextFile,
 } from './managed-runtime-provider-protocol.js';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
+import { WebFetchTool } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
+import { TodoWriteTool } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import {
   ManagedAutomationGateTool,
   type ManagedAutomationGateExecution,
@@ -243,6 +246,10 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
+  // #15076: `todo_write`, declared only by `files/3`. It writes no
+  // Workspace file: the task list is the Worker's own bookkeeping.
+  TodoWriteTool.Name,
+  WebFetchTool.Name,
   // The managed automation gate probe: the Harness's own execution, never
   // a model's (docs/design/2026-10-22-managed-automation-gate.md).
   ManagedAutomationGateTool.Name,
@@ -2486,6 +2493,13 @@ export class ManagedToolExecutor {
         }
         result = relativizeGlobResult(result, root);
       }
+      // #15076: core turns a `todo_write` filesystem failure into a
+      // success-shaped result whose text embeds the absolute runtime path,
+      // which sits outside the Workspace the glob rewrite anchors on. Scrub
+      // the runtime root itself before the result is durably committed.
+      if (entry.toolName === TodoWriteTool.Name) {
+        result = relativizeRuntimeResult(result);
+      }
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2501,11 +2515,14 @@ export class ManagedToolExecutor {
         responseParts: [],
         error: {
           // A refused or failed glob reaches the model and the durable record
-          // the same way its results do, so it is rewritten the same way.
+          // the same way its results do, so it is rewritten the same way. A
+          // `todo_write` that throws carries the same runtime-root text.
           message:
             entry.toolName === GlobTool.Name && tools.directory !== undefined
               ? relativizeGlobText(message, tools.directory)
-              : message,
+              : entry.toolName === TodoWriteTool.Name
+                ? relativizeRuntimeText(message)
+                : message,
         },
       };
     }
@@ -2706,6 +2723,12 @@ export function createManagedToolSet(
     fileCheckpointingEnabled: false,
     // The worker has no conversation history to justify cached read elision.
     fileReadCacheDisabled: true,
+    // #15076: the `/3` profiles declare `todo_write`, so the Worker opts in
+    // explicitly. Core defaults this off and the operator-facing path gates
+    // registration on it; leaving it at the default while registering the
+    // tool would give a managed Session a tool the same setting hides
+    // elsewhere.
+    todoWriteEnabled: true,
   });
   registerSessionProjectDir(sessionId, config.storage.getProjectDir());
   return {
@@ -2719,12 +2742,14 @@ export function createManagedToolSet(
         new ReadFileTool(config),
         new WriteFileTool(config),
         new EditTool(config),
+        new WebFetchTool(config, 'managed'),
         // The walk never leaves the Session, whatever the pattern spells.
         new GlobTool(config, {
           containmentRoot: directory,
           executionTimeoutMs: 5_000,
         }),
         new ShellTool(config),
+        new TodoWriteTool(config),
         new ManagedAutomationGateTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
@@ -2806,7 +2831,35 @@ function sameInvocation(
  * context becomes Workspace-relative, and the root itself becomes ".".
  */
 export function relativizeGlobText(text: string, directory: string): string {
-  const root = path.resolve(directory);
+  return relativizeRootedText(text, path.resolve(directory));
+}
+
+/**
+ * #15076: strip the Worker's runtime root, which sits outside the Workspace.
+ * Core reports a `todo_write` filesystem failure inside a success-shaped
+ * result, so the Workspace-rooted glob rewrite cannot reach that path.
+ */
+export function relativizeRuntimeText(text: string): string {
+  return relativizeRootedText(text, path.resolve(Storage.getRuntimeBaseDir()));
+}
+
+/** The runtime root rides both of `todo_write`'s model-facing channels. */
+function relativizeRuntimeResult(result: ToolResult): ToolResult {
+  const next: ToolResult = { ...result };
+  if (typeof next.llmContent === 'string') {
+    next.llmContent = relativizeRuntimeText(next.llmContent);
+  }
+  if (typeof next.error?.message === 'string') {
+    next.error = {
+      ...next.error,
+      message: relativizeRuntimeText(next.error.message),
+    };
+  }
+  return next;
+}
+
+/** Strip an absolute root from model-facing text, at path-token boundaries. */
+function relativizeRootedText(text: string, root: string): string {
   // A Session installed at the filesystem root is its own boundary: every
   // absolute path legitimately starts with it, so there is nothing to strip
   // and a one-character prefix would only eat separators (the echoed pattern
