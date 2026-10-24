@@ -883,6 +883,9 @@ describe('Gemini Client (client.ts)', () => {
       authType: AuthType.USE_GEMINI,
     };
     mockConfig = {
+      refreshWorkflowMode: vi.fn(),
+      resetWorkflowModeContext: vi.fn(),
+      prepareWorkflowMode: vi.fn().mockReturnValue({}),
       getContentGeneratorConfig: vi
         .fn()
         .mockReturnValue(contentGeneratorConfig),
@@ -1375,6 +1378,75 @@ describe('Gemini Client (client.ts)', () => {
       expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledTimes(2);
       expectSessionStart(hookSystem, SessionStartSource.Startup, { nth: 1 });
       expectSessionStart(hookSystem, SessionStartSource.Resume, { nth: 2 });
+    });
+  });
+
+  describe('DW04: explicit workflow mode eligibility', () => {
+    beforeEach(() => {
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+      vi.mocked(mockConfig.prepareWorkflowMode).mockReturnValue({
+        reminder: '<system-reminder>Workflow mode fixture</system-reminder>',
+        onModelRequestDispatched: vi.fn(),
+      });
+    });
+
+    it('accepts an explicitly eligible fresh turn without human provenance', async () => {
+      await run([{ text: 'ordinary SDK input' }], 'mode-fresh', {
+        type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
+      });
+      expect(getLastTurnRequestText()).toContain('Workflow mode fixture');
+      expect(mockConfig.prepareWorkflowMode).toHaveBeenCalledOnce();
+      expect(mockConfig.prepareWorkflowMode).toHaveBeenCalledWith(null);
+    });
+
+    it.each([
+      SendMessageType.ToolResult,
+      SendMessageType.Steer,
+      SendMessageType.Retry,
+      SendMessageType.Hook,
+      SendMessageType.Cron,
+      SendMessageType.Notification,
+      SendMessageType.Teammate,
+    ])('rejects eligibility on %s', async (type) => {
+      await run([{ text: 'generated input' }], `mode-${type}`, {
+        type,
+        workflowModeEligible: true,
+      });
+      expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+    });
+
+    it('defaults unknown producers and side queries to ineligible', async () => {
+      await run([{ text: 'plain' }], 'mode-unknown', {
+        type: SendMessageType.UserQuery,
+      });
+      await run([{ text: 'side' }], 'mode-side', {
+        type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
+        isConcurrentSideQuery: true,
+      });
+      expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+    });
+
+    it('excludes a fresh UserQuery when Goal admission adds its permit', async () => {
+      const permit = { goalId: 'mode-goal', revision: 1, turnId: 'mode-turn' };
+      const beginTurn = vi.fn(() => permit);
+      mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue({
+        getSnapshot: () => ({
+          ...emptyGoalSnapshot(),
+          goal: { goalId: 'mode-goal', revision: 1, status: 'active' },
+        }),
+        permitForTurn: vi.fn(() => undefined),
+        beginTurn,
+        finishTurn: vi.fn().mockResolvedValue(undefined),
+        subscribe: vi.fn(() => vi.fn()),
+      } as unknown as GoalRuntime);
+      await run([{ text: 'ordinary goal input' }], 'mode-goal-admission', {
+        type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
+      });
+      expect(beginTurn).toHaveBeenCalledExactlyOnceWith('mode-goal-admission');
+      expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
     });
   });
 
@@ -4125,6 +4197,7 @@ describe('Gemini Client (client.ts)', () => {
       client.setHistory([userText('replaced')]);
 
       expect(cacheClear).toHaveBeenCalled();
+      expect(mockConfig.resetWorkflowModeContext).toHaveBeenCalledOnce();
       expect(client.getTrustedUserAnswers()).toEqual([]);
     });
 
@@ -4164,6 +4237,8 @@ describe('Gemini Client (client.ts)', () => {
       client.truncateHistory(2);
 
       expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+      expect(mockConfig.resetWorkflowModeContext).toHaveBeenCalledOnce();
+      vi.mocked(mockConfig.resetWorkflowModeContext).mockClear();
 
       // A no-op truncate keeps the router prompt in history, so the
       // delivered revision is still accurate and must survive.
@@ -4173,6 +4248,7 @@ describe('Gemini Client (client.ts)', () => {
       client.truncateHistory(99);
 
       expect(client['lastDeliveredMemoryTreeRevision']).toBe('still-valid');
+      expect(mockConfig.resetWorkflowModeContext).not.toHaveBeenCalled();
     });
 
     it('stripOrphanedUserEntriesFromHistory clears the delivered memory-tree revision only when entries were stripped', () => {

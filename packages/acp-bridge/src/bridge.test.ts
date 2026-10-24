@@ -8549,6 +8549,7 @@ describe('createAcpSessionBridge', () => {
     'available_commands_update',
     'current_mode_update',
     'session_info_update',
+    'config_option_update',
   ] as const)(
     'keeps the turn error on refresh when an idle %s session_update lands after it',
     async (subtype) => {
@@ -8630,7 +8631,9 @@ describe('createAcpSessionBridge', () => {
               }
             : subtype === 'current_mode_update'
               ? { sessionUpdate: subtype, currentModeId: 'plan' }
-              : { sessionUpdate: subtype, title: 'Durable title' },
+              : subtype === 'config_option_update'
+                ? { sessionUpdate: subtype, configOptions: [] }
+                : { sessionUpdate: subtype, title: 'Durable title' },
       });
       await sawIdleUpdate;
 

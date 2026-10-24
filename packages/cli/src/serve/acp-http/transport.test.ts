@@ -391,6 +391,18 @@ class FakeBridge {
     return { modelServiceId: 'qwen-max' };
   }
 
+  lastWorkflowMode:
+    | { sessionId: string; value: string; context?: { clientId?: string } }
+    | undefined;
+  async setSessionConfigOption(
+    sessionId: string,
+    request: { value: string },
+    context?: { clientId?: string },
+  ) {
+    this.lastWorkflowMode = { sessionId, value: request.value, context };
+    return { configOptions: [] };
+  }
+
   lastApprovalMode: string | undefined;
   async setSessionApprovalMode(_s: string, mode: string) {
     this.lastApprovalMode = mode;
@@ -3829,6 +3841,27 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.lastSetModel).toMatchObject({ modelId: 'qwen-max' });
   });
 
+  it('session/set_config_option (workflow_mode) reaches the same session owner with its lease', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 91,
+      method: 'session/set_config_option',
+      params: { sessionId: 'sess-1', configId: 'workflow_mode', value: 'on' },
+    });
+    const [frame] = (await got) as Array<{ id: number; result?: unknown }>;
+    expect(frame).toMatchObject({ id: 91, result: {} });
+    expect(bridge.lastWorkflowMode).toMatchObject({
+      sessionId: 'sess-1',
+      value: 'on',
+      context: { clientId: expect.any(String) },
+    });
+  });
+
   it('session/set_config_option (mode) routes to setSessionApprovalMode', async () => {
     const connId = await initialize();
     await newSession(connId);
@@ -7086,7 +7119,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.error.message).toContain(
       'ConfigId not supported by this transport: reasoning_effort',
     );
-    expect(frame.error.message).toContain('(supported: model, mode)');
+    expect(frame.error.message).toContain(
+      '(supported: model, mode, workflow_mode)',
+    );
     expect(bridge.lastSetModel).toBeUndefined();
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
@@ -8662,6 +8697,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect.arrayContaining(['stream_error', 'client_evicted']),
     );
     // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
+  });
+
+  it('filters config_option_update through the same routable option allowlist', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const stream = await openStream(connId, 'sess-1');
+    const got = takeFrames(stream, 1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const workflow = {
+      id: 'workflow_mode',
+      currentValue: 'on',
+      _meta: { 'qwen.workflowMode': { available: true, effective: true } },
+    };
+    bridge.queues.get('sess-1')?.push({
+      type: 'session_update',
+      data: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [
+            { id: 'model' },
+            { id: 'mode' },
+            workflow,
+            { id: 'reasoning_effort' },
+          ],
+        },
+      },
+    });
+    const [frame] = await got;
+    expect(frame).toMatchObject({
+      method: 'session/update',
+      params: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [{ id: 'model' }, { id: 'mode' }, workflow],
+        },
+      },
+    });
   });
 
   it('keeps availableSkillDetails verbatim on pumped session_update frames (#9234)', async () => {

@@ -2855,6 +2855,12 @@ export async function runNonInteractive(
         const roundOptions: SendMessageOptions = {
           type: sendType,
           modelOverride,
+          workflowModeEligible:
+            isFirstTurn &&
+            sendType === SendMessageType.UserQuery &&
+            !goalTurn &&
+            !options.continueInterrupted &&
+            !isSlashCommand(input),
           ...(isFirstTurn &&
             sendType === SendMessageType.UserQuery &&
             !goalTurn &&

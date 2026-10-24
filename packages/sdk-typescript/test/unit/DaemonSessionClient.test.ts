@@ -160,6 +160,31 @@ function turnCompleteFrame(promptId: string): string {
 }
 
 describe('DaemonSessionClient', () => {
+  it('writes durable Workflow mode without a user settings persistence flag', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { configOptions: [], persisted: true }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'workflow-session',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'workflow-client',
+      },
+    });
+    await expect(
+      session.setConfigOption('workflow_mode', 'off'),
+    ).resolves.toEqual({ configOptions: [], persisted: true });
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      configId: 'workflow_mode',
+      value: 'off',
+    });
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('workflow-client');
+  });
+
   it('binds continuation admission to the session without waiting for SSE', async () => {
     const body = {
       accepted: true,

@@ -2677,6 +2677,14 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, []);
 
+  useEffect(
+    () =>
+      config.onWorkflowModeChange?.(() => {
+        if (config.hasWorkflowModeContext()) abortPromptSuggestion();
+      }),
+    [config, abortPromptSuggestion],
+  );
+
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const llmClient = config.getLlmClient();
 
@@ -3465,7 +3473,8 @@ export const AppContainer = (props: AppContainerProps) => {
         spec.status !== 'idle' &&
         spec.suggestion === submittedValue &&
         spec.status === 'completed' &&
-        !needsWorkflowIntent
+        !needsWorkflowIntent &&
+        !config.hasWorkflowModeContext()
       ) {
         // Accept completed speculation: inject messages and apply files
         acceptSpeculation(spec, llmClient)
@@ -3562,7 +3571,11 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Automatic speculation never received the current human intent.
-      if (spec.status === 'running' || needsWorkflowIntent) {
+      if (
+        spec.status === 'running' ||
+        needsWorkflowIntent ||
+        (spec.status !== 'idle' && config.hasWorkflowModeContext())
+      ) {
         abortSpeculation(spec).catch(() => {});
         speculationRef.current = IDLE_SPECULATION;
       }
@@ -4112,9 +4125,16 @@ export const AppContainer = (props: AppContainerProps) => {
           if (result.suggestion) {
             setPromptSuggestion(result.suggestion);
             // Start speculation if enabled (runs in background)
-            if (settings.merged.ui?.enableSpeculation) {
+            if (
+              settings.merged.ui?.enableSpeculation &&
+              !config.hasWorkflowModeContext()
+            ) {
               startSpeculation(config, result.suggestion, ac.signal)
                 .then((state) => {
+                  if (ac.signal.aborted || config.hasWorkflowModeContext()) {
+                    void abortSpeculation(state).catch(() => {});
+                    return;
+                  }
                   speculationRef.current = state;
                 })
                 .catch(() => {

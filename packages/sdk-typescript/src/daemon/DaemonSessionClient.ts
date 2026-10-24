@@ -992,11 +992,38 @@ export class DaemonSessionClient {
     configId: 'reasoning_effort',
     value: ReasoningSelection,
     opts?: { persist?: boolean },
+  ): Promise<DaemonSessionConfigOptionResult>;
+  setConfigOption(
+    configId: 'workflow_mode',
+    value: 'on' | 'off',
+  ): Promise<DaemonSessionConfigOptionResult>;
+  setConfigOption(
+    configId: 'reasoning_effort' | 'workflow_mode',
+    value: ReasoningSelection | 'on' | 'off',
+    opts?: { persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
-    return this.client.setSessionConfigOption(this.sessionId, configId, value, {
-      clientId: this.clientId,
-      persist: opts?.persist,
-    });
+    if (configId === 'workflow_mode') {
+      if ((value !== 'on' && value !== 'off') || opts !== undefined) {
+        throw new Error(
+          'Workflow mode requires on/off and does not accept persist',
+        );
+      }
+      return this.client.setSessionConfigOption(
+        this.sessionId,
+        configId,
+        value,
+        { clientId: this.clientId },
+      );
+    }
+    return this.client.setSessionConfigOption(
+      this.sessionId,
+      configId,
+      value as ReasoningSelection,
+      {
+        clientId: this.clientId,
+        persist: opts?.persist,
+      },
+    );
   }
 
   getMessageGroups(): Promise<DaemonMessageGroupsSnapshot> {

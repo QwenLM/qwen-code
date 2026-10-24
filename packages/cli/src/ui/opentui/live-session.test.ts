@@ -472,6 +472,7 @@ describe('livePromptEvents', () => {
         promptId: 'same-id',
         submittedPrompt: '@owned.txt',
         humanInput: { text: 'original' },
+        workflowModeEligible: true,
         retry: {
           content,
           modelOverride: 'skill-model',
@@ -1044,6 +1045,29 @@ describe('livePromptEvents', () => {
     expect((sendMessageStream.mock.calls[0] as unknown[])[2]).toBe(
       'session-9########7',
     );
+  });
+
+  it('forwards fresh-mode eligibility once without inventing human provenance', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'mode-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    await drain(
+      livePromptEvents(config, 'ordinary recalled input', undefined, {
+        workflowModeEligible: true,
+      }),
+    );
+    expect((sendMessageStream.mock.calls[0] as unknown[])[3]).toMatchObject({
+      workflowModeEligible: true,
+    });
+    expect(
+      (sendMessageStream.mock.calls[0] as unknown[])[3],
+    ).not.toHaveProperty('humanInput');
+    expect(
+      (sendMessageStream.mock.calls[1] as unknown[])[3],
+    ).not.toHaveProperty('workflowModeEligible');
   });
 
   it('forwards multimodal part lists unchanged', async () => {

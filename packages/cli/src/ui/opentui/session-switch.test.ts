@@ -231,7 +231,21 @@ describe('handleResumeSession', () => {
       failClientInitialize: true,
     });
     const host = createFakeHost(config);
+    const snapshot = {
+      requested: true,
+      recorded: true,
+      pending: false,
+      turns: 4,
+      announced: true,
+      available: true,
+    };
+    const restoreMode = vi.fn();
+    Object.assign(config, {
+      captureWorkflowModeState: () => snapshot,
+      restoreWorkflowModeState: restoreMode,
+    });
     await handleResumeSession(host, 'target-session');
+    expect(restoreMode).toHaveBeenCalledExactlyOnceWith(snapshot);
 
     // Forward swap happened, then the rollback restored the old session.
     expect(calls.startNewSession.map(([id]) => id)).toEqual([

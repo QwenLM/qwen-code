@@ -1714,6 +1714,7 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   if (
     subtype === 'available_commands_update' ||
     subtype === 'current_mode_update' ||
+    subtype === 'config_option_update' ||
     subtype === 'session_info_update'
   ) {
     return true;
@@ -14658,24 +14659,30 @@ export function createSessionControlPlane(
       return response;
     },
 
-    async setSessionConfigOption(sessionId, req) {
+    async setSessionConfigOption(sessionId, req, context, assertCanCommit) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      const info = channelInfoForEntry(entry);
-      if (!info || info.harness.isDying)
-        throw new SessionNotFoundError(sessionId);
+      const assertCurrentOwner = () => {
+        assertCanCommit?.();
+        assertAttachableSessionEntry(sessionId, entry);
+        resolveTrustedClientId(entry, context?.clientId);
+      };
+      assertCurrentOwner();
       const normalized: SetSessionConfigOptionRequest = { ...req, sessionId };
       const transportClosed = getTransportClosedReject(entry);
-      const work = entry.modelChangeQueue.then(() =>
-        Promise.race([
+      const work = entry.modelChangeQueue.then(async () => {
+        assertCurrentOwner();
+        const response = await Promise.race([
           withTimeout(
             entry.connection.setSessionConfigOption(normalized),
             initTimeoutMs,
             'setSessionConfigOption',
           ),
           transportClosed,
-        ]),
-      );
+        ]);
+        assertCurrentOwner();
+        return response;
+      });
       entry.modelChangeQueue = work.then(
         () => undefined,
         () => undefined,

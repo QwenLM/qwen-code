@@ -690,6 +690,7 @@ export function llmPreparedProviderPin(
 
 export interface LlmChatSendOptions {
   onPreparedRequest?: LlmPreparedRequestCallback;
+  onModelRequestDispatched?: () => void;
   preparedRequest?: LlmPreparedRequest;
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
@@ -4032,6 +4033,8 @@ export class LlmChat {
               acceptQuietToolResultCompletion,
               options?.onPreparedRequest,
               promptTokensForClamp,
+              false,
+              options?.onModelRequestDispatched,
             );
             streamEstablished = true;
 
@@ -4919,6 +4922,7 @@ export class LlmChat {
                 options?.onPreparedRequest,
                 promptTokensForClamp,
                 retryEvent.isContinuation === true,
+                options?.onModelRequestDispatched,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -5358,6 +5362,7 @@ export class LlmChat {
                     options?.onPreparedRequest,
                     promptTokensForClamp,
                     fallbackConfig,
+                    options?.onModelRequestDispatched,
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
@@ -5562,6 +5567,7 @@ export class LlmChat {
     onPreparedRequest?: LlmPreparedRequestCallback,
     promptTokensForClamp = 0,
     continuationInFlight = false,
+    onModelRequestDispatched?: () => void,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -5650,6 +5656,7 @@ export class LlmChat {
           /* Telemetry is observational. */
         }
       }
+      onModelRequestDispatched?.();
       return generator.generateContentStream(request, prompt_id);
     };
     const cgConfig = this.config.getContentGeneratorConfig();
@@ -5745,6 +5752,7 @@ export class LlmChat {
     onPreparedRequest?: LlmPreparedRequestCallback,
     promptTokensForClamp = 0,
     contentGeneratorConfig?: ContentGeneratorConfig,
+    onModelRequestDispatched?: () => void,
   ): AsyncGenerator<StreamEvent> {
     const stream = await this.makeApiCallAndProcessStream(
       model,
@@ -5763,6 +5771,8 @@ export class LlmChat {
       false,
       onPreparedRequest,
       promptTokensForClamp,
+      false,
+      onModelRequestDispatched,
     );
 
     for await (const chunk of stream) {

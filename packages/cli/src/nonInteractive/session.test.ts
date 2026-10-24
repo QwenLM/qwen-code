@@ -384,7 +384,64 @@ describe('runNonInteractiveStreamJson', () => {
 
     await runNonInteractiveStreamJson(config, '');
 
-    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest, true);
+  });
+
+  it('keeps MCP responses flowing while a Workflow mode getter awaits readiness', async () => {
+    let releaseInitialization!: () => void;
+    const initialization = new Promise<void>((resolve) => {
+      releaseInitialization = resolve;
+    });
+    config = createConfig({ initialize: vi.fn(() => initialization) });
+    let waitForInitialization!: () => Promise<void>;
+    vi.mocked(ControlContext).mockImplementation((options) => {
+      waitForInitialization = options.waitForInitialization!;
+      return {} as ControlContext;
+    });
+    let getter: Promise<void> | undefined;
+    let getterComplete = false;
+    mockDispatcher.dispatch.mockImplementation((request: CLIControlRequest) => {
+      if (request.request.subtype === 'get_workflow_mode') {
+        getter = waitForInitialization().then(() => {
+          getterComplete = true;
+        });
+        return getter;
+      }
+      return Promise.resolve();
+    });
+    mockDispatcher.handleControlResponse.mockImplementation(() => {
+      expect(getterComplete).toBe(false);
+      releaseInitialization();
+    });
+    mockDispatcher.waitForPendingIncomingRequests.mockImplementation(
+      () => getter,
+    );
+    mockInputReader.read = async function* () {
+      yield createControlRequest();
+      yield {
+        type: 'control_request',
+        request_id: 'workflow-get',
+        request: { subtype: 'get_workflow_mode' },
+      };
+      yield createControlResponse('mcp-initialize');
+    };
+    await runNonInteractiveStreamJson(config, '');
+    expect(mockDispatcher.handleControlResponse).toHaveBeenCalledOnce();
+    expect(getterComplete).toBe(true);
+  });
+
+  it('does not dispatch the first prompt after an initial Workflow mode staging failure', async () => {
+    mockDispatcher.dispatch.mockRejectedValueOnce(
+      new Error('Conflicting Workflow mode'),
+    );
+    mockInputReader.read = async function* () {
+      yield createControlRequest();
+      yield createUserMessage('must not reach the model');
+    };
+    await runNonInteractiveStreamJson(config, '');
+    expect(config.initialize).not.toHaveBeenCalled();
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalled();
   });
 
   it('writes only warnings produced during deferred initialization to stderr', async () => {
@@ -1419,7 +1476,11 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.dispatch).toHaveBeenCalledTimes(2);
-    expect(mockDispatcher.dispatch).toHaveBeenNthCalledWith(1, initRequest);
+    expect(mockDispatcher.dispatch).toHaveBeenNthCalledWith(
+      1,
+      initRequest,
+      true,
+    );
     expect(mockDispatcher.dispatch).toHaveBeenNthCalledWith(2, controlRequest);
   });
 
@@ -1626,7 +1687,7 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     // Verify initialization happened
-    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest, true);
     expect(mockDispatcher.shutdown).toHaveBeenCalled();
   });
 

@@ -403,6 +403,7 @@ export interface ChatRecord {
     | 'omni_recall'
     | 'session_model'
     | 'session_approval_mode'
+    | 'session_workflow_mode'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
@@ -521,6 +522,7 @@ export interface ChatRecord {
     | SessionModelRecordPayload
     | SessionExecutionEnginePayload
     | SessionApprovalModeRecordPayload
+    | SessionWorkflowModeRecordPayload
     | NotificationRecordPayload
     | UserPromptRecordPayload
     | RewindRecordPayload
@@ -768,6 +770,21 @@ export interface SessionModelRecordPayload {
   authType: string;
   baseUrl?: string;
   isRuntime?: boolean;
+}
+
+export interface SessionWorkflowModeRecordPayload {
+  enabled: boolean;
+}
+
+export function isValidSessionWorkflowModePayload(
+  payload: unknown,
+): payload is SessionWorkflowModeRecordPayload {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    typeof (payload as SessionWorkflowModeRecordPayload).enabled === 'boolean'
+  );
 }
 
 /** Last-wins approval state a daemon session should restore. */
@@ -1139,6 +1156,7 @@ export interface ChatRecordingRestoreState {
   sourceId?: string;
   sessionModel?: SessionModelRecordPayload;
   sessionApprovalMode?: SessionApprovalModeRecordPayload;
+  sessionWorkflowMode?: SessionWorkflowModeRecordPayload;
 }
 
 /**
@@ -1246,6 +1264,7 @@ export class ChatRecordingService {
   private currentSourceId: string | undefined;
   /** Last-wins daemon session model binding, used to skip duplicate writes. */
   private currentSessionModel: SessionModelRecordPayload | undefined;
+  private currentSessionWorkflowMode: boolean | undefined;
   /** Last-wins daemon session approval state, used to skip duplicate writes. */
   private currentSessionApprovalMode:
     | SessionApprovalModeRecordPayload
@@ -1439,6 +1458,7 @@ export class ChatRecordingService {
     this.currentSourceId = undefined;
     this.currentSessionModel = undefined;
     this.currentSessionApprovalMode = undefined;
+    this.currentSessionWorkflowMode = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
@@ -1474,6 +1494,10 @@ export class ChatRecordingService {
           this.currentSessionModel = normalizeSessionModelPayload(
             record.systemPayload,
           );
+        }
+      } else if (record.subtype === 'session_workflow_mode') {
+        if (isValidSessionWorkflowModePayload(record.systemPayload)) {
+          this.currentSessionWorkflowMode = record.systemPayload.enabled;
         }
       } else if (record.subtype === 'session_approval_mode') {
         if (isValidSessionApprovalModePayload(record.systemPayload)) {
@@ -1518,6 +1542,11 @@ export class ChatRecordingService {
     this.currentSourceId = state.sourceId;
     this.currentSessionModel = state.sessionModel
       ? normalizeSessionModelPayload(state.sessionModel)
+      : undefined;
+    this.currentSessionWorkflowMode = isValidSessionWorkflowModePayload(
+      state.sessionWorkflowMode,
+    )
+      ? state.sessionWorkflowMode.enabled
       : undefined;
     this.currentSessionApprovalMode = state.sessionApprovalMode
       ? normalizeSessionApprovalModePayload(state.sessionApprovalMode)
@@ -3419,6 +3448,15 @@ export class ChatRecordingService {
         });
       }
 
+      if (this.currentSessionWorkflowMode !== undefined) {
+        this.appendRecord({
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: 'session_workflow_mode',
+          systemPayload: { enabled: this.currentSessionWorkflowMode },
+        });
+      }
+
       // Re-record surviving file history snapshots on the active branch so
       // they are visible to reconstructHistory on resume.
       if (survivingFileHistorySnapshots?.length) {
@@ -3719,6 +3757,39 @@ export class ChatRecordingService {
         debugLogger.error('Error saving session model record:', error);
       }
       return false;
+    }
+  }
+
+  restoreSessionWorkflowMode(enabled: boolean | undefined): void {
+    this.currentSessionWorkflowMode = enabled;
+  }
+
+  getSessionWorkflowMode(): boolean | undefined {
+    return this.currentSessionWorkflowMode;
+  }
+
+  async recordSessionWorkflowMode(enabled: boolean): Promise<void> {
+    if (typeof enabled !== 'boolean') {
+      throw new Error('Workflow mode must be a boolean');
+    }
+    // Even a no-op must validate that the recorder still owns a live writer.
+    await this.assertCanStartTurn();
+    if (this.currentSessionWorkflowMode === enabled) return;
+    if (!this.writerLeaseRequired) this.ensureConversationFile();
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_workflow_mode',
+      systemPayload: { enabled },
+    };
+    const previous = this.currentSessionWorkflowMode;
+    // A rewind queued during this append must re-anchor the same choice.
+    this.currentSessionWorkflowMode = enabled;
+    try {
+      await this.appendRecordStrict(record);
+    } catch (error) {
+      this.currentSessionWorkflowMode = previous;
+      throw error;
     }
   }
 
