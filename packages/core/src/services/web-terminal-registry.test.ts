@@ -7,48 +7,57 @@
 import type { MockInstance } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '@xterm/headless';
+import { Writable } from 'node:stream';
+import { promises as fs } from 'node:fs';
+import {
+  MAX_PTY_INPUT_QUEUE_TASKS,
+  PTY_INPUT_QUEUE_FIELDS,
+} from './pty-input-queue.js';
 import * as conptyHost from './conpty-host.js';
 
 const { Terminal } = pkg;
-const { warn } = vi.hoisted(() => ({ warn: vi.fn() }));
-vi.mock('../utils/debugLogger.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../utils/debugLogger.js')>();
-  return {
-    ...actual,
-    createDebugLogger: (tag: string) => ({
-      ...actual.createDebugLogger(tag),
-      warn,
-    }),
-  };
-});
-
-const { spawn, loadPty, spawnSync, osPlatform, loadXtermHeadless } = vi.hoisted(
-  () => ({
-    spawn: vi.fn(),
-    loadPty: vi.fn(),
-    spawnSync: vi.fn(),
-    osPlatform: vi.fn(),
-    loadXtermHeadless: vi.fn(),
-  }),
-);
+const {
+  spawn,
+  loadPty,
+  spawnSync,
+  osPlatform,
+  loadXtermHeadless,
+  warn,
+  logFileEnabled,
+  logSessionEnabled,
+} = vi.hoisted(() => ({
+  spawn: vi.fn(),
+  loadPty: vi.fn(),
+  spawnSync: vi.fn(),
+  osPlatform: vi.fn(),
+  loadXtermHeadless: vi.fn(),
+  warn: vi.fn(),
+  logFileEnabled: vi.fn(),
+  logSessionEnabled: vi.fn(),
+}));
 
 vi.mock('node:child_process', () => ({ spawnSync }));
 vi.mock('../utils/getPty.js', () => ({ loadPty }));
 vi.mock('../utils/load-xterm-headless.js', () => ({ loadXtermHeadless }));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({ warn, isEnabled: logSessionEnabled }),
+  isDebugLogFileEnabled: logFileEnabled,
+}));
 // conpty-host reads os.platform() for its win32 release gate, and the
 // registry for the bundled-vs-inbox ConPTY backend choice; killPtyTree
 // branches on process.platform, so this steers both without touching it.
 // Windows CI is skipped on PRs, so the win32 path has to be reachable here.
-// Everything else passes through -- Storage (via debugLogger) needs the real
-// os.homedir()/os.tmpdir().
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
   const patched = { ...actual, platform: osPlatform };
   return { ...patched, default: patched };
 });
 
-import { DEFAULT_WRITE_QUEUE_BYTES } from '../utils/bun-pty.js';
+import {
+  DEFAULT_WRITE_QUEUE_BYTES,
+  processPtyBudget,
+} from '../utils/bun-pty.js';
+import * as bunPty from '../utils/bun-pty.js';
 import {
   MAX_CONCURRENT_WEB_TERMINALS,
   resolveWebTerminalShell,
@@ -65,15 +74,18 @@ describe('WebTerminalRegistry', () => {
   let conoutDispose: ReturnType<typeof vi.fn>;
   let disposeData: ReturnType<typeof vi.fn>;
   let disposeExit: ReturnType<typeof vi.fn>;
+  let inputSocket: { writableLength: number };
 
   const createSpawnedPty = () => ({
     pid: 1,
     write,
     resize,
     kill,
+    _socket: inputSocket,
     // node-pty's WindowsPtyAgent internals, which releaseConPtyHost drives
     // directly instead of going through kill(). See #11303.
     _agent: {
+      inSocket: inputSocket,
       _pty: 42,
       _useConptyDll: false,
       _ptyNative: { kill: nativeKill },
@@ -183,10 +195,16 @@ describe('WebTerminalRegistry', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    warn.mockReset();
+    logFileEnabled.mockReset().mockReturnValue(true);
+    logSessionEnabled.mockReset().mockReturnValue(true);
+    inputSocket = { writableLength: 0 };
+    write = vi.fn((data: string | Buffer) => {
+      inputSocket.writableLength += Buffer.byteLength(data);
+    });
     // Every test is isolated from host PIDs, including release fixtures that
     // deliberately model a live POSIX process/group with pid 42.
     vi.spyOn(process, 'kill').mockImplementation(() => true);
-    write = vi.fn();
     resize = vi.fn();
     kill = vi.fn();
     nativeKill = vi.fn();
@@ -368,7 +386,7 @@ describe('WebTerminalRegistry', () => {
 
     // DA is last, so its answer also waits for all preceding queries to parse.
     await vi.waitFor(() => {
-      expect(write).toHaveBeenCalledExactlyOnceWith('\x1b[?1;2c');
+      expect(write).toHaveBeenCalledExactlyOnceWith(Buffer.from('\x1b[?1;2c'));
     });
     expect(received).toEqual(chunks);
     expect(registry.readSnapshot('terminal:queries')).toMatchObject({
@@ -743,6 +761,7 @@ describe('WebTerminalRegistry', () => {
     spawn.mockReturnValueOnce({
       pid: 42,
       write,
+      stats: { writeQueuedBytes: 0 },
       resize,
       kill,
       onData: vi.fn((listener: (data: string) => void) => {
@@ -1207,7 +1226,7 @@ describe('WebTerminalRegistry', () => {
     });
   });
 
-  it('forwards live output and bounds unacknowledged PTY input', async () => {
+  it('bounds queued input across reconnects without treating output as a drain', async () => {
     const registry = await start('terminal:io');
     const listener = vi.fn();
     const detachListener = registry.addOutputListener('terminal:io', listener);
@@ -1228,23 +1247,183 @@ describe('WebTerminalRegistry', () => {
 
     onData('ready');
     expect(listener).toHaveBeenCalledWith('ready');
+    expect(registry.write('terminal:io', '12345')).toBe('backpressure');
+
+    inputSocket.writableLength = 0;
     expect(registry.write('terminal:io', '12345')).toBe('written');
-    expect(registry.write('terminal:io', 'x')).toBe('backpressure');
+    expect(registry.write('terminal:io', 'x')).toBe('written');
+    registry.dispose();
   });
 
-  it('refuses an input frame above the admission budget on an idle session', async () => {
+  it('accepts one complete oversized input frame on an idle session', async () => {
     const registry = await start('terminal:paste');
     const paste = 'x'.repeat(256 * 1024 + 1);
 
+    expect(registry.write('terminal:paste', paste)).toBe('written');
     expect(registry.write('terminal:paste', paste)).toBe('backpressure');
-    expect(write).not.toHaveBeenCalled();
-    expect(registry.readSnapshot('terminal:paste')?.failed).toBeUndefined();
+    expect(write).toHaveBeenCalledOnce();
+    registry.dispose();
   });
 
-  it('refuses a single input frame above the backend write budget without failing the session', async () => {
+  it.each(['lydell-node-pty', 'node-pty'])(
+    'bounds idle input frames on %s in UTF-8 bytes',
+    async (name) => {
+      loadPty.mockResolvedValue({
+        impl: { module: { spawn }, name },
+        loadError: null,
+      });
+      const registry = await start('terminal:frame-limit');
+      const limit = 1024 * 1024;
+      expect(
+        registry.write('terminal:frame-limit', 'é'.repeat(limit / 2 + 1)),
+      ).toBe('backpressure');
+      expect(write).not.toHaveBeenCalled();
+      expect(
+        registry.write('terminal:frame-limit', 'é'.repeat(limit / 2)),
+      ).toBe('written');
+      expect(write).toHaveBeenCalledOnce();
+      inputSocket.writableLength = 0;
+      expect(
+        registry.write('terminal:frame-limit', 'x'.repeat(300 * 1024)),
+      ).toBe('written');
+      registry.dispose();
+    },
+  );
+
+  it('reserves a native queue for other Bun PTYs under shared-budget pressure', async () => {
+    const originalLimit = processPtyBudget.totalWriteQueueBytes;
+    expect(
+      MAX_CONCURRENT_WEB_TERMINALS * DEFAULT_WRITE_QUEUE_BYTES,
+    ).toBeLessThanOrEqual(originalLimit);
+    processPtyBudget.totalWriteQueueBytes =
+      (MAX_CONCURRENT_WEB_TERMINALS + 1) * 4096 + DEFAULT_WRITE_QUEUE_BYTES;
+    let sharedPending = 0;
+    let backendFailures = 0;
+    const queues: Array<{ pending: number }> = [];
+    vi.spyOn(bunPty, 'getPtyBudgetStats').mockImplementation(() => ({
+      activePtys: queues.length,
+      pausedHoldBytes: 0,
+      writeQueueBytes: sharedPending,
+    }));
+    const writeNative = (queue: { pending: number }, data: string | Buffer) => {
+      const bytes = Buffer.byteLength(data);
+      if (sharedPending + bytes > processPtyBudget.totalWriteQueueBytes) {
+        backendFailures++;
+        return;
+      }
+      queue.pending += bytes;
+      sharedPending += bytes;
+    };
+    spawn.mockImplementation(() => {
+      const queue = { pending: 0 };
+      queues.push(queue);
+      return {
+        ...createSpawnedPty(),
+        _agent: undefined,
+        _socket: undefined,
+        get stats() {
+          return { writeQueuedBytes: queue.pending };
+        },
+        write: vi.fn((data: string | Buffer) => writeNative(queue, data)),
+      };
+    });
+    loadPty.mockResolvedValue({
+      impl: { module: { spawn }, name: 'qwen-bun-pty' },
+      loadError: null,
+    });
+    const registry = new WebTerminalRegistry();
+    try {
+      for (let i = 0; i < MAX_CONCURRENT_WEB_TERMINALS; i++) {
+        await create(registry, `terminal:shared-${i}`);
+        expect(registry.write(`terminal:shared-${i}`, 'x'.repeat(4096))).toBe(
+          'written',
+        );
+      }
+      // Equality at the web ceiling is allowed; the next ordinary byte is not.
+      expect(registry.write('terminal:shared-0', 'x'.repeat(4096))).toBe(
+        'written',
+      );
+      expect(sharedPending).toBe(
+        processPtyBudget.totalWriteQueueBytes - DEFAULT_WRITE_QUEUE_BYTES,
+      );
+      expect(registry.write('terminal:shared-1', 'x')).toBe('backpressure');
+      const victimPending = queues[1].pending;
+      expect(registry.write('terminal:shared-1', '\x03')).toBe('written');
+      expect(queues[1].pending).toBe(victimPending + 1);
+      expect(spawn.mock.results[1].value.write).toHaveBeenLastCalledWith(
+        Buffer.from('\x03'),
+      );
+      const otherPty = { pending: 0 };
+      writeNative(otherPty, Buffer.alloc(DEFAULT_WRITE_QUEUE_BYTES - 1));
+      expect(otherPty.pending).toBe(DEFAULT_WRITE_QUEUE_BYTES - 1);
+      expect(sharedPending).toBe(processPtyBudget.totalWriteQueueBytes);
+      expect(registry.write('terminal:shared-1', '\x03')).toBe('backpressure');
+      expect(queues[1].pending).toBe(victimPending + 1);
+      // Recovery controls may reach equality, but never exceed the hard total.
+      sharedPending--;
+      otherPty.pending--;
+      expect(registry.write('terminal:shared-1', '\x03')).toBe('written');
+      expect(sharedPending).toBe(processPtyBudget.totalWriteQueueBytes);
+      expect(queues[1].pending).toBe(victimPending + 2);
+      expect(registry.write('terminal:shared-1', 'x')).toBe('backpressure');
+      expect(backendFailures).toBe(0);
+      expect(
+        registry.readSnapshot('terminal:shared-1')?.failed,
+      ).toBeUndefined();
+      sharedPending = 0;
+      for (const queue of queues) queue.pending = 0;
+      expect(registry.write('terminal:shared-1', 'next\r')).toBe('written');
+    } finally {
+      registry.dispose();
+      processPtyBudget.totalWriteQueueBytes = originalLimit;
+    }
+  });
+
+  it('admits Bun input from public stats across output, drain and reconnect', async () => {
+    let pending = 0;
+    write.mockImplementation((data: string | Buffer) => {
+      pending += Buffer.byteLength(data);
+    });
+    spawn.mockImplementationOnce(() => ({
+      ...createSpawnedPty(),
+      _socket: undefined,
+      _agent: undefined,
+      get stats() {
+        return { writeQueuedBytes: pending };
+      },
+    }));
+    loadPty.mockResolvedValueOnce({
+      impl: { module: { spawn }, name: 'qwen-bun-pty' },
+      loadError: null,
+    });
+    const registry = await start('terminal:bun');
+    const detach = registry.addOutputListener('terminal:bun', vi.fn());
+    expect(registry.write('terminal:bun', 'é'.repeat(128 * 1024))).toBe(
+      'written',
+    );
+    expect(pending).toBe(256 * 1024);
+    expect(registry.write('terminal:bun', 'x')).toBe('backpressure');
+    onData('output does not drain input');
+    detach?.();
+    registry.addOutputListener('terminal:bun', vi.fn());
+    expect(registry.write('terminal:bun', 'x')).toBe('backpressure');
+    expect(registry.write('terminal:bun', '\x03')).toBe('written');
+    pending = 0;
+    expect(registry.write('terminal:bun', 'next command\r')).toBe('written');
+    expect(warn).not.toHaveBeenCalled();
+    registry.dispose();
+  });
+
+  it('preserves the Bun hard write budget for oversized frames and recovery controls', async () => {
+    loadPty.mockResolvedValueOnce({
+      impl: { module: { spawn }, name: 'qwen-bun-pty' },
+      loadError: null,
+    });
+    let pending = 0;
     const errorListeners: Array<(err: Error) => void> = [];
-    const acceptedBytes = vi.fn((data: string) => {
-      if (Buffer.byteLength(data) <= DEFAULT_WRITE_QUEUE_BYTES) return;
+    const acceptedBytes = vi.fn((data: string | Buffer) => {
+      pending += Buffer.byteLength(data);
+      if (pending <= DEFAULT_WRITE_QUEUE_BYTES) return;
       for (const listener of errorListeners) {
         listener(
           Object.assign(new Error('qwen-bun-pty resource limit reached'), {
@@ -1256,6 +1435,9 @@ describe('WebTerminalRegistry', () => {
     spawn.mockReturnValueOnce({
       pid: 42,
       write: acceptedBytes,
+      get stats() {
+        return { writeQueuedBytes: pending };
+      },
       resize,
       kill,
       onData: vi.fn((listener: (data: string) => void) => {
@@ -1283,9 +1465,372 @@ describe('WebTerminalRegistry', () => {
     ).toBe('backpressure');
     expect(acceptedBytes).not.toHaveBeenCalled();
     expect(
+      registry.write(
+        'terminal:oversized-frame',
+        'é'.repeat(DEFAULT_WRITE_QUEUE_BYTES / 2),
+      ),
+    ).toBe('written');
+    expect(acceptedBytes).toHaveBeenCalledOnce();
+    expect(registry.write('terminal:oversized-frame', '\x03')).toBe(
+      'backpressure',
+    );
+    expect(acceptedBytes).toHaveBeenCalledOnce();
+    expect(
       registry.readSnapshot('terminal:oversized-frame')?.failed,
     ).toBeUndefined();
   });
+
+  it('accepts more input after a silent socket drain, including after reconnect', async () => {
+    const registry = await start('terminal:silent');
+    const detach = registry.addOutputListener('terminal:silent', vi.fn());
+
+    expect(registry.write('terminal:silent', 'x'.repeat(300 * 1024))).toBe(
+      'written',
+    );
+    inputSocket.writableLength = 0;
+    expect(registry.write('terminal:silent', 'next command\r')).toBe('written');
+    inputSocket.writableLength = 0;
+    detach?.();
+    registry.addOutputListener('terminal:silent', vi.fn());
+    expect(registry.write('terminal:silent', 'after reconnect\r')).toBe(
+      'written',
+    );
+    expect(registry.readSnapshot('terminal:silent')?.output).toBe('');
+    registry.dispose();
+  });
+
+  it('measures the remaining bytes in the POSIX backend write queue', async () => {
+    const queue: Array<{ buffer: Buffer; offset: number }> = [];
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _writeStream: { _writeQueue: queue },
+    }));
+    write.mockImplementation((data: string | Buffer) => {
+      queue.push({ buffer: Buffer.from(data), offset: 0 });
+    });
+    const registry = await start('terminal:posix', 'linux');
+
+    expect(registry.write('terminal:posix', 'é'.repeat(128 * 1024))).toBe(
+      'written',
+    );
+    expect(registry.write('terminal:posix', 'x')).toBe('backpressure');
+    onData('unrelated output');
+    expect(registry.write('terminal:posix', 'x')).toBe('backpressure');
+    queue[0].offset = 2;
+    expect(registry.write('terminal:posix', 'é')).toBe('written');
+    expect(registry.write('terminal:posix', 'x')).toBe('backpressure');
+    queue.length = 0;
+    expect(registry.write('terminal:posix', 'next\r')).toBe('written');
+    registry.dispose();
+  });
+
+  it('bounds small-frame queue scans and resumes after silent drain', async () => {
+    let visitedTasks = 0;
+    const queue: Array<{ buffer: Buffer; offset: number }> = [];
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _writeStream: { _writeQueue: queue },
+    }));
+    write.mockImplementation((data: string | Buffer) => {
+      const buffer = Buffer.from(data);
+      queue.push({
+        get buffer() {
+          visitedTasks++;
+          return buffer;
+        },
+        offset: 0,
+      });
+    });
+    const registry = await start('terminal:small-frames', 'linux');
+    for (let n = 0; n < MAX_PTY_INPUT_QUEUE_TASKS; n++) {
+      expect(registry.write('terminal:small-frames', 'x')).toBe('written');
+    }
+    const visitsAtLimit = visitedTasks;
+    expect(visitsAtLimit).toBeLessThanOrEqual(
+      (MAX_PTY_INPUT_QUEUE_TASKS * (MAX_PTY_INPUT_QUEUE_TASKS - 1)) / 2,
+    );
+    for (let n = 0; n < 4000; n++) {
+      expect(registry.write('terminal:small-frames', 'x')).toBe('backpressure');
+    }
+    onData('unrelated output');
+    registry.addOutputListener('terminal:small-frames', vi.fn())?.();
+    registry.addOutputListener('terminal:small-frames', vi.fn());
+    expect(registry.write('terminal:small-frames', 'x')).toBe('backpressure');
+    expect(visitedTasks).toBe(visitsAtLimit);
+    expect(write).toHaveBeenCalledTimes(MAX_PTY_INPUT_QUEUE_TASKS);
+    expect(registry.write('terminal:small-frames', '\x03')).toBe('written');
+    queue.length = 0;
+    expect(registry.write('terminal:small-frames', 'next\r')).toBe('written');
+    expect(warn).not.toHaveBeenCalled();
+    registry.dispose();
+  });
+
+  it('bounds deferred Windows startup input until its input socket drains', async () => {
+    const spawned = { ...createSpawnedPty(), _isReady: false };
+    spawn.mockReturnValue(spawned);
+    write.mockImplementation(() => {});
+    const registry = await start('terminal:starting', 'win32');
+
+    expect(registry.write('terminal:starting', 'x'.repeat(256 * 1024))).toBe(
+      'written',
+    );
+    expect(registry.write('terminal:starting', 'x')).toBe('backpressure');
+    expect(registry.write('terminal:starting', '\x03')).toBe('written');
+    spawned._isReady = true;
+    inputSocket.writableLength = 256 * 1024 + 1;
+    onData('prompt');
+    expect(registry.write('terminal:starting', 'x')).toBe('backpressure');
+    inputSocket.writableLength = 0;
+    expect(registry.write('terminal:starting', 'next\r')).toBe('written');
+    expect(warn).not.toHaveBeenCalled();
+    registry.dispose();
+  });
+
+  it('does not mistake the Windows output socket for its input queue', async () => {
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _socket: { writableLength: 0 },
+    }));
+    const registry = await start('terminal:windows', 'win32');
+
+    inputSocket.writableLength = 256 * 1024;
+    expect(registry.write('terminal:windows', 'x')).toBe('backpressure');
+    inputSocket.writableLength = 0;
+    expect(registry.write('terminal:windows', 'x')).toBe('written');
+    onExit({ exitCode: 0 });
+    expect(registry.write('terminal:windows', 'x')).toBe('unavailable');
+    registry.release('terminal:windows');
+    expect(registry.write('terminal:windows', 'x')).toBe('unavailable');
+  });
+
+  it('uses the socket queue for older POSIX backends', async () => {
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _agent: undefined,
+    }));
+    const registry = await start('terminal:socket', 'linux');
+
+    inputSocket.writableLength = 256 * 1024;
+    expect(registry.write('terminal:socket', 'x')).toBe('backpressure');
+    inputSocket.writableLength = 0;
+    expect(registry.write('terminal:socket', 'x')).toBe('written');
+    registry.dispose();
+  });
+
+  it('counts UTF-8 bytes when an input socket does not decode strings', async () => {
+    const socket = new Writable({ decodeStrings: false, write() {} });
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _agent: { ...createSpawnedPty()._agent, inSocket: socket },
+    }));
+    write.mockImplementation((data: string | Buffer) => socket.write(data));
+    const registry = await start('terminal:utf8', 'win32');
+
+    expect(registry.write('terminal:utf8', 'é'.repeat(128 * 1024))).toBe(
+      'written',
+    );
+    expect(socket.writableLength).toBe(256 * 1024);
+    expect(registry.write('terminal:utf8', 'x')).toBe('backpressure');
+    registry.dispose();
+    socket.destroy();
+  });
+
+  it.each(['lydell-node-pty', 'node-pty'])(
+    'warns once per session when %s exposes no input queue',
+    async (name) => {
+      loadPty.mockResolvedValue({
+        impl: { module: { spawn }, name },
+        loadError: null,
+      });
+      spawn.mockImplementation(() => ({
+        ...createSpawnedPty(),
+        _agent: undefined,
+        _socket: undefined,
+      }));
+      const registry = await start('terminal:unknown');
+
+      expect(registry.write('terminal:unknown', 'private input')).toBe(
+        'unavailable',
+      );
+      registry.addOutputListener('terminal:unknown', vi.fn())?.();
+      onData('unrelated output');
+      expect(registry.write('terminal:unknown', 'retry')).toBe('unavailable');
+      expect(write).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining(`${name} input queue`),
+      );
+      expect(warn.mock.calls[0][0]).toContain('_writeStream._writeQueue');
+      expect(warn.mock.calls[0][0]).toContain('_agent.inSocket.writableLength');
+      expect(warn.mock.calls[0][0]).toContain('_socket.writableLength');
+      for (const field of PTY_INPUT_QUEUE_FIELDS) {
+        expect(warn.mock.calls[0][0]).toContain(field);
+      }
+      expect(warn.mock.calls[0][0]).not.toContain('private input');
+      expect(registry.write('terminal:unknown', '\x03')).toBe('written');
+
+      await create(registry, 'terminal:another');
+      expect(registry.write('terminal:another', 'x')).toBe('unavailable');
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(warn.mock.calls[1][0]).toContain('terminal:another');
+      registry.dispose();
+    },
+  );
+
+  it.each([false, true])(
+    'warns once on stderr without a debug session (file enabled: %s)',
+    async (fileEnabled) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      logFileEnabled.mockReturnValue(fileEnabled);
+      logSessionEnabled.mockReturnValue(false);
+      spawn.mockImplementation(() => ({ ...createSpawnedPty(), _agent: {} }));
+      const terminalId = 'terminal:daemon\n[INFO] forged line';
+      const registry = await start(terminalId);
+
+      expect(registry.write(terminalId, 'private input')).toBe('unavailable');
+      registry.addOutputListener(terminalId, vi.fn())?.();
+      onData('private output');
+      registry.addOutputListener(terminalId, vi.fn());
+      expect(registry.write(terminalId, 'retry')).toBe('unavailable');
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining('cannot inspect node-pty input queue'),
+      );
+      const message = String(stderr.mock.calls[0][0]);
+      expect(message.trimEnd().split('\n')).toHaveLength(1);
+      expect(message).toContain(JSON.stringify(terminalId));
+      for (const field of PTY_INPUT_QUEUE_FIELDS)
+        expect(message).toContain(field);
+      expect(message).not.toContain('private input');
+      expect(message).not.toContain('private output');
+      expect(warn).not.toHaveBeenCalled();
+      expect(registry.write(terminalId, '\x03')).toBe('written');
+      expect(stderr).toHaveBeenCalledOnce();
+
+      await create(registry, 'terminal:another');
+      expect(registry.write('terminal:another', 'x')).toBe('unavailable');
+      expect(stderr).toHaveBeenCalledTimes(2);
+      expect(stderr.mock.calls[1][0]).toContain('terminal:another');
+      logFileEnabled.mockReturnValue(true);
+      logSessionEnabled.mockReturnValue(true);
+      expect(registry.write(terminalId, 'retry')).toBe('unavailable');
+      expect(registry.write(terminalId, 'retry')).toBe('unavailable');
+      expect(warn).toHaveBeenCalledOnce();
+      expect(stderr).toHaveBeenCalledTimes(2);
+      registry.dispose();
+    },
+  );
+
+  it.each([
+    { _writeStream: {} },
+    { _writeStream: { _writeQueue: {} } },
+    { _writeStream: { _writeQueue: [null] } },
+    { _writeStream: { _writeQueue: [{ offset: 0 }] } },
+    { _writeStream: { _writeQueue: [{ buffer: Buffer.from('x') }] } },
+    {
+      _writeStream: {
+        _writeQueue: [{ buffer: Buffer.from('x'), offset: 2 }],
+      },
+    },
+    { _agent: {} },
+    { _agent: { inSocket: {} } },
+    { _agent: { inSocket: { writableLength: -1 } } },
+    { _agent: { inSocket: { writableLength: NaN } } },
+  ])('rejects malformed input queues without throwing: %j', async (shape) => {
+    const spawned = { ...createSpawnedPty(), ...shape };
+    spawn.mockReturnValue(spawned);
+    const registry = await start('terminal:malformed');
+
+    expect(registry.write('terminal:malformed', 'x')).toBe('unavailable');
+    expect(registry.write('terminal:malformed', 'x')).toBe('unavailable');
+    expect(write).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(registry.write('terminal:malformed', '\x03')).toBe('written');
+    registry.dispose();
+  });
+
+  it('can inspect a recovered input queue after warning once', async () => {
+    const spawned = { ...createSpawnedPty(), _writeStream: {} };
+    spawn.mockReturnValue(spawned);
+    const registry = await start('terminal:recovered');
+
+    expect(registry.write('terminal:recovered', 'x')).toBe('unavailable');
+    spawned._writeStream = { _writeQueue: [] };
+    expect(registry.write('terminal:recovered', 'x')).toBe('written');
+    expect(warn).toHaveBeenCalledOnce();
+    registry.dispose();
+  });
+
+  it.each(['file', 'session'])(
+    'logs once through the real debug sink (%s enabled first)',
+    async (firstEnabled) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const actual = await vi.importActual<
+        typeof import('../utils/debugLogger.js')
+      >('../utils/debugLogger.js');
+      const appendFile = vi
+        .spyOn(fs, 'appendFile')
+        .mockResolvedValue(undefined);
+      const mkdir = vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+      const logger = actual.createDebugLogger('WEB_TERMINAL_REGISTRY');
+      logFileEnabled.mockImplementation(actual.isDebugLogFileEnabled);
+      logSessionEnabled.mockImplementation(logger.isEnabled);
+      warn.mockImplementation(logger.warn);
+      actual.resetDebugLoggingState();
+      actual.setDebugLogSession(null);
+      vi.stubEnv('QWEN_DEBUG_LOG_FILE', undefined);
+      spawn.mockImplementation(() => ({
+        ...createSpawnedPty(),
+        _agent: {},
+      }));
+      const terminalId = 'terminal:late-debug\n[INFO] forged line';
+      const registry = await start(terminalId);
+      try {
+        expect(registry.write(terminalId, 'private input')).toBe('unavailable');
+        expect(warn).not.toHaveBeenCalled();
+        expect(appendFile).not.toHaveBeenCalled();
+        expect(stderr).toHaveBeenCalledOnce();
+        const stderrLine = String(stderr.mock.calls[0][0]);
+        expect(stderrLine.trimEnd().split('\n')).toHaveLength(1);
+        expect(stderrLine).toContain(JSON.stringify(terminalId));
+
+        if (firstEnabled === 'file') {
+          vi.stubEnv('QWEN_DEBUG_LOG_FILE', '1');
+        } else {
+          actual.setDebugLogSession({
+            getSessionId: () => 'terminal-debug-test',
+          });
+        }
+        expect(registry.write(terminalId, 'private input')).toBe('unavailable');
+        expect(warn).not.toHaveBeenCalled();
+        expect(appendFile).not.toHaveBeenCalled();
+
+        vi.stubEnv('QWEN_DEBUG_LOG_FILE', '1');
+        actual.setDebugLogSession({
+          getSessionId: () => 'terminal-debug-test',
+        });
+        expect(registry.write(terminalId, 'private input')).toBe('unavailable');
+        await vi.waitFor(() => expect(appendFile).toHaveBeenCalledTimes(1));
+        const line = String(appendFile.mock.calls[0][1]);
+        expect(line).toContain('[WARN] [WEB_TERMINAL_REGISTRY]');
+        expect(line.trimEnd().split('\n')).toHaveLength(1);
+        expect(line).toContain(JSON.stringify(terminalId));
+        expect(line).toContain('node-pty');
+        for (const field of PTY_INPUT_QUEUE_FIELDS) {
+          expect(line).toContain(field);
+        }
+        expect(line).not.toContain('private input');
+        expect(registry.write(terminalId, 'retry')).toBe('unavailable');
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(appendFile).toHaveBeenCalledTimes(1);
+      } finally {
+        registry.dispose();
+        actual.setDebugLogSession(null);
+        actual.resetDebugLoggingState();
+        appendFile.mockRestore();
+        mkdir.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'kills every process in the PTY session',

@@ -23,9 +23,12 @@ import {
 
 // The exact @lydell/node-pty pin whose JS field shape and native teardown
 // semantics the release path in conpty-host.ts was verified against. A
-// version bump turns this test red on purpose: re-check the WindowsPtyAgent
-// fields and src/win/conpty.cc (the baton erase became unconditional in
-// 1.2.0-beta.14 — see conpty-host.ts) before updating the constant.
+// version bump turns this test red on purpose: re-check PTY_INPUT_QUEUE_FIELDS
+// and queue mutation assumptions in pty-input-queue.ts, plus deferred _isReady
+// startup writes, alongside the cleanup fields and src/win/conpty.cc (the baton erase
+// became unconditional in 1.2.0-beta.14 — see conpty-host.ts), before updating
+// the constant. The native POSIX queue test cannot exercise Windows
+// _agent.inSocket or deferred _isReady writes: verify both on Windows manually.
 const VERIFIED_NODE_PTY = '1.2.0-beta.10';
 
 describe('conpty-host', () => {
