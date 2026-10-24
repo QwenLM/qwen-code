@@ -30,6 +30,10 @@ import {
 } from './emitters/tool-call-emitter.js';
 import { formatHistoryGapNotice } from '../../ui/utils/history-gap-notice.js';
 import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
+import {
+  findBoundaryAtOrBefore,
+  isReplayTurnStartType,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 
 export const MISSING_TOOL_RESULT_MESSAGE =
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE;
@@ -52,8 +56,10 @@ export interface PendingReplayToolCall {
 
 export interface HistoryReplayPageOptions {
   pendingToolCalls?: PendingReplayToolCall[];
+  /** False skips all finalization: a later page may contain the results. */
   finalizeDangling?: boolean;
   skipFinalizeCallIds?: ReadonlySet<string>;
+  skipFinalizeRecordIds?: ReadonlySet<string>;
   gaps?: HistoryGap[];
   goalState?: GoalSnapshotV2;
   goalCause?: GoalStateCause;
@@ -105,6 +111,12 @@ export class HistoryReplayer {
       initialGoalCause?: GoalStateCause;
       goalBootstrap?: HistoryReplayGoalBootstrap;
       skipFinalizeCallIds?: ReadonlySet<string>;
+      /**
+       * False preserves the trailing replay turn's unmatched calls while
+       * finalizing earlier ones. Unlike bulk replay, replayPage(false)
+       * finalizes nothing because later pages may contain the results.
+       * See docs/design/replay-trailing-turn-finalization.md.
+       */
       finalizeDangling?: boolean;
     } = {},
   ): Promise<void> {
@@ -122,8 +134,27 @@ export class HistoryReplayer {
         };
         await this.sendUpdate(update);
       }
+      // Voice records do not own tools. Without a boundary the walk returns zero
+      // (-1 for empty input), so a busy replay preserves every source record.
+      const lastTurnStart = findBoundaryAtOrBefore(
+        records,
+        records.length - 1,
+        0,
+        (record) =>
+          record.subtype !== 'realtime_message' &&
+          isReplayTurnStartType(record.type, record.subtype),
+      );
       await this.replayPage(records, {
-        finalizeDangling: options.finalizeDangling ?? true,
+        finalizeDangling: true,
+        ...(options.finalizeDangling === false
+          ? {
+              skipFinalizeRecordIds: new Set(
+                records
+                  .slice(Math.max(0, lastTurnStart))
+                  .map((record) => record.uuid),
+              ),
+            }
+          : {}),
         gaps,
         ...(options.skipFinalizeCallIds
           ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
@@ -181,7 +212,11 @@ export class HistoryReplayer {
     }
 
     let danglingError: unknown;
-    if (options.finalizeDangling === true) {
+    // An incomplete live replay may not have reached a later matching result.
+    if (
+      options.finalizeDangling === true &&
+      (!replayError || options.skipFinalizeRecordIds === undefined)
+    ) {
       for (const emission of this.machine.finalize()) {
         this.setActiveRecordId(
           emission.sourceRecordId,
@@ -250,6 +285,9 @@ export class HistoryReplayer {
       presentation: this.presentationAdapter(),
       ...(options.skipFinalizeCallIds
         ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
+        : {}),
+      ...(options.skipFinalizeRecordIds
+        ? { skipFinalizeRecordIds: options.skipFinalizeRecordIds }
         : {}),
       ...(options.includeTiming ? { includeTiming: true } : {}),
       onDiagnostic: (diagnostic) => {
