@@ -669,6 +669,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_acp_status',
   'auth_provider_install',
   'workspace_memory',
+  'memory_import_v1',
   'workspace_memory_remember',
   'workspace_memory_remember_project_scope',
   'workspace_memory_remember_user_scope',
@@ -5814,6 +5815,7 @@ describe('createServeApp', () => {
       );
       expect(window).toEqual([
         'workspace_memory',
+        'memory_import_v1',
         'workspace_memory_remember',
         'workspace_memory_remember_project_scope',
         'workspace_memory_remember_user_scope',
@@ -41274,6 +41276,10 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     return {
       workspaceId: 'ws-registry',
       workspaceCwd: '/work/registry-primary',
+      sessionRuntimeBaseDir: path.join(
+        serverTestEnvironmentRoot,
+        'registry-runtime',
+      ),
       primary: true,
       trusted: true,
       env: { mode: 'parent-process', overlayKeys: [] },
