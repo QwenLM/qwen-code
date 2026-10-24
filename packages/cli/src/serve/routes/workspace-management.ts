@@ -277,10 +277,20 @@ export function registerWorkspaceManagementRoutes(
     pickWorkspaceDirectoryOverride ?? pickNativeDirectory;
   const canonicalizeIfPresent = (candidate: string): string => {
     const resolved = resolve(candidate);
-    try {
-      return realpathSync.native(resolved);
-    } catch {
-      return resolved;
+    let current = resolved;
+    const missing: string[] = [];
+    for (;;) {
+      try {
+        const canonical = realpathSync.native(current);
+        return missing.length === 0
+          ? canonical
+          : join(canonical, ...missing.reverse());
+      } catch {
+        const parent = dirname(current);
+        if (parent === current) return resolved;
+        missing.push(basename(current));
+        current = parent;
+      }
     }
   };
   const isReservedWorkspacePath = (candidate: string): boolean => {
