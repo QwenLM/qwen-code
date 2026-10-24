@@ -515,10 +515,10 @@ function checkRunAttempt(
 }
 
 /**
- * The check run each re-run check and head was re-run from, by
- * `<identity>@<head>`, read from `rerunChecks`
- * (`<identity>@<head>@<check run id>`). An entry without its check run
- * counts every run of the check as the re-run's.
+ * The floor of each re-run check and head, by `<identity>@<head>`, read
+ * from `<identity>@<head>@<check run id>` entries (`rerunFloors`: spent
+ * and held re-runs). An entry without its check run counts every run of
+ * the check as the re-run's.
  */
 export function rerunFrom(rerunChecks: Iterable<string>): Map<string, number> {
   const from = new Map<string, number>();

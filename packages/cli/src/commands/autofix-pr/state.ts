@@ -58,9 +58,9 @@ export interface AutofixPrState {
    * left for a human, or re-run), keyed like the gate cursor's checks. */
   handledChecks?: string[];
   /** `<identity>@<headSha>@<check run id>` of checks re-run once already,
-   * or whose re-run waits for a deferred run to end, with the check run
-   * that was (or is to be) re-run; the failure of a later run on that head
-   * is treated as real. */
+   * with the check run a later run must come after to be the re-run's
+   * answer; the failure of such a run on that head is treated as real. A
+   * re-run a deferral holds is in `heldChecks` until it is spent. */
   rerunChecks?: string[];
   /** Head SHA whose merge conflict was left for a human. */
   handledConflictSha?: string | null;

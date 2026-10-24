@@ -115,7 +115,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>]`
 
-一次 GraphQL 调用（检查或 review thread 每多一页再加一次）读取：
+一次 GraphQL 调用（check context、check suite 或 review thread 每多一页再加一次；对开启线程的机器人评论，另有一次 REST 调用询问它是否在回答一条已删除的评论，见本节评论规则）读取：
 
 - PR 字段：`state`、`isDraft`、`title`、`url`、`headRefOid`、`mergeable`、作者和当前用户
 - head 提交的 check suite，从最新的读起，向前翻页直到最早的（最多五页，每页 100 个：推送创建的 suite 是一个 head 上最早的，之后每条 review 评论都可能再添一个）
@@ -194,7 +194,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 `snapshot <n> --gate` 是定时任务闸门背后的那条命令。它不需要 worktree，也不需要状态文件：首次运行用 `--repo` 指定 PR 所在的仓库（或由已准备好的状态提供），它自己的游标 `.qwen/tmp/autofix-pr-<n>-gate.json` 记录已经报告过的内容。没有 `--host`（或 `GH_HOST`）时，先用该 PR 已在监视的 host——游标里的，或已准备状态里的——最后才回落到 github.com；空白的 `--host` 会被拒绝。游标属于另一个仓库的同号 PR 时直接拒绝，比较方式与 `prepare` 比较状态文件相同。它输出同样的 JSON，但只包含自上次运行以来的迁移，没有迁移时什么都不输出，因此会话只会为迁移被唤醒：
 
-- 失败的检查按（检查，head，attempt）报告一次；由 review 或评论启动的 workflow，其 attempt 是 workflow 加触发事件（`#on:<workflow id>:<event>`）：任何人每提交一次 review 它都会再跑一次，而已处理过的失败再跑一次，对代码没有新信息。一轮在这个 head 上重跑过它、或延后了它的重跑之后（`rerunChecks` 记下那个 check run），之后那次运行的失败就是重跑的回答，以 `#rerun:<workflow id>:<event>` 再报告一次；被重跑的那次运行保留原来的键，所以 GitHub 还没列出的重跑、或回答丢失的重跑，都不会被当成它。游标键带上运行 id（commit status 则是它的创建时间），所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。同一 PR 的已准备监视不靠推送处理掉的失败（`handledChecks`）视为已报告。因为 run 仍在进行而延后重跑的失败（`deferredRuns`，第 6.9 节）在该 run 进行期间不报告（prepared snapshot 也不列出它）——只指延后时保留的那些 check run，不包括该 run 里延后之后才失败的 job——在 run 结束时再报告一次，以便监视那时重跑它，除非某一轮此后已回答了它的键。不指明运行的键（`#on:`、`#rerun:`）对该检查在这个 head 上的每次运行都相同：游标记下报告它时的那次运行，所以之后某次运行的失败（某一轮读 PR 时有 review 启动了这次运行）会再报告，直到某一轮处理了这个键；更早一次运行的失败（某次部分读取只列出了它）则不会。run 的结束按该 run 最新的 check run 标记：run 里重跑某个 job 会让 run 再次运行，对它的第二次延后也会再结束一次。被跳过的 job（`if:` 为假）没有运行过，永远不会取代它之前的那次运行。
+- 失败的检查按（检查，head，attempt）报告一次；由 review 或评论启动的 workflow，其 attempt 是 workflow 加触发事件（`#on:<workflow id>:<event>`）：任何人每提交一次 review 它都会再跑一次，而已处理过的失败再跑一次，对代码没有新信息。一轮在这个 head 上重跑过它、或延后了它的重跑之后（`rerunChecks` 记下那个 check run，延后则记在 `heldChecks` 里），之后那次运行的失败就是重跑的回答，以 `#rerun:<workflow id>:<event>` 再报告一次；被重跑的那次运行保留原来的键，所以 GitHub 还没列出的重跑、或回答丢失的重跑，都不会被当成它。游标键带上运行 id（commit status 则是它的创建时间），所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。同一 PR 的已准备监视不靠推送处理掉的失败（`handledChecks`）视为已报告。因为 run 仍在进行而延后重跑的失败（`deferredRuns`，第 6.9 节）在该 run 进行期间不报告（prepared snapshot 也不列出它）——只指延后时保留的那些 check run，不包括该 run 里延后之后才失败的 job——在 run 结束时再报告一次，以便监视那时重跑它，除非某一轮此后已回答了它的键。不指明运行的键（`#on:`、`#rerun:`）对该检查在这个 head 上的每次运行都相同：游标记下报告它时的那次运行，所以之后某次运行的失败（某一轮读 PR 时有 review 启动了这次运行）会再报告，直到某一轮处理了这个键；更早一次运行的失败（某次部分读取只列出了它）则不会。run 的结束按该 run 最新的 check run 标记：run 里重跑某个 job 会让 run 再次运行，对它的第二次延后也会再结束一次。被跳过的 job（`if:` 为假）没有运行过，永远不会取代它之前的那次运行。
 - 进行中的检查从不报告；不会出现 `ci_pending`。
 - 冲突按 head 报告一次；`mergeable` 清除标记，`UNKNOWN` 保留标记。已准备监视在该 head 上留给人处理的冲突（`handledConflictSha`）不报告。
 - 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。工具自己的回复（当前用户发的、以回复标记结尾的评论）永远不是事件，同一 PR 的已准备监视处理过的评论（`handledCommentIds`、`postedCommentIds`）也不是；其中查询结果里还在的会被并入游标，所以 `cleanup` 删掉状态文件之后它们仍然保持安静。只有不可信评论时作为提醒报告（`wait`）。查询结果里仍然出现的已报告 id 全部保留在游标里，不论多少；只有已经离开页面的 id 才有上限，所以内容相同的轮询是安静的。正文截到前 1,000 个字符（`bodyTruncated: true`）；完整内容见事件的 `url`。

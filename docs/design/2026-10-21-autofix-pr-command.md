@@ -189,8 +189,9 @@ worktree included:
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>]`
 
-One GraphQL call, plus one per further page of checks or review threads,
-reads:
+One GraphQL call, plus one per further page of check contexts, check suites
+or review threads (and a REST call for a bot's comment that opens a thread,
+asking whether it answers a deleted one; see below), reads:
 
 - PR fields: `state`, `isDraft`, `title`, `url`, `headRefOid`, `mergeable`,
   the author and the viewer
@@ -382,7 +383,8 @@ when there are none, so the session is woken only for them:
   trigger (`#on:<workflow id>:<event>`): it runs again for every review
   anyone submits, and a new run of a handled failure says nothing new of
   the code. Once a round re-ran it on the head, or deferred its re-run
-  (`rerunChecks` records the check run), a failure of a later run is the
+  (`rerunChecks`, or `heldChecks` for a deferral, records the check run), a
+  failure of a later run is the
   re-run's answer,
   reported once more under `#rerun:<workflow id>:<event>`; the run re-run
   keeps its key, so a re-run GitHub has not listed yet, or one whose

@@ -115,11 +115,16 @@ function rerunLocked(
   // back by a refusal.
   const othersHolds = (entries: string[]) =>
     entries.filter((entry) => !entry.startsWith(`${runId}:`));
-  // Each with the check run the re-run's runs come after.
+  // Each with the check run the re-run's runs come after, the run's holds
+  // included: a check it held that no longer fails in the run (a job
+  // re-run on its own since) had its re-run all the same.
   const reran = [
     ...new Set([
       ...(state.rerunChecks ?? []),
       ...jobs.map(({ floor }, index) => `${rerunKeys[index]}@${floor}`),
+      ...(state.heldChecks ?? [])
+        .filter((entry) => entry.startsWith(`${runId}:`))
+        .map((entry) => entry.slice(`${runId}:`.length)),
     ]),
   ];
   if (repeated.length > 0) {

@@ -318,6 +318,29 @@ describe('runRerun', () => {
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
+  it('spends a hold of a check that no longer fails in the run', () => {
+    contexts = [
+      failedRun(5, 'Lint', 50, 1, 'IN_PROGRESS'),
+      failedRun(6, 'Test', 50, 1, 'IN_PROGRESS'),
+    ];
+    expect(runRerun(7, 50)).toMatchObject({ deferred: true });
+    // Someone re-ran Test on its own before the run ended, and it passed.
+    contexts = [
+      failedRun(5, 'Lint', 50),
+      failedRun(6, 'Test', 50),
+      { ...failedRun(7, 'Test', 50), conclusion: 'SUCCESS' },
+    ];
+    expect(runRerun(7, 50)).toMatchObject({ rerun: true, checks: ['Lint'] });
+    // Test's re-run was had: a later failure of it is the re-run's answer.
+    expect(state()).toMatchObject({ heldChecks: [] });
+    expect(state().rerunChecks).toEqual(
+      expect.arrayContaining([
+        `run:15368:1:pull_request:Lint@${HEAD}@5`,
+        `run:15368:1:pull_request:Test@${HEAD}@6`,
+      ]),
+    );
+  });
+
   it('tells a re-run another run spent from one a deferral holds', () => {
     // Run 49 failed K and had J cancelled; run 50 failed A, J still going.
     const going = {
