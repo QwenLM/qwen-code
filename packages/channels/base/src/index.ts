@@ -6,6 +6,7 @@ export {
 export { PollingChannelBase } from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 export {
+  ACP_ASK_USER_QUESTION_CAPABILITY_META_KEY,
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
   CHANNEL_BTW_METHOD,

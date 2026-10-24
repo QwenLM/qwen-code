@@ -11,6 +11,16 @@
 - **File management**: @-mention files to add them to the conversation context
 - **Conversation history**: Access to past conversations within Zed
 
+### Interactive questions
+
+When the agent asks the user a question, ACP has no structured-choice primitive, so Qwen Code projects the question onto a permission request:
+
+- For a **single question**, each choice becomes a real selectable option, followed by `Other…` and `Cancel`. Picking one answers the question directly.
+- For **multiple questions** in one request, Zed cannot render them as one form. The questions and their choices are shown as text in the request body, and answering still requires the Qwen-compatible surfaces (VS Code companion, web shell, or channel cards).
+- `multiSelect` questions degrade to a single choice.
+
+These limitations exist because ACP only models an approve/deny response. A client that understands the Qwen `_meta.qwenQuestions` payload can opt out of the flat option list by advertising `clientCapabilities._meta['qwen.askUserQuestion'] = true` during `initialize`; Zed does not, so it receives the selectable options.
+
 ### Requirements
 
 - Zed Editor (latest version recommended)

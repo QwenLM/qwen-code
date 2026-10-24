@@ -514,6 +514,7 @@ import {
   interactionMetaFields,
   type PermissionPersistencePolicy,
   requestPermissionWithAbort,
+  resolveAskUserQuestionAnswers,
   resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
@@ -15684,6 +15685,7 @@ export class Session implements SessionContext {
               this.requiresManagedConversationBinding
                 ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
                 : undefined,
+              this.config.getAskUserQuestionHostSupported?.() !== true,
             );
 
             // Set up sub-agent tool tracking
@@ -16562,12 +16564,16 @@ export class Session implements SessionContext {
                 );
               }
 
+              const flattenStructuredQuestions =
+                confirmationDetails.type === 'ask_user_question' &&
+                this.config.getAskUserQuestionHostSupported?.() !== true;
               const permissionOptions = toPermissionOptions(
                 confirmationDetails,
                 pmForcedAsk,
                 this.requiresManagedConversationBinding
                   ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
                   : undefined,
+                flattenStructuredQuestions,
               );
               const offeredPermissionOptions = permissionOptions.map(
                 (option) => ({ ...option }),
@@ -16665,6 +16671,7 @@ export class Session implements SessionContext {
                 outcome = resolvePermissionOutcome(
                   output,
                   offeredPermissionOptions,
+                  flattenStructuredQuestions,
                 );
               } catch (error) {
                 debugLogger.error(
@@ -16723,8 +16730,20 @@ export class Session implements SessionContext {
                 );
               }
 
+              // Answers arrive either as the private top-level `answers` sibling a
+              // Qwen host returns, or — for a flattened question answered
+              // through a real PermissionOption — reconstructed from the
+              // selected option id.
+              const answers =
+                output.answers ??
+                resolveAskUserQuestionAnswers(
+                  confirmationDetails,
+                  output.outcome.outcome === 'selected'
+                    ? output.outcome.optionId
+                    : undefined,
+                );
               let confirmationPayload: ToolConfirmationPayload | undefined = {
-                answers: output.answers,
+                answers,
                 ...(output.expectedPlanExecutionMode !== undefined
                   ? {
                       expectedPlanExecutionMode:
@@ -16781,7 +16800,7 @@ export class Session implements SessionContext {
                     ?.recordTrustedUserAnswers(
                       callId,
                       confirmationDetails.questions,
-                      output.answers,
+                      answers,
                     );
                 }
               } catch (error) {
