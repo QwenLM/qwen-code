@@ -664,6 +664,13 @@ describe('post-merge push lane', () => {
         collector?.uses,
         `${job}: 'Upload disk-pressure samples' must stay on ${PIN}`,
       ).toBe(PIN);
+      // Same coordinated-edit blindness, second field: no suite pins the
+      // sample window. Literal 14, not a shared constant — the JUnit
+      // `Upload Test Results Artifact` step deliberately retains 7.
+      expect(
+        collector?.with?.['retention-days'],
+        `${job}: disk-pressure samples must stay retained for 14 days`,
+      ).toBe(14);
     }
   });
 
@@ -744,8 +751,9 @@ describe('post-merge push lane', () => {
     // `true` left every suite green while the required check stopped running
     // the tool it is named for. Pin the load-bearing substring of each body —
     // NOT whitespace-exact text, so reformatting one of the multi-line blocks
-    // stays benign. The map is total over FULL_PAYLOAD: a step added without
-    // an entry reads `undefined` and fails here instead of silently unpinned.
+    // stays benign. Totality is asserted below, not left to a missing key:
+    // `toContain` coerces `undefined` to the literal string "undefined", so a
+    // body containing that word would pass with its command unpinned.
     const LOAD_BEARING_RUN = {
       'Audit critical runtime dependencies': 'npm run audit:runtime:critical',
       'Check lockfile': 'npm run check:lockfile',
@@ -774,13 +782,40 @@ describe('post-merge push lane', () => {
       'Run .github/scripts helper tests':
         'node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}',
     };
+    expect(
+      Object.keys(LOAD_BEARING_RUN).sort(),
+      'LOAD_BEARING_RUN drifted from FULL_PAYLOAD',
+    ).toEqual([...FULL_PAYLOAD].sort());
+    // Whole literal, not the `ci_profile == 'full'` substring filtered above:
+    // an appended `&&` clause still matches that substring while dropping the
+    // step from the unattended post-merge lane. All 19 gates are identical.
+    const FULL_GATE =
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}";
     for (const n of FULL_PAYLOAD) {
+      const step = stepByName.get(n);
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
+      expect(String(step.if), `${n} gate drifted`).toBe(FULL_GATE);
       expect(
-        String(stepByName.get(n).run ?? ''),
+        String(step.run ?? ''),
         `${n} no longer runs its load-bearing command`,
       ).toContain(LOAD_BEARING_RUN[n]);
+      // Containment says the command is present, not that its failure reaches
+      // the job. The body guard is `|| true`/`|| :`, not a bare `||`: the
+      // helper-tests retry legitimately uses `|| {`. Both stay inside this
+      // loop — two non-payload steps set continue-on-error on purpose.
+      expect(
+        step['continue-on-error'],
+        `${n} must not swallow its own failure`,
+      ).toBeUndefined();
+      expect(
+        String(step.run ?? ''),
+        `${n} swallows its exit status`,
+      ).not.toMatch(/\|\|\s*(true|:)/);
     }
+    expect(
+      String(stepByName.get('Check settings schema is up-to-date').run),
+      'settings-schema gate lost its exit 1',
+    ).toContain('exit 1');
     // The two deliberately-different gates, pinned as they are.
     expect(String(stepByName.get('Check workflow file size').if)).toBe(
       "${{ needs.classify_pr.outputs.skip_ci != 'true' }}",
