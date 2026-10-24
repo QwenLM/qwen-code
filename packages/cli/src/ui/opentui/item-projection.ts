@@ -39,7 +39,10 @@ import {
   formatUserPromptSubmitBlocked,
 } from './event-adapter.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
-import { calculateCost } from '../../utils/costCalculator.js';
+import {
+  billableOutputTokens,
+  calculateCost,
+} from '../../utils/costCalculator.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
 import { levelLabel } from '../utils/skill-level-label.js';
@@ -239,12 +242,7 @@ function entryCost(
 ): number | null {
   return calculateCost({
     inputTokens: entry.metrics.tokens.prompt,
-    // `total - prompt` is the output under BOTH usage conventions;
-    // guard it so a record with no usable total keeps today's sum.
-    outputTokens:
-      entry.metrics.tokens.total > entry.metrics.tokens.prompt
-        ? entry.metrics.tokens.total - entry.metrics.tokens.prompt
-        : entry.metrics.tokens.candidates + entry.metrics.tokens.thoughts,
+    outputTokens: billableOutputTokens(entry.metrics.tokens),
     pricing: (modelPricing ?? {})[entry.key.split('::')[0]] as Parameters<
       typeof calculateCost
     >[0]['pricing'],

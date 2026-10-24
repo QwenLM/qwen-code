@@ -1176,7 +1176,7 @@ describe('cost does not double-count included reasoning tokens (#15444)', () => 
 
   it('falls back to candidates + thoughts when no usable total is reported', () => {
     // Mirrors the cost-ledger guard: derive only when the subtraction is
-    // meaningful, so an absent/zero total keeps today's behaviour instead of
+    // meaningful, so an absent total keeps today's behaviour instead of
     // billing a negative output.
     const text = projectModelStats(
       metricsWith({
@@ -1188,5 +1188,50 @@ describe('cost does not double-count included reasoning tokens (#15444)', () => 
       PRICING,
     );
     expect(text).toContain('Estimated $0.1700');
+  });
+
+  it('does not bill a total-only record as output', () => {
+    // A provider that reports only `total_tokens` leaves prompt and candidates
+    // at 0. Deriving anyway would bill the entire total -- almost all input --
+    // at the output rate, where the old sum reported no cost at all.
+    const text = projectModelStats(
+      metricsWith({ prompt: 0, candidates: 0, thoughts: 0, total: 250_000 }),
+      PRICING,
+    );
+    expect(text).not.toContain('$0.2500');
+    expect(text).not.toContain('Estimated');
+  });
+
+  it('does not bill a cached-only prompt as output', () => {
+    // Cached input coerces prompt to 0 while total keeps the cache, so
+    // derived 52_000 sits far above the band [10_000, 12_000]; the over-bill
+    // would be exactly the cached count, i.e. input tokens at the output rate.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 0,
+        candidates: 10_000,
+        thoughts: 2_000,
+        total: 52_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.0120');
+    expect(text).not.toContain('$0.0520');
+  });
+
+  it('does not under-bill when a short total lands below candidates', () => {
+    // One total-less event among complete ones subtracts an unreported prompt
+    // from the other events' output: derived 180_000 < candidates 190_000.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 110_000,
+        candidates: 190_000,
+        thoughts: 0,
+        total: 290_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1900');
+    expect(text).not.toContain('$0.1800');
   });
 });

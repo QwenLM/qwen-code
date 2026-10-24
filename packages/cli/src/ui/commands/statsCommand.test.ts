@@ -501,6 +501,48 @@ describe('statsCommand', () => {
       expect(result.content).toContain('Estimated cost: $0.1500');
     });
 
+    it('stats model bills total - prompt for OpenAI-shaped usage (#15444)', async () => {
+      const modelSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'model',
+      );
+      if (!modelSubCommand?.action) throw new Error('Subcommand has no action');
+
+      const context = createMockCommandContext({
+        executionMode: 'non_interactive',
+      });
+      (context.services.settings as unknown as Record<string, unknown>)[
+        'merged'
+      ] = {
+        // Output at $1/M makes the printed figure exactly output / 1M.
+        modelPricing: {
+          'qwen3-max-001': { outputPerMillionTokens: 1 },
+        },
+      };
+      // Reasoning already sits inside `candidates`, so summing `thoughts` on
+      // top of it would print $0.2700 instead of the provider's $0.1500.
+      context.session.stats.metrics.models = {
+        'qwen3-max-001': toModelMetrics({
+          tokens: {
+            prompt: 100_000,
+            candidates: 150_000,
+            cached: 0,
+            total: 250_000,
+            thoughts: 120_000,
+          },
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 0 },
+        }),
+      };
+
+      const result = (await modelSubCommand.action(context, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.type).toBe('message');
+      expect(result.content).toContain('Estimated cost: $0.1500');
+      expect(result.content).not.toContain('$0.2700');
+    });
+
     it('stats model shows cost only for models with pricing', async () => {
       const modelSubCommand = statsCommand.subCommands?.find(
         (sc) => sc.name === 'model',

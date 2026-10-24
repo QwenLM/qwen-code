@@ -536,6 +536,30 @@ describe('<ModelStatsDisplay />', () => {
         expect(lastFrame()).toContain('0.0060');
       });
 
+      it('bills total - prompt for OpenAI-shaped usage (#15444)', () => {
+        // `makeCore` derives total = prompt + candidates + thoughts, i.e. the
+        // disjoint shape on which both derivations agree, so this leg needs its
+        // own literal tokens: reasoning is already inside `candidates` here.
+        const openAiCore: ModelMetricsCore = {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 100_000,
+            candidates: 150_000,
+            total: 250_000,
+            cached: 0,
+            thoughts: 120_000,
+            tool: 0,
+          },
+        };
+        const { lastFrame } = renderCostTest(
+          { 'qwen3-max-001': mainOnly(openAiCore) },
+          // Output at $1/M makes the rendered figure exactly output / 1M.
+          { 'qwen3-max-001': { outputPerMillionTokens: 1 } },
+        );
+        expect(lastFrame()).toContain('$0.1500');
+        expect(lastFrame()).not.toContain('$0.2700');
+      });
+
       it('should use raw model name for pricing with subagent attribution', () => {
         const core = makeCore(10, 20, 0);
         const { lastFrame } = renderCostTest(
