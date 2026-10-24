@@ -536,17 +536,18 @@ for (const { width, language, theme } of [
               .evaluate((button) => {
                 const meta = button.parentElement!.getBoundingClientRect();
                 const header = button.parentElement!.parentElement!;
-                const value = header.firstElementChild!.getBoundingClientRect();
                 return {
                   right: Math.abs(
                     meta.right - header.getBoundingClientRect().right,
                   ),
-                  wrapped: meta.top >= value.bottom,
                   fits: header.scrollWidth <= header.clientWidth + 1,
                 };
               });
+            // Wrap itself is not pinned: whether the meta still fits beside
+            // the value at minimum width depends on CJK glyph widths, which
+            // differ across runner images (the hz ARM64 pool keeps them on
+            // one line). The invariants are right alignment and no overflow.
             expect(alignment.right).toBeLessThanOrEqual(1);
-            expect(alignment.wrapped).toBe(true);
             expect(alignment.fits).toBe(true);
           }
         }
