@@ -816,8 +816,10 @@ its failed checks — in `heldChecks`, apart from the spent ones in
 re-run another run spent is never taken for one this run holds — and only
 those check runs are left out: a job of the run that fails after it is the
 round's at once, however long the run goes on. The run is re-run when it
-ends, and a later run of the check on the head — one a
-review started before it ended, say — answers for it as a re-run's would,
+ends; the re-run, or a lost answer, spends every hold of the run, one whose
+check no longer fails in it included (a job re-run on its own had its
+re-run). A later run of the check on the head — one a review started before
+it ended, say — answers for it as a re-run's would,
 under the re-run's key (Section 6.2), and is treated as real. Two jobs of
 one workflow that share a name are one check: when the second fails only
 after the deferral, the re-run is held by the first, and the second is
@@ -1010,7 +1012,8 @@ the table says stop; the cron job expires. Every stop but the scheduled task's e
 prints the reason, the pushes made and any `needsHuman` items.
 
 Cost: a quiet check is one probe run — one GraphQL call, plus one per extra
-page of checks or review threads — and no model turn. Only a check with events reaches the
+page of check contexts, check suites or review threads, and a REST call per
+bot comment that opens a thread and was not asked about before — and no model turn. Only a check with events reaches the
 model, so a two-minute cadence costs nothing while the PR is quiet.
 
 ## 11. Resolved decisions

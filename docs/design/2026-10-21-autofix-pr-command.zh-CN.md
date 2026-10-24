@@ -292,7 +292,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job，只针对打开的 PR。只认 PR 所在仓库的 GitHub Actions job：commit status 或其他 app 可以链接任意 URL，从中读出的 run id 会重跑某个无关的 run。该 run 最新一次 attempt 里的每个失败或被取消的 job 都用掉它所属检查唯一的一次重跑——在 PR 上已被该检查更晚一次运行取代的 job 也一样，因为 `--failed` 也会重跑它（`rerunChecks`，按检查身份——app、workflow、触发事件和 job 名，与第 6.2 节区分检查的方式相同——和 head 记，所以两个 workflow 里同名的 job 各有各的一次，并记下该检查之后的运行必须晚于哪个 check run 才算重跑的回答，第 6.2 节据此定键：这个 job 的，或者 PR 上已有更晚的运行时，该检查最新的那个）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。重跑在询问 GitHub 之前就计数，调用本身也不重试，所以响应丢失的重跑不会被再请求一次：最多一次，绝不两次。只有 GitHub 接受了重跑，其失败才记为已处理：被拒绝（gh 的 `run <id> cannot be rerun`，即 403——token 没有 `actions: write`、run 太旧——或其他 HTTP 4xx）会退还这次重跑（包括延后时保留的那次），而任何错误都会让这一轮把这些失败作为需要人工处理来回答，所以检查不会一直红着却无人报告。
 
-GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就报告。因此仍在进行的 run 不询问 GitHub，直接回答 `{"rerun": false, "deferred": true}`，并记入 `deferredRuns`：该 run 结束时闸门会再报告一次它的失败（第 6.2 节），届时那一轮再重跑。在那之前 prepared snapshot 也不列出它们，这样别的事件不会把同一个失败再交给这一轮延后一次。延后为它的每个失败检查保留那一次重跑（记在 `heldChecks` 里，与已花掉的 `rerunChecks` 分开，带上该 run 的 id 和被延后的 check run，所以别的 run 花掉的重跑永远不会被当成这个 run 保留的），也只隐藏这些 check run：该 run 里延后之后才失败的 job 立即交给这一轮，不论 run 还要跑多久。该 run 结束时重跑它；而在该 head 上这个检查更晚的一次运行——比如它结束前某次 review 启动的运行——视同重跑的回答，以重跑的键报告（第 6.2 节），并按真实失败处理。同一 workflow 里同名的两个 job 算同一个检查：第二个在延后之后才失败时，那次重跑已由第一个占用，run 结束后第二个按真实失败处理。这是已知限制。
+GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就报告。因此仍在进行的 run 不询问 GitHub，直接回答 `{"rerun": false, "deferred": true}`，并记入 `deferredRuns`：该 run 结束时闸门会再报告一次它的失败（第 6.2 节），届时那一轮再重跑。在那之前 prepared snapshot 也不列出它们，这样别的事件不会把同一个失败再交给这一轮延后一次。延后为它的每个失败检查保留那一次重跑（记在 `heldChecks` 里，与已花掉的 `rerunChecks` 分开，带上该 run 的 id 和被延后的 check run，所以别的 run 花掉的重跑永远不会被当成这个 run 保留的），也只隐藏这些 check run：该 run 里延后之后才失败的 job 立即交给这一轮，不论 run 还要跑多久。该 run 结束时重跑它——这次重跑（或回答丢失）会把该 run 的所有保留都算作已花掉，包括在 run 里已不再失败的检查（单独重跑过的 job 已经用过它的重跑）；而在该 head 上这个检查更晚的一次运行——比如它结束前某次 review 启动的运行——视同重跑的回答，以重跑的键报告（第 6.2 节），并按真实失败处理。同一 workflow 里同名的两个 job 算同一个检查：第二个在延后之后才失败时，那次重跑已由第一个占用，run 结束后第二个按真实失败处理。这是已知限制。
 
 `push`、`sync`、`reply` 和 `rerun` 在读写状态文件期间都持有这次监视的锁（`.qwen/tmp/autofix-pr-<n>.lock`）：否则模型同时发出的两个辅助命令调用会各自写回自己读到的内容，抹掉对方关于推送、回复或重跑的记录。`prepare` 在创建 worktree 和状态文件期间也持有它，所以同时进行的两次启动不会回滚或接管对方的 worktree。锁以硬链接的方式整体创建（链接到一个已写好令牌的文件），并且只在仍持有自己令牌时才删除。沙箱可能让每条命令运行在独立的 pid 命名空间里，pid 会重复，所以只在同一命名空间里才检查持有者的 pid；其他锁在存在时间超过任何辅助命令的运行时长（十五分钟）后被接管，`cleanup --force` 则会立即删除它。过期锁一次只由一个辅助命令打破，在独占的 `<lock>.break` 文件保护下进行（被杀掉的辅助命令留下的 `.break` 在一分钟后清除，不论时钟偏前还是偏后）；此时锁里仍是过期令牌，就用一次 rename 把它替换成打破者自己的令牌，所以锁路径从不出现空档让别的辅助命令趁机拿到，新的锁也永远不会被动到。
 
@@ -385,7 +385,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 
 停止条件：PR 已合并或关闭；执行 `/autofix-pr stop`；上表中某项预算要求停止；cron 任务过期。除了定时任务过期（默认 7 天：`experimental.cronRecurringMaxAgeDays` 或 `QWEN_CODE_CRON_MAX_AGE_DAYS`）会不经过任何一轮就结束监视之外，每次停止都会执行 `cleanup`，并输出原因、已做的推送和所有 `needsHuman` 项。
 
-开销：一轮无事发生的检查只是一次探针运行——一次 GraphQL 调用，检查或 review thread 每多一页再加一次——没有模型回合。只有带事件的检查才到达模型，所以两分钟的节奏在 PR 安静时不花任何开销。
+开销：一轮无事发生的检查只是一次探针运行——一次 GraphQL 调用，check context、check suite 或 review thread 每多一页再加一次，每条之前没问过的、开启线程的机器人评论再加一次 REST 调用——没有模型回合。只有带事件的检查才到达模型，所以两分钟的节奏在 PR 安静时不花任何开销。
 
 ## 11. 已定决策
 
