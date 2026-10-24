@@ -517,6 +517,25 @@ describe('getCommandRoots', () => {
     expect(result).toEqual(['grep', 'curl']);
   });
 
+  // Bash's lexer skips only space, tab and newline, so a bare CR (not part of a
+  // CRLF pair) and NBSP are ordinary word characters. Reading them via `/\s/`
+  // hid the `&`/`|` that follows a redirection, and the trailing command
+  // vanished from the roots (#12089).
+  it('should split on a bare CR or NBSP before an async operator', async () => {
+    expect(getCommandRoots('echo x >\r& rm -rf /tmp/x')).toEqual([
+      'echo',
+      'rm',
+    ]);
+    expect(getCommandRoots('echo x >\u00a0& rm -rf /tmp/x')).toEqual([
+      'echo',
+      'rm',
+    ]);
+    expect(getCommandRoots('echo x > \u00a0| rm -rf /tmp/x')).toEqual([
+      'echo',
+      'rm',
+    ]);
+  });
+
   it('should handle mixed newlines and operators', async () => {
     const result = getCommandRoots('ls\necho hello && cat file\r\nrm -rf /');
     expect(result).toEqual(['ls', 'echo', 'cat', 'rm']);
@@ -790,6 +809,11 @@ describe('hasNonFinalTopLevelBackgroundOperator', () => {
     expectEach(hasNonFinalTopLevelBackgroundOperator, true, [
       'tail -f app.log & echo ok',
       'tail -f app.log & # watch',
+      // A bare CR or NBSP is an ordinary word character to bash, so `>\r&` is a
+      // redirect to a file named `\r` followed by a background operator, not the
+      // `>&` dup-redirect that reading `\r` as whitespace made it look like.
+      'echo x >\r& rm -rf /tmp/x',
+      'echo x >\u00a0& rm -rf /tmp/x',
     ]);
   });
 
@@ -1272,6 +1296,34 @@ describe('splitCommands', () => {
   // The segments this returns decide which sub-commands the shell tool asks
   // about and which one it reads for git attribution, so a command that goes
   // missing here goes missing from those too.
+
+  // `String.prototype.trim` strips `\r`, `\v`, `\f` and `\u00a0`, which bash
+  // treats as ordinary word characters. Trimming a segment with it both deleted
+  // a redirection target made of those characters and hid the operator that
+  // followed, so the trailing command disappeared (#12089).
+  it('keeps a bare CR or NBSP and still splits on the operator that follows', () => {
+    expect(splitCommands('echo x >\r& rm -rf /tmp/x')).toEqual([
+      'echo x >\r',
+      'rm -rf /tmp/x',
+    ]);
+    expect(splitCommands('echo x >\u00a0& rm -rf /tmp/x')).toEqual([
+      'echo x >\u00a0',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // Keeping those characters at a segment edge must not keep a segment that is
+  // nothing but them: downstream `checkCommandPermissions` normalizes such a
+  // segment to '' and `isCommandAllowed('')` answers 'ask', so one stray CR at
+  // the end of a paste turns an allow-listed command into a prompt.
+  it('drops a trailing segment made only of whitespace-class characters', () => {
+    for (const phantom of ['\r', '\v', '\f', '\u00a0', '\r\r', ' \r ']) {
+      expect(splitCommands(`git status;${phantom}`)).toEqual(['git status']);
+      expect(splitCommands(`git status\n${phantom}`)).toEqual(['git status']);
+      expect(splitCommands(`git status&&${phantom}`)).toEqual(['git status']);
+    }
+  });
+
   describe('command substitution containing a quoted paren', () => {
     it.each([
       [
