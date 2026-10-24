@@ -43,6 +43,21 @@ public class ManagedSessionStoreController {
         this.store = store;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore userMessages;
+
+    public record QueueClaim(String workspaceId, String writerId, long writerGeneration, String promptId, boolean initialOnly) { }
+
+    @PostMapping("/user-messages:claim")
+    @org.springframework.transaction.annotation.Transactional
+    public Object claimUserMessages(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestBody QueueClaim request) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(request.workspaceId(), request.writerId(), request.writerGeneration(), null));
+        return userMessages.claim(tenant.tenantId(), sessionId, request.promptId(), request.initialOnly());
+    }
+
     @PostMapping("/approval:query")
     public Object approvalSelection(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
