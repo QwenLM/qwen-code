@@ -15,7 +15,7 @@ import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
-  AuthType,
+  type AuthType,
   type AvailableModel,
   type Config,
   isImageCapable,
@@ -25,6 +25,8 @@ import {
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
   ACP_ROUTE_ID_PREFIX,
+  DISCONTINUED_QWEN_OAUTH_MESSAGE,
+  isDiscontinuedQwenOAuthSelection,
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
   resolveAcpFastModelSelector,
@@ -169,14 +171,12 @@ async function switchMainModel(
   const parsed = parseAcpModelOption(modelArg);
 
   if (parsed.authType) {
-    await config.switchModel(
-      parsed.authType,
-      parsed.modelId,
-      parsed.authType !== currentAuthType &&
-        parsed.authType === AuthType.QWEN_OAUTH
-        ? { requireCachedCredentials: true }
-        : undefined,
-    );
+    // The main-model branch of the `/model` action rejects a typed
+    // `(qwen-oauth)` selection before this point (the free tier is
+    // discontinued), so `switchModel` is never asked to require cached Qwen
+    // OAuth credentials here. The `--fast`/`--vision`/`--compaction`/`--image`
+    // branches are not covered — they still resolve and persist the tier.
+    await config.switchModel(parsed.authType, parsed.modelId, undefined);
     if (persistSelection) {
       persistSetting(
         settings,
@@ -1127,6 +1127,24 @@ export const modelCommand: SlashCommand = {
       firstSpace === -1 ? '' : trimmedArgs.slice(firstSpace + 1).trim();
     if (modelName) {
       const parsed = parseAcpModelOption(modelName);
+      // `coder-model(qwen-oauth)` from the shipped registry would otherwise
+      // reach the switch and surface a misleading "credentials expired" error
+      // for a tier that no longer exists. A wrapped
+      // `$runtime|qwen-oauth|<id>(qwen-oauth)` snapshot also parses to
+      // `authType: QWEN_OAUTH` — the parser keys off the trailing `(...)` and
+      // has no `$runtime|` branch — so this guard is wider than the picker's
+      // non-runtime predicate (`ModelDialog.tsx`, `dialog-data.ts`). That is
+      // harmless only because `getAvailableModelsForAuthType` lists registry
+      // ids and never `$runtime|…` snapshot ids, so the wrapped form already
+      // failed below. Revisit if this lookup is widened to
+      // `getAllConfiguredModels()`, which does list the runtime option.
+      if (isDiscontinuedQwenOAuthSelection(parsed.authType)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(DISCONTINUED_QWEN_OAUTH_MESSAGE),
+        };
+      }
       const targetAuthType = parsed.authType ?? authType;
       const availableModels = config
         .getAvailableModelsForAuthType(targetAuthType)
