@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LoadedSettings } from '../config/settings.js';
 
 const checkForUpdatesDetailed = vi.hoisted(() => vi.fn());
+const describeUpdateCheckFailureMessage = vi.hoisted(() => vi.fn());
 const handleAutoUpdate = vi.hoisted(() => vi.fn());
 const getInstallationInfo = vi.hoisted(() => vi.fn());
 const performStandaloneUpdate = vi.hoisted(() => vi.fn());
@@ -15,9 +16,10 @@ const writeStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('./utils/updateCheck.js', () => ({
   checkForUpdatesDetailed,
-  // Classification behavior is covered by updateCheck.test.ts; a fixed reason
-  // keeps this suite from importing the real update-notifier chain.
-  describeUpdateCheckFailure: () => 'registry error',
+  // Classification and suffix behavior are covered by updateCheck.test.ts; a
+  // fixed reason keeps this suite from importing the real update-notifier
+  // chain.
+  describeUpdateCheckFailureMessage,
 }));
 vi.mock('./handleAutoUpdate.js', () => ({ handleAutoUpdate }));
 vi.mock('../utils/installationInfo.js', () => ({ getInstallationInfo }));
@@ -41,6 +43,9 @@ describe('updateBeforeRelaunch', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    describeUpdateCheckFailureMessage.mockReturnValue(
+      'Failed to check for updates (registry error). Please check your network or registry configuration.',
+    );
     checkForUpdatesDetailed.mockResolvedValue({
       status: 'update',
       info: {
@@ -101,6 +106,23 @@ describe('updateBeforeRelaunch', () => {
     );
     expect(writeStderrLine).toHaveBeenCalledWith(
       'Failed to check for updates (registry error). Please check your network or registry configuration.',
+    );
+  });
+
+  it('prints the neutral timeout message without a network hint', async () => {
+    describeUpdateCheckFailureMessage.mockReturnValue(
+      'Failed to check for updates (update check timed out after 15s).',
+    );
+    checkForUpdatesDetailed.mockResolvedValue({ status: 'error' });
+
+    await expect(updateBeforeRelaunch(settings, '/repo', true)).resolves.toBe(
+      true,
+    );
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Failed to check for updates (update check timed out after 15s).',
+    );
+    expect(writeStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Please check your network'),
     );
   });
 

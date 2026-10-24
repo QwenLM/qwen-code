@@ -69,6 +69,9 @@ vi.mock('../i18n/index.js', () => ({
 }));
 
 const { updateCommand } = await import('./update.js');
+const { UpdateCheckTimeoutError, FETCH_TIMEOUT_MS } = await import(
+  '../ui/utils/updateCheck.js'
+);
 
 // The ecs-qwen pool runs several jobs at once; under that contention these
 // tests pass alone in milliseconds but blow the 15s ceiling without any
@@ -247,6 +250,21 @@ describe('update command', () => {
 
     expect(writeStderrLine).toHaveBeenCalledWith(
       'Failed to check for updates (registry error). Please check your network or registry configuration.',
+    );
+    expect(process.exitCode).toBe(1);
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+
+  it('does not blame the network or registry for a timeout (#14686)', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'error',
+      error: new UpdateCheckTimeoutError(FETCH_TIMEOUT_MS),
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      `Failed to check for updates (update check timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s).`,
     );
     expect(process.exitCode).toBe(1);
     expect(getInstallationInfo).not.toHaveBeenCalled();

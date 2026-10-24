@@ -15,6 +15,8 @@ import {
   checkForUpdates,
   checkForUpdatesDetailed,
   classifyUpdateCheckError,
+  describeUpdateCheckFailure,
+  describeUpdateCheckFailureMessage,
   fetchGlobalNpmUpdateInfo,
   FETCH_TIMEOUT_MS,
   runGlobalNpm,
@@ -570,9 +572,65 @@ describe('checkForUpdates', () => {
   });
 
   describe('timeout budget (#7049)', () => {
-    it('allows at least 5 seconds for slow registries', () => {
-      expect(FETCH_TIMEOUT_MS).toBeGreaterThanOrEqual(5000);
+    it('allows at least 15 seconds for slow Windows npm startup', () => {
+      expect(FETCH_TIMEOUT_MS).toBeGreaterThanOrEqual(15000);
     });
+  });
+});
+
+describe('describeUpdateCheckFailure', () => {
+  it('renders a timeout without blaming the registry (#14686)', () => {
+    const reason = describeUpdateCheckFailure(
+      new UpdateCheckTimeoutError(FETCH_TIMEOUT_MS),
+    );
+
+    expect(reason).toContain('timed out');
+    expect(reason).toContain(`${Math.round(FETCH_TIMEOUT_MS / 1000)}s`);
+    expect(reason).not.toContain('registry');
+  });
+
+  it('keeps registry wording for offline failures', () => {
+    const error = new Error('getaddrinfo failed') as NodeJS.ErrnoException;
+    error.code = 'ENOTFOUND';
+
+    expect(describeUpdateCheckFailure(error)).toBe('registry unreachable');
+  });
+
+  it('keeps registry wording for registry failures', () => {
+    expect(describeUpdateCheckFailure(new Error('404 Not Found'))).toBe(
+      'registry error',
+    );
+  });
+});
+
+describe('describeUpdateCheckFailureMessage', () => {
+  it('omits the network/registry hint for a timeout (#14686)', () => {
+    const message = describeUpdateCheckFailureMessage(
+      new UpdateCheckTimeoutError(FETCH_TIMEOUT_MS),
+    );
+
+    expect(message).toBe(
+      `Failed to check for updates (update check timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s).`,
+    );
+    expect(message).not.toContain('network');
+    expect(message).not.toContain('registry');
+  });
+
+  it('keeps the network/registry hint for offline failures', () => {
+    const error = new Error('getaddrinfo failed') as NodeJS.ErrnoException;
+    error.code = 'ENOTFOUND';
+
+    expect(describeUpdateCheckFailureMessage(error)).toBe(
+      `Failed to check for updates (${describeUpdateCheckFailure(error)}). Please check your network or registry configuration.`,
+    );
+  });
+
+  it('keeps the network/registry hint for registry failures', () => {
+    const error = new Error('404 Not Found');
+
+    expect(describeUpdateCheckFailureMessage(error)).toBe(
+      `Failed to check for updates (${describeUpdateCheckFailure(error)}). Please check your network or registry configuration.`,
+    );
   });
 });
 
