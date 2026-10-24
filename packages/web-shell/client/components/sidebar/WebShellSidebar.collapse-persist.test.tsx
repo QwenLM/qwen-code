@@ -36,8 +36,11 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
     return {
       connection: {
         status: 'connected',
+        error: undefined as Error | undefined,
         sessionId: null as string | null,
+        loadingTranscript: false,
         workspaceCwd: '/tmp/project',
+        sessionContext: undefined as { kind: 'standalone' } | undefined,
         capabilities: undefined as
           | {
               qwenCodeVersion: string;
@@ -53,6 +56,13 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
             }
           | undefined,
         client: {
+          listWorkspaceSessionsPage: vi
+            .fn()
+            .mockResolvedValue({ sessions: [] }),
+          listStandaloneSessionsPage: vi
+            .fn()
+            .mockResolvedValue({ sessions: [] }),
+          archiveStandaloneSessions: vi.fn(),
           workspaceByCwd: vi.fn(() => ({
             listWorkspaceSessions: vi.fn().mockResolvedValue([]),
             listSessionGroups: vi.fn().mockResolvedValue({
@@ -98,6 +108,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
   useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
+  useStreamingState: () => 'idle',
   useSessions: (options?: { archiveState?: string; group?: string }) => {
     if (options?.archiveState === 'archived') return archived;
     if (options?.group === 'pinned') return pinned;
@@ -133,6 +144,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     invalidateWorkspace: vi.fn(),
     refreshWorkspace: vi.fn(),
     renamed: vi.fn(),
+    toggleSessionPinned: vi.fn(),
   }),
   useSessionCatalogPolling: () => undefined,
   useSessionCatalogQuery: (
@@ -191,7 +203,11 @@ let container: HTMLDivElement;
 function renderSidebar(
   collapsed = false,
   props: {
+    onNewSession?: () => Promise<boolean> | boolean;
     onSelectCurrentSession?: () => void;
+    currentSessionActive?: boolean;
+    onLoadStandaloneSession?: (sessionId: string) => void;
+    onStandaloneNotice?: (message: string) => void;
     layout?: 'single' | 'rail';
     activePage?: string;
     containerWidth?: number;
@@ -209,6 +225,7 @@ function renderSidebar(
   const sidebar = (
     <WebShellSidebar
       collapsed={collapsed}
+      currentSessionActive={props.currentSessionActive}
       layout={props.layout}
       activePage={props.activePage}
       containerWidth={props.containerWidth}
@@ -223,8 +240,10 @@ function renderSidebar(
       onOpenGoals={() => {}}
       onOpenSessions={() => {}}
       onOpenSplitView={() => {}}
-      onNewSession={() => false}
+      onNewSession={props.onNewSession ?? (() => false)}
       onLoadSession={loadSession}
+      onLoadStandaloneSession={props.onLoadStandaloneSession}
+      onStandaloneNotice={props.onStandaloneNotice}
       onSelectCurrentSession={props.onSelectCurrentSession}
       mobileOpen={props.mobileOpen}
       onMobileClose={props.onMobileClose}
@@ -259,7 +278,20 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  connection.status = 'connected';
+  connection.loadingTranscript = false;
+  connection.error = undefined;
   connection.sessionId = null;
+  connection.sessionContext = undefined;
+  workspace.client.listWorkspaceSessionsPage
+    .mockReset()
+    .mockResolvedValue({ sessions: [] });
+  workspace.client.listStandaloneSessionsPage
+    .mockReset()
+    .mockResolvedValue({ sessions: [] });
+  workspace.client.archiveStandaloneSessions.mockReset();
+  workspaceActions.updateSessionOrganization.mockReset().mockResolvedValue({});
+  active.archiveSession.mockClear();
   connection.workspaceCwd = '/tmp/project';
   connection.capabilities = organizationCapabilities;
   workspace.capabilities = organizationCapabilities;
@@ -2586,6 +2618,491 @@ describe('WebShellSidebar rail navigation', () => {
     ).toBe('420');
     expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
       '420px',
+    );
+  });
+});
+
+describe('Recent sessions shared rows', () => {
+  function enableRecentSessions() {
+    const capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: [
+        'session_organization',
+        'session_archive',
+        'workspace_qualified_rest_core',
+        'standalone_sessions_v1',
+      ],
+    };
+    connection.capabilities = capabilities;
+    workspace.capabilities = capabilities;
+  }
+
+  it('renders after Project using the same row structure, with pin and archive only', async () => {
+    enableRecentSessions();
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [active.sessions[0]],
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const originalRow = [
+      ...container.querySelectorAll<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      ),
+    ].find(
+      (row) => !recent.contains(row) && row.textContent?.includes('API review'),
+    )!;
+    const row = recent.querySelector<HTMLElement>(
+      `div.${sidebarStyles.sessionRow}`,
+    )!;
+    expect(originalRow).toBeDefined();
+    expect(
+      row.querySelector(`.${sidebarStyles.sessionTextInner}`)?.textContent,
+    ).toBe('API review');
+    expect(
+      row.querySelector(`.${sidebarStyles.sessionMetaSlot}`),
+    ).not.toBeNull();
+    expect(
+      [...row.querySelectorAll('button')].map((button) =>
+        button.getAttribute('aria-label'),
+      ),
+    ).toEqual(['Pin', 'Archive']);
+    expect(row.textContent).not.toContain('project');
+    expect(
+      originalRow.compareDocumentPosition(recent) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    click(row.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!);
+    await flushSidebar();
+    expect(active.archiveSession).toHaveBeenCalledWith('session-a');
+    workspaceActions.updateSessionOrganization.mockImplementationOnce(
+      async () => {
+        workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+          sessions: [{ ...active.sessions[0], isPinned: true }],
+        });
+      },
+    );
+    click(recent.querySelector<HTMLButtonElement>('[aria-label="Pin"]')!);
+    await flushSidebar();
+    expect(workspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      'session-a',
+      { isPinned: true },
+    );
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(recent.textContent).not.toContain('API review');
+  });
+
+  it('hides a stale recent row when the pinned catalog already contains it', async () => {
+    enableRecentSessions();
+    pinned.sessions = [{ ...active.sessions[0], isPinned: true }];
+    pinned.data = pinned.sessions;
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [active.sessions[0]],
+    });
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-testid="recent-sessions"]')?.textContent,
+    ).not.toContain('API review');
+  });
+
+  it('refreshes Recent immediately after unpinning without waiting for polling', async () => {
+    enableRecentSessions();
+    active.sessions = [
+      makeSession('session-a', { displayName: 'Pinned chat', isPinned: true }),
+    ];
+    active.data = active.sessions;
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: active.sessions,
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    expect(recent.textContent).not.toContain('Pinned chat');
+    workspaceActions.updateSessionOrganization.mockImplementationOnce(
+      async () => {
+        active.sessions = [{ ...active.sessions[0], isPinned: false }];
+        active.data = active.sessions;
+        workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+          sessions: active.sessions,
+        });
+      },
+    );
+    click(container.querySelector<HTMLButtonElement>('[aria-label="Unpin"]')!);
+    await flushSidebar();
+    expect(workspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      'session-a',
+      { isPinned: false },
+    );
+    expect(recent.textContent).toContain('Pinned chat');
+  });
+
+  it.each(['/tmp/project', undefined])(
+    'highlights only the clicked list copy with workspace %s while protecting the actual current session',
+    async (workspaceCwd) => {
+      enableRecentSessions();
+      active.sessions = [{ ...active.sessions[0], workspaceCwd }];
+      active.data = active.sessions;
+      connection.sessionId = 'session-a';
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: [active.sessions[0]],
+      });
+      renderSidebar();
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      const rows = [
+        ...container.querySelectorAll<HTMLElement>(
+          `div.${sidebarStyles.sessionRow}`,
+        ),
+      ];
+      const original = rows.find(
+        (row) =>
+          !recent.contains(row) && row.textContent?.includes('API review'),
+      )!;
+      const copy = recent.querySelector<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      )!;
+      click(copy);
+      await flushSidebar();
+      expect(copy.getAttribute('aria-current')).toBe('page');
+      expect(original.hasAttribute('aria-current')).toBe(false);
+      renderSidebar(false, { currentSessionActive: false });
+      await flushSidebar();
+      expect(copy.hasAttribute('aria-current')).toBe(false);
+      expect(original.hasAttribute('aria-current')).toBe(false);
+      expect(
+        copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!
+          .disabled,
+      ).toBe(true);
+      renderSidebar(false, { currentSessionActive: true });
+      await flushSidebar();
+      expect(copy.getAttribute('aria-current')).toBe('page');
+      expect(original.hasAttribute('aria-current')).toBe(false);
+      click(original);
+      await flushSidebar();
+      expect(original.getAttribute('aria-current')).toBe('page');
+      expect(copy.hasAttribute('aria-current')).toBe(false);
+      expect(
+        copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!
+          .disabled,
+      ).toBe(true);
+      expect(loadSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it('moves standalone selection across copies without restoring the current session again', async () => {
+    enableRecentSessions();
+    connection.sessionId = 'standalone-chat';
+    connection.sessionContext = { kind: 'standalone' };
+    const summary = makeSession('standalone-chat', {
+      workspaceCwd: '/conversations',
+      sourceType: 'standalone',
+      displayName: 'Standalone title',
+    });
+    workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [summary],
+    });
+    const onLoadStandaloneSession = vi.fn();
+    const onSelectCurrentSession = vi.fn();
+    renderSidebar(false, {
+      onLoadStandaloneSession,
+      onSelectCurrentSession,
+      onStandaloneNotice: vi.fn(),
+    });
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const copy = recent.querySelector<HTMLElement>(
+      `div.${sidebarStyles.sessionRow}`,
+    )!;
+    click(copy);
+    await flushSidebar();
+    expect(copy.getAttribute('aria-current')).toBe('page');
+    const original = container
+      .querySelector('[data-testid="standalone-active-group"]')!
+      .querySelector<HTMLElement>(`div.${sidebarStyles.sessionRow}`)!;
+    click(original);
+    await flushSidebar();
+    expect(original.getAttribute('aria-current')).toBe('page');
+    expect(copy.hasAttribute('aria-current')).toBe(false);
+    expect(onLoadStandaloneSession).not.toHaveBeenCalled();
+    expect(onSelectCurrentSession).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])(
+    'selects the newly created Recent row (standalone=%s)',
+    async (standalone) => {
+      enableRecentSessions();
+      connection.sessionId = 'session-a';
+      connection.sessionContext = standalone
+        ? { kind: 'standalone' }
+        : undefined;
+      const createdSession = makeSession('created-chat', {
+        displayName: 'Created chat',
+        workspaceCwd: standalone ? '/conversations' : '/tmp/project',
+        sourceType: standalone ? 'standalone' : 'default',
+      });
+      const onNewSession = vi.fn(() => {
+        connection.sessionId = null;
+        return true;
+      });
+      renderSidebar(false, {
+        onNewSession,
+        onLoadStandaloneSession: vi.fn(),
+        onStandaloneNotice: vi.fn(),
+      });
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      const create = recent.querySelector<HTMLButtonElement>(
+        '[aria-label="New task"]',
+      )!;
+      click(create);
+      await flushSidebar();
+      expect(onNewSession).toHaveBeenCalledWith(undefined);
+      connection.sessionId = 'created-chat';
+      (standalone
+        ? workspace.client.listStandaloneSessionsPage
+        : workspace.client.listWorkspaceSessionsPage
+      ).mockResolvedValue({
+        sessions: [createdSession],
+      });
+      renderSidebar(false, {
+        onNewSession,
+        onLoadStandaloneSession: vi.fn(),
+        onStandaloneNotice: vi.fn(),
+      });
+      await flushSidebar();
+      const row = recent.querySelector('[aria-current="page"]');
+      expect(row?.textContent).toContain('Created chat');
+    },
+  );
+
+  it('resumes the catalog when session loading fails while still connecting', async () => {
+    enableRecentSessions();
+    connection.status = 'connecting';
+    connection.sessionId = 'session-a';
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [active.sessions[0]],
+    });
+    renderSidebar();
+    await flushSidebar();
+    expect(workspace.client.listWorkspaceSessionsPage).not.toHaveBeenCalled();
+    connection.error = new Error('restore failed');
+    renderSidebar();
+    await flushSidebar();
+    expect(workspace.client.listWorkspaceSessionsPage).toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="recent-sessions"]')?.textContent,
+    ).toContain('API review');
+  });
+
+  it.each(['restore', 'managed'])(
+    'clears pending Recent creation when leaving the draft through %s',
+    async (navigation) => {
+      enableRecentSessions();
+      connection.sessionId = 'session-a';
+      const onNewSession = vi.fn(() => {
+        connection.sessionId = null;
+        return true;
+      });
+      renderSidebar(false, { onNewSession });
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      click(
+        recent.querySelector<HTMLButtonElement>('[aria-label="New task"]')!,
+      );
+      await flushSidebar();
+      renderSidebar(false, { onNewSession });
+      await flushSidebar();
+      if (navigation === 'restore') {
+        connection.sessionId = 'session-b';
+        connection.loadingTranscript = true;
+      }
+      renderSidebar(false, {
+        onNewSession,
+        currentSessionActive: navigation !== 'managed',
+      });
+      await flushSidebar();
+      connection.sessionId = 'session-b';
+      connection.loadingTranscript = false;
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: [makeSession('session-b', { displayName: 'Restored chat' })],
+      });
+      renderSidebar(false, { onNewSession });
+      await flushSidebar();
+      expect(recent.textContent).toContain('Restored chat');
+      expect(recent.querySelector('[aria-current="page"]')).toBeNull();
+    },
+  );
+
+  it.each(['collapse', 'pin'])(
+    'restores a visible selection after Recent %s',
+    async (action) => {
+      enableRecentSessions();
+      connection.sessionId = 'session-a';
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: [active.sessions[0]],
+      });
+      renderSidebar();
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      const copy = recent.querySelector<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      )!;
+      click(copy);
+      await flushSidebar();
+      expect(copy.getAttribute('aria-current')).toBe('page');
+      if (action === 'collapse') {
+        click(
+          recent.querySelector<HTMLButtonElement>('button[aria-expanded]')!,
+        );
+      } else {
+        pinned.sessions = [{ ...active.sessions[0], isPinned: true }];
+        pinned.data = pinned.sessions;
+        renderSidebar();
+      }
+      await flushSidebar();
+      expect(
+        recent.querySelector(`div.${sidebarStyles.sessionRow}`),
+      ).toBeNull();
+      const originals = [
+        ...container.querySelectorAll<HTMLElement>(
+          `div.${sidebarStyles.sessionRow}`,
+        ),
+      ].filter(
+        (row) =>
+          !recent.contains(row) && row.textContent?.includes('API review'),
+      );
+      expect(originals.length).toBeGreaterThan(0);
+      expect(
+        originals.some((row) => row.getAttribute('aria-current') === 'page'),
+      ).toBe(true);
+    },
+  );
+
+  it('prevents standalone Recent archive when items excludes archive', async () => {
+    enableRecentSessions();
+    workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        makeSession('standalone-chat', {
+          sourceType: 'standalone',
+          displayName: 'Independent chat',
+        }),
+      ],
+    });
+    workspace.client.archiveStandaloneSessions.mockResolvedValue({
+      archived: ['standalone-chat'],
+      alreadyArchived: [],
+      errors: [],
+    });
+    renderSidebar(false, {
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { items: ['details'] },
+    });
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    expect(recent.textContent).toContain('Independent chat');
+    const archive = recent.querySelector<HTMLButtonElement>(
+      '[aria-label="Archive"]',
+    );
+    if (archive && !archive.disabled) click(archive);
+    await flushSidebar();
+    expect(workspace.client.archiveStandaloneSessions).not.toHaveBeenCalled();
+  });
+  it('does not leave a pending Recent selection when creation is cancelled', async () => {
+    enableRecentSessions();
+    connection.sessionId = 'session-a';
+    const onNewSession = vi.fn(() => false);
+    renderSidebar(false, { onNewSession });
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    click(recent.querySelector<HTMLButtonElement>('[aria-label="New task"]')!);
+    await flushSidebar();
+    connection.sessionId = 'session-b';
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [makeSession('session-b')],
+    });
+    renderSidebar(false, { onNewSession });
+    await flushSidebar();
+    expect(recent.querySelector('[aria-current="page"]')).toBeNull();
+  });
+
+  it('archives no-workspace sessions through their own endpoint and refreshes both lists', async () => {
+    enableRecentSessions();
+    const standalone = makeSession('standalone-chat', {
+      sourceType: 'standalone',
+      displayName: 'Independent chat',
+    });
+    workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [standalone],
+    });
+    workspace.client.archiveStandaloneSessions.mockImplementation(async () => {
+      workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+        sessions: [],
+      });
+      return { archived: ['standalone-chat'], alreadyArchived: [], errors: [] };
+    });
+    renderSidebar(false, {
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const pin = recent.querySelector<HTMLButtonElement>('[aria-label="Pin"]')!;
+    expect(pin.disabled).toBe(true);
+    expect(pin.title).toContain('not supported');
+    click(recent.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!);
+    await flushSidebar();
+    expect(workspace.client.archiveStandaloneSessions).toHaveBeenCalledWith([
+      'standalone-chat',
+    ]);
+    expect(recent.textContent).not.toContain('Independent chat');
+    expect(
+      container.querySelector('[data-testid="standalone-active-group"]')
+        ?.textContent,
+    ).not.toContain('Independent chat');
+    expect(active.archiveSession).not.toHaveBeenCalled();
+  });
+
+  it('disables archive for current and running sessions and provides the standard hover details', async () => {
+    enableRecentSessions();
+    connection.sessionId = 'session-a';
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        active.sessions[0],
+        makeSession('running-chat', { hasActivePrompt: true }),
+      ],
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const archiveButtons = [
+      ...recent.querySelectorAll<HTMLButtonElement>('[aria-label="Archive"]'),
+    ];
+    expect(archiveButtons).toHaveLength(2);
+    expect(archiveButtons.every((button) => button.disabled)).toBe(true);
+    const row = [
+      ...recent.querySelectorAll<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      ),
+    ].find((element) => element.textContent?.includes('API review'))!;
+    await act(async () => {
+      row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'session-a',
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'API review',
     );
   });
 });

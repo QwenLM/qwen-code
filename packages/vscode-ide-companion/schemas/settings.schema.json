@@ -29,6 +29,12 @@
           "type": "boolean",
           "default": false
         },
+        "maxSessions": {
+          "description": "Per-workspace cap on concurrent live sessions. New spawn requests beyond this return 503; attaching to an existing session still works. Set to 0 to disable. Honored from user, system, and system-defaults settings only — a workspace settings file must not raise a daemon-wide resource cap; qwen serve --max-sessions wins when passed.",
+          "type": "integer",
+          "default": 32,
+          "minimum": 0
+        },
         "maxConcurrentSubSessionsPerCaller": {
           "description": "Per-session ceiling on concurrent in-flight sub-sessions spawned via the create_sub_session tool.",
           "type": "integer",
