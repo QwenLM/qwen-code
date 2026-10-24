@@ -240,7 +240,7 @@ filename is spent: raw.githubusercontent serves a URL from cache, so
 overwriting `02-matrix.png` leaves every earlier link showing the old image.
 Republish as `02-matrix-v2.png`, update the body and every comment that quotes
 it, then read the file back at that ref (`gh api
-repos/<owner>/<repo>/contents/<path>?ref=<branch>`) to confirm its size and
+repos/<assets-repo>/contents/<path>?ref=<branch>`) to confirm its size and
 blob sha. Posting is not the end: the guard and the read-back below still
 apply on this path, because neither the workflow publisher nor a CI re-run
 covers it.

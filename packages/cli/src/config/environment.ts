@@ -649,10 +649,18 @@ function reportRejectedSettingsEnv(
   // one, and only the operator may choose where evidence is published. Say so
   // instead of dropping the entry silently, and name the channel that works.
   for (const [setting, key] of Object.entries(VERIFY_PR_COORDINATE_ENV)) {
-    const value = env[key];
-    if (typeof value !== 'string' || value.trim() === '') continue;
+    // The gate that drops the entry folds case (Windows env lookup does), so
+    // an exact-spelling lookup here would stay silent for the spellings it
+    // rejects. Report whichever spelling was actually written.
+    const entry = Object.entries(env).find(
+      ([candidate, value]) =>
+        candidate.toUpperCase() === key &&
+        typeof value === 'string' &&
+        value.trim() !== '',
+    );
+    if (!entry) continue;
     writeStderrLineSafe(
-      `qwen: ${source} cannot set ${key}; ignored. Set verifyPr.${setting} at user scope in settings.json, or export it in the launch environment.`,
+      `qwen: ${source} cannot set ${entry[0]}; ignored. Set verifyPr.${setting} at user scope in settings.json, or export it in the launch environment.`,
     );
   }
 }

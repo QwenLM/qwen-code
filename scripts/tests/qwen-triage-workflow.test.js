@@ -5234,6 +5234,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('git/refs');
     // ...and the sha to create it from is looked up in THAT repository.
     expect(flat).toContain('.object.sha');
+    // The read-back must query the repository the blob was written to, not
+    // the PR's own repository, whose same path may not exist or may differ.
+    expect(flat).toContain('repos/<assets-repo>/contents/<path>?ref=');
     // The deliverables are the skill's, not the maintainer's list.
     expect(flat).toContain('do not ask the maintainer to restate them');
   });
