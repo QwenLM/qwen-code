@@ -12,6 +12,7 @@ import { type IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from '../CommandFormatMigrationNudge.js';
 import { type FolderTrustChoice } from '../components/FolderTrustDialog.js';
 import { type McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import { type ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import {
   type EditorType,
   type ApprovalMode,
@@ -76,6 +77,9 @@ export interface UIActions {
   handleCommandMigrationComplete: (result: CommandMigrationNudgeResult) => void;
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
   handleMcpApprovalSelect: (choice: McpApprovalChoice) => void;
+  handleProjectHooksApprovalSelect: (
+    choice: ProjectHooksApprovalChoice,
+  ) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
   onTabConsumerChange: (active: boolean) => void;

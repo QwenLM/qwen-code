@@ -44,6 +44,7 @@ function makeConfig(options: {
   systemHooks?: Record<string, unknown>;
   userHooks?: Record<string, unknown>;
   projectHooks?: Record<string, unknown>;
+  withheldProjectHooks?: Record<string, unknown>;
   extensions?: Array<{ isActive: boolean; hooks?: Record<string, unknown> }>;
 }): HooksListingConfig {
   const session = options.session ?? new SessionHooksManager();
@@ -63,6 +64,9 @@ function makeConfig(options: {
     getSystemHooks: vi.fn().mockReturnValue(options.systemHooks),
     getUserHooks: vi.fn().mockReturnValue(options.userHooks),
     getProjectHooks: vi.fn().mockReturnValue(options.projectHooks),
+    getWithheldProjectHooks: vi
+      .fn()
+      .mockReturnValue(options.withheldProjectHooks),
     getExtensions: vi.fn().mockReturnValue(options.extensions ?? []),
   } as unknown as HooksListingConfig;
 }
@@ -445,6 +449,17 @@ describe('buildHooksListing', () => {
       expect(row?.source).toBe(HooksConfigSource.User);
       expect(row).not.toHaveProperty('agentScope');
     });
+  });
+
+  it('lists project hooks withheld for approval as awaiting it', async () => {
+    const listed = await lintRows({ withheldProjectHooks: LINT_SETTINGS });
+
+    expect(
+      listed.map((row) => [row.source, row.enabled, row.disabledReason]),
+    ).toEqual([
+      [HooksConfigSource.User, true, undefined],
+      [HooksConfigSource.Project, false, 'pendingApproval'],
+    ]);
   });
 
   describe('without a hook system', () => {

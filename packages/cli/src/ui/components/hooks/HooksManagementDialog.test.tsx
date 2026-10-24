@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  onTestFinished,
+} from 'vitest';
 import { cleanup } from 'ink-testing-library';
 import { HookEventName } from '@qwen-code/qwen-code-core';
 import { HooksManagementDialog } from './HooksManagementDialog.js';
@@ -44,6 +52,7 @@ function disabledHooksConfig(): ReturnType<typeof useConfig> {
       })),
     })),
     getSessionId: vi.fn(() => 'test-session-id'),
+    isProjectHooksPendingApproval: vi.fn(() => false),
   } as unknown as ReturnType<typeof useConfig>;
 }
 
@@ -90,6 +99,7 @@ vi.mock('../../contexts/ConfigContext.js', async (importOriginal) => {
         })),
       })),
       getSessionId: vi.fn(() => 'test-session-id'),
+      isProjectHooksPendingApproval: vi.fn(() => false),
     })),
   };
 });
@@ -154,11 +164,18 @@ function createKey(name: string, sequence = ''): Key {
   };
 }
 
-function mockSettingsHooks(userHooks: Record<string, unknown>): void {
+function mockSettingsHooks(
+  userHooks: Record<string, unknown>,
+  workspaceHooks: Record<string, unknown> = {},
+): void {
   mockedUseSettings.mockReturnValue({
     forScope: vi.fn((scope: SettingScope) => ({
       settings:
-        scope === SettingScope.User ? { hooks: userHooks } : { hooks: {} },
+        scope === SettingScope.User
+          ? { hooks: userHooks }
+          : scope === SettingScope.Workspace
+            ? { hooks: workspaceHooks }
+            : { hooks: {} },
     })),
   } as unknown as ReturnType<typeof useSettings>);
 }
@@ -412,6 +429,50 @@ describe('HooksManagementDialog', () => {
     await vi.waitFor(() => {
       expect(lastFrame()).toContain('Hook details');
       expect(lastFrame()).toContain('echo stop two');
+    });
+  });
+
+  it('marks project hooks withheld for approval', async () => {
+    const defaultConfig = mockedUseConfig.getMockImplementation();
+    onTestFinished(() => {
+      mockedUseConfig.mockImplementation(defaultConfig!);
+    });
+    mockedUseConfig.mockImplementation(
+      () =>
+        ({
+          ...disabledHooksConfig(),
+          getDisableAllHooks: vi.fn(() => false),
+          isProjectHooksPendingApproval: vi.fn(() => true),
+        }) as unknown as ReturnType<typeof useConfig>,
+    );
+    mockSettingsHooks(
+      {},
+      {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: './repo-hook.sh' }],
+          },
+        ],
+      },
+    );
+
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Hooks');
+    });
+    pressKey('return');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Bash');
+    });
+    pressKey('return');
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('./repo-hook.sh');
+      expect(lastFrame()).toContain('Local Settings · disabled');
+      expect(lastFrame()).toContain('(awaiting approval)');
     });
   });
 });

@@ -82,6 +82,12 @@ import { normalizePastedText } from './input-prompt-model.js';
 import { caretSpans, useLineEdit } from './line-edit.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import {
+  PROJECT_HOOKS_DIALOG_CHROME_ROWS,
+  PROJECT_HOOKS_DIALOG_MIN_HOOK_ROWS,
+  ProjectHooksApprovalChoice,
+} from '../components/hooks/ProjectHooksApprovalDialog.js';
+import { fitHookLines } from '../../config/hook-approvals.js';
 import { computeHeaderCap } from '../components/messages/AskUserQuestionDialog.js';
 import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
 import { t } from '../../i18n/index.js';
@@ -1456,6 +1462,88 @@ export function OpenTuiMcpApprovalDialog(props: OpenTuiMcpApprovalProps) {
               </text>
             )}
           />
+        </box>
+      </DialogFrame>
+    </box>
+  );
+}
+
+interface OpenTuiProjectHooksApprovalProps {
+  /** One line per configured hook, e.g. `SessionStart  ./setup.sh`. */
+  lines: readonly string[];
+  onSelect: (choice: ProjectHooksApprovalChoice) => void;
+}
+
+const PROJECT_HOOKS_APPROVAL_OPTIONS: Array<
+  DialogListItem<ProjectHooksApprovalChoice>
+> = [
+  { key: 'approve', value: ProjectHooksApprovalChoice.APPROVE },
+  { key: 'reject', value: ProjectHooksApprovalChoice.REJECT },
+];
+
+/**
+ * Startup approval for the workspace's project hooks, the hook counterpart
+ * of {@link OpenTuiMcpApprovalDialog}: the queue, the persisted hash-bound
+ * decision and the registry reload live in the renderer-agnostic hook.
+ */
+export function OpenTuiProjectHooksApprovalDialog(
+  props: OpenTuiProjectHooksApprovalProps,
+) {
+  const { lines, onSelect } = props;
+  const { width, height } = useTerminalDimensions();
+  const select = useDialogSelect<DialogListItem<ProjectHooksApprovalChoice>>({
+    items: PROJECT_HOOKS_APPROVAL_OPTIONS,
+    onSelect: (value) => onSelect(value),
+  });
+
+  useKeyboard((key) => {
+    if (toOriginalKey(key).name === 'escape') {
+      onSelect(ProjectHooksApprovalChoice.DISMISS);
+    }
+  });
+
+  return (
+    <box marginLeft={3} width={Math.max(0, dialogAreaWidth(width) - 1)}>
+      <DialogFrame borderColor={C.yellow}>
+        <box flexDirection="column">
+          <box flexDirection="column" marginBottom={1}>
+            <text fg={C.text} attributes={1}>
+              {t('Untrusted hooks in .qwen/settings.json')}
+            </text>
+            <text fg={C.text}>
+              {t(
+                'This workspace declares hooks: commands Qwen Code runs on events such as session start or before a tool call. Approving lets them run with your privileges. Approval is bound to this exact configuration — if .qwen/settings.json changes, you will be asked again.',
+              )}
+            </text>
+          </box>
+          <box flexDirection="column" marginBottom={1}>
+            {fitHookLines(
+              lines,
+              Math.max(
+                PROJECT_HOOKS_DIALOG_MIN_HOOK_ROWS,
+                height - PROJECT_HOOKS_DIALOG_CHROME_ROWS,
+              ),
+            ).map((line, index) => (
+              <text key={`${index}-${line}`} fg={C.text} wrapMode="none">
+                {`  ${line}`}
+              </text>
+            ))}
+          </box>
+          <DialogSelect
+            items={PROJECT_HOOKS_APPROVAL_OPTIONS}
+            activeIndex={select.activeIndex}
+            scrollOffset={select.scrollOffset}
+            onHover={select.highlightIndex}
+            onSelectIndex={select.selectIndex}
+            renderLabel={(item, { isSelected }) => (
+              <text fg={isSelected ? C.accent : C.text}>
+                {item.value === ProjectHooksApprovalChoice.APPROVE
+                  ? t('Approve these hooks')
+                  : t('Reject')}
+              </text>
+            )}
+          />
+          <text fg={C.dim}>{t('Esc to decide later')}</text>
         </box>
       </DialogFrame>
     </box>

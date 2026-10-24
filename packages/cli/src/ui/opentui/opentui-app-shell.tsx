@@ -111,10 +111,12 @@ import { OpenTuiQueuedMessageDisplay } from './queued-message.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiMcpApprovalDialog,
+  OpenTuiProjectHooksApprovalDialog,
   OpenTuiShellConfirmation,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
+import { useProjectHooksApproval } from '../hooks/use-project-hooks-approval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
 import {
   getDialogMaxHeight,
@@ -538,6 +540,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // app level; without it a `.mcp.json` checked into the project is never
   // offered here and its servers stay silently disconnected.
   const mcpApproval = useMcpApproval(config);
+  const hooksApproval = useProjectHooksApproval(config, settings, (text) =>
+    addInfoItem({ type: MessageType.INFO, text }),
+  );
 
   // Shift+Tab lives here, not in the composer: ink mounts useAutoAcceptIndicator
   // at App level (disabled only for the agent-tab view), so it still cycles
@@ -1172,6 +1177,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           !activeModal &&
           !activeToolCall &&
           !mcpApproval.isMcpApprovalDialogOpen &&
+          !hooksApproval.isProjectHooksApprovalDialogOpen &&
           updateNotice ? (
             <text>{updateNotice}</text>
           ) : null}
@@ -1192,6 +1198,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               pendingServers={mcpApproval.pendingMcpApprovals}
               remaining={mcpApproval.mcpApprovalRemaining}
               onSelect={mcpApproval.handleMcpApprovalSelect}
+            />
+          ) : hooksApproval.isProjectHooksApprovalDialogOpen &&
+            hooksApproval.pendingProjectHooks ? (
+            <OpenTuiProjectHooksApprovalDialog
+              key="project-hooks-approval"
+              lines={hooksApproval.pendingProjectHooks.lines}
+              onSelect={hooksApproval.handleProjectHooksApprovalSelect}
             />
           ) : activeToolCall ? (
             <box key="tool-confirm-area" flexDirection="column">
@@ -1328,6 +1341,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             !activeModal &&
             !activeToolCall &&
             !mcpApproval.isMcpApprovalDialogOpen &&
+            !hooksApproval.isProjectHooksApprovalDialogOpen &&
             !showSuggestions) ? (
             <OpenTuiFooter
               config={config}

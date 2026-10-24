@@ -80,4 +80,27 @@ describe('DialogManager', () => {
       expect(frame).not.toContain('1. default');
     });
   });
+
+  describe('project hooks approval dialog', () => {
+    it('renders the pending hooks with the approve option inside the dialog height', () => {
+      const { lastFrame } = renderDialogManager(
+        createUIState({
+          constrainHeight: true,
+          terminalHeight: 24,
+          isProjectHooksApprovalDialogOpen: true,
+          pendingProjectHooks: {
+            hooks: {},
+            lines: Array.from({ length: 40 }, (_, i) => `Stop  hook-${i}.sh`),
+          },
+        }),
+        {},
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Untrusted hooks in .qwen/settings.json');
+      expect(frame).toContain('hook-0.sh');
+      expect(frame).toContain('more (see .qwen/settings.json)');
+      expect(frame).toContain('Approve these hooks');
+    });
+  });
 });
