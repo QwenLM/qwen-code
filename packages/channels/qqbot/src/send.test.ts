@@ -12,7 +12,8 @@ import type {
   Envelope,
 } from '@qwen-code/channel-base';
 import { isValidChatId, DeliveryError } from './QQChannel.js';
-import { QQRichMediaError } from './api.js';
+import { QQ_FILE_TYPE, QQRichMediaError } from './api.js';
+import type { QQMediaKind } from './file-tools.js';
 
 const {
   mockSendQQMessage,
@@ -74,7 +75,7 @@ vi.mock('node:fs', () => ({
 }));
 
 vi.mock('./api.js', async (importOriginal) => {
-  // Keep the real error class and error-code parser: the sendQQFile assertions
+  // Keep the real error class and error-code parser: the sendQQMedia assertions
   // below must exercise the production code, not a copy of it.
   const actual = await importOriginal<typeof import('./api.js')>();
   return {
@@ -5714,20 +5715,21 @@ describe('disconnect clears routing state', () => {
 });
 
 // ---------------------------------------------------------------------------
-// sendQQFile: the outbound file path shares the text path's delivery core
+// sendQQMedia: the outbound media path shares the text path's delivery core
 // ---------------------------------------------------------------------------
-describe('sendQQFile', () => {
-  interface SendFileInput {
+describe('sendQQMedia', () => {
+  interface SendMediaInput {
     sessionId: string;
     chatId: string;
+    kind: QQMediaKind;
     fileName: string;
     bytes: Buffer;
   }
-  interface SendFileResult {
+  interface SendMediaResult {
     ok: boolean;
     message?: string;
   }
-  type SendQQFile = (input: SendFileInput) => Promise<SendFileResult>;
+  type SendQQMedia = (input: SendMediaInput) => Promise<SendMediaResult>;
 
   function makeChannel(overrides?: {
     chatType?: 'c2c' | 'group';
@@ -5777,11 +5779,11 @@ describe('sendQQFile', () => {
     return ch;
   }
 
-  function sendFile(
+  function sendMedia(
     ch: QQChannelInstance,
-    input: SendFileInput,
-  ): Promise<SendFileResult> {
-    const fn = (ch as unknown as { sendQQFile: SendQQFile }).sendQQFile;
+    input: SendMediaInput,
+  ): Promise<SendMediaResult> {
+    const fn = (ch as unknown as { sendQQMedia: SendQQMedia }).sendQQMedia;
     return fn.call(ch, input);
   }
 
@@ -5797,9 +5799,10 @@ describe('sendQQFile', () => {
       : undefined;
   }
 
-  const input: SendFileInput = {
+  const input: SendMediaInput = {
     sessionId: 's1',
     chatId: 'test-chat-id',
+    kind: 'file',
     fileName: 'report.pdf',
     bytes: Buffer.from('body'),
   };
@@ -5820,7 +5823,7 @@ describe('sendQQFile', () => {
   it('sends msg_type=7 with the uploaded file_info anchored to the session reply', async () => {
     const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result).toEqual({ ok: true });
     expect(mockUploadQQRichMedia).toHaveBeenCalledWith(
@@ -5829,6 +5832,7 @@ describe('sendQQFile', () => {
         chatId: 'test-chat-id',
         fileName: 'report.pdf',
         accessToken: 'test-token',
+        fileType: QQ_FILE_TYPE.file,
       }),
     );
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
@@ -5848,7 +5852,7 @@ describe('sendQQFile', () => {
   it('routes the upload through the group scope for a group chat', async () => {
     const ch = makeChannel({ chatType: 'group', sessionAnchor: 'msg-anchor' });
 
-    await sendFile(ch, input);
+    await sendMedia(ch, input);
 
     expect(mockUploadQQRichMedia).toHaveBeenCalledWith(
       expect.objectContaining({ scope: 'groups' }),
@@ -5868,7 +5872,7 @@ describe('sendQQFile', () => {
       chatAnchor: 'msg-anchor',
     });
 
-    await sendFile(ch, input);
+    await sendMedia(ch, input);
     expect(seqOf(ch, 'msg-anchor')).toBe(1);
 
     mockSendQQMessage.mockClear();
@@ -5887,7 +5891,7 @@ describe('sendQQFile', () => {
   it('sends without an anchor when the session has none', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result).toEqual({ ok: true });
     expect(mockSendQQMessage).toHaveBeenCalledWith(
@@ -5906,7 +5910,7 @@ describe('sendQQFile', () => {
       ] as Map<string, boolean>
     ).set('test-chat-id', false);
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain('active messages are disabled');
@@ -5920,7 +5924,7 @@ describe('sendQQFile', () => {
       new QQRichMediaError('merge', 200, 40093002, 'over quota'),
     );
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain('daily file-sending limit');
@@ -5935,7 +5939,7 @@ describe('sendQQFile', () => {
       )
       .mockResolvedValueOnce(mockResponse(true));
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result).toEqual({ ok: true });
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
@@ -5957,7 +5961,7 @@ describe('sendQQFile', () => {
       mockResponse(false, 400, JSON.stringify({ code: 40034004 })),
     );
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result.ok).toBe(false);
     // The specific text, not just the code: the generic branch also contains it.
@@ -5981,7 +5985,7 @@ describe('sendQQFile', () => {
       mockResponse(false, 400, JSON.stringify({ code: 304080 })),
     );
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain('handle expired');
@@ -6006,7 +6010,7 @@ describe('sendQQFile', () => {
         throw new Error('socket hang up');
       });
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain('did not complete');
@@ -6019,7 +6023,7 @@ describe('sendQQFile', () => {
       mockResponse(false, 429, JSON.stringify({ code: 11244 })),
     );
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result.ok).toBe(false);
     // A retry would double the rate-limit pressure the 429 just reported.
@@ -6038,7 +6042,7 @@ describe('sendQQFile', () => {
       mockResponse(false, 400, JSON.stringify({ code: 40034004 })),
     );
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain('active messages are disabled');
@@ -6056,7 +6060,7 @@ describe('sendQQFile', () => {
       ),
     );
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain('handle expired');
@@ -6066,10 +6070,62 @@ describe('sendQQFile', () => {
     const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
     mockSendQQMessage.mockRejectedValue(new Error('socket hang up'));
 
-    const result = await sendFile(ch, input);
+    const result = await sendMedia(ch, input);
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain('did not complete');
     expect(seqOf(ch, 'msg-anchor')).toBe(0);
+  });
+
+  it('maps each media kind to its platform file_type', async () => {
+    const cases: Array<[QQMediaKind, number]> = [
+      ['file', QQ_FILE_TYPE.file],
+      ['image', QQ_FILE_TYPE.image],
+      ['video', QQ_FILE_TYPE.video],
+      ['voice', QQ_FILE_TYPE.voice],
+    ];
+
+    for (const [kind, fileType] of cases) {
+      const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+
+      await sendMedia(ch, { ...input, kind });
+
+      expect(mockUploadQQRichMedia).toHaveBeenLastCalledWith(
+        expect.objectContaining({ fileType }),
+      );
+    }
+  });
+
+  it('prefixes an upload failure with the tool that was invoked', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockUploadQQRichMedia.mockRejectedValue(
+      new QQRichMediaError('merge', 200, 850019, 'unsupported'),
+    );
+
+    const result = await sendMedia(ch, {
+      ...input,
+      kind: 'image',
+      fileName: 'chart.png',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('qq_send_image:');
+    expect(result.message).toContain('does not support this file format');
+  });
+
+  it('prefixes a send failure with the tool that was invoked', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockSendQQMessage.mockResolvedValue(
+      mockResponse(false, 429, JSON.stringify({ code: 11244 })),
+    );
+
+    const result = await sendMedia(ch, {
+      ...input,
+      kind: 'voice',
+      fileName: 'note.wav',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('qq_send_voice:');
   });
 });

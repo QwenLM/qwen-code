@@ -5,7 +5,7 @@
  *  - Access token issuance
  *  - WebSocket Gateway URL resolution
  *  - Message sending (text / markdown)
- *  - Rich-media (file) upload
+ *  - Rich-media (image / video / voice / file) upload
  *  - Message recall and group member removal
  */
 
@@ -189,9 +189,17 @@ const MD5_10M_BYTES = 10002432;
  *  delay of its own (upload_prepare). */
 const RETRY_DELAY_FALLBACK_MS = 1000;
 
-/** Rich media is uploaded as a downloadable file card (`file_type: 4`), which
- *  is the only type that accepts any format. */
-const QQ_FILE_TYPE_FILE = 4;
+/** Platform rich-media types. An image, video, or voice file is rendered by the
+ *  client; a file (`4`) is a downloadable card and the only type that accepts
+ *  any format. */
+export const QQ_FILE_TYPE = {
+  image: 1,
+  video: 2,
+  voice: 3,
+  file: 4,
+} as const;
+
+export type QQFileType = (typeof QQ_FILE_TYPE)[keyof typeof QQ_FILE_TYPE];
 
 export type QQRichMediaScope = 'users' | 'groups';
 
@@ -202,6 +210,8 @@ export interface QQRichMediaUploadInput {
   chatId: string;
   fileName: string;
   bytes: Buffer;
+  /** `file_type` sent with both the prepare and the merge call. */
+  fileType: QQFileType;
 }
 
 export interface QQRichMediaUploadResult {
@@ -247,7 +257,7 @@ export class QQRichMediaError extends Error {
 export async function uploadQQRichMedia(
   input: QQRichMediaUploadInput,
 ): Promise<QQRichMediaUploadResult> {
-  const { base, accessToken, scope, chatId, fileName, bytes } = input;
+  const { base, accessToken, scope, chatId, fileName, bytes, fileType } = input;
   const scopePath = `/v2/${scope}/${encodeURIComponent(chatId)}`;
 
   // prepare is retried too: the platform marks 40093001 and 850027 ("try again
@@ -260,7 +270,7 @@ export async function uploadQQRichMedia(
         accessToken,
         `${scopePath}/upload_prepare`,
         {
-          file_type: QQ_FILE_TYPE_FILE,
+          file_type: fileType,
           file_size: String(bytes.length),
           file_name: fileName,
           md5: digest('md5', bytes),
@@ -364,7 +374,7 @@ export async function uploadQQRichMedia(
         `${scopePath}/files`,
         {
           upload_id: uploadId,
-          file_type: QQ_FILE_TYPE_FILE,
+          file_type: fileType,
           file_name: fileName,
           srv_send_msg: false,
         },

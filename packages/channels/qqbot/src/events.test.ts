@@ -4198,10 +4198,10 @@ describe('channel-base test double', () => {
   });
 });
 
-// The outbound file tool is what the model calls to hand a local file back to
-// the chat, so its registration switch and its chat binding are pinned here
+// The outbound media tools are what the model calls to hand a local file back
+// to the chat, so their registration switch and chat binding are pinned here
 // rather than only in the tool-unit tests.
-describe('outbound file tool registration', () => {
+describe('outbound media tool registration', () => {
   function registeredTools(
     configOverrides?: Record<string, unknown>,
   ): Array<{ name: string; owner?: string }> {
@@ -4213,18 +4213,25 @@ describe('outbound file tool registration', () => {
     return registered;
   }
 
+  const OUTBOUND_TOOL_NAMES = [
+    'qq_send_file',
+    'qq_send_image',
+    'qq_send_video',
+    'qq_send_voice',
+  ];
+
   function fileToolNames(configOverrides?: Record<string, unknown>): string[] {
     return registeredTools(configOverrides)
       .map((tool) => tool.name)
-      .filter((name) => name === 'qq_send_file');
+      .filter((name) => OUTBOUND_TOOL_NAMES.includes(name));
   }
 
   it('registers nothing by default', () => {
     expect(fileToolNames()).toEqual([]);
   });
 
-  it('registers qq_send_file once when fileTools is true', () => {
-    expect(fileToolNames({ fileTools: true })).toEqual(['qq_send_file']);
+  it('registers the four outbound media tools when fileTools is true', () => {
+    expect(fileToolNames({ fileTools: true })).toEqual(OUTBOUND_TOOL_NAMES);
   });
 
   it('treats any value other than true as disabled', () => {
@@ -4232,10 +4239,12 @@ describe('outbound file tool registration', () => {
     expect(fileToolNames({ fileTools: 'yes' })).toEqual([]);
   });
 
-  it('tags the tool with the owning channel', () => {
-    expect(registeredTools({ fileTools: true })).toEqual([
-      expect.objectContaining({ name: 'qq_send_file', owner: 'test-bot' }),
-    ]);
+  it('tags the tools with the owning channel', () => {
+    expect(registeredTools({ fileTools: true })).toEqual(
+      OUTBOUND_TOOL_NAMES.map((name) =>
+        expect.objectContaining({ name, owner: 'test-bot' }),
+      ),
+    );
   });
 
   it('skips registration on bridges without channel tool support', () => {

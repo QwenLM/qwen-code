@@ -18,6 +18,7 @@ vi.stubGlobal(
 );
 
 const {
+  QQ_FILE_TYPE,
   QQRichMediaError,
   fetchAccessToken,
   fetchGatewayUrl,
@@ -406,6 +407,7 @@ describe('uploadQQRichMedia', () => {
       chatId: 'CHAT',
       fileName: 'report.txt',
       bytes,
+      fileType: QQ_FILE_TYPE.file,
       ...overrides,
     });
   }
@@ -430,6 +432,41 @@ describe('uploadQQRichMedia', () => {
     // case would leak its queue into the next one; reset drops the queue.
     mockFetch.mockReset();
   });
+
+  it.each([
+    [QQ_FILE_TYPE.image, 1],
+    [QQ_FILE_TYPE.video, 2],
+    [QQ_FILE_TYPE.voice, 3],
+    [QQ_FILE_TYPE.file, 4],
+  ])(
+    'sends file_type %i in both the prepare and the merge body',
+    async (fileType, expected) => {
+      mockFetch
+        .mockResolvedValueOnce(
+          mockResponse(
+            true,
+            200,
+            prepareBody([
+              { index: 1, url: 'https://cos.test/p1', size: bytes.length },
+            ]),
+          ),
+        )
+        .mockResolvedValueOnce(mockResponse(true, 200, ''))
+        .mockResolvedValueOnce(mockResponse(true, 200, {}))
+        .mockResolvedValueOnce(
+          mockResponse(true, 200, { file_info: 'FILE-INFO', ttl: 0 }),
+        );
+
+      await upload({ fileType });
+
+      expect(
+        JSON.parse(String(mockFetch.mock.calls[0]![1]?.body)),
+      ).toMatchObject({ file_type: expected });
+      expect(
+        JSON.parse(String(mockFetch.mock.calls[3]![1]?.body)),
+      ).toMatchObject({ file_type: expected });
+    },
+  );
 
   it('walks prepare → PUT → part_finish → merge and returns the handle', async () => {
     mockFetch

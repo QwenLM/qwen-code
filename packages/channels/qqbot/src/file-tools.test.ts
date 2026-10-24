@@ -12,9 +12,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   QQ_OUTBOUND_FILE_MAX_BYTES,
+  QQ_OUTBOUND_IMAGE_MAX_BYTES,
+  QQ_OUTBOUND_VIDEO_MAX_BYTES,
+  QQ_OUTBOUND_VOICE_MAX_BYTES,
   buildFileTools,
   readOutboundFile,
   type QQFileToolDeps,
+  type QQMediaKind,
 } from './file-tools.js';
 
 // Two guards are only observable through the descriptor the module opens, so
@@ -195,6 +199,7 @@ describe('buildFileTools', () => {
   interface Sent {
     sessionId: string;
     chatId: string;
+    kind: QQMediaKind;
     fileName: string;
     bytes: Buffer;
   }
@@ -208,7 +213,7 @@ describe('buildFileTools', () => {
     const deps: QQFileToolDeps = {
       resolveChat: () => ({ chatId: 'CHAT' }),
       sessionCwd: () => workspace,
-      sendFile: async (input) => {
+      sendMedia: async (input) => {
         sent.push(input);
         return result;
       },
@@ -217,9 +222,19 @@ describe('buildFileTools', () => {
     };
     const tools = buildFileTools(deps);
     const tool = tools[0]!;
+    const byName = (name: string) => {
+      const found = tools.find((entry) => entry.name === name);
+      if (!found) throw new Error(`${name} was not registered`);
+      return found;
+    };
     const call = (args: Record<string, unknown>, sessionId = 'S1') =>
       tool.handler(args, { sessionId });
-    return { tool, call, sent, logs };
+    const callTool = (
+      name: string,
+      args: Record<string, unknown>,
+      sessionId = 'S1',
+    ) => byName(name).handler(args, { sessionId });
+    return { tool, tools, call, callTool, sent, logs };
   }
 
   function textOf(value: unknown): string {
@@ -244,11 +259,22 @@ describe('buildFileTools', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('exposes exactly one tool named qq_send_file', () => {
-    const { tool } = harness();
+  it('exposes the four media tools, with file_name only on qq_send_file', () => {
+    const { tools } = harness();
 
-    expect(tool.name).toBe('qq_send_file');
-    expect(tool.inputSchema['required']).toEqual(['path']);
+    expect(tools.map((entry) => entry.name)).toEqual([
+      'qq_send_file',
+      'qq_send_image',
+      'qq_send_video',
+      'qq_send_voice',
+    ]);
+    for (const entry of tools) {
+      expect(entry.inputSchema['required']).toEqual(['path']);
+    }
+    expect(tools[0]!.inputSchema['properties']).toHaveProperty('file_name');
+    for (const entry of tools.slice(1)) {
+      expect(entry.inputSchema['properties']).not.toHaveProperty('file_name');
+    }
   });
 
   it('sends the file bytes with its own name', async () => {
@@ -262,6 +288,7 @@ describe('buildFileTools', () => {
     expect(textOf(result)).toBe('File sent (report.txt).');
     expect(sent).toHaveLength(1);
     expect(sent[0]!.chatId).toBe('CHAT');
+    expect(sent[0]!.kind).toBe('file');
     expect(sent[0]!.fileName).toBe('report.txt');
     expect(sent[0]!.bytes.toString()).toBe('payload');
   });
@@ -350,5 +377,168 @@ describe('buildFileTools', () => {
     expect(isError(result)).toBe(true);
     expect(textOf(result)).toBe('upload failed');
     expect(logs.some((line) => line.includes('upload failed'))).toBe(true);
+  });
+
+  // --- image / video / voice -------------------------------------------------
+
+  const PNG = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from('body'),
+  ]);
+  const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+  const MP4 = Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x18]),
+    Buffer.from('ftypisom'),
+    Buffer.alloc(8),
+  ]);
+  const SILK = Buffer.from('#!SILK_V3payload');
+  const SILK_WITH_FORMAT_BYTE = Buffer.from('\x02#!SILK_V3payload');
+  const MP3 = Buffer.from('ID3\x04\x00payload');
+  const WAV = Buffer.concat([
+    Buffer.from('RIFF'),
+    Buffer.from([0x24, 0x00, 0x00, 0x00]),
+    Buffer.from('WAVEfmt '),
+  ]);
+  const OGG = Buffer.from('OggS\x00\x02payload');
+
+  /** Report a size the real file does not have, without writing it to disk. */
+  function reportSize(size: number): void {
+    const real = fsHooks.realFstatSync!;
+    fsHooks.fstatSync.mockImplementationOnce(((fd: number) => {
+      const stat = real(fd);
+      // Keep the Stats prototype: spreading drops isFile() and friends.
+      return Object.assign(
+        Object.create(Object.getPrototypeOf(stat)) as object,
+        stat,
+        { size },
+      );
+    }) as never);
+  }
+
+  it('sends a PNG as an image', async () => {
+    const path = join(workspace, 'chart.png');
+    writeFileSync(path, PNG);
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_image', { path });
+
+    expect(isError(result)).toBe(false);
+    expect(textOf(result)).toBe('Image sent (chart.png).');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.kind).toBe('image');
+    expect(sent[0]!.bytes.toString('latin1', 0, 4)).toBe('\x89PNG');
+  });
+
+  it('sends a JPEG as an image', async () => {
+    const path = join(workspace, 'photo.jpg');
+    writeFileSync(path, JPEG);
+    const { callTool } = harness();
+
+    const result = await callTool('qq_send_image', { path });
+
+    expect(isError(result)).toBe(false);
+    expect(textOf(result)).toBe('Image sent (photo.jpg).');
+  });
+
+  it('rejects a GIF as an image and points at qq_send_file', async () => {
+    const path = join(workspace, 'page.gif');
+    writeFileSync(path, Buffer.from('GIF89a-payload'));
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_image', { path });
+
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('qq_send_image:');
+    expect(textOf(result)).toContain('PNG or JPEG');
+    expect(textOf(result)).toContain('qq_send_file');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('sends an MP4 as a video', async () => {
+    const path = join(workspace, 'clip.mp4');
+    writeFileSync(path, MP4);
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_video', { path });
+
+    expect(isError(result)).toBe(false);
+    expect(textOf(result)).toBe('Video sent (clip.mp4).');
+    expect(sent[0]!.kind).toBe('video');
+  });
+
+  it('rejects a non-MP4 file as a video', async () => {
+    const path = join(workspace, 'clip.webm');
+    writeFileSync(path, Buffer.from('webm-payload'));
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_video', { path });
+
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('an MP4 video');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('sends SILK, MP3, WAV and OGG as voice', async () => {
+    const samples: Array<[string, Buffer]> = [
+      ['a.silk', SILK],
+      ['b.silk', SILK_WITH_FORMAT_BYTE],
+      ['c.mp3', MP3],
+      ['d.wav', WAV],
+      ['e.ogg', OGG],
+    ];
+
+    for (const [name, bytes] of samples) {
+      const path = join(workspace, name);
+      writeFileSync(path, bytes);
+      const { callTool, sent } = harness();
+
+      const result = await callTool('qq_send_voice', { path });
+
+      expect(isError(result)).toBe(false);
+      expect(textOf(result)).toBe(`Voice sent (${name}).`);
+      expect(sent[0]!.kind).toBe('voice');
+    }
+  });
+
+  it('rejects a text file as voice', async () => {
+    const path = join(workspace, 'notes.txt');
+    writeFileSync(path, 'not audio');
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_voice', { path });
+
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('SILK, MP3, WAV or OGG');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('rejects an image above the platform soft limit', () => {
+    const path = join(workspace, 'big.png');
+    writeFileSync(path, PNG);
+    reportSize(QQ_OUTBOUND_IMAGE_MAX_BYTES + 1);
+
+    expect(() => readOutboundFile(path, workspace, 'image')).toThrow(
+      /larger than 20 MB/,
+    );
+  });
+
+  it('rejects a video above the platform soft limit', () => {
+    const path = join(workspace, 'big.mp4');
+    writeFileSync(path, MP4);
+    reportSize(QQ_OUTBOUND_VIDEO_MAX_BYTES + 1);
+
+    expect(() => readOutboundFile(path, workspace, 'video')).toThrow(
+      /larger than 30 MB/,
+    );
+  });
+
+  it('rejects a voice message above the platform soft limit', () => {
+    const path = join(workspace, 'big.wav');
+    writeFileSync(path, WAV);
+    reportSize(QQ_OUTBOUND_VOICE_MAX_BYTES + 1);
+
+    expect(() => readOutboundFile(path, workspace, 'voice')).toThrow(
+      /larger than 20 MB/,
+    );
   });
 });

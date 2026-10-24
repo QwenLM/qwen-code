@@ -74,6 +74,7 @@ import {
 } from './accounts.js';
 import { qrCodeLogin } from './login.js';
 import {
+  QQ_FILE_TYPE,
   QQRichMediaError,
   fetchAccessToken,
   fetchGatewayUrl,
@@ -88,7 +89,11 @@ import {
   buildModerationTools,
   type ModerationApiResult,
 } from './moderation-tools.js';
-import { buildFileTools } from './file-tools.js';
+import {
+  QQ_MEDIA_TOOL_NAMES,
+  buildFileTools,
+  type QQMediaKind,
+} from './file-tools.js';
 
 /** QQ Bot OPENID format: exactly 32 uppercase hex chars (bot and sender OPENIDs). */
 const QQ_OPENID_RE = /^[A-F0-9]{32}$/i;
@@ -347,35 +352,39 @@ function attachmentFileName(
 }
 
 /** Upload failures the model can act on, keyed by the platform's own codes. */
-function describeUploadFailure(error: unknown): string {
+function describeUploadFailure(error: unknown, toolName: string): string {
   if (!(error instanceof QQRichMediaError)) {
-    return `qq_send_file: the upload failed (${sanitizeLogText(error instanceof Error ? error.message : String(error), 120)}).`;
+    return `${toolName}: the upload failed (${sanitizeLogText(error instanceof Error ? error.message : String(error), 120)}).`;
   }
   const detail = sanitizeLogText(error.message, 120);
   switch (error.code) {
     case 850031:
-      return 'qq_send_file: the platform rejected the file as too large (850031).';
+      return `${toolName}: the platform rejected the file as too large (850031).`;
     case 40093002:
-      return 'qq_send_file: the platform refused (40093002) — this chat has hit its daily file-sending limit, so retrying today will not help.';
+      return `${toolName}: the platform refused (40093002) — this chat has hit its daily file-sending limit, so retrying today will not help.`;
     case 850019:
-      return 'qq_send_file: the platform does not support this file format (850019).';
+      return `${toolName}: the platform does not support this file format (850019).`;
     case 40093001:
-      return 'qq_send_file: the platform failed to store the file (40093001); it is safe to retry.';
+      return `${toolName}: the platform failed to store the file (40093001); it is safe to retry.`;
     default:
-      return `qq_send_file: the upload failed (HTTP ${error.status}${error.code === undefined ? '' : `, code ${error.code}`}: ${detail}).`;
+      return `${toolName}: the upload failed (HTTP ${error.status}${error.code === undefined ? '' : `, code ${error.code}`}: ${detail}).`;
   }
 }
 
-/** Send failures for a file that uploaded fine, keyed by platform code. */
-function describeMediaSendFailure(status: number, body: string): string {
+/** Send failures for media that uploaded fine, keyed by platform code. */
+function describeMediaSendFailure(
+  status: number,
+  body: string,
+  toolName: string,
+): string {
   const code = parseQQErrorCode(body);
   switch (code) {
     case 304080:
-      return 'qq_send_file: the uploaded file handle expired (304080) before it could be sent; retrying re-uploads it.';
+      return `${toolName}: the uploaded file handle expired (304080) before it could be sent; retrying re-uploads it.`;
     case 40034004:
-      return 'qq_send_file: the platform failed to transfer the uploaded file (40034004); it is safe to retry.';
+      return `${toolName}: the platform failed to transfer the uploaded file (40034004); it is safe to retry.`;
     default:
-      return `qq_send_file: the platform rejected the file message (HTTP ${status}${code === undefined ? '' : `, code ${code}`}: ${sanitizeLogText(body, 120)}).`;
+      return `${toolName}: the platform rejected the file message (HTTP ${status}${code === undefined ? '' : `, code ${code}`}: ${sanitizeLogText(body, 120)}).`;
   }
 }
 
@@ -5060,8 +5069,8 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * Expose the outbound file tool to the agent as a client MCP tool. Opt-in:
-   * a no-op unless the channel sets fileTools: true, because the tool lets the
+   * Expose the outbound media tools to the agent as client MCP tools. Opt-in:
+   * a no-op unless the channel sets fileTools: true, because the tools let the
    * model hand a local file to the platform under the bot's own identity.
    */
   private registerFileTools(): void {
@@ -5078,7 +5087,7 @@ export class QQChannel extends ChannelBase {
         return { chatId: target.chatId };
       },
       sessionCwd: (sessionId) => this.router.getSessionCwd(sessionId),
-      sendFile: (input) => this.sendQQFile(input),
+      sendMedia: (input) => this.sendQQMedia(input),
       log: (message) => process.stderr.write(`[QQ:${this.name}] ${message}\n`),
     })) {
       register({ ...tool, owner: this.name });
@@ -5089,34 +5098,35 @@ export class QQChannel extends ChannelBase {
    * Upload local bytes and deliver them as a QQ media message, sharing the text
    * path's route, reply anchor, active-message guard and msg_seq bookkeeping.
    *
-   * There is deliberately no text fallback: a file that cannot be sent is
+   * There is deliberately no text fallback: media that cannot be sent is
    * reported to the model, because replacing it with a text message would read
-   * as success while the user never got the file. The only retry is the same
-   * media message re-sent as an active one (no msg_id/msg_seq) when the
-   * anchored attempt is rejected.
+   * as success while the user never got it. The only retry is the same media
+   * message re-sent as an active one (no msg_id/msg_seq) when the anchored
+   * attempt is rejected.
    */
-  private async sendQQFile(input: {
+  private async sendQQMedia(input: {
     sessionId: string;
     chatId: string;
+    kind: QQMediaKind;
     fileName: string;
     bytes: Buffer;
   }): Promise<{ ok: true } | { ok: false; message: string }> {
-    const { sessionId, chatId, fileName, bytes } = input;
+    const { sessionId, chatId, kind, fileName, bytes } = input;
+    const toolName = QQ_MEDIA_TOOL_NAMES[kind];
     const route = await this.resolveRoute(chatId);
     if ('block' in route) {
       return {
         ok: false,
-        message: `qq_send_file: the message route is not usable right now (${route.block}).`,
+        message: `${toolName}: the message route is not usable right now (${route.block}).`,
       };
     }
-    // The same per-session anchor the streaming sends use, so the file lands in
+    // The same per-session anchor the streaming sends use, so the media lands in
     // this turn's reply chain instead of starting a new one.
     const { msgId } = this.resolveSessionReplyAnchor(sessionId);
     if (!msgId && this.groupActiveMsgEnabled.get(chatId) === false) {
       return {
         ok: false,
-        message:
-          'qq_send_file: active messages are disabled for this chat and this turn has no open reply window, so the file cannot be sent.',
+        message: `${toolName}: active messages are disabled for this chat and this turn has no open reply window, so the media cannot be sent.`,
       };
     }
     const scope: QQRichMediaScope =
@@ -5131,12 +5141,13 @@ export class QQChannel extends ChannelBase {
         chatId,
         fileName,
         bytes,
+        fileType: QQ_FILE_TYPE[kind],
       });
       fileInfo = uploaded.fileInfo;
     } catch (error) {
-      const message = describeUploadFailure(error);
+      const message = describeUploadFailure(error, toolName);
       process.stderr.write(
-        `[QQ:${this.name}] qq_send_file upload failed: ${sanitizeLogText(message, 200)}\n`,
+        `[QQ:${this.name}] ${toolName} upload failed: ${sanitizeLogText(message, 200)}\n`,
       );
       return { ok: false, message };
     }
@@ -5182,7 +5193,7 @@ export class QQChannel extends ChannelBase {
         this.saveQQState();
       }
       process.stderr.write(
-        `[QQ:${this.name}] qq_send_file send failed (HTTP ${resp.status}: ${sanitizeLogText(errorBody, 200)})\n`,
+        `[QQ:${this.name}] ${toolName} send failed (HTTP ${resp.status}: ${sanitizeLogText(errorBody, 200)})\n`,
       );
       // 429 is rate limiting rather than a closed reply window, so retrying
       // without the anchor would only double the pressure — the same reason
@@ -5200,7 +5211,7 @@ export class QQChannel extends ChannelBase {
         // JSON and lose the error code the message is chosen from.
         return {
           ok: false,
-          message: describeMediaSendFailure(resp.status, errorBody),
+          message: describeMediaSendFailure(resp.status, errorBody, toolName),
         };
       }
       // The anchored (passive) send was rejected. Mirror the text path's
@@ -5210,7 +5221,7 @@ export class QQChannel extends ChannelBase {
       if (this.groupActiveMsgEnabled.get(chatId) === false) {
         return {
           ok: false,
-          message: `qq_send_file: the anchored send was rejected (HTTP ${resp.status}) and active messages are disabled for this chat, so the file cannot be sent.`,
+          message: `${toolName}: the anchored send was rejected (HTTP ${resp.status}) and active messages are disabled for this chat, so the media cannot be sent.`,
         };
       }
       const activeResp = await sendQQMessage(
@@ -5222,17 +5233,21 @@ export class QQChannel extends ChannelBase {
       const activeErrorBody = await activeResp.text().catch(() => '');
       if (activeResp.ok) {
         process.stderr.write(
-          `[QQ:${this.name}] qq_send_file active retry succeeded for ${sanitizeLogText(chatId, 64)}\n`,
+          `[QQ:${this.name}] ${toolName} active retry succeeded for ${sanitizeLogText(chatId, 64)}\n`,
         );
         this.saveQQState();
         return { ok: true };
       }
       process.stderr.write(
-        `[QQ:${this.name}] qq_send_file active retry failed (HTTP ${activeResp.status}: ${sanitizeLogText(activeErrorBody, 200)})\n`,
+        `[QQ:${this.name}] ${toolName} active retry failed (HTTP ${activeResp.status}: ${sanitizeLogText(activeErrorBody, 200)})\n`,
       );
       return {
         ok: false,
-        message: describeMediaSendFailure(activeResp.status, activeErrorBody),
+        message: describeMediaSendFailure(
+          activeResp.status,
+          activeErrorBody,
+          toolName,
+        ),
       };
     } catch (error) {
       if (msgId && !rolledBack) {
@@ -5241,7 +5256,7 @@ export class QQChannel extends ChannelBase {
         }
         this.saveQQState();
       }
-      const message = `qq_send_file: the platform call did not complete (${sanitizeLogText(error instanceof Error ? error.message : String(error), 120)}).`;
+      const message = `${toolName}: the platform call did not complete (${sanitizeLogText(error instanceof Error ? error.message : String(error), 120)}).`;
       process.stderr.write(`[QQ:${this.name}] ${message}\n`);
       return { ok: false, message };
     } finally {
