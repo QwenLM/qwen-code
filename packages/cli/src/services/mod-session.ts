@@ -27,6 +27,7 @@ import type {
   ModLog,
   ModSessionFacts,
 } from '@qwen-code/qwen-code-core/mods/types.js';
+import { runOutsideAgentContext } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
@@ -80,15 +81,17 @@ export class ModSession implements ICommandLoader {
   private recorder?: ChatRecordingService;
   private context = { tokens: 0, window: 0 };
   // Also runs on every API response, so a session that no hook saw still has
-  // its figures when it ends.
-  private readonly observe = () => {
-    if (this.config.getSessionId() !== this.sessionId) return;
-    this.recorder = this.config.getChatRecordingService();
-    this.context = {
-      tokens: uiTelemetryService.getLastPromptTokenCount(),
-      window: this.config.getContentGeneratorConfig()?.contextWindowSize || 0,
-    };
-  };
+  // its figures when it ends. A subagent's response emits from inside its
+  // agent frame, whose model would otherwise answer for the main session.
+  private readonly observe = () =>
+    runOutsideAgentContext(() => {
+      if (this.config.getSessionId() !== this.sessionId) return;
+      this.recorder = this.config.getChatRecordingService();
+      this.context = {
+        tokens: uiTelemetryService.getLastPromptTokenCount(),
+        window: this.config.getContentGeneratorConfig()?.contextWindowSize || 0,
+      };
+    });
   private toolGeneration = new AbortController();
   private unregisterCleanup: () => void;
 
@@ -516,7 +519,12 @@ export class ModSession implements ICommandLoader {
     return (this.startedAt = Number.isFinite(first) ? first : this.adoptedAt);
   }
 
+  // The main session's facts, even when a dispatch starts in an agent frame.
   private facts(): ModSessionFacts {
+    return runOutsideAgentContext(() => this.readFacts());
+  }
+
+  private readFacts(): ModSessionFacts {
     const startedAt = this.capture();
     const { tokens, window } = this.context;
     return {

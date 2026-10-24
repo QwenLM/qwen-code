@@ -18,6 +18,11 @@ import type {
   ModSessionFacts,
 } from '@qwen-code/qwen-code-core/mods/types.js';
 import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import {
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 import { ModSession, type ModTerminalHost } from './mod-session.js';
@@ -537,6 +542,50 @@ describe('Mod session ownership', () => {
         context: { tokens: 812, window: 1_000, percent: 81 },
       },
     });
+  });
+
+  it('reads the main session through a subagent model frame', async () => {
+    // The real Config resolves these through the current agent frame.
+    const { session, runtime, config } = setup({
+      getProjectRoot: () => '/workspace',
+      getModel: () =>
+        getRuntimeContentGenerator()?.contentGeneratorConfig.model ??
+        'qwen-max',
+      getChatRecordingService: () => ({ getUserTurnCount: () => 2 }),
+      getContentGeneratorConfig: () =>
+        getRuntimeContentGenerator()?.contentGeneratorConfig ?? {
+          contextWindowSize: 1_000,
+        },
+      getResumedSessionData: () => undefined,
+    });
+    await session.loadCommands(new AbortController().signal);
+    const facts = mocks.create.mock.calls[0][7] as () => ModSessionFacts;
+    const subagent = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'qwen-turbo', contextWindowSize: 8_000 },
+    } as unknown as RuntimeContentGeneratorView;
+    const main = { tokens: 304, window: 1_000, percent: 30 };
+    uiTelemetryService.setLastPromptTokenCount(304);
+    // A subagent's API response emits the update from inside its frame.
+    await runWithRuntimeContentGenerator(subagent, async () => {
+      uiTelemetryService.setLastPromptTokenCount(304);
+      expect(facts()).toMatchObject({
+        model: 'qwen-max',
+        usage: { context: main },
+      });
+    });
+    expect(facts().usage.context).toEqual(main);
+
+    await runWithRuntimeContentGenerator(subagent, async () => {
+      uiTelemetryService.setLastPromptTokenCount(304);
+    });
+    let ending: ModSessionFacts | undefined;
+    runtime.end.mockImplementation(async () => {
+      ending = facts();
+    });
+    config.getSessionId.mockReturnValue('session-2');
+    await session.syncSession('clear');
+    expect(ending?.usage.context).toEqual(main);
   });
 
   it('answers no turns without chat recording and no percent without a window', async () => {
