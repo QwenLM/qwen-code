@@ -722,14 +722,18 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   before the child Session is created, in the parent's Runtime.
 - Scanner capacity. A gated `fire_run` now holds the scanner thread while the
   probe runs, for up to the relay's 30 s, and the scanner works its rows one
-  after another. Enough slow gates make ticks run late, until later slots of
-  every definition on the node are recorded `missed`. Rows are leased one by
-  one, so working them on a bounded pool (or answering a gated fire
-  asynchronously) is the natural fix; it changes the scanner's threading and
-  is left to its own change (#15418). The Harness side has the same shape: a
-  probe runs inside the automation funnel's serial queue, so a slow gate also
-  delays the Session's other automation operations (define, cancel, the settle
-  of a finished automation turn) for its duration.
+  after another. The `automation.concurrency` setting (4 by default) does not
+  change this: it caps the non-terminal runs of one `allow` definition and
+  bounds how many blocking runs one decision reconciles (concurrency + 1, at
+  least 2), one at a time on the same thread; it is not a scanner thread
+  count. Enough slow gates make ticks run late, until later slots of every
+  definition on the node are recorded `missed`. Rows are leased one by one, so
+  working them on a bounded pool (or answering a gated fire asynchronously) is
+  the natural fix; it changes the scanner's threading and is left to its own
+  change (#15418). The Harness side has the same shape: a probe runs inside
+  the automation funnel's serial queue, so a slow gate also delays the
+  Session's other automation operations (define, cancel, the settle of a
+  finished automation turn) for its duration.
 
   Measured with the PR watch probes (§4.4), with the rig's `scan-delay` of 1
   s: in the first of the four slots, the three gates finished their probes
