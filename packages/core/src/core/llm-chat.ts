@@ -138,7 +138,10 @@ import {
   makeChatCompressionEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { createUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import {
   type ChatCompressionInfo,
   CompressionStatus,
@@ -3521,7 +3524,13 @@ export class LlmChat {
         }
         if (
           options?.suppressedHookContext &&
-          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
+          // One owner per send: the caller may already have appended the
+          // block after a compaction of its own.
+          !hasUserPromptSubmitContext(
+            userContent,
+            options.suppressedHookContext,
+          )
         ) {
           // Compaction replaced the history holding the block's only copy, so
           // the model would otherwise not see it on this turn at all.

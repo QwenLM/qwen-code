@@ -9621,10 +9621,11 @@ export class Session implements SessionContext {
     let compressionInfo: ChatCompressionInfo | null = null;
     let compressionFailed = false;
     // Exactly one owner re-appends a suppressed hook block per send: this
-    // method when the compaction it runs itself consumes it, otherwise
-    // LlmChat when a compaction inside the send does. Cleared once appended
-    // here so forwarding it cannot yield a second identical block.
-    let hookRescueContext = options.suppressedHookContext;
+    // method when the compaction it runs itself consumes the copy, otherwise
+    // LlmChat when a compaction inside the send does. LlmChat's hard-tier
+    // rescue skips the append when the request already carries the block, so
+    // appending here and still forwarding cannot yield a second copy — and a
+    // later compaction inside the same send keeps an owner.
     if (
       !options.skipCompression &&
       !(options.getModelOverride?.() ?? options.modelOverride)
@@ -9644,14 +9645,13 @@ export class Session implements SessionContext {
           // task block (a short reminder refers back to a message that is no
           // longer in context).
           this.loopTickResolver?.resetCache();
-          if (hookRescueContext) {
+          if (options.suppressedHookContext) {
             // The compaction replaced the history entry holding the block's
             // only copy, so the request must carry it on this send.
             message = [
               ...message,
-              createUserPromptSubmitContextPart(hookRescueContext),
+              createUserPromptSubmitContextPart(options.suppressedHookContext),
             ];
-            hookRescueContext = undefined;
           }
           const reasonClause =
             compressed.triggerReason === 'image_overflow'
@@ -9790,17 +9790,19 @@ export class Session implements SessionContext {
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
       sourceStream =
-        options.historyPromptId !== undefined || hookRescueContext
+        options.historyPromptId !== undefined || options.suppressedHookContext
           ? await chat.sendMessageStream(model, request, promptId, goalPermit, {
               ...(options.historyPromptId !== undefined
                 ? { promptId: options.historyPromptId }
                 : {}),
               // A compaction inside this send (LlmChat's hard-tier rescue or
               // reactive overflow) replaces the history entry holding the
-              // block's only copy, and this method's own rescue above did not
-              // run — so LlmChat owns the re-append for this send.
-              ...(hookRescueContext
-                ? { suppressedHookContext: hookRescueContext }
+              // block's only copy — including one this method's own rescue
+              // just appended — so LlmChat must keep the token to re-append
+              // it. Its hard-tier site skips an already-present block, which
+              // is what keeps this to one owner per send.
+              ...(options.suppressedHookContext
+                ? { suppressedHookContext: options.suppressedHookContext }
                 : {}),
             })
           : goalPermit

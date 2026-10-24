@@ -154,13 +154,26 @@ accepted and documented as a limitation rather than solved here.
   dialect copies a similarity score, the payload differs whenever the score
   does, so suppression only fires when the score repeats as well. Dialects that
   omit the score see the full benefit.
-- **History replacement re-injects once, then re-arms.** Suppression is
-  receipt-gated, and the receipt is re-stamped only where per-turn `hookContext`
-  provenance exists — the interactive resume path. Compaction, a client-driven
-  ACP rollback, a `structuredClone` history install such as the
-  prepared-request replay, and any restore that crosses serialization rebuild
-  history without that provenance, so the next identical block is injected
-  once and suppression re-arms from the fresh part.
+- **Compaction is rescued inside the send; other history rebuilds re-inject
+  once, then re-arm.** Suppression is receipt-gated, and the receipt is
+  re-stamped only where per-turn `hookContext` provenance exists — the
+  interactive resume path. A rebuild that drops the receipt would otherwise
+  lose the block on the very turn that lost the most context, so compaction
+  carries a rescue: exactly one owner re-appends the block once per send — the
+  ACP send helper when the compaction it runs itself consumes the copy,
+  otherwise `LlmChat` at whichever of its hard-tier or reactive rescue sites
+  fires. The token travels on `LlmChatSendOptions.suppressedHookContext` and a
+  matching `Turn` constructor parameter, and `LlmChat`'s hard-tier rescue skips
+  a block the request already carries, so forwarding after a helper-side append
+  cannot duplicate it. The three rescues are not equivalent for
+  re-arming: the helper and hard-tier sites append into an entry that already
+  holds the user's own part, so suppression re-arms from the fresh trailing
+  part, while the reactive site's fallback arm pushes a sole-part entry, which
+  the predicate treats as user-authored and so never re-arms. A rebuild with no
+  rescue — a client-driven ACP rollback, a `structuredClone` history install
+  such as the prepared-request replay, the resume of an ACP/IDE turn (which
+  records no provenance), or any restore that crosses serialization — re-injects
+  one duplicate and then re-arms from the fresh part.
 
 ## Validation plan
 
@@ -195,9 +208,12 @@ is sent to the model.
   observed in the model-bound request and in the session transcript. A later
   append into that entry (the manual plan-exit notice, a mid-turn merge) pushes
   the stamped part off the trailing position, and a history rebuild without
-  per-turn `hookContext` provenance (compaction, or the resume of an ACP/IDE
-  turn, which records none) drops the receipt: each re-injects one duplicate and
-  then re-arms.
+  per-turn `hookContext` provenance drops the receipt.
+- A compaction inside a send re-appends the suppressed block exactly once — one
+  owner per send, the ACP send helper when its own compaction consumed the
+  copy, otherwise `LlmChat` — and never twice when the helper already appended
+  it. A rebuild with no rescue (the resume of an ACP/IDE turn, which records no
+  provenance) re-injects one duplicate and then re-arms.
 - A changed payload is always appended.
 - No new configuration, schema, or public API surface beyond the one exported
   predicate.

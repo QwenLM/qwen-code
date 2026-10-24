@@ -86,7 +86,10 @@ import {
 } from '../utils/api-history-metadata.js';
 import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
-import { wrapUserPromptSubmitContext } from '../hooks/user-prompt-submit-context.js';
+import {
+  createUserPromptSubmitContextPart,
+  wrapUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
   getToolCallPreparations,
@@ -3798,6 +3801,34 @@ describe('LlmChat', async () => {
           'test-model',
           { message: 'go' },
           'prompt-id-hook-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(1);
+    });
+
+    it('does not append a second suppressed hook block when the request already carries it', async () => {
+      mockCompressOnce(
+        compressed(1000, 200, [userText('summary'), modelText('ok')]),
+      );
+      mockStream(textStream('answer'));
+
+      // The ACP send re-appends the block after a compaction of its own and
+      // still forwards the option, so this rescue must not add a second copy.
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [{ text: 'go' }, createUserPromptSubmitContextPart('CTX')],
+          },
+          'prompt-id-hook-already-present',
           undefined,
           { suppressedHookContext: 'CTX' },
         ),

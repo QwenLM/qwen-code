@@ -40993,13 +40993,14 @@ describe('Session', () => {
           expect(sentText.at(-1)).toBe(
             core.wrapUserPromptSubmitContext('extra hook context'),
           );
-          // This method consumed the rescue, so it must not also be forwarded
-          // for LlmChat to append a second identical block.
+          // Still forwarded: a second compaction inside this send destroys the
+          // copy just appended, and LlmChat's already-present scan is what
+          // keeps the forwarding from becoming a duplicate.
           expect(
             vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[4],
-          ).not.toEqual(
+          ).toEqual(
             expect.objectContaining({
-              suppressedHookContext: expect.anything(),
+              suppressedHookContext: 'extra hook context',
             }),
           );
         });
