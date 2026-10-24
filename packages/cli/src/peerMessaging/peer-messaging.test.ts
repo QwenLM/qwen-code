@@ -1874,9 +1874,8 @@ describe.skipIf(isWindows)('held message expiry', () => {
     const sender = await startSenderInbox();
     const { messaging, submitted } = await start(ApprovalMode.YOLO, {
       getPolicySetting: () => 'hold',
-      // Real timers: the assertions below straddle a socket round trip,
-      // so the window has to outlast `settle()` and still be short
-      // enough to wait out.
+      // Real timers: the waits below outlast this window, so it only has
+      // to be short, not exact.
       getHeldExpiryMs: () => 250,
     });
 
@@ -1885,18 +1884,18 @@ describe.skipIf(isWindows)('held message expiry', () => {
       buildUserFrame({ content: 'anyone there?', from: sender.socketPath }),
       { authToken: TEST_TOKEN },
     );
-    await settle();
-    expect(messaging.getHeld()).toHaveLength(1);
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(1));
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await settle();
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(0));
 
-    expect(messaging.getHeld()).toHaveLength(0);
     expect(submitted).toHaveLength(0);
-    const statuses = receipts
-      .filter((frame) => frame.type === 'control')
-      .map((frame) => (frame as { status: string }).status);
-    expect(statuses).toContain('expired');
+    await vi.waitFor(() =>
+      expect(
+        receipts
+          .filter((frame) => frame.type === 'control')
+          .map((frame) => (frame as { status: string }).status),
+      ).toContain('expired'),
+    );
   });
 
   it('does not call a listing stale when only an expiry removed an entry', async () => {
@@ -1917,14 +1916,11 @@ describe.skipIf(isWindows)('held message expiry', () => {
       buildUserFrame({ content: 'first', from: sender.socketPath }),
       { authToken: TEST_TOKEN },
     );
-    await settle();
-    expect(messaging.getHeld()).toHaveLength(1);
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(1));
     messaging.recordHeldListing(messaging.getHeld());
     expect(messaging.heldSetChangedSinceListing()).toBe(false);
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await settle();
-    expect(messaging.getHeld()).toHaveLength(0);
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(0));
 
     expect(messaging.heldSetChangedSinceListing()).toBe(false);
   });
@@ -1939,7 +1935,7 @@ describe.skipIf(isWindows)('held message expiry', () => {
     const sender = await startSenderInbox();
     const { messaging } = await start(ApprovalMode.YOLO, {
       getPolicySetting: () => 'hold',
-      getHeldExpiryMs: () => 600,
+      getHeldExpiryMs: () => 3000,
     });
 
     await sendPeerFrame(
@@ -1951,8 +1947,11 @@ describe.skipIf(isWindows)('held message expiry', () => {
       { authToken: TEST_TOKEN },
     );
     await settle();
-    // Parked later, so it outlives the shorter id's window.
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Parked later, so it outlives the shorter id's window. The gap is
+    // half the lifetime, so the first assertion below still has ~1.4s of
+    // slack: on a loaded CI runner these sleeps overshoot by hundreds of
+    // ms, and a tighter gap expires `abc` before the assertion runs.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
     await sendPeerFrame(
       messaging.socketPath!,
       {
@@ -1969,8 +1968,8 @@ describe.skipIf(isWindows)('held message expiry', () => {
     messaging.recordHeldListing(messaging.getHeld());
     expect(messaging.heldSetChangedSinceListing()).toBe(false);
 
-    // `abc` ages past 600ms while `abc12345` has ~300ms left.
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    // `abc` ages past 3000ms while `abc12345` still has ~1.1s left.
+    await new Promise((resolve) => setTimeout(resolve, 1800));
     await settle();
     expect(messaging.getHeld().map((e) => e.frame.msgId)).toEqual(['abc12345']);
 

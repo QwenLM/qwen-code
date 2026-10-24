@@ -66,6 +66,14 @@ const nodeReplPackage = JSON.parse(
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
+const cuaSdkInstallScript = readFileSync(
+  'packages/cua-driver/typescript/scripts/install-native.mjs',
+  'utf8',
+);
+const testSignWorkerScript = readFileSync(
+  '.github/scripts/test-sign-cua-windows-worker.ps1',
+  'utf8',
+);
 const browserUsePackage = JSON.parse(
   readFileSync('packages/browser-use/package.json', 'utf8'),
 );
@@ -171,9 +179,86 @@ describe('CUA release workflow', () => {
     expect(cuaReleaseWorkflow).toMatch(
       /Build \(release\)[\s\S]*?Verify unsigned UIAccess worker[\s\S]*?Get-AuthenticodeSignature[\s\S]*?NotSigned[\s\S]*?qwen-cua-driver-uia\.exe[\s\S]*?release artifact contract/,
     );
-    expect(cuaReleaseWorkflow).not.toMatch(/WINDOWS_CERTIFICATE|WIN_CSC_LINK/);
+    expect(cuaReleaseWorkflow).not.toMatch(
+      /WINDOWS_CERTIFICATE|WIN_CSC_LINK|New-SelfSignedCertificate/,
+    );
     expect(cuaReleaseWorkflow).toContain(
       '- **Windows**: unsigned UIAccess worker + native SDK payload',
+    );
+  });
+
+  it('test-signs the Windows worker only for branch dry runs', () => {
+    const job = cuaReleaseJobs['build-windows'];
+    const steps = job.steps;
+    const index = (name) => steps.findIndex((step) => step.name === name);
+    const verifyIndex = index('Verify unsigned UIAccess worker');
+    const signIndex = index('Test-sign UIAccess worker (dry run)');
+    const packageIndex = index('Package');
+    const installIndex = index(
+      'Clean-install Windows SDK from packaged payload',
+    );
+    const uploadIndex = steps.findIndex(
+      (step) => step.uses === 'actions/upload-artifact@v4',
+    );
+
+    expect(job.permissions).toEqual({ contents: 'read' });
+    expect(job.env.CUA_TEST_SIGNING).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/') }}",
+    );
+    expect(cuaReleaseJobs.release.if).toContain(
+      "startsWith(github.ref, 'refs/tags/cua-driver-rs-v')",
+    );
+    expect(verifyIndex).toBeGreaterThan(-1);
+    expect(signIndex).toBeGreaterThan(verifyIndex);
+    expect(packageIndex).toBeGreaterThan(signIndex);
+    expect(installIndex).toBeGreaterThan(packageIndex);
+    expect(uploadIndex).toBeGreaterThan(installIndex);
+
+    const signStep = steps[signIndex];
+    expect(signStep.if).toBe("env.CUA_TEST_SIGNING == 'true'");
+    expect(signStep.env.SIGNPATH_API_TOKEN).toBe(
+      '${{ secrets.SIGNPATH_API_TOKEN }}',
+    );
+    expect(signStep.run).toContain(
+      '.github/scripts/test-sign-cua-windows-worker.ps1',
+    );
+    expect(cuaReleaseWorkflow).not.toContain(
+      'github-action-submit-signing-request',
+    );
+    expect(testSignWorkerScript).toContain(
+      '/SigningRequests/SubmitWithArtifact',
+    );
+    expect(testSignWorkerScript).toContain(
+      "signingPolicySlug         = 'test-signing'",
+    );
+    expect(testSignWorkerScript).toContain(
+      "-ne '0B27B4BA9D646BCDB1FD59B4F229C0DAA7E8EEF0'",
+    );
+    expect(testSignWorkerScript).toMatch(
+      /Thumbprint -ne[\s\S]*?Cert:\\LocalMachine\\Root[\s\S]*?\.Status -ne 'Valid'[\s\S]*?Copy-Item/,
+    );
+
+    const install = steps[installIndex];
+    expect(install.env.CUA_DRIVER_USE_UIACCESS).toBe(
+      "${{ env.CUA_TEST_SIGNING == 'true' && '1' || '0' }}",
+    );
+    expect(install.run).toContain('npm install');
+    expect(install.run).toContain('--ignore-scripts=false');
+    expect(job.needs).toContain('verify-browser-package');
+    expect(install.run).toContain('qwen-code-browser-use-');
+    expect(install.run).toContain("throw 'Windows SDK postinstall failed'");
+    expect(install.run).toContain(
+      "if ((Get-AuthenticodeSignature -LiteralPath $worker).Status -ne 'Valid') {",
+    );
+    expect(install.run).toContain(
+      "throw 'Ordinary installation must not deploy the UIAccess worker'",
+    );
+    expect(cuaSdkInstallScript).toContain('await run("powershell", args');
+    expect(cuaSdkInstallScript).toMatch(
+      /CouldNotAutoloadMatchingModule[\s\S]*?run\("pwsh"/,
+    );
+    expect(cuaSdkInstallScript).toContain(
+      'if (!String(error?.stderr).includes("CouldNotAutoloadMatchingModule")) {',
     );
   });
 
