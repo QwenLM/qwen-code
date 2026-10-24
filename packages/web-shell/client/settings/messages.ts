@@ -408,6 +408,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.option.policy.permissionStrategy.designated': '指定发起方',
   'settings.option.policy.permissionStrategy.consensus': '共识法定人数',
   'settings.option.policy.permissionStrategy.local-only': '仅本机',
+  'settings.label.serve.maxSessions': '最大并发会话数',
+  'settings.description.serve.maxSessions':
+    '单个工作区同时存活的会话数上限；超出的新会话请求返回 503，接入已有会话不受影响。设为 0 表示不限制。仅在用户、系统、系统默认作用域生效；传入 qwen serve --max-sessions 时以命令行参数为准。修改后需要重启 daemon。',
   'settings.label.experimental.cron': '启用 Cron/Loop 工具',
   'settings.description.experimental.cron':
     '启用会话内 cron/loop 工具。启用后，模型可以用 cron_create、cron_list 和 cron_delete 创建周期性提示。也可通过 QWEN_CODE_DISABLE_CRON=1 环境变量禁用。',

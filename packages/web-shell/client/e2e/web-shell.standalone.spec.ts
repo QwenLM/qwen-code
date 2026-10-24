@@ -199,7 +199,9 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
 }, testInfo) => {
   const sessionId = '33333333-3333-4333-8333-333333333333';
   const scenario = createWebShellDaemonScenario({
-    capabilities: { features: standaloneFeatures },
+    capabilities: {
+      features: [...standaloneFeatures, 'workspace_qualified_rest_core'],
+    },
     standaloneSessions: [
       standaloneSummary(sessionId, 'Independent conversation'),
     ],
@@ -214,6 +216,7 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
       exact: true,
     })
     .first();
+  await expect(sidebar.getByTestId('recent-sessions')).toBeVisible();
   const group = sidebar.getByTestId('standalone-active-group');
   const toggle = group.getByRole('button', {
     name: 'No-workspace sessions',

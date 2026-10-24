@@ -1874,9 +1874,8 @@ describe.skipIf(isWindows)('held message expiry', () => {
     const sender = await startSenderInbox();
     const { messaging, submitted } = await start(ApprovalMode.YOLO, {
       getPolicySetting: () => 'hold',
-      // Real timers: the assertions below straddle a socket round trip,
-      // so the window has to outlast `settle()` and still be short
-      // enough to wait out.
+      // Real timers: the waits below outlast this window, so it only has
+      // to be short, not exact.
       getHeldExpiryMs: () => 250,
     });
 
@@ -1885,18 +1884,18 @@ describe.skipIf(isWindows)('held message expiry', () => {
       buildUserFrame({ content: 'anyone there?', from: sender.socketPath }),
       { authToken: TEST_TOKEN },
     );
-    await settle();
-    expect(messaging.getHeld()).toHaveLength(1);
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(1));
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await settle();
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(0));
 
-    expect(messaging.getHeld()).toHaveLength(0);
     expect(submitted).toHaveLength(0);
-    const statuses = receipts
-      .filter((frame) => frame.type === 'control')
-      .map((frame) => (frame as { status: string }).status);
-    expect(statuses).toContain('expired');
+    await vi.waitFor(() =>
+      expect(
+        receipts
+          .filter((frame) => frame.type === 'control')
+          .map((frame) => (frame as { status: string }).status),
+      ).toContain('expired'),
+    );
   });
 
   it('does not call a listing stale when only an expiry removed an entry', async () => {
@@ -1917,14 +1916,11 @@ describe.skipIf(isWindows)('held message expiry', () => {
       buildUserFrame({ content: 'first', from: sender.socketPath }),
       { authToken: TEST_TOKEN },
     );
-    await settle();
-    expect(messaging.getHeld()).toHaveLength(1);
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(1));
     messaging.recordHeldListing(messaging.getHeld());
     expect(messaging.heldSetChangedSinceListing()).toBe(false);
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await settle();
-    expect(messaging.getHeld()).toHaveLength(0);
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(0));
 
     expect(messaging.heldSetChangedSinceListing()).toBe(false);
   });
