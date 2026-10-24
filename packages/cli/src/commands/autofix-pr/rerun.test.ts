@@ -240,12 +240,31 @@ describe('runRerun', () => {
       checks: ['Lint'],
     });
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
-    expect(state()).toMatchObject({ deferredRuns: [50] });
-    expect(state().rerunChecks).toBeUndefined();
+    // The deferral holds the check's re-run for the run deferred.
+    expect(state()).toMatchObject({
+      deferredRuns: [50],
+      rerunChecks: [`run:15368:1:pull_request:Lint@${HEAD}@5`],
+    });
 
     contexts = [failedRun(5, 'Lint', 50)];
     expect(runRerun(7, 50)).toMatchObject({ rerun: true });
-    expect(state()).toMatchObject({ deferredRuns: [] });
+    expect(state()).toMatchObject({
+      deferredRuns: [],
+      rerunChecks: [`run:15368:1:pull_request:Lint@${HEAD}@5`],
+    });
+  });
+
+  it('counts a later run of a deferred check as its re-run', () => {
+    contexts = [failedRun(5, 'Lint', 50, 1, 'IN_PROGRESS')];
+    expect(runRerun(7, 50)).toMatchObject({ deferred: true });
+    // Another run of the workflow took its place before it ended — a
+    // review started it, say — and failed as well.
+    contexts = [failedRun(5, 'Lint', 50), failedRun(8, 'Lint', 51)];
+    expect(runRerun(7, 51)).toMatchObject({
+      rerun: false,
+      reason: expect.stringMatching(/re-run on this head already/),
+    });
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
   it('counts a re-run before asking GitHub, so a lost answer is not re-run twice', () => {

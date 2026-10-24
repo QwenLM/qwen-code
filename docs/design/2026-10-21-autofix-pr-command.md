@@ -555,9 +555,11 @@ The helper decides what may be posted, against one fresh read of the PR
   comments cannot be marked handled; a check key must be one a `ci_failed`
   event reports on the head (prepared mode prints its `key`) — now, or in
   the round's prepared snapshot file: the head can move on from a failure
-  while the round runs (a re-run, a run a review starts, a deferred run),
-  and the round's answer still stands, under the key the next failure of a
-  review-started workflow on that head carries; a conflict can
+  while the round runs (a re-run, a run a review starts), and the round's
+  answer still stands, under the key the next failure of a review-started
+  workflow on that head carries. A failure of a run still deferred is not
+  recorded (it counts in `ignoredChecks`): the gate reports it once more
+  when the run has ended, and the round answers it then; a conflict can
   be left for a human only while there is one. The PR must be open.
 - The head the plan is judged by is the one the watch knows (`sync` and
   `push` read it from the branch), not the API's, which can lag a push.
@@ -784,7 +786,11 @@ failed job as soon as it fails. A run still in progress therefore answers
 in `deferredRuns`: the gate reports its failures once more when the run has
 ended (Section 6.2), and the round then re-runs it. Until then prepared
 snapshots leave them out as well, so another event does not hand the round
-the same failure to defer again.
+the same failure to defer again. The deferral holds the re-run of each of
+its failed checks (in `rerunChecks`, with the check run deferred): that run
+is re-run when it ends, and a later run of the check on the head — one a
+review started before it ended, say — answers for it as a re-run's would,
+under the re-run's key (Section 6.2), and is treated as real.
 
 `push`, `sync`, `reply` and `rerun` each hold the watch's lock
 (`.qwen/tmp/autofix-pr-<n>.lock`) while they read and write the state file:

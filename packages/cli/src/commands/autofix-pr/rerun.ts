@@ -90,13 +90,24 @@ function rerunLocked(
     ({ identity }) => `${identity}@${pr.headRefOid}`,
   );
   const already = rerunFrom(state.rerunChecks ?? []);
-  const repeated = checks.filter((_, index) => already.has(rerunKeys[index]));
+  // A run deferred while it was going holds its checks' re-run: the run
+  // re-run is that one, and a later run of them — one a review started
+  // before it ended, say — answers for it, as a re-run's would.
+  const deferredHere = (state.deferredRuns ?? []).includes(runId);
+  const repeated = checks.filter((_, index) => {
+    const from = already.get(rerunKeys[index]);
+    return (
+      from !== undefined && !(deferredHere && from === failed[index].checkRunId)
+    );
+  });
   // Each with the check run re-run: the re-run's runs come after it.
   const reran = [
-    ...(state.rerunChecks ?? []),
-    ...failed.map(
-      ({ checkRunId }, index) => `${rerunKeys[index]}@${checkRunId ?? 0}`,
-    ),
+    ...new Set([
+      ...(state.rerunChecks ?? []),
+      ...failed.map(
+        ({ checkRunId }, index) => `${rerunKeys[index]}@${checkRunId ?? 0}`,
+      ),
+    ]),
   ];
   if (repeated.length > 0) {
     return {
@@ -109,6 +120,7 @@ function rerunLocked(
   if (failed.some(({ runDone }) => !runDone)) {
     writeState(paths.statePath, {
       ...state,
+      rerunChecks: reran,
       deferredRuns: [...new Set([...(state.deferredRuns ?? []), runId])],
     });
     return {
@@ -116,7 +128,7 @@ function rerunLocked(
       runId,
       checks,
       deferred: true,
-      reason: `run ${runId} is still in progress; the gate reports its failures again once it has ended`,
+      reason: `run ${runId} is still in progress; the gate reports its failures again once it has ended, and a later run of these checks counts as their re-run`,
     };
   }
   const attempts = failed.map(({ event, attempt }) =>

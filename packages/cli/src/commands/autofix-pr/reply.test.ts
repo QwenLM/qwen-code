@@ -289,16 +289,20 @@ describe('runReply', () => {
     const gate = `Gate@${HEAD}@#on:9:pull_request_review`;
     const startup = `CI@${HEAD}@#startup:3:pull_request`;
     const earlier = `Test@${HEAD}@#4`;
+    const deferred = `Build@${HEAD}@#7`;
     writeFileSync(
       paths.snapshotPath,
       JSON.stringify({
         events: [
-          { type: 'ci_failed', check: 'Gate', key: gate },
-          { type: 'ci_failed', check: 'CI', key: startup },
-          { type: 'ci_failed', check: 'Test', key: earlier },
+          { type: 'ci_failed', check: 'Gate', key: gate, runId: 90 },
+          { type: 'ci_failed', check: 'CI', key: startup, runId: null },
+          { type: 'ci_failed', check: 'Test', key: earlier, runId: 40 },
+          { type: 'ci_failed', check: 'Build', key: deferred, runId: 70 },
         ],
       }),
     );
+    // The round deferred Build's run: it is answered once the run ends.
+    writeState(paths.statePath, { ...state(), deferredRuns: [70] });
     // A stranger's review started Gate again while the round ran; CI
     // started this time; Test ran again (#5).
     const moved = prData();
@@ -311,9 +315,11 @@ describe('runReply', () => {
       detailsUrl: 'https://github.com/o/r/actions/runs/90/job/9',
     });
     mocks.fetchPrData.mockImplementation(() => ({ pr: moved, viewer: 'me' }));
-    expect(reply({ handledChecks: [gate, startup, earlier] })).toMatchObject({
+    expect(
+      reply({ handledChecks: [gate, startup, earlier, deferred] }),
+    ).toMatchObject({
       handledChecks: 3,
-      ignoredChecks: 0,
+      ignoredChecks: 1,
     });
     // Gate's next failure on this head carries the key: it stays handled.
     expect(state().handledChecks).toEqual([gate, startup, earlier]);

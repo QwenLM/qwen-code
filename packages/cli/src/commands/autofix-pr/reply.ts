@@ -196,25 +196,31 @@ function keyHead(key: string): string | null {
 }
 
 /**
- * The failure keys the round's prepared snapshot reported. The head can
- * move on from one while the round runs — a re-run, a run a review starts,
- * a run that is deferred — and the round's answer to it still stands: a
- * key that names no run (a workflow a review starts) is the one the next
+ * The failure keys the round's prepared snapshot reported, each with its
+ * run. The head can move on from one while the round runs — a re-run, a
+ * run a review starts — and the round's answer to it still stands: a key
+ * that names no run (a workflow a review starts) is the one the next
  * failure of that check on the head carries.
  */
-function snapshotChecks(path: string): Set<string> {
+function snapshotChecks(path: string): Map<string, number | null> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    return new Set();
+    return new Map();
   }
   const events = (parsed as { events?: unknown } | null)?.events;
-  if (!Array.isArray(events)) return new Set();
-  return new Set(
+  if (!Array.isArray(events)) return new Map();
+  return new Map(
     events.flatMap((event: unknown) => {
-      const { type, key } = (event ?? {}) as { type?: unknown; key?: unknown };
-      return type === 'ci_failed' && typeof key === 'string' ? [key] : [];
+      const { type, key, runId } = (event ?? {}) as {
+        type?: unknown;
+        key?: unknown;
+        runId?: unknown;
+      };
+      return type === 'ci_failed' && typeof key === 'string'
+        ? [[key, typeof runId === 'number' ? runId : null] as const]
+        : [];
     }),
   );
 }
@@ -417,6 +423,7 @@ function replyLocked(
   // current head, so it is not recorded.
   const knownChecks = new Set(state.handledChecks ?? []);
   const roundChecks = snapshotChecks(paths.snapshotPath);
+  const deferredRuns = new Set(state.deferredRuns ?? []);
   const currentChecks: string[] = [];
   let ignoredChecks = 0;
   for (const key of new Set(plan.handledChecks)) {
@@ -432,10 +439,19 @@ function replyLocked(
       continue;
     }
     if (knownChecks.has(key)) continue;
-    if (!offer.checks.has(key) && !roundChecks.has(key)) {
-      throw new Error(
-        `${key} is not a failure snapshot reports on the PR head; pass the \`key\` of a ci_failed event.`,
-      );
+    if (!offer.checks.has(key)) {
+      if (!roundChecks.has(key)) {
+        throw new Error(
+          `${key} is not a failure snapshot reports on the PR head; pass the \`key\` of a ci_failed event.`,
+        );
+      }
+      // A failure of a run still deferred is reported again once the run
+      // has ended, and answered then: recorded now, it would be hidden.
+      const run = roundChecks.get(key);
+      if (run != null && deferredRuns.has(run)) {
+        ignoredChecks += 1;
+        continue;
+      }
     }
     currentChecks.push(key);
   }
