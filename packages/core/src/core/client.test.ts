@@ -1504,6 +1504,54 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('onPromptAdmitted', () => {
+    beforeEach(() => {
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+    });
+
+    it('reports an admitted prompt once, before its model request', async () => {
+      const order: string[] = [];
+      const bus = installMessageBus(
+        vi.fn(async () => {
+          order.push('hook');
+          return { output: {} };
+        }),
+        'UserPromptSubmit',
+      );
+      mockTurnRunFn.mockImplementation(() => {
+        order.push('request');
+        return textTurn('ok');
+      });
+      await run([{ text: 'hello' }], 'admitted', {
+        type: SendMessageType.UserQuery,
+        onPromptAdmitted: () => order.push('admitted'),
+      });
+      expect(bus.request).toHaveBeenCalledOnce();
+      expect(order).toEqual(['hook', 'admitted', 'request']);
+    });
+
+    it('does not report a prompt a hook blocks', async () => {
+      installMessageBus(
+        vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'blocked by fixture' },
+        }),
+        'UserPromptSubmit',
+      );
+      const admitted = vi.fn();
+      const events = await run([{ text: 'hello' }], 'blocked', {
+        type: SendMessageType.UserQuery,
+        onPromptAdmitted: admitted,
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: LlmEventType.UserPromptSubmitBlocked,
+        }),
+      );
+      expect(admitted).not.toHaveBeenCalled();
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+  });
+
   describe('fireSessionStartHook', () => {
     const fireHook = (source: SessionStartSource, signal?: AbortSignal) =>
       client['fireSessionStartHook'](source, signal);

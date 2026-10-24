@@ -88,6 +88,29 @@ export interface ModSessionFacts {
   usage: ModSessionUsage;
 }
 
+/** What a main-loop turn cost, in the API's spelling, and the last model. */
+export interface ModTurnUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  model: string;
+}
+
+export interface ModTurnStart {
+  text: string;
+  turnId: string;
+}
+
+export interface ModTurnComplete {
+  answer: string;
+  durationMs: number;
+  isAborted: boolean;
+  turnId: string;
+  reason: 'answer' | 'aborted' | 'error';
+  usage?: ModTurnUsage;
+}
+
 export type ModRequest =
   | {
       type: 'load';
@@ -112,7 +135,10 @@ export type ModRequest =
       input: ModToolCheckInput;
       verdict: ModToolCheckResult;
     }
-  | { type: 'end'; sessionId: string; reason: 'clear' | 'resume' | 'other' };
+  | { type: 'end'; sessionId: string; reason: 'clear' | 'resume' | 'other' }
+  | { type: 'turn-start'; input: ModTurnStart }
+  | { type: 'turn-complete'; input: ModTurnComplete }
+  | { type: 'turn-abort-result'; id: number; error?: string };
 
 export type ModReply =
   | { type: 'result'; json: string }
@@ -126,6 +152,7 @@ export type ModReply =
       result?: ModToolCheckResult;
       error?: string;
     }
+  | { type: 'turn-abort'; id: number; turnId: string }
   | ({ type: 'log'; plugin: string } & ModLog);
 
 export type ModWorkerRequest = ModRequest & {

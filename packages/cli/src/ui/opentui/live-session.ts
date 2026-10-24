@@ -35,6 +35,7 @@ import { getInteractiveModSession } from '../../services/interactive-mod-session
 import type {
   AgentResultDisplay,
   Config,
+  ServerLlmStreamEvent,
   SteerInput,
   ToolCallConfirmationDetails,
   ToolResultDisplay,
@@ -138,6 +139,10 @@ export interface LivePromptOptions {
    * is minted here (first turn of a session, …).
    */
   promptId?: string;
+  /** Called once UserPromptSubmit admits the prompt, before its request. */
+  onPromptAdmitted?: () => void;
+  /** Sees every event of the turn's model streams, as the client sent it. */
+  onStreamEvent?: (event: ServerLlmStreamEvent) => void;
 }
 
 /**
@@ -772,6 +777,9 @@ export async function* livePromptEvents(
     const sendOptions = first
       ? {
           type: SendMessageType.UserQuery,
+          ...(options?.onPromptAdmitted
+            ? { onPromptAdmitted: options.onPromptAdmitted }
+            : {}),
           ...(options?.humanInput ? { humanInput: options.humanInput } : {}),
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
           ...(options?.submittedPrompt
@@ -794,6 +802,7 @@ export async function* livePromptEvents(
         sendOptions,
       );
       for await (const ev of stream) {
+        options?.onStreamEvent?.(ev);
         if (!current() || abort.aborted) return;
         dualOutput?.processEvent(ev);
         for (const event of acceptedSteerEvents.splice(0)) yield event;

@@ -22,6 +22,7 @@ import { act, renderHook } from '@testing-library/react';
 import {
   ToolConfirmationOutcome,
   type Config,
+  type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
 import type {
   LivePromptOptions,
@@ -37,6 +38,7 @@ import {
   imagePathsToParts,
   useOpenTuiLiveTurn,
 } from './live-turn.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 
 // Stream-layer stub: records what each turn was handed and holds the first
 // turn open until the test releases it, so a second submission lands mid-turn.
@@ -1150,6 +1152,113 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       result.current.resetTranscript([]);
     });
     expect(result.current.messageQueue).toEqual([]);
+  });
+});
+
+describe('useOpenTuiLiveTurn Mod turns', () => {
+  beforeEach(() => {
+    live.turns.length = 0;
+    live.waiters.length = 0;
+    live.declines.clear();
+    live.signals.length = 0;
+    live.script.clear();
+    live.holds.clear();
+    live.errors.clear();
+    vi.restoreAllMocks();
+  });
+
+  const installMods = () => {
+    const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
+    const startTurn = vi.fn((_text: string, _abort: () => void) => turn);
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      startTurn,
+    } as unknown as ReturnType<
+      typeof interactiveMods.getInteractiveModSession
+    >);
+    return { turn, startTurn };
+  };
+  const options = (turn: number) =>
+    live.turns[turn - 1].options as LivePromptOptions;
+  async function settle(result: { current: { streaming: boolean } }) {
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+  }
+
+  it('hears the turn from its admission and ends it once', async () => {
+    const { turn, startTurn } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('Fix it', undefined, {
+        submittedPrompt: 'Fix [pasted]',
+        humanInput: { text: 'Fix it' },
+      });
+    });
+    expect(startTurn).not.toHaveBeenCalled();
+    options(1).onPromptAdmitted?.();
+    expect(startTurn).toHaveBeenCalledExactlyOnceWith(
+      'Fix it',
+      expect.any(Function),
+    );
+    const event = { type: 'content', value: 'Done.' } as ServerLlmStreamEvent;
+    options(1).onStreamEvent?.(event);
+    expect(turn.saw).toHaveBeenCalledExactlyOnceWith(event);
+    await settle(result);
+    expect(turn.complete).toHaveBeenCalledExactlyOnceWith(undefined);
+  });
+
+  it('reports an interrupted or failed turn as such', async () => {
+    const { turn } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('first'));
+    options(1).onPromptAdmitted?.();
+    act(() => result.current.interrupt());
+    await settle(result);
+    expect(turn.complete).toHaveBeenLastCalledWith('aborted');
+
+    live.errors.set(2, new Error('boom'));
+    live.holds.add(2);
+    act(() => result.current.submit('second'));
+    options(2).onPromptAdmitted?.();
+    await settle(result);
+    expect(turn.complete).toHaveBeenLastCalledWith('error');
+  });
+
+  it('lets a Mod end the turn and still runs the queued prompt', async () => {
+    const { turn, startTurn } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+      result.current.submit('queued');
+    });
+    options(1).onPromptAdmitted?.();
+    act(() => startTurn.mock.calls[0][1]());
+    expect(live.signals[0].aborted).toBe(true);
+    await settle(result);
+    expect(turn.complete).toHaveBeenCalledWith('aborted');
+    // Unlike Esc, nothing returns to the composer: the queue goes on.
+    await vi.waitFor(() =>
+      expect(live.turns.map((entry) => entry.prompt)).toEqual([
+        'first',
+        'queued',
+      ]),
+    );
+  });
+
+  it('offers no turn hooks without a Mod session', () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('plain'));
+    expect(options(1).onPromptAdmitted).toBeUndefined();
+    expect(options(1).onStreamEvent).toBeUndefined();
   });
 });
 

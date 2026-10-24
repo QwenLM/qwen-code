@@ -518,6 +518,33 @@ describe('livePromptEvents', () => {
     expect(options).toEqual({ type: SendMessageType.UserQuery });
   });
 
+  it('hands the turn hooks the admission and every event of its streams', async () => {
+    const events = [
+      { type: 'content', value: 'hi' },
+      {
+        type: 'finished',
+        value: { reason: undefined, usageMetadata: undefined },
+      },
+    ];
+    const sendMessageStream = vi.fn(function* (...args: unknown[]) {
+      (args[3] as { onPromptAdmitted?: () => void }).onPromptAdmitted?.();
+      yield* events;
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const onPromptAdmitted = vi.fn();
+    const onStreamEvent = vi.fn();
+
+    await drain(
+      livePromptEvents(config, 'hello', new AbortController().signal, {
+        onPromptAdmitted,
+        onStreamEvent,
+      }),
+    );
+
+    expect(onPromptAdmitted).toHaveBeenCalledOnce();
+    expect(onStreamEvent.mock.calls.map(([event]) => event)).toEqual(events);
+  });
+
   it('shares one initialization promise across callers', async () => {
     const initialize = vi.fn(async () => {});
     const config = { initialize } as unknown as Config;

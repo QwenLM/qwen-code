@@ -6475,6 +6475,155 @@ describe('runNonInteractive', () => {
     },
   );
 
+  describe('Mod turns', () => {
+    const installModTurn = () => {
+      const order: string[] = [];
+      let abort = () => {};
+      let ended: Promise<void> | undefined;
+      // Like the real turn, only the first report counts.
+      const turn = {
+        id: 'turn-1',
+        saw: vi.fn(),
+        complete: vi.fn((_ending?: string) => {
+          ended ??= Promise.resolve().then(() => void order.push('complete'));
+          return ended;
+        }),
+      };
+      const startTurn = vi.fn((_text: string, abortTurn: () => void) => {
+        order.push('start');
+        abort = abortTurn;
+        return turn;
+      });
+      vi.spyOn(ModSession, 'create').mockImplementation(
+        () =>
+          ({
+            initialize: vi.fn().mockResolvedValue(undefined),
+            close: vi.fn(async () => {
+              order.push('close');
+            }),
+            flushOutput: vi.fn().mockResolvedValue(undefined),
+            flushLogs: vi.fn(),
+            syncSession: vi.fn().mockResolvedValue(undefined),
+            hasToolHooks: false,
+            toolCall: () => undefined,
+            startTurn,
+          }) as unknown as ModSession,
+      );
+      return { order, turn, startTurn, abort: () => abort() };
+    };
+    // Admits the prompt, as core does once UserPromptSubmit lets it through.
+    const admitting = (events: () => AsyncGenerator<ServerLlmStreamEvent>) =>
+      mockLlmClient.sendMessageStream.mockImplementation(
+        (...args: unknown[]) => {
+          (args[3] as { onPromptAdmitted?: () => void })?.onPromptAdmitted?.();
+          return events();
+        },
+      );
+
+    it('hears the prompt from its admission to its answer', async () => {
+      setupMetricsMock();
+      const { order, turn, startTurn } = installModTurn();
+      const events: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'Done.' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: undefined },
+        },
+      ];
+      admitting(() => createStreamFromEvents(events));
+
+      await runNonInteractive(mockConfig, mockSettings, 'Fix it', 'mod-turn');
+
+      expect(startTurn).toHaveBeenCalledExactlyOnceWith(
+        'Fix it',
+        expect.any(Function),
+      );
+      expect(turn.saw.mock.calls.map(([event]) => event)).toEqual(events);
+      // The answer ends the turn before the run settles and closes.
+      expect(turn.complete.mock.calls[0]).toEqual([]);
+      expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);
+    });
+
+    it('starts no turn for a prompt core never admits', async () => {
+      setupMetricsMock();
+      const { startTurn } = installModTurn();
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.UserPromptSubmitBlocked,
+            value: { reason: 'blocked', originalPrompt: 'Fix it' },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, 'Fix it', 'blocked');
+
+      expect(startTurn).not.toHaveBeenCalled();
+    });
+
+    it.each([OutputFormat.JSON, OutputFormat.TEXT])(
+      'lets a Mod end the turn with a result in %s',
+      async (format) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        setupMetricsMock();
+        const mod = installModTurn();
+        admitting(async function* () {
+          yield { type: LlmEventType.Content, value: 'Partial' };
+          mod.abort();
+          yield { type: LlmEventType.UserCancelled } as ServerLlmStreamEvent;
+        });
+
+        const exitCode = await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Fix it',
+          'mod-abort',
+        );
+
+        expect(exitCode).toBe(130);
+        // The run answers with a result rather than exiting as an interrupt.
+        expect(process.exit).not.toHaveBeenCalled();
+        expect(mod.turn.complete.mock.calls[0]).toEqual(['aborted']);
+        if (format === OutputFormat.JSON) {
+          const messages = JSON.parse(
+            processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+          );
+          expect(messages.at(-1)).toMatchObject({
+            type: 'result',
+            is_error: true,
+            error: { message: 'A Mod ended the turn.' },
+          });
+        } else {
+          expect(processStderrSpy).toHaveBeenCalledWith(
+            'A Mod ended the turn.\n',
+          );
+        }
+      },
+    );
+
+    it('ends the turn as an error when its request fails', async () => {
+      setupMetricsMock();
+      const { turn } = installModTurn();
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Error,
+            value: { error: { message: 'boom', status: 500 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Fix it',
+        'mod-error',
+      ).catch(() => undefined);
+
+      expect(turn.complete.mock.calls[0]).toEqual(['error']);
+    });
+  });
+
   it('should handle API errors in text mode and exit with error code', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
     setupMetricsMock();

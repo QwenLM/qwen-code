@@ -137,6 +137,7 @@ export const MOD_GUEST_FACTORY = String.raw`
           });
         }
       },
+      turn: { abort: input => invoke('turn.abort', input) },
       ui: { log: (text, options = {}) => {
         if (!object(options) || keys(options).some(k => k !== 'to')) throw new Error('Invalid Mod log');
         void invoke('ui.log', { text: String(text), to: options.to ?? 'transcript' }).catch(() => {});

@@ -365,7 +365,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
               root: '/fixture',
               entry: '/fixture/mod.js',
               source: `export function register(on) {
-                on('turn.start', ($, e, next) => next(e));
+                on('turn.step', ($, e, next) => next(e));
                 on('prompt.submit', ($, e, next) => next(e));
                 on('session.start', ($, e, next) => next(e));
               }`,
@@ -377,7 +377,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
         signal(),
       ),
     ).rejects.toThrow(
-      'Mod strict: Mod events not supported: prompt.submit, turn.start',
+      'Mod strict: Mod events not supported: prompt.submit, turn.step',
     );
     expect(logs).toEqual([]);
   });
@@ -433,6 +433,9 @@ describe('ModRuntime with the real QuickJS worker', () => {
             'session.version',
             'tool.call',
             'tool.check',
+            'turn.abort',
+            'turn.complete',
+            'turn.start',
             'ui.log',
           ],
           methods: [
@@ -448,6 +451,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
             'session.turns',
             'session.usage',
             'session.version',
+            'turn.abort',
             'ui.log',
           ],
         },
@@ -780,6 +784,169 @@ describe('ModRuntime with the real QuickJS worker', () => {
     expect(await runtime.runCommand('hello', '', signal())).toBe(
       'original:one',
     );
+  });
+
+  const createTurns = async (
+    sources: string[],
+    abortTurn?: (turnId: string) => void,
+  ) => {
+    const runtime = await ModRuntime.createGroup(
+      sources.map((source, index) => ({
+        id: `mod-${index}`,
+        name: `mod-${index}`,
+        source: { root: '/fixture', entry: '/fixture/mod.js', source },
+        options: {},
+      })),
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      'terminal',
+      '1.2.3',
+      undefined,
+      abortTurn,
+    );
+    runtimes.push(runtime);
+    return runtime;
+  };
+  const turnEnd = {
+    answer: 'Done.',
+    durationMs: 12,
+    isAborted: false,
+    turnId: 'turn-1',
+    reason: 'answer' as const,
+    usage: {
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_input_tokens: 90,
+      cache_creation_input_tokens: 0,
+      model: 'qwen-max',
+    },
+  };
+
+  it('names the plugins whose hooks hear the turn events', async () => {
+    const runtime = await createTurns([
+      `export function register(on) { on('turn.start', ($, e, next) => next(e)); }`,
+      `export function register(on) { on('turn.*', ($, e, next) => next(e)); }`,
+      `export function register(on) { on('!session.*', ($, e, next) => next(e)); }`,
+      `export function register(on) { on('tool.call', ($, e, next) => next(e)); }`,
+    ]);
+    expect(runtime.turnHooks).toEqual({
+      start: true,
+      complete: ['mod-1', 'mod-2'],
+    });
+    const none = await createTurns([fixture()]);
+    expect(none.turnHooks).toEqual({ start: false, complete: [] });
+  });
+
+  it('runs turn.start and turn.complete with pinned input and returns the answer or a text', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('turn.start', async ($, e, next) => {
+          const echoed = await next(e);
+          $.ui.log('start:' + JSON.stringify(e) + ':' + JSON.stringify(echoed));
+          return {turnId: 'ignored'};
+        });
+        on('turn.complete', async ($, e, next) => {
+          $.ui.log('complete:' + JSON.stringify(e));
+          try { await next({...e, answer: 'rewritten'}); } catch (error) { $.ui.log(String(error)); }
+          return next(e);
+        });
+      }`,
+      `export function register(on) {
+        on('turn.complete', {reason: 'answer'}, ($, e) => ({text: 'TL;DR ' + e.answer.length}));
+      }`,
+    ]);
+    const { usage: _usage, ...aborted } = {
+      ...turnEnd,
+      reason: 'aborted' as const,
+      isAborted: true,
+    };
+    await runtime.startTurn({ text: 'Fix it', turnId: 'turn-1' }, signal());
+    expect(await runtime.completeTurn(turnEnd, signal())).toBe('TL;DR 5');
+    expect(await runtime.completeTurn(aborted, signal())).toBe('Done.');
+    expect(logs.map((log) => log.text)).toEqual([
+      'start:{"text":"Fix it","turnId":"turn-1"}:{"turnId":"turn-1"}',
+      `complete:${JSON.stringify(turnEnd)}`,
+      expect.stringContaining('changed pinned event fields'),
+      `complete:${JSON.stringify(aborted)}`,
+      expect.stringContaining('changed pinned event fields'),
+    ]);
+  });
+
+  it('refuses a turn.complete answer of the wrong shape and keeps the answer', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('turn.complete', ($, e) => e.durationMs === 1
+          ? {text: 'x', usage: {...e.usage, input_tokens: 1.5}}
+          : {text: 7});
+      }`,
+    ]);
+    for (const durationMs of [1, 2])
+      expect(
+        await runtime.completeTurn({ ...turnEnd, durationMs }, signal()),
+      ).toBe('Done.');
+  });
+
+  it('asks the host to end the running turn and rejects with its reason', async () => {
+    const asked: string[] = [];
+    const source = `export function register(on) {
+      on('turn.start', async ($, e, next) => {
+        const results = [];
+        for (const input of [{turnId: e.turnId}, {turnId: 'turn-0'}, {}, 'turn-1']) {
+          try { results.push(String(await $.turn.abort(input))); }
+          catch (error) { results.push(String(error)); }
+        }
+        $.ui.log(JSON.stringify(results));
+        return next(e);
+      });
+    }`;
+    const runtime = await createTurns([source], (turnId) => {
+      asked.push(turnId);
+      if (turnId !== 'turn-1')
+        throw new Error(`$.turn.abort: ${turnId} is not the running turn`);
+    });
+    await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+    expect(asked).toEqual(['turn-1', 'turn-0']);
+    expect(JSON.parse(logs.at(-1)!.text)).toEqual([
+      'undefined',
+      expect.stringContaining('$.turn.abort: turn-0 is not the running turn'),
+      expect.stringContaining('takes { turnId } (the id turn.start carried)'),
+      expect.stringContaining('Invalid Mod event input'),
+    ]);
+    const unhosted = await createTurns([source]);
+    await unhosted.startTurn({ text: '', turnId: 'turn-1' }, signal());
+    expect(JSON.parse(logs.at(-1)!.text)[0]).toContain(
+      '$.turn.abort: no turn is running (asked for turn-1)',
+    );
+  });
+
+  it('lets another plugin deny or rewrite $.turn.abort', async () => {
+    const asked: string[] = [];
+    const runtime = await createTurns(
+      [
+        `export function register(on) {
+          on('turn.abort', ($, e, next) =>
+            e.turnId === 'keep' ? {deny: 'kept by mod-0'} : next({turnId: e.turnId + '!'}));
+        }`,
+        `export function register(on) {
+          on('turn.start', async ($, e, next) => {
+            const results = [];
+            for (const turnId of ['keep', 'turn-1'])
+              results.push(await $.turn.abort({turnId}).then(String, String));
+            $.ui.log(JSON.stringify(results));
+            return next(e);
+          });
+        }`,
+      ],
+      (turnId) => void asked.push(turnId),
+    );
+    await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+    expect(asked).toEqual(['turn-1!']);
+    expect(JSON.parse(logs.at(-1)!.text)).toEqual([
+      expect.stringContaining('kept by mod-0'),
+      'undefined',
+    ]);
   });
 
   it('bounds logs and applies a whole session.end timeout', async () => {

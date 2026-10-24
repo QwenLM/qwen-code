@@ -235,6 +235,16 @@ describe('UiTelemetryService', () => {
     expect(lastPromptTokenCount).toBe(0);
   });
 
+  it('passes the added event to update listeners', () => {
+    const spy = vi.fn();
+    service.on('update', spy);
+    const event = proResponse();
+
+    service.addEvent(event);
+
+    expect(spy.mock.calls[0][0].event).toBe(event);
+  });
+
   describe('API Response Event Processing', () => {
     it('applies cached-input fallback per session event without changing global metrics', () => {
       const sessionId = 'session-mixed-cache';
