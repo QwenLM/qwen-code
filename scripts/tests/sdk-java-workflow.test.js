@@ -642,9 +642,20 @@ describe('SDK Java self-hosted workflow guards', () => {
           'sdk_java_lock_acquire() { :; }\n',
         );
         mkdirSync(bin, { recursive: true });
-        writeFileSync(join(bin, 'mvn'), '#!/bin/sh\nexit 1\n', {
-          mode: 0o755,
-        });
+        // Fail only the first invocation: with every call failing, a later
+        // step restores the exit status after the first `|| suite_status=$?`
+        // is removed, so the test would not pin that guard.
+        const mvnCount = join(dir, 'mvn-count');
+        writeFileSync(
+          join(bin, 'mvn'),
+          '#!/bin/sh\n' +
+            `count=$(cat "${mvnCount}" 2>/dev/null || echo 0)\n` +
+            'count=$((count + 1))\n' +
+            `echo "$count" > "${mvnCount}"\n` +
+            '[ "$count" -eq 1 ] && exit 1\n' +
+            'exit 0\n',
+          { mode: 0o755 },
+        );
         const result = spawnSync('bash', ['-e', '-c', suite.run], {
           encoding: 'utf8',
           timeout: 15000,
@@ -659,6 +670,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           },
         });
         expect(result.status, suite.name + result.stderr).toBe(1);
+        expect(readFileSync(mvnCount, 'utf8').trim(), suite.name).toBe('1');
         expect(
           existsSync(join(home, '.m2', 'repository', 'downloaded.jar')),
           suite.name,
