@@ -99,6 +99,20 @@ loop runs at most N rounds and then stops touching the PR.
    budget discards it too and the next scan re-selects the conflict under the
    new window.
 
+7. **An automatic re-arm never rebases a bounded engagement.** The growth audit
+   appends `<!-- autofix-rearm -->` to open a fresh window for its own round
+   accounting. A window opened that way carries no budget marker, so rebasing a
+   `for N` engagement would silently restore the 100-round cap without any
+   maintainer asking for it. The report script therefore skips the automatic
+   re-arm while the current window carries a budget; the audit round simply
+   stays inside the budget it was given.
+
+8. **Prepare mirrors the scan's attempt census.** A queued round can outlive the
+   sibling that spent the window's last attempt: a no-op leaves `ROUND` at 0 and
+   the window key unchanged, so neither the superseded-window check nor the
+   round cap discards it. `review-address` therefore recounts the window's eval
+   markers and discards when the budget is already spent.
+
 ## Files affected
 
 - `.github/workflows/qwen-autofix.yml` — parser, route output wire, engage/re-arm

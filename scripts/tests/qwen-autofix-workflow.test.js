@@ -3824,6 +3824,94 @@ describe('qwen-autofix workflow', () => {
     expect(run('false', '0')).toBe('true');
   });
 
+  it('keeps a bounded engagement bounded across an automatic growth-audit re-arm', () => {
+    // The audit's automatic re-arm exists to rebase the round window, but a
+    // window opened that way carries no budget marker — so rebasing a `for N`
+    // engagement would silently restore the 100-round cap (P1).
+    const script = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        '../../.github/scripts/autofix-push-and-report.sh',
+      ),
+      'utf8',
+    );
+    const fn = script.match(
+      /(emit_growth_audit_marker\(\) \{[\s\S]*?\n\})/,
+    )?.[1];
+    expect(fn).toBeTruthy();
+    const run = (ic, verdict = 'sound') => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-audit-rearm-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            `KISS_AUDIT=true\nAUDIT_VERDICT='${verdict}'\nGROWTH_BASE_WIN='W1'\nWINDOW='W1'\nWORKDIR='${dir}'\nAUTOFIX_BOT='qwen-code-dev-bot'\n${fn}\nemit_growth_audit_marker true`,
+          ],
+          { encoding: 'utf8' },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const ack = (body) => [
+      { user: { login: 'qwen-code-dev-bot' }, created_at: 'W1', body },
+    ];
+    // Unbudgeted: the audit still rebases the window.
+    expect(run(ack('<!-- takeover-ack engaged -->'))).toContain(
+      '<!-- autofix-rearm -->',
+    );
+    // Budgeted: no re-arm, so the remaining budget survives the audit.
+    const budgeted = run(
+      ack('<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->'),
+    );
+    expect(budgeted).toContain('autofix-growth-audit');
+    expect(budgeted).not.toContain('autofix-rearm');
+    // A marker on another window never suppresses the re-arm.
+    expect(
+      run([
+        {
+          user: { login: 'qwen-code-dev-bot' },
+          created_at: 'OLD',
+          body: '<!-- autofix-round-budget 2 -->',
+        },
+      ]),
+    ).toContain('<!-- autofix-rearm -->');
+    // Only a `sound` audit re-arms at all.
+    expect(run(ack('<!-- takeover-ack engaged -->'), 'drift')).not.toContain(
+      'autofix-rearm',
+    );
+  });
+
+  it('discards a same-window queued round once the attempt budget is spent', () => {
+    // A sibling's no-op spends the last attempt without advancing ROUND or
+    // changing the window key, so neither the superseded-window nor the round
+    // cap sees it; prepare must mirror the scan's attempt census (P2).
+    const block = workflow.match(
+      /(if \[\[ "\$\{STALE\}" != "true" && "\$\{LIVE_ROUND_BUDGET\}" -gt 0 && "\$\{LIVE_ATTEMPTS\}" -ge "\$\{LIVE_ROUND_BUDGET\}" \]\]; then[\s\S]*?\n {10}fi)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const run = (attempts, budget) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `STALE=false\nLIVE_ATTEMPTS='${attempts}'\nLIVE_ROUND_BUDGET='${budget}'\n${block.replace(/\n {10}/g, '\n')}\nprintf '%s' "$STALE"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .at(-1);
+    // One attempt spent of one: discard.
+    expect(run('1', '1')).toBe('true');
+    // One of two: still admitted.
+    expect(run('1', '2')).toBe('false');
+    // No budget: the ordinary paths decide.
+    expect(run('1', '0')).toBe('false');
+  });
+
   it('applies the needs-human escalation label at the cap and removes it on resume/release', () => {
     // The label contract: one env definition, one idempotent create with a
     // fixed color (a REST add of a missing label would mint a random one).
@@ -4696,8 +4784,8 @@ describe('qwen-autofix workflow', () => {
     expect(budgetedEngage.writes).toContain(
       '<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->',
     );
-    expect(budgetedEngage.writes).toContain('2-round budget');
-    expect(budgetedEngage.writes).toContain('leaves the PR to you');
+    expect(budgetedEngage.writes).toContain('Budget: 2 round(s)');
+    expect(budgetedEngage.writes).toContain('the loop removes the');
     const budgetedRearm = runToggle({
       cmd: 'add',
       labels: ['autofix/takeover'],

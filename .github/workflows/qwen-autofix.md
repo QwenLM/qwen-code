@@ -4619,6 +4619,16 @@ cross the new engagement limit, so the live window's budget makes it
 stale too and the next scan re-selects the conflict under the new
 window.
 
+Two automatic paths need the same care. A growth audit appends
+`<!-- autofix-rearm -->` to rebase the round window for its own account-
+ing, and a window opened that way carries no budget marker — so the
+report script skips that automatic re-arm while the current window is
+budgeted, and the audit round stays inside the budget it was given.
+And a queued round can outlive the sibling that spent the last attempt:
+a no-op leaves ROUND at 0 and the window key unchanged, so neither the
+superseded-window check nor the round cap sees it — prepare recounts the
+window's eval markers and discards on a spent budget too.
+
 What happens at the boundary differs by authorship, and that difference
 is the point. A HUMAN-authored PR is simply released: nothing is stuck,
 so the escalation label and the paused notice would both be false — the

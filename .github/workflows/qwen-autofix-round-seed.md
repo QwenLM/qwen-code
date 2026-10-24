@@ -154,6 +154,16 @@ far past the real attempts and posts no extra marker — so the window is not
 "spent" and the PR lands on the normal paused path with `autofix/needs-human`. A
 breaker asks for a human; the release note would be wrong.
 
+**An automatic re-arm never rebases a bounded engagement.** A growth-audit round
+normally appends `autofix-rearm` to open a fresh window for its own round
+accounting; while the window carries a budget the loop skips that marker, so the
+audit stays inside the budget instead of silently restoring the 100-round cap.
+
+**A queued round from the same window is discarded once the budget is spent.** A
+no-op leaves the round number at 0 and the window key unchanged, so neither the
+superseded-window nor the round-cap check would catch a round that was queued
+before it; the address leg recounts the window's attempts and drops it.
+
 **The budget is window-scoped.** It is read from the comment whose timestamp is
 the window key, so `/retry` or a bare `/takeover` opens a new window with no
 budget (unbounded takeover, as before), and a budgeted re-arm
