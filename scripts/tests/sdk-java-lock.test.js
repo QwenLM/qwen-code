@@ -600,6 +600,51 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   );
 
   it(
+    'returns after a timeout so the caller guard keeps the step green',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-return-'));
+      const held = join(home, 'held');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, join(home, 'order')));
+      const child = spawn(
+        'bash',
+        [
+          '--noprofile',
+          '--norc',
+          '-eo',
+          'pipefail',
+          '-c',
+          [
+            `source "${script}"`,
+            'sdk_java_lock_acquire 2 fast || echo GUARD_FIRED',
+            'echo SURVIVED',
+          ].join('\n'),
+        ],
+        {
+          env: { ...baseEnv, HOME: home, PATH: `${stub}:${process.env.PATH}` },
+        },
+      );
+      const state = { out: '' };
+      child.stdout.on('data', (d) => (state.out += d));
+      child.stderr.on('data', (d) => (state.out += d));
+      const code = await new Promise((resolve) => child.on('close', resolve));
+      // Both markers are the contract: GUARD_FIRED proves the function
+      // returned instead of exiting the sourcing shell, SURVIVED proves the
+      // caller continued to its guard. An `exit 1` leaves neither.
+      expect(code).toBe(0);
+      expect(state.out).toContain('GUARD_FIRED');
+      expect(state.out).toContain('SURVIVED');
+      expect(state.out).toContain(
+        '::error::sdk-java host lock not acquired within',
+      );
+      expect(readdirSync(queueDir(home)).filter((f) => f !== '.seq')).toEqual(
+        [],
+      );
+    },
+  );
+
+  it(
     'names the blocking head ticket when it times out behind one',
     { timeout: 30000 },
     async () => {

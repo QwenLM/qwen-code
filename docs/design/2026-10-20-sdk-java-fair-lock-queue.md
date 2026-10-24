@@ -26,12 +26,17 @@ hold at a time — no constant budget bounds the queue.
 - Goal: make the wait deterministic. A waiter's worst-case wait is the work
   ahead of it in line, not how often it has re-entered the queue.
 - Goal: preserve the current semantics elsewhere. The lock still releases
-  automatically at the step boundary; the pinned infrastructure-signature
-  error text (`lock not acquired within`) stays so the rerun classifier in
-  `qwen-autofix.yml` is untouched.
+  automatically at the step boundary. The helper's default (fatal) mode keeps
+  the pinned infrastructure-signature error text (`lock not acquired within`)
+  as its contract; both steps in this workflow rewrite that line to a
+  non-fatal warning as the helper emits it, so no path here fails on the lock
+  or leaves that signature on a green step.
 - Non-goal: reducing total occupancy. Sharding the lock by suite, capping
   registrations per host, or adding hosts are orthogonal and can follow;
-  fairness makes their remaining work measurable instead of urgent.
+  fairness makes their remaining work measurable instead of urgent. The
+  hold-scope change below does run sdk-java suites concurrently on one host;
+  that host-resource contention is an accepted residual (see Hold scope), not
+  a claim that concurrent suites are free.
 - Non-goal: changing the 5400 s budget or the 150/310-minute job ceilings.
 
 ## Design
@@ -66,11 +71,14 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   acquisition order, not release semantics.
 - On timeout the helper prints
   `::error::sdk-java host lock not acquired within N minutes as queue ticket S (CLASS); head of queue is H`
-  and returns 1. `CLASS` is `fast` or `normal`, as the ticket stood when it
-  gave up; `H` is the head of the queue at that moment, or
-  `(no other ticket queued)` when this ticket was the last one. The
-  `lock not acquired within` substring is the contract the rerun classifiers
-  match.
+  and returns 1. Both steps in this workflow rewrite that line in place —
+  the `::error::...not acquired within` prefix becomes
+  `::warning::sdk-java host lock wait exhausted after` — so the ticket,
+  class and queue head survive without the classifier signature. `CLASS` is
+  `fast` or `normal`, as the ticket stood when it gave up; `H` is the head
+  of the queue at that moment, or `(no other ticket queued)` when this
+  ticket was the last one. The `lock not acquired within` substring remains
+  the helper's contract, which the rerun classifiers match.
 - Wait observability: a non-blocking probe runs first, and only a waiter
   that actually has to wait prints its ticket number and the remaining
   budget — before it blocks, and at most once a minute after. A blocked head
@@ -100,6 +108,33 @@ holds one acquisition, and its `mkdir` and bounded `find`/`cp` children
 drop fd 9 so a survivor
 cannot retain the lock. A hold now measures the copy instead of the suite, and
 the fast tier's 90-minute budget is again far above one hold.
+
+The test job had the same shape and the same failure: the Java 21 leg held
+the lock across the sdk-java suite and the managed-agent H2 suite (925 s), and
+the Java 11/17 legs across the sdk-java suite. On 2026-10-22 run
+39794057849's fast job stayed head of the queue for the full 5400 s as ticket
+257, and failed before Maven on both attempts, on two different hosts. That job now seeds a job-local repository,
+runs all three Maven commands unlocked, and takes the lock only for its
+write-back, so no hold spans a suite anywhere in this workflow.
+
+This is strictly more suite concurrency than the sharded-lock alternative
+rejected below, on a pool whose only recorded evidence is that it OOMed a
+build. No per-host memory headroom measurement is available for concurrent
+sdk-java suites, so host-resource contention is an accepted residual of this
+change, owned by the SDK Java CI maintainers: if a Java leg flakes while
+sibling suites run on the same host, re-scope the lock for that lane rather
+than attributing the flake to the suite.
+
+The write-back acquisition is also best-effort at both sites: a lock that
+cannot be acquired within its budget warns and skips the copy instead of
+failing a step whose suite already passed. On that path the workflow rewrites
+the helper's fatal line to a distinct `sdk-java host lock wait exhausted`
+warning with the same ticket/class/queue-head attribution and appends a
+step-summary line, instead of leaving the pinned `lock not acquired within`
+error, so a succeeding step cannot leave the infrastructure signature on a
+job where a later genuine failure would be misclassified. The helper's
+default mode and the docker-lock callers keep the substring. The 5400 s
+budget and the fd 9 closures are unchanged.
 
 ### Fast-tier priority
 
@@ -156,8 +191,10 @@ its last 52 minutes as head behind one hold and timed out, and full-tier
 MariaDB holds of 7426 s and 8685 s have been measured on this lock; a hold
 like that exhausts a fast head's 5400 s budget whatever the ticket order.
 Naming the holder (a long ticketed hold, or a process that never took a
-ticket) is the diagnostic in qwen-code#15031, and bounding hold length stays
-with #14566.
+ticket) is the diagnostic in qwen-code#15031. The hold-scope change above
+bounds every hold this workflow takes to one write-back copy; a hold that
+still outlasts the budget now comes from a stale or non-ticketed process,
+and the best-effort acquisition keeps it from reddening the suite.
 
 The head keepalive matters more with two classes. Without it, a head blocked
 past 1800 s loses its ticket to another waiter's reaper, and the next ticket
@@ -169,8 +206,10 @@ order this section exists to prevent.
 ### Why fairness over the alternatives
 
 - Shard the lock by suite: reduces queue frequency but each shard is still a
-  bare flock, and it rides on an untested assumption that concurrent suites
-  share the host safely on a pool that just OOMed a build.
+  bare flock. The earlier rejection rested on an untested assumption that
+  concurrent suites share the host safely; the hold-scope change now runs the
+  suites unlocked, so the remaining concern is the host-contention residual
+  recorded under Hold scope, not a reason to keep suite-spanning holds.
 - Cap registrations per host: needs pool topology changes outside the repo
   and leaves the same lost-place race per host.
 - Second host: at least three hosts starved simultaneously; host count is
@@ -209,9 +248,10 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
-  `sdk_java_lock_acquire 5400` budget at each acquisition site, the MariaDB
-  lane's Maven runs above its acquisition and its write-back children's fd 9
-  close, and the `.size-baseline` records the workflow's new size.
+  `sdk_java_lock_acquire 5400` budget at each acquisition site, every Maven
+  run above its acquisition, both write-backs' fd 9 closes, and the
+  best-effort guard that keeps a missed acquisition from failing the step.
+  The `.size-baseline` records the workflow's new size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -219,13 +259,23 @@ order this section exists to prevent.
 
 - Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
   the test job passes its tier and the MariaDB site defaults to normal.
+- Every Maven run resolves from a job-local repository above its acquisition,
+  and a failed acquisition skips the write-back without failing the step.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
-- The error text still contains the substring `lock not acquired within`,
-  so `qwen-autofix.yml`'s `INFRA_FAILURE_SIGNATURES` keeps matching.
+- The helper still emits `lock not acquired within`, so
+  `qwen-autofix.yml`'s `INFRA_FAILURE_SIGNATURES` keeps matching for the
+  docker-lock callers and any future fatal sdk-java caller; both steps here
+  rewrite that line to `sdk-java host lock wait exhausted` before it reaches
+  the annotation channel, so a succeeding step cannot carry the
+  infrastructure signature.
 
 ## Open questions
 
 - Whether queue depth should be published as a metric; the minute-capped wait
   line is the minimal observability landed here.
+- A starved write-back now shows as a green job with a warning (plus a step
+  summary line), not a failed check-run, and neither infra classifier reads
+  warnings on green jobs. Aggregating consecutive skips per host remains a
+  named follow-up; merging this change accepts that trade explicitly.
