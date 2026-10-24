@@ -472,6 +472,7 @@ interface WebShellSidebarProps {
   canOpenSplitView?: boolean;
   onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
   onNewStandaloneSession?: () => Promise<boolean> | boolean;
+  standaloneSessionsReloadToken?: number;
   onLoadSession: (
     sessionId: string,
     workspaceCwd?: string,
@@ -1114,6 +1115,7 @@ export function WebShellSidebar({
   canOpenSplitView,
   onNewSession,
   onNewStandaloneSession,
+  standaloneSessionsReloadToken = 0,
   onLoadSession,
   onOpenHostSession,
   onSelectCurrentSession,
@@ -7213,7 +7215,10 @@ export function WebShellSidebar({
                               !connection.loadingTranscript &&
                               !connection.catchingUp
                             }
-                            refreshKey={standaloneRefreshKey}
+                            refreshKey={
+                              standaloneRefreshKey +
+                              standaloneSessionsReloadToken
+                            }
                             searchQuery={searchQuery}
                             renderSession={(session, standalone) =>
                               renderSessionRow(session, {
@@ -7221,17 +7226,7 @@ export function WebShellSidebar({
                                 standalone,
                               })
                             }
-                            onNewSession={
-                              onNewStandaloneSession
-                                ? () => {
-                                    void Promise.resolve(
-                                      onNewStandaloneSession(),
-                                    ).then((created) => {
-                                      if (created) handleStandaloneMutation();
-                                    });
-                                  }
-                                : undefined
-                            }
+                            onNewSession={onNewStandaloneSession}
                             onLoadSession={onLoadStandaloneSession}
                             onRenameSession={(sessionId, displayName) =>
                               onSessionRenameConfirmed?.(
