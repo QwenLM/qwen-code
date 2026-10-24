@@ -915,6 +915,42 @@ describe('POST /workspace/settings', () => {
     },
   );
 
+  it('serves general.outputLanguage read-only for host display', async () => {
+    const { app, persistSetting } = makeApp({
+      userSettings: { general: { outputLanguage: '中文' } },
+    });
+
+    const read = await request(app).get('/workspace/settings');
+    expect(read.status).toBe(200);
+    const descriptor = read.body.settings.find(
+      (setting: { key?: string }) => setting.key === 'general.outputLanguage',
+    );
+    expect(descriptor?.values.effective).toBe('中文');
+    expect(descriptor?.options).toEqual(
+      expect.arrayContaining([
+        { value: 'Chinese', label: '中文 (Chinese)' },
+        { value: 'English', label: 'English' },
+      ]),
+    );
+    // Suggestions carry the full names the command persists, not locale codes.
+    expect(
+      (descriptor?.options ?? []).map(
+        (option: { value: string }) => option.value,
+      ),
+    ).not.toContain('zh');
+
+    // Persisting this key alone would leave output-language.md and running
+    // sessions stale, so the language command stays the only write path.
+    const write = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'general.outputLanguage',
+      value: 'English',
+    });
+    expect(write.status).toBe(400);
+    expect(write.body).toMatchObject({ code: 'disallowed_key' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
   it.each(['ui.brand', 'ui.brand.name', 'ui.brand.logoPath'])(
     'keeps the web shell brand (%s) off the settings surface',
     async (key) => {
