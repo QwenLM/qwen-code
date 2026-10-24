@@ -194,7 +194,10 @@ function validUsage(value: unknown): boolean {
     only(context, ['tokens', 'window', 'percent', 'breakdown']) &&
     amount(context['window']) &&
     (context['tokens'] === undefined || amount(context['tokens'])) &&
-    (context['percent'] === undefined || amount(context['percent'])) &&
+    (context['percent'] === undefined ||
+      (Number.isInteger(context['percent']) &&
+        amount(context['percent']) &&
+        context['percent'] <= 100)) &&
     (context['breakdown'] === undefined || record(context['breakdown'])) &&
     Array.isArray(rateLimits) &&
     rateLimits.every(

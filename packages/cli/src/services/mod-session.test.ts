@@ -468,6 +468,9 @@ describe('Mod session ownership', () => {
       },
     });
 
+    // The last response can arrive after the last dispatch: only the
+    // telemetry listener sees it before the config moves on.
+    uiTelemetryService.setLastPromptTokenCount(612);
     // The config moves to the next session before the old one ends.
     config.getSessionId.mockReturnValue('session-2');
     recorder.mockReturnValue({ getUserTurnCount: () => 0 });
@@ -484,7 +487,7 @@ describe('Mod session ownership', () => {
       turns: 2,
       usage: {
         startedAt: Date.parse('2026-10-20T08:00:00.000Z'),
-        context: { tokens: 304 },
+        context: { tokens: 612, window: 1_000, percent: 61 },
       },
     });
     const next = facts();
@@ -586,6 +589,31 @@ describe('Mod session ownership', () => {
     config.getSessionId.mockReturnValue('session-2');
     await session.syncSession('clear');
     expect(ending?.usage.context).toEqual(main);
+  });
+
+  it('rounds the context percent and caps it at 100', async () => {
+    const { session } = setup({
+      getProjectRoot: () => '/workspace',
+      getModel: () => 'qwen-max',
+      getChatRecordingService: () => undefined,
+      getContentGeneratorConfig: () => ({ contextWindowSize: 1_000 }),
+      getResumedSessionData: () => undefined,
+    });
+    await session.loadCommands(new AbortController().signal);
+    const facts = mocks.create.mock.calls[0][7] as () => ModSessionFacts;
+    uiTelemetryService.setLastPromptTokenCount(306);
+    expect(facts().usage.context.percent).toBe(31);
+    // After a switch to a smaller model the last prompt can exceed its window.
+    uiTelemetryService.setLastPromptTokenCount(1_200);
+    expect(facts().usage.context.percent).toBe(100);
+  });
+
+  it('stops listening to telemetry once closed', async () => {
+    const before = uiTelemetryService.listenerCount('update');
+    const { session } = setup();
+    expect(uiTelemetryService.listenerCount('update')).toBe(before + 1);
+    await session.close();
+    expect(uiTelemetryService.listenerCount('update')).toBe(before);
   });
 
   it('answers no turns without chat recording and no percent without a window', async () => {

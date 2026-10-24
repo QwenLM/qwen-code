@@ -654,13 +654,41 @@ describe('ModRuntime with the real QuickJS worker', () => {
         return next(e);
       });
       on('command.run', async () => { throw new Error('first'); })
-        .catch(async ($) => { await $.clock.sleep(5000); return {text: 'woke'}; });
+        .catch(async ($, e) => {
+          // A wait past the timer range would fire at once without the clamp.
+          await $.clock.sleep(e.args === 'huge' ? 2 ** 32 : 5000);
+          return {text: 'woke'};
+        });
     }`);
-    const started = performance.now();
-    await expect(runtime.runCommand('hello', '', signal())).rejects.toThrow(
-      'No Mod hook answered /hello',
-    );
-    expect(performance.now() - started).toBeLessThan(4000);
+    for (const args of ['', 'huge']) {
+      const started = performance.now();
+      await expect(runtime.runCommand('hello', args, signal())).rejects.toThrow(
+        'No Mod hook answered /hello',
+      );
+      expect(performance.now() - started).toBeLessThan(4000);
+    }
+  });
+
+  it('ends the sleep of a failed hook while its catch recovers', async () => {
+    const runtime = await create(`export function register(on) {
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name:'hello',description:'Hello'});
+        return next(e);
+      });
+      on('command.run', async ($) => {
+        globalThis.detached = 'pending';
+        void $.clock.sleep(60000).then(
+          () => { globalThis.detached = 'slept'; },
+          () => { globalThis.detached = 'ended'; },
+        );
+        await $.clock.now();
+        throw new Error('first');
+      }).catch(async ($) => {
+        await $.clock.sleep(100);
+        return {text: globalThis.detached};
+      });
+    }`);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('ended');
   });
 
   it.each([

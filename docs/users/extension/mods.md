@@ -141,7 +141,7 @@ this recovery exception.
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-`$.session.messages` and `repo`, state/store, timers, rendering, streaming events and hot reload are not implemented.
+`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, rendering, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -514,8 +514,8 @@ declares:
 
 `$.session.usage()` reports the figures the status line shows. `tokens` is the
 input of the main conversation's last response, including cached tokens, and
-`window` is the model's context window. `percent` is a whole number and is
-absent when the window size is unknown. `startedAt` is when the session began;
+`window` is the model's context window. `percent` is a whole number. When the
+window size is unknown, `window` is 0 and `percent` is absent. `startedAt` is when the session began;
 for a resumed session it is the session's first record. A branch made with
 `/branch` copies its parent's records, so it keeps the parent's `startedAt` and
 its `turns` include the parent's turns. Qwen Code keeps no cost

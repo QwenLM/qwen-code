@@ -73,7 +73,8 @@ export interface ModLog {
 
 export interface ModSessionUsage {
   startedAt: number;
-  context: { tokens: number; window: number; percent?: number };
+  // Claude Code declares `tokens` optional; Qwen Code always reports it.
+  context: { tokens?: number; window: number; percent?: number };
   rateLimits: Array<{ kind: string; percentUsed: number; resetsAt?: string }>;
 }
 

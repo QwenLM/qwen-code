@@ -676,6 +676,21 @@ describe('Mod API event shapes', () => {
       },
       true,
     ],
+    [
+      'session.usage',
+      { ...usage, context: { window: 10, percent: 100 } },
+      true,
+    ],
+    [
+      'session.usage',
+      { ...usage, context: { window: 10, percent: 33.5 } },
+      false,
+    ],
+    [
+      'session.usage',
+      { ...usage, context: { window: 10, percent: 101 } },
+      false,
+    ],
     ['session.usage', { ...usage, extra: 1 }, false],
     ['session.usage', { ...usage, context: {} }, false],
     ['session.usage', { ...usage, rateLimits: [{ kind: 'x' }] }, false],
