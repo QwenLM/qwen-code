@@ -2,11 +2,11 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：提案。本文档是 PR 0，不改动代码。PR 1（headless）尚未开始。
+- **状态**：已在 #15343 中通过。PR 1（headless）是 #15369。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
   - tracking issue #15327；
-  - 早先的提案 #8775；
+  - 早先的提案 #8775，它从 AgentCore 和 headless 入手；本设计把它的目标扩展到全部七份 loop，其中 AgentCore 这一步是 PR 5；
   - 对比各 loop 时发现的缺陷：#15324、#15325、#15326；
   - [loop protection 设置](2026-10-21-loop-protection-setting.zh-CN.md)。
 
@@ -104,7 +104,7 @@ agent loop 指这样一个循环：发送提示、流式接收回复、执行模
 LlmClient → Turn → LlmChat（不改）
 ```
 
-loop 是一个异步生成器。它原样 yield 每个模型事件，另外 yield 工具生命周期事件，因此现有的入口适配层可以继续工作。它返回一个结果，入口把其中的停止原因映射成自己的结果。由入口决定的事项以回调形式提供。
+loop 是一个异步函数。每个模型事件都通过回调原样交给入口，因此现有的入口适配层可以继续工作；工具结果和工具的实时输出也以同样方式送达。由入口决定的事项同样以回调形式提供。loop 返回一个结果，入口把其中的停止原因映射成自己的结果。
 
 ### 模型轮
 
@@ -121,15 +121,15 @@ loop 是一个异步生成器。它原样 yield 每个模型事件，另外 yiel
 
 1. **重复调用。** 重复 call id 的调用不会再次执行。provider 重放的调用得到重复响应；同一个 provider id 再次出现时，loop 以 `duplicate_provider_call` 停止。这些都使用 `turn.ts` 和 `toolCallIdUtils.ts` 中已有的辅助函数。
 2. **选择。** 入口可以限制哪些调用执行（headless 的 structured output）。每个没有执行的调用也都会得到响应。
-3. **进入 plan mode。** 如果这一批调用会进入 plan mode，同批的其他调用通过已有的 `findPlanModeEntryBatchBoundaryIndex` 跳过。
-4. **调度。** 整批调用交给同一个 scheduler 调度。
-   - 默认使用 `CoreToolScheduler`。它已经具备按并发安全性分批、并发上限、审批、hook、不完整编辑守卫、Mod 工具检查和运行时视图。
+3. **调度。** 整批调用交给同一个 scheduler 调度。
+   - 默认使用 `CoreToolScheduler`。它已经具备按并发安全性分批、并发上限、审批、hook、不完整编辑守卫、Mod 工具检查和运行时视图。它还会跳过进入 plan mode 那个调用的同批调用；headless 现在自己做这件事，只是因为它一次只调度一个调用。
+   - 工具在入口提供的工具信号下运行，这个信号可以与 loop 自身的信号不同：headless 只为工具额外加上 Goal 轮次的信号。
    - 入口提供它现在自己负责的 scheduler 选项：审批接线、进度输出，以及整轮模型回调。
    - 如果某个入口的 Mod 带有工具 hook，它就传入现在使用的、能感知 Mod 的 scheduler（`schedule` 契约相同），因此 Mod 的行为不变：Ink 和 OpenTUI 用 `InteractiveModToolScheduler`，headless 用逐个调用的 Mod 执行器。
-5. **启动钩子。** 给 `CoreToolScheduler` 新增一个选项 `beforeToolLaunch(call)`。它在每次启动调用之前，按请求顺序串行执行，并发批次中也是如此。返回 `false` 时该调用不执行。headless 需要它来实现：
-   - `--max-tool-calls` 的精确计数（启动前计数）；
+4. **启动钩子。** 给 `CoreToolScheduler` 新增一个选项 `beforeToolLaunch(call)`。它在每次启动调用之前按请求顺序串行执行。在并发批次中，scheduler 先对能同时运行的每个调用执行它，再一起启动这些调用，因此拒绝会在同组其他调用开始之前生效，与 headless 现在的行为一致。返回 `false` 时该调用不执行。`exec` 脚本内发起的调用不经过它；现在的 headless 也不计入这些调用。loop 会把批次中的每个调用按请求顺序交给入口询问一次；scheduler 没有启动就已结束的调用（参数无效、被拒绝）在轮到它时询问。headless 需要它来实现：
+   - `--max-tool-calls` 的精确计数：每次启动前计数，失败的调用也计入；
    - “第一个有效的 `structured_output` 结束会话”。
-6. **按序输出结果。** 一旦某个调用之前的所有调用都已完成，它的结果就按请求顺序 yield 出去。工具进度也走同一个队列，因此 stream-json 帧保持现在的顺序。
+5. **批次结束时输出结果。** 整批完成后，结果按请求顺序交给入口：先是重放调用，然后是执行过的调用、未执行的调用和重复 call id 的调用。等到整批完成，scheduler 才能先应用批次级 hook 的输出和批次输出预算，入口报告的内容因此与模型收到的完全一致。工具的实时输出仍然在发生时立即流出。
 
 ### 续发
 
@@ -145,7 +145,8 @@ loop 是一个异步生成器。它原样 yield 每个模型事件，另外 yiel
 结果包含停止原因、轮数和最后一个 `Turn`。停止原因有：
 
 - `completed`；
-- `cancelled`；
+- `next_round`——达到 `maxRounds`，结果中带有待发送的工具结果；
+- `cancelled` —— loop 自己的 signal 被中止；如果取消只来自 client 合并进来的其他 signal（例如 Goal 轮次的 signal），这一轮按模型没有发起调用来结束，与 headless 现在的行为一致；
 - `loop_detected`；
 - `duplicate_provider_call`；
 - `tool_ended_turn`；
@@ -156,6 +157,8 @@ loop 是一个异步生成器。它原样 yield 每个模型事件，另外 yiel
 - `error`。
 
 由入口映射停止原因：headless 映射成退出码和结果，之后 ACP 映射成 `stopReason`，AgentCore 映射成 `terminateMode`。
+
+headless 的主循环以 `maxRounds: 1` 运行。因此它为每一轮做的准备（teammate 消息、轮数上限、发送类型）保留在现在的位置，而这一轮本身由 loop 负责。drain 条目则在一次调用中跑完它的所有轮次。
 
 ### 入口策略
 
@@ -182,20 +185,21 @@ if (config.isUnifiedAgentLoopEnabled()) {
 // 现有 loop，保持不变
 ```
 
-现有 loop 作为 `else` 分支保留，在该设置存在期间不做重构。尚未迁移的入口忽略这个设置，设置的说明会列出它覆盖的入口。`qwen serve` 启动的 ACP 子进程读取同一份设置，所以 ACP 迁移后，daemon 和 Web Shell 也会遵循这个设置。
+现有 loop 作为 `else` 分支保留，在该设置存在期间不做重构。尚未迁移的入口忽略这个设置，设置的说明会列出它覆盖的入口。`qwen serve` 启动的 ACP 子进程读取同一份设置，所以 ACP 迁移后，daemon 和 Web Shell 也会遵循这个设置。在此之前，Web Shell 设置面板不显示这个设置，因为它在那里不起作用。
 
 ### Headless 迁到共享 loop（PR 1）
 
 | headless 现状                                                            | 设置开启后                                                                             |
 | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
 | `while (true)` 轮次循环，`drainBatch` 中还有第二份副本                   | 每次交互调用一次 loop；每个 drain 条目是另一次调用，使用各自的发送类型                 |
-| `limitedTurnCount` 门限（退出码 53）                                     | 不变；client 发出的 `MaxSessionTurns` 现在以相同的错误结果结束，而不是假成功（#15325） |
+| `limitedTurnCount` 门限（退出码 53）                                     | 不变；client 发出的 `MaxSessionTurns` 现在以同样的方式结束运行，而不是假成功（#15325） |
 | 遇到 `Retry` / `ModelFallback` 时的 `discardAbandonedAttempt`            | 由 loop 丢弃调用；入口重启本次尝试并写出 retry 帧                                      |
 | `processToolCallBatch` 的重复调用与重放处理                              | 由 loop 负责                                                                           |
 | `structured_output` 预扫描与首次成功即结束                               | 入口策略：调用选择，加上一个可以结束 loop 的结果回调                                   |
-| 进入 plan mode 时跳过同批调用                                            | 由 loop 负责                                                                           |
+| 进入 plan mode 时跳过同批调用                                            | 由 scheduler 对整批处理；逐个调用的 Mod 执行器自己处理                                 |
 | 每个调用一次 `executeToolCall`、`partitionHeadlessToolCalls`、并发上限   | 每轮一个 scheduler，分批规则与上限相同                                                 |
 | 启动前计数                                                               | `beforeToolLaunch`                                                                     |
+| 审批：stream-json 的 `can_use_tool`，一次一个调用                        | 同一个回调，在整批执行前为整批请求                                                     |
 | Mod 带工具 hook 时串行执行                                               | 用逐个调用的 Mod 执行器作为批次 scheduler                                              |
 | 按序收尾、`finalizeToolResponses`、带 Goal 来源信息的 `recordToolResult` | 由 loop 负责                                                                           |
 | 模型覆盖的优先级（内联 `/model` > 整轮视觉 > `\0` 哨兵）                 | 入口策略                                                                               |
@@ -239,13 +243,14 @@ if (config.isUnifiedAgentLoopEnabled()) {
 - 单个工具；
 - 并行只读批次；
 - 安全与不安全调用混合；
+- 调用工具的 Code Mode `exec` 脚本；
 - 审批通过与拒绝（stream-json 的 `can_use_tool`）；
 - 工具执行中取消；
 - 流中途重试与模型回退；
 - 输出被截断的编辑；
 - 循环检测；
 - 阻断型 Stop hook；
-- 预算边界上的 `--max-tool-calls`；
+- 预算边界上的 `--max-tool-calls`：并行批次、顺序批次、在执行前就被拒绝的调用，以及需要审批的批次；
 - 跨两条 stream-json 消息的 `--max-session-turns`；
 - 带同批调用的 structured output；
 - 合并进工具结果轮的 teammate 消息。
@@ -255,11 +260,20 @@ if (config.isUnifiedAgentLoopEnabled()) {
 ## 兼容性
 
 - 设置关闭时，任何入口都不变。唯一改动的共享代码是 scheduler 新增的可选项 `beforeToolLaunch`，不传入时它不起作用。
-- 设置开启时，有意引入的差异是：
-  - #15325（headless）的修复；
-  - 以及之后的 #15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
+- 设置开启时，headless 与现在相比有以下有意的差异。其中大多数源于把一批调用作为一个整体调度，这也是 TUI 现在的做法：
+  - 在 stream-json 中，超过 `--max-session-turns` 的消息会在会话轮数上限处结束运行，与 `-p` 相同（错误写到 stderr，退出码 53），而不是返回一个重复上一条回答的成功结果（#15325）；
+  - 通知轮次（cron、monitor 等排队条目）的每一轮模型调用都计入 `--max-session-turns`，与主轮次相同，而不是整个条目只计一轮，因此通知轮次中调用工具的运行可能更早到达上限；
+  - 一批调用的 PreToolUse hook 和审批（stream-json 的 `can_use_tool`）会在这一批的任何调用启动之前为所有调用执行，而不是一次一个调用；在 `--max-tool-calls` 下，超出预算的调用可能先被审批通过，然后在执行前被停下；
+  - PostToolBatch hook 每批触发一次，带上这一批的所有调用，批次输出预算也按整批计算；现在每个调用都是单独的一批；
+  - 遥测按整批记录，与 TUI 一致：进入 plan mode 那个调用的同批调用记为失败的工具调用（JSON 输出的 `stats` 也计入），启动前被拦下的调用仍有工具 span；带 Mod 工具 hook 时调用仍逐个调度，这两点都不适用；
+  - 一批中有多个串行调用时，它们的结果在整批完成时输出，而不是每个调用完成后输出；
+  - 配置了 PreToolUse 或 PermissionRequest hook 时，只读的 shell 调用可以并行执行，按 hook 处理后的输入判断，而不是总是单独执行；
+  - 同批中排在前面的 skill 注册了 PreToolUse hook 时，后面的调用会被拦下，需要模型重新发起，而不是由新的 hook 检查；
+  - 在 `--json-schema` 下，同一次回复中重复 call id 的 `structured_output` 调用按重复调用作答而不执行，因此有效的第二次提交要等到下一轮；之后的轮次以相同的 call id 和相同的参数重新提交时，也按重复调用作答，再提交一次则以 provider 重复循环结束运行，而不是每次都执行。
 
-  每一项都会在对拍测试中列出。
+  对拍测试覆盖了保持不变的常见场景，并对 #15325 的停止和 `--max-tool-calls` 下被审批的调用做了断言。headless 单测在两份 loop 上运行通知轮次的计数和重新提交的 `structured_output`。
+
+- 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 
 - 不删除任何设置、协议字段或文件格式。
 
@@ -294,7 +308,8 @@ if (config.isUnifiedAgentLoopEnabled()) {
 ## 待定问题
 
 - `model.maxSessionTurns: 0` 应该表示“不允许任何轮次”，还是应该被拒绝？目前各 loop 的理解不一致（#15325）。
-- 对于并发批次内部的工具进度帧，它们之间的相对顺序现在本来就不确定。对拍测试的输出比较是否应该容忍这类帧的位置变化？
+- 对拍测试按顺序比较各帧，目前还没有场景并发运行带实时输出的调用；这类调用的进度帧在两份 loop 中都没有固定顺序。这类场景是否应该按调用分别比较进度帧？
+- 被 `beforeToolLaunch` 拒绝的调用，对 PostToolBatch 来说仍是所在批次的成员，因此 hook 附加在它上面的停止指令或补充上下文不会到达模型。headless 只在运行结束时才拒绝调用，所以这在 headless 中不会表现出来。在其他入口使用 `beforeToolLaunch` 之前，应该让被拒绝的调用离开 hook 看到的批次，还是把 hook 的输出移到最后一个实际运行的调用上？
 
 ## 后续工作
 
