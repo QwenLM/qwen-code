@@ -288,6 +288,7 @@ export interface LspClient {
   workspaceSymbols(
     query: string,
     limit?: number,
+    serverName?: string,
   ): Promise<LspSymbolInformation[]>;
 
   /**

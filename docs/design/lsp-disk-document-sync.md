@@ -76,11 +76,14 @@ prepare at a current location before traversal. Unrelated drifted or unreadable 
 healthy siblings. Root freshness and connection changes still reject the whole
 request, even for an empty result or request error. Non-file URIs remain unsigned
 and report “cannot be traversed; prepare at a file location instead”, not a
-retryable stale error. Ordinary non-file requests pass through unchanged.
+retryable stale error. Ordinary document queries reject non-file URIs under
+the [file routing contract](lsp-file-routing.md).
 
 ## Boundaries
 
-- Workspace symbols remain warmup-only. Optional warmup failures log and do not
+- Workspace symbols remain warmup-only. Primary-root resolution failures during
+  TypeScript or generic warmup discovery propagate as explicit refusals rather
+  than empty symbol results. Optional candidate read/send failures log and do not
   cancel symbol search. Successful disk-reader discovery is connection-local;
   readability is rechecked without retaining delivered text, removed candidates
   trigger rediscovery and missing candidates are not negatively cached. Workspace diagnostics additionally
@@ -95,7 +98,8 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   connection. A fixed delay does not prove server analysis has completed. Pending closes are retried without rediscovering documents. The tool's optional top-symbol
   reference lookup is document-targeted and also synchronizes.
 - No file watchers, edit-time feedback, IDE buffers, installation, workspace-wide
-  dependency freshness, or diagnostic push/pull redesign. Reads observe disk
+  dependency freshness, or push-diagnostic cache. Pull negotiation and failure
+  visibility are covered by the diagnostic failure contract below. Reads observe disk
   snapshots, not an atomic transaction with concurrent external writers. For
   disk-reading servers, unchanged text has no client-delivered version; external
   edits that return to identical text between observations cannot be detected.
@@ -103,75 +107,69 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   an earlier server returned diagnostics. Workspace synchronization failures
   (unreadable/deleted tracked files, thrown sends, or unsupported changes) escape
   the ordinary pull-request catch; no empty or partial success is returned. A
-  tracked URI remains parked after its first failed read, including ENOENT. Its
-  second consecutive failed read drops only that URI from the parked set; both
-  observing diagnostic calls reject. The shared synchronization helper applies
-  this bound to ordinary queries, warmup and sweeps, counting
-  actual reads rather than calls. A successful read resets the count, and a new
-  connection resets counts and versions. An untracked, unreadable first query
+  tracked URI remains parked after its first failed read or physical-scope
+  resolution, including ENOENT. Its second consecutive failure drops only that
+  URI from the parked set; both observing diagnostic calls reject. The shared
+  synchronization helper applies this bound to ordinary queries, warmup and
+  sweeps, counting attempted synchronization failures rather than calls. A
+  successful read resets the count, and a new connection resets counts and
+  versions. An untracked, unreadable first query
   does not create a replay obligation. After eviction, later sweeps can proceed;
-  a successful document-targeted query is needed to track the restored file again.
-  Eviction retains the same-connection version and any pending close. Unsupported
-  changes and thrown sends do not consume read retries. Configuration-reload
-  replay still consumes the parked set before delivery; retaining failed reload
+  when no pending close remains, a successful document-targeted query is needed
+  to track the restored file again.
+  Eviction retains the same-connection version and any pending close. Pending
+  closes remain eligible for scope rechecks: after two resolution failures,
+  further unresolved attempts defer without blocking the pull. Once scope
+  returns, the old buffer is closed and current text delivered before querying,
+  so workspace diagnostics cannot reuse a stale peer buffer. Recovery parks the
+  URI before closing so a thrown reopen send remains retryable. Confirmed scope
+  revocation, unsupported changes and thrown sends do not consume read retries.
+  Configuration-reload replay still consumes the parked set before delivery;
+  retaining failed reload
   deliveries remains deferred. The manager catches internal TypeScript
   warmup errors; failure of a different warmup file does not prevent querying a
   synchronized target. Propagated failures reach the tool's existing failure
   message rather than claiming a clean or complete result. Successful empty
-  diagnostics still display as clean. For the two diagnostics pulls the error
-  result design is now in place: a failed pull and an unusable response (no
-  response, or reported items none of which survive normalization) are
-  recorded per server. A `-32601` refusal is not a failure: the server never
-  implemented the pull, so it is recorded on a separate `unsupported` ledger
-  that never vetoes on either leg. A document answer is refused for it only
-  when the refusing server declares the queried extension and no answering
-  server owns it. A workspace query has no queried file and so no extension to
-  attribute a refusal to: the refusal neither vetoes a sibling's report nor
-  excuses one, and appears only in a rejection the gate already owes to
-  another cause. A document query that
-  retrieves nothing rejects when a recorded failure belongs to a server the
-  queried file does not exclude, when a declared owner's refusal stands
-  unbacked, or when a server that could own the queried file was unreachable;
-  the tool surfaces the rejection as `ToolErrorType.EXECUTION_FAILED`. An
-  authoritative empty report is clean only when it is both relevant and, for an
-  extension the tables can place, positively owned; a file whose extension no
-  table can place (`.h`, `.mts`, an extensionless name) has no decidable owner
-  and is judged on relevance alone, as it was before ownership became a
-  requirement. A non-`file:` URI (`jdt://…`) reaches the same undecidable case
-  by another route: `synchronizeDocument` returns before sending any `didOpen`,
-  so the server answers for a document it was never sent, and the pass-through
-  is kept rather than refused, because refusing would break servers that
-  diagnose their own virtual documents. Its empty answer is therefore surfaced
-  as clean on relevance alone — as it was before this change, so it is a
-  pre-existing fail-open on the merge base rather than a regression, and no
-  scan can distinguish it from a genuinely clean render. That kept pass-through
-  is pinned at the same gate as the unplaceable-extension case, so a later
-  ownership change cannot silently turn it into a refusal. Whether such an answer
-  should instead be labelled unbacked is an open ruling, not something this
-  change settles. Relevance is decided against every extension the diagnostics
-  tables can place — the language-ID mapping, the diagnostics-local alias rows
-  and the identity-mapped language IDs — and the JS/TS family widening is
-  one-directional: a `typescript` declaration covers the JavaScript side, while
-  a `javascript`-only declaration cannot claim `.ts` or `.tsx`. The rejection
-  names which condition failed: an answer was retrieved and a queried server
-  did answer, but no answer positively owns the queried extension; a relevant
-  answer could not be attributed to the queried file; or no configured server
-  covers it. A
-  server that could never own the queried file does not veto a document query;
-  a workspace query refuses an unbacked clean report while any configured
-  server is unreachable, and while any pull failed for a reason other than a
-  refusal. A server that finishes starting while a query is in flight is asked
-  before that decision, not reported as unreachable: each pull re-reads live
-  handle state and appends whatever became ready, and only handles not queried
-  yet are added, so the pass is bounded and cannot repeat a server. A handle
-  whose readiness becomes observable only after the last such read still vetoes
-  as never asked. That relevance rule excuses a server from vetoing
-  _another_ server's answer, never from being the only answer: a document
-  query that no queried server answered rejects even when every recorded
-  failure belongs to a server the queried file excludes. Other request/pull
-  catches and public
-  query catches other than hierarchy provenance handling are unchanged and can
-  return empty arrays or null; these are **not evidence of clean diagnostics**.
+  diagnostics still display as clean only when a usable answering server backs
+  them. Independent transport failures are recorded per server; actual nonempty
+  diagnostics from healthy servers survive under main's existing partial-result
+  policy, but do not certify complete analysis. Missing (`undefined`) and literal
+  `null` responses are recorded as failures with distinct reasons; neither backs
+  a clean answer. Actual diagnostics survive a later null response. Invalid report
+  envelopes or malformed in-scope payloads reject
+  immediately, even after earlier diagnostics. Synchronization failures, scope
+  resolution errors and workspace scan-budget exhaustion also remain hard errors.
+  The tool exposes rejected diagnostic queries as
+  `ToolErrorType.EXECUTION_FAILED`.
+
+  Document diagnostics retain the file-only routing gate, authoritative explicit
+  extension maps, fresh workspace containment and per-server roots. Explicit
+  `serverName` bypasses language/root selection and declaration-based ownership,
+  never workspace containment. A READY server is excused as unasked only when
+  its resolved roots are nonempty and disjoint from the file, or its declared
+  languages prove it irrelevant. Partial extension maps and unusable roots cannot
+  prove exclusion and retain the empty-answer veto. A primary-root server still
+  covers all registered directories. Relevant configured servers that are not ready can
+  veto an otherwise unbacked empty answer; live ready handles are refreshed after
+  each pull and eligible newly ready servers are queried once.
+
+  Empty document answers require relevance and, for an extension the diagnostic
+  tables can place, positive ownership. Unplaceable extensions retain relevance
+  checks rather than invented ownership; legacy dispatch still allows actual
+  diagnostics from opaque server-name language keys. Diagnostic aliases and
+  directionally widened TypeScript ownership remain separate from the explicit
+  extension routing set: mapped language values do not enable omitted extensions.
+  Non-file locations may remain visible as navigation results, but cannot be
+  submitted as document diagnostic queries.
+
+  A `-32601` refusal is recorded separately because the server never implemented
+  the pull. It cannot veto a genuine answering sibling. With no usable answering
+  server, however, an unsupported workspace pull cannot certify clean results and
+  rejects with the unsupported server's reason. Other transport catches are
+  unchanged; their empty arrays or null are not evidence of clean diagnostics.
+  This failure accounting follows the
+  [diagnostic failure contract](lsp-diagnostic-failures.md).
+
 - Notification delivery is not acknowledged by the transport. This change does
   not redesign asynchronous writes/closed connections.
 
