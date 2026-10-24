@@ -184,6 +184,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     const lockAt = integration.indexOf(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
+    expect(lockAt).toBeGreaterThan(-1);
     expect(
       integration.indexOf('-f packages/sdk-java/qwencode/pom.xml'),
     ).toBeLessThan(lockAt);
@@ -1328,7 +1329,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // still recapture. The write-back is best-effort like the seed: its
     // warning arms keep a copy failure from reddening the gate after mvn
     // has already passed.
-    expect(step.run).toContain('mkdir -p "${HOME}/.m2/repository"');
+    expect(step.run).toContain('mkdir -p "${HOME}/.m2/repository" 9>&-');
     // Run 39563394993 spent 60 minutes streaming the whole seeded tree and
     // was cancelled at the job ceiling. Only the nlink == 1 delta Maven
     // fetched in this job is published, by per-file hardlinks that never
@@ -1352,11 +1353,15 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository"');
     const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
     const verifyAt = step.run.indexOf('-Pmysql-integration');
+    const lockAt = step.run.indexOf(
+      'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
+    );
     const writeBackAt = step.run.indexOf('cd "${RUNNER_TEMP}/m2-repo"');
     expect(seedAt).toBeGreaterThan(-1);
     expect(installAt).toBeGreaterThan(seedAt);
     expect(verifyAt).toBeGreaterThan(installAt);
-    expect(writeBackAt).toBeGreaterThan(verifyAt);
+    expect(lockAt).toBeGreaterThan(verifyAt);
+    expect(writeBackAt).toBeGreaterThan(lockAt);
   });
 });
 
