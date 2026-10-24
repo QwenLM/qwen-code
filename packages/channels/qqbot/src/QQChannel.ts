@@ -4931,11 +4931,15 @@ export class QQChannel extends ChannelBase {
     messageId: string,
   ): void {
     if (!senderId || !messageId) return;
+    const prior = this.recentInbound.get(chatId) ?? [];
+    // First write wins for one message id. The same platform id is redelivered
+    // on reconnect replay and arrives twice when a message is both
+    // GROUP_AT_MESSAGE_CREATE and GROUP_MESSAGE_CREATE; re-stamping it would
+    // make an older message outrank a newer one and extend its recall window.
+    if (prior.some((entry) => entry.messageId === messageId)) return;
     const now = Date.now();
-    const entries = (this.recentInbound.get(chatId) ?? []).filter(
-      (entry) =>
-        now - entry.at < QQChannel.RECALL_WINDOW_MS &&
-        entry.messageId !== messageId,
+    const entries = prior.filter(
+      (entry) => now - entry.at < QQChannel.RECALL_WINDOW_MS,
     );
     entries.push({ messageId, senderId, at: now });
     if (entries.length > QQChannel.MAX_RECENT_INBOUND) {
@@ -4945,6 +4949,21 @@ export class QQChannel extends ChannelBase {
     if (this.recentInbound.size > QQChannel.MAX_RECENT_INBOUND_CHATS) {
       this.sweepRecentInbound(now);
     }
+  }
+
+  /**
+   * Drop one recalled message from the ring so the next member-targeted recall
+   * resolves the previous message instead of re-targeting the destroyed one.
+   * Splices in place: `recentMemberMessage`'s backward scan relies on the ring
+   * staying ascending by `at`.
+   */
+  private dropRecentMessage(chatId: string, messageId: string): void {
+    const entries = this.recentInbound.get(chatId);
+    if (!entries) return;
+    const index = entries.findIndex((entry) => entry.messageId === messageId);
+    if (index === -1) return;
+    entries.splice(index, 1);
+    if (entries.length === 0) this.recentInbound.delete(chatId);
   }
 
   /** Keep the ring's chat keys bounded: stale chats first, then LRU. */
@@ -5012,8 +5031,13 @@ export class QQChannel extends ChannelBase {
       currentMessageId: (sessionId) => this.getResponseMessageId(sessionId),
       recentMemberMessage: (chatId, senderId) =>
         this.recentMemberMessage(chatId, senderId),
+      dropRecentMessage: (chatId, messageId) =>
+        this.dropRecentMessage(chatId, messageId),
       request: (input) => this.requestModerationApi(input),
-      log: (message) => process.stderr.write(`[QQ:${this.name}] ${message}\n`),
+      log: (message) =>
+        process.stderr.write(
+          `[QQ:${this.name}] ${sanitizeLogText(message, 200)}\n`,
+        ),
     })) {
       register({ ...tool, owner: this.name });
     }
@@ -5025,6 +5049,9 @@ export class QQChannel extends ChannelBase {
     path: string;
     body?: Record<string, unknown>;
   }): Promise<ModerationApiResult> {
+    if (this.disposed) {
+      return { ok: false, status: 0, message: 'channel disposed' };
+    }
     if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
       try {
         await this.fetchToken();
@@ -6446,6 +6473,7 @@ export class QQChannel extends ChannelBase {
     }
     this.botOpenIdByGroup.delete(groupId);
     this._lastKeywordNoMatchLog.delete(groupId);
+    this.recentInbound.delete(groupId);
     // Clean up cron buffers targeting this group (always, regardless of config flag)
     let cleanedCron = 0;
     for (const [sid, entry] of this.cronBuffer) {

@@ -76,13 +76,14 @@ export QQ_APP_SECRET=<your-app-secret>
 
 ### QQ-Specific Options
 
-| Option                | Default | Description                                                                                                                                      |
-| --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `appID`               | —       | QQ Bot AppID from developer portal. If omitted, QR code login is used.                                                                           |
-| `appSecret`           | —       | QQ Bot AppSecret. Supports `$ENV_VAR` syntax. If omitted, QR code login is used.                                                                 |
-| `sandbox`             | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`)                                                                |
-| `moderationTools`     | `false` | Expose the QQ group-management tools to the agent — see [Group Management Tools](#group-management-tools). Off by default; set `true` to opt in. |
-| `purgeLegacySessions` | `false` | Delete legacy single-scope and user-scope session routes — see below.                                                                            |
+| Option                | Default | Description                                                                                                                                                                                                                                                                      |
+| --------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appID`               | —       | QQ Bot AppID from developer portal. If omitted, QR code login is used.                                                                                                                                                                                                           |
+| `appSecret`           | —       | QQ Bot AppSecret. Supports `$ENV_VAR` syntax. If omitted, QR code login is used.                                                                                                                                                                                                 |
+| `sandbox`             | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`)                                                                                                                                                                                                |
+| `moderationTools`     | `false` | Expose the QQ group-management tools to the agent — see [Group Management Tools](#group-management-tools). Off by default; set `true` to opt in.                                                                                                                                 |
+| `groupAllPolicy`      | unset   | Receive ordinary (non-@) group messages: `"log"` to observe them only, `"keyword"` or `"all"` to let them start a turn (with `groups: {"*": {"requireMention": false}}`). Unset means the gateway delivers only @-mentions and direct messages. See [Group Chats](#group-chats). |
+| `purgeLegacySessions` | `false` | Delete legacy single-scope and user-scope session routes — see below.                                                                                                                                                                                                            |
 
 All standard channel options (see [Channel Overview](./overview#options)) are also supported:
 `privatePolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
@@ -134,7 +135,7 @@ With `moderationTools: true`, the channel exposes the QQ group-management API to
 
 Every tool reports the platform's error code and what it means, so the agent can tell "the bot is not a group admin" from "the message is past the 2-minute window" from "this app is not allowed to call this endpoint".
 
-For a group action to reach a member's message by name, the channel remembers the last inbound messages per chat for the platform's 2-minute recall window; a message older than that cannot be recalled at all. That memory is per-process only — after a restart there is nothing to recall by member until new messages arrive.
+For a group action to reach a member's message by name, the channel remembers the last inbound messages per chat for the platform's 2-minute recall window; a message older than that cannot be recalled at all. That memory is per-process only — after a restart there is nothing to recall by member until new messages arrive. It also only holds messages the gateway actually delivered: with `groupAllPolicy` unset the bot receives only @-mentions (and direct messages), so member-targeted recall can only reach an ordinary member's message when `groupAllPolicy` is `"keyword"`, `"all"`, or `"log"`. Without an argument the tool recalls the message that triggered the current turn — the inbound message the bot is answering, not the bot's own reply. A successful recall reports the message id it destroyed and drops that id from the per-chat ring, so a second member-targeted recall reaches the previous message instead of retrying a destroyed one; a failed recall keeps the entry so the same target can be retried.
 
 Each channel instance owns its tools: one bridge can serve several channels, and a tool is only offered to sessions of the channel that registered it, so two QQ channels in one process never act on each other's chats or credentials.
 

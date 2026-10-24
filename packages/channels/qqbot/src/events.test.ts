@@ -1530,6 +1530,23 @@ describe('群管理事件', () => {
       expect(groupActiveMsgEnabled.has('group-del-1')).toBe(false);
     });
 
+    it('drops the group from the recent-inbound ring', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const ring = (ch as unknown as { recentInbound: Map<string, unknown[]> })
+        .recentInbound;
+      pvt['recordRecentInbound']('group-del-1', 'alice', 'msg-1');
+      expect(ring.has('group-del-1')).toBe(true);
+
+      pvt['handleGroupDelRobot']({
+        group_openid: 'group-del-1',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      } as GroupDelRobotEvent);
+
+      expect(ring.has('group-del-1')).toBe(false);
+    });
+
     it('清理 cron buffer/timer（cron-msg-experimental 启用）', () => {
       const ch = makeChannel({ 'cron-msg-experimental': true });
       const pvt = ch as unknown as QQChannelRaw;
@@ -3955,6 +3972,57 @@ describe('qqbot moderation tools', () => {
     expect(ring.get('group-1')).toHaveLength(1);
   });
 
+  it('keeps the first arrival order when a replayed id arrives again', () => {
+    const ch = makeChannel();
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-b');
+    // A replay of the older message must not become the newest entry.
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-b');
+  });
+
+  it('does not extend the recall window when a message is replayed', () => {
+    const ch = makeChannel();
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+    vi.advanceTimersByTime(RECALL_WINDOW_MS - 10_000);
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-a');
+    vi.advanceTimersByTime(15_000);
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBeUndefined();
+  });
+
+  it('drops a recalled message from the ring, leaving the older target reachable', () => {
+    const ch = makeChannel();
+    const raw = ch as unknown as QQChannelRaw;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-2');
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-2');
+
+    raw['dropRecentMessage']('group-1', 'msg-2');
+
+    expect(raw['recentMemberMessage']('group-1', 'alice')).toBe('msg-1');
+  });
+
+  it('leaves the ring untouched when the recalled id is not tracked', () => {
+    const ch = makeChannel();
+    const raw = ch as unknown as QQChannelRaw;
+    const ring = (
+      ch as unknown as {
+        recentInbound: Map<string, Array<{ messageId: string }>>;
+      }
+    ).recentInbound;
+    raw['recordRecentInbound']('group-1', 'alice', 'msg-1');
+
+    raw['dropRecentMessage']('group-1', 'msg-other');
+
+    expect(ring.get('group-1')?.map((entry) => entry.messageId)).toEqual([
+      'msg-1',
+    ]);
+  });
+
   describe('requestModerationApi', () => {
     function channelWithToken(): {
       ch: InstanceType<typeof QQChannel>;
@@ -3997,6 +4065,25 @@ describe('qqbot moderation tools', () => {
         'tok',
         undefined,
       );
+    });
+
+    it('refuses to call the platform after the channel is disposed', async () => {
+      mockRequestQQApi.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => '',
+      });
+      const { ch, request } = channelWithToken();
+      (ch as unknown as { disposed: boolean }).disposed = true;
+
+      await expect(
+        request({ method: 'DELETE', path: '/v2/groups/g/messages/m' }),
+      ).resolves.toEqual({
+        ok: false,
+        status: 0,
+        message: 'channel disposed',
+      });
+      expect(mockRequestQQApi).not.toHaveBeenCalled();
     });
 
     it('surfaces success with no body as undefined data', async () => {
@@ -4143,6 +4230,57 @@ describe('qqbot moderation tool ownership and recovery', () => {
     expect(result.isError).toBe(true);
     expect(result.text).toContain('No QQ chat is bound');
   });
+
+  it('caps and sanitizes the stderr line for an unsanitized failure body', async () => {
+    const tools: Array<{
+      name: string;
+      handler: (
+        args: Record<string, unknown>,
+        context: { sessionId: string },
+      ) => Promise<unknown>;
+    }> = [];
+    const ch = makeChannel(
+      { moderationTools: true },
+      {
+        registerChannelTool: (tool: { name: string }) =>
+          tools.push(tool as never),
+      },
+      {
+        router: {
+          getTarget: () => ({
+            channelName: 'test-bot',
+            chatId: 'G1',
+            isGroup: true,
+          }),
+        },
+      },
+    );
+    const internals = ch as unknown as {
+      accessToken: string;
+      tokenExpiresAt: number;
+    };
+    internals.accessToken = 'tok';
+    internals.tokenExpiresAt = Date.now() + 3_600_000;
+    mockRequestQQApi.mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: async () => '<html>' + 'x'.repeat(5_000) + '\u001b[31m',
+    });
+
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let written = '';
+    try {
+      const recall = tools.find((tool) => tool.name === 'qq_recall_message');
+      await recall?.handler({ message_id: 'M1' }, { sessionId: 's-1' });
+      written = stderr.mock.calls.map((call) => String(call[0])).join('');
+    } finally {
+      stderr.mockRestore();
+    }
+
+    expect(written).toContain('qq_recall_message failed');
+    expect(written.length).toBeLessThan(400);
+    expect(written).not.toContain('\u001b');
+  });
 });
 
 describe('qqbot recent-inbound ring bounds', () => {
@@ -4159,6 +4297,8 @@ describe('qqbot recent-inbound ring bounds', () => {
     expect(ring.size).toBeLessThanOrEqual(256);
     expect(raw['recentMemberMessage']('group-0', 'alice')).toBeUndefined();
     expect(raw['recentMemberMessage']('group-299', 'alice')).toBe('msg-299');
+  });
+});
 
 // The channel-base mock above keeps the shipped implementations rather than
 // mirrors, so the double cannot diverge from what production imports. Pin the

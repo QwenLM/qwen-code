@@ -549,6 +549,39 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it("does not register another channel's owned tools on a loop-opted-out session", async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn(async () => {}),
+      unregister: vi.fn(async () => {}),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelTool({
+      name: 'qq_recall_message',
+      description: 'Recall a QQ message.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: vi.fn(async () => 'Message recalled.'),
+      owner: 'qq-main',
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo', {
+      enableChannelLoops: false,
+      sourceId: 'feishu-main',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(host.register).not.toHaveBeenCalled();
+
+    events.close();
+    bridge.stop();
+  });
+
   it('ignores duplicate and reserved adapter tool names', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

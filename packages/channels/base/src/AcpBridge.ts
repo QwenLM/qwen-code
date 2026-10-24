@@ -428,6 +428,17 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const conn = this.ensureConnection();
+    // A binding skipped at session creation (MCP budget, one transient
+    // runtime-add failure) must not cost the session every channel tool for its
+    // lifetime. Retry it on the next turn, fire-and-forget so a slow or skipped
+    // bind never delays the prompt; registerChannelLoopMcpServer is idempotent
+    // and deduplicates concurrent attempts.
+    if (
+      this.knownSessionIds.has(sessionId) &&
+      !this.channelLoopMcpBoundSessions.has(sessionId)
+    ) {
+      void this.registerChannelLoopMcpServer(sessionId);
+    }
 
     const chunks: string[] = [];
     let slashCommandOutput = '';
@@ -938,9 +949,16 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       throw new Error('Invalid client MCP payload.');
     }
     const sessionId = this.boundSessionId(params);
+    const rawSessionId = params['sessionId'];
+    const carriedSessionId =
+      sessionId === undefined &&
+      typeof rawSessionId === 'string' &&
+      rawSessionId.length > 0
+        ? rawSessionId
+        : undefined;
     const response = await this.channelLoopMcpServer.handleMessage(
       payload as JsonRpcMessage,
-      { sessionId },
+      { sessionId, carriedSessionId },
     );
     this.logChannelToolDiagnostic(params, sessionId, response);
     if (!response) {

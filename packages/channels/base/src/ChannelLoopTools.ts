@@ -17,6 +17,12 @@ export type JsonRpcMessage = Record<string, unknown>;
 
 export interface ChannelLoopMcpContext {
   sessionId?: string;
+  /**
+   * Session id the frame named that the bridge could not bind to a channel
+   * server. Present only when `sessionId` is absent, so the tool result can
+   * name the failed binding instead of a missing id.
+   */
+  carriedSessionId?: string;
 }
 
 const createTool = {
@@ -182,8 +188,14 @@ export class ChannelLoopMcpServer {
   ): Promise<unknown> {
     if (!context.sessionId) {
       // A tool call that resolves to no session must fail as a tool result,
-      // not as a transport error: nothing may execute on an unknown chat.
-      return this.toolErrorPayload('Missing channel session id.');
+      // not as a transport error: nothing may execute on an unknown chat. A
+      // frame that named a known-but-unbound session failed to bind, which is
+      // a different operator-facing problem from a frame with no id at all.
+      return this.toolErrorPayload(
+        context.carriedSessionId
+          ? 'No channel tool binding is active for this session.'
+          : 'Missing channel session id.',
+      );
     }
     if (typeof rawParams !== 'object' || rawParams === null) {
       throw new Error('Invalid tools/call params.');

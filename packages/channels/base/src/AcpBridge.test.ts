@@ -317,6 +317,34 @@ describe('AcpBridge', () => {
     expect(bridge.knownSessionIds.has('s-1')).toBe(true);
   });
 
+  it('re-attempts a skipped channel loop binding on the next prompt', async () => {
+    const extMethod = vi
+      .fn()
+      .mockResolvedValueOnce({ skipped: true, reason: 'budget_warning_only' })
+      .mockResolvedValue({});
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+    const prompt = vi.fn().mockResolvedValue({ stopReason: 'end_turn' });
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod, newSession, prompt };
+    bridge.channelLoopMcpServer = {};
+
+    await expect(bridge.newSession('/tmp')).resolves.toBe('s-1');
+    expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(false);
+
+    await bridge.prompt('s-1', 'question');
+
+    await vi.waitFor(() => expect(extMethod).toHaveBeenCalledTimes(2));
+    expect(extMethod).toHaveBeenLastCalledWith(
+      SESSION_MCP_RUNTIME_ADD_METHOD,
+      expect.objectContaining({ sessionId: 's-1' }),
+    );
+    expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(true);
+  });
+
   it('binds a resumed session through the session-scoped runtime add', async () => {
     const extMethod = vi.fn().mockResolvedValue({});
     const unstable_resumeSession = vi.fn().mockResolvedValue({});
