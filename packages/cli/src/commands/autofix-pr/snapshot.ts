@@ -42,6 +42,7 @@ import {
   readState,
   repoRoot,
   requireState,
+  rerunFloors,
   sameRepository,
   writeGateCursor,
   type AutofixPrGateCursor,
@@ -461,14 +462,15 @@ function heldByDeferral(
   failure: FailedCheck,
   head: string,
   deferred: Set<number>,
-  held: Map<string, number>,
+  held: Set<string>,
 ): boolean {
+  const run = failure.event.runId;
   return (
     !failure.runDone &&
-    failure.event.runId !== null &&
-    deferred.has(failure.event.runId) &&
+    run !== null &&
+    deferred.has(run) &&
     failure.checkRunId !== undefined &&
-    held.get(`${failure.identity}@${head}`) === failure.checkRunId
+    held.has(`${run}:${failure.identity}@${head}@${failure.checkRunId}`)
   );
 }
 
@@ -695,13 +697,12 @@ export function failedJobsOfRun(
  */
 export function heldKeys(
   pr: PrData,
-  rerunChecks: string[],
-  deferredRuns: number[],
+  state: Pick<AutofixPrState, 'rerunChecks' | 'heldChecks' | 'deferredRuns'>,
 ): Set<string> {
-  const deferred = new Set(deferredRuns);
-  const held = rerunFrom(rerunChecks);
+  const deferred = new Set(state.deferredRuns ?? []);
+  const held = new Set(state.heldChecks ?? []);
   return new Set(
-    checkEvents(pr, rerunChecks)
+    checkEvents(pr, rerunFloors(state))
       .failed.filter((failure) =>
         heldByDeferral(failure, pr.headRefOid, deferred, held),
       )
@@ -1000,14 +1001,14 @@ export function buildSnapshot(
 
   const checks = lagging
     ? { failed: [], pending: [], truncated: false }
-    : checkEvents(pr, state.rerunChecks ?? []);
+    : checkEvents(pr, rerunFloors(state));
   // A failure handled without a push (declined, left for a human, re-run)
   // stays on the head, so it is skipped by its attempt; a re-run that fails
   // again is a new attempt. `key` is what `reply` and `rerun` record.
   const handledChecks = new Set(state.handledChecks ?? []);
   // A run the round could not re-run yet is offered again once it ended.
   const deferredRuns = new Set(state.deferredRuns ?? []);
-  const held = rerunFrom(state.rerunChecks ?? []);
+  const held = new Set(state.heldChecks ?? []);
   for (const failure of checks.failed) {
     if (heldByDeferral(failure, pr.headRefOid, deferredRuns, held)) continue;
     const { event, attempt } = failure;
@@ -1047,9 +1048,10 @@ export function buildSnapshot(
 export interface GateWatch {
   knownHeads: string[];
   seenCommentIds: string[];
-  /** Checks a round re-ran, or deferred a re-run of, by identity, head and
-   * check run. */
+  /** Checks a round re-ran, by identity, head and check run. */
   rerunChecks?: string[];
+  /** Re-runs a deferral holds, by run, identity, head and check run. */
+  heldChecks?: string[];
   /** This run stopped reading at its time budget, in the check runs, in
    * the suites read after them (where failures to start are found) or in
    * the threads read last: what it did not read, and what came after it,
@@ -1138,7 +1140,7 @@ export function buildGateSnapshot(
   // A failure a round handled without a push counts as reported; one of a
   // run the round could not re-run yet is reported once more, under a key
   // of its own, when that run has ended.
-  const checks = checkEvents(pr, watch.rerunChecks ?? []);
+  const checks = checkEvents(pr, rerunFloors(watch));
   const cursorChecks = new Set(next.reportedChecks);
   // A marked key (`<key>~<check run>`) was reported up to that check run.
   const marked = new Map<string, number>();
@@ -1150,7 +1152,7 @@ export function buildGateSnapshot(
   }
   const handledChecks = new Set(watch.handledChecks ?? []);
   const deferred = new Set(watch.deferredRuns ?? []);
-  const held = rerunFrom(watch.rerunChecks ?? []);
+  const held = new Set(watch.heldChecks ?? []);
   const runsLatest = latestOfRuns(pr);
   // A read the time cut in the check runs lists a check's earlier runs and
   // not always its latest (the rollup lists them oldest first): it keeps
@@ -1194,16 +1196,15 @@ export function buildGateSnapshot(
     const keys = [key];
     // One a round has answered since, through another run of the check,
     // has nothing left for the round to do. A read cut in the check runs
-    // may not list the run's latest one: its end waits for a whole read.
-    if (
+    // may not list the run's latest one: the end, failure and all, waits
+    // for a whole read.
+    const ended =
       runDone &&
       event.runId !== null &&
       deferred.has(event.runId) &&
-      !handledChecks.has(key) &&
-      !cutInRuns
-    ) {
-      keys.push(`${key}@ended`);
-    }
+      !handledChecks.has(key);
+    if (ended && cutInRuns) continue;
+    if (ended) keys.push(`${key}@ended`);
     // A key that names no run (a workflow a review starts) is the same for
     // every run of its check on the head. The cursor marks the run it was
     // reported for, so a failure of a later one — a review started it while
@@ -1802,6 +1803,7 @@ function runGate(args: SnapshotArgs): void {
           handledConflictSha: state.handledConflictSha ?? null,
           deferredRuns: state.deferredRuns ?? [],
           rerunChecks: state.rerunChecks ?? [],
+          heldChecks: state.heldChecks ?? [],
         }
       : { knownHeads: [], seenCommentIds: [] };
 

@@ -72,6 +72,11 @@ export interface AutofixPrState {
   authorCanPush?: boolean;
   /** Runs `rerun` was asked for while they were still in progress. */
   deferredRuns?: number[];
+  /** `<run id>:<identity>@<headSha>@<check run id>` of the re-runs a
+   * deferral holds for its run until it ends, apart from the ones spent
+   * (`rerunChecks`): only the run that holds one may spend it, and a later
+   * run of the check answers for it. */
+  heldChecks?: string[];
   /** Replies `reply` is about to post, written before each POST: one whose
    * answer is lost is recognized on the PR by these, never by a new plan. */
   pendingPosts?: PendingPost[];
@@ -107,6 +112,19 @@ export interface AutofixPrHistory {
    * recognizes those that reached the PR. */
   pendingPosts?: PendingPost[];
   deferredRuns?: number[];
+  heldChecks?: string[];
+}
+
+/** The re-run floors of a watch, spent and held alike: a later run of a
+ * check is the answer to either (`<identity>@<headSha>@<check run id>`). */
+export function rerunFloors(state: {
+  rerunChecks?: string[];
+  heldChecks?: string[];
+}): string[] {
+  return [
+    ...(state.rerunChecks ?? []),
+    ...(state.heldChecks ?? []).map((entry) => entry.replace(/^\d+:/, '')),
+  ];
 }
 
 /** Pushes one watch may make before it stops (Section 10 of the design). */
@@ -363,6 +381,9 @@ export function stateDefect(state: AutofixPrState): string | null {
   if (state.deferredRuns !== undefined && !isRunList(state.deferredRuns)) {
     return 'deferredRuns';
   }
+  if (state.heldChecks !== undefined && !isStringList(state.heldChecks)) {
+    return 'heldChecks';
+  }
   if (
     state.pendingPosts !== undefined &&
     !(
@@ -459,6 +480,7 @@ export function readHistory(path: string): AutofixPrHistory | null {
     deferredRuns: Array.isArray(parsed.deferredRuns)
       ? parsed.deferredRuns.filter((run) => Number.isInteger(run))
       : [],
+    heldChecks: stringList(parsed.heldChecks),
   };
 }
 
@@ -498,6 +520,7 @@ export function keepHistory(
     // history in again would bring back what was settled.
     pendingPosts: state.pendingPosts ?? earlier?.pendingPosts ?? [],
     deferredRuns: state.deferredRuns ?? earlier?.deferredRuns ?? [],
+    heldChecks: state.heldChecks ?? earlier?.heldChecks ?? [],
   };
   atomicWriteFileSync(path, `${JSON.stringify(history, null, 2)}\n`);
   return path;

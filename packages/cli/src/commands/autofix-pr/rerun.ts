@@ -28,6 +28,7 @@ import {
   checkAttemptKey,
   repoRoot,
   requireState,
+  rerunFloors,
   withWatchLock,
   writeState,
   type AutofixPrPaths,
@@ -80,7 +81,7 @@ function rerunLocked(
   // rerun`: a commit status or another app may link any URL. `checkEvents`
   // gives a run id to such a job only, read against the PR's own URL — the
   // repository's current name, whatever name the watch was prepared under.
-  const failed = checkEvents(pr, state.rerunChecks ?? []).failed.filter(
+  const failed = checkEvents(pr, rerunFloors(state)).failed.filter(
     ({ event, actions }) => actions && event.runId === runId,
   );
   if (failed.length === 0) {
@@ -95,25 +96,25 @@ function rerunLocked(
   // Keyed by the check's identity, not its name: two workflows may each
   // have a failed job of the same name, and each has its own re-run.
   const rerunKeys = jobs.map(({ identity }) => `${identity}@${pr.headRefOid}`);
-  const already = rerunFrom(state.rerunChecks ?? []);
-  // A run deferred while it was going holds its checks' re-run: the run
-  // re-run is that one, and a later run of them — one a review started
-  // before it ended, say — answers for it, as a re-run's would.
-  const deferredHere = (state.deferredRuns ?? []).includes(runId);
-  // The re-runs the run's deferral held, which a refusal gives back.
-  const heldHere = new Set(
-    jobs.flatMap(({ floor }, index) =>
-      deferredHere && already.get(rerunKeys[index]) === floor
-        ? [`${rerunKeys[index]}@${floor}`]
-        : [],
-    ),
+  // Spent and held re-runs alike: a later run of a check answers either.
+  const already = rerunFrom(rerunFloors(state));
+  // A run deferred while it was going holds its checks' re-runs apart from
+  // the spent ones, under its own id: only it may spend them, and only for
+  // the floor it held — a later run of a check (one a review started
+  // before it ended, say) answers for it, as a re-run's would.
+  const held = new Set(state.heldChecks ?? []);
+  const holds = jobs.map(
+    ({ floor }, index) => `${runId}:${rerunKeys[index]}@${floor}`,
   );
   const repeated = jobs
-    .filter(({ floor }, index) => {
-      const from = already.get(rerunKeys[index]);
-      return from !== undefined && !(deferredHere && from === floor);
-    })
+    .filter(
+      (_, index) => already.has(rerunKeys[index]) && !held.has(holds[index]),
+    )
     .map(({ check }) => check);
+  // The holds of other runs: this one's are spent by a re-run, or given
+  // back by a refusal.
+  const othersHolds = (entries: string[]) =>
+    entries.filter((entry) => !entry.startsWith(`${runId}:`));
   // Each with the check run the re-run's runs come after.
   const reran = [
     ...new Set([
@@ -132,7 +133,7 @@ function rerunLocked(
   if (failed.some(({ runDone }) => !runDone)) {
     writeState(paths.statePath, {
       ...state,
-      rerunChecks: reran,
+      heldChecks: [...new Set([...(state.heldChecks ?? []), ...holds])],
       deferredRuns: [...new Set([...(state.deferredRuns ?? []), runId])],
     });
     return {
@@ -153,6 +154,7 @@ function rerunLocked(
   writeState(paths.statePath, {
     ...state,
     rerunChecks: reran,
+    ...(state.heldChecks ? { heldChecks: othersHolds(state.heldChecks) } : {}),
     deferredRuns: (state.deferredRuns ?? []).filter((id) => id !== runId),
   });
   try {
@@ -174,15 +176,12 @@ function rerunLocked(
     // gh words a 403 as "run <id> cannot be rerun; <reason>" (a token
     // without `actions: write`, a run too old), other 4xx as "HTTP 4xx".
     const refused = /\bHTTP 4\d\d\b|\bcannot be rerun\b/.test(message);
+    // One a deferral held is given back as well.
     if (refused) {
       writeState(paths.statePath, {
         ...state,
-        ...(state.rerunChecks
-          ? {
-              rerunChecks: state.rerunChecks.filter(
-                (entry) => !heldHere.has(entry),
-              ),
-            }
+        ...(state.heldChecks
+          ? { heldChecks: othersHolds(state.heldChecks) }
           : {}),
       });
     }
@@ -193,6 +192,7 @@ function rerunLocked(
   writeState(paths.statePath, {
     ...state,
     rerunChecks: reran,
+    ...(state.heldChecks ? { heldChecks: othersHolds(state.heldChecks) } : {}),
     handledChecks: [...(state.handledChecks ?? []), ...attempts],
     deferredRuns: (state.deferredRuns ?? []).filter((id) => id !== runId),
   });

@@ -296,7 +296,7 @@ describe('buildGateSnapshot', () => {
       knownHeads: [],
       seenCommentIds: [],
       deferredRuns: [456],
-      rerunChecks: [`run:1:9:pull_request_review:B@${HEAD}@5`],
+      heldChecks: [`456:run:1:9:pull_request_review:B@${HEAD}@5`],
     };
     const going = buildGateSnapshot(
       pr({}, [job(5, 456, 'IN_PROGRESS')]),
@@ -500,6 +500,23 @@ describe('buildGateSnapshot', () => {
         watch,
       ).snapshot,
     ).toBeNull();
+    // The held failure left the cursor while its run went: a cut read does
+    // not report it on its own, and the whole read reports it once, end
+    // and all.
+    const fresh = buildGateSnapshot(pr({}, [failed('Test', 1)]), cursor(), {
+      ...watch,
+      partial: 'checks',
+    });
+    expect(fresh.snapshot).toBeNull();
+    const once = buildGateSnapshot(
+      pr({}, [failed('Test', 1), laterJob]),
+      fresh.cursor,
+      watch,
+    );
+    expect(once.snapshot).toMatchObject({
+      events: [{ type: 'ci_failed', check: 'Test' }],
+    });
+    expect(once.cursor.reportedChecks).toEqual([key, `${key}@ended~5`]);
   });
 
   it('forgets a check gone green on a run its time budget cut in the threads', () => {
@@ -2126,7 +2143,7 @@ describe('runSnapshot --gate', () => {
       handledChecks: [`Test@${HEAD}@#5`],
       handledConflictSha: HEAD,
       deferredRuns: [456],
-      rerunChecks: [`run:1:2:pull_request:Lint@${HEAD}@6`],
+      heldChecks: [`456:run:1:2:pull_request:Lint@${HEAD}@6`],
     });
     const lint = (status: string): Contexts[number] => ({
       __typename: 'CheckRun',

@@ -305,7 +305,7 @@ describe('runReply', () => {
     writeState(paths.statePath, {
       ...state(),
       deferredRuns: [70],
-      rerunChecks: [`run:15368:2:pull_request:Build@${HEAD}@7`],
+      heldChecks: [`70:run:15368:2:pull_request:Build@${HEAD}@7`],
     });
     // A stranger's review started Gate again while the round ran; CI
     // started this time; Test ran again (#5).

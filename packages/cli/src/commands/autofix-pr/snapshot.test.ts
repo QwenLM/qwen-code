@@ -664,7 +664,7 @@ describe('buildSnapshot', () => {
     // `rerun` deferred it, holding Lint's run 5.
     const deferred = state({
       deferredRuns: [123],
-      rerunChecks: [`run:1:2:pull_request:Lint@${HEAD}@5`],
+      heldChecks: [`123:run:1:2:pull_request:Lint@${HEAD}@5`],
     });
     expect(
       buildSnapshot(pr({}, [lint('IN_PROGRESS')]), deferred),

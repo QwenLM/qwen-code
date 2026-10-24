@@ -449,7 +449,7 @@ when there are none, so the session is woken only for them:
   can list an earlier run of a check and not its latest: the cursor keeps
   the latest run of each check the last whole read saw (`latestChecks`),
   and a cut read reports no failure of an earlier one, nor a deferred
-  run's end, which waits for a whole read. While
+  run's end, failure and all, which waits for a whole read. While
   GitHub stays that slow, what lies past the pages the gate reads — a check
   failure, a newer review thread — waits for a round something else
   starts, which reads it all; a page cap, which every run meets alike —
@@ -649,7 +649,7 @@ same number is refused until that file is removed.
 What the watch posted and handled — `handledCommentIds`,
 `postedCommentIds`, `handledChecks`, `rerunChecks`, `handledConflictSha`,
 and the replies announced but not yet settled (`pendingPosts`) and re-runs
-deferred (`deferredRuns`), which are the watch's own lists as they stand
+deferred (`deferredRuns`, `heldChecks`), which are the watch's own lists as they stand
 (they were started from the history, and what was settled since must not
 come back) — is added to the PR's history before the state file goes,
 `.qwen/tmp/autofix-pr-<n>-history-<host>+<owner>+<repo>.history.json` (one
@@ -809,7 +809,9 @@ in `deferredRuns`: the gate reports its failures once more when the run has
 ended (Section 6.2), and the round then re-runs it. Until then prepared
 snapshots leave them out as well, so another event does not hand the round
 the same failure to defer again. The deferral holds the re-run of each of
-its failed checks (in `rerunChecks`, with the check run deferred), and only
+its failed checks — in `heldChecks`, apart from the spent ones in
+`rerunChecks`, under the run's id and with the check run deferred, so a
+re-run another run spent is never taken for one this run holds — and only
 those check runs are left out: a job of the run that fails after it is the
 round's at once, however long the run goes on. The run is re-run when it
 ends, and a later run of the check on the head — one a

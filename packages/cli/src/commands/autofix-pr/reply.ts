@@ -418,7 +418,7 @@ function replyLocked(
   // current head, so it is not recorded.
   const knownChecks = new Set(state.handledChecks ?? []);
   const roundChecks = snapshotChecks(paths.snapshotPath);
-  const held = heldKeys(pr, state.rerunChecks ?? [], state.deferredRuns ?? []);
+  const held = heldKeys(pr, state);
   const currentChecks: string[] = [];
   let ignoredChecks = 0;
   for (const key of new Set(plan.handledChecks)) {

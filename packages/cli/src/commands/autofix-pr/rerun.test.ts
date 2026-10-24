@@ -240,16 +240,19 @@ describe('runRerun', () => {
       checks: ['Lint'],
     });
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
-    // The deferral holds the check's re-run for the run deferred.
+    // The deferral holds the check's re-run for the run deferred, apart
+    // from the spent ones.
     expect(state()).toMatchObject({
       deferredRuns: [50],
-      rerunChecks: [`run:15368:1:pull_request:Lint@${HEAD}@5`],
+      heldChecks: [`50:run:15368:1:pull_request:Lint@${HEAD}@5`],
     });
+    expect(state().rerunChecks).toBeUndefined();
 
     contexts = [failedRun(5, 'Lint', 50)];
     expect(runRerun(7, 50)).toMatchObject({ rerun: true });
     expect(state()).toMatchObject({
       deferredRuns: [],
+      heldChecks: [],
       rerunChecks: [`run:15368:1:pull_request:Lint@${HEAD}@5`],
     });
   });
@@ -315,6 +318,42 @@ describe('runRerun', () => {
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
+  it('tells a re-run another run spent from one a deferral holds', () => {
+    // Run 49 failed K and had J cancelled; run 50 failed A, J still going.
+    const going = {
+      ...failedRun(9, 'J', 50, 1, 'IN_PROGRESS'),
+      status: 'IN_PROGRESS',
+      conclusion: null,
+    };
+    contexts = [
+      failedRun(2, 'K', 49),
+      { ...failedRun(3, 'J', 49), conclusion: 'CANCELLED' },
+      failedRun(8, 'A', 50, 1, 'IN_PROGRESS'),
+      going,
+    ];
+    // Run 49's re-run spends J, past its latest run on the PR (run 50's).
+    expect(runRerun(7, 49)).toMatchObject({ rerun: true });
+    expect(state().rerunChecks).toContain(
+      `run:15368:1:pull_request:J@${HEAD}@9`,
+    );
+    expect(runRerun(7, 50)).toMatchObject({ deferred: true });
+    expect(state().heldChecks).toEqual([
+      `50:run:15368:1:pull_request:A@${HEAD}@8`,
+    ]);
+    // J fails in run 50 too: its re-run was spent by run 49, not held.
+    contexts = [
+      failedRun(2, 'K', 49),
+      { ...failedRun(3, 'J', 49), conclusion: 'CANCELLED' },
+      failedRun(8, 'A', 50),
+      failedRun(9, 'J', 50),
+    ];
+    expect(runRerun(7, 50)).toMatchObject({
+      rerun: false,
+      reason: expect.stringMatching(/J was re-run on this head already/),
+    });
+    expect(mocks.ghWithInput).toHaveBeenCalledTimes(1);
+  });
+
   it('counts a later run of a deferred check as its re-run', () => {
     contexts = [failedRun(5, 'Lint', 50, 1, 'IN_PROGRESS')];
     expect(runRerun(7, 50)).toMatchObject({ deferred: true });
@@ -364,7 +403,8 @@ describe('runRerun', () => {
       throw new Error('HTTP 403: Resource not accessible by integration');
     });
     expect(() => runRerun(7, 50)).toThrow(/GitHub did not re-run run 50: /);
-    expect(state().rerunChecks).toEqual([]);
+    expect(state().heldChecks).toEqual([]);
+    expect(state().rerunChecks ?? []).toEqual([]);
     // Lint fails again on the head: its re-run was never spent.
     contexts = [failedRun(5, 'Lint', 50), failedRun(9, 'Lint', 52)];
     expect(runRerun(7, 52)).toMatchObject({ rerun: true });
