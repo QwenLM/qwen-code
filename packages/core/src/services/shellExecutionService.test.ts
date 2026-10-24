@@ -14,6 +14,7 @@ import {
   type Mock,
 } from 'vitest';
 import EventEmitter from 'node:events';
+import { isUtf8 } from 'node:buffer';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
 import pkg from '@xterm/headless';
@@ -33,6 +34,9 @@ import type { AnsiOutput } from '../utils/terminalSerializer.js';
 const { Terminal } = pkg;
 
 const mockGetSystemEncoding = vi.hoisted(() =>
+  vi.fn().mockReturnValue('utf-8'),
+);
+const mockGetCachedEncodingForBuffer = vi.hoisted(() =>
   vi.fn().mockReturnValue('utf-8'),
 );
 const mockPtySpawn = vi.hoisted(() => vi.fn());
@@ -113,8 +117,8 @@ vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
 }));
 vi.mock('../utils/systemEncoding.js', () => ({
-  getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
   getSystemEncoding: mockGetSystemEncoding,
+  getCachedEncodingForBuffer: mockGetCachedEncodingForBuffer,
 }));
 
 const mockProcessKill = vi
@@ -2180,6 +2184,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetCachedEncodingForBuffer.mockReturnValue('utf-8');
     mockIsBinary.mockReturnValue(false);
     mockPlatform.mockReturnValue('linux');
     mockGetPty.mockResolvedValue(null);
@@ -2249,7 +2254,15 @@ describe('ShellExecutionService child_process fallback', () => {
    * Executes under a raw-output capture with a 64-byte preview; `drive` emits
    * the child's output, then both streams end and the child exits with `code`.
    */
-  const runCaptured = async (command: string, drive: () => void, code = 0) => {
+  const runCaptured = async (
+    command: string,
+    drive: () => void,
+    code = 0,
+    config: ShellExecutionConfig = {
+      ...shellExecutionConfig,
+      maxBufferedOutputBytes: 64,
+    },
+  ) => {
     for (const stream of [mockChildProcess.stdout!, mockChildProcess.stderr!]) {
       Object.assign(stream, { pause: vi.fn(), resume: vi.fn() });
     }
@@ -2265,7 +2278,7 @@ describe('ShellExecutionService child_process fallback', () => {
       onOutputEventMock,
       new AbortController().signal,
       true,
-      { ...shellExecutionConfig, maxBufferedOutputBytes: 64 },
+      config,
       { rawCapture: capture },
     );
     drive();
@@ -2339,6 +2352,172 @@ describe('ShellExecutionService child_process fallback', () => {
     );
     expect(result.output).toBe(stdout.toString());
     expect(capture.write).toHaveBeenCalledWith('stdout', stdout);
+  });
+
+  it('strips an orphan CSI suffix left by a cut ANSI sequence at the tail boundary', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(30, 'A'),
+      Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]), // \x1b[31m
+      Buffer.alloc(30, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^A+$/);
+  });
+
+  it('drops orphan UTF-8 continuation bytes when the remainder is all ASCII', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(32, 'A'),
+      Buffer.from([0xe9, 0x94, 0x99]),
+      Buffer.alloc(31, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^A+$/);
+  });
+
+  it('keeps a legitimate 100ms prefix when the tail opens on plain ASCII', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(37768, 'A'),
+      Buffer.from('100ms latency ok'),
+      Buffer.alloc(32752, 'A'),
+    ]);
+    const { result } = await runCaptured(
+      'printf output',
+      () => emitOut(payload),
+      0,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 65536 },
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^100ms latency ok/);
+  });
+
+  it('drops an orphan CSI fragment when the ring is cut inside \\x1b[?25l', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(30, 'A'),
+      Buffer.from([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x6c]), // \x1b[?25l
+      Buffer.from('REST'),
+      Buffer.alloc(26, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^REST/);
+  });
+
+  it('falls back to UTF-8 when the detected label is not decodable', async () => {
+    mockGetCachedEncodingForBuffer.mockReturnValue('utf-32');
+    const payload = Buffer.concat([
+      Buffer.alloc(32, 'A'),
+      Buffer.from([0xe9, 0x94, 0x99]),
+      Buffer.alloc(31, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^A+$/);
+  });
+
+  it('detects the tail label on ring bytes even when the full buffer is not UTF-8', async () => {
+    mockGetCachedEncodingForBuffer.mockImplementation((b: Buffer) =>
+      isUtf8(b) ? 'utf-8' : 'gbk',
+    );
+    // 0xff poisons the FULL capture, so a label taken from the head/final
+    // buffer resolves to 'gbk' and mojibakes the tail. The ring bytes stay
+    // valid UTF-8, so only ring-based detection decodes the marker correctly.
+    const marker = 'caf\u00e9 na\u00efve r\u00e9sum\u00e9';
+    const payload = Buffer.concat([
+      Buffer.from([0xff]),
+      Buffer.alloc(34, 'A'),
+      Buffer.from(marker, 'utf-8'),
+      Buffer.alloc(10, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toContain(marker);
+    expect(tail).not.toContain('\uFFFD');
+  });
+
+  it('preserve non-UTF_8 leading bytes when the ring starts on them', async () => {
+    mockGetCachedEncodingForBuffer.mockReturnValue('latin1');
+    const payload = Buffer.concat([
+      Buffer.alloc(33, 'A'),
+      Buffer.from([0xb0, 0xa1]),
+      Buffer.alloc(30, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toContain('¡');
+    expect(tail).not.toContain('\uFFFD');
+  });
+
+  it('strips orphan CSI suffix at 64 KiB budget', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(32767, 'A'),
+      Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]), // \x1b[31m
+      Buffer.alloc(32765, 'A'),
+    ]);
+    const { result } = await runCaptured(
+      'printf output',
+      () => emitOut(payload),
+      0,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 65536 },
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^A+$/);
+  });
+
+  it('strips orphan CSI suffix from stderr preview', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(62, 'A'),
+      Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]), // \x1b[31m
+      Buffer.alloc(6, 'A'),
+    ]);
+    const { result } = await runCaptured('printf err', () =>
+      emitOut(payload, 'stderr'),
+    );
+    expect(result.output.split('[Recent stderr]\n')[1]).toMatch(/^A+$/);
+  });
+
+  it('handles binary remainder in tail preview without throwing', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(32, 'A'),
+      Buffer.from([0xff, 0xfe, 0xff]),
+      Buffer.alloc(31, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^\uFFFDA+$/);
   });
 
   describe('child environment sanitization (#6601)', () => {
@@ -3201,6 +3380,7 @@ describe('ShellExecutionService execution method selection', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetCachedEncodingForBuffer.mockReturnValue('utf-8');
     onOutputEventMock = vi.fn();
     mockPtyProcess = makePty();
     mockPtySpawn.mockReturnValue(mockPtyProcess);
