@@ -78,6 +78,7 @@ import {
   persistStableClientId,
 } from './clientLifecycle.js';
 import {
+  daemonClientSessionContext,
   getDaemonErrorCode,
   getStandaloneConnectionState,
   resolveActionSessionContext,
@@ -959,12 +960,7 @@ export function createDaemonSessionActions({
       currentConnection.sessionContext ??
       (currentConnection.workspaceCwd
         ? { kind: 'workspace' as const, cwd: currentConnection.workspaceCwd }
-        : currentSession?.workspaceCwd
-          ? {
-              kind: 'workspace' as const,
-              cwd: currentSession.workspaceCwd,
-            }
-          : undefined);
+        : daemonClientSessionContext(currentSession));
     const fallbackContext = currentConnection.error
       ? getDefaultSessionContext()
       : (currentSessionContext ?? getDefaultSessionContext());
@@ -2217,10 +2213,9 @@ export function createDaemonSessionActions({
         session.sessionId,
         'load',
         {
-          sessionContext: getConnection().sessionContext ?? {
-            kind: 'workspace',
-            cwd: session.workspaceCwd,
-          },
+          sessionContext:
+            getConnection().sessionContext ??
+            daemonClientSessionContext(session),
         },
         signal,
         options?.replaySource,
