@@ -98,6 +98,8 @@ Everything saved is plain markdown — you can open, edit, or delete any file at
 
 `MEMORY.md` is a compact index, rather than the full memory store. Its generated body and the portion loaded into prompts share a limit of 200 lines and 25,000 UTF-16 code units; truncation notices are added separately. Line endings are normalized before prompt budgeting. Under size pressure, complete ordinary entries (up to 150 code units) get space before longer entries, and retained entries keep their original order. An entry that cannot fit is skipped whole, so its Markdown link is never cut in the middle. Keep detail in the linked topic files.
 
+The warning for a partially loaded index distinguishes the line and character budgets. Shortening descriptions can help with the total character budget even when no entry exceeds the ordinary line length. For formatted index entries, that advice is offered only when removing descriptions leaves enough room for their names and links, including grouped links. Prune or merge entries when those links alone consume the budget. If the line-count limit is exceeded, entries must still be pruned or merged: shortening a description does not reduce the number of lines. When both budgets are exceeded, reducing the index to 200 entries may still require shorter descriptions or fewer entries to meet the character budget; the warning reports the actual candidate count. Shortening to 150 units per entry is not always enough to meet the 25,000-unit total. The known writer notice is included when diagnosing the size of a saved index, so long links still receive length advice when that notice tips the file over budget.
+
 #### Pinned memory
 
 Put hand-curated documents that automatic memory maintenance should preserve

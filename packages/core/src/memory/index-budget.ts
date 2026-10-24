@@ -8,6 +8,8 @@ export const MAX_INDEX_LINE_CHARS = 150;
 export const MAX_INDEX_LINES = 200;
 // Keep the existing UTF-16 code-unit budget; the warning is appended separately.
 export const MAX_INDEX_CHARS = 25_000;
+export const INDEX_HOOK_SEPARATOR = ' — ';
+export const INDEX_ALSO_OPEN = ' (also: ';
 export const INDEX_TRUNCATION_WARNING =
   '> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.';
 export const INDEX_TRUNCATION_NOTICE = `\n\n${INDEX_TRUNCATION_WARNING}`;
