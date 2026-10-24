@@ -216,6 +216,8 @@ export function useOpenTuiLiveTurn(
     seq: number;
     prompt?: OpenTuiInputSubmission;
     toolStarted: boolean;
+    // Set by Esc or another interrupt, even after a Mod ended the turn.
+    interrupted?: boolean;
     onCancelSettled?: OpenTuiCancelSettled;
   } | null>(null);
   const mountedRef = useRef(true);
@@ -327,6 +329,7 @@ export function useOpenTuiLiveTurn(
                 turnOptions?.humanInput?.text ??
                   turnOptions?.submittedPrompt ??
                   '',
+                abort.signal,
                 () => {
                   // Ends the turn as Esc does; nothing returns to the composer.
                   modEnded = true;
@@ -408,7 +411,9 @@ export function useOpenTuiLiveTurn(
           setWaitingCalls([]);
           setBusy(false);
           if (activeTurnRef.current === active) activeTurnRef.current = null;
-          if (abort.signal.aborted && !modEnded) {
+          // An interrupt settles as a cancel whether or not a Mod ended the
+          // turn first; only a Mod's end alone lets the queue go on.
+          if (abort.signal.aborted && (!modEnded || active.interrupted)) {
             const settled = active.onCancelSettled;
             const queued = settled ? popQueue() : null;
             queueRef.current = queueRef.current.filter(
@@ -600,6 +605,7 @@ export function useOpenTuiLiveTurn(
   const interrupt = useCallback((onSettled?: OpenTuiCancelSettled) => {
     const active = activeTurnRef.current;
     if (active && active.seq === turnSeqRef.current) {
+      active.interrupted = true;
       active.onCancelSettled ??= onSettled;
       abortRef.current?.abort();
     } else {

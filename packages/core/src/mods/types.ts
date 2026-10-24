@@ -100,6 +100,8 @@ export interface ModTurnUsage {
 export interface ModTurnStart {
   text: string;
   turnId: string;
+  /** Set when `text` kept only its head and tail to fit the Mod payload. */
+  isTextTruncated?: true;
 }
 
 export interface ModTurnComplete {
@@ -109,6 +111,8 @@ export interface ModTurnComplete {
   turnId: string;
   reason: 'answer' | 'aborted' | 'error';
   usage?: ModTurnUsage;
+  /** Set when `answer` kept only its head and tail to fit the Mod payload. */
+  isAnswerTruncated?: true;
 }
 
 export type ModRequest =

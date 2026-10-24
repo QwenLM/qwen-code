@@ -162,8 +162,14 @@ export class InteractiveModSession implements ICommandLoader {
     return this.session.syncSession(reason);
   }
 
-  startTurn(text: string, abort: () => void): ModTurn | undefined {
-    return this.closing ? undefined : this.session.startTurn(text, abort);
+  startTurn(
+    text: string,
+    signal: AbortSignal,
+    abort: () => void,
+  ): ModTurn | undefined {
+    return this.closing
+      ? undefined
+      : this.session.startTurn(text, signal, abort);
   }
 
   close(): Promise<void> {

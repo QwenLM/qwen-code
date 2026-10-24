@@ -104,8 +104,12 @@ describe('Mod session ownership', () => {
       end: vi.fn().mockResolvedValue(undefined),
       dispose: vi.fn().mockResolvedValue(undefined),
       turnHooks: { start: false, complete: [] as string[] },
-      startTurn: vi.fn<(input: ModTurnStart) => Promise<void>>(),
-      completeTurn: vi.fn<(input: ModTurnComplete) => Promise<string>>(),
+      startTurn:
+        vi.fn<(input: ModTurnStart, signal: AbortSignal) => Promise<void>>(),
+      completeTurn:
+        vi.fn<
+          (input: ModTurnComplete, signal: AbortSignal) => Promise<string>
+        >(),
     };
     mocks.load.mockResolvedValue({
       root: '/mod',
@@ -648,6 +652,7 @@ describe('Mod session ownership', () => {
       prompt_id: 'prompt-1',
       ...changes,
     }) as unknown as UiEvent;
+  const turnSignal = new AbortController().signal;
   const loadTurns = async (
     complete = ['hello-mod'],
     overrides: Record<string, unknown> = {},
@@ -668,9 +673,9 @@ describe('Mod session ownership', () => {
   it('starts no turn when no hook hears the turn events', async () => {
     const { session, runtime } = setup();
     await session.initialize(new AbortController().signal);
-    expect(session.startTurn('hi', vi.fn())).toBeUndefined();
+    expect(session.startTurn('hi', turnSignal, vi.fn())).toBeUndefined();
     runtime.turnHooks = { start: false, complete: ['hello-mod'] };
-    expect(session.startTurn('hi', vi.fn())).toBeDefined();
+    expect(session.startTurn('hi', turnSignal, vi.fn())).toBeDefined();
     expect(runtime.startTurn).not.toHaveBeenCalled();
   });
 
@@ -690,7 +695,7 @@ describe('Mod session ownership', () => {
       order.push('complete');
       return input.answer;
     });
-    const turn = session.startTurn('Fix it', vi.fn())!;
+    const turn = session.startTurn('Fix it', turnSignal, vi.fn())!;
     // The model request does not wait for the hooks.
     expect(runtime.startTurn).not.toHaveBeenCalled();
     await vi.waitFor(() =>
@@ -727,7 +732,7 @@ describe('Mod session ownership', () => {
 
   it('answers with the last response the turn streamed', async () => {
     const { session, ended } = await loadTurns();
-    const retried = session.startTurn('', vi.fn())!;
+    const retried = session.startTurn('', turnSignal, vi.fn())!;
     retried.saw(content('Checking.'));
     retried.saw(finished());
     retried.saw(content('Half'));
@@ -738,7 +743,7 @@ describe('Mod session ownership', () => {
     await retried.complete();
     expect(ended().answer).toBe('Done.');
 
-    const fellBack = session.startTurn('', vi.fn())!;
+    const fellBack = session.startTurn('', turnSignal, vi.fn())!;
     fellBack.saw(content('Overloaded'));
     fellBack.saw({
       type: LlmEventType.ModelFallback,
@@ -750,7 +755,7 @@ describe('Mod session ownership', () => {
     await fellBack.complete('aborted');
     expect(ended().answer).toBe('Done on the fallback.');
 
-    const continued = session.startTurn('', vi.fn())!;
+    const continued = session.startTurn('', turnSignal, vi.fn())!;
     continued.saw(content('Part one, '));
     continued.saw({ type: LlmEventType.Retry, isContinuation: true });
     continued.saw(content('part two.'));
@@ -762,7 +767,7 @@ describe('Mod session ownership', () => {
     });
 
     // Cancelled while its tools ran: the last finished response stands.
-    const cancelled = session.startTurn('', vi.fn())!;
+    const cancelled = session.startTurn('', turnSignal, vi.fn())!;
     cancelled.saw({
       type: LlmEventType.Thought,
       value: { subject: 'x', description: 'thinking' },
@@ -780,15 +785,15 @@ describe('Mod session ownership', () => {
       { type: LlmEventType.LoopDetected },
       { type: LlmEventType.MaxSessionTurns },
     ] as ServerLlmStreamEvent[]) {
-      const turn = session.startTurn('', vi.fn())!;
+      const turn = session.startTurn('', turnSignal, vi.fn())!;
       turn.saw(event);
       await turn.complete();
       expect(ended()).toMatchObject({ reason: 'error', isAborted: false });
     }
-    const thrown = session.startTurn('', vi.fn())!;
+    const thrown = session.startTurn('', turnSignal, vi.fn())!;
     await thrown.complete('error');
     expect(ended().reason).toBe('error');
-    const failedThenCancelled = session.startTurn('', vi.fn())!;
+    const failedThenCancelled = session.startTurn('', turnSignal, vi.fn())!;
     failedThenCancelled.saw({
       type: LlmEventType.LoopDetected,
     } as ServerLlmStreamEvent);
@@ -801,7 +806,7 @@ describe('Mod session ownership', () => {
       getContentGeneratorConfig: () => ({ authType: 'gemini-api-key' }),
     });
     uiTelemetryService.addEvent(apiResponse({ model: 'before' }), 'session-1');
-    const turn = session.startTurn('', vi.fn())!;
+    const turn = session.startTurn('', turnSignal, vi.fn())!;
     turn.saw(
       finished({
         promptTokenCount: 100,
@@ -843,29 +848,75 @@ describe('Mod session ownership', () => {
       model: 'qwen-plus',
     });
 
-    const quiet = session.startTurn('', vi.fn())!;
+    const quiet = session.startTurn('', turnSignal, vi.fn())!;
     await quiet.complete('aborted');
     expect(ended()).not.toHaveProperty('usage');
   });
 
-  it('counts reasoning once where the provider includes it in the output', async () => {
-    const { session, ended } = await loadTurns(['hello-mod'], {
-      getContentGeneratorConfig: () => ({ authType: 'openai' }),
-    });
-    const turn = session.startTurn('', vi.fn())!;
-    turn.saw(
-      finished({
-        promptTokenCount: 10,
-        candidatesTokenCount: 8,
-        thoughtsTokenCount: 6,
-      }),
-    );
+  it.each(['openai', 'openai-responses', 'qwen-oauth'])(
+    'counts reasoning once where the provider includes it in the output (%s)',
+    async (authType) => {
+      const { session, ended } = await loadTurns(['hello-mod'], {
+        getContentGeneratorConfig: () => ({ authType }),
+      });
+      const turn = session.startTurn('', turnSignal, vi.fn())!;
+      turn.saw(
+        finished({
+          promptTokenCount: 10,
+          candidatesTokenCount: 8,
+          thoughtsTokenCount: 6,
+        }),
+      );
+      await turn.complete();
+      expect(ended().usage).toMatchObject({
+        input_tokens: 10,
+        output_tokens: 8,
+        model: 'qwen-max',
+      });
+    },
+  );
+
+  it('ends a running turn.start with its turn, but not turn.complete', async () => {
+    const { session, runtime } = await loadTurns();
+    const host = new AbortController();
+    const turn = session.startTurn('Fix it', host.signal, vi.fn())!;
+    await vi.waitFor(() => expect(runtime.startTurn).toHaveBeenCalledOnce());
+    const started = runtime.startTurn.mock.calls[0][1];
+    expect(started.aborted).toBe(false);
+    host.abort();
+    expect(started.aborted).toBe(true);
+    await turn.complete('aborted');
+    expect(runtime.completeTurn.mock.calls[0][1].aborted).toBe(false);
+  });
+
+  it('keeps the head and tail of a prompt or answer too long for a Mod payload', async () => {
+    const { session, runtime, adapter, ended } = await loadTurns(['long-mod']);
+    const long = 'a'.repeat(200_000) + 'z'.repeat(200_000);
+    const turn = session.startTurn(long, turnSignal, vi.fn())!;
+    turn.saw(content(long));
+    turn.saw(finished());
     await turn.complete();
-    expect(ended().usage).toMatchObject({
-      input_tokens: 10,
-      output_tokens: 8,
-      model: 'qwen-max',
+    const started = runtime.startTurn.mock.calls[0][0];
+    expect(started).toEqual({
+      text: expect.stringMatching(
+        /^a+\n\[\.\.\. truncated for Mods \.\.\.\]\nz+$/,
+      ),
+      turnId: turn.id,
+      isTextTruncated: true,
     });
+    expect(Buffer.byteLength(JSON.stringify(started.text))).toBeLessThanOrEqual(
+      131_072,
+    );
+    expect(ended()).toMatchObject({
+      answer: started.text,
+      isAnswerTruncated: true,
+    });
+    // The hooks returned the answer they heard, so no note goes beneath it.
+    expect(
+      adapter.emitSystemMessage.mock.calls.filter(
+        ([, data]) => data.plugin === 'long-mod',
+      ),
+    ).toEqual([]);
   });
 
   it('shows a different turn.complete text beneath the answer', async () => {
@@ -873,9 +924,15 @@ describe('Mod session ownership', () => {
       'hello-mod',
       'other-mod',
     ]);
-    for (const text of ['Done.', '  ', 'TL;DR', 'x'.repeat(5000)]) {
+    for (const text of [
+      'Done.',
+      '  ',
+      'TL;DR',
+      'x'.repeat(5000),
+      `${'x'.repeat(4095)}\u{1F600}tail`,
+    ]) {
       runtime.completeTurn.mockResolvedValueOnce(text);
-      const turn = session.startTurn('', vi.fn())!;
+      const turn = session.startTurn('', turnSignal, vi.fn())!;
       turn.saw(content('Done.'));
       turn.saw(finished());
       await turn.complete();
@@ -890,6 +947,13 @@ describe('Mod session ownership', () => {
         'ui_log',
         { plugin: 'hello-mod+other-mod', text: `${'x'.repeat(4096)}…` },
       ],
+      [
+        'ui_log',
+        {
+          plugin: 'hello-mod+other-mod',
+          text: `${'x'.repeat(4095)}\u{1F600}…`,
+        },
+      ],
     ]);
   });
 
@@ -899,7 +963,7 @@ describe('Mod session ownership', () => {
       getOutputFormat: () => OutputFormat.TEXT,
     });
     runtime.completeTurn.mockResolvedValueOnce('TL;DR\u001b[31m');
-    await session.startTurn('', vi.fn())!.complete();
+    await session.startTurn('', turnSignal, vi.fn())!.complete();
     const notes = () =>
       stderr.mock.calls.filter(([text]) => String(text).includes('TL;DR'));
     // The answer is written when the run ends; the note waits for it.
@@ -917,7 +981,7 @@ describe('Mod session ownership', () => {
       '$.turn.abort: no turn is running (asked for turn-0)',
     );
     const abort = vi.fn();
-    const turn = session.startTurn('', abort)!;
+    const turn = session.startTurn('', turnSignal, abort)!;
     expect(() => abortTurn('turn-0')).toThrow(
       `$.turn.abort: turn-0 is not the running turn (${turn.id})`,
     );
@@ -936,11 +1000,11 @@ describe('Mod session ownership', () => {
   it('keeps the queue running after a failed turn hook and drops a turn of an ended session', async () => {
     const { session, runtime, config } = await loadTurns();
     runtime.startTurn.mockRejectedValueOnce(new Error('hook failed'));
-    const failed = session.startTurn('', vi.fn())!;
+    const failed = session.startTurn('', turnSignal, vi.fn())!;
     await failed.complete('error');
     expect(runtime.completeTurn).toHaveBeenCalledOnce();
 
-    const old = session.startTurn('', vi.fn())!;
+    const old = session.startTurn('', turnSignal, vi.fn())!;
     config.getSessionId.mockReturnValue('session-2');
     await session.syncSession('clear');
     await old.complete();
@@ -1006,6 +1070,12 @@ describe('Mod session ownership', () => {
       'hello-mod',
       'session-1',
     );
+    log.mockClear();
+    emit(
+      { to: 'transcript', text: `${'x'.repeat(1999)}\u{1F600}tail` },
+      'hello-mod',
+    );
+    expect(log.mock.calls[0][0].text).toBe(`${'x'.repeat(1999)}\u{1F600}`);
     log.mockClear();
     emit(
       {

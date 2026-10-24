@@ -46,8 +46,9 @@ Qwen Code 在加载时跳过这些 hook，并提示 `Hooks for unsupported event
 
 - `text`：人提交的提示，粘贴的内容已展开；重试和续行时为 `""`。
 - `turnId`：新生成的 id，本回合的 `turn.complete` 带同一个 id。
+- `isTextTruncated`：提示太长、超出一次 Mod 传输的上限时为 `true`。这样的提示保留开头和结尾，中间换成一行 `[... truncated for Mods ...]`，按 JSON 计不超过 128 KiB，hook 照常运行。其他情况下没有这个字段。
 
-模型请求不等待这些 hook。本回合的 `tool.call` 派发和 `turn.complete` 都排在它们后面，所以听到开始的 hook 一定在之后听到结束。输入字段是固定的，hook 的返回值不会改变任何东西。
+模型请求不等待这些 hook。本回合的 `tool.call` 派发和 `turn.complete` 都排在它们后面，所以听到开始的 hook 一定在之后听到结束。取消回合时，仍在运行的 `turn.start` hook 也随之结束，与 Claude Code 相同，本回合的工具调用不必等它们。输入字段是固定的，hook 的返回值不会改变任何东西。
 
 ### 3. `turn.complete`
 
@@ -62,6 +63,7 @@ Qwen Code 在加载时跳过这些 hook，并提示 `Hooks for unsupported event
   - 不会出现 `refusal`。
 - `turnId`。
 - `usage`：本回合各次模型响应的四项 API token 计数之和，以及最后一次响应的模型；没有响应完成时没有这个字段。子代理、辅助查询和上下文压缩发出的请求不计入。
+- `isAnswerTruncated`：答案像长提示那样被截断时为 `true`。
 
 hook 返回的 `{ text }` 与答案不同且不是空白时，这段文字显示在答案下方，署名为挂了 `turn.complete` hook 的插件：
 
@@ -69,7 +71,7 @@ hook 返回的 `{ text }` 与答案不同且不是空白时，这段文字显示
 - headless 文本模式下是 stderr 上的同一行，位于答案之后；
 - JSON 模式下是 result 之前的一条 `system` `ui_log` 消息。
 
-文字最多保留 4,096 个字符，会话记录本身不做修改。
+文字最多保留 4,096 个字符，会话记录本身不做修改。hook 原样返回它收到的答案时（无论是否截断过），不会多出这一行。
 
 终端里，这些 hook 在回合结束后运行，此时下一条提示已经可以开始。headless 运行会等它们跑完再输出结果。
 
@@ -78,6 +80,8 @@ hook 返回的 `{ text }` 与答案不同且不是空白时，这段文字显示
 `$.turn.abort({ turnId })` 像取消操作一样结束正在进行的回合和其中正在运行的工具，但不留下"Request cancelled."之类的取消提示，也不把提示放回输入框。之后排队的提示照常运行。
 
 以下情况调用会被拒绝：没有回合在运行；`turnId` 不是正在运行的回合；回合已经在结束中。它和其他 `$` 方法一样是 API 事件，其他插件可以观察、改写或拒绝。
+
+如果人也按了 Esc，不论在 Mod 调用之前还是之后，回合都按人的取消结束，和没有 Mod 时一样。
 
 在 headless 运行中，回合以错误结果"A Mod ended the turn."结束，退出码为 130，与被中断的回合相同。stream-json 会话会继续处理下一条消息。
 
@@ -99,6 +103,7 @@ hook 返回的 `{ text }` 与答案不同且不是空白时，这段文字显示
 - 回合事件只覆盖主循环，而且只覆盖由人提交的提示，不会出现 `agentId`。
 - `reason` 不会是 `refusal`。
 - `usage.cache_creation_input_tokens` 为 0，除非 provider 单独报告缓存写入（Anthropic 会报告）。
+- 按 JSON 计超过 128 KiB 的提示或答案，截断后才交给 hook，并带上 `isTextTruncated` 或 `isAnswerTruncated`。Claude Code 会完整传入。
 - headless 文本模式下，说明文字输出到 stderr。
 - 还没有 `$.prompt.submit`，所以 Mod 不能在 `$.turn.abort` 之后发送提示。
 
@@ -108,21 +113,24 @@ hook 返回的 `{ text }` 与答案不同且不是空白时，这段文字显示
   - 哪些插件能收到回合事件；
   - 固定的输入；
   - `{ text }` 结果和结构不对的结果；
+  - 截断到会话所允许长度的提示和答案；
   - `$.turn.abort` 询问宿主、各种拒绝，以及其他插件拒绝或改写它。
 - 客户端测试：`onPromptAdmitted` 在放行之后、请求之前调用，被拦下的提示不会调用。
 - Mod 会话测试：
   - `turn.start` 与回合并行，结束排在本回合的工具之后；
+  - 取消回合会结束它的 `turn.start` hook，但不影响 `turn.complete` hook；
   - 重试和取消时的答案；
   - 结束原因；
-  - 用量累加；
-  - 说明文字；
+  - 用量累加，各 provider 的推理 token 只计一次；
+  - 超出 Mod 传输上限的提示和答案；
+  - 说明文字，截断时不拆开字符；
   - `$.turn.abort` 的判定规则；
   - hook 失败；
   - 所属会话已经结束的回合。
 - 宿主测试：
   - headless：正常回答、被拦下的提示、JSON 和文本模式下的 Mod 中止、请求失败；
   - Ink：从放行到空闲的回合、Mod 中止与 Esc 的对比、没有 Mod 时不传回调；
-  - OpenTUI：放行和只结束一次、中断和出错、Mod 中止后排队提示继续运行、没有 Mod 时不传回调。
+  - OpenTUI：放行和只结束一次、中断和出错、Mod 中止后排队提示继续运行、Esc 在 Mod 中止之前或之后、没有 Mod 时不传回调。
 - 用构建出的 CLI 连接测试用的服务器，在 headless JSON 和文本模式以及 Ink 和 OpenTUI 终端里验证：
   - `turn.start` 的文字；
   - `turn.complete` 的答案，以及与服务器计数一致的用量；

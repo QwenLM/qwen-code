@@ -4250,6 +4250,7 @@ export const useLlmStream = (
                     finishModTurn();
                     const turn = mods?.startTurn(
                       metadata?.humanInput?.text ?? submittedPrompt ?? '',
+                      abortSignal,
                       () => cancelForModRef.current(),
                     );
                     if (!turn) return;

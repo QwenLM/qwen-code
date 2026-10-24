@@ -566,18 +566,24 @@ it through and before the first model request. A prompt they block has no turn.
 `e.text` is the prompt as submitted, with pasted text expanded, or `""` for a
 retry or a continuation. `e.turnId` is new for each turn. The model request does
 not wait for the hooks, but the turn's tool middleware and its `turn.complete`
-run after them.
+run after them. Cancelling the turn ends the `turn.start` hooks still running.
+
+A prompt longer than 128 KiB as JSON reaches the hooks with its beginning and
+end around the line `[... truncated for Mods ...]`, and `e.isTextTruncated` is
+`true`. A long answer is cut the same way, with `e.isAnswerTruncated`. Claude
+Code passes both whole.
 
 `turn.complete` fires once the turn has ended and receives:
 
-| Field        | Value                                                                                                                                  |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `answer`     | the visible text of the turn's last model response, or `""`                                                                            |
-| `durationMs` | how long the turn took                                                                                                                 |
-| `reason`     | `answer`; `aborted` when a person or a Mod cancelled the turn; `error` when an API error, a loop detection or a session limit ended it |
-| `isAborted`  | `true` when `reason` is `aborted`                                                                                                      |
-| `turnId`     | the id `turn.start` carried                                                                                                            |
-| `usage`      | `{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, model}` summed over the turn's model responses    |
+| Field               | Value                                                                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `answer`            | the visible text of the turn's last model response, or `""`                                                                            |
+| `durationMs`        | how long the turn took                                                                                                                 |
+| `reason`            | `answer`; `aborted` when a person or a Mod cancelled the turn; `error` when an API error, a loop detection or a session limit ended it |
+| `isAborted`         | `true` when `reason` is `aborted`                                                                                                      |
+| `turnId`            | the id `turn.start` carried                                                                                                            |
+| `usage`             | `{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, model}` summed over the turn's model responses    |
+| `isAnswerTruncated` | `true` when `answer` was cut to fit; absent otherwise                                                                                  |
 
 The fields of both events are pinned. `next(e)` resolves to `{text: e.answer}`,
 with `usage` when the turn has it. Return a different, non-blank `text` to show

@@ -661,7 +661,7 @@ describe('UiTelemetryService', () => {
       },
     );
 
-    it.each(['openai', 'qwen-oauth'])(
+    it.each(['openai', 'openai-responses', 'qwen-oauth'])(
       'does not double-count reasoning for %s events',
       (authType) => {
         service.addEvent(

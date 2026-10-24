@@ -22,12 +22,16 @@ import {
 } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
-import { MOD_END_TIMEOUT_MS } from '@qwen-code/qwen-code-core/mods/types.js';
+import {
+  MOD_END_TIMEOUT_MS,
+  MOD_MAX_BYTES,
+} from '@qwen-code/qwen-code-core/mods/types.js';
 import type {
   ModCommandPresentation,
   ModLog,
   ModSessionFacts,
   ModTurnComplete,
+  ModTurnStart,
   ModTurnUsage,
 } from '@qwen-code/qwen-code-core/mods/types.js';
 import { runOutsideAgentContext } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
@@ -37,7 +41,10 @@ import {
   LlmEventType,
   type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core/core/turn.js';
-import { getGenAiUsageProvenance } from '@qwen-code/qwen-code-core/telemetry/gen-ai-usage.js';
+import {
+  getGenAiUsageProvenance,
+  outputIncludesThoughts,
+} from '@qwen-code/qwen-code-core/telemetry/gen-ai-usage.js';
 import type { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   EVENT_API_RESPONSE,
@@ -50,12 +57,15 @@ import type { LoadedSettings } from '../config/settings.js';
 import type { ICommandLoader } from '../services/types.js';
 import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
 import {
+  cpLen,
+  cpSlice,
   sanitizeTerminalLine,
   sanitizeTerminalText,
   stripUnsafeCharacters,
 } from '../ui/utils/textUtils.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { flushOutput } from '../utils/flush-output.js';
+import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 
 const logger = createDebugLogger('MODS');
@@ -531,10 +541,15 @@ export class ModSession implements ICommandLoader {
 
   /**
    * Starts a main-loop turn once its prompt is admitted, before its first
-   * model request. `abort` ends the turn as a cancel does, without the notice
-   * a person's cancel leaves; `$.turn.abort` calls it.
+   * model request. `signal` is the turn's own: cancelling the turn ends its
+   * `turn.start` hooks too. `abort` ends the turn as a cancel does, without
+   * the notice a person's cancel leaves; `$.turn.abort` calls it.
    */
-  startTurn(text: string, abort: () => void): ModTurn | undefined {
+  startTurn(
+    text: string,
+    signal: AbortSignal,
+    abort: () => void,
+  ): ModTurn | undefined {
     const hooks = this.runtime?.turnHooks;
     if (!hooks || (!hooks.start && !hooks.complete.length) || this.closing)
       return undefined;
@@ -551,10 +566,17 @@ export class ModSession implements ICommandLoader {
     this.turn = turn;
     // The model request does not wait for these hooks; the turn's tool calls
     // and its end queue behind them.
-    if (hooks.start)
-      void this.queueTurnEvent(turn, (signal) =>
-        this.runtime!.startTurn({ text, turnId: turn.id }, signal),
+    if (hooks.start) {
+      const fitted = fitTurnText(text);
+      const input: ModTurnStart = {
+        text: fitted.text,
+        turnId: turn.id,
+        ...(fitted.truncated && { isTextTruncated: true as const }),
+      };
+      void this.queueTurnEvent(turn, (lifetime) =>
+        this.runtime!.startTurn(input, AbortSignal.any([lifetime, signal])),
       );
+    }
     let ending: Promise<void> | undefined;
     return {
       id: turn.id,
@@ -608,8 +630,9 @@ export class ModSession implements ICommandLoader {
         : ending === 'error' || turn.failed
           ? 'error'
           : 'answer';
+    const answer = fitTurnText((turn.streaming || turn.answer).trim());
     const input: ModTurnComplete = {
-      answer: (turn.streaming || turn.answer).trim(),
+      answer: answer.text,
       durationMs: Date.now() - turn.startedAt,
       isAborted: reason === 'aborted',
       turnId: turn.id,
@@ -624,13 +647,14 @@ export class ModSession implements ICommandLoader {
             },
           }
         : {}),
+      ...(answer.truncated && { isAnswerTruncated: true as const }),
     };
     return this.queueTurnEvent(turn, async (signal) => {
       const text = await this.runtime!.completeTurn(input, signal);
       // A different text is shown beneath the answer; the record keeps it.
       if (text === input.answer || !text.trim()) return;
       const note = {
-        text: text.length > 4096 ? `${text.slice(0, 4096)}…` : text,
+        text: cpLen(text) > 4096 ? `${cpSlice(text, 0, 4096)}…` : text,
         to: 'transcript' as const,
         plugin: plugins.join('+'),
         sessionId: turn.sessionId,
@@ -694,7 +718,7 @@ export class ModSession implements ICommandLoader {
         : stripAnsiAndControl(entry.text);
       if ('surface' in this.output) {
         this.output.log(
-          { ...entry, text: text.slice(0, 2000) },
+          { ...entry, text: cpSlice(text, 0, 2000) },
           entry.plugin,
           entry.sessionId,
         );
@@ -817,11 +841,9 @@ function addTurnUsage(
   const read = metadata.cachedContentTokenCount ?? 0;
   const written =
     getGenAiUsageProvenance(metadata)?.cacheCreationInputTokens ?? 0;
-  // OpenAI-compatible providers already count reasoning in the output.
-  const thoughts =
-    authType === 'openai' || authType === 'qwen-oauth'
-      ? 0
-      : (metadata.thoughtsTokenCount ?? 0);
+  const thoughts = outputIncludesThoughts(authType)
+    ? 0
+    : (metadata.thoughtsTokenCount ?? 0);
   return {
     input_tokens:
       (usage?.input_tokens ?? 0) + Math.max(0, prompt - read - written),
@@ -833,4 +855,15 @@ function addTurnUsage(
     cache_creation_input_tokens:
       (usage?.cache_creation_input_tokens ?? 0) + written,
   };
+}
+
+// A text too long for a Mod payload keeps its head and tail around a marker,
+// as tool results do on the headless and ACP transports.
+function fitTurnText(text: string): { text: string; truncated: boolean } {
+  const fitted = projectJsonStringToByteBudget(
+    text,
+    MOD_MAX_BYTES / 2,
+    '\n[... truncated for Mods ...]\n',
+  );
+  return { text: fitted, truncated: fitted !== text };
 }

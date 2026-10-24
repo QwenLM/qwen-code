@@ -13607,7 +13607,9 @@ describe('useLlmStream', () => {
     describe('Mod turns', () => {
       const installModTurn = () => {
         const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
-        const startTurn = vi.fn((_text: string, _abort: () => void) => turn);
+        const startTurn = vi.fn(
+          (_text: string, _signal: AbortSignal, _abort: () => void) => turn,
+        );
         vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
           ready: Promise.resolve(),
           startTurn,
@@ -13647,6 +13649,7 @@ describe('useLlmStream', () => {
         expect(turn.complete).toHaveBeenCalledWith(undefined);
         expect(startTurn).toHaveBeenCalledExactlyOnceWith(
           'Fix it',
+          expect.any(AbortSignal),
           expect.any(Function),
         );
         expect(turn.saw.mock.calls.map(([event]) => event.type)).toEqual([
@@ -13684,9 +13687,11 @@ describe('useLlmStream', () => {
           );
 
           act(() => {
-            if (byMod) startTurn.mock.calls[0][1]();
+            if (byMod) startTurn.mock.calls[0][2]();
             else result.current.cancelOngoingRequest();
           });
+          // Either way the turn's own signal ends its turn.start hooks.
+          expect(startTurn.mock.calls[0][1].aborted).toBe(true);
 
           await waitFor(() =>
             expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted'),

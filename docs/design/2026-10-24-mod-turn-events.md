@@ -46,8 +46,9 @@ Turn events cover the prompts a person submits, the same turns `$.session.turns(
 
 - `text`: the prompt as the person submitted it, with pasted text expanded, or `""` for a retry or a continuation.
 - `turnId`: a new id. The turn's `turn.complete` carries the same one.
+- `isTextTruncated`: `true` when the prompt was too long for a Mod payload. Such a prompt keeps its beginning and end around the line `[... truncated for Mods ...]`, within 128 KiB as JSON, so the hooks still run. The field is absent otherwise.
 
-The model request does not wait for the hooks. The turn's `tool.call` dispatches and its `turn.complete` queue behind them, so a hook that heard the start hears the end after it. The input is pinned, and a hook's return value changes nothing.
+The model request does not wait for the hooks. The turn's `tool.call` dispatches and its `turn.complete` queue behind them, so a hook that heard the start hears the end after it. Cancelling the turn also ends the `turn.start` hooks that are still running, as in Claude Code, so the turn's tool calls do not wait for them. The input is pinned, and a hook's return value changes nothing.
 
 ### 3. `turn.complete`
 
@@ -62,6 +63,7 @@ The model request does not wait for the hooks. The turn's `tool.call` dispatches
   - `refusal` does not occur.
 - `turnId`.
 - `usage`: the four API token counts of the turn's model responses, summed, and the model of the last response. It is absent when no response finished. Requests made by subagents, side queries and compaction are not counted.
+- `isAnswerTruncated`: `true` when the answer was cut the way a long prompt is.
 
 A hook that returns `{ text }` with a different, non-blank text shows it beneath the answer. The line is attributed to the plugins that have `turn.complete` hooks:
 
@@ -69,7 +71,7 @@ A hook that returns `{ text }` with a different, non-blank text shows it beneath
 - in headless text mode, as the same line on stderr, after the answer;
 - in JSON modes, as a `system` `ui_log` message before the result.
 
-The text is kept up to 4,096 characters. The conversation record is not changed.
+The text is kept up to 4,096 characters. The conversation record is not changed, and a hook that returns the answer it heard, cut or not, adds no line.
 
 In a terminal the hooks run after the turn ends, and the next prompt can already start. A headless run waits for them before it writes its result.
 
@@ -78,6 +80,8 @@ In a terminal the hooks run after the turn ends, and the next prompt can already
 `$.turn.abort({ turnId })` ends the running turn and its running tools, the way a cancel does. It leaves no cancel notice such as "Request cancelled." and does not put the prompt back in the composer. Queued prompts then run.
 
 The call rejects when no turn is running, when `turnId` is not the running turn's id, or when the turn is already ending. Like the other `$` methods, it is an API event that other plugins can observe, rewrite or deny.
+
+A person's Esc still counts when it comes too, before or after the Mod's call: the turn ends as their cancel, as it would without the Mod.
 
 In a headless run the turn ends with the error result "A Mod ended the turn." and exit code 130, the code of an interrupted turn. A stream-json session goes on to its next message.
 
@@ -99,6 +103,7 @@ These go into the user guide:
 - Turn events cover only the main loop and only the prompts a person submits. `agentId` never appears.
 - `reason` is never `refusal`.
 - `usage.cache_creation_input_tokens` is 0 unless the provider reports cache writes separately, as Anthropic's does.
+- A prompt or answer longer than 128 KiB as JSON reaches the hooks cut, with `isTextTruncated` or `isAnswerTruncated` set. Claude Code passes it whole.
 - In headless text mode the note goes to stderr.
 - `$.prompt.submit` does not exist yet, so a Mod cannot send a prompt after `$.turn.abort`.
 
@@ -108,21 +113,24 @@ These go into the user guide:
   - which plugins hear the turn events;
   - pinned inputs;
   - `{ text }` results, and results of the wrong shape;
+  - a prompt and an answer at the size the session cuts them to;
   - `$.turn.abort` asking the host, its rejections, and another plugin denying or rewriting it.
 - A client test that `onPromptAdmitted` runs after admission and before the request, and never for a blocked prompt.
 - Mod session tests:
   - `turn.start` runs beside the turn, and its end after the turn's tools;
+  - cancelling the turn ends its `turn.start` hooks, not its `turn.complete` hooks;
   - the answer through retries and cancels;
   - the reasons;
-  - the usage sums;
-  - the note;
+  - the usage sums, with reasoning counted once for each provider;
+  - a prompt and an answer too long for a Mod payload;
+  - the note, cut without splitting a character;
   - the rules of `$.turn.abort`;
   - a failed hook;
   - a turn whose session has ended.
 - Host tests:
   - headless: an answer, a blocked prompt, a Mod abort in JSON and text, and a failed request;
   - Ink: a turn from admission to idle, a Mod abort compared with Esc, and no hook without Mods;
-  - OpenTUI: admission and a single end, interrupt and error, a Mod abort that lets the queue run, and no hooks without Mods.
+  - OpenTUI: admission and a single end, interrupt and error, a Mod abort that lets the queue run, an Esc before or after a Mod abort, and no hooks without Mods.
 - The built CLI against a fixture server, in headless JSON and text and in the Ink and OpenTUI terminals:
   - the `turn.start` text;
   - the `turn.complete` answer, and usage that matches the fixture's counts;

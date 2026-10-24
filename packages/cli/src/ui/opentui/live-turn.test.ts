@@ -1169,7 +1169,9 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
 
   const installMods = () => {
     const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
-    const startTurn = vi.fn((_text: string, _abort: () => void) => turn);
+    const startTurn = vi.fn(
+      (_text: string, _signal: AbortSignal, _abort: () => void) => turn,
+    );
     vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
       startTurn,
     } as unknown as ReturnType<
@@ -1201,8 +1203,11 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     options(1).onPromptAdmitted?.();
     expect(startTurn).toHaveBeenCalledExactlyOnceWith(
       'Fix it',
+      expect.any(AbortSignal),
       expect.any(Function),
     );
+    // The turn's own signal, so Esc ends its turn.start hooks.
+    expect(startTurn.mock.calls[0][1]).toBe(live.signals[0]);
     const event = { type: 'content', value: 'Done.' } as ServerLlmStreamEvent;
     options(1).onStreamEvent?.(event);
     expect(turn.saw).toHaveBeenCalledExactlyOnceWith(event);
@@ -1239,7 +1244,7 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
       result.current.submit('queued');
     });
     options(1).onPromptAdmitted?.();
-    act(() => startTurn.mock.calls[0][1]());
+    act(() => startTurn.mock.calls[0][2]());
     expect(live.signals[0].aborted).toBe(true);
     await settle(result);
     expect(turn.complete).toHaveBeenCalledWith('aborted');
@@ -1251,6 +1256,42 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
       ]),
     );
   });
+
+  it.each(['Esc', 'the Mod'])(
+    'settles an Esc as a cancel when %s ends the turn first',
+    async (first) => {
+      const { turn, startTurn } = installMods();
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      act(() => {
+        result.current.submit('first');
+        result.current.submit('queued');
+      });
+      options(1).onPromptAdmitted?.();
+      const settled = vi.fn();
+      const endByMod = () => startTurn.mock.calls[0][2]();
+      const esc = () => result.current.interrupt(settled);
+      act(() => {
+        if (first === 'Esc') {
+          esc();
+          endByMod();
+        } else {
+          endByMod();
+          esc();
+        }
+      });
+      await settle(result);
+      expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted');
+      // The queued prompt goes back to the composer instead of running.
+      expect(settled).toHaveBeenCalledExactlyOnceWith({
+        kind: 'cancelled',
+        queued: expect.objectContaining({ text: 'queued' }),
+        prompt: expect.objectContaining({ text: 'first' }),
+      });
+      expect(live.turns).toHaveLength(1);
+    },
+  );
 
   it('offers no turn hooks without a Mod session', () => {
     const { result } = renderHook(() =>

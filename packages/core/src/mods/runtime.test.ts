@@ -6,7 +6,12 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ModRuntime } from './runtime.js';
-import type { ModLog, ModOptions, ModSessionFacts } from './types.js';
+import {
+  MOD_MAX_BYTES,
+  type ModLog,
+  type ModOptions,
+  type ModSessionFacts,
+} from './types.js';
 import type { ModToolNext } from './tool-events.js';
 
 const signal = () => new AbortController().signal;
@@ -823,6 +828,37 @@ describe('ModRuntime with the real QuickJS worker', () => {
       model: 'qwen-max',
     },
   };
+
+  it('carries a prompt and an answer as long as the session lets them be', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('turn.start', ($, e, next) => {
+          $.ui.log('start ' + e.text.length + ' ' + e.isTextTruncated);
+          return next(e);
+        });
+        on('turn.complete', ($, e, next) => {
+          $.ui.log('complete ' + e.answer.length + ' ' + e.isAnswerTruncated);
+          return next(e);
+        });
+      }`,
+    ]);
+    // The session fits each text into half a payload, quotes included.
+    const text = 'x'.repeat(MOD_MAX_BYTES / 2 - 2);
+    await runtime.startTurn(
+      { text, turnId: 'turn-1', isTextTruncated: true },
+      signal(),
+    );
+    expect(
+      await runtime.completeTurn(
+        { ...turnEnd, answer: text, isAnswerTruncated: true },
+        signal(),
+      ),
+    ).toBe(text);
+    expect(logs.map((log) => log.text)).toEqual([
+      `start ${text.length} true`,
+      `complete ${text.length} true`,
+    ]);
+  });
 
   it('names the plugins whose hooks hear the turn events', async () => {
     const runtime = await createTurns([

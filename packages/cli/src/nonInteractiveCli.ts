@@ -2599,6 +2599,7 @@ export async function runNonInteractive(
                     options.continueInterrupted
                       ? ''
                       : (options.humanInput?.text ?? input),
+                    abortController.signal,
                     () => abortController.abort(new ModTurnAbortedError()),
                   );
                 },

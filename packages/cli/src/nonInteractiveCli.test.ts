@@ -6489,11 +6489,13 @@ describe('runNonInteractive', () => {
           return ended;
         }),
       };
-      const startTurn = vi.fn((_text: string, abortTurn: () => void) => {
-        order.push('start');
-        abort = abortTurn;
-        return turn;
-      });
+      const startTurn = vi.fn(
+        (_text: string, _signal: AbortSignal, abortTurn: () => void) => {
+          order.push('start');
+          abort = abortTurn;
+          return turn;
+        },
+      );
       vi.spyOn(ModSession, 'create').mockImplementation(
         () =>
           ({
@@ -6536,7 +6538,12 @@ describe('runNonInteractive', () => {
 
       expect(startTurn).toHaveBeenCalledExactlyOnceWith(
         'Fix it',
+        expect.any(AbortSignal),
         expect.any(Function),
+      );
+      // The run's own signal, so an interrupt ends the turn.start hooks.
+      expect(startTurn.mock.calls[0][1]).toBe(
+        mockLlmClient.sendMessageStream.mock.calls[0][1],
       );
       expect(turn.saw.mock.calls.map(([event]) => event)).toEqual(events);
       // The answer ends the turn before the run settles and closes.
