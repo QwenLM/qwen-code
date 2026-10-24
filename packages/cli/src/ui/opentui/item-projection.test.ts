@@ -1115,3 +1115,78 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
     });
   });
 });
+
+describe('cost does not double-count included reasoning tokens (#15444)', () => {
+  // Priced so the rendered dollar figure isolates the OUTPUT term: input at
+  // $0/M and output at $1/M makes `$X` exactly outputTokens / 1_000_000.
+  const PRICING = {
+    'qwen3-max-001': { inputPerMillionTokens: 0, outputPerMillionTokens: 1 },
+  };
+
+  const metricsWith = (tokens: {
+    prompt: number;
+    candidates: number;
+    thoughts: number;
+    total: number;
+  }): SessionMetrics =>
+    ({
+      models: {
+        'qwen3-max-001': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: { ...tokens, cached: 0 },
+          bySource: Object.create(null),
+        },
+      },
+    }) as unknown as SessionMetrics;
+
+  it('bills total − prompt when reasoning is already inside candidates', () => {
+    // OpenAI-style usage: the provider's `total` already counts the reasoning
+    // tokens that sit inside `candidates`, so `candidates + thoughts` bills
+    // the reasoning twice — 150000 + 120000 = 270000 ($0.2700) instead of the
+    // 150000 output the provider actually reported ($0.1500).
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 150_000,
+        thoughts: 120_000,
+        total: 250_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1500');
+    expect(text).not.toContain('$0.2700');
+  });
+
+  it('is unchanged when thoughts are disjoint from candidates', () => {
+    // Gemini-style usage: total = prompt + candidates + thoughts, so
+    // total − prompt (170000) already equals candidates + thoughts (170000).
+    // The fix must be a no-op here — without this leg an implementation that
+    // drops thinking entirely would still pass the OpenAI assertion above.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 270_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+
+  it('falls back to candidates + thoughts when no usable total is reported', () => {
+    // Mirrors the cost-ledger guard: derive only when the subtraction is
+    // meaningful, so an absent/zero total keeps today's behaviour instead of
+    // billing a negative output.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 0,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+});

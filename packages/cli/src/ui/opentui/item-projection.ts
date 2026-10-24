@@ -239,8 +239,12 @@ function entryCost(
 ): number | null {
   return calculateCost({
     inputTokens: entry.metrics.tokens.prompt,
+    // `total - prompt` is the output under BOTH usage conventions;
+    // guard it so a record with no usable total keeps today's sum.
     outputTokens:
-      entry.metrics.tokens.candidates + entry.metrics.tokens.thoughts,
+      entry.metrics.tokens.total > entry.metrics.tokens.prompt
+        ? entry.metrics.tokens.total - entry.metrics.tokens.prompt
+        : entry.metrics.tokens.candidates + entry.metrics.tokens.thoughts,
     pricing: (modelPricing ?? {})[entry.key.split('::')[0]] as Parameters<
       typeof calculateCost
     >[0]['pricing'],
