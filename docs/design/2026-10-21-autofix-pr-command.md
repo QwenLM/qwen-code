@@ -138,6 +138,7 @@ worktree included:
 - state: `.qwen/tmp/autofix-pr-<n>-state.json`
 - gate cursor: `.qwen/tmp/autofix-pr-<n>-gate.json`
 - latest prepared snapshot: `.qwen/tmp/autofix-pr-<n>-snapshot.json`
+- what GitHub said of bot comments: `.qwen/tmp/autofix-pr-<n>-replies.json`
 - logs, briefs and reply plans: `.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
 - reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
 
@@ -311,10 +312,14 @@ Event rules:
   requests. Once the comment a reply answered is deleted, GraphQL drops its
   `replyTo` and lists it first in the thread, so a bot comment that looks
   as if it opened one, and is not known yet, is asked about over REST, one comment
-  at a time (`in_reply_to_id` stays on it) and at most 20 a run, only for
-  an open thread of an open PR. The gate leaves one GitHub does not answer
-  about, or past the 20, for its next fire, neither a request nor seen; a
-  round fails instead, so it never drops a request the gate reported. The gate keeps bot replies
+  at a time (`in_reply_to_id` stays on it), only for an open thread of an
+  open PR, and once: the answers are kept in
+  `.qwen/tmp/autofix-pr-<n>-replies.json`, which the gate, prepared
+  snapshots and `reply` share. A comment deleted meanwhile is no request.
+  The gate asks about 20 at most a fire and stops at the first failure,
+  leaving the rest — neither requests nor seen — for its next fire; a
+  round asks about every one and fails when GitHub does not answer, so it
+  never drops a request the gate reported. The gate keeps bot replies
   as seen.
   Otherwise a review bot that answers every reply would keep a
   round going for each, and an untrusted commenter could have a bot speak

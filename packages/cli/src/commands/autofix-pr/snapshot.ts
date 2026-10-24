@@ -17,7 +17,7 @@
 //   so the session is woken only for them.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -1125,27 +1125,52 @@ function graphql(query: string, target: PrTarget, extra: string[]): unknown {
   );
 }
 
-/** Bot comments asked about over REST in one run; the rest wait. */
-const MAX_REPLY_CHECKS = 20;
+/** Bot comments the gate asks about over REST in one fire; the rest wait. */
+const MAX_GATE_REPLY_CHECKS = 20;
+
+/** How a caller of `fetchPrData` has bot comments checked for replies. */
+export interface ReplyCheck {
+  /** Comments the caller has reported or handled: nothing to ask. */
+  known: (id: string) => boolean;
+  /** A round, which must not drop a request: an unanswered question
+   * fails it. The gate goes on, and asks again at its next fire. */
+  strict: boolean;
+  /** Where the answers are kept: one never changes, so each comment is
+   * asked about once. */
+  cachePath: string;
+}
+
+function readReplyCache(path: string): Record<string, string | null> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, string | null>)
+      : {};
+  } catch {
+    return {};
+  }
+}
 
 /**
  * Marks the bot comments that look as if they opened a thread but answer
  * a comment since deleted: GraphQL drops `replyTo` along with the parent,
  * while REST keeps `in_reply_to_id` on the comment itself. Asked only for
- * an open thread whose first comment is a bot's that `known` (what the
- * caller has reported or handled) does not hold yet, one comment at a
- * time and at most `MAX_REPLY_CHECKS` a run. One not asked, or that GitHub
- * does not answer about, is neither a request nor seen this time
- * (`replyUnknown`) — unless `strict`, when an unanswered question fails the
- * run, as a round must not drop a request the gate already reported.
+ * an open thread whose first comment is a bot's the caller does not know
+ * yet, and only once per comment: the answers are kept. A comment deleted
+ * meanwhile is no request. The gate asks about `MAX_GATE_REPLY_CHECKS` at
+ * most a fire and stops at the first failure — one not asked about is
+ * neither a request nor seen this time (`replyUnknown`); a round asks
+ * about every one, and fails when GitHub does not answer.
  */
 function markOrphanReplies(
   target: PrTarget,
   pr: PrData,
-  known: (id: string) => boolean,
-  strict: boolean,
+  check: ReplyCheck,
 ): void {
+  const cache = readReplyCache(check.cachePath);
+  const learned: Record<string, string | null> = {};
   let asked = 0;
+  let failed = false;
   for (const thread of pr.reviewThreads.nodes) {
     const first = thread.comments.nodes[0];
     if (
@@ -1155,43 +1180,53 @@ function markOrphanReplies(
       first.author?.__typename !== 'Bot' ||
       first.databaseId === undefined ||
       first.databaseId !== thread.root.nodes[0]?.databaseId ||
-      known(first.id)
+      check.known(first.id)
     ) {
       continue;
     }
-    if (asked >= MAX_REPLY_CHECKS) {
-      if (strict) {
-        throw new Error(
-          `more than ${MAX_REPLY_CHECKS} new bot threads to check on PR #${target.prNumber}; run snapshot again`,
-        );
+    let parent: string | null | undefined =
+      first.id in cache ? cache[first.id] : undefined;
+    if (parent === undefined) {
+      if (!check.strict && (failed || asked >= MAX_GATE_REPLY_CHECKS)) {
+        first.replyUnknown = true;
+        continue;
       }
-      first.replyUnknown = true;
-      continue;
+      asked += 1;
+      let answer: string;
+      try {
+        answer = gh(
+          'api',
+          `repos/${target.owner}/${target.repo}/pulls/comments/${first.databaseId}`,
+          '--jq',
+          '.in_reply_to_id',
+        ).trim();
+      } catch (err) {
+        if (/\b404\b|Not Found/.test(String((err as Error).message))) {
+          first.replyUnknown = true;
+          continue;
+        }
+        if (check.strict) throw err;
+        failed = true;
+        first.replyUnknown = true;
+        continue;
+      }
+      parent = answer === '' || answer === 'null' ? null : answer;
+      learned[first.id] = parent;
     }
-    asked += 1;
-    let parent: string;
-    try {
-      parent = gh(
-        'api',
-        `repos/${target.owner}/${target.repo}/pulls/comments/${first.databaseId}`,
-        '--jq',
-        '.in_reply_to_id',
-      ).trim();
-    } catch (err) {
-      if (strict) throw err;
-      first.replyUnknown = true;
-      continue;
-    }
-    if (parent !== '' && parent !== 'null') {
-      first.replyTo = { id: `#${parent}` };
-    }
+    if (parent !== null) first.replyTo = { id: `#${parent}` };
+  }
+  if (Object.keys(learned).length > 0) {
+    // Read again: another helper may have learned others meanwhile.
+    atomicWriteFileSync(
+      check.cachePath,
+      `${JSON.stringify({ ...readReplyCache(check.cachePath), ...learned })}\n`,
+    );
   }
 }
 
 export function fetchPrData(
   target: PrTarget,
-  known?: (id: string) => boolean,
-  strict = true,
+  replyCheck?: ReplyCheck,
 ): { pr: PrData; viewer: string } {
   const data = graphql(PR_QUERY, target, []) as {
     data: {
@@ -1296,8 +1331,8 @@ export function fetchPrData(
     threads.pageInfo = more.pageInfo;
   }
   // A merged or closed PR asks nothing more: its `stop` must get through.
-  if (known && pr.state === 'OPEN') {
-    markOrphanReplies(target, pr, known, strict);
+  if (replyCheck && pr.state === 'OPEN') {
+    markOrphanReplies(target, pr, replyCheck);
   }
   return { pr, viewer: data.data.viewer.login };
 }
@@ -1397,8 +1432,11 @@ function runGate(args: SnapshotArgs): void {
   // at the next fire.
   const { pr, viewer } = fetchPrData(
     { ...target, prNumber: args.pr },
-    (id) => reportedBefore.has(id),
-    false,
+    {
+      known: (id) => reportedBefore.has(id),
+      strict: false,
+      cachePath: paths.repliesPath,
+    },
   );
   const cursor: AutofixPrGateCursor = {
     ...(existing ?? {
@@ -1454,7 +1492,7 @@ export function runSnapshot(args: SnapshotArgs): void {
   assertOwnedBySession(state);
   setGhHost(state.host);
   ensureAuthenticated();
-  const { pr } = fetchPrData(state, handledBy(state));
+  const { pr } = fetchPrData(state, roundReplyCheck(state));
   // Asked only when the API disagrees with the watch: whether the branch
   // moved, or the API has yet to see the head `sync` or `push` recorded.
   let branchHead: string | null | undefined;
@@ -1509,10 +1547,14 @@ export function bodyLines(body: string): Array<string | string[]> {
   });
 }
 
-/** What a watch has handled or posted: no comment to ask GitHub about. */
-export function handledBy(state: AutofixPrState): (id: string) => boolean {
+/** How a round has bot comments checked: strictly, past what it handled. */
+export function roundReplyCheck(state: AutofixPrState): ReplyCheck {
   const seen = new Set([...state.handledCommentIds, ...state.postedCommentIds]);
-  return (id) => seen.has(id);
+  return {
+    known: (id) => seen.has(id),
+    strict: true,
+    cachePath: autofixPrPaths(repoRoot(), state.prNumber).repliesPath,
+  };
 }
 
 export const snapshotCommand: CommandModule = {

@@ -68,6 +68,7 @@ Files live under `.qwen/tmp/` of the clone's main worktree:
 | `autofix-pr-<n>-state.json`              | the watch: known head, pushes, handled ids                        |
 | `autofix-pr-<n>-gate.json`               | the gate probe's cursor                                           |
 | `autofix-pr-<n>-snapshot.json`           | the latest round's snapshot of the PR, read by the round          |
+| `autofix-pr-<n>-replies.json`            | which bot comments answer another, as GitHub said                 |
 | `autofix-pr-<n>-history-*.json`          | what earlier watches of the PR posted and handled, kept by `stop` |
 | `autofix-pr-<n>-*.log`, `*.md`, `*.json` | CI logs, fix briefs and reply plans                               |
 

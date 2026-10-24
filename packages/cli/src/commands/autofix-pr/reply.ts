@@ -23,7 +23,7 @@ import {
 import {
   buildSnapshot,
   fetchPrData,
-  handledBy,
+  roundReplyCheck,
   isOwnReply,
   type CommentNode,
   type PrData,
@@ -293,7 +293,7 @@ function replyLocked(
   assertOwnedBySession(state);
   setGhHost(state.host);
   ensureAuthenticated();
-  const { pr } = fetchPrData(state, handledBy(state));
+  const { pr } = fetchPrData(state, roundReplyCheck(state));
   if (pr.state !== 'OPEN') {
     throw new Error(
       `PR #${args.pr} is ${pr.state.toLowerCase()}; nothing is posted on it.`,

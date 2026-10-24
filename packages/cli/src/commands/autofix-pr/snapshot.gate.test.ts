@@ -804,11 +804,19 @@ describe('fetchPrData', () => {
       for (const answer of answers) mockGh.mockImplementationOnce(answer);
     };
     const target = { owner: 'o', repo: 'r', prNumber: 7 };
+    const cacheDir = mkdtempSync(join(tmpdir(), 'autofix-replies-'));
+    let caches = 0;
+    const check = (strict = true, cachePath?: string) => ({
+      known: (id: string) => id === 'SEEN',
+      strict,
+      cachePath: cachePath ?? join(cacheDir, `replies-${caches++}.json`),
+    });
+    const kept = join(cacheDir, 'kept.json');
     respondWith(
       () => '3763973590\n',
       () => 'null\n',
     );
-    const { pr: fetched } = fetchPrData(target, (id) => id === 'SEEN');
+    const { pr: fetched } = fetchPrData(target, check(true, kept));
     // The two not known yet, each asked about on its own; not the seen
     // one, nor the resolved thread.
     expect(mockGh).toHaveBeenCalledTimes(3);
@@ -825,6 +833,32 @@ describe('fetchPrData', () => {
         event.type === 'review_thread' ? event.comments.map((c) => c.id) : [],
     );
     expect(ids).toEqual(['REAL', 'SEEN']);
+    // The answers are kept: never asked about again.
+    expect(JSON.parse(readFileSync(kept, 'utf8'))).toEqual({
+      ORPHAN: '3763973590',
+      REAL: null,
+    });
+    mockGh.mockReset();
+    respondWith();
+    const { pr: again } = fetchPrData(target, check(true, kept));
+    expect(mockGh).toHaveBeenCalledTimes(1);
+    expect(again.reviewThreads.nodes[0]!.comments.nodes[0]!.replyTo).toEqual({
+      id: '#3763973590',
+    });
+
+    // A comment deleted between the two reads is no request, and fails
+    // nothing.
+    mockGh.mockReset();
+    respondWith(
+      () => {
+        throw new Error('HTTP 404: Not Found');
+      },
+      () => 'null\n',
+    );
+    const { pr: gone } = fetchPrData(target, check());
+    expect(gone.reviewThreads.nodes[0]!.comments.nodes[0]!.replyUnknown).toBe(
+      true,
+    );
 
     // GitHub does not answer. A round fails rather than drop a request the
     // gate reported; the gate goes on, with the bot comments neither
@@ -834,16 +868,12 @@ describe('fetchPrData', () => {
     };
     mockGh.mockReset();
     respondWith(refuse);
-    expect(() => fetchPrData(target, (id) => id === 'SEEN')).toThrow(
-      /rate limit/,
-    );
+    expect(() => fetchPrData(target, check())).toThrow(/rate limit/);
     mockGh.mockReset();
     respondWith(refuse, refuse);
-    const { pr: unanswered } = fetchPrData(
-      target,
-      (id) => id === 'SEEN',
-      false,
-    );
+    const { pr: unanswered } = fetchPrData(target, check(false));
+    // The gate stops asking at the first failure.
+    expect(mockGh).toHaveBeenCalledTimes(2);
     const quiet = buildGateSnapshot(unanswered, cursor());
     expect(
       quiet.snapshot!.events.flatMap((event) =>
@@ -865,7 +895,7 @@ describe('fetchPrData', () => {
         },
       }),
     );
-    fetchPrData(target, () => false);
+    fetchPrData(target, check());
     expect(mockGh).toHaveBeenCalledTimes(1);
 
     // Nor does a resolved thread, which no round reads.
@@ -886,11 +916,12 @@ describe('fetchPrData', () => {
         },
       }),
     );
-    fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 }, () => false);
+    fetchPrData(target, check());
     expect(mockGh).toHaveBeenCalledTimes(1);
+    rmSync(cacheDir, { recursive: true, force: true });
   });
 
-  it('asks about 20 bot threads a run at most, leaving the rest for the next', () => {
+  it('has the gate ask about 20 bot threads a fire at most, and a round about all', () => {
     const threads = Array.from({ length: 21 }, (_, index) => ({
       id: `T${index}`,
       isResolved: false,
@@ -925,11 +956,16 @@ describe('fetchPrData', () => {
       );
       mockGh.mockImplementation(() => 'null\n');
     };
+    const cacheDir = mkdtempSync(join(tmpdir(), 'autofix-replies-'));
+    const check = (strict: boolean, name: string) => ({
+      known: () => false,
+      strict,
+      cachePath: join(cacheDir, name),
+    });
     respond21();
     const { pr: fetched } = fetchPrData(
       { owner: 'o', repo: 'r', prNumber: 7 },
-      () => false,
-      false,
+      check(false, 'gate.json'),
     );
     expect(mockGh).toHaveBeenCalledTimes(21);
     expect(
@@ -937,11 +973,27 @@ describe('fetchPrData', () => {
         (t) => t.comments.nodes[0]!.replyUnknown,
       ),
     ).toHaveLength(1);
+    // The next fire asks about the one left, the others being kept.
     respond21();
-    expect(() =>
-      fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 }, () => false),
-    ).toThrow(/more than 20 new bot threads/);
+    fetchPrData(
+      { owner: 'o', repo: 'r', prNumber: 7 },
+      check(false, 'gate.json'),
+    );
+    expect(mockGh).toHaveBeenCalledTimes(2);
+    // A round asks about every one it does not know.
+    respond21();
+    const { pr: round } = fetchPrData(
+      { owner: 'o', repo: 'r', prNumber: 7 },
+      check(true, 'round.json'),
+    );
+    expect(mockGh).toHaveBeenCalledTimes(22);
+    expect(
+      round.reviewThreads.nodes.filter(
+        (t) => t.comments.nodes[0]!.replyUnknown,
+      ),
+    ).toHaveLength(0);
     mockGh.mockReset();
+    rmSync(cacheDir, { recursive: true, force: true });
   });
 
   it('pages check suites back to the oldest, where a push put the code triggered ones', () => {

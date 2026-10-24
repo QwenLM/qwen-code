@@ -157,6 +157,8 @@ export interface AutofixPrPaths {
   gatePath: string;
   /** The last prepared snapshot, whole: too long for a line of output. */
   snapshotPath: string;
+  /** What GitHub said of bot comments: whether each answers another. */
+  repliesPath: string;
   /** Held while a helper reads and writes the state file. */
   lockPath: string;
   branch: string;
@@ -185,6 +187,7 @@ export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
     statePath: join(tmp, `autofix-pr-${prNumber}-state.json`),
     gatePath: join(tmp, `autofix-pr-${prNumber}-gate.json`),
     snapshotPath: join(tmp, `autofix-pr-${prNumber}-snapshot.json`),
+    repliesPath: join(tmp, `autofix-pr-${prNumber}-replies.json`),
     // Not `autofix-pr-<n>-…`: cleanup's sweep of the watch's files must not
     // take a lock another helper holds.
     lockPath: join(tmp, `autofix-pr-${prNumber}.lock`),
