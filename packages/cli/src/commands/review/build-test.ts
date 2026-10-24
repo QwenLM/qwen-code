@@ -331,6 +331,65 @@ export function buildRunEnv(
 }
 
 /**
+ * The shell a POSIX command runs under: it runs the command, and when the
+ * deadline's SIGTERM (or an interrupt) arrives it kills the command's whole
+ * process tree before dying of that same signal. (On an interrupt, bash
+ * before 5.0, which is macOS's `/bin/sh`, exits 130 instead.) Exported for
+ * its tests; `$1` is the command.
+ *
+ * `spawnSync` signals only its own child. A test runner's workers are that
+ * child's grandchildren, so a suite the deadline killed left them reparented
+ * to init and still running, outside every process tree this pipeline
+ * measures or cleans up. Measured on an 8-CPU machine: a killed `packages/cli`
+ * suite left 7 vitest workers that grew to 28 GB in four minutes, until the
+ * kernel's OOM killer started taking processes.
+ *
+ * The tree is read while it is still a tree: the walk runs before anything in
+ * it dies, so nothing has been reparented yet. The `stat` files go through
+ * `cat`, which skips one whose process exited after the glob. Handed the files
+ * itself, awk stops at the first it cannot open (mawk, gawk and busybox awk
+ * all do) and never reads the rest, so on a busy machine, where something
+ * exits during almost every walk, the command's tree went unkilled. Same
+ * process group as before, so a signal to the caller's group still reaches
+ * every process directly.
+ * The command runs as a background job, which a POSIX shell starts with
+ * SIGINT ignored — hence the INT trap, without which a Ctrl+C would leave the
+ * suite running. Its exit status is the command's, as under `sh -c`.
+ *
+ * The traps go in before the job starts, so a signal can no longer land
+ * between the job's start and the traps and kill only the shell. What is left
+ * is the step between the fork and `c=$!`; a signal there finds `c` empty and
+ * reaps nothing. Reading `$!` in the trap instead would close that too, but
+ * zsh, which macOS can install as `/bin/sh`, expands `$!` to 0 before any job,
+ * and the walk from pid 0 is every process on the machine.
+ */
+export const REAPING_SHELL = `cmd=$1
+shift
+reap() {
+  [ -n "$1" ] || return 0
+  { if [ -r /proc/self/stat ]; then
+      cat /proc/[0-9]*/stat 2>/dev/null |
+        awk '{ s = $0; sub(/^.*\\) /, "", s); split(s, f, " "); print $1, f[2] }'
+    else
+      ps -A -o pid= -o ppid=
+    fi; } |
+    awk -v root="$1" '
+      { kids[$2] = kids[$2] " " $1 }
+      END {
+        n = 1; q[1] = root
+        for (i = 1; i <= n; i++) { m = split(kids[q[i]], k, " "); for (j = 1; j <= m; j++) q[++n] = k[j] }
+        for (i = 1; i <= n; i++) print q[i]
+      }' |
+    xargs kill -KILL 2>/dev/null
+}
+c=
+trap 'reap "$c"; trap - TERM; kill -TERM $$' TERM
+trap 'reap "$c"; trap - INT; kill -INT $$' INT
+( eval "$cmd" ) &
+c=$!
+wait "$c"`;
+
+/**
  * Exported for the one thing an injected `exec` cannot cover: that the failing
  * set is measured HERE, off the raw text, and survives a trim that drops the
  * FAIL lines it was parsed from.
@@ -423,16 +482,25 @@ export function run(
         // variables a repository could have shipped in its own `.env`.
         env: runtimeClientEnv(),
       })
-    : spawnSync(command, {
-        cwd,
-        shell: true,
-        encoding: 'utf8',
-        timeout: deadlineMs,
-        maxBuffer: 64 * 1024 * 1024,
-        // A build that asks a question is a build that hangs until the deadline.
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: buildRunEnv(),
-      });
+    : spawnSync(
+        // `shell: true` on Windows, where there is no process tree to walk
+        // from a shell; everywhere else, the shell that cleans up after a
+        // killed command — see `REAPING_SHELL`.
+        process.platform === 'win32' ? command : '/bin/sh',
+        process.platform === 'win32'
+          ? []
+          : ['-c', REAPING_SHELL, 'sh', command],
+        {
+          cwd,
+          shell: process.platform === 'win32',
+          encoding: 'utf8',
+          timeout: deadlineMs,
+          maxBuffer: 64 * 1024 * 1024,
+          // A build that asks a question is a build that hangs until the deadline.
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: buildRunEnv(),
+        },
+      );
   if (boxed && boxedRunLeftContainer(r.status)) {
     // The deadline killed the CLIENT; the container outlives it — see the
     // `--name` comment in `containerCommand`. Reach the daemon instead, then

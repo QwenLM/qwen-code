@@ -25,6 +25,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { PUBLISHED_PACKAGES } from '../assert-release-version.mjs';
 import { RELEASE_WORKSPACES } from '../release-packages.mjs';
+import { isAlreadyPublishedDryRunFailure } from '../../packages/cua-driver/scripts/publish-dry-run-skip.mjs';
 import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -574,6 +575,10 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
+    // 880, raised from 870 for quality_scripts' standalone runtime cache
+    // step: the same four-line export of a host-wide cache path as ci.yml's
+    // test job — orchestration; the cache logic lives in
+    // scripts/lib/runtime-archive-cache.js.
     // 870, raised from 850 for moving publish/collect onto the opt-in
     // ecs-qwen-release-host lane and quality onto the pool its checks already
     // use: the added lines are two runs-on expressions, two anchored steps,
@@ -587,7 +592,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(870);
+    expect(workflow.split('\n').length).toBeLessThan(880);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -3460,5 +3465,41 @@ describe('release lane runner routing', () => {
     expect(wipe.if).toBe("${{ runner.environment == 'self-hosted' }}");
     expect(wipe.run).toBe('rm -rf prebuilds');
     expect(rest[0].name).toBe('Merge per-platform prebuilds');
+  });
+});
+
+describe('SDK publish dry-run already-published tolerance', () => {
+  // After a release, the packaged version lives in the registry and the
+  // dry-run's collision probe is permanently red until the next bump; only
+  // that exact registry state may be treated as a skip.
+  it.each([
+    {
+      label: 'npm stderr line',
+      text: 'npm error You cannot publish over the previously published versions: 0.26.0.',
+    },
+    {
+      label: 'npm --json error summary',
+      text: '{"error":{"code":"E403","summary":"You cannot publish over the previously published versions: 0.26.0."}}',
+    },
+  ])('skips the registry-collision case: $label', ({ text }) => {
+    expect(isAlreadyPublishedDryRunFailure(text)).toBe(true);
+  });
+
+  it.each([
+    {
+      label: 'permission denied',
+      text: 'npm error code E403\nnpm error 403 403 Forbidden - PUT https://registry.npmjs.org/@qwen-code%2fcua-sdk - You do not have permission to publish "@qwen-code/cua-sdk".',
+    },
+    {
+      label: 'network failure',
+      text: 'npm error code ENOTFOUND\nnpm error network request to https://registry.npmjs.org/@qwen-code%2fcua-sdk failed',
+    },
+    {
+      label: 'bare exit without captured detail',
+      text: 'npm exited with status 1',
+    },
+    { label: 'empty', text: '' },
+  ])('keeps failing every other registry failure: $label', ({ text }) => {
+    expect(isAlreadyPublishedDryRunFailure(text)).toBe(false);
   });
 });
