@@ -5248,7 +5248,15 @@ describe('qwen-triage verify hardening round 2', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
 
     expect(flat).toContain('`--watch` installs a standing trigger');
-    expect(flat).toContain('autofix-pr snapshot <n> --gate --repo');
+    // The gate runs the wrapper, not the bare probe: the probe also reports
+    // comments and failed checks, and every non-empty gate output wakes the
+    // model whether or not the head moved.
+    expect(flat).toContain('scripts/verify-pr-watch-gate.mjs');
+    expect(flat).toContain('resync');
+    // One cursor serves one consumer; installing over an existing autofix
+    // watch would starve this one of head moves and lose `stop`.
+    expect(flat).toContain('--check');
+    expect(flat).toContain('one cursor serves one consumer');
     expect(flat).toContain('head_moved_externally');
     expect(flat).toContain('verify-pr-watch-');
     expect(flat).toContain('cron_delete');

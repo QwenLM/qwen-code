@@ -157,7 +157,12 @@ creating the watch is the consent those rounds run under, so never create one
 from a request that did not ask for a standing watch.
 
 The gate is a shell command the scheduler runs outside the model: silence skips
-the fire with no model turn, and output delivers that JSON to the session.
+the fire with no model turn, and output delivers that JSON to the session. Run
+it through `scripts/verify-pr-watch-gate.mjs` instead of calling the probe
+directly: the probe also reports comments and failed checks, and every
+non-empty gate output starts a turn whether or not the head moved. The wrapper
+forwards only `action: "resync"` (a moved head) and `action: "stop"`.
+
 Build the task in this order and stop at the first failure:
 
 1. **Resolve a binary that carries the probe.** The gate runs in a fresh shell,
@@ -165,9 +170,15 @@ Build the task in this order and stop at the first failure:
    confirm `qwen autofix-pr snapshot --help` lists `snapshot`. A binary without
    it makes every fire fail: say which build is needed and schedule nothing.
 2. **Confirm `gh auth status` succeeds in that same shell.**
-3. **Create the task** with `cron_create`: `cron: "*/2 * * * *"`,
+3. **Refuse to share the probe's state.** Run
+   `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --check`. Exit 3 means
+   this PR already has an `autofix-pr` watch — its gate cursor or prepared
+   state exists — and one cursor serves one consumer: a second watch would
+   starve the first of head moves and lose `stop`. Say coexistence is
+   unsupported and stop; do not delete the other watch to make room.
+4. **Create the task** with `cron_create`: `cron: "*/2 * * * *"`,
    `recurring: true`, `durable: true`, `sessionMode: "current"`, and
-   `gate: "<absolute qwen> autofix-pr snapshot <n> --gate --repo <owner>/<repo>"`
+   `gate: "node <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli <absolute qwen>"`
    (the gate is capped at 2048 characters). The prompt is the contract below.
 
 The prompt consumes the gate's JSON and nothing else. On
