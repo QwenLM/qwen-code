@@ -175,17 +175,21 @@ class ManagedActionsTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"read_file", "write_file", "edit", "run_shell_command",
+    @ValueSource(strings = {"web_fetch", "read_file", "write_file", "edit", "run_shell_command",
+            "todo_write",
             "team_create", "task_create", "task_update", "workflow",
             "request_shutdown", "exit_plan_mode", "team_plan_approval"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
         String tenant = tenant();
         String session = session(tenant);
         String arguments = switch (tool) {
+            case "web_fetch" -> "{ \"url\" : \"https://example.com/docs\", \"prompt\" : \"Summarize\" }";
             case "read_file" -> "{ \"file_path\" : \"notes.md\", \"offset\" : 1e2 }";
             case "write_file" -> "{ \"file_path\" : \"notes.md\", \"content\" : \"\\u4e2d\\n\" }";
             case "edit" -> "{ \"file_path\" : \"notes.md\", \"old_string\" : \"a\", \"new_string\" : \"b\" }";
             case "run_shell_command" -> "{ \"command\" : \"printf 'text'\" }";
+            // #15076: the task list is the only preview this profile adds.
+            case "todo_write" -> "{ \"todos\" : [ { \"id\" : \"1\", \"content\" : \"audit\", \"status\" : \"pending\" } ] }";
             case "team_create" -> "{ \"team_name\" : \"review\" }";
             case "task_create" -> "{ \"subject\" : \"Audit\", \"description\" : \"the diff\" }";
             case "task_update" -> "{ \"taskId\" : \"1\", \"status\" : \"in_progress\", \"owner\" : \"alice\" }";

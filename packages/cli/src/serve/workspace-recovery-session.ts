@@ -822,10 +822,9 @@ export async function verifyRecoverySession(
         'invalid genesis',
       );
       const definition = object(json(await read(header.definitionRef)));
-      // The /2 profiles are the same Hosted files/shell surfaces plus glob;
-      // the W1b bundle doc puts Hosted files and Shell profiles inside the
-      // capture closure, so one /2 Session must not abort recovery of the
-      // whole shared storage.
+      // The W1b bundle includes Hosted file-search and Shell profiles in
+      // its capture closure, so a search-capable Session must not abort
+      // recovery of the whole shared storage.
       requireValue(
         definition['engine'] === 'managed' &&
           definition['sessionId'] === source.sessionId &&
