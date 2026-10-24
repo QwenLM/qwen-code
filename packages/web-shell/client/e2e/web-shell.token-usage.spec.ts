@@ -550,6 +550,11 @@ for (const { width, language, theme } of [
                   fits: header.scrollWidth <= header.clientWidth + 1,
                 };
               });
+            // Wrap itself is not pinned: whether the meta still fits beside
+            // the value at minimum width depends on CJK glyph widths, which
+            // differ across runner images (the hz ARM64 pool keeps them on
+            // one line). The invariants are right alignment, no overlap, and no
+            // overflow.
             expect(alignment.right).toBeLessThanOrEqual(1);
             expect(alignment.overlap).toBe(false);
             expect(alignment.fits).toBe(true);
