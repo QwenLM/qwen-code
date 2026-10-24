@@ -21904,6 +21904,63 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('keeps the Hosted Harness on its requested port', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-port-')),
+    );
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+    } as unknown as express.Application);
+    const testServer = createServer();
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      const err = new Error('address in use') as NodeJS.ErrnoException;
+      err.code = 'EADDRINUSE';
+      setImmediate(() => testServer.emit('error', err));
+      return testServer;
+    }) as unknown as typeof testServer.listen;
+
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 4170,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          },
+          {
+            bridge: makeFakeBridge(),
+            httpServerFactory: () => testServer,
+            resolveOnListen: true,
+          },
+        ),
+      ).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(portsAttempted).toEqual([4170]);
+    expect(
+      stderrWrites.some((w) =>
+        w.includes(
+          'port 4170 is in use; --profile hosted-harness does not move to another port',
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it('does not retry on non-EADDRINUSE listen errors', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-no-retry-')),
