@@ -37,7 +37,10 @@ interface Scenario {
   args?: string[];
   prepare?: (rig: TestRig) => void;
   settings?: JsonObject;
-  /** Run without --yolo and allow every stream-json `can_use_tool` request. */
+  /**
+   * Run in the default approval mode, which asks for every edit, and allow
+   * every stream-json `can_use_tool` request.
+   */
   approve?: boolean;
   /** The exit code both runs must end with; defaults to 0. */
   exitCode?: number;
@@ -186,7 +189,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const args = [
       rig.bundlePath,
       '--no-chat-recording',
-      ...(scenario.approve ? [] : ['--yolo']),
+      ...(scenario.approve ? ['--approval-mode', 'default'] : ['--yolo']),
       ...(scenario.prompt !== undefined ? ['--prompt', scenario.prompt] : []),
       '--output-format',
       'stream-json',
@@ -242,6 +245,17 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     });
     let stderr = '';
     child.stderr.on('data', (data: Buffer) => (stderr += data));
+    // A session whose first message is a user message runs without the
+    // control channel, so it would never send `can_use_tool`.
+    if (scenario.approve) {
+      child.stdin.write(
+        `${JSON.stringify({
+          type: 'control_request',
+          request_id: 'initialize-parity',
+          request: { subtype: 'initialize' },
+        })}\n`,
+      );
+    }
     sendNext();
     const exitCode = await new Promise<number | null>((resolve) =>
       child.on('close', resolve),
