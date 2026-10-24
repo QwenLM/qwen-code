@@ -628,6 +628,10 @@ jobs:
           package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
 
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
+
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
@@ -885,13 +889,20 @@ jobs:
           reporter: 'java-junit'
           fail-on-error: 'false'
 
-      - name: 'Upload Test Results Artifact (for forks)'
+      - name: 'Upload Test Results Artifact'
         if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}
+        # Advisory like the publisher above: a transient artifact-service
+        # failure must not turn a green suite red. `always()` also fires on a
+        # run cancelled mid-suite, so a partial report can be retained under
+        # the complete run's name.
+        continue-on-error: true
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'test-results-fork-22.x-ubuntu-latest'
+          name: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'test-results-fork-22.x-ubuntu-latest' || 'test-results-22.x-ubuntu-latest' }}"
           path: 'packages/*/junit.xml'
+          if-no-files-found: 'ignore'
+          retention-days: 7
 
       # Push only: that is the one lane where QWEN_CI_COVERAGE turns
       # collection on, so a pull-request run has nothing to upload.
@@ -935,6 +946,8 @@ jobs:
     # only the warm half of that reality. Hosted runners keep the tighter
     # ceiling so a genuine hang there does not burn the ECS allowance.
     timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''90'' || ''45'') }}'
+    env:
+      LINT_BASE_SHA: "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}"
     permissions:
       contents: 'read'
       pull-requests: 'read'
@@ -1202,6 +1215,21 @@ jobs:
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: 'node .github/scripts/check-test-growth.mjs'
 
+      # Stays below the two steps above that refetch shallow history: a
+      # depth-1 fetch of the base ref grafts the commit LINT_BASE_SHA names and
+      # `merge-base` then fails closed to a silent full scan (design doc,
+      # "PR-lane history"). The helper-checks step that runs lint.js is below.
+      - name: 'Fetch incremental lint history'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
+        timeout-minutes: 2
+        continue-on-error: true
+        env:
+          LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: |-
+          # Bound transfer on the shared runners. lint-scope falls back to full
+          # checks when this history cannot prove the PR's merge base.
+          git fetch --no-tags --depth=100 origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
+
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
       - name: 'Set up Node.js 22.x (hosted)'
@@ -1211,6 +1239,10 @@ jobs:
           node-version: '22.x'
           package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
@@ -1244,6 +1276,9 @@ jobs:
 
       - name: 'Install dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        env:
+          QWEN_SKIP_PREPARE: '1'
+          QWEN_SKIP_NOTICE_GENERATION: '1'
         run: |-
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
@@ -1321,6 +1356,24 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --sensitive-keywords'
 
+      # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
+      # npm run test:ci only, so they intentionally do not repeat this
+      # platform-independent bundle closure check.
+      - name: 'Check serve fast-path bundle closure'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run check:serve-fast-path-bundle'
+
+      # cli sources name core modules by path (`.../config/storage.js`). In the
+      # repo those resolve through tsconfig paths or vitest aliases; in the
+      # published package neither exists and Node resolves them against core's
+      # `exports`, where one `./*` entry carries all of them. Nothing else
+      # exercises that entry, so without this a change to it — or to the
+      # dist layout — leaves every suite green and breaks `qwen` at startup.
+      # Runs after the step above has already built the workspace.
+      - name: 'Check core subpath exports resolve'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run check:core-subpath-exports'
+
       - name: 'Run i18n check'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check-i18n'
@@ -1359,26 +1412,6 @@ jobs:
             exit 1
           fi
           echo "NOTICES.txt is up-to-date"
-
-      # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
-      # npm run test:ci only, so they intentionally do not repeat this
-      # platform-independent bundle closure check.
-      - name: 'Check serve fast-path bundle closure'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:serve-fast-path-bundle'
-
-      # cli sources name core modules by path (`.../config/storage.js`). In the
-      # repo those resolve through tsconfig paths or vitest aliases; in the
-      # published package neither exists and Node resolves them against core's
-      # `exports`, where one `./*` entry carries all of them. Nothing else
-      # exercises that entry, so without this a change to it — or to the
-      # dist layout — leaves every suite green and breaks `qwen` at startup.
-      # Runs after the step above has already built the workspace.
-      - name: 'Check core subpath exports resolve'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: |-
-          npm run build --workspace=packages/core
-          npm run check:core-subpath-exports
 
       # The `github_ci_only` profile runs the .github/scripts helper tests, but a
       # `full` PR that touches those scripts skips that path and `npm run
@@ -1445,15 +1478,19 @@ jobs:
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
+    # Gate on the classifier's own profile output instead of the copy `test`
+    # re-derives: it is the same value (the classifier already forces an
+    # unknown one to `full`), and dropping the `test` edge lets this
+    # 35-minute lane run beside Test instead of behind it. `|| 'full'`
+    # extends that fail-safe to a classifier that emitted nothing at all.
     needs:
       - 'classify_pr'
-      - 'test'
     if: |-
       ${{
         !cancelled() &&
         (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
-        needs.test.outputs.ci_profile == 'full'
+        (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
       }}
     # Keep the classifier's trust and hosted overrides, but use ARM64 for
     # this lane independently of the ordinary Linux CI fleet. The history
