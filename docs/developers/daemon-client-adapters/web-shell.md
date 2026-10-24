@@ -61,6 +61,18 @@ last event id on `DaemonSessionClient`, and reconnects the stream by default.
 Callers can disable that with `autoReconnect={false}` for tests or custom
 connection management.
 
+### Deleting selected sessions
+
+Session Overview supports deleting more than 100 selected sessions. It groups
+the selection by owning workspace and sends sequential requests of at most
+100 session IDs through each workspace's client. Successful deletions remain
+accounted for if a later request fails, including cleanup of a deleted current
+session, while the failure is shown in the overview.
+
+The batch size follows the daemon's shared 100-ID request validation for
+session deletion and archiving, including workspace-qualified routes. During
+deletion, an earlier per-session error does not hide a later request failure.
+
 ### Removing composer attachments
 
 In the desktop Web Shell composer, when the text body is empty and the caret
