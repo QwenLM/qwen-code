@@ -2194,6 +2194,46 @@ describe('resumed promptId attachment', () => {
       ...over,
     }) as unknown as ChatRecord;
 
+  it('rewinds a legacy placeholder prompt through its source record', () => {
+    const messages: ChatRecord[] = [
+      'hello',
+      'response hello',
+      '[Old inline media cleared: image/png]',
+      'response colliding',
+      'world',
+      'response world',
+    ].map((text, index) => ({
+      uuid: `legacy-${index}`,
+      parentUuid: index === 0 ? null : `legacy-${index - 1}`,
+      sessionId: 's',
+      timestamp: '2026-10-09T00:00:00.000Z',
+      cwd: '/workspace',
+      version: '0.10.5',
+      type: index % 2 === 0 ? 'user' : 'assistant',
+      message: {
+        role: index % 2 === 0 ? 'user' : 'model',
+        parts: [{ text }],
+      },
+    }));
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 0);
+    const api = buildApiHistoryFromConversation(sessionData.conversation);
+    const target = ui.find((item) => item.type === 'user' && item.id === 3)!;
+
+    expect(target).toMatchObject({
+      text: '[Old inline media cleared: image/png]',
+    });
+    expect('promptId' in target).toBe(false);
+    const cut = computeApiTruncationIndex(ui, target.id, api);
+    expect(cut).toBe(2);
+    expect(api.slice(0, cut).map((entry) => entry.parts?.[0]?.text)).toEqual([
+      'hello',
+      'response hello',
+    ]);
+  });
+
   it('attaches recorded prompt identities to resumed user items', () => {
     const sessionData = {
       conversation: {
