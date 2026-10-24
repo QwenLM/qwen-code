@@ -41,8 +41,15 @@ interface RetainedSelection {
 }
 
 interface SelectionState {
-  /** The address the next enable posts. */
+  /** The address shown as selected in the picker. */
   selected: string;
+  /**
+   * Whether `selected` is a named choice — the operator's pick or the
+   * retained address — rather than a single-candidate auto-fill. Only a
+   * named choice is posted as `address`: the daemon reads a named address as
+   * the operator's later choice and revokes the daemon-start grant (#14140).
+   */
+  named: boolean;
   /**
    * The address the daemon last committed to — reported by an active status,
    * or vouched for by the daemon's grant (`grantedAddress` /
@@ -59,22 +66,30 @@ interface SelectionState {
 // new DHCP address) would otherwise be silently re-sent with no way to fix it.
 function reconcileSelection(
   interfaces: LanCandidate[] | undefined,
-  current: string,
+  current: SelectionState,
   retained: RetainedSelection | undefined,
-): string {
-  if (!interfaces) return current;
+): SelectionState {
+  if (!interfaces) return { ...current, retained };
+  if (current.selected && current.selected === retained?.candidate.address) {
+    return { ...current, named: true, retained };
+  }
   if (
-    current &&
-    (current === retained?.candidate.address ||
-      interfaces.some((c) => c.address === current))
+    current.selected &&
+    interfaces.some((c) => c.address === current.selected)
   ) {
-    return current;
+    return { ...current, retained };
   }
   // The committed pick outranks the single-candidate auto-fill: it is the
   // address the operator (or the daemon's grant) actually chose.
-  if (retained) return retained.candidate.address;
-  if (interfaces.length === 1) return interfaces[0]!.address;
-  return '';
+  if (retained) {
+    return { selected: retained.candidate.address, named: true, retained };
+  }
+  // A lone candidate is a fallback the daemon may pick for us, not a named
+  // choice: posting it as one would supersede the daemon-start grant.
+  if (interfaces.length === 1) {
+    return { selected: interfaces[0]!.address, named: false, retained };
+  }
+  return { selected: '', named: false, retained };
 }
 
 function reconcileRetained(
@@ -131,6 +146,7 @@ export function LocalControlSettingsCard() {
   const [status, setStatus] = useState<LocalControlStatus>();
   const [selection, setSelection] = useState<SelectionState>({
     selected: '',
+    named: false,
     retained: undefined,
   });
   const [busy, setBusy] = useState(false);
@@ -147,14 +163,7 @@ export function LocalControlSettingsCard() {
         setStatus(next);
         setSelection((prev) => {
           const retained = reconcileRetained(prev.retained, next);
-          return {
-            retained,
-            selected: reconcileSelection(
-              next.interfaces,
-              prev.selected,
-              retained,
-            ),
-          };
+          return reconcileSelection(next.interfaces, prev, retained);
         });
       })
       .catch((failure: unknown) => {
@@ -173,11 +182,14 @@ export function LocalControlSettingsCard() {
     if (!status) return;
     setBusy(true);
     setError('');
-    // Captured before the request: the 409 recovery below needs to know
-    // whether the refused address was the retained pick.
-    const postedAddress = status.active
-      ? undefined
-      : selection.selected || undefined;
+    // Only a named choice is posted as `address`; a single-candidate
+    // auto-fill goes out address-less so it cannot revoke the daemon-start
+    // grant (#14140). Captured before the request: the 409 recovery below
+    // needs to know whether the refused address was the retained pick.
+    const postedAddress =
+      !status.active && selection.named
+        ? selection.selected || undefined
+        : undefined;
     try {
       const path = status.active
         ? '/workspace/local-control/disable'
@@ -198,14 +210,7 @@ export function LocalControlSettingsCard() {
       setStatus(next);
       setSelection((prev) => {
         const retained = reconcileRetained(prev.retained, next);
-        return {
-          retained,
-          selected: reconcileSelection(
-            next.interfaces,
-            prev.selected,
-            retained,
-          ),
-        };
+        return reconcileSelection(next.interfaces, prev, retained);
       });
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -226,10 +231,7 @@ export function LocalControlSettingsCard() {
             prev.retained && postedAddress === prev.retained.candidate.address
               ? undefined
               : prev.retained;
-          return {
-            retained,
-            selected: reconcileSelection(recovered, prev.selected, retained),
-          };
+          return reconcileSelection(recovered, prev, retained);
         });
       }
     } finally {
@@ -274,7 +276,7 @@ export function LocalControlSettingsCard() {
         <Select
           value={selection.selected}
           onValueChange={(value) =>
-            setSelection((prev) => ({ ...prev, selected: value }))
+            setSelection((prev) => ({ ...prev, selected: value, named: true }))
           }
         >
           <SelectTrigger
