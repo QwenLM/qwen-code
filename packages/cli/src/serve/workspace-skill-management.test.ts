@@ -806,8 +806,23 @@ describe('workspace Skill management', () => {
       path.dirname(baseDir),
       '.skills-stable-skill.backup-stale',
     );
+    const datedBackup = path.join(
+      baseDir,
+      '.stable-skill.backup-1792788267646',
+    );
+    const randomStaging = path.join(
+      path.dirname(baseDir),
+      '.skills-stable-skill.installing-sdk0Bp',
+    );
+    const foreignBackup = path.join(
+      path.dirname(baseDir),
+      '.skills-stable-skill.backup-my_data.txt',
+    );
     await fs.mkdir(legacyBackup, { recursive: true });
     await fs.mkdir(staleBackup, { recursive: true });
+    await fs.mkdir(datedBackup, { recursive: true });
+    await fs.mkdir(randomStaging, { recursive: true });
+    await fs.mkdir(foreignBackup, { recursive: true });
     await fs.writeFile(
       path.join(legacyBackup, 'SKILL.md'),
       skillMarkdown('stable-skill'),
@@ -825,6 +840,9 @@ describe('workspace Skill management', () => {
 
     await expect(fs.access(legacyBackup)).rejects.toThrow();
     await expect(fs.access(staleBackup)).rejects.toThrow();
+    await expect(fs.access(datedBackup)).rejects.toThrow();
+    await expect(fs.access(randomStaging)).rejects.toThrow();
+    await expect(fs.access(foreignBackup)).resolves.toBeUndefined();
   });
 
   it('restores the existing Skill when committing a replacement fails', async () => {

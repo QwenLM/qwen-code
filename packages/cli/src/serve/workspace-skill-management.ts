@@ -37,10 +37,18 @@ export const MAX_PACKAGE_BYTES = 64 * 1024 * 1024;
 export const MAX_FILES = 2000;
 const MAX_PATH_LENGTH = 512;
 const MAX_PATH_DEPTH = 16;
+// GitHub returns at most 1000 entries per Contents API listing and silently
+// truncates larger directories, so a page-sized listing is re-read via git.
+const GITHUB_CONTENTS_PAGE_LIMIT = 1000;
 const PACKAGE_TOO_MANY = 'Skill package has too many files (max 2000)';
 const ZIP_TOO_MANY = 'Skill ZIP contains too many files (max 2000)';
 export const MAX_WORKSPACE_SKILL_NAME_LENGTH = 256;
 const execFileAsync = promisify(execFile);
+
+// Live staging and backup directories owned by in-flight installs. The orphan
+// sweep in removeInstallArtifacts must reclaim crashed runs without deleting a
+// concurrent install that has not committed yet.
+const liveInstallArtifacts = new Set<string>();
 
 interface PackageState {
   count: number;
@@ -310,6 +318,13 @@ async function downloadGitHubDirectory(
   const items = (await response.json()) as unknown;
   if (!Array.isArray(items))
     skillError('invalid_skill_source', 'GitHub URL must point to SKILL.md');
+  if (items.length >= GITHUB_CONTENTS_PAGE_LIMIT) {
+    throw new WorkspaceSkillManagementError(
+      'github_api_failed',
+      'GitHub directory listing reached the API page limit; retrying with git',
+      502,
+    );
+  }
   for (const item of items) {
     if (!item || typeof item !== 'object') continue;
     const record = item as Record<string, unknown>;
@@ -372,8 +387,10 @@ async function downloadGitHubDirectoryWithGit(
   directory: string,
   staging: string,
   state: PackageState,
+  githubToken?: string,
   assertGenerationOpen?: () => void,
 ): Promise<void> {
+  assertGenerationOpen?.();
   const checkout = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-git-'));
   try {
     await execFileAsync(
@@ -389,7 +406,22 @@ async function downloadGitHubDirectoryWithGit(
         `https://github.com/${owner}/${repo}.git`,
         checkout,
       ],
-      { timeout: 60_000, maxBuffer: 1024 * 1024 },
+      {
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024,
+        ...(githubToken
+          ? {
+              // Keep the credential out of argv (visible in `ps`); git reads
+              // these environment entries as configuration.
+              env: {
+                ...process.env,
+                GIT_CONFIG_COUNT: '1',
+                GIT_CONFIG_KEY_0: 'http.extraHeader',
+                GIT_CONFIG_VALUE_0: `Authorization: Bearer ${githubToken}`,
+              },
+            }
+          : {}),
+      },
     );
     if (directory) {
       await execFileAsync(
@@ -404,6 +436,7 @@ async function downloadGitHubDirectoryWithGit(
         { timeout: 30_000, maxBuffer: 1024 * 1024 },
       );
     }
+    assertGenerationOpen?.();
     await copyFolder(
       path.join(checkout, directory),
       staging,
@@ -412,6 +445,12 @@ async function downloadGitHubDirectoryWithGit(
     );
   } catch (error) {
     if (error instanceof WorkspaceSkillManagementError) throw error;
+    if (
+      error instanceof Error &&
+      error.name === 'WorkspaceGenerationClosedError'
+    ) {
+      throw error;
+    }
     throw new WorkspaceSkillManagementError(
       'github_skill_download_failed',
       `Failed to download GitHub Skill: ${error instanceof Error ? error.message : String(error)}`,
@@ -558,6 +597,7 @@ async function downloadGitHubSkill(
       plan.directory,
       staging,
       state,
+      githubToken,
       assertGenerationOpen,
     );
   }
@@ -917,13 +957,16 @@ async function removeInstallArtifacts(
     const entries = await fs.readdir(directory, { withFileTypes: true });
     await Promise.all(
       entries
-        .filter((entry) =>
-          prefixes.some(
+        .filter((entry) => {
+          if (liveInstallArtifacts.has(path.join(directory, entry.name))) {
+            return false;
+          }
+          return prefixes.some(
             (prefix) =>
               entry.name.startsWith(prefix) &&
               /^[A-Za-z0-9-]+$/.test(entry.name.slice(prefix.length)),
-          ),
-        )
+          );
+        })
         .map(async (entry) => {
           assertGenerationOpen?.();
           await fs.rm(path.join(directory, entry.name), {
@@ -994,6 +1037,7 @@ export async function installWorkspaceSkill(
   const staging = await fs.mkdtemp(
     path.join(workDir, `${workPrefix}.installing-`),
   );
+  liveInstallArtifacts.add(staging);
   const backup = path.join(workDir, `${workPrefix}.backup-${Date.now()}`);
   let movedExisting = false;
   let committedStaging = false;
@@ -1026,6 +1070,7 @@ export async function installWorkspaceSkill(
     }
     if (existing) {
       assertGenerationOpen?.();
+      liveInstallArtifacts.add(backup);
       await fs.rename(destination, backup);
       movedExisting = true;
     }
@@ -1044,6 +1089,9 @@ export async function installWorkspaceSkill(
       await fs.rename(backup, destination).catch(() => undefined);
     }
     throw error;
+  } finally {
+    liveInstallArtifacts.delete(staging);
+    liveInstallArtifacts.delete(backup);
   }
   if (movedExisting) {
     await fs

@@ -331,8 +331,10 @@ Implementation scope.
 - `yauzl`'s `fromBuffer` requires the whole archive. That cost is capped
   by `MAX_ZIP_ARCHIVE_BYTES` and is acceptable. Do not add a temp-file ZIP
   reader in this change.
-- GitHub Contents API listings and the existing git fallback are
-  unchanged. A 2000-file API walk can be slow or rate-limited. The new
+- GitHub Contents API listings stop at the API's 1000-entry page maximum.
+  A listing at that length is treated as truncated and re-read through the
+  existing git fallback, so enumeration completeness does not depend on the
+  API walk. A 2000-file API walk can still be slow or rate-limited. The new
   file cap is a ceiling, not a completion-time guarantee. Both the SDK
   request and Web Shell action currently time out after 30 s. A slow
   install may finish on the daemon after the client reports a timeout;
@@ -385,6 +387,9 @@ Touch only:
 
 - `packages/cli/src/serve/workspace-skill-management.ts`
 - `packages/cli/src/serve/workspace-skill-management.test.ts`
+- `packages/cli/src/serve/workspace-skill-management-recovery.test.ts`
+  (new; Contents API failure retry with a staging reset, and artifact-prefix
+  collision isolation)
 - `packages/web-shell/client/components/skills/SkillInstallDialog.tsx`
 - `packages/web-shell/client/i18n.tsx` (English and Chinese catalogs)
 
@@ -447,8 +452,10 @@ formula. The number is otherwise unexplained. No other new comments.
 
 ## Validation
 
-Update `packages/cli/src/serve/workspace-skill-management.test.ts`. Do not
-run the full suite for the design; the implementation PR runs this file.
+Update `packages/cli/src/serve/workspace-skill-management.test.ts` and the
+new `packages/cli/src/serve/workspace-skill-management-recovery.test.ts`.
+Do not run the full suite for the design; the implementation PR runs both
+files.
 
 - Assert `MAX_ZIP_ARCHIVE_BYTES` equals the formula above, and that a
   worst-case envelope plus the base64 of that many bytes is ≤ 10,485,760,

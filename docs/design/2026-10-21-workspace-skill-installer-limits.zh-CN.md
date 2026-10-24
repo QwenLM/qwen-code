@@ -281,10 +281,12 @@ MAX_ZIP_ARCHIVE_BYTES   = 3 * floor(10_485_430 / 4) // 7_864_071
 - `yauzl` 的 `fromBuffer` 需要整个压缩包。这笔开销由
   `MAX_ZIP_ARCHIVE_BYTES` 封顶，可以接受。本次不要另加把 ZIP 先落盘再读的
   读取器。
-- GitHub Contents API 的目录列表和现有 git 回退保持不变。2000 个文件的
-  API 遍历可能很慢或触发速率限制。新的文件数上限不保证完成时间。SDK
-  请求和 Web Shell 操作当前都在 30 秒后超时；客户端报告超时后，daemon
-  仍可能完成安装。取消机制与超时调整留作后续工作。
+- GitHub Contents API 的目录列表在 API 的 1000 条目分页上限处停止。达到该
+  长度的列表会被视为被截断，并改用现有 git 回退重新读取，因此枚举完整性
+  不依赖 API 遍历。2000 个文件的 API 遍历仍可能很慢或触发速率限制。新的
+  文件数上限不保证完成时间。SDK 请求和 Web Shell 操作当前都在 30 秒后
+  超时；客户端报告超时后，daemon 仍可能完成安装。取消机制与超时调整留作
+  后续工作。
 - Web Shell 与 CLI 没有可供这个常量共用的模块。两个字面量必须在评审时保持
   相等。
 - 不单独限制 ZIP 压缩比。压缩包和展开字节上限分别生效，高压缩比的包
@@ -325,6 +327,8 @@ closes` 在第三次 `assertGenerationOpen` 时抛出，并期望不存在 `.qwe
 
 - `packages/cli/src/serve/workspace-skill-management.ts`
 - `packages/cli/src/serve/workspace-skill-management.test.ts`
+- `packages/cli/src/serve/workspace-skill-management-recovery.test.ts`
+  （新增；Contents API 失败后的重试与暂存重置，以及安装产物前缀碰撞的隔离）
 - `packages/web-shell/client/components/skills/SkillInstallDialog.tsx`
 - `packages/web-shell/client/i18n.tsx`（英文和中文两份目录）
 
@@ -384,8 +388,9 @@ closes` 在第三次 `assertGenerationOpen` 时抛出，并期望不存在 `.qwe
 
 ## 验证
 
-更新 `packages/cli/src/serve/workspace-skill-management.test.ts`。设计阶段
-不跑完整测试套件；实现 PR 跑这个文件。
+更新 `packages/cli/src/serve/workspace-skill-management.test.ts`，以及新增的
+`packages/cli/src/serve/workspace-skill-management-recovery.test.ts`。设计阶段
+不跑完整测试套件；实现 PR 跑这两个文件。
 
 - 断言 `MAX_ZIP_ARCHIVE_BYTES` 等于上面的公式，并且最坏信封加上这么多字节的
   base64 后 ≤ 10,485,760，再多 1 个原始字节则超出。为该断言导出常量，或者

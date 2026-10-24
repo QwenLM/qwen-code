@@ -191,4 +191,306 @@ describe('workspace Skill install recovery', () => {
       ).toBe(markdown(name));
     },
   );
+
+  it('falls back to git when a Contents API listing reaches the page limit', async () => {
+    const workspace = await temporary();
+    const fixture = await temporary();
+    await fs.mkdir(path.join(fixture, 'skills/foo'), { recursive: true });
+    await fs.writeFile(
+      path.join(fixture, 'skills/foo/SKILL.md'),
+      markdown('foo'),
+    );
+    await fs.writeFile(path.join(fixture, 'skills/foo/a.txt'), 'must survive');
+    execFileMock.mockImplementation(
+      (
+        _file: string,
+        args: string[],
+        _options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        const operation =
+          args[0] === 'clone'
+            ? fs.cp(fixture, args[args.length - 1], { recursive: true })
+            : Promise.resolve();
+        void operation.then(
+          () => callback(null, '', ''),
+          (error: Error) => callback(error, '', ''),
+        );
+      },
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        if (input.includes('/contents/skills/foo?')) {
+          return Response.json(
+            Array.from({ length: 1000 }, (_, index) =>
+              index === 0
+                ? {
+                    name: 'SKILL.md',
+                    type: 'file',
+                    path: 'skills/foo/SKILL.md',
+                    download_url:
+                      'https://raw.githubusercontent.com/owner/repo/main/skills/foo/SKILL.md',
+                  }
+                : {
+                    name: `missing-${index}.txt`,
+                    type: 'file',
+                    path: `skills/foo/missing-${index}.txt`,
+                  },
+            ),
+          );
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+    await installWorkspaceSkill(workspace, {
+      name: 'foo',
+      scope: 'workspace',
+      source: {
+        type: 'github',
+        url: 'https://github.com/owner/repo/blob/main/skills/foo/SKILL.md',
+      },
+    });
+    expect(execFileMock).toHaveBeenCalled();
+    expect(
+      await fs.readFile(path.join(workspace, '.qwen/skills/foo/a.txt'), 'utf8'),
+    ).toBe('must survive');
+  });
+
+  it('keeps a live staging directory when another scope shares the base directory', async () => {
+    const workspace = await temporary();
+    const source = await temporary();
+    await fs.writeFile(path.join(source, 'SKILL.md'), markdown('other'));
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = path.join(workspace, '.qwen');
+    let release!: () => void;
+    let parked!: () => void;
+    const pause = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      parked = resolve;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        if (input.includes('/contents/skills/foo?'))
+          return Response.json([
+            {
+              name: 'a.txt',
+              type: 'file',
+              path: 'skills/foo/a.txt',
+              download_url:
+                'https://raw.githubusercontent.com/owner/repo/main/skills/foo/a.txt',
+            },
+            {
+              name: 'SKILL.md',
+              type: 'file',
+              path: 'skills/foo/SKILL.md',
+              download_url:
+                'https://raw.githubusercontent.com/owner/repo/main/skills/foo/SKILL.md',
+            },
+          ]);
+        if (input.endsWith('/a.txt')) return new Response('must survive');
+        if (input.endsWith('/SKILL.md')) {
+          parked();
+          await pause;
+          return new Response(markdown('foo'));
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+    try {
+      const victim = installWorkspaceSkill(workspace, {
+        name: 'foo',
+        scope: 'workspace',
+        source: {
+          type: 'github',
+          url: 'https://github.com/owner/repo/blob/main/skills/foo/SKILL.md',
+        },
+      });
+      await ready;
+      try {
+        await expect(
+          installWorkspaceSkill(workspace, {
+            name: 'foo',
+            scope: 'global',
+            source: { type: 'folder', path: source },
+          }),
+        ).rejects.toMatchObject({ code: 'skill_name_mismatch' });
+      } finally {
+        release();
+      }
+      await victim;
+      expect(
+        await fs.readFile(
+          path.join(workspace, '.qwen/skills/foo/a.txt'),
+          'utf8',
+        ),
+      ).toBe('must survive');
+    } finally {
+      release();
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+    }
+  });
+
+  it('does not start git when the generation is already closed', async () => {
+    const workspace = await temporary();
+    let closed = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        closed = true;
+        return new Response('rate limited', { status: 429 });
+      }),
+    );
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const callback = args[3] as (
+        error: Error | null,
+        stdout: string,
+        stderr: string,
+      ) => void;
+      callback(null, '', '');
+    });
+    const generationClosed = () => {
+      if (closed) {
+        const error = new Error('generation closed');
+        error.name = 'WorkspaceGenerationClosedError';
+        throw error;
+      }
+    };
+    await expect(
+      installWorkspaceSkill(
+        workspace,
+        {
+          name: 'foo',
+          scope: 'workspace',
+          source: {
+            type: 'github',
+            url: 'https://github.com/owner/repo/blob/main/skills/foo/SKILL.md',
+          },
+        },
+        undefined,
+        generationClosed,
+      ),
+    ).rejects.toMatchObject({ name: 'WorkspaceGenerationClosedError' });
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it('stops the git fallback when the generation closes during the clone', async () => {
+    const workspace = await temporary();
+    const fixture = await temporary();
+    await fs.mkdir(path.join(fixture, 'skills/foo'), { recursive: true });
+    await fs.writeFile(
+      path.join(fixture, 'skills/foo/SKILL.md'),
+      markdown('foo'),
+    );
+    let closed = false;
+    execFileMock.mockImplementation(
+      (
+        _file: string,
+        args: string[],
+        _options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        const operation =
+          args[0] === 'clone'
+            ? fs.cp(fixture, args[args.length - 1], { recursive: true })
+            : Promise.resolve();
+        void operation.then(
+          () => {
+            if (args[0] === 'clone') closed = true;
+            callback(null, '', '');
+          },
+          (error: Error) => callback(error, '', ''),
+        );
+      },
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('rate limited', { status: 429 })),
+    );
+    const generationClosed = () => {
+      if (closed) {
+        const error = new Error('generation closed');
+        error.name = 'WorkspaceGenerationClosedError';
+        throw error;
+      }
+    };
+    await expect(
+      installWorkspaceSkill(
+        workspace,
+        {
+          name: 'foo',
+          scope: 'workspace',
+          source: {
+            type: 'github',
+            url: 'https://github.com/owner/repo/blob/main/skills/foo/SKILL.md',
+          },
+        },
+        undefined,
+        generationClosed,
+      ),
+    ).rejects.toMatchObject({ name: 'WorkspaceGenerationClosedError' });
+  });
+
+  it('passes the configured token to the git fallback without argv exposure', async () => {
+    const workspace = await temporary();
+    const fixture = await temporary();
+    await fs.mkdir(path.join(fixture, 'skills/foo'), { recursive: true });
+    await fs.writeFile(
+      path.join(fixture, 'skills/foo/SKILL.md'),
+      markdown('foo'),
+    );
+    execFileMock.mockImplementation(
+      (
+        _file: string,
+        args: string[],
+        _options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        const operation =
+          args[0] === 'clone'
+            ? fs.cp(fixture, args[args.length - 1], { recursive: true })
+            : Promise.resolve();
+        void operation.then(
+          () => callback(null, '', ''),
+          (error: Error) => callback(error, '', ''),
+        );
+      },
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('denied', { status: 429 })),
+    );
+    const token = 'ghp_TEST_TOKEN';
+    await installWorkspaceSkill(
+      workspace,
+      {
+        name: 'foo',
+        scope: 'workspace',
+        source: {
+          type: 'github',
+          url: 'https://github.com/owner/repo/blob/main/skills/foo/SKILL.md',
+        },
+      },
+      token,
+    );
+    const clone = execFileMock.mock.calls.find(
+      ([, args]) => (args as string[])[0] === 'clone',
+    );
+    expect(clone).toBeDefined();
+    const [, argv, options] = clone as [
+      string,
+      string[],
+      { env?: Record<string, string> },
+    ];
+    expect(argv.join(' ')).not.toContain(token);
+    expect(options.env).toMatchObject({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.extraHeader',
+      GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}`,
+    });
+  });
 });
