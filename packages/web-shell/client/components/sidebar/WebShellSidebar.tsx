@@ -292,6 +292,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'scheduledTasks'
   | 'workflows'
   | 'goals'
+  | 'todos'
   | 'managed';
 
 export interface WebShellSidebarPrimaryNavOptions {
@@ -340,6 +341,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
     'scheduledTasks',
     'workflows',
     'goals',
+    'todos',
     'managed',
   ];
 
@@ -459,6 +461,7 @@ interface WebShellSidebarProps {
   onOpenScheduledTasks: () => void;
   onOpenWorkflows: () => void;
   onOpenGoals: () => void;
+  onOpenTodos: () => void;
   onOpenSessions: () => void;
   /**
    * Whether to offer the Session Overview entry point. The table handles
@@ -1107,6 +1110,7 @@ export function WebShellSidebar({
   onOpenScheduledTasks,
   onOpenWorkflows,
   onOpenGoals,
+  onOpenTodos,
   onOpenSessions,
   canOpenSessionsOverview,
   onOpenWorkspacesOverview,
@@ -1255,7 +1259,8 @@ export function WebShellSidebar({
         (showLive && primaryNavItems.has('live') && Boolean(onOpenLive)) ||
         primaryNavItems.has('scheduledTasks') ||
         primaryNavItems.has('workflows') ||
-        primaryNavItems.has('goals'))) ||
+        primaryNavItems.has('goals') ||
+        primaryNavItems.has('todos'))) ||
     (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
@@ -6051,6 +6056,23 @@ export function WebShellSidebar({
             <TargetIcon size={16} strokeWidth={1.2} />
           </span>
           {!collapsed && !railLayout && <span>{t('sidebar.goals')}</span>}
+        </button>
+      )}
+      {projectFeaturesEnabled && primaryNavItems.has('todos') && (
+        <button
+          className={styles.pluginButton}
+          type="button"
+          title={railLayout ? undefined : t('sidebar.todos')}
+          aria-label={t('sidebar.todos')}
+          aria-current={
+            railLayout && activePage === 'todos' ? 'page' : undefined
+          }
+          onClick={() => openNavigation(onOpenTodos)}
+        >
+          <span className={styles.navIcon}>
+            <ListTodoIcon size={16} strokeWidth={1.2} />
+          </span>
+          {!collapsed && !railLayout && <span>{t('sidebar.todos')}</span>}
         </button>
       )}
       {primaryNavItems.has('managed') && onOpenManagedSessions && (

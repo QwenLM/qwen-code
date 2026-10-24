@@ -420,6 +420,51 @@ export interface DaemonGoalList {
   droppedCount: number;
 }
 
+export type DaemonTodoStatus = 'pending' | 'in_progress' | 'completed';
+
+export interface DaemonTodoItem {
+  id: string;
+  content: string;
+  status: DaemonTodoStatus;
+  blockedBy?: string[];
+  /**
+   * Due date from the sidecar overlay (`todos/due-dates.json`), `YYYY-MM-DD`.
+   * Null when the todo has no due date.
+   */
+  dueDate?: string | null;
+}
+
+/** One session's todos, attributed to its project working directory. */
+export interface DaemonTodoSession {
+  sessionId: string;
+  cwd: string | null;
+  mtimeMs: number;
+  todos: DaemonTodoItem[];
+}
+
+/** Todos grouped by project working directory. */
+export interface DaemonTodoGroup {
+  project: string;
+  open: number;
+  done: number;
+  sessions: DaemonTodoSession[];
+}
+
+/** Snapshot returned by `GET /todos` (the Web Shell "Todos" page). */
+export interface DaemonTodosSnapshot {
+  v: number;
+  generatedAt: number;
+  totals: {
+    projects: number;
+    sessions: number;
+    open: number;
+    pending: number;
+    in_progress: number;
+    completed: number;
+  };
+  groups: DaemonTodoGroup[];
+}
+
 export interface DaemonWorkspacePathSuggestion {
   name: string;
   path: string;
@@ -668,6 +713,14 @@ export interface DaemonWorkspaceActions {
   ): Promise<GoalStateResponse>;
   /** Drop a session's goal hook. No-op when that session has no active goal. */
   clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
+
+  // Todos (cross-session aggregation over the native todo store)
+  listTodos(includeAll?: boolean): Promise<DaemonTodosSnapshot>;
+  updateTodo(
+    sessionId: string,
+    todoId: string,
+    patch: { status?: DaemonTodoStatus; dueDate?: string | null },
+  ): Promise<void>;
 
   // Providers / env (read-only diagnostics)
   loadProviders(workspaceCwd?: string): Promise<DaemonWorkspaceProvidersStatus>;

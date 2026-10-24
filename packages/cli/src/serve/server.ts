@@ -169,6 +169,7 @@ import {
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
+import { registerTodosRoutes } from './routes/todos.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
 import { registerSessionAgentSquadRoutes } from './routes/session-agent-squads.js';
 import {
@@ -3747,6 +3748,13 @@ export function createServeApp(
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
+
+  // Cross-session todo aggregation (the Web Shell "Todos" page). Reads the
+  // native per-session todo store and attributes each session to its project
+  // cwd (live session registry, then the per-project chat runtime records).
+  // The update path flips exactly one todo status through the non-strict
+  // mutate gate — the same capability class as scheduled-task edits.
+  registerTodosRoutes(app, { mutate, safeBody });
 
   // Being joined as a runtime (`hosts/service`, `hosts/connect`) needs only
   // the bearer gate, a trusted workspace and the mutation gate — not the
