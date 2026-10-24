@@ -704,13 +704,20 @@ describe('containerCommand', () => {
     // The direct spawn gets it through `buildRunEnv`; the allowlist has no
     // NODE_OPTIONS, so without this a boxed `tsc --build` dies at Node's
     // default heap — the failure the declared heap exists to prevent. npm
-    // replaces NODE_OPTIONS with its own `node-options`, hence the second.
-    const argv = (kind: 'build' | 'test' | 'install'): string[] =>
+    // replaces NODE_OPTIONS with the tree's own `node-options`, hence the
+    // second, which keeps the rest of what those say.
+    const npm = '--require=/w/preload.cjs --max-old-space-size=512';
+    const argv = (
+      kind: 'build' | 'test' | 'install',
+      // `null`: the tree has none.
+      own: string | null = npm,
+    ): string[] =>
       containerCommand('npm run build', {
         ...base,
         cwd: join(tmpDir, 'review-pr-9'),
         kind,
         heapMb: 6144,
+        npmNodeOptions: own ?? undefined,
       }).args;
     const passed = (args: string[]): string[] =>
       args.filter((_, i) => args[i - 1] === '--env');
@@ -718,7 +725,7 @@ describe('containerCommand', () => {
       const args = argv(kind);
       expect(passed(args)).toContain('NODE_OPTIONS=--max-old-space-size=6144');
       expect(passed(args)).toContain(
-        'npm_config_node_options=--max-old-space-size=6144',
+        'npm_config_node_options=--require=/w/preload.cjs --max-old-space-size=6144',
       );
       // After the image they are `sh -lc`'s arguments, not the container's
       // environment.
@@ -734,6 +741,15 @@ describe('containerCommand', () => {
       args.some((a, i) => a === '--network' && args[i + 1] === 'none');
     expect(offline(argv('install'))).toBe(false);
     expect(offline(argv('build'))).toBe(true);
+    // No npm options of the tree's own, or ones that already set enough:
+    // npm's channel is left as it is.
+    for (const own of [null, '--max-old-space-size=8192']) {
+      expect(
+        passed(argv('build', own)).some((e) =>
+          e.startsWith('npm_config_node_options='),
+        ),
+      ).toBe(false);
+    }
     expect(
       passed(argv('test')).some(
         (e) =>

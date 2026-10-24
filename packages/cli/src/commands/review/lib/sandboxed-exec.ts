@@ -63,6 +63,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { operatorReviewSettings } from './review-settings.js';
 import { mountRootFor } from './worktree.js';
+import { raiseHeap } from './heap.js';
 import { CUSTOM_SANDBOX_IMAGE_ENV_VAR } from '../../../utils/processUtils.js';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
 import { readPackageUpSync } from 'read-package-up';
@@ -466,6 +467,12 @@ export interface ContainerCommandOptions {
    * Ignored for a test.
    */
   heapMb?: number;
+  /**
+   * The tree's own npm `node-options` (`npmNodeOptions`, isolated), which npm
+   * inside the container hands a lifecycle script in place of
+   * `NODE_OPTIONS`. Raised to `heapMb` with the rest kept, never replaced.
+   */
+  npmNodeOptions?: string;
   runtime: ContainerRuntime;
   image: string;
   /**
@@ -598,16 +605,20 @@ export function containerCommand(
   for (const entry of containerEnv(join(opts.tmpDir, '.npm-cache'))) {
     args.push('--env', entry);
   }
-  // The declared heap, on both channels the direct spawn writes it to
-  // (`buildRunEnv`) — npm replaces `NODE_OPTIONS` with its own `node-options`
-  // config, and a mounted `.npmrc` can set that. Nothing larger can be
-  // inherited here: `containerEnv` passes no `NODE_OPTIONS`. Pushed here, not
-  // added to `containerEnv`, which subagent workers share; and before the
-  // image, or the runtime hands it to `sh -lc` as arguments.
+  // The declared heap, on both channels the direct spawn raises
+  // (`buildRunEnv`). Nothing larger can be inherited here: `containerEnv`
+  // passes no `NODE_OPTIONS`. npm's own `node-options` — the mounted tree's
+  // `.npmrc` can set it, and npm replaces `NODE_OPTIONS` with it — is raised
+  // only where it sets less, keeping its other options. Pushed here, not added
+  // to `containerEnv`, which subagent workers share; and before the image, or
+  // the runtime hands them to `sh -lc` as arguments.
   if (opts.kind !== 'test' && opts.heapMb !== undefined) {
-    const heap = `--max-old-space-size=${opts.heapMb}`;
-    args.push('--env', `NODE_OPTIONS=${heap}`);
-    args.push('--env', `npm_config_node_options=${heap}`);
+    args.push('--env', `NODE_OPTIONS=--max-old-space-size=${opts.heapMb}`);
+    const npm =
+      opts.npmNodeOptions === undefined
+        ? undefined
+        : raiseHeap(opts.npmNodeOptions, opts.heapMb);
+    if (npm !== undefined) args.push('--env', `npm_config_node_options=${npm}`);
   }
   args.push(opts.image, 'sh', '-lc', command);
   return { file: opts.runtime, args };

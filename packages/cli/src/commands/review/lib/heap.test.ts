@@ -9,6 +9,7 @@ import {
   heapBannerIn,
   heapFlagMb,
   killedFromOutside,
+  raiseHeap,
   withoutHeapFlag,
 } from './heap.js';
 
@@ -36,6 +37,20 @@ describe('heapFlagMb / withoutHeapFlag', () => {
         '--enable-source-maps --max-old-space-size 1024 --max_old_space_size=2 -r x',
       ),
     ).toBe('--enable-source-maps -r x');
+  });
+});
+
+describe('raiseHeap', () => {
+  it('raises a smaller heap to the one asked for, keeping every other option', () => {
+    expect(raiseHeap('--require=/p.cjs --max-old-space-size=512', 6144)).toBe(
+      '--require=/p.cjs --max-old-space-size=6144',
+    );
+    expect(raiseHeap('', 6144)).toBe('--max-old-space-size=6144');
+  });
+
+  it('leaves options that already set as much or more', () => {
+    expect(raiseHeap('--max-old-space-size=6144', 6144)).toBeUndefined();
+    expect(raiseHeap('-r x --max_old_space_size=8192', 6144)).toBeUndefined();
   });
 });
 

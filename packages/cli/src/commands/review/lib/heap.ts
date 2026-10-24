@@ -36,6 +36,15 @@ export function withoutHeapFlag(options: string): string {
 }
 
 /**
+ * `options` with its heap raised to `mb` — every other option kept as written
+ * — or undefined when it already sets at least that much.
+ */
+export function raiseHeap(options: string, mb: number): string | undefined {
+  if ((heapFlagMb(options) ?? 0) >= mb) return undefined;
+  return `${withoutHeapFlag(options)} --max-old-space-size=${mb}`.trim();
+}
+
+/**
  * The line V8 prints when a Node process dies of heap exhaustion — `FATAL
  * ERROR: Reached heap limit Allocation failed - JavaScript heap out of
  * memory` and its variants. Anchored at the start of a line, where V8 prints

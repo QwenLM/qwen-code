@@ -40,6 +40,7 @@
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { devNull } from 'node:os';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -72,7 +73,7 @@ import {
 } from './lib/toolchain.js';
 import { type TestScope } from './lib/workspace-scope.js';
 import { declaredBuildHeapMb } from './lib/workspaces.js';
-import { heapBannerIn, heapFlagMb, withoutHeapFlag } from './lib/heap.js';
+import { heapBannerIn, raiseHeap } from './lib/heap.js';
 
 /**
  * The root toolchains build-test can select. One today; the registry exists so
@@ -350,17 +351,21 @@ export function trimOutput(s: string): string {
  * Harmless on any repo that does not read it.
  *
  * `heapMb` is the heap a build or install command gets — see
- * `declaredBuildHeapMb` — unless `NODE_OPTIONS` already sets a larger one: the
- * larger of the two, as the root build would never have run below the
- * declared one. A Web Shell review cannot set it from outside: `qwen serve`
- * drops an inherited `NODE_OPTIONS`. Written to npm's channel too, because npm
- * REPLACES a lifecycle script's `NODE_OPTIONS` with its `node-options` config
- * (an `.npmrc`, or `npm_config_node_options`), and the environment outranks
- * every `.npmrc`.
+ * `declaredBuildHeapMb` — at least: a channel that already sets more keeps
+ * it, as the root build would never have run below the declared one. A Web
+ * Shell review cannot set it from outside: `qwen serve` drops an inherited
+ * `NODE_OPTIONS`.
+ *
+ * Two channels reach a lifecycle script, and each is raised on its own,
+ * keeping everything else it says. `NODE_OPTIONS`, unless npm has
+ * `node-options` of its own (`npmNodeOptions`) — then npm REPLACES the
+ * script's `NODE_OPTIONS` with those, so they are raised too and handed back
+ * through `npm_config_node_options`, which outranks every `.npmrc`.
  */
 export function buildRunEnv(
   base: NodeJS.ProcessEnv = process.env,
   heapMb?: number,
+  npmNodeOptions?: string,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...base,
@@ -368,15 +373,79 @@ export function buildRunEnv(
     npm_config_yes: 'true',
     QWEN_SKIP_PREPARE: '1',
   };
-  const nodeOptions = base['NODE_OPTIONS'] ?? '';
-  if (heapMb !== undefined && heapMb > (heapFlagMb(nodeOptions) ?? 0)) {
-    // Replaced, not appended: with two heap flags the child gets whichever
-    // V8 reads last.
-    env['NODE_OPTIONS'] =
-      `${withoutHeapFlag(nodeOptions)} --max-old-space-size=${heapMb}`.trim();
-    env['npm_config_node_options'] = env['NODE_OPTIONS'];
+  if (heapMb === undefined) return env;
+  // Replaced, not appended: with two heap flags the child gets whichever V8
+  // reads last.
+  const nodeOptions = raiseHeap(base['NODE_OPTIONS'] ?? '', heapMb);
+  if (nodeOptions !== undefined) env['NODE_OPTIONS'] = nodeOptions;
+  const npmOptions =
+    npmNodeOptions === undefined
+      ? undefined
+      : raiseHeap(npmNodeOptions, heapMb);
+  if (npmOptions !== undefined) {
+    // One spelling: npm reads the variable case-insensitively, and two of
+    // them leave the winner to the environment's order.
+    for (const key of Object.keys(env)) {
+      if (key.toLowerCase() === 'npm_config_node_options') delete env[key];
+    }
+    env['npm_config_node_options'] = npmOptions;
   }
   return env;
+}
+
+const npmNodeOptionsCache = new Map<string, string | undefined>();
+
+/**
+ * The `node-options` npm hands a lifecycle script in place of its
+ * `NODE_OPTIONS`, or undefined when npm has none. Any layer can set it — the
+ * tree's `.npmrc`, the user's or the global one, `npm_config_node_options` —
+ * so it is asked of npm itself, in the tree the command runs in. `isolated`
+ * asks what a container sees: the tree's own `.npmrc` only, as its HOME is
+ * empty and `containerEnv` passes no npm configuration. A query that fails
+ * reads as none. Once per tree: nothing a review runs changes it.
+ */
+export function npmNodeOptions(
+  cwd: string,
+  base: NodeJS.ProcessEnv = process.env,
+  isolated = false,
+): string | undefined {
+  const key = `${isolated}\0${cwd}`;
+  if (npmNodeOptionsCache.has(key)) return npmNodeOptionsCache.get(key);
+  const env = isolated
+    ? Object.fromEntries(
+        Object.entries(base).filter(
+          ([k]) => !k.toLowerCase().startsWith('npm_config_'),
+        ),
+      )
+    : base;
+  const r = spawnSync(
+    'npm',
+    [
+      'config',
+      'get',
+      'node-options',
+      // Two different paths: npm refuses to load one file as both. The
+      // global one names a child of the null device, which cannot exist.
+      ...(isolated
+        ? ['--userconfig', devNull, '--globalconfig', join(devNull, 'npmrc')]
+        : []),
+    ],
+    {
+      cwd,
+      env,
+      encoding: 'utf8',
+      timeout: 30_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      shell: process.platform === 'win32',
+    },
+  );
+  const value = r.status === 0 ? (r.stdout ?? '').trim() : '';
+  const options =
+    value === '' || value === 'null' || value === 'undefined'
+      ? undefined
+      : value;
+  npmNodeOptionsCache.set(key, options);
+  return options;
 }
 
 /**
@@ -459,6 +528,7 @@ function containerised(
   command: string,
   cwd: string,
   kind: CommandKind,
+  heapMb: number | undefined,
 ): {
   file: string;
   args: string[];
@@ -480,7 +550,9 @@ function containerised(
       cwd: workdir,
       tmpDir,
       kind,
-      heapMb: kind === 'test' ? undefined : declaredBuildHeapMb(cwd),
+      ...(heapMb === undefined
+        ? {}
+        : { heapMb, npmNodeOptions: npmNodeOptions(cwd, process.env, true) }),
       name,
       runtime: verdict.runtime,
       rootless: runtimeIsRootless(verdict.runtime),
@@ -508,7 +580,11 @@ export function run(
   // install scripts the PR committed, its build, its suite — so it is the
   // thing #9556 is about. `containerised` returns null when the run is not
   // sandboxed, and the direct spawn below is unchanged for that case.
-  const boxed = containerised(command, cwd, kind);
+  // A build or an install gets the heap the root build declares; an install
+  // because `npm ci` runs `prepare`, which is the whole-project build on many
+  // repos.
+  const heapMb = kind === 'test' ? undefined : declaredBuildHeapMb(cwd);
+  const boxed = containerised(command, cwd, kind, heapMb);
   const r = boxed
     ? spawnSync(boxed.file, boxed.args, {
         cwd,
@@ -549,11 +625,10 @@ export function run(
           maxBuffer: 64 * 1024 * 1024,
           // A build that asks a question is a build that hangs until the deadline.
           stdio: ['ignore', 'pipe', 'pipe'],
-          // An install gets it too: `npm ci` runs `prepare`, which is the
-          // whole-project build on many repos.
           env: buildRunEnv(
             process.env,
-            kind === 'test' ? undefined : declaredBuildHeapMb(cwd),
+            heapMb,
+            heapMb === undefined ? undefined : npmNodeOptions(cwd),
           ),
         },
       );

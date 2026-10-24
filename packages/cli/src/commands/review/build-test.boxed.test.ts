@@ -54,17 +54,24 @@ describe('run (boxed): the declared heap reaches the container', () => {
       }),
     );
     mocks.spawnSync.mockReset();
-    mocks.spawnSync.mockReturnValue({
+    // The host asks npm for the tree's own node-options; the runtime runs
+    // the command.
+    mocks.spawnSync.mockImplementation((file: string) => ({
       status: 0,
       signal: null,
-      stdout: '',
+      stdout:
+        file === 'npm'
+          ? '--require=/w/preload.cjs --max-old-space-size=512\n'
+          : '',
       stderr: '',
-    });
+    }));
   });
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
+  const callsOf = (file: string): unknown[][] =>
+    mocks.spawnSync.mock.calls.filter((c) => c[0] === file);
   const envEntries = (): string[] => {
-    const args = mocks.spawnSync.mock.calls[0]![1] as string[];
+    const args = callsOf('docker')[0]![1] as string[];
     return args.filter((_, i) => args[i - 1] === '--env');
   };
 
@@ -72,11 +79,44 @@ describe('run (boxed): the declared heap reaches the container', () => {
     for (const kind of ['build', 'install'] as const) {
       mocks.spawnSync.mockClear();
       run('npm run build', root, 30_000, kind);
-      expect(mocks.spawnSync.mock.calls[0]![0]).toBe('docker');
+      expect(callsOf('docker')).toHaveLength(1);
       expect(envEntries()).toContain('NODE_OPTIONS=--max-old-space-size=6144');
+      // The tree's own npm options, raised and kept whole.
+      expect(envEntries()).toContain(
+        'npm_config_node_options=--require=/w/preload.cjs --max-old-space-size=6144',
+      );
     }
     mocks.spawnSync.mockClear();
     run('npm test', root, 30_000, 'test');
-    expect(envEntries().some((e) => e.startsWith('NODE_OPTIONS='))).toBe(false);
+    expect(
+      envEntries().some(
+        (e) =>
+          e.startsWith('NODE_OPTIONS=') ||
+          e.startsWith('npm_config_node_options='),
+      ),
+    ).toBe(false);
+  });
+
+  it("asks npm what the container sees: the tree's .npmrc, no user or global file", () => {
+    vi.stubEnv('npm_config_node_options', '--max-old-space-size=700');
+    try {
+      run('npm run build', root, 30_000, 'build');
+      const [, args, opts] = callsOf('npm')[0]! as [
+        string,
+        string[],
+        { cwd: string; env: NodeJS.ProcessEnv },
+      ];
+      expect(args.slice(0, 3)).toEqual(['config', 'get', 'node-options']);
+      expect(args).toContain('--userconfig');
+      expect(args).toContain('--globalconfig');
+      expect(opts.cwd).toBe(root);
+      expect(
+        Object.keys(opts.env).some((k) =>
+          k.toLowerCase().startsWith('npm_config_'),
+        ),
+      ).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

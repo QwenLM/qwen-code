@@ -28,6 +28,7 @@ import {
   trimOutput,
   unresolvedWorkspaceDeps,
   buildRunEnv,
+  npmNodeOptions,
   REAPING_SHELL,
   type CommandResult,
 } from './build-test.js';
@@ -163,18 +164,119 @@ describe('buildRunEnv', () => {
     }
   });
 
-  it("writes the heap to npm's own channel, which replaces NODE_OPTIONS for a script", () => {
+  it("raises npm's own node-options, which replace NODE_OPTIONS for a script, keeping the rest", () => {
     // npm assigns a lifecycle script's NODE_OPTIONS from its `node-options`
-    // config — an `.npmrc` or an inherited npm_config_node_options — and the
-    // environment outranks every `.npmrc`.
+    // config — an `.npmrc` or npm_config_node_options — and the environment
+    // outranks every `.npmrc`. A preload there must survive.
+    const npm = '--require=/abs/preload.cjs --max-old-space-size=512';
+    for (const ambient of [
+      '--max-old-space-size=1024',
+      // A parent heap that already meets the declared one does not reach
+      // the script: npm replaces it.
+      '--max-old-space-size=6144',
+      '--max-old-space-size=8192',
+    ]) {
+      const env = buildRunEnv({ NODE_OPTIONS: ambient }, 6144, npm);
+      expect(env['npm_config_node_options']).toBe(
+        '--require=/abs/preload.cjs --max-old-space-size=6144',
+      );
+    }
+    // Enough already, or no npm options at all: npm's channel is left alone.
+    expect(
+      buildRunEnv({}, 6144, '--max-old-space-size=8192')[
+        'npm_config_node_options'
+      ],
+    ).toBeUndefined();
+    expect(buildRunEnv({}, 6144)['npm_config_node_options']).toBeUndefined();
+    // One spelling, whatever case the inherited one used.
     const env = buildRunEnv(
-      { npm_config_node_options: '--max-old-space-size=512' },
+      { NPM_CONFIG_NODE_OPTIONS: '--max-old-space-size=512' },
       6144,
+      '--max-old-space-size=512',
     );
-    expect(env['npm_config_node_options']).toBe('--max-old-space-size=6144');
-    expect(env['NODE_OPTIONS']).toBe('--max-old-space-size=6144');
+    expect(
+      Object.keys(env).filter(
+        (k) => k.toLowerCase() === 'npm_config_node_options',
+      ),
+    ).toEqual(['npm_config_node_options']);
   });
 });
+
+describe.skipIf(process.platform === 'win32')(
+  "npmNodeOptions and a real npm script's heap",
+  () => {
+    let root: string;
+    beforeEach(() => {
+      root = mkdtempSync(join(tmpdir(), 'bt-npmrc-'));
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({
+          name: 'r',
+          scripts: {
+            build:
+              'cross-env NODE_OPTIONS="--max-old-space-size=6144" node b.js',
+            probe:
+              "node -e \"const mb = require('v8').getHeapStatistics().heap_size_limit / 1048576; console.log(process.env.PRELOADED, mb >= 6144 ? 'heap-ok' : 'heap-low:' + Math.round(mb))\"",
+          },
+        }),
+      );
+      writeFileSync(
+        join(root, 'preload.cjs'),
+        "process.env.PRELOADED = 'preloaded';",
+      );
+    });
+    afterEach(() => {
+      rmSync(root, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+    });
+
+    it("reads the tree's .npmrc, or none", () => {
+      expect(npmNodeOptions(root)).toBeUndefined();
+      const other = mkdtempSync(join(tmpdir(), 'bt-npmrc-'));
+      try {
+        // npm reads the `.npmrc` of the tree its package.json roots.
+        writeFileSync(join(other, 'package.json'), '{"name":"o"}');
+        writeFileSync(
+          join(other, '.npmrc'),
+          'node-options=--max-old-space-size=512\n',
+        );
+        expect(npmNodeOptions(other)).toBe('--max-old-space-size=512');
+        expect(npmNodeOptions(other, process.env, true)).toBe(
+          '--max-old-space-size=512',
+        );
+      } finally {
+        rmSync(other, { recursive: true, force: true });
+      }
+    });
+
+    it("asks a container's question without the environment's npm config", () => {
+      const env = {
+        ...process.env,
+        npm_config_node_options: '--max-old-space-size=700',
+      };
+      expect(npmNodeOptions(root, env)).toBe('--max-old-space-size=700');
+      expect(npmNodeOptions(root, env, true)).toBeUndefined();
+    });
+
+    it('hands a lifecycle script the declared heap and the .npmrc preload, whatever the parent heap', () => {
+      writeFileSync(
+        join(root, '.npmrc'),
+        `node-options=--require=${join(root, 'preload.cjs')} --max-old-space-size=512\n`,
+      );
+      for (const ambient of [
+        '',
+        '--max-old-space-size=1024',
+        '--max-old-space-size=6144',
+        '--max-old-space-size=8192',
+      ]) {
+        vi.stubEnv('NODE_OPTIONS', ambient);
+        const r = run('npm run -s probe', root, 60_000, 'build');
+        expect(r.exitCode).toBe(0);
+        expect(r.output).toContain('preloaded heap-ok');
+      }
+    });
+  },
+);
 
 describe('run (capture-time failing-file measurement)', () => {
   it.skipIf(process.platform === 'win32')(
