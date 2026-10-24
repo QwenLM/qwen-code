@@ -43,11 +43,11 @@ public final class RuntimeResourceHandle {
         return value;
     }
 
-    String toJson() {
+    public String toJson() {
         return json;
     }
 
-    static RuntimeResourceHandle fromJson(String kind, int version,
+    public static RuntimeResourceHandle fromJson(String kind, int version,
             String json) {
         if (json == null || json.isBlank()) {
             throw new IllegalArgumentException("resource handle is required");

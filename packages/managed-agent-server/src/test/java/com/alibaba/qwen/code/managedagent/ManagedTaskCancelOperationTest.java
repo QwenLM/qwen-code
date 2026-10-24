@@ -1,19 +1,21 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore.TaskCancelOutcome;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore.TaskCancelOutcome;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -54,8 +56,11 @@ class ManagedTaskCancelOperationTest {
     private static final String ACTOR_DIGEST = "digest-of-actor";
     private static final String RUNNING_CHILD = "task_" + "a".repeat(64);
     private static final String SETTLED_CHILD = "task_" + "b".repeat(64);
-    private static final String MONITOR = "task_" + "c".repeat(64);
+    private static final String AUTOMATION = "task_" + "c".repeat(64);
     private static final String WORKFLOW = "task_" + "e".repeat(64);
+    private static final String SHELL = "task_" + "f".repeat(64);
+    private static final String MONITOR = "task_" + "9".repeat(64);
+    private static final String DELIVERY = "task_" + "8".repeat(64);
     private final AtomicLong now = new AtomicLong(1_000_000);
     private ManagedAgentStore store;
     private JdbcTemplate jdbc;
@@ -92,7 +97,7 @@ class ManagedTaskCancelOperationTest {
                 null, null, List.of(), null).sessionId();
         task(RUNNING_CHILD, "child_run", "child_agent", "running");
         task(SETTLED_CHILD, "child_run", "child_agent", "completed");
-        task(MONITOR, "monitor_run", "monitor", "running");
+        task(AUTOMATION, "automation_run", "automation_run", "running");
     }
 
     @Test
@@ -142,8 +147,6 @@ class ManagedTaskCancelOperationTest {
 
     @Test
     void aNewRequestNeedsTheTasksCancelAction() {
-        refused(() -> begin("key-1", "digest-1", MONITOR),
-                HttpStatus.CONFLICT, "task_action_unavailable");
         refused(() -> begin("key-2", "digest-2", SETTLED_CHILD),
                 HttpStatus.CONFLICT, "task_action_unavailable");
         refused(() -> begin("key-3", "digest-3", "task_" + "d".repeat(64)),
@@ -160,6 +163,23 @@ class ManagedTaskCancelOperationTest {
                 + " task_state = 'recovery_blocked' WHERE record_key = ?",
                 "a".repeat(64));
         refused(() -> begin("key-4", "digest-4", RUNNING_CHILD),
+                HttpStatus.CONFLICT, "task_action_unavailable");
+    }
+
+    @Test
+    void anAutomationRunAdmitsCancelAndReplaysAfterSettlement() {
+        OperationRecord admitted = begin("auto-key", "auto-digest", AUTOMATION)
+                .operation();
+        assertThat(admitted.kind()).isEqualTo(OperationKind.TASK_CANCEL);
+        assertThat(admitted.taskId()).isEqualTo(AUTOMATION);
+        refused(() -> begin("auto-key", "other-digest", AUTOMATION),
+                HttpStatus.CONFLICT, "idempotency_conflict");
+        settle(admitted, TaskCancelOutcome.completed());
+        jdbc.update("UPDATE ma_session_record SET task_state = 'cancelled'"
+                + " WHERE record_key = ?", "c".repeat(64));
+        assertThat(begin("auto-key", "auto-digest", AUTOMATION).operation()
+                .operationId()).isEqualTo(admitted.operationId());
+        refused(() -> begin("auto-next", "auto-digest", AUTOMATION),
                 HttpStatus.CONFLICT, "task_action_unavailable");
     }
 
@@ -197,6 +217,64 @@ class ManagedTaskCancelOperationTest {
                     WORKFLOW), HttpStatus.CONFLICT,
                     "task_action_unavailable");
         }
+    }
+
+    // H4f-c: a background Shell and a Monitor take the same admission
+    // rule — the cancellable states admit, terminal and recovery_blocked
+    // states refuse, and the retained key replays.
+    @Test
+    void theH3TasksAdmitCancelUnderTheSameRule() {
+        task(SHELL, "child_run", "background_shell", "running");
+        task(MONITOR, "monitor_run", "monitor", "running");
+        for (String taskId : new String[] {SHELL, MONITOR}) {
+            String recordKey = taskId.substring("task_".length());
+            OperationAdmission first = begin(taskId + "-1", "digest-1",
+                    taskId);
+            assertThat(first.replayed()).isFalse();
+            assertThat(first.operation().taskId()).isEqualTo(taskId);
+            assertThat(begin(taskId + "-1", "digest-1", taskId).replayed())
+                    .isTrue();
+            settle(first.operation(), TaskCancelOutcome.completed());
+            for (String state : new String[] {"pending", "waiting",
+                    "degraded"}) {
+                jdbc.update("UPDATE ma_session_record SET"
+                        + " task_state = ? WHERE record_key = ?", state,
+                        recordKey);
+                settle(begin(taskId + state, "digest-" + state, taskId)
+                        .operation(), TaskCancelOutcome.completed());
+            }
+            for (String state : new String[] {"completed", "failed",
+                    "cancelled", "recovery_blocked"}) {
+                jdbc.update("UPDATE ma_session_record SET"
+                        + " task_state = ? WHERE record_key = ?", state,
+                        recordKey);
+                refused(() -> begin(taskId + state, "digest-" + state,
+                        taskId), HttpStatus.CONFLICT,
+                        "task_action_unavailable");
+            }
+        }
+    }
+
+    // #13746 F3: a channel delivery admits a cancel only while pending —
+    // planned, with no adapter claim — and the retained key replays.
+    @Test
+    void aDeliveryTaskAdmitsCancelOnlyWhilePending() {
+        task(DELIVERY, "channel_delivery", "channel_delivery", "pending");
+        OperationAdmission first = begin("delivery-1", "digest-1", DELIVERY);
+        assertThat(first.replayed()).isFalse();
+        assertThat(first.operation().taskId()).isEqualTo(DELIVERY);
+        settle(first.operation(), TaskCancelOutcome.completed());
+        for (String state : new String[] {"running", "waiting", "degraded",
+                "completed", "failed", "cancelled", "recovery_blocked"}) {
+            jdbc.update("UPDATE ma_session_record SET"
+                    + " task_state = ? WHERE record_key = ?", state,
+                    "8".repeat(64));
+            refused(() -> begin("delivery-" + state, "digest-" + state,
+                    DELIVERY), HttpStatus.CONFLICT,
+                    "task_action_unavailable");
+        }
+        assertThat(begin("delivery-1", "digest-1", DELIVERY).replayed())
+                .isTrue();
     }
 
     // A bound Session under storage migration admits no new cancel, as
@@ -265,7 +343,7 @@ class ManagedTaskCancelOperationTest {
                     competition.executeWithoutResult(ignored -> begin(key,
                             "digest-" + key, RUNNING_CHILD));
                     outcomes.add("admitted");
-                } catch (ApiException error) {
+                } catch (ManagedAgentException error) {
                     outcomes.add(error.getCode());
                 } catch (Exception error) {
                     outcomes.add(error.getClass().getSimpleName());
@@ -302,11 +380,18 @@ class ManagedTaskCancelOperationTest {
                 admitted.operationId(), "owner-2", Duration.ofSeconds(30)))
                 .isEmpty();
         assertThat(store.findDeliverableTaskCancels(10)).isEmpty();
-        assertThat(store.findParkedTaskCancels(10)).isEmpty();
+        assertThat(store.findParkedOperations(10)).isEmpty();
         jdbc.update("UPDATE ma_operation SET available_at = 0");
-        assertThat(store.findParkedTaskCancels(10))
-                .extracting(OperationTarget::operationId)
-                .containsExactly(admitted.operationId());
+        ParkedOperation due = new ParkedOperation(TENANT, sessionId,
+                admitted.operationId(), "TASK_CANCEL");
+        assertThat(store.findParkedOperations(10)).containsExactly(due);
+        // Due for reconciliation is still not claimable (D7-2): its
+        // acceptance is unknown, so no claim may send it again, however
+        // early it parked.
+        assertThat(store.claimOperation(TENANT, sessionId,
+                admitted.operationId(), "owner-2", Duration.ofSeconds(30)))
+                .isEmpty();
+        assertThat(read(admitted).state()).isEqualTo("RECOVERY_BLOCKED");
         // Not open: a new cancel is admitted, and so is the close.
         OperationRecord second = begin("key-2", "digest-2", RUNNING_CHILD)
                 .operation();
@@ -319,9 +404,13 @@ class ManagedTaskCancelOperationTest {
         assertThat(store.settleTaskCancel(TENANT, sessionId,
                 admitted.operationId(), "owner", claimed.claimGeneration(),
                 TaskCancelOutcome.completed(), 0)).isFalse();
-        assertThat(store.settleTaskCancel(TENANT, sessionId,
-                admitted.operationId(), null, 0,
-                TaskCancelOutcome.completed(), 0)).isTrue();
+        // Unknown evidence parks it again for the recheck.
+        assertThat(store.settleParkedOperation(due,
+                AcceptanceVerdict.unknown(), now.get() + 60_000)).isTrue();
+        assertThat(read(admitted).state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(store.findParkedOperations(10)).isEmpty();
+        assertThat(store.settleParkedOperation(due,
+                AcceptanceVerdict.committed(), 0)).isTrue();
         OperationRecord reconciled = read(admitted);
         assertThat(reconciled.state()).isEqualTo("COMPLETED");
         assertThat(reconciled.admissionStage())
@@ -329,9 +418,8 @@ class ManagedTaskCancelOperationTest {
         assertThat(reconciled.deliveryState()).isEqualTo("CONFIRMED");
         assertThat(reconciled.receiptId()).startsWith("rcpt_");
         assertThat(reconciled.failureCode()).isNull();
-        assertThat(store.settleTaskCancel(TENANT, sessionId,
-                admitted.operationId(), null, 0,
-                TaskCancelOutcome.failed("task_already_settled"), 0))
+        assertThat(store.settleParkedOperation(due,
+                AcceptanceVerdict.notCommitted("task_already_settled"), 0))
                 .isFalse();
     }
 
@@ -372,9 +460,9 @@ class ManagedTaskCancelOperationTest {
         assertThat(store.claimOperation(TENANT, sessionId,
                 admitted.operationId(), "owner-2", Duration.ofSeconds(30)))
                 .isEmpty();
-        assertThat(store.settleTaskCancel(TENANT, sessionId,
-                admitted.operationId(), null, 0,
-                TaskCancelOutcome.completed(), 0)).isFalse();
+        assertThat(store.settleParkedOperation(new ParkedOperation(TENANT,
+                sessionId, admitted.operationId(), "TASK_CANCEL"),
+                AcceptanceVerdict.committed(), 0)).isFalse();
     }
 
     // The relay's evidence on real SQL: only a cancel that took effect on
@@ -480,7 +568,7 @@ class ManagedTaskCancelOperationTest {
     private static void refused(Runnable call, HttpStatus status,
             String code) {
         assertThatThrownBy(call::run).isInstanceOfSatisfying(
-                ApiException.class, error -> {
+                ManagedAgentException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(status);
                     assertThat(error.getCode()).isEqualTo(code);
                 });

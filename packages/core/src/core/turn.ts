@@ -42,7 +42,7 @@ import {
   getThoughtSummary,
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
-import type { LoopType } from '../telemetry/types.js';
+import type { LoopStopDetail, LoopType } from '../telemetry/types.js';
 import type {
   GoalSnapshotV2,
   GoalStateCause,
@@ -244,7 +244,8 @@ export interface ToolCallResponseInfo {
    * Set only when the call was denied because it needed user approval and the
    * session had no way to ask for it (non-interactive mode). Headless front
    * ends use it to suggest an approval mode; every other denial, such as a
-   * hook block or a deny rule, reports its own reason instead.
+   * hook block, a deny rule, or a hook or Mod ask that only a person can
+   * answer, reports its own reason instead.
    */
   approvalRequired?: true;
   visionBridgeNotice?: string;
@@ -561,7 +562,7 @@ export type ServerLlmLoopDetectedEvent = {
   // it so downstream consumers can surface a concrete reason to the user.
   value?: {
     loopType: LoopType;
-  };
+  } & LoopStopDetail;
 };
 
 export type ServerLlmCitationEvent = {

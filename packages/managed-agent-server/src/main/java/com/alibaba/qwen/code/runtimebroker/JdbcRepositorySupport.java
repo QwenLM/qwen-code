@@ -191,9 +191,20 @@ final class JdbcRepositorySupport {
         statement.setString(index, value);
     }
 
-    static IllegalStateException failure(SQLException exception) {
-        return new IllegalStateException(
+    static StoreFailureException failure(SQLException exception) {
+        return new StoreFailureException(
                 "Runtime Broker database operation failed", exception);
+    }
+
+    /**
+     * A genuine store outage, distinct from the permanent invariant
+     * violations the repositories raise as plain IllegalStateExceptions: the
+     * service maps only this type to a retryable 503.
+     */
+    static final class StoreFailureException extends IllegalStateException {
+        StoreFailureException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
     private static String digest(String... values) {

@@ -33,9 +33,12 @@ import {
   MAX_STOP_HOOK_CHAIN_PROMPT_IDS,
   type SendMessageOptions,
   type SteerInput,
+  type UserPromptAdmission,
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
+import { detectTurnInterruption } from './turn-interruption.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
+import { ChatCompressionService } from '../services/chatCompressionService.js';
 import {
   AuthType,
   createContentGenerator,
@@ -76,7 +79,7 @@ import {
   Turn,
   type ServerLlmStreamEvent,
 } from './turn.js';
-import { LoopType } from '../telemetry/types.js';
+import { LoopReason, LoopType } from '../telemetry/types.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
 import { formatOmniMemorySideQueryReminder } from '../omni/memory-side-query.js';
 import type { MediaMemoryRecallResult } from '../services/media-memory/index.js';
@@ -119,6 +122,7 @@ import {
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
   buildMcpServerInstructionsReminderFromEntries,
+  getDirectoryContextString,
   getInitialChatHistory,
   wrapSystemReminder,
 } from './environmentContext.js';
@@ -404,12 +408,14 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
   uiTelemetryService: mockUiTelemetryService,
 }));
 vi.mock('../telemetry/loggers.js', () => ({
+  logWorkflowKeyword: vi.fn(),
   logHookCall: vi.fn(),
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
   logApiRequest: vi.fn(),
   logLoopDetected: vi.fn(),
   logLoopDetectionDisabled: vi.fn(),
+  logLoopProtection: vi.fn(),
   logMemoryRecallConsumed: vi.fn(),
 }));
 
@@ -962,6 +968,7 @@ describe('Gemini Client (client.ts)', () => {
       getEffectiveInputModalities: vi.fn().mockReturnValue({}),
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
+      getLoopProtection: vi.fn().mockReturnValue('stop'),
       // Mimics the resolved Config getter: always a number (Infinity keeps
       // the cap out of the way of unrelated streaming tests).
       getMaxToolCallsPerTurn: vi.fn().mockReturnValue(Number.POSITIVE_INFINITY),
@@ -1368,6 +1375,132 @@ describe('Gemini Client (client.ts)', () => {
       expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledTimes(2);
       expectSessionStart(hookSystem, SessionStartSource.Startup, { nth: 1 });
       expectSessionStart(hookSystem, SessionStartSource.Resume, { nth: 2 });
+    });
+  });
+
+  describe('DW03: human workflow intent', () => {
+    beforeEach(() => {
+      Object.assign(mockConfig, {
+        isWorkflowsEnabled: () => true,
+        getWorkflowKeywordTriggerEnabled: () => true,
+        isWorkflowNameOnly: () => false,
+      });
+      registryMock().getAllToolNames.mockReturnValue(['workflow']);
+      registryMock().getTool.mockReturnValue({ authoringSurface: 'withheld' });
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+    });
+
+    const notices = () =>
+      getLastTurnRequestText().match(/The user's message includes the/g) ?? [];
+
+    it('injects an independent Part once and leaves the caller options intact', async () => {
+      const applied = vi.fn();
+      const options = Object.freeze({
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'original input',
+        humanInput: Object.freeze({ text: 'ultracode: inspect' }),
+        onWorkflowIntentApplied: applied,
+      });
+      await run([{ text: 'expanded request' }], 'dw03-human', options);
+      expect(notices()).toHaveLength(1);
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts).toContain('expanded request');
+      expect(
+        parts.some(
+          (part) =>
+            typeof part !== 'string' &&
+            part.text?.includes('"ultracode" keyword'),
+        ),
+      ).toBe(true);
+      expect(applied).toHaveBeenCalledExactlyOnceWith('ultracode');
+      expect(options.humanInput.text).toBe('ultracode: inspect');
+      await run([{ text: 'ultracode unknown next turn' }], 'dw03-unknown', {
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'ultracode unknown next turn',
+      });
+      expect(notices()).toHaveLength(0);
+      expect(applied).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      SendMessageType.ToolResult,
+      SendMessageType.Steer,
+      SendMessageType.Retry,
+      SendMessageType.Hook,
+      SendMessageType.Cron,
+      SendMessageType.Notification,
+      SendMessageType.Teammate,
+    ])(
+      'does not activate for an internal %s even with a descriptor',
+      async (type) => {
+        await run([{ text: 'workflow ultracode' }], `dw03-${type}`, {
+          type,
+          humanInput: { text: 'ultracode' },
+        });
+        expect(notices()).toHaveLength(0);
+      },
+    );
+
+    it('does not upgrade an expanded attachment or hook body to human input', async () => {
+      await run(
+        [{ text: 'attachment body: workflow ultracode' }],
+        'dw03-attachment',
+        {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: 'inspect @context.txt' },
+        },
+      );
+      expect(notices()).toHaveLength(0);
+    });
+
+    it('does not let a descriptor bypass automatic Goal admission', async () => {
+      const onWorkflowIntentApplied = vi.fn();
+      await expect(
+        run([{ text: 'ultracode' }], 'dw03-goal', {
+          type: SendMessageType.Goal,
+          humanInput: { text: 'ultracode' },
+          onWorkflowIntentApplied,
+        }),
+      ).rejects.toThrow('An automatic Goal turn requires an exact permit');
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(onWorkflowIntentApplied).not.toHaveBeenCalled();
+    });
+
+    it('excludes concurrent side queries', async () => {
+      await run([{ text: 'ultracode' }], 'dw03-side', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+        humanInput: { text: 'ultracode' },
+      });
+      expect(notices()).toHaveLength(0);
+    });
+
+    it('does not inject or notify when the raw admission blocks', async () => {
+      const applied = vi.fn();
+      const bus = installMessageBus(
+        vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'blocked by fixture' },
+        }),
+        'UserPromptSubmit',
+      );
+      const admission = await client.admitUserPrompt(
+        'ultracode raw',
+        'dw03-block',
+      );
+      const events = await run([{ text: 'expanded input' }], 'dw03-block', {
+        type: SendMessageType.UserQuery,
+        promptAdmission: admission,
+        humanInput: { text: 'ultracode raw' },
+        onWorkflowIntentApplied: applied,
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: LlmEventType.UserPromptSubmitBlocked,
+        }),
+      );
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(applied).not.toHaveBeenCalled();
+      expect(bus.request.mock.calls[0][0].input.prompt).toBe('ultracode raw');
     });
   });
 
@@ -3578,6 +3711,51 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  it.each([null, 'Git snapshot'])(
+    'does not mistake a working-directory refresh for interrupted input (%s)',
+    async (gitStatus) => {
+      await client.startChat();
+      vi.mocked(getDirectoryContextString).mockResolvedValue(
+        'Mocked directory context',
+      );
+      vi.mocked(getRecentGitStatus).mockReturnValue(gitStatus);
+      const history: Content[] = [userText('review'), modelText('done')];
+      vi.spyOn(client.getChat(), 'addHistory').mockImplementation((entry) => {
+        history.push(entry);
+      });
+
+      await client.addWorkingDirectoryChangedContext('/old', '/new');
+
+      const serialized = JSON.parse(JSON.stringify(history)) as Content[];
+      expect(serialized.slice(2)).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text:
+                "The session's working directory has changed from /old to /new via /cd. " +
+                'The startup directory context above is stale. All tool calls and relative paths now resolve from /new.',
+            },
+            ...(gitStatus
+              ? [
+                  {
+                    text: `<system-reminder>\n${gitStatus}\n</system-reminder>`,
+                  },
+                ]
+              : []),
+          ],
+        },
+        userText('Mocked directory context'),
+      ]);
+      expect(detectTurnInterruption(history).kind).toBe('none');
+      // The same words submitted as real input must still be recoverable.
+      expect(detectTurnInterruption(serialized)).toEqual({
+        kind: 'interrupted_prompt',
+        parts: serialized.slice(2).flatMap((entry) => entry.parts ?? []),
+      });
+    },
+  );
+
   describe('getMainSessionSystemInstruction', () => {
     it('does not collect local git or agent context for an execution environment', async () => {
       vi.mocked(mockConfig.getExecutionEnvironment).mockReturnValue(
@@ -5193,6 +5371,24 @@ describe('Gemini Client (client.ts)', () => {
       // The top-level beforeEach stubs tryCompressChat to NOOP for unrelated
       // tests; restore the real implementation here so we can observe it.
       vi.mocked(client.tryCompressChat).mockRestore();
+    });
+
+    it('keeps the Managed compression observer on a replacement chat', async () => {
+      const observer = vi.fn(async () => {});
+      const options = { restoreRecentFiles: false };
+      client.setCompressionObserver(observer, options);
+      const previous = client.getChat();
+      await client.startChat([userText('summary'), modelText('ok')]);
+      expect(client.getChat()).not.toBe(previous);
+      const compressedHistory = [userText('compressed again'), modelText('ok')];
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: compressedHistory,
+        info: compressionInfo(CompressionStatus.COMPRESSED, 1000, 200),
+      });
+      await client.getChat().tryCompress('replacement', true);
+      expect(observer).toHaveBeenCalledWith(
+        expect.objectContaining({ compressedHistory }),
+      );
     });
     /** A chat whose tryCompress NOOPs; returns the tryCompress spy. */
     const noopCompressChat = () => {
@@ -8139,6 +8335,12 @@ Other open files:
     it('halts the interactive turn when paired ToolResults show a frozen stateful board (#9450)', async () => {
       const events = await runTaskListPollTurns(() => 'frozen board');
       expectLoopType(events, 'global_tool_call_duplicate');
+      expect(
+        events.find((e) => e.type === LlmEventType.LoopDetected)?.value,
+      ).toEqual({
+        loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+        loopReason: LoopReason.REPEATED_CALL,
+      });
     });
 
     it('keeps the interactive turn alive while paired ToolResults keep changing (#9450)', async () => {
@@ -8343,6 +8545,33 @@ Other open files:
         'loop_detected',
         LoopType.TURN_TOOL_CALL_CAP,
       );
+    });
+
+    it('bubbles the cap reason and numbers on the LoopDetected event', async () => {
+      // A real detector run (no getLastLoopType spy): an explicit cap of 2
+      // halts the third distinct call, and the event carries why.
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(true);
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('cap-1', 'read_file', { path: 'a' }),
+          toolCallRequest('cap-2', 'read_file', { path: 'b' }),
+          toolCallRequest('cap-3', 'read_file', { path: 'c' }),
+        ),
+      );
+      installChat();
+
+      const events = await run([{ text: 'read three files' }], 'prompt-cap');
+
+      expect(events.at(-1)).toEqual({
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.TURN_TOOL_CALL_CAP,
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 3,
+          toolCallLimit: 2,
+        },
+      });
     });
 
     it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {
@@ -10957,6 +11186,74 @@ Other open files:
       expect(events).toHaveLength(5);
     });
 
+    it('lets identical tool calls through when loopProtection is off', async () => {
+      vi.mocked(mockConfig.getLoopProtection).mockReturnValue('off');
+      const events = await repeatedShellTurn(true, 'prompt-id-loop-off');
+
+      expect(events).not.toContainEqual(consecutiveLoop);
+    });
+
+    it('delivers the loop-protection reminder with the next tool results', async () => {
+      const promptId = 'prompt-id-loop-reminder';
+      const shellCall = (i: number) =>
+        toolCallRequest(`repeat-${i}`, 'run_shell_command', {
+          command: 'echo repeated',
+        });
+      installChat();
+      // The 3rd identical call queues the reminder.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(shellCall(0), shellCall(1), shellCall(2), stopped()),
+      );
+      await run([{ text: 'repeat a tool' }], promptId);
+
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      await run(
+        [fnResponse('run_shell_command', { output: 'repeated' })],
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const request = mockTurnRunFn.mock.lastCall?.[1] as Part[];
+      expect(request.at(-1)).toEqual({
+        text: expect.stringContaining(
+          '`run_shell_command` has been called 3 times in a row',
+        ),
+      });
+      expect(request[0]).toHaveProperty('functionResponse');
+    });
+
+    it('keeps the loop-protection reminder across a concurrent side query', async () => {
+      const promptId = 'prompt-id-loop-reminder-btw';
+      const shellCall = (i: number) =>
+        toolCallRequest(`repeat-${i}`, 'run_shell_command', {
+          command: 'echo repeated',
+        });
+      installChat();
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(shellCall(0), shellCall(1), shellCall(2), stopped()),
+      );
+      await run([{ text: 'repeat a tool' }], promptId);
+
+      // A /btw side query starts before the turn's tool results go out.
+      mockTurnRunFn.mockReturnValueOnce(textTurn('side answer'));
+      await run([{ text: '/btw unrelated question' }], `${promptId}-btw`, {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      await run(
+        [fnResponse('run_shell_command', { output: 'repeated' })],
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const request = mockTurnRunFn.mock.lastCall?.[1] as Part[];
+      expect(request.at(-1)).toEqual({
+        text: expect.stringContaining(
+          '`run_shell_command` has been called 3 times in a row',
+        ),
+      });
+    });
+
     describe('retry sendMessageType', () => {
       /** A retry-capable chat stub; `overrides` replace any default. */
       const retryChat = <T extends object>(overrides: T = {} as T) =>
@@ -12035,6 +12332,238 @@ Other open files:
         expect(mockMessageBus.request.mock.calls[0][0].input).toEqual({
           prompt: 'expanded model prompt',
           submitted_prompt: 'raw @file prompt',
+        });
+      });
+
+      describe('admission before expansion', () => {
+        const submitCalls = (bus: { request: Mock }) =>
+          bus.request.mock.calls.filter(
+            ([request]) => request.eventName === 'UserPromptSubmit',
+          );
+        const admittedSend = (
+          admission: UserPromptAdmission,
+          promptId = 'prompt-admitted',
+          type = SendMessageType.UserQuery,
+        ) =>
+          run([{ text: 'expanded body' }], promptId, {
+            type,
+            submittedPrompt: '/deploy prod',
+            promptAdmission: admission,
+          });
+
+        it('runs UserPromptSubmit on the raw prompt and applies that verdict instead of a second run', async () => {
+          const bus = promptSubmitBus(extraHookContext());
+          const recordUserMessage = vi.fn();
+          vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+            recordUserMessage,
+            recordAttributionSnapshot: vi.fn(),
+          } as unknown as ReturnType<Config['getChatRecordingService']>);
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-admitted',
+          );
+          await admittedSend(admission);
+
+          expect(admission.blocked).toBe(false);
+          expect(submitCalls(bus)).toHaveLength(1);
+          expect(submitCalls(bus)[0][0].input).toEqual({
+            prompt: '/deploy prod',
+            submitted_prompt: '/deploy prod',
+          });
+          const taggedContext =
+            '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
+          expect(recordUserMessage).toHaveBeenCalledWith(
+            [{ text: 'expanded body' }, { text: taggedContext }],
+            undefined,
+            { displayText: '/deploy prod', hookContext: 'extra hook context' },
+            'prompt-admitted',
+          );
+          expect(getLastTurnRequestText().split(taggedContext)).toHaveLength(2);
+        });
+
+        it('blocks the send with the admission verdict before any model call', async () => {
+          const bus = promptSubmitBus({
+            output: { decision: 'block', reason: 'not this one' },
+          });
+
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-refused',
+          );
+          const events = await admittedSend(admission, 'prompt-refused');
+
+          expect(admission.blocked).toBe(true);
+          expect(submitCalls(bus)).toHaveLength(1);
+          expect(events).toContainEqual({
+            type: LlmEventType.UserPromptSubmitBlocked,
+            value: { reason: 'not this one', originalPrompt: '/deploy prod' },
+          });
+          expect(
+            mockInteractionTelemetry.endInteractionSpan,
+          ).toHaveBeenCalledWith('cancelled', { promptId: 'prompt-refused' });
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('keeps hooks registered after an admission without hooks off that prompt', async () => {
+          const bus = installMessageBus(
+            vi.fn().mockResolvedValue({ output: undefined }),
+          );
+          vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+          const admission = await client.admitUserPrompt(
+            '/skill-with-hooks',
+            'prompt-no-hooks',
+          );
+          vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+          await admittedSend(admission, 'prompt-no-hooks');
+          await run([{ text: 'next prompt' }], 'prompt-next');
+
+          expect(
+            submitCalls(bus).map(([request]) => request.input.prompt),
+          ).toEqual(['next prompt']);
+        });
+
+        it("spends the admission on its UserQuery, not on that turn's continuations", async () => {
+          const bus = promptSubmitBus({ output: undefined });
+          vi.mocked(mockConfig.getSkipNextSpeakerCheck).mockReturnValue(false);
+          vi.mocked(await importedNextSpeaker())
+            .mockResolvedValueOnce({
+              reasoning: 'more to do',
+              next_speaker: 'model',
+            })
+            .mockResolvedValue(null);
+          notDoneChat();
+          mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-continued',
+          );
+          await admittedSend(admission, 'prompt-continued');
+
+          // The continuation re-spreads the send options and keeps its
+          // existing UserPromptSubmit run.
+          expect(
+            submitCalls(bus).map(([request]) => request.input.prompt),
+          ).toEqual(['/deploy prod', 'Please continue.']);
+          expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        });
+
+        it.each([
+          [
+            'a forged object',
+            () => Object.freeze({ blocked: false }),
+            'prompt-a',
+          ],
+          ['another prompt id', undefined, 'prompt-b'],
+        ])('rejects an admission from %s', async (_, forge, promptId) => {
+          promptSubmitBus({ output: undefined });
+          const admission =
+            forge?.() ??
+            (await client.admitUserPrompt('/deploy prod', 'prompt-a'));
+
+          await expect(admittedSend(admission, promptId)).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission that was already spent', async () => {
+          promptSubmitBus({ output: undefined });
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-twice',
+          );
+          await admittedSend(admission, 'prompt-twice');
+
+          await expect(admittedSend(admission, 'prompt-twice')).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        });
+
+        it('rejects an admission on a send that is not a UserQuery', async () => {
+          promptSubmitBus({ output: undefined });
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-tool-result',
+          );
+
+          await expect(
+            admittedSend(
+              admission,
+              'prompt-tool-result',
+              SendMessageType.ToolResult,
+            ),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission issued by another client', async () => {
+          promptSubmitBus({ output: undefined });
+          const other = await initializedClient();
+          const admission = await other.admitUserPrompt(
+            '/deploy prod',
+            'prompt-other-client',
+          );
+
+          await expect(
+            admittedSend(admission, 'prompt-other-client'),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission after the session changes', async () => {
+          promptSubmitBus({ output: undefined });
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-session',
+          );
+          vi.mocked(mockConfig.getSessionId).mockReturnValue('next-session');
+
+          await expect(
+            admittedSend(admission, 'prompt-session'),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('binds the admission to the hook owner fields, not the owner object', async () => {
+          promptSubmitBus({ output: undefined });
+          vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+            runtimeId: 'runtime-1',
+          } as unknown as ReturnType<Config['getHookSystem']>);
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+          const sameOwner = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-same-owner',
+          );
+          await admittedSend(sameOwner, 'prompt-same-owner');
+
+          const subagentOwner = await runWithHookExecutionOwner(
+            {
+              runtimeId: 'runtime-1',
+              sessionId: 'test-session-id',
+              agentId: 'agent-1',
+            },
+            () => client.admitUserPrompt('/deploy prod', 'prompt-other-owner'),
+          );
+          await expect(
+            admittedSend(subagentOwner, 'prompt-other-owner'),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).toHaveBeenCalledOnce();
         });
       });
 

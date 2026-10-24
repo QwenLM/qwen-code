@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  measureToolOutput,
+  getToolOutputProvenance,
+  updateToolOutputBudget,
+} from './tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
+import { ToolResultSizeEvent } from '../telemetry/types.js';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from './tools.js';
@@ -325,7 +332,7 @@ export function enforceFunctionResponseBudget(
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) return entries;
 
-  return replaceTextSlots(
+  const reduced = replaceTextSlots(
     entries,
     slots,
     allocateTextBudget(
@@ -333,6 +340,19 @@ export function enforceFunctionResponseBudget(
       budget,
     ),
   );
+  for (let index = 0; index < reduced.length; index++)
+    for (
+      let partIndex = 0;
+      partIndex < reduced[index].responseParts.length;
+      partIndex++
+    ) {
+      const part = reduced[index].responseParts[partIndex];
+      // Attribute this fallback to the model send policy, including when a
+      // Hosted Skill applies it before saving its model-facing result.
+      if (part !== entries[index].responseParts[partIndex])
+        updateToolOutputBudget([part], budget, 'send_guard');
+    }
+  return reduced;
 }
 
 export async function finalizeToolResponses(
@@ -463,6 +483,7 @@ export async function finalizeToolResponses(
         entry.toolName,
         content,
         config,
+        promptIds?.get(entry.callId),
       );
       withPersistence[entryIndex] = {
         ...entry,
@@ -479,6 +500,48 @@ export async function finalizeToolResponses(
   }
 
   const finalized = replaceTextSlots(withPersistence, slots, allocations);
+  for (let index = 0; index < finalized.length; index++) {
+    if (!entriesToPersist.has(index)) continue;
+    const entry = finalized[index];
+    for (
+      let partIndex = 0;
+      partIndex < entry.responseParts.length;
+      partIndex++
+    ) {
+      const part = entry.responseParts[partIndex];
+      if (part !== entries[index].responseParts[partIndex])
+        updateToolOutputBudget([part], budget, 'batch');
+    }
+    try {
+      // Measurement is part of the observation: an estimator throw must not
+      // fail the finalizer it only observes.
+      const before = measureToolOutput(entries[index].responseParts, config);
+      const after = measureToolOutput(entry.responseParts, config);
+      const provenance = entry.responseParts
+        .map(getToolOutputProvenance)
+        .find(Boolean);
+      logToolResultSize(
+        config,
+        new ToolResultSizeEvent(
+          provenance?.toolName ?? entry.toolName,
+          provenance?.toolType ??
+            (entry.toolName.startsWith('mcp__') ? 'mcp' : 'native'),
+          'batch',
+          before.chars,
+          after.chars,
+          before.estimatedTokens,
+          after.estimatedTokens,
+          true,
+          budget,
+          'batch',
+          entry.callId,
+          promptIds?.get(entry.callId),
+        ),
+      );
+    } catch {
+      /* Telemetry is observational. */
+    }
+  }
   if (observeBoundary)
     observeFinalizerEntries(
       config,

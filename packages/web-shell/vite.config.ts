@@ -1,3 +1,4 @@
+import { pierreResources } from './pierre-build';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
@@ -128,8 +129,18 @@ function configureDevelopmentMiddleware(
 export default defineConfig(({ command }) => ({
   root: 'client',
   // Worker-only imports otherwise trigger a dev-page reload on first preview.
-  optimizeDeps: { include: ['exceljs', 'ssf'] },
+  optimizeDeps: {
+    exclude: ['@pierre/diffs', 'shiki/wasm'],
+    include: [
+      'exceljs',
+      'ssf',
+      'shiki-files/core',
+      'shiki-files/engine/javascript',
+      'shiki-files/engine/oniguruma',
+    ],
+  },
   plugins: [
+    pierreResources(),
     react(),
     tailwindcss(),
     {

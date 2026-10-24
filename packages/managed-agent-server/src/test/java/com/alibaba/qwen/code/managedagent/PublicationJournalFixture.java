@@ -1,12 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
@@ -18,6 +17,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -73,38 +73,41 @@ public final class PublicationJournalFixture {
     public String commitDigest;
     public WorkspaceCsiReservationStore.Reservation csiReservation;
 
-    private PublicationJournalFixture(DataSource source,
-            boolean journalHeadAuthorization) {
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+    private PublicationJournalFixture(DataSource source) {
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         sessions = new ManagedSessionStore(jdbc);
         bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("key", new byte[32]),
                 () -> "binding-1");
         executions = new JdbcToolExecutionRepository(source);
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+        store = newStore(10 * ALLOCATION, 10);
     }
 
-    public static PublicationJournalFixture create(DataSource source,
-            boolean journalHeadAuthorization) {
-        return create(source, journalHeadAuthorization, null);
+    public static PublicationJournalFixture create(DataSource source) {
+        return create(source, null);
     }
 
-    public static PublicationJournalFixture create(DataSource source,
-            boolean journalHeadAuthorization, WorkspaceCsiRegistration registration) {
+    public static PublicationJournalFixture create(DataSource source, WorkspaceCsiRegistration registration) {
         PublicationJournalFixture fixture =
-                new PublicationJournalFixture(source, journalHeadAuthorization);
-        fixture.populate(source, registration);
+                new PublicationJournalFixture(source);
+        fixture.populate(source, registration, false);
         return fixture;
     }
 
-    private void populate(DataSource source, WorkspaceCsiRegistration registration) {
+    public static PublicationJournalFixture createSessionIsolated(DataSource source) {
+        var fixture = new PublicationJournalFixture(source);
+        fixture.populate(source, null, true);
+        return fixture;
+    }
+
+    private void populate(DataSource source, WorkspaceCsiRegistration registration, boolean sessionIsolated) {
         boolean csi = registration != null;
         var scope = new RuntimeScope("tenant-1", "workspace-1", csi ? "1" : "generation-1",
-                "/workspace", csi ? "sha256:" + "a".repeat(64) : "capability", csi ? "session" : "workspace");
+                "/workspace", csi ? "sha256:" + "a".repeat(64) : "capability", csi || sessionIsolated ? "session" : "workspace");
         var runtime = bindings.findOrCreate(csi
                 ? new RuntimeProvisionRequest(scope, "session-1", "kubernetes-workspace", registration.storageId())
-                : new RuntimeProvisionRequest(scope, null));
+                : new RuntimeProvisionRequest(scope, sessionIsolated ? "session-1" : null));
         runtime = bindings.claimOperation(runtime.getBindingId(), "owner", Duration.ofMinutes(1));
         if (csi) {
             var csiStore = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
@@ -201,16 +204,10 @@ public final class PublicationJournalFixture {
     }
 
     public ToolPublicationStore newStore(long bytes, long count) {
-        return newStore(bytes, count, false);
-    }
-
-    public ToolPublicationStore newStore(long bytes, long count,
-            boolean journalHeadAuthorization) {
         return new ToolPublicationStore(jdbc, manager, sessions, executions,
                 bindings,
                 new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, bytes,
-                        bytes, count),
-                journalHeadAuthorization);
+                        bytes, count));
     }
 
     public JsonNode reserve() {

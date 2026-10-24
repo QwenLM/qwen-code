@@ -19,6 +19,7 @@ import { writeClipboardText } from '../../../utils/clipboard';
 import { Button } from '../../ui/button';
 import {
   extractText,
+  hasRecordedOutput,
   getToolDescription,
   isActiveToolStatus,
   localizeToolDisplayName,
@@ -79,6 +80,9 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
       : [{ text: output }];
   }, [live, result, text, active, tool.rawOutput]);
   const output = segments?.map((seg) => seg.text).join('') ?? '';
+  const emptyOutput = t(
+    hasRecordedOutput(tool) ? 'shell.result.empty' : 'shell.result.unavailable',
+  );
   const outputRef = useRef<HTMLPreElement>(null);
   const following = useRef(true);
   useLayoutEffect(() => {
@@ -154,7 +158,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
         </div>
         <div className={styles.expandedCardBody}>
           <pre className={styles.expandedOutput}>
-            {output ? sanitizeControlChars(output) : t('shell.result.empty')}
+            {output ? sanitizeControlChars(output) : emptyOutput}
           </pre>
         </div>
       </div>
@@ -241,7 +245,9 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
                       {sanitizeControlChars(seg.text)}
                     </span>
                   ))
-                : t(active ? 'shell.result.waiting' : 'shell.result.empty')}
+                : active
+                  ? t('shell.result.waiting')
+                  : emptyOutput}
             </pre>
           </details>
           {!documentMode && (
@@ -288,7 +294,10 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
             {t('shell.result.signal')}: {result.signal}
           </div>
         )}
-        {(result || showTimeout || live || elapsed) && (
+        {(result ||
+          showTimeout ||
+          live?.totalLines !== undefined ||
+          live?.totalBytes !== undefined) && (
           <details className={styles.shellDetails} open={documentMode}>
             <summary>{t('shell.result.details')}</summary>
             <dl>

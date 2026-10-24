@@ -14,6 +14,7 @@ import {
   hostedApprovalAsks,
   hostedApprovalDefinition,
   parseHostedApprovalSettings,
+  readHostedApprovalDefinition,
 } from './hosted-tool-approval.js';
 import {
   HOSTED_WORKSPACE_READ_PROFILE,
@@ -56,7 +57,7 @@ describe('Hosted tool approval settings', () => {
         (tool) => hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool, search),
       );
     expect(asked('yolo')).toEqual([]);
-    // `glob` is asked outside the `/2` search profiles, including for an
+    // `glob` is asked outside the search profiles, including for an
     // MCP-declared tool of that name; only a search profile pre-approves it.
     expect(asked('default')).toEqual([
       'write_file',
@@ -136,6 +137,14 @@ describe('Hosted tool approval settings', () => {
     expect(
       hostedApprovalDefinition({ mode: 'auto-edit', timeoutMs: 5_000 }),
     ).toEqual({ approvalMode: 'auto-edit', approvalTimeoutMs: 5_000 });
+  });
+
+  it('retains a selectable Full Access timeout through a cold definition read', () => {
+    const settings = parseHostedApprovalSettings('yolo', 5_000)!;
+    expect(settings.timeoutMs).toBe(5_000);
+    expect(
+      readHostedApprovalDefinition(hostedApprovalDefinition(settings, true)),
+    ).toEqual({ mode: 'yolo', timeoutMs: 5_000 });
   });
 });
 
@@ -243,6 +252,30 @@ describe('Hosted approval waiters', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(settled).toBe(true);
     await waiting;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not overlap asynchronous policy polls and propagates a failed read', async () => {
+    vi.useFakeTimers();
+    let fail!: (error: Error) => void;
+    const onPoll = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    const waiting = new HostedApprovalWaiters().wait(
+      'policy',
+      Date.now() + 60_000,
+      new AbortController().signal,
+      () => false,
+      onPoll,
+    );
+    const failure = waiting.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(onPoll).toHaveBeenCalledOnce();
+    fail(new Error('writer fenced'));
+    await expect(failure).resolves.toMatchObject({ message: 'writer fenced' });
     expect(vi.getTimerCount()).toBe(0);
   });
 

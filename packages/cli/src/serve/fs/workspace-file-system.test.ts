@@ -24,6 +24,7 @@ import {
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { canonicalizeWorkspace } from './paths.js';
 import { isFsError } from './errors.js';
+import { PathMutexRegistry } from './path-mutex-registry.js';
 import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 interface Harness {
@@ -40,6 +41,7 @@ async function makeHarness(opts?: {
   includeRawPaths?: boolean;
   generationGuard?: { assertOpen(): void };
   newFileMode?: NewFileModePolicy;
+  pathLocks?: PathMutexRegistry;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
@@ -56,6 +58,7 @@ async function makeHarness(opts?: {
     includeRawPaths: opts?.includeRawPaths,
     generationGuard: opts?.generationGuard,
     newFileMode: opts?.newFileMode,
+    pathLocks: opts?.pathLocks,
   });
   const fs = factory.forRequest({
     originatorClientId: 'client-x',
@@ -3169,5 +3172,234 @@ describe('WorkspaceFileSystem - factory', () => {
     } finally {
       await fsp.rm(scratch, { recursive: true, force: true });
     }
+  });
+});
+
+describe('WorkspaceFileSystem - deleteFile', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await teardown(h);
+  });
+
+  it.each(['text', 'binary', 'empty'])(
+    'deletes only the requested %s file and audits the operation',
+    async (kind) => {
+      await fsp.mkdir(path.join(h.workspace, 'nested'));
+      const target = path.join(h.workspace, 'nested', 'file.bin');
+      await fsp.writeFile(
+        target,
+        kind === 'empty'
+          ? Buffer.alloc(0)
+          : kind === 'binary'
+            ? Buffer.from([0, 255, 128])
+            : 'text',
+      );
+      await fsp.writeFile(path.join(h.workspace, 'keep.txt'), 'keep');
+      expect(await h.fs.deleteFile!('nested/file.bin')).toBe(target);
+      expect(await fsp.stat(target).catch(() => null)).toBeNull();
+      expect(
+        await fsp.readFile(path.join(h.workspace, 'keep.txt'), 'utf8'),
+      ).toBe('keep');
+      expect(
+        h.events.some(
+          (event) =>
+            event.type === FS_ACCESS_EVENT_TYPE &&
+            (event.data as { intent: string }).intent === 'delete',
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    ['.', 'parse_error', 400],
+    ['..', 'parse_error', 400],
+    ['', 'parse_error', 400],
+    ['folder/', 'parse_error', 400],
+    ['folder', 'parse_error', 400],
+    ['a\0b.txt', 'parse_error', 400],
+    ['file.', 'parse_error', 400],
+    ['../outside.txt', 'path_outside_workspace', 400],
+    ['missing.txt', 'path_not_found', 404],
+  ] as const)(
+    'refuses target %j with %s (%i)',
+    async (target, kind, status) => {
+      await fsp.mkdir(path.join(h.workspace, 'folder'));
+      await fsp.writeFile(path.join(h.workspace, 'folder', 'keep.txt'), 'keep');
+      await fsp.writeFile(path.join(h.scratch, 'outside.txt'), 'outside');
+      await expect(h.fs.deleteFile!(target)).rejects.toMatchObject({
+        kind,
+        status,
+      });
+      expect(
+        await fsp.readFile(
+          path.join(h.workspace, 'folder', 'keep.txt'),
+          'utf8',
+        ),
+      ).toBe('keep');
+      expect(
+        await fsp.readFile(path.join(h.scratch, 'outside.txt'), 'utf8'),
+      ).toBe('outside');
+    },
+  );
+
+  it('records ignore attribution and original size for deleted files', async () => {
+    await teardown(h);
+    h = await makeHarness({ ignore: new Ignore().add('*.log') });
+    await fsp.writeFile(path.join(h.workspace, 'ignored.log'), 'audit');
+    await h.fs.deleteFile!('ignored.log');
+    expect(
+      h.events.find((event) => event.type === FS_ACCESS_EVENT_TYPE)?.data,
+    ).toMatchObject({
+      intent: 'delete',
+      matchedIgnore: 'file',
+      sizeBytes: 5,
+    });
+  });
+
+  it('waits on the canonical path lock used by other mutations', async () => {
+    await teardown(h);
+    const pathLocks = new PathMutexRegistry();
+    h = await makeHarness({ pathLocks });
+    const target = path.join(h.workspace, 'keep.txt');
+    await fsp.writeFile(target, 'keep');
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const lock = vi.spyOn(pathLocks, 'runExclusive');
+    const held = pathLocks.runExclusive(target, () => hold);
+    const unlink = vi.spyOn(fsp, 'unlink');
+    const deletion = h.fs.deleteFile!('./keep.txt');
+    try {
+      await vi.waitFor(() => expect(lock).toHaveBeenCalledTimes(2));
+      expect(lock).toHaveBeenLastCalledWith(target, expect.any(Function));
+      expect(unlink).not.toHaveBeenCalled();
+      expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+    } finally {
+      release();
+      await held;
+      await deletion;
+    }
+    await expect(fsp.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each(['lock acquisition', 'metadata read'])(
+    'refuses a parent replaced after %s without deleting either file',
+    async (phase) => {
+      await teardown(h);
+      const pathLocks = new PathMutexRegistry();
+      h = await makeHarness({ pathLocks });
+      const parent = path.join(h.workspace, 'nested');
+      const saved = path.join(h.workspace, 'saved');
+      const outside = path.join(h.scratch, 'outside');
+      await fsp.mkdir(parent);
+      await fsp.mkdir(outside);
+      await fsp.writeFile(path.join(parent, 'keep.txt'), 'inside');
+      await fsp.writeFile(path.join(outside, 'keep.txt'), 'outside');
+      const swap = async () => {
+        await fsp.rename(parent, saved);
+        await fsp.symlink(outside, parent, 'dir');
+      };
+      const lstat = fsp.lstat;
+      const metadata = vi.spyOn(fsp, 'lstat');
+      if (phase === 'lock acquisition') {
+        const runExclusive = pathLocks.runExclusive.bind(pathLocks);
+        vi.spyOn(pathLocks, 'runExclusive').mockImplementation((key, fn) =>
+          runExclusive(key, async () => {
+            await swap();
+            return fn();
+          }),
+        );
+      } else {
+        metadata.mockImplementation(async (...args) => {
+          const stat = await lstat(...args);
+          if (args[0] === path.join(parent, 'keep.txt')) await swap();
+          return stat;
+        });
+      }
+      await expect(h.fs.deleteFile!('nested/keep.txt')).rejects.toMatchObject({
+        kind: 'symlink_escape',
+      });
+      if (phase === 'lock acquisition') {
+        expect(metadata).not.toHaveBeenCalledWith(
+          path.join(parent, 'keep.txt'),
+        );
+      }
+      expect(await fsp.readFile(path.join(saved, 'keep.txt'), 'utf8')).toBe(
+        'inside',
+      );
+      expect(await fsp.readFile(path.join(outside, 'keep.txt'), 'utf8')).toBe(
+        'outside',
+      );
+    },
+  );
+
+  it('rejects final symlinks without removing either link or target', async () => {
+    const target = path.join(h.workspace, 'target.txt');
+    await fsp.writeFile(target, 'keep');
+    await fsp.symlink(target, path.join(h.workspace, 'link'));
+    await expect(h.fs.deleteFile!('link')).rejects.toMatchObject({
+      kind: 'symlink_escape',
+    });
+    expect(
+      (await fsp.lstat(path.join(h.workspace, 'link'))).isSymbolicLink(),
+    ).toBe(true);
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+  });
+
+  it('rejects a symlink parent escaping the workspace', async () => {
+    const outside = path.join(h.scratch, 'outside');
+    await fsp.mkdir(outside);
+    await fsp.writeFile(path.join(outside, 'keep.txt'), 'keep');
+    await fsp.symlink(outside, path.join(h.workspace, 'link'), 'dir');
+    await expect(h.fs.deleteFile!('link/keep.txt')).rejects.toMatchObject({
+      kind: 'symlink_escape',
+    });
+    expect(await fsp.readFile(path.join(outside, 'keep.txt'), 'utf8')).toBe(
+      'keep',
+    );
+    expect(
+      h.events.filter((event) => event.type === FS_DENIED_EVENT_TYPE),
+    ).toHaveLength(1);
+  });
+
+  it('rejects untrusted workspaces before deletion', async () => {
+    await teardown(h);
+    h = await makeHarness({ trusted: false });
+    const target = path.join(h.workspace, 'keep.txt');
+    await fsp.writeFile(target, 'keep');
+    await expect(h.fs.deleteFile!('keep.txt')).rejects.toMatchObject({
+      kind: 'untrusted_workspace',
+    });
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+  });
+
+  it('rechecks generation after metadata work and before unlink', async () => {
+    await teardown(h);
+    let closed = false;
+    const failure = Object.assign(new Error('generation closed'), {
+      code: 'workspace_generation_closed',
+    });
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          if (closed) throw failure;
+        },
+      },
+    });
+    const target = path.join(h.workspace, 'keep.txt');
+    await fsp.writeFile(target, 'keep');
+    const original = fsp.lstat;
+    vi.spyOn(fsp, 'lstat').mockImplementation(async (...args) => {
+      const stat = await original(...args);
+      if (args[0] === target) closed = true;
+      return stat;
+    });
+    await expect(h.fs.deleteFile!('keep.txt')).rejects.toBe(failure);
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
   });
 });

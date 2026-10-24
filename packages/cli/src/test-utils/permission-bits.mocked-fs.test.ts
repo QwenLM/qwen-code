@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import mockedFsDefault, * as mockedFs from 'node:fs';
 import { createRequire } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -43,6 +44,11 @@ function refusedWithEacces(attempt: () => unknown): boolean {
 it.skipIf(process.platform === 'win32')(
   'answers for the kernel while the test file mocks node:fs',
   () => {
+    // The mock is in place, both ways, or this test would pass without
+    // pinning anything. Asked of the graph's node:fs, never of realFs,
+    // which the mock never reaches.
+    expect(mockedFs.mkdtempSync).toBe(mocked.mkdtempSync);
+    expect(mockedFsDefault.mkdtempSync).toBe(mocked.mkdtempSync);
     const dir = realFs.mkdtempSync(path.join(os.tmpdir(), 'locked-'));
     realFs.chmodSync(dir, 0o000);
     let enforced: boolean;

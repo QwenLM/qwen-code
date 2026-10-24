@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.daemon;
 import java.util.Map;
 
 /** A received non-success HTTP response from the daemon or an intermediary. */
-public final class DaemonHttpException extends DaemonException {
+public class DaemonHttpException extends DaemonException {
     private final int statusCode;
     private final String responseBody;
 
@@ -12,6 +12,13 @@ public final class DaemonHttpException extends DaemonException {
                 + (responseBody.isEmpty() ? "" : ": " + responseBody));
         this.statusCode = statusCode;
         this.responseBody = responseBody;
+    }
+
+    // A refusal subclass that carries no wire response (a local veto).
+    DaemonHttpException(String message) {
+        super(message);
+        this.statusCode = 0;
+        this.responseBody = "";
     }
 
     public int getStatusCode() {

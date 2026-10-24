@@ -50,12 +50,15 @@ describe('arePermissionBitsEnforced', () => {
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-bits-test-'));
     process.env['TMPDIR'] = tmp;
+    // The diagnostic's shape depends on it, and CI sets it.
+    vi.stubEnv('GITHUB_ACTIONS', '');
     stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     probe = probeFs();
   });
 
   afterEach(() => {
     stderr.mockRestore();
+    vi.unstubAllEnvs();
     if (initialTmpdir === undefined) delete process.env['TMPDIR'];
     else process.env['TMPDIR'] = initialTmpdir;
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -65,7 +68,7 @@ describe('arePermissionBitsEnforced', () => {
   function diagnostics(): string[] {
     return stderr.mock.calls
       .map((call) => String(call[0]))
-      .filter((line) => line.startsWith('[permission-bits]'));
+      .filter((line) => /^(::warning::)?\[permission-bits\]/.test(line));
   }
 
   /** The probe was made in os.tmpdir() and is gone again. */
@@ -143,8 +146,26 @@ describe('arePermissionBitsEnforced', () => {
       expect(arePermissionBitsEnforced(probe)).toBe(false);
       expect(probe.chmodSync).not.toHaveBeenCalled();
       expect(fs.readdirSync(tmp)).toEqual([]);
+      // One whole line, with no workflow command outside GitHub Actions.
       expect(diagnostics()).toEqual([
-        expect.stringContaining('probe inconclusive (ENOSPC)'),
+        expect.stringMatching(
+          /^\[permission-bits\] probe inconclusive \(ENOSPC\)[^\n]*\n$/,
+        ),
+      ]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'opens the line with a warning command under GitHub Actions',
+    () => {
+      vi.stubEnv('GITHUB_ACTIONS', 'true');
+      probe.mkdtempSync.mockImplementationOnce(refusal('ENOSPC'));
+      expect(arePermissionBitsEnforced(probe)).toBe(false);
+      // A workflow command counts only at the start of a line.
+      expect(diagnostics()).toEqual([
+        expect.stringMatching(
+          /^::warning::\[permission-bits\] probe inconclusive \(ENOSPC\)[^\n]*\n$/,
+        ),
       ]);
     },
   );

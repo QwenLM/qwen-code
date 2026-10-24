@@ -2,6 +2,10 @@
 
 [English](2026-10-15-managed-approval-selector.md) | [中文](2026-10-15-managed-approval-selector.zh-CN.md)
 
+## 状态
+
+本文记录最初的创建选择器切片。其中固定策略和 Shell Full Access 的限制已由[托管审批选择设计](managed-approval-selection.zh-CN.md)取代：后续设计增加能力协商下的 Full Access 和空闲会话策略切换，并保留本文的创建协议。
+
 ## 问题与现状
 
 本地 WebShell 提供审批策略选择器，托管任务创建界面却隐藏了它。托管模式已有持久化权限 Action 和共享 ToolApproval 卡片。Java 服务为每个会话固定审批策略，Harness 加载时核对该策略。页面选择必须改变真实准入，不能只修改文字。

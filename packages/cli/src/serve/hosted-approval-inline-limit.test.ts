@@ -17,6 +17,7 @@ import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import {
   HOSTED_TOOL_APPROVAL_POLICY,
@@ -112,6 +113,11 @@ it.each([
           return localPublish(kind, bytes);
         },
       );
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = {

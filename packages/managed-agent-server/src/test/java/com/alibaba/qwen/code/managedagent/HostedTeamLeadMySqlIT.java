@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,6 +25,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -194,8 +195,8 @@ class HostedTeamLeadMySqlIT {
 
     /**
      * Closing the lead cancels its running member through the H4b cascade.
-     * The close cancels the member's Turn in flight, leaves the team's
-     * records as they were and never revives the lead.
+     * The close cancels the member's Turn while its model response is held,
+     * leaves the team's records as they were and never revives the lead.
      */
     @Test
     @Timeout(80)
@@ -247,8 +248,8 @@ class HostedTeamLeadMySqlIT {
             assertThat(run.path("stopReason").asText()).isEqualTo("stop_requested");
             assertThat(sessionStatus(child)).isEqualTo("CLOSED");
         });
-        assertThat(releases.get("carol").getCount()).isEqualTo(1);
         assertThat(childTurnStatus(child)).isEqualTo("CANCELLED");
+        assertThat(releases.get("carol").getCount()).as("member response is still held").isEqualTo(1);
         releases.get("carol").countDown();
         assertThat(revision(lead, "team_state")).isEqualTo(stateRevision);
         assertThat(team(lead).path("lifecycle").asText()).isEqualTo("active");
@@ -747,7 +748,10 @@ class HostedTeamLeadMySqlIT {
      * the sum of its waits instead of stopping at its ceiling.
      */
     private static ConditionFactory waiting() {
-        return await().failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted());
+        // Awaitility also observes sibling delivery threads; a rolled-back
+        // deadlock remains lease-recoverable, so await this case's durable facts.
+        return await().ignoreExceptionsInstanceOf(CannotAcquireLockException.class)
+                .failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted());
     }
 
     private void boot() throws Exception {
@@ -843,7 +847,7 @@ class HostedTeamLeadMySqlIT {
         .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
         if ("Linux".equals(System.getProperty("os.name"))) {
-            spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class)
+            spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class)
                     .register(tenant, "storage-0", UUID.randomUUID().toString());
         }
     }

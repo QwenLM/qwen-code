@@ -953,6 +953,13 @@
   opacity: 1;
 }
 
+/* The label and value carry no right padding of their own; the remove button
+   supplies that edge when it is present. A chip without one ends on the
+   content box, so it needs the inset itself. */
+.tagContent:last-child {
+  padding-right: 7px;
+}
+
 .tagRemove {
   flex: 0 0 auto;
   width: 22px;
@@ -1418,6 +1425,23 @@
   flex: 0 0 28px;
 }
 
+.dropdownSearch {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dropdownSearchRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dropdownSearchRow > :first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .dropdownList {
   display: flex;
   min-height: 0;
@@ -1473,8 +1497,26 @@
   padding: 6px 9px;
 }
 
+.dropdownItem[data-disabled] {
+  color: var(--muted-foreground);
+  cursor: default;
+  opacity: 0.5;
+}
+
+.dropdownItem[data-disabled] .dropdownItemLabel,
+.dropdownItem[data-disabled] .dropdownItemCheck {
+  color: var(--muted-foreground);
+}
+
 .dropdownItem:hover {
   background: var(--accent);
+}
+
+.dropdownItem[data-disabled]:hover,
+.dropdownItem[data-disabled]:focus-visible,
+.dropdownItem[data-disabled][aria-expanded='true'] {
+  background: var(--accent);
+  opacity: 0.7;
 }
 
 .dropdownItemActive {

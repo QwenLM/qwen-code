@@ -7,16 +7,17 @@ import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.RuleClass;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Surface;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.security.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -103,6 +104,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "qwen.managed-agent.session-store.enabled=true",
         "qwen.managed-agent.session-store.binding-key="
                 + "0123456789abcdef0123456789abcdef",
+        "qwen.managed-agent.runtime-broker.ssh.enabled=false",
         "qwen.managed-agent.tool-publication.entry-concurrency=4",
         "qwen.managed-agent.artifacts.enabled=true",
         // The scheduled projector would race the publication-chain fixture
@@ -156,6 +158,9 @@ class SurfaceAdmissionAcceptanceTest {
     @Autowired
     private AgentStateStore store;
 
+    @Autowired
+    private SshWorkspaceStore sshWorkspaces;
+
     private final String tenant = "acc-" + UUID.randomUUID();
     private final AtomicInteger keys = new AtomicInteger();
     private String bound;
@@ -170,6 +175,7 @@ class SurfaceAdmissionAcceptanceTest {
     private String artifactItemId;
     private String automation;
     private String settledTask;
+    private String registrationOperation;
 
     @BeforeAll
     void graph() throws Exception {
@@ -232,6 +238,16 @@ class SurfaceAdmissionAcceptanceTest {
         pendingActionLegacy = insertAction(tenant, legacy);
         automation = insertAutomation(tenant, bound);
         settledTask = insertSettledTask(tenant, bound);
+        var registration = sshWorkspaces.begin(tenant, OWNER,
+                "surface-registration", "node-probe", "/work/project", "Project");
+        var claim = sshWorkspaces.claim(tenant, OWNER,
+                registration.operationId(), "fixture");
+        assertThat(claim).isNotNull();
+        // D7-2: only a reserved registration may have reached its node, so
+        // only a reserved one parks recovery_blocked.
+        sshWorkspaces.reserve(claim, "fixture", reservedRegistration(claim, tenant));
+        sshWorkspaces.fail(claim, "fixture", "ssh_runtime_identity_mismatch", false);
+        registrationOperation = registration.operationId();
     }
 
     // A6: a retained key replays only while current access holds — a
@@ -250,7 +266,7 @@ class SurfaceAdmissionAcceptanceTest {
                         + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
                         + " 'run-retained', ?, 1, 'resource-retained',"
                         + " 'child_agent', 'running', 'session', 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
                         .sessionScopeKey(tenant, session),
                 recordKey, tenant, session, "f".repeat(64));
         String key = nextKey();
@@ -302,9 +318,27 @@ class SurfaceAdmissionAcceptanceTest {
                         + " 'run-settled', ?, 1, 'resource-settled',"
                         + " 'child_agent', 'completed', 'session',"
                         + " 'consumed', 1, 2)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
                         .sessionScopeKey(tenant, session),
                 recordKey, tenant, session, "b".repeat(64));
+        // The task view reads a child task's committed body for its child
+        // Session link (#13746 F2), so the list probes need one.
+        String scope = com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(tenant, session);
+        byte[] body = "{\"childSessionId\":null}".getBytes(
+                StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO ma_resource (resource_key,"
+                        + " session_scope_key, tenant_id, workspace_id,"
+                        + " session_id, resource_id, kind, schema_version,"
+                        + " byte_length, sha256, storage_kind, inline_bytes,"
+                        + " publish_command_id, state, gmt_create) VALUES (?,"
+                        + " ?, ?, 'ws', ?, 'resource-settled',"
+                        + " 'managed-child_run', 1, ?, ?, 'MYSQL_INLINE', ?,"
+                        + " 'command', 'REFERENCED', 1)",
+                com.alibaba.qwen.code.runtimebroker.managedschema
+                        .ManagedSchemaKeys.key(scope, "resource-settled"),
+                scope, tenant, session, body.length,
+                org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
+                body);
         return "task_" + recordKey;
     }
 
@@ -413,7 +447,16 @@ class SurfaceAdmissionAcceptanceTest {
                 if (entry.capabilities().contains(Capability.ACTION_RESPOND)) {
                     expect(entry, OPERATOR, 202, "action_response");
                     expect(entry, OWNER_RANK, 202, "action_response");
-                } else if (entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)) {
+                } else if (entry.capabilities().contains(Capability.MCP_MANAGEMENT)) {
+                    if (entry == SurfaceRegistry.PUBLIC_MCP_MANAGEMENT || entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
+                        expectAdmitted(entry, OPERATOR);
+                        expectAdmitted(entry, OWNER_RANK);
+                    } else {
+                        expect(entry, OPERATOR, 409, "unsupported_feature");
+                        expect(entry, OWNER_RANK, 409, "unsupported_feature");
+                    }
+                } else if (entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)) {
                     expect(entry, OPERATOR, 409, "unsupported_feature");
                     expect(entry, OWNER_RANK, 409, "unsupported_feature");
                 } else {
@@ -425,7 +468,9 @@ class SurfaceAdmissionAcceptanceTest {
                 // stay invisible so an unauthenticated caller learns
                 // nothing about the bound Session.
                 boolean actorRequired = entry.capabilities().contains(Capability.SESSION_CWD_CHANGE)
-                        || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE);
+                        || entry.capabilities().contains(Capability.MCP_MANAGEMENT)
+                        || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION);
                 expect(entry, null, actorRequired ? 401 : 404,
                         actorRequired
                                 ? "actor_required" : "session_not_found");
@@ -451,9 +496,13 @@ class SurfaceAdmissionAcceptanceTest {
                 // An anonymous mutation needs an actor: the automation
                 // mutations name it up front (401), while the lifecycle
                 // family stays invisible (404).
-                expect(entry, null, automationEntry(entry) ? 401 : 404,
-                        automationEntry(entry) ? "actor_required"
+                expect(entry, null, (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? 401 : 404,
+                        (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? "actor_required"
                                 : "session_not_found");
+            }
+            case WORKSPACE_FILES -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "workspace_not_found");
             }
             case WORKSPACE_ALLOCATION -> {
                 expect(entry, null, 401, "actor_required");
@@ -461,6 +510,34 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case WORKSPACE_DISCOVERY ->
                 expect(entry, null, 401, "actor_required");
+            case RUNTIME_NODE_ACCESS -> {
+                expect(entry, null, 401, "actor_required");
+                for (String actor : List.of(STRANGER, READER, OPERATOR,
+                        OWNER_RANK, OWNER)) {
+                    if (entry.capabilities().contains(Capability.RUNTIME_NODE_LIST)) {
+                        var catalog = JSON.readTree(expect(entry, actor, 200, null)
+                                .getResponse().getContentAsString());
+                        assertThat(catalog.path("supported").asBoolean()).isFalse();
+                        assertThat(catalog.path("data").isArray()).isTrue();
+                        assertThat(catalog.path("data")).isEmpty();
+                    } else {
+                        expect(entry, actor, 404, "ssh_runtime_disabled");
+                    }
+                }
+            }
+            case WORKSPACE_REGISTRATION_OWNER -> {
+                expect(entry, null, 401, "actor_required");
+                for (String actor : List.of(STRANGER, READER, OPERATOR,
+                        OWNER_RANK)) {
+                    expect(entry, actor, 404, "operation_not_found");
+                }
+                var operation = JSON.readTree(expect(entry, OWNER, 200, null)
+                        .getResponse().getContentAsString());
+                assertThat(operation.path("operationId").asText())
+                        .isEqualTo(registrationOperation);
+                assertThat(operation.path("status").asText()).isEqualTo("recovery_blocked");
+                assertThat(operation.path("replayed").asBoolean()).isTrue();
+            }
             case SESSION_OPTIONS ->
                 expect(entry, null, 401, "actor_required");
             case INTERNAL_WRITER ->
@@ -518,6 +595,21 @@ class SurfaceAdmissionAcceptanceTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted());
+    }
+
+    // The admitted list probes only prove "not refused": pin that a
+    // reader's task list really serves the child task whose committed body
+    // the view reads for its child Session link (#13746 F2).
+    @Test
+    void aReadersTaskListServesTheChildTaskThroughItsBody() throws Exception {
+        mvc.perform(get("/v1/agents/sessions/" + bound + "/tasks")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, READER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[?(@.id == '" + settledTask
+                        + "')].kind").value("child_agent"))
+                .andExpect(jsonPath("$.data[?(@.id == '" + settledTask
+                        + "')].child_session_id").isEmpty());
     }
 
     @Test
@@ -1373,7 +1465,8 @@ class SurfaceAdmissionAcceptanceTest {
         String session = artifactArm ? ARTIFACT_SESSION : bound;
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
-        variables.put("operationId", "op_0000000000000000");
+        variables.put("operationId", entry.capabilities().contains(Capability.MCP_MANAGEMENT)
+                ? "11111111-1111-4111-8111-111111111111" : "op_0000000000000000");
         variables.put("taskId", entry.capabilities().contains(
                 Capability.TASK_CANCEL) ? settledTask
                 : "task_0000000000000000");
@@ -1465,6 +1558,14 @@ class SurfaceAdmissionAcceptanceTest {
 
     private String bodyFor(SurfaceRegistry entry, String tenant,
             String session) {
+        if (entry == SurfaceRegistry.INTERNAL_WRITER_QUIESCE_OWNERSHIP
+                || entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP) {
+            String scope = "\"workspaceId\":\"ws\",\"writerId\":\"boot-probe\",\"writerGeneration\":1,"
+                    + "\"instanceId\":\"pod-probe\",\"bootId\":\"boot-probe\",\"placementEpoch\":1";
+            return "{" + scope + (entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP
+                    ? ",\"operationId\":\"release-probe\",\"journalRevision\":1,\"commitProof\":{\"lastCommitSequence\":1,"
+                            + "\"committedPrefixHash\":\"" + "a".repeat(64) + "\"}" : "") + "}";
+        }
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
@@ -1481,16 +1582,26 @@ class SurfaceAdmissionAcceptanceTest {
                             + "\",\"sessionId\":\"" + session
                             + "\",\"input\":[{\"type\":\"text\","
                             + "\"text\":\"probe\"}]}";
-            case SESSION_RENAME -> "{\"title\":\"probe\"}";
+            case SESSION_RENAME -> publicSurface ? "{\"title\":\"probe\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"title\":\"probe\","
+                            + "\"idempotencyKey\":\"" + nextKey() + "\"}";
             case SESSION_CWD_CHANGE -> publicSurface
                     ? "{\"cwd_relative\":\"probe\","
                             + "\"expected_context_revision\":1}"
                     : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
                             + nextKey() + "\",\"cwdRelative\":\"probe\","
                             + "\"expectedContextRevision\":1}";
+            case SESSION_CONTEXT_COMPRESSION -> publicSurface
+                    ? "{\"expected_compaction_revision\":0}"
+                    : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
+                            + nextKey() + "\",\"expectedCompactionRevision\":0}";
             case SESSION_LIST -> "{}";
             case SESSION_GET -> "{\"sessionId\":\"" + session + "\"}";
-            case TRANSCRIPT_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_RECOVERY_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_RECOVERY_RECHECK -> publicSurface
+                    ? "{\"turnId\":\"turn_0000000000000000\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"turnId\":\"turn_0000000000000000\"}";
+            case TRANSCRIPT_QUERY, ITEM_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case TAIL_EVENTS -> "{\"sessionId\":\"" + session
                     + "\",\"afterSequence\":0}";
             case TASK_LIST -> "{\"sessionId\":\"" + session + "\"}";
@@ -1533,12 +1644,34 @@ class SurfaceAdmissionAcceptanceTest {
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
+            case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
+            case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
+            case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
-            case SESSION_MODELS -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";
+            case MCP_MANAGEMENT -> {
+                if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
+                    yield "{\"sessionId\":\"" + session + "\"}";
+                }
+                if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT_OPERATION) {
+                    yield "{\"sessionId\":\"" + session + "\",\"operationId\":\"11111111-1111-4111-8111-111111111111\"}";
+                }
+                yield "{" + (publicSurface ? "" : "\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"mcp-management\",")
+                        + "\"action\":\"restart\",\"serverId\":\"docs\",\"expectedRevision\":0}";
+            }
+            case SESSION_APPROVAL_CHANGE -> "{\"sessionId\":\"" + session
+                    + "\",\"idempotencyKey\":\"approval-change\",\"approvalMode\":\"yolo\",\"expectedRevision\":0}";
             case SESSION_MODEL_CHANGE -> "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"model-change\",\"modelId\":\"model-a\",\"expectedRevision\":0}";
             case WORKSPACE_LIST -> "{}";
             case WORKSPACE_GET -> "{\"workspaceId\":\"ws\"}";
+            case RUNTIME_NODE_LIST -> "{}";
+            case WORKSPACE_DIRECTORY_CHECK ->
+                "{\"nodeId\":\"node-probe\",\"path\":\"/work/project\"}";
+            case WORKSPACE_REGISTER -> "{\"nodeId\":\"node-probe\",\"path\":\"/work/project\","
+                    + "\"displayName\":\"Project\",\"idempotencyKey\":\"" + nextKey() + "\"}";
+            case WORKSPACE_REGISTRATION_GET ->
+                "{\"operationId\":\"" + registrationOperation + "\"}";
             case AUTOMATION_CREATE -> "{\"session_id\":\"" + session
                     + "\",\"goal\":\"probe\",\"cron\":\"0 2 * * *\","
                     + "\"timezone\":\"UTC\",\"prompt\":\"probe\"}";
@@ -1639,7 +1772,7 @@ class SurfaceAdmissionAcceptanceTest {
         jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, domain, record_id, revision, tenant_id,"
                 + " session_id, action_id, action_version, state, options_json, gmt_create)"
                 + " VALUES ('ACTION', ?, ?, 'action', ?, 1, ?, ?, ?, 1, 'requested', ?, 0)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(tenant, session),
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(tenant, session),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant, session, "action", action),
                 action, tenant, session, action, JSON.writeValueAsString(Map.of("expiresAt",
                         System.currentTimeMillis() + 3_600_000L,
@@ -1722,17 +1855,15 @@ class SurfaceAdmissionAcceptanceTest {
          */
         @Bean
         @Primary
-        com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector
+        com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector
                 acceptanceProjector(
                         ManagedToolResultStore store, JdbcTemplate jdbc,
                         org.springframework.beans.factory.ObjectProvider<
                                 ToolPublicationDataStore> publications,
-                        com.alibaba.qwen.code.managedagent.store
-                        .ManagedArtifactReader reader,
+                        com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader reader,
                         ManagedArtifactPolicy acceptancePolicy,
                         ManagedAgentProperties properties) {
-            return new com.alibaba.qwen.code.managedagent.store
-                    .ManagedToolResultProjector(store, jdbc, publications,
+            return new com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector(store, jdbc, publications,
                             reader, acceptancePolicy, properties) {
                 @Override
                 public void tick() {
@@ -1752,8 +1883,7 @@ class SurfaceAdmissionAcceptanceTest {
                     mock(ToolExecutionRepository.class),
                     mock(RuntimeBindingRepository.class),
                     new ToolPublicationStore.Capacity(1024L * 1024 * 1024,
-                            1024L * 1024 * 1024, 1024L * 1024 * 1024, 4),
-                    false);
+                            1024L * 1024 * 1024, 1024L * 1024 * 1024, 4));
         }
 
         /**
@@ -1793,5 +1923,18 @@ class SurfaceAdmissionAcceptanceTest {
                             acceptancePublicationData),
                     properties);
         }
+    }
+
+    static java.util.Map<String, Object> reservedRegistration(
+            com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore.Intent intent, String tenant) {
+        java.util.Map<String, Object> identity = java.util.Map.of("root", "/work/project",
+                "hostId", "host-" + tenant, "device", "1", "inode", "2", "birthTime", "3");
+        var marker = new java.util.LinkedHashMap<String, Object>(identity);
+        marker.put("version", 2);
+        marker.put("tenantId", intent.tenantId());
+        marker.put("storageId", intent.storageId());
+        marker.put("registrationId", intent.registrationId());
+        return java.util.Map.of("nodeId", intent.nodeId(), "identity", identity, "marker", marker,
+                "qwenVersion", "0.25.1");
     }
 }

@@ -2,64 +2,70 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicContentPart;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItem;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicWorkspace;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionCapabilities;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionResyncRequired;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellAdmission;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCancelRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellChangeCwdRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellContentPart;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCreateRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCwdOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellLifecycleRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionCapabilities;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEventQueryRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskQueryRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
+import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
+import com.alibaba.qwen.code.managedagent.api.SshWorkspaceController;
+import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceDiscoveryController;
+import com.alibaba.qwen.code.managedagent.model.ApiModels;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.ChangeCwdRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CreateSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContentPart;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCwdOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItem;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItemList;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSession;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTask;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTurn;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicWorkspace;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionCapabilities;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionEventRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionResyncRequired;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.UpdateSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCancelRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeCwdRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellContentPart;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCreateRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCwdOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellItem;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellListRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellOperationRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellResyncRequired;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSession;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionCapabilities;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellStreamRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSubmitRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEventQueryRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskGetRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskQueryRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscript;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscriptRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTurn;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellWorkspace;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.session.SessionRenameCoordinator;
+import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -75,11 +81,13 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
@@ -90,7 +98,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -102,6 +112,9 @@ import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -140,6 +153,9 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(ApiModels.WebShellLifecycleOperation.class, List.of("WebShellLifecycleOperation")),
+                    entry(ApiModels.WebShellExportRequest.class, List.of("WebShellExportRequest")),
+                    entry(ApiModels.WebShellExportPage.class, List.of("WebShellExportPage")),
                     entry(ApiModels.AgentDefinitionRequest.class, List.of("AgentDefinitionRequest")),
                     entry(ApiModels.AgentDefinition.class, List.of("AgentDefinition")),
                     entry(ApiModels.PermissionResponse.class, List.of("PermissionResponse")),
@@ -151,9 +167,19 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.ArtifactAccess.class, List.of("ArtifactAccess")),
                     entry(ApiModels.ArtifactResponse.class, List.of("ArtifactResponse")),
                     entry(ApiModels.ToolResultResponse.class, List.of("ToolResultResponse")),
+                    entry(ApiModels.WebShellToolDetails.class, List.of("WebShellToolDetails")),
+                    entry(ApiModels.WebShellShellResult.class, List.of("WebShellShellResult")),
                     entry(ApiModels.WebShellArtifactQueryRequest.class, List.of("WebShellArtifactQueryRequest")),
                     entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
+                    entry(SshWorkspaceController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryRequest")),
+                    entry(WorkspaceDiscoveryController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryQueryRequest")),
+                    entry(SshWorkspaceController.CreateRequest.class, List.of("WebShellWorkspaceRegisterRequest")),
+                    entry(SshWorkspaceController.OperationRequest.class, List.of("WebShellWorkspaceOperationRequest")),
+                    entry(SshWorkspaceService.NodeSummary.class, List.of("WebShellRuntimeNode")),
+                    entry(SshWorkspaceService.NodePage.class, List.of("WebShellRuntimeNodePage")),
+                    entry(SshWorkspaceService.Directory.class, List.of("WebShellWorkspaceDirectory")),
+                    entry(SshWorkspaceStore.Operation.class, List.of("WebShellWorkspaceCreateOperation")),
                     entry(InputBlock.class, List.of("InputBlock")),
                     entry(CreateSessionRequest.class,
                             List.of("CreateSessionRequest")),
@@ -161,6 +187,10 @@ class ManagedAgentApiContractTest {
                             List.of("SessionEventRequest")),
                     entry(UpdateSessionRequest.class,
                             List.of("UpdateSessionRequest")),
+                    entry(ApiModels.CompressSessionRequest.class, List.of("CompressSessionRequest")),
+                    entry(ApiModels.WebShellContextCompressionRequest.class, List.of("WebShellContextCompressionRequest")),
+                    entry(ApiModels.PublicContextCompressionOperation.class, List.of("PublicContextCompressionOperation")),
+                    entry(ApiModels.WebShellContextCompressionOperation.class, List.of("WebShellContextCompressionOperation")),
                     entry(ChangeCwdRequest.class, List.of("ChangeCwdRequest")),
                     entry(PublicCwdOperation.class,
                             List.of("PublicCwdOperation")),
@@ -174,6 +204,10 @@ class ManagedAgentApiContractTest {
                     entry(WebShellWorkspace.class,
                             List.of("WebShellWorkspaceContext")),
                     entry(PublicSession.class, List.of("PublicSession")),
+                    entry(ApiModels.SessionRecovery.class, List.of("SessionRecovery")),
+                    entry(ApiModels.SessionRecoveryActions.class, List.of("SessionRecoveryActions")),
+                    entry(ApiModels.RecoveryRecheckRequest.class, List.of("RecoveryRecheckRequest")),
+                    entry(ApiModels.WebShellRecoveryRecheckRequest.class, List.of("WebShellRecoveryRecheckRequest")),
                     entry(PublicCommandOperation.class,
                             List.of("PublicCommandOperation")),
                     entry(SessionCapabilities.class,
@@ -188,6 +222,8 @@ class ManagedAgentApiContractTest {
                             List.of("AutomationDefinitionRequest")),
                     entry(ApiModels.PublicAutomation.class,
                             List.of("PublicAutomation")),
+                    entry(ApiModels.PublicAutomationGateStatus.class,
+                            List.of("AutomationGateStatus")),
                     entry(ApiModels.PublicAutomationRun.class,
                             List.of("PublicAutomationRun")),
                     entry(ApiModels.PublicChannel.class,
@@ -207,6 +243,20 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
                             List.of("WebShellSessionRequest")),
+                    entry(ApiModels.ManagedMcpServerPin.class,
+                            List.of("ManagedMcpServerPin")),
+                    entry(ApiModels.ManagedMcpManagementCommand.class,
+                            List.of("ManagedMcpManagementCommand")),
+                    entry(ApiModels.WebShellMcpManagementQuery.class,
+                            List.of("WebShellMcpManagementQuery")),
+                    entry(ApiModels.WebShellMcpManagementSubmit.class,
+                            List.of("WebShellMcpManagementSubmit")),
+                    entry(ApiModels.WebShellMcpManagementOperationQuery.class,
+                            List.of("WebShellMcpManagementOperationQuery")),
+                    entry(ApiModels.WebShellRenameRequest.class,
+                            List.of("WebShellRenameRequest")),
+                    entry(ApiModels.WebShellRenameResult.class,
+                            List.of("WebShellRenameResult")),
                     entry(WebShellTranscriptRequest.class,
                             List.of("WebShellTranscriptRequest")),
                     entry(WebShellStreamRequest.class,
@@ -235,14 +285,22 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellModelContext")),
                     entry(ApiModels.WebShellModelOption.class, List.of("WebShellModelOption")),
                     entry(ApiModels.WebShellModelSelection.class, List.of("WebShellModelSelection")),
+                    entry(ApiModels.WebShellSessionApprovalRequest.class, List.of("WebShellSessionApprovalRequest")),
+                    entry(ApiModels.WebShellSessionApproval.class, List.of("WebShellSessionApproval")),
+                    entry(ApiModels.WebShellChangeApprovalRequest.class, List.of("WebShellChangeApprovalRequest")),
+                    entry(ApiModels.WebShellApprovalChangeResult.class, List.of("WebShellApprovalChangeResult")),
+                    entry(ApiModels.WebShellApprovalSelection.class, List.of("WebShellApprovalSelection")),
                     entry(ApiModels.WebShellSessionModelsRequest.class, List.of("WebShellSessionModelsRequest")),
                     entry(ApiModels.WebShellSessionModels.class, List.of("WebShellSessionModels")),
+                    entry(ApiModels.WebShellSkill.class, List.of("WebShellSkill")),
+                    entry(ApiModels.WebShellSessionSkills.class, List.of("WebShellSessionSkills")),
                     entry(ApiModels.WebShellChangeModelRequest.class, List.of("WebShellChangeModelRequest")),
                     entry(ApiModels.WebShellModelChangeResult.class, List.of("WebShellModelChangeResult")),
                     entry(WebShellSessionCapabilities.class,
                             List.of("WebShellSessionCapabilities")),
+                    entry(ApiModels.WebShellTaskPage.class, List.of("WebShellTaskPage")),
                     entry(WebShellPage.class, List.of("WebShellSessionPage",
-                            "WebShellTaskPage", "WebShellTaskEventPage",
+                            "WebShellTaskEventPage",
                             "WebShellActionPage", "WebShellArtifactPage")),
                     entry(PublicTask.class, List.of("PublicTask")),
                     entry(WebShellTask.class, List.of("WebShellTask")),
@@ -290,6 +348,9 @@ class ManagedAgentApiContractTest {
     private ManagedTaskEventStore taskEvents;
 
     @Autowired
+    private SshWorkspaceStore sshWorkspaces;
+
+    @Autowired
     @Qualifier("requestMappingHandlerMapping")
     private RequestMappingHandlerMapping handlerMapping;
 
@@ -321,7 +382,7 @@ class ManagedAgentApiContractTest {
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, actor.actorId().getBytes(StandardCharsets.UTF_8));
         new JdbcRuntimeBindingRepository(jdbc.getDataSource(),
-                new com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector("fixture", new byte[32]))
+                new com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector("fixture", new byte[32]))
                 .requestStorageFence(tenant, "storage", UUID.randomUUID().toString());
         assertThat(CONTRACT.node("/components/schemas/ErrorEnvelope/properties/error/properties/retryable/type").asText())
                 .isEqualTo("boolean");
@@ -423,7 +484,7 @@ class ManagedAgentApiContractTest {
                         || pattern.startsWith("/error")) {
                     continue;
                 }
-                if (!com.alibaba.qwen.code.managedagent.api.PublicSurface
+                if (!com.alibaba.qwen.code.managedagent.security.PublicSurface
                         .covers(pattern)) {
                     uncovered.add(pattern);
                 }
@@ -528,7 +589,9 @@ class ManagedAgentApiContractTest {
     @Test
     void recordsMatchTheirSchemas() {
         Map<String, String> drift = new TreeMap<>();
-        for (Class<?> type : ApiModels.class.getDeclaredClasses()) {
+        Set<Class<?>> records = new LinkedHashSet<>(Arrays.asList(ApiModels.class.getDeclaredClasses()));
+        records.addAll(RECORD_SCHEMAS.keySet());
+        for (Class<?> type : records) {
             if (!type.isRecord()) {
                 continue;
             }
@@ -562,6 +625,165 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void archivedHistoryFiltersBeforePaginationAndBindsItsCursor() throws Exception {
+        String tenant = "tenant-filter-" + UUID.randomUUID();
+        for (String state : List.of("ACTIVE", "ARCHIVED", "CLOSED", "ARCHIVED", "ACTIVE")) {
+            String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))))
+                    .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString())
+                    .path("sessionId").asText();
+            jdbc.update("UPDATE ma_session SET status = ? WHERE tenant_id = ? AND session_id = ?", state, tenant, id);
+        }
+        String firstBody = mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"archiveState\":\"archived\",\"limit\":1}"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        JsonNode first = json(firstBody);
+        assertThat(first.path("data")).hasSize(1);
+        assertThat(first.at("/data/0/status").asText()).isEqualTo("archived");
+        String cursor = first.path("nextCursor").asText();
+        assertThat(cursor).isNotBlank();
+        JsonNode next = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "archiveState", "archived", "limit", 1, "cursor", cursor))))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(next.path("data")).hasSize(1);
+        assertThat(next.at("/data/0/sessionId").asText()).isNotEqualTo(first.at("/data/0/sessionId").asText());
+        assertThat(next.path("nextCursor").isNull()).isTrue();
+        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "archiveState", "unarchived", "cursor", cursor))))
+                .andExpect(status().isBadRequest());
+        for (String filter : List.of("unarchived", "all")) {
+            JsonNode page = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "archiveState", filter, "limit", 100))))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            assertThat(page.path("data")).hasSize(filter.equals("all") ? 5 : 3);
+        }
+        JsonNode all = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"limit\":1}"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        String decoded = new String(java.util.Base64.getUrlDecoder().decode(all.path("nextCursor").asText()),
+                StandardCharsets.UTF_8);
+        String prefix = "v3:all:" + org.apache.commons.codec.digest.DigestUtils.sha256Hex("") + ":";
+        assertThat(decoded).startsWith(prefix);
+        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(
+                        Map.of("cursor", all.path("nextCursor").asText()))))
+                .andExpect(status().isOk());
+        for (String oldPrefix : List.of("", "v2:all:")) {
+            String legacy = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    (oldPrefix + decoded.substring(prefix.length())).getBytes(StandardCharsets.UTF_8));
+            mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of("cursor", legacy))))
+                    .andExpect(status().isBadRequest());
+            mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant).param("cursor", legacy))
+                    .andExpect(status().isBadRequest());
+        }
+        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"archiveState\":\"bad\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void titleSearchIsLiteralAndBindsBothApisToTheirFilters() throws Exception {
+        String tenant = "tenant-title-query-" + UUID.randomUUID();
+        for (String title : List.of("Alpha_%", "Unrelated", "alpha_% next")) {
+            String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))))
+                    .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString())
+                    .path("sessionId").asText();
+            jdbc.update("UPDATE ma_session SET title = ?, status = ? WHERE tenant_id = ? AND session_id = ?",
+                    title, title.equals("Alpha_%") ? "ARCHIVED" : "CLOSED", tenant, id);
+        }
+        JsonNode first = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("title_query", " ALPHA_% ").param("limit", "1"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(first.path("data")).hasSize(1);
+        assertThat(first.path("has_more").asBoolean()).isTrue();
+        String cursor = first.path("next_cursor").asText();
+        JsonNode next = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("title_query", "ALPHA_%").param("limit", "1").param("cursor", cursor))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(next.path("data")).hasSize(1);
+        assertThat(next.at("/data/0/id").asText()).isNotEqualTo(first.at("/data/0/id").asText());
+        assertThat(next.path("has_more").asBoolean()).isFalse();
+        mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("title_query", "Unrelated").param("cursor", cursor))
+                .andExpect(status().isBadRequest());
+        mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("archive_state", "archived").param("title_query", "ALPHA_%").param("cursor", cursor))
+                .andExpect(status().isBadRequest());
+        for (String state : List.of("all", "unarchived", "archived")) {
+            JsonNode web = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "titleQuery", "_%", "archiveState", state))))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            JsonNode api = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                    .param("title_query", "_%").param("archive_state", state))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            assertThat(web.path("data")).hasSize(state.equals("all") ? 2 : 1);
+            assertThat(api.path("data")).hasSize(state.equals("all") ? 2 : 1);
+        }
+        for (String query : List.of("\u00a0\ufeff _% \u00a0", "\u00a0\ufeff")) {
+            int expected = query.contains("_%") ? 2 : 3;
+            JsonNode web = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "titleQuery", query))))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            JsonNode api = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                    .param("title_query", query))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            assertThat(web.path("data")).hasSize(expected);
+            assertThat(api.path("data")).hasSize(expected);
+        }
+        JsonNode alias = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("archive_state", "unarchived").param("title_query", "_%"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(alias.path("data")).hasSize(1);
+        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "titleQuery", "other", "cursor", cursor))))
+                .andExpect(status().isBadRequest());
+        JsonNode other = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant + "-other")
+                .param("title_query", "_%"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(other.path("data")).isEmpty();
+    }
+
+    @Test
+    void lifecycleCommandsEchoTraceIdentityAndExposeTheirOperation() throws Exception {
+        String tenant = "tenant-lifecycle-ui-" + UUID.randomUUID();
+        String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))))
+                .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString()).path("sessionId").asText();
+        var response = mvc.perform(post(WEB_SHELL + "/sessions/close").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "sessionId", id, "idempotencyKey", "close-ui", "requestId", "ui-trace"))))
+                .andExpect(status().isAccepted()).andReturn().getResponse();
+        assertThat(response.getHeader(RequestIdFilter.HEADER)).isEqualTo("ui-trace");
+        assertThat(json(response.getContentAsString()).path("operationId").asText()).isNotBlank();
+        var replay = mvc.perform(post(WEB_SHELL + "/sessions/close").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "sessionId", id, "idempotencyKey", "close-ui", "requestId", "retry-trace"))))
+                .andExpect(status().isAccepted()).andReturn().getResponse();
+        assertThat(replay.getHeader(RequestIdFilter.HEADER)).isEqualTo("retry-trace");
+        assertThat(json(replay.getContentAsString()).path("operationId").asText())
+                .isEqualTo(json(response.getContentAsString()).path("operationId").asText());
+        assertThat(json(replay.getContentAsString()).path("replayed").asBoolean()).isTrue();
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            JsonNode session = json(mvc.perform(post(WEB_SHELL + "/sessions/get").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of("sessionId", id))))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            assertThat(session.path("status").asText()).isEqualTo("closed");
+            assertThat(session.hasNonNull("lifecycleOperation")).isFalse();
+        });
+    }
+
+    @Test
     void routesAnswerWithTheirSchemas() throws Exception {
         Map<String, String> drift = new TreeMap<>();
         String tenant = "tenant-contract-" + UUID.randomUUID();
@@ -574,12 +796,26 @@ class ManagedAgentApiContractTest {
                 {"agent_id":"qwen-code","metadata":{"title":"contract"},
                  "input":[{"type":"input_text","text":"hello"}]}
                 """)).get("id").asText();
+        exchange(drift, "getSessionRecovery", 200,
+                get("/v1/agents/sessions/{id}/recovery", sessionId).header(TENANT, tenant), null);
+        exchange(drift, "queryWebShellSessionRecovery", 200,
+                post(WEB_SHELL + "/session-recovery/query").header(TENANT, tenant),
+                "{\"sessionId\":\"" + sessionId + "\"}");
+        exchange(drift, "recheckSessionRecovery", 409,
+                post("/v1/agents/sessions/{id}/recovery/recheck", sessionId).header(TENANT, tenant),
+                "{\"turnId\":\"turn_stale\"}");
+        exchange(drift, "recheckWebShellSessionRecovery", 409,
+                post(WEB_SHELL + "/session-recovery/recheck").header(TENANT, tenant),
+                "{\"sessionId\":\"" + sessionId + "\",\"turnId\":\"turn_stale\"}");
         exchange(drift, "listArtifacts", 401,
                 get("/v1/agents/sessions/%s/artifacts".formatted(sessionId))
                         .header(TENANT, tenant), null);
         exchange(drift, "getArtifactContent", 401,
                 get("/v1/agents/sessions/%s/artifacts/artifact_missing/content".formatted(sessionId))
                         .header(TENANT, tenant), null);
+        exchange(drift, "getWebShellToolDetails", 401,
+                post("/api/agent/web-shell/v1/tool-details/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
         exchange(drift, "getWebShellToolResult", 401,
                 post("/api/agent/web-shell/v1/tool-results/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
@@ -815,6 +1051,19 @@ class ManagedAgentApiContractTest {
         assertThat(cancelling.get("input_item_id").asText())
                 .isEqualTo("item_" + turnId + "_input");
         settleCancelledTurn(tenant, cancelledId, cancels);
+        // D7-1: the input and its cancel each read back as their own
+        // command operation, settled from the Turn the Harness cancelled.
+        for (String kind : List.of("SUBMIT_INPUT", "CANCEL")) {
+            JsonNode command = json(exchange(drift, "getSessionCwdOperation",
+                    200, get("/v1/agents/sessions/{id}/operations/{op}",
+                            cancelledId, turnCommandOperation(cancelledId,
+                                    kind)).header(TENANT, tenant), null));
+            assertThat(command.get("type").asText())
+                    .isEqualTo(kind.toLowerCase(Locale.ROOT));
+            assertThat(command.get("status").asText()).isEqualTo("completed");
+            assertThat(command.get("admission_stage").asText())
+                    .isEqualTo("harness_confirmed");
+        }
 
         String webSessionId = json(exchange(drift, "webShellCreateSession",
                 202, post(WEB_SHELL + "/sessions/create")
@@ -824,6 +1073,29 @@ class ManagedAgentApiContractTest {
                  "agentId":"qwen-code","title":"web",
                  "metadata":{"clientId":"contract"},"input":[]}
                 """)).get("sessionId").asText();
+        exchange(drift, "webShellExportSession", 200,
+                post(WEB_SHELL + "/sessions/export/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId));
+        exchange(drift, "webShellExportSession", 404,
+                post(WEB_SHELL + "/sessions/export/query").header(TENANT, otherTenant),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId));
+        String renameBody = """
+                {"requestId":"contract-rename","sessionId":"%s",
+                 "idempotencyKey":"contract-web-rename","title":"renamed web"}
+                """.formatted(webSessionId);
+        JsonNode renamed = json(exchange(drift, "webShellRenameSession", 200,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant), renameBody));
+        assertThat(renamed.path("sessionId").asText()).isEqualTo(webSessionId);
+        assertThat(renamed.path("title").asText()).isEqualTo("renamed web");
+        assertThat(renamed.path("replayed").asBoolean()).isFalse();
+        JsonNode renameReplay = json(exchange(drift, "webShellRenameSession", 200,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant), renameBody));
+        assertThat(renameReplay.path("replayed").asBoolean()).isTrue();
+        exchange(drift, "webShellRenameSession", 400,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant),
+                renameBody.replace("renamed web", " "));
+        exchange(drift, "webShellRenameSession", 404,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, otherTenant), renameBody);
         // The widened metadata contract: a body with keys beyond clientId
         // is both served (202) and schema-valid. exchange() validates
         // sub-300 request bodies, so re-tightening WebShellMetadata to
@@ -919,6 +1191,19 @@ class ManagedAgentApiContractTest {
                  "sessionId":"%s","turnId":"%s"}
                 """.formatted(webSessionId, webTurnId));
         settleCancelledTurn(tenant, webSessionId, cancels);
+        for (String kind : List.of("SUBMIT_INPUT", "CANCEL")) {
+            JsonNode command = json(exchange(drift,
+                    "webShellQueryCwdOperation", 200,
+                    post(WEB_SHELL + "/operations/query").header(TENANT, tenant),
+                    """
+                    {"sessionId":"%s","operationId":"%s"}
+                    """.formatted(webSessionId,
+                            turnCommandOperation(webSessionId, kind))));
+            assertThat(command.get("type").asText())
+                    .isEqualTo(kind.toLowerCase(Locale.ROOT));
+            assertThat(command.get("deliveryState").asText())
+                    .isEqualTo("confirmed");
+        }
         awaitMaterialized(tenant, webSessionId);
         exchange(drift, "webShellGetSession", 200,
                 post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
@@ -1161,6 +1446,18 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/create")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"workspace-create\"}");
+        exchange(drift, "queryWebShellWorkspaceDirectories", 409,
+                post(WEB_SHELL + "/workspaces/directories/query")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\"}");
+        exchange(drift, "webShellWorkspaceFilesQuery", 409,
+                post(WEB_SHELL + "/workspaces/files/query")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\",\"directory\":\".\"}");
+        exchange(drift, "webShellWorkspaceFilesRead", 409,
+                post(WEB_SHELL + "/workspaces/files/read")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\",\"path\":\"a.txt\",\"expectedScopeRevision\":\"old\"}");
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
@@ -1200,8 +1497,26 @@ class ManagedAgentApiContractTest {
                 .isEqualTo(1);
         assertThat(webBound.at("/workspace/state").asText())
                 .isEqualTo("ready");
+        exchange(drift, "queryWebShellSessionApproval", 200,
+                post(WEB_SHELL + "/session-approval/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionApproval", 401,
+                post(WEB_SHELL + "/session-approval/query").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "changeWebShellSessionApproval", 409,
+                post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
+        exchange(drift, "changeWebShellSessionApproval", 401,
+                post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
         exchange(drift, "queryWebShellSessionModels", 200,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 200,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 401,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\"}");
         exchange(drift, "queryWebShellSessionModels", 401,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant),
@@ -1218,6 +1533,20 @@ class ManagedAgentApiContractTest {
         // workspace-files opt-in is disabled, so a bound Session answers
         // workspace_unavailable; the operation-level behavior is exercised
         // by the cwd integration tests.
+        exchange(drift, "compressSessionContext", 400,
+                post("/v1/agents/sessions/{id}/compress", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "compress-shape"), "{}");
+        exchange(drift, "compressSessionContext", 409,
+                post("/v1/agents/sessions/{id}/compress", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "compress-disabled"), "{\"expected_compaction_revision\":0}");
+        exchange(drift, "webShellCompressContext", 400,
+                post(WEB_SHELL + "/sessions/compress").header(TENANT, workspaceTenant).principal(actor), "{}");
+        exchange(drift, "webShellCompressContext", 409,
+                post(WEB_SHELL + "/sessions/compress").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\",\"idempotencyKey\":\"compress-web-disabled\","
+                        + "\"expectedCompactionRevision\":0}");
         String cwdBody = """
                 {"cwd_relative":"services/api","expected_context_revision":1}
                 """;
@@ -1349,6 +1678,44 @@ class ManagedAgentApiContractTest {
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
                         .header(TENANT, workspaceTenant).principal(actor), null);
         assertThat(json(mcpCatalog).path("servers")).isEmpty();
+        String webMcp = exchange(drift, "queryWebShellSessionMcp", 200,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        assertThat(json(webMcp)).isEqualTo(json(mcpCatalog));
+        String mcpManagement = exchange(drift, "getSessionMcpManagement", 200,
+                get("/v1/agents/sessions/{id}/mcp-management", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        assertThat(json(mcpManagement).path("supported").asBoolean()).isFalse();
+        exchange(drift, "queryWebShellSessionMcpManagement", 200,
+                post(WEB_SHELL + "/session-mcp/management/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        String mcpCommand = "{\"action\":\"restart\",\"serverId\":\"docs\",\"expectedRevision\":0}";
+        exchange(drift, "submitSessionMcpManagement", 409,
+                post("/v1/agents/sessions/{id}/mcp-management/commands", publicBoundId)
+                        .header(TENANT, workspaceTenant).header("Idempotency-Key", "mcp-restart").principal(actor), mcpCommand);
+        exchange(drift, "submitWebShellSessionMcpManagement", 409,
+                post(WEB_SHELL + "/session-mcp/management/submit").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + publicBoundId + "\",\"idempotencyKey\":\"mcp-restart\","
+                        + mcpCommand.substring(1));
+        String mcpOperation = "11111111-1111-4111-8111-111111111111";
+        exchange(drift, "getSessionMcpManagementOperation", 409,
+                get("/v1/agents/sessions/{id}/mcp-management/commands/{operation}", publicBoundId, mcpOperation)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "queryWebShellSessionMcpManagementOperation", 409,
+                post(WEB_SHELL + "/session-mcp/management/operations/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + publicBoundId + "\",\"operationId\":\"" + mcpOperation + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 401,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 404,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, otherTenant).principal(actor(otherTenant)),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 403,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor(otherTenant)),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 400,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor),
+                "{}");
         exchange(drift, "getSessionMcpCatalog", 404,
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
                         .header(TENANT, otherTenant), null);
@@ -1378,12 +1745,145 @@ class ManagedAgentApiContractTest {
         exchangeTurns(drift, tenant, otherTenant);
         exchangeAgents(drift, tenant, otherTenant);
         exchangeChannels(drift, tenant, otherTenant);
+        exchangeWorkspaceRegistration(drift, tenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
                                 operation.status()))
                         .map(Operation::operationId).toList());
         assertKnownGaps(drift, "request", "response");
+    }
+
+    private void exchangeWorkspaceRegistration(Map<String, String> drift, String tenant) throws Exception {
+        var owner = actor(tenant);
+        JsonNode nodes = json(exchange(drift, "webShellQueryRuntimeNodes", 200,
+                post(WEB_SHELL + "/runtime-nodes/query").header(TENANT, tenant).principal(owner), null));
+        assertThat(nodes.path("supported").asBoolean()).isFalse();
+        assertThat(nodes.path("data")).isEmpty();
+        String directory = "{\"nodeId\":\"mac\",\"path\":\"/work/project\"}";
+        String create = """
+                {"nodeId":"mac","path":"/work/project","displayName":"Project",
+                 "idempotencyKey":"contract-registration","requestId":"registration-trace"}
+                """;
+        for (String code : List.of(
+                exchange(drift, "webShellCheckWorkspaceDirectory", 404,
+                        post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant).principal(owner), directory),
+                exchange(drift, "webShellRegisterWorkspace", 404,
+                        post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant).principal(owner), create))) {
+            assertThat(json(code).at("/error/code").asText()).isEqualTo("ssh_runtime_disabled");
+        }
+        exchange(drift, "webShellGetWorkspaceOperation", 404,
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(owner),
+                "{\"operationId\":\"missing\"}");
+        exchange(drift, "webShellQueryRuntimeNodes", 401,
+                post(WEB_SHELL + "/runtime-nodes/query").header(TENANT, tenant), null);
+        exchange(drift, "webShellCheckWorkspaceDirectory", 401,
+                post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant), directory);
+        exchange(drift, "webShellRegisterWorkspace", 401,
+                post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant), create);
+        exchange(drift, "webShellGetWorkspaceOperation", 401,
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant), "{\"operationId\":\"missing\"}");
+    }
+
+    @Test
+    void localPathContractRequiresExplicitImportCapability() throws Exception {
+        String tenant = "contract-local-import-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        assertThat(json(exchange(drift, "webShellCreateWorkspace", 409,
+                post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"displayName\":\"Project\",\"idempotencyKey\":\"local\",\"localPath\":\"/not-admitted\"}"))
+                .at("/error/code").asText()).isEqualTo("workspace_creation_unavailable");
+        assertThat(json(exchange(drift, "queryWebShellWorkspaceDirectories", 409,
+                post(WEB_SHELL + "/workspaces/directories/query").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"localPath\":\"\"}"))
+                .at("/error/code").asText()).isEqualTo("workspace_creation_unavailable");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+        assertThat(drift).isEmpty();
+    }
+
+    @Test
+    void localWorkspaceCreationRejectsRemotePayloadsBeforeAdmission() throws Exception {
+        String tenant = "contract-local-remote-boundary-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        for (String extra : List.of(
+                ",\"nodeId\":\"mac\",\"path\":\"/work/project\"",
+                ",\"nodeId\":null,\"path\":\"/work/project\"",
+                ",\"nodeId\":null", ",\"path\":null")) {
+            String body = "{\"displayName\":\"Remote\",\"idempotencyKey\":\"original\"" + extra + "}";
+            assertThat(json(exchange(drift, "webShellCreateWorkspace", 400,
+                    post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(actor(tenant)), body))
+                    .at("/error/code").asText()).isEqualTo("invalid_request");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?"
+                + " AND namespace = 'WORKSPACE_CREATE'", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+        assertThat(drift).isEmpty();
+    }
+
+    @Test
+    void sshRegistrationOperationsStayActorOwnedWhenNewAdmissionIsDisabled() throws Exception {
+        String tenant = "contract-registration-" + UUID.randomUUID();
+        var operation = sshWorkspaces.begin(tenant, "actor-a", "original", "mac", "/work/project", "Project");
+        var intent = sshWorkspaces.claim(tenant, "actor-a", operation.operationId(), "fixture");
+        // D7-2: only a reserved registration parks recovery_blocked.
+        sshWorkspaces.reserve(intent, "fixture", SurfaceAdmissionAcceptanceTest.reservedRegistration(intent, tenant));
+        sshWorkspaces.fail(intent, "fixture", "ssh_runtime_identity_conflict", false);
+        String body = objectMapper.writeValueAsString(Map.of("operationId", operation.operationId()));
+        Map<String, String> drift = new TreeMap<>();
+        JsonNode saved = json(exchange(drift, "webShellGetWorkspaceOperation", 200,
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(actor(tenant)), body));
+        assertThat(saved.path("operationId").asText()).isEqualTo(operation.operationId());
+        assertThat(saved.path("status").asText()).isEqualTo("recovery_blocked");
+        assertThat(saved.path("replayed").asBoolean()).isTrue();
+        for (var request : List.of(
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(actor(tenant, "actor-b")),
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant + "-other").principal(actor(tenant + "-other")))) {
+            assertThat(json(exchange(drift, "webShellGetWorkspaceOperation", 404, request, body))
+                    .at("/error/code").asText()).isEqualTo("operation_not_found");
+        }
+        assertThat(drift).isEmpty();
+    }
+
+    @Test
+    void sshRegistrationSuccessResponsesMatchTheContractWithoutConnectingToSsh() throws Exception {
+        String tenant = "contract-ssh-proxy";
+        SshWorkspaceService ssh = mock(SshWorkspaceService.class);
+        when(ssh.list(tenant, "actor-a")).thenReturn(new SshWorkspaceService.NodePage(true,
+                List.of(new SshWorkspaceService.NodeSummary("mac", "Build Mac"))));
+        when(ssh.check(tenant, "actor-a", "mac", "/work/project"))
+                .thenReturn(new SshWorkspaceService.Directory("mac", "/work/project", "darwin"));
+        when(ssh.create(tenant, "actor-a", "mac", "/work/project", "Project", "original"))
+                .thenReturn(new SshWorkspaceStore.Operation("registration", "workspace_create", "pending", null, null, false));
+        MockMvc proxy = MockMvcBuilders.standaloneSetup(new SshWorkspaceController(ssh))
+                .setCustomArgumentResolvers(new TenantContextArgumentResolver())
+                .setControllerAdvice(new ApiExceptionHandler())
+                .setMessageConverters(new MappingJackson2HttpMessageConverter(objectMapper))
+                .addFilters(new RequestIdFilter(), new TenantContextFilter(objectMapper)).build();
+        Map<String, String> drift = new TreeMap<>();
+        exchange(proxy, drift, "webShellQueryRuntimeNodes", 200,
+                post(WEB_SHELL + "/runtime-nodes/query").header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(proxy, drift, "webShellCheckWorkspaceDirectory", 200,
+                post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"nodeId\":\"mac\",\"path\":\"/work/project\"}");
+        exchange(proxy, drift, "webShellRegisterWorkspace", 202,
+                post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant).principal(actor(tenant)),
+                """
+                {"nodeId":"mac","path":"/work/project","displayName":"Project",
+                 "idempotencyKey":"original","requestId":"create-registration-trace"}
+                """);
+        for (String status : List.of("pending", "running", "completed", "failed", "cancelled", "recovery_blocked")) {
+            when(ssh.get(tenant, "actor-a", "registration")).thenReturn(new SshWorkspaceStore.Operation(
+                    "registration", "workspace_create", status, "completed".equals(status) ? "workspace" : null,
+                    "recovery_blocked".equals(status) ? "ssh_runtime_identity_conflict" : null, true));
+            exchange(proxy, drift, "webShellGetWorkspaceOperation", 200,
+                    post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(actor(tenant)),
+                    "{\"operationId\":\"registration\"}");
+        }
+        verify(ssh).check(tenant, "actor-a", "mac", "/work/project");
+        verify(ssh).create(tenant, "actor-a", "mac", "/work/project", "Project", "original");
+        assertThat(drift).isEmpty();
     }
 
     private void exchangeActions(Map<String, String> drift, String tenant) throws Exception {
@@ -1642,6 +2142,27 @@ class ManagedAgentApiContractTest {
                                 rest.at("/data/0/id").asText()));
     }
 
+    /** A committed record body for a synthetic child_run row. */
+    private void childRunResource(String tenant, String sessionId,
+            String resourceId, String json) {
+        String scope = com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        byte[] body = json.getBytes(StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO ma_resource (resource_key,"
+                + " session_scope_key, tenant_id, workspace_id, session_id,"
+                + " resource_id, kind, schema_version, byte_length, sha256,"
+                + " storage_kind, inline_bytes, publish_command_id, state,"
+                + " gmt_create) VALUES (?, ?, ?, 'workspace-contract', ?, ?,"
+                + " 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?,"
+                + " 'command', 'REFERENCED', "
+                + com.alibaba.qwen.code.runtimebroker.managedschema
+                        .ManagedSchemaTime.SQL_NOW + ")",
+                com.alibaba.qwen.code.runtimebroker.managedschema
+                        .ManagedSchemaKeys.key(scope, resourceId),
+                scope, tenant, sessionId, resourceId, body.length,
+                org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
+                body);
+    }
+
     /**
      * H4f: the cancel routes over a monitor task (no cancel action) and a
      * running child-agent task row. Delivery is the coordinator's and is
@@ -1662,15 +2183,29 @@ class ManagedAgentApiContractTest {
                         + " ?, 'child_run', 'run-contract', ?, 1,"
                         + " 'resource-run-contract', 'child_agent', 'running',"
                         + " 'ready', 'session', 'planned', 1, 2)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
                         .sessionScopeKey(tenant, sessionId),
                 recordKey, tenant, sessionId, "d".repeat(64));
+        // #13746 F2: the run's committed record names its child Session,
+        // and both task views carry that link inside their schemas.
+        String childSession = UUID.randomUUID().toString();
+        childRunResource(tenant, sessionId, "resource-run-contract",
+                "{\"kind\":\"child_agent\",\"childSessionId\":\""
+                        + childSession + "\"}");
         String childTask = "task_" + recordKey;
         JsonNode view = json(exchange(drift, "getSessionTask", 200,
                 get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
                         childTask).header(TENANT, tenant), null));
         assertThat(view.get("action_capabilities").toString())
                 .isEqualTo("[\"cancel\"]");
+        assertThat(view.get("child_session_id").asText())
+                .isEqualTo(childSession);
+        JsonNode webShellView = json(exchange(drift, "getWebShellTask", 200,
+                post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, childTask)));
+        assertThat(webShellView.get("childSessionId").asText())
+                .isEqualTo(childSession);
         String cancelPath = "/v1/agents/sessions/{id}/tasks/{task}/cancel";
         JsonNode admitted = json(exchange(drift, "cancelSessionTask", 202,
                 post(cancelPath, sessionId, childTask).header(TENANT, tenant)
@@ -1772,15 +2307,19 @@ class ManagedAgentApiContractTest {
         // and its view advertises the action.
         String workflowKey = "e".repeat(64);
         jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'child_run', 'run-contract-wf', ?, 1, 'resource-run-contract-wf', 'workflow', 'running', 'ready', 'session', 'planned', 1, 2)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
                         .sessionScopeKey(tenant, sessionId),
                 workflowKey, tenant, sessionId, "f".repeat(64));
+        childRunResource(tenant, sessionId, "resource-run-contract-wf",
+                "{\"kind\":\"workflow\",\"childSessionId\":null}");
         String workflowTask = "task_" + workflowKey;
         JsonNode workflowView = json(exchange(drift, "getSessionTask", 200,
                 get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
                         workflowTask).header(TENANT, tenant), null));
         assertThat(workflowView.get("action_capabilities").toString())
                 .isEqualTo("[\"cancel\"]");
+        // Before its child is known, a child task names none.
+        assertThat(workflowView.has("child_session_id")).isFalse();
         // The child_agent cancel above stays open in this fixture, and the
         // one open operation per Session rule spans task kinds.
         assertThat(json(exchange(drift, "cancelSessionTask", 409,
@@ -1819,6 +2358,37 @@ class ManagedAgentApiContractTest {
         assertThat(workflowWebShell.get("operationId").asText())
                 .isEqualTo(workflowAdmitted.get("id").asText());
         assertThat(workflowWebShell.get("replayed").asBoolean()).isTrue();
+
+        String automationKey = "1".repeat(64);
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED'"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind = 'TASK_CANCEL'"
+                + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'automation_run', 'arun-contract', ?, 2, 'resource-automation-contract', 'automation_run', 'running', 'ready', 'session', 'planned', 1, 2)",
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
+                        .sessionScopeKey(tenant, sessionId),
+                automationKey, tenant, sessionId, "2".repeat(64));
+        childRunResource(tenant, sessionId, "resource-automation-contract",
+                "{\"scheduleId\":\"asch_" + "1".repeat(32)
+                        + "\",\"occurrenceKey\":\"manual:contract\"}");
+        String automationTask = "task_" + automationKey;
+        assertThat(json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        automationTask).header(TENANT, tenant), null))
+                .get("action_capabilities").toString()).isEqualTo("[\"cancel\"]");
+        JsonNode automationAdmitted = json(exchange(drift, "cancelSessionTask", 202,
+                post(cancelPath, sessionId, automationTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-automation-cancel"), null));
+        assertThat(automationAdmitted.get("type").asText()).isEqualTo("task_cancel");
+        assertThat(automationAdmitted.get("task_id").asText()).isEqualTo(automationTask);
+        JsonNode automationWebShell = json(exchange(drift, "cancelWebShellTask", 202,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-automation-cancel\"}")
+                        .formatted(sessionId, automationTask)));
+        assertThat(automationWebShell.get("operationId").asText())
+                .isEqualTo(automationAdmitted.get("id").asText());
+        assertThat(automationWebShell.get("replayed").asBoolean()).isTrue();
     }
 
     /**
@@ -1907,6 +2477,40 @@ class ManagedAgentApiContractTest {
         assertThat(created.path("definition_revision").asLong()).isEqualTo(1);
         assertThat(created.path("state").asText()).isEqualTo("live");
         assertThat(created.path("session_id").asText()).isEqualTo(sessionId);
+        assertThat(created.has("gate")).isFalse();
+        assertThat(created.has("gate_status")).isFalse();
+        // A gated definition: the command is carried and mirrored, an
+        // explicit null clears it, and the request's own bounds refuse.
+        JsonNode gatedCreate = json(exchange(drift, "createAgentAutomation", 202,
+                post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create-gated"),
+                body.replace("\"prompt\"",
+                        "\"gate\":\"./probe.sh --gate\",\"prompt\"")));
+        String gatedId = gatedCreate.path("id").asText();
+        assertThat(gatedCreate.path("gate").asText()).isEqualTo("./probe.sh --gate");
+        assertThat(gatedCreate.has("gate_status")).isFalse();
+        JsonNode gatedRead = json(exchange(drift, "getAgentAutomation", 200,
+                get("/v1/agent-automations/{id}", gatedId)
+                        .header(TENANT, tenant).principal(actor), null));
+        assertThat(gatedRead.path("gate").asText()).isEqualTo("./probe.sh --gate");
+        JsonNode ungated = json(exchange(drift, "updateAgentAutomation", 202,
+                post("/v1/agent-automations/{id}", gatedId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-gate-clear"),
+                "{\"gate\":null}"));
+        assertThat(ungated.has("gate")).isFalse();
+        assertThat(ungated.path("definition_revision").asLong()).isEqualTo(2);
+        exchange(drift, "updateAgentAutomation", 400,
+                post("/v1/agent-automations/{id}", gatedId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-gate-long"),
+                "{\"gate\":\"" + "x".repeat(2049) + "\"}");
+        exchange(drift, "updateAgentAutomation", 400,
+                post("/v1/agent-automations/{id}", gatedId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-gate-blank"),
+                "{\"gate\":\"   \"}");
         exchange(drift, "createAgentAutomation", 202,
                 post("/v1/agent-automations").header(TENANT, tenant)
                         .principal(actor)
@@ -1964,9 +2568,9 @@ class ManagedAgentApiContractTest {
         JsonNode list = json(exchange(drift, "listAgentAutomations", 200,
                 get("/v1/agent-automations").header(TENANT, tenant)
                         .principal(actor).param("limit", "10"), null));
-        assertThat(list.path("data")).hasSize(1);
-        assertThat(list.path("data").get(0).path("id").asText())
-                .isEqualTo(automationId);
+        assertThat(list.path("data")).hasSize(2);
+        assertThat(list.path("data").findValuesAsText("id"))
+                .containsExactlyInAnyOrder(automationId, gatedId);
         exchange(drift, "listAgentAutomations", 400,
                 get("/v1/agent-automations").header(TENANT, tenant)
                         .principal(actor).param("cursor", "!!"), null);
@@ -2135,13 +2739,13 @@ class ManagedAgentApiContractTest {
                         + " 1, 'connected', 'channel-reader', 'ws-channel',"
                         + " '.', '{}', 1000, 1000)", channelTenant);
         String sessionId = UUID.randomUUID().toString();
-        var routeRepository = new com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository(jdbc);
-        routeRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.ChannelRoute(
+        var routeRepository = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelRouteRepository(jdbc);
+        routeRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.persistence.ChannelRouteRepository.ChannelRoute(
                 channelTenant, "a".repeat(64), "mail-1", 1, "1700:42", 1, sessionId,
                 "alice@example.com", "alice@example.com", "thread-1", "admitted", "chin-" + "a".repeat(64),
                 List.of("sha256:" + "b".repeat(64)), 1000, 1000));
-        var deliveryRepository = new com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository(jdbc);
-        deliveryRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.ChannelDelivery(
+        var deliveryRepository = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository(jdbc);
+        deliveryRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.persistence.ChannelDeliveryRepository.ChannelDelivery(
                 channelTenant, "mail-1", "delivery-1", "delivery-1:0", 0, "planned", null, 1000, 1000));
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "planned", "sending", null);
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "sending", "delivered", "<m1@example.com>");
@@ -2367,11 +2971,12 @@ class ManagedAgentApiContractTest {
         for (JsonNode session : List.of(publicSession, publicListed)) {
             assertThat(session.get("id").asText()).isEqualTo(sessionId);
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
-            assertThat(session.get("capabilities")).isEqualTo(json("""
+            JsonNode capabilities = json("""
                     {"items":true,"snapshots":true,"artifacts":false,
                      "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
-                     "session_archive":true,"session_unarchive":true,"session_delete":true}
-                    """));
+                     "session_archive":true,"session_unarchive":true,"session_delete":true,"context_compression":false}
+                    """);
+            assertThat(session.get("capabilities")).isEqualTo(capabilities);
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
                     .isPositive().isEqualTo(snapshotThrough);
@@ -2385,11 +2990,11 @@ class ManagedAgentApiContractTest {
                 assertThat(other.get("lastSequence").asLong())
                         .isPositive()
                         .isEqualTo(session.get("last_event_id").asLong());
-                assertThat(other.get("capabilities"))
-                        .isEqualTo(json("""
+                JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false}
-                                """));
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false}
+                                """);
+                assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
             }
         }
 
@@ -2465,7 +3070,7 @@ class ManagedAgentApiContractTest {
         assertThat(publishedKib * 1024)
                 .as("published durable-record limit is the enforced one")
                 .isEqualTo(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES);
-        assertThat(CONTRACT.node("/components/schemas/InputBlock"
+        assertThat(CONTRACT.node("/components/schemas/InputTextBlock"
                 + "/properties/text/maxLength").asLong())
                 .as("published per-block maxLength is the enforced"
                         + " per-block cap")
@@ -2623,6 +3228,10 @@ class ManagedAgentApiContractTest {
     }
 
     private static AuthenticatedTenantActor actor(String tenant) {
+        return actor(tenant, "actor-a");
+    }
+
+    private static AuthenticatedTenantActor actor(String tenant, String actorId) {
         return new AuthenticatedTenantActor() {
             @Override
             public String tenantId() {
@@ -2631,12 +3240,12 @@ class ManagedAgentApiContractTest {
 
             @Override
             public String actorId() {
-                return "actor-a";
+                return actorId;
             }
 
             @Override
             public String getName() {
-                return "actor-a";
+                return actorId;
             }
         };
     }
@@ -2649,7 +3258,111 @@ class ManagedAgentApiContractTest {
                 .getContentAsString(StandardCharsets.UTF_8);
     }
 
+    @Test
+    void javaDurableAdmissionNamesTheOperationItsAdmissionSaved()
+            throws Exception {
+        String tenant = "contract-durable-on-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        String sessionId = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-create"),
+                """
+                {"agent_id":"qwen-code","agent_revision":"1","input":[]}
+                """)).get("id").asText();
+        String hold = """
+                {"type":"agent.session.input.message",
+                 "input":[{"type":"input_text","text":"hold"}]}
+                """;
+        JsonNode input = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-input"), hold));
+        String operationId = input.get("operation_id").asText();
+        assertThat(operationId).startsWith("op_");
+        assertThat(input.get("admission_stage").asText())
+                .isEqualTo("java_durable");
+        assertThat(input.get("delivery_state").asText()).isEqualTo("pending");
+        assertThat(input.get("replayed").asBoolean()).isFalse();
+        String turnId = input.get("turn_id").asText();
+        int cancels = awaitHeldTurn();
+        // A lost response replays the same operation, whatever its latest stage.
+        JsonNode retry = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-input"), hold));
+        assertThat(retry.get("replayed").asBoolean()).isTrue();
+        assertThat(retry.get("operation_id").asText()).isEqualTo(operationId);
+        assertThat(retry.get("turn_id").asText()).isEqualTo(turnId);
+        JsonNode cancel = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-cancel"),
+                """
+                {"type":"agent.session.cancel",
+                 "turn_id":"%s"}
+                """.formatted(turnId)));
+        String cancelId = cancel.get("operation_id").asText();
+        assertThat(cancelId).startsWith("op_").isNotEqualTo(operationId);
+        assertThat(cancel.get("admission_stage").asText())
+                .isEqualTo("java_durable");
+        assertThat(cancel.get("delivery_state").asText()).isEqualTo("pending");
+        settleCancelledTurn(tenant, sessionId, cancels);
+        // Each id resolves through the operation query to its own command.
+        for (var expected : Map.of(operationId, "submit_input", cancelId,
+                "cancel").entrySet()) {
+            JsonNode operation = json(exchange(drift, "getSessionCwdOperation",
+                    200, get("/v1/agents/sessions/{id}/operations/{op}",
+                            sessionId, expected.getKey())
+                            .header(TENANT, tenant), null));
+            assertThat(operation.get("type").asText())
+                    .isEqualTo(expected.getValue());
+            assertThat(operation.get("status").asText()).isEqualTo("completed");
+        }
+        // The fixture Harness serves one Turn per Session, so use a fresh Session.
+        String plainId = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-plain-create"),
+                """
+                {"agent_id":"qwen-code","agent_revision":"1","input":[]}
+                """)).get("id").asText();
+        JsonNode plain = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", plainId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-plain"),
+                """
+                {"type":"agent.session.input.message",
+                 "input":[{"type":"input_text","text":"plain"}]}
+                """));
+        assertThat(plain.path("operation_id").asText()).startsWith("op_");
+        assertThat(plain.path("admission_stage").asText()).isEqualTo("java_durable");
+        awaitIdle(tenant, plainId);
+        String webSessionId = json(exchange(drift, "webShellCreateSession",
+                202, post(WEB_SHELL + "/sessions/create")
+                        .header(TENANT, tenant),
+                """
+                {"requestId":"durable-on","idempotencyKey":"durable-on-web",
+                 "agentId":"qwen-code","title":"web","input":[]}
+                """)).get("sessionId").asText();
+        JsonNode web = json(exchange(drift, "webShellSubmitTurn", 202,
+                post(WEB_SHELL + "/turns/submit").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"durable-on-web-submit","sessionId":"%s",
+                 "input":[{"type":"input_text","text":"web"}]}
+                """.formatted(webSessionId)));
+        assertThat(web.get("operationId").asText()).startsWith("op_");
+        assertThat(web.get("admissionStage").asText()).isEqualTo("java_durable");
+        assertThat(web.get("deliveryState").asText()).isEqualTo("pending");
+        awaitIdle(tenant, webSessionId);
+        assertThat(drift).isEmpty();
+    }
+
     private String exchange(Map<String, String> drift, String operationId,
+            int expectedStatus, MockHttpServletRequestBuilder request,
+            String body) throws Exception {
+        return exchange(mvc, drift, operationId, expectedStatus, request, body);
+    }
+
+    private String exchange(MockMvc target, Map<String, String> drift, String operationId,
             int expectedStatus, MockHttpServletRequestBuilder request,
             String body) throws Exception {
         Operation operation = CONTRACT.operation(operationId);
@@ -2666,7 +3379,7 @@ class ManagedAgentApiContractTest {
                         objectMapper.readTree(body)));
             }
         }
-        MockHttpServletResponse response = mvc.perform(request).andReturn()
+        MockHttpServletResponse response = target.perform(request).andReturn()
                 .getResponse();
         String content = response.getContentAsString(StandardCharsets.UTF_8);
         int status = response.getStatus();
@@ -2866,6 +3579,12 @@ class ManagedAgentApiContractTest {
                         .andReturn().getResponse()
                         .getContentAsString(StandardCharsets.UTF_8))
                         .get("status").asText()).isEqualTo("completed"));
+    }
+
+    private String turnCommandOperation(String sessionId, String kind) {
+        return jdbc.queryForObject("SELECT operation_id FROM ma_operation"
+                + " WHERE session_id = ? AND operation_kind = ?", String.class,
+                sessionId, kind);
     }
 
     private int awaitHeldTurn() {

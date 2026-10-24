@@ -2355,7 +2355,9 @@ the PR and clears on a re-run (observed: #7490's E2E "runner lost
 communication"; #6506's checkout "RPC failed; curl 92" / "fetch-pack:
 invalid index-pack output" — both green on the rerun; #13622's Classify
 PR, "repeatedly failed to be acquired" — the hosted pool never assigned a
-runner, so zero steps executed). The scan
+runner, so zero steps executed; #14550's SDK Java lane, "sdk-java host
+lock not acquired within 40 minutes" — the per-host test lock starved
+behind cross-run pool traffic and no test ran). The scan
 auto-reruns those failed jobs ONCE, guarded by run_attempt so a persistent
 infra problem cannot loop. Deliberately conservative — only unambiguous
 machine/transport failures, never a bare test-level timeout, which could be

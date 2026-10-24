@@ -1,3 +1,4 @@
+import { formatFileName } from './file-name-display';
 import { safeDisplayText } from '../../hooks/useAtMentionSources';
 import { usePanelRef } from 'react-resizable-panels';
 import { FileTree, type ContextMenuOpenContext } from '@pierre/trees';
@@ -57,6 +58,8 @@ import {
   downloadWorkspaceFile,
   getImageMimeTypeFromPath,
   isExcelFile,
+  isDocxFile,
+  isPdfArtifact,
 } from './artifactUtils';
 import { writeClipboardText } from '../../utils/clipboard';
 import { Input } from '../ui/input';
@@ -122,6 +125,8 @@ export function WorkspaceFileBrowser({
   const treePanelRef = usePanelRef();
   const contentPanelRef = usePanelRef();
   const hostRef = useRef<HTMLDivElement>(null);
+  const filterRef = useRef<HTMLInputElement>(null);
+  const restoreFilterFocusRef = useRef(false);
   const treeLabelRef = useRef(t('files.title'));
   treeLabelRef.current = t('files.title');
   const treeRef = useRef<FileTree | undefined>(undefined);
@@ -138,6 +143,7 @@ export function WorkspaceFileBrowser({
   }>();
   const deletedRef = useRef<((path: string) => void) | undefined>(undefined);
   const [deletePath, setDeletePath] = useState<string>();
+  const [deleteKind, setDeleteKind] = useState<'file' | 'directory'>('file');
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string>();
   const [createName, setCreateName] = useState('');
@@ -163,13 +169,22 @@ export function WorkspaceFileBrowser({
   const closingMenuRef = useRef(false);
 
   useEffect(() => {
-    if (!hasPreview) return undefined;
     // Wait for the group to register the nonzero preview constraints.
-    const frame = requestAnimationFrame(() =>
-      contentPanelRef.current?.resize('70%'),
-    );
+    const frame = requestAnimationFrame(() => {
+      if (hasPreview) contentPanelRef.current?.resize('70%');
+      else treePanelRef.current?.resize('100%');
+    });
     return () => cancelAnimationFrame(frame);
-  }, [hasPreview, contentPanelRef]);
+  }, [hasPreview, contentPanelRef, treePanelRef]);
+
+  useEffect(() => {
+    if (hasPreview || !treeVisible || !restoreFilterFocusRef.current) return;
+    restoreFilterFocusRef.current = false;
+    const frame = requestAnimationFrame(() => {
+      filterRef.current?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [hasPreview, treeVisible]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -195,6 +210,7 @@ export function WorkspaceFileBrowser({
       initialExpansion: 'closed',
       flattenEmptyDirectories: false,
       icons: 'complete',
+      formatItemName: formatFileName,
       unsafeCSS: `
         [data-file-tree-virtualized-scroll] { overflow: auto; }
         [data-file-tree-virtualized-list] {
@@ -206,6 +222,7 @@ export function WorkspaceFileBrowser({
           flex-shrink: 0;
         }
         [data-item-section="spacing"] { flex-shrink: 0; }
+        [data-truncate-content] { white-space: pre; }
       `,
       // The host supplies the visible filter instead of Pierre's search input.
       search: false,
@@ -358,7 +375,7 @@ export function WorkspaceFileBrowser({
       const child = `${path}/`;
       deletedPaths.add(path);
       for (const key of entries.keys()) {
-        if (key === child || key.startsWith(child)) {
+        if (key === path || key === child || key.startsWith(child)) {
           entries.delete(key);
           createdEntries.delete(key);
         }
@@ -370,6 +387,7 @@ export function WorkspaceFileBrowser({
         }
       }
       if (tree.getItem(child)) tree.remove(child, { recursive: true });
+      else if (tree.getItem(path)) tree.remove(path);
       const parent = path.split('/').slice(0, -1).join('/');
       const directory = cache.get(parent);
       if (directory)
@@ -610,17 +628,23 @@ export function WorkspaceFileBrowser({
   };
 
   const confirmDelete = async () => {
-    if (!deletePath || deleting || isBusy || !actions.deleteDirectory) return;
+    const remove =
+      deleteKind === 'directory'
+        ? actions.deleteDirectory
+        : actions.deleteWorkspaceFile;
+    if (!deletePath || deleting || isBusy || !remove) return;
     const path = deletePath;
     const lifetime = lifetimeRef.current;
     setDeleting(true);
     setDeleteError(undefined);
     try {
-      await actions.deleteDirectory(path);
+      await remove(path);
       if (lifetimeRef.current !== lifetime) return;
       deletedRef.current?.(path);
       setSelectedPath((selected) =>
-        selected?.startsWith(`${path}/`) ? undefined : selected,
+        selected === path || selected?.startsWith(`${path}/`)
+          ? undefined
+          : selected,
       );
       setDeletePath(undefined);
     } catch (error) {
@@ -636,7 +660,7 @@ export function WorkspaceFileBrowser({
     path
       ? `${workspaceCwd.replace(separator === '\\' ? /[\\/]+$/ : /\/+$/, '')}${separator}${path.replaceAll('/', separator)}`
       : workspaceCwd;
-  const workspaceName = safeDisplayText(
+  const workspaceName = formatFileName(
     workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1) ?? workspaceCwd,
   );
   const absoluteMenuPath = absolutePath(menu?.path ?? '');
@@ -681,7 +705,7 @@ export function WorkspaceFileBrowser({
           </DropdownMenuTrigger>
           <DropdownMenuContent
             className="w-48"
-            aria-label={`${t('files.title')}: ${safeDisplayText(menu.path)}`}
+            aria-label={`${t('files.title')}: ${formatFileName(menu.path)}`}
             aria-labelledby={undefined}
             data-file-tree-context-menu-root="true"
             onCloseAutoFocus={(event) => {
@@ -723,6 +747,7 @@ export function WorkspaceFileBrowser({
                       const path = menu.path.replace(/\/$/, '');
                       void runMenuAction(() => {
                         setDeleteError(undefined);
+                        setDeleteKind('directory');
                         setDeletePath(path);
                       }, true);
                     }}
@@ -735,7 +760,9 @@ export function WorkspaceFileBrowser({
               <>
                 {(/\.(?:md|markdown|html?)$/i.test(menu.path) ||
                   getImageMimeTypeFromPath(menu.path) ||
-                  isExcelFile(menu.path)) && (
+                  isExcelFile(menu.path) ||
+                  isDocxFile(menu.path) ||
+                  isPdfArtifact({ workspacePath: menu.path })) && (
                   <DropdownMenuItem
                     onSelect={() =>
                       void runMenuAction(() => onOpenPreview(menu.path), true)
@@ -783,6 +810,22 @@ export function WorkspaceFileBrowser({
                 >
                   {t('common.download')}
                 </DropdownMenuItem>
+                {menu.kind === 'file' && actions.deleteWorkspaceFile && (
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => {
+                      captureDialogFocus();
+                      const path = menu.path;
+                      void runMenuAction(() => {
+                        setDeleteError(undefined);
+                        setDeleteKind('file');
+                        setDeletePath(path);
+                      }, true);
+                    }}
+                  >
+                    {t('files.deleteMenu')}
+                  </DropdownMenuItem>
+                )}
               </>
             )}
           </DropdownMenuContent>
@@ -883,11 +926,25 @@ export function WorkspaceFileBrowser({
           }}
         >
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('files.deleteFolderTitle')}</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t(
+                deleteKind === 'directory'
+                  ? 'files.deleteFolderTitle'
+                  : 'files.deleteTitle',
+              )}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              {t('files.deleteFolderWarning')}
+              {t(
+                deleteKind === 'directory'
+                  ? 'files.deleteFolderWarning'
+                  : 'files.deleteWarning',
+              )}
               <span className="mt-2 block break-all font-medium text-foreground">
-                {safeDisplayText(deletePath)}
+                {safeDisplayText(
+                  deleteKind === 'file'
+                    ? absolutePath(deletePath ?? '')
+                    : deletePath,
+                )}
               </span>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -908,7 +965,13 @@ export function WorkspaceFileBrowser({
                 void confirmDelete();
               }}
             >
-              {t(deleting ? 'files.deleting' : 'files.deleteMenu')}
+              {t(
+                deleting
+                  ? 'files.deleting'
+                  : deleteKind === 'file'
+                    ? 'files.delete'
+                    : 'files.deleteMenu',
+              )}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -916,10 +979,10 @@ export function WorkspaceFileBrowser({
       <header className={styles.toolbar}>
         <span
           className={styles.path}
-          title={safeDisplayText(absolutePath(selectedPath ?? ''))}
+          title={formatFileName(absolutePath(selectedPath ?? ''))}
         >
           {workspaceName}
-          {selectedPath && <> / {safeDisplayText(selectedPath)}</>}
+          {selectedPath && <> / {formatFileName(selectedPath)}</>}
         </span>
         {canPreview && (
           <Button
@@ -976,6 +1039,22 @@ export function WorkspaceFileBrowser({
             aria-pressed={treeVisible}
           >
             <FolderIcon />
+          </Button>
+        )}
+        {hasPreview && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={t('files.closePreview')}
+            title={t('files.closePreview')}
+            onClick={() => {
+              restoreFilterFocusRef.current = true;
+              treeRef.current?.getItem(selectedPath)?.deselect();
+              treePanelRef.current?.expand();
+              setSelectedPath(undefined);
+            }}
+          >
+            <XIcon />
           </Button>
         )}
       </header>
@@ -1076,6 +1155,7 @@ export function WorkspaceFileBrowser({
             <div className={styles.search}>
               <SearchIcon aria-hidden />
               <Input
+                ref={filterRef}
                 data-workspace-file-filter
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
@@ -1150,7 +1230,7 @@ export function WorkspaceFileBrowser({
                   <div key={directory.path}>
                     <span>
                       {directory.path
-                        ? safeDisplayText(directory.path)
+                        ? formatFileName(directory.path)
                         : t('files.title')}
                       :{' '}
                     </span>

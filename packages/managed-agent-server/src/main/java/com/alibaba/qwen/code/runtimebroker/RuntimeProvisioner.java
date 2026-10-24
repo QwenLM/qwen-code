@@ -17,10 +17,26 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return "legacy";
     }
 
+    /** Exact provider identities a routing provisioner may dispatch. */
+    default boolean supportsKind(String provisionerKind) {
+        return kind().equals(provisionerKind);
+    }
+
     /** Creates placement identity from trusted embedding configuration. */
     default RuntimeProvisionRequest createRequest(RuntimeScope scope,
             String isolationKey) {
         return new RuntimeProvisionRequest(scope, isolationKey, kind());
+    }
+
+    /**
+     * Creates placement identity for a Harness Session: the Session id resolves
+     * and authorizes the placement while the isolation key may stay empty on a
+     * shared (Workspace-isolated) request. The default keeps the isolation-key
+     * contract.
+     */
+    default RuntimeProvisionRequest createRequest(RuntimeScope scope,
+            String isolationKey, String harnessSessionId) {
+        return createRequest(scope, isolationKey);
     }
 
     /** Short, bounded pre-create admission only; never creates a resource or calls a worker. */
@@ -89,6 +105,11 @@ public interface RuntimeProvisioner extends AutoCloseable {
 
     default boolean supportsDrainedStop() {
         return false;
+    }
+
+    /** Stop eligibility belongs to the saved placement, not another routed provider. */
+    default boolean supportsDrainedStop(RuntimeBindingRecord binding) {
+        return binding != null && supportsKind(binding.getRequest().getProvisionerKind()) && supportsDrainedStop();
     }
 
     default CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {

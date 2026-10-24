@@ -1,6 +1,7 @@
 import type {
   DaemonCapabilities,
   DaemonWorkspaceCapability,
+  WorkspaceDaemonClient,
 } from '@qwen-code/sdk/daemon';
 import {
   useWorkspace,
@@ -22,6 +23,7 @@ export type ArtifactWorkspaceActions = Pick<
   | 'updateScheduledTask'
   | 'deleteScheduledTask'
 > &
+  Partial<Pick<WorkspaceDaemonClient, 'deleteWorkspaceFile'>> &
   Partial<FileUploadClient> & {
     createFile?(path: string): Promise<void>;
     createDirectory?(path: string): Promise<void>;
@@ -112,6 +114,13 @@ export function useArtifactWorkspaceTarget(
           (entry) => entry.id === owner.id,
         )?.ssh,
     );
+  const canDelete =
+    localOwner &&
+    Boolean(
+      workspace.capabilities?.features?.includes('workspace_file_delete'),
+    );
+  const deleteAllowedRef = useRef(canDelete);
+  deleteAllowedRef.current = canDelete;
   const canCreateFile =
     localOwner &&
     Boolean(workspace.capabilities?.features?.includes('workspace_file_write'));
@@ -210,6 +219,25 @@ export function useArtifactWorkspaceTarget(
       requireCreationOwner();
     };
     return {
+      ...(canDelete
+        ? {
+            async deleteWorkspaceFile(path: string) {
+              const current = requireOwner();
+              if (!deleteAllowedRef.current)
+                throw new Error(
+                  'Workspace file deletion is no longer available',
+                );
+              await workspace.client
+                .workspaceByCwd(current.cwd)
+                .deleteWorkspaceFile(path);
+              requireOwner();
+              if (!deleteAllowedRef.current)
+                throw new Error(
+                  'Workspace file deletion is no longer available',
+                );
+            },
+          }
+        : {}),
       ...(canCreateFile
         ? { createFile: (path: string) => create('file', path) }
         : {}),
@@ -317,6 +345,7 @@ export function useArtifactWorkspaceTarget(
     authority,
     primaryActions,
     workspace.client,
+    canDelete,
     canCreateFile,
     canCreateDirectory,
     canDeleteDirectory,
