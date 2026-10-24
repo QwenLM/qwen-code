@@ -204,6 +204,12 @@ export interface HistoryItemBase {
      * when history is collapsed.
      */
     kind?: 'collapse-summary';
+    /**
+     * An attributed message from another session, not one this session made
+     * about itself: it must not read like the system chatter around it, and
+     * unlike those it carries none of the user's authority.
+     */
+    peer?: boolean;
   };
 }
 
