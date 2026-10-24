@@ -9018,6 +9018,11 @@ describe('Hosted Harness no-tool session', () => {
     expect((await readJournal()).events).toHaveLength(parked.events.length);
     expect(state.model).not.toHaveBeenCalled();
     const redriven = await (async () => {
+      let initialPassFinished = false;
+      await wake!.exclusive(async () => {
+        initialPassFinished = true;
+      }, SETTLE_TIMEOUT_MS);
+      expect(initialPassFinished).toBe(true);
       kick.call(wake!);
       const cleanup = await import('./hosted-turn-cleanup.js');
       const debt = vi.spyOn(cleanup, 'hasHostedCleanupDebt');
