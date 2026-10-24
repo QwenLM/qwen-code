@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +43,31 @@ type Message = {
   role: string;
   content: string | Array<{ type: string; text?: string }>;
 };
+
+type JournalRow = {
+  type: string;
+  uuid: string;
+  sessionId: string;
+  parentUuid: string | null;
+  promptId?: string;
+  message?: { parts?: Array<{ text?: string }> };
+};
+const journalFiles = (directory: string): string[] =>
+  readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const file = join(directory, entry.name);
+    return entry.isDirectory()
+      ? journalFiles(file)
+      : file.endsWith('.jsonl')
+        ? [file]
+        : [];
+  });
+const journalRows = (directory: string): JournalRow[] =>
+  journalFiles(directory).flatMap((file) => {
+    const bytes = readFileSync(file, 'utf8');
+    const lines = bytes.split('\n');
+    if (!bytes.endsWith('\n')) lines.pop();
+    return lines.filter(Boolean).map((line) => JSON.parse(line) as JournalRow);
+  });
 
 it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`, async () => {
   const scratch = mkdtempSync(join(tmpdir(), 'qwen-clipboard-source-'));
@@ -72,8 +104,11 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
       ui: { enableFollowupSuggestions: false },
       memory: E2E_MEMORY_SETTINGS_DEFAULTS,
     });
-    server = await startFakeOpenAIServer(() => ({
-      content: 'PASTE_SOURCE_MODEL_DONE',
+    server = await startFakeOpenAIServer(({ requestIndex }) => ({
+      content:
+        requestIndex === 0
+          ? 'PASTE_SOURCE_MODEL_DONE'
+          : 'PASTE_SOURCE_RECALL_DONE',
     }));
     session = await InteractiveSession.start({
       cwd: workspace,
@@ -181,6 +216,119 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
       'model HTTP transport must close',
     );
     reached['closedHTTP'] = true;
+    if (renderer === 'opentui') {
+      const originalRaw = 'PASTE_OWNER_START ' + payload + ' OWNER_END';
+      const originalLines = originalRaw.split('\n');
+      expect(originalLines[0]).toBe(
+        'PASTE_OWNER_START RAW_SOURCE_BEGIN\\path\\file',
+      );
+      expect(originalLines[1]).toBe(
+        '<clipboard-paste>literal boundary</clipboard-paste>',
+      );
+      expect(
+        originalLines.slice(0, 2).every((line) => /^[\x20-\x7e]+$/.test(line)),
+      ).toBe(true);
+      expect(originalLines[0].length + 4).toBeLessThan(100);
+      expect(originalLines[1].length + '_RECALL_EDIT'.length + 4).toBeLessThan(
+        100,
+      );
+      const expectedRecall = [
+        originalLines[0],
+        '<clipboard-paste>literal boundary</clipboard-paste>_RECALL_EDIT',
+        ...originalLines.slice(2),
+      ].join('\n');
+      active.pressKey('\x1b[A');
+      await active.idle(350, 1000);
+      expect(server.requests).toHaveLength(1);
+      frames['recall'] = await active.viewport();
+      // Up starts at zero; Down and CtrlE select the unwrapped second line end.
+      active.pressKey('\x1b[B');
+      await active.idle(250, 750);
+      active.pressKey('\x05');
+      expect(server.requests).toHaveLength(1);
+      await type('_RECALL_EDIT');
+      active.pressKey('\r');
+      await until(
+        async () =>
+          (await active.viewport()).includes('PASTE_SOURCE_RECALL_DONE'),
+        'explicit recalled-edit reply missing',
+      );
+      await active.idle(250, 750);
+      expect(server.requests).toHaveLength(2);
+      const secondUsers = (
+        server.requests[1].body['messages'] as Message[]
+      ).filter((message) => message.role === 'user');
+      expect(secondUsers).toHaveLength(2);
+      const secondContent = secondUsers[1].content;
+      const secondParts =
+        typeof secondContent === 'string'
+          ? [{ type: 'text', text: secondContent }]
+          : secondContent;
+      const edited = secondParts.filter((part) =>
+        part.text?.includes('_RECALL_EDIT'),
+      );
+      expect(edited).toHaveLength(1);
+      expect(edited[0].text).toBe(expectedRecall);
+      json(join(evidence, 'actual-recalled-model-user.json'), secondUsers[1]);
+      await until(
+        () =>
+          server!.requests.every(
+            (request) =>
+              request.transport.writableEndedAtClose === true &&
+              typeof request.transport.closedAt === 'number',
+          ),
+        'both model HTTP transports must close',
+      );
+      const authoredRows = (rows: JournalRow[]) =>
+        rows.filter(
+          (row) =>
+            row.type === 'user' &&
+            row.message?.parts?.some((part) =>
+              part.text?.includes('PASTE_OWNER_START'),
+            ),
+        );
+      await until(
+        () => authoredRows(journalRows(runtimeDir)).length === 2,
+        'two actual user records must persist',
+      );
+      const rows = journalRows(runtimeDir);
+      const recordedUsers = authoredRows(rows);
+      expect(recordedUsers).toHaveLength(2);
+      for (const row of recordedUsers) {
+        expect(row.uuid).toBeTruthy();
+        expect(row.sessionId).toBeTruthy();
+        expect(row.promptId).toBeTruthy();
+        expect(Object.hasOwn(row, 'parentUuid')).toBe(true);
+      }
+      expect(recordedUsers[1].uuid).not.toBe(recordedUsers[0].uuid);
+      expect(recordedUsers[1].sessionId).toBe(recordedUsers[0].sessionId);
+      expect(
+        recordedUsers[0].message?.parts
+          ?.map((part) => part.text ?? '')
+          .join(''),
+      ).toBe(expectedModelText);
+      expect(
+        recordedUsers[1].message?.parts
+          ?.map((part) => part.text ?? '')
+          .join(''),
+      ).toBe(expectedRecall);
+      const byId = new Map(rows.map((row) => [row.uuid, row]));
+      const ancestry: string[] = [];
+      let cursor = recordedUsers[1].parentUuid;
+      while (cursor && !ancestry.includes(cursor)) {
+        ancestry.push(cursor);
+        cursor = byId.get(cursor)?.parentUuid ?? null;
+      }
+      expect(ancestry).toContain(recordedUsers[0].uuid);
+      json(join(evidence, 'actual-model-journal-records.json'), recordedUsers);
+      json(join(evidence, 'actual-model-journal-ancestry.json'), ancestry);
+      json(join(evidence, 'raw-human-journal-scope.json'), {
+        modelFacingRecordsProvenOnly: true,
+        humanInputPersistence: 'NOT_ASSERTED',
+      });
+      reached['nativeRawRecallEdit'] = true;
+      reached['actualModelJournal'] = true;
+    }
     await active.idle(250, 750);
     await active.send('/quit');
     await until(
@@ -189,7 +337,7 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
     );
     expect(active.exitResult()).toEqual({ exitCode: 0, signal: 0 });
     reached['naturalQuit'] = true;
-    expect(server.requests).toHaveLength(1);
+    expect(server.requests).toHaveLength(renderer === 'opentui' ? 2 : 1);
   } catch (error) {
     recordFailure(error);
   } finally {
@@ -218,6 +366,13 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
           writeFileSync(join(evidence, 'terminal.ansi'), session.output());
       },
       async () => json(join(evidence, 'requests.json'), server?.requests ?? []),
+      async () => {
+        for (const [index, file] of journalFiles(runtimeDir).entries())
+          writeFileSync(
+            join(evidence, `raw-journal-${index}.jsonl`),
+            readFileSync(file),
+          );
+      },
       async () => session?.close(),
       async () => server?.close(),
       async () => rmSync(scratch, { recursive: true, force: true }),
@@ -241,7 +396,7 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
       naturalExitBeforeClose,
       requestCount: server?.requests.length ?? 0,
       scope:
-        'actual bracketed text paste; exact model text, not persisted humanInput or OS clipboard coverage',
+        'same exact first framing for all renderers; native additionally verifies raw recall edit and model-record ancestry; no humanInput persistence or OS clipboard claim',
     });
   }
   if (failure) throw new Error(failure);
