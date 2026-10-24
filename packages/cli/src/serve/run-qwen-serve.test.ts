@@ -6536,6 +6536,8 @@ describe('runQwenServe deployment profiles', () => {
   });
 
   it('does not restore channels or scheduled sessions for Hosted Harness', async () => {
+    vi.stubEnv('QWEN_HOSTED_HARNESS_BROKER_URL', 'https://broker.internal');
+    vi.stubEnv('QWEN_HOSTED_HARNESS_BROKER_TOKEN', 'file-fed-broker-secret');
     const workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-profile-')),
     );
@@ -6567,12 +6569,19 @@ describe('runQwenServe deployment profiles', () => {
         },
       );
       expect(createApp.mock.calls[0]?.[0].channelSelection).toBeUndefined();
+      expect(createApp.mock.calls[0]?.[0].managedRuntimeBrokerUrl).toBe(
+        'https://broker.internal',
+      );
+      expect(createApp.mock.calls[0]?.[0].managedRuntimeBrokerToken).toBe(
+        'file-fed-broker-secret',
+      );
       expect(createApp.mock.calls[0]?.[2]?.manageScheduledTaskSessions).toBe(
         false,
       );
     } finally {
       await handle?.close();
       createApp.mockRestore();
+      vi.unstubAllEnvs();
       fs.rmSync(workspace, { recursive: true, force: true });
     }
   });

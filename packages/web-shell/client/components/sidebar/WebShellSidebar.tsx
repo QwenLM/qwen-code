@@ -29,6 +29,7 @@ import {
   type DaemonWorkspaceCapability,
   type SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
+import type { ManagedArchivedSessionsStatus } from '../managed/ManagedArchivedSessions';
 import {
   HouseIcon,
   InboxIcon,
@@ -109,6 +110,12 @@ import { useFanoutOrigins } from '../../config/host-fanout';
 import { WorkspaceRemovalDialog } from '../workspaces/WorkspaceRemovalDialog';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
 import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
+import {
+  moveWorkspace,
+  orderWorkspaces,
+  readWorkspaceOrder,
+  writeWorkspaceOrder,
+} from './workspaceOrder';
 import { WorkspaceRenameDialog } from './WorkspaceRenameDialog';
 import {
   DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
@@ -525,6 +532,9 @@ interface WebShellSidebarProps {
   sessionContent?: ReactNode;
   sessionHeader?: ReactNode;
   managedWorkspaces?: ReactNode;
+  managedArchivedSessions?: ManagedArchivedSessionsStatus & {
+    content: ReactNode;
+  };
   onSearchQueryChange?: (query: string) => void;
   /** Selection styling only; the attached session still owns its actions. */
   currentSessionActive?: boolean;
@@ -1124,6 +1134,7 @@ export function WebShellSidebar({
   sessionContent,
   sessionHeader,
   managedWorkspaces,
+  managedArchivedSessions,
   onSearchQueryChange,
   currentSessionActive = true,
   showSessionSourceSwitch = true,
@@ -1353,6 +1364,19 @@ export function WebShellSidebar({
     () => providedWorkspaces ?? workspace.capabilities?.workspaces ?? [],
     [providedWorkspaces, workspace.capabilities?.workspaces],
   );
+  // Display-only ordering preference, scoped per daemon host so two hosts
+  // never share one list. Workspaces the stored order does not mention (new
+  // registrations) keep the daemon's order after the listed ones.
+  const workspaceOrderScope = useMemo(
+    () => (workspace.baseUrl || window.location.origin).replace(/\/+$/, ''),
+    [workspace.baseUrl],
+  );
+  const [workspaceOrder, setWorkspaceOrder] = useState<string[]>(() =>
+    readWorkspaceOrder(workspaceOrderScope),
+  );
+  useEffect(() => {
+    setWorkspaceOrder(readWorkspaceOrder(workspaceOrderScope));
+  }, [workspaceOrderScope]);
   const workspaceCatalogAdvertised =
     workspaces.length > 0 ||
     workspace.capabilities?.workspaces !== undefined ||
@@ -2093,6 +2117,26 @@ export function WebShellSidebar({
   const projectWorkspaces = useMemo(
     () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
     [displayedWorkspaces],
+  );
+  // Only the rendered list is reordered: the derived cwd lists above feed
+  // order-sensitive catalog query keys, so reordering them would re-subscribe
+  // every secondary workspace's session catalog.
+  const orderedProjectWorkspaces = useMemo(
+    () => orderWorkspaces(projectWorkspaces, workspaceOrder),
+    [projectWorkspaces, workspaceOrder],
+  );
+  const moveWorkspaceInList = useCallback(
+    (cwd: string, direction: -1 | 1) => {
+      const next = moveWorkspace(
+        orderedProjectWorkspaces.map((entry) => entry.cwd),
+        cwd,
+        direction,
+      );
+      if (!next) return;
+      writeWorkspaceOrder(workspaceOrderScope, next);
+      setWorkspaceOrder(next);
+    },
+    [orderedProjectWorkspaces, workspaceOrderScope],
   );
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
@@ -5697,7 +5741,9 @@ export function WebShellSidebar({
 
   const archivedSection = useMemo(() => {
     if (
-      (!sessionArchiveEnabled && !standaloneSessionsVisible) ||
+      (!sessionArchiveEnabled &&
+        !standaloneSessionsVisible &&
+        managedArchivedSessions === undefined) ||
       searchQuery.trim()
     ) {
       return null;
@@ -5705,10 +5751,12 @@ export function WebShellSidebar({
 
     const archivedCount =
       allArchivedSessions.length +
-      (standaloneSessionsVisible ? standaloneArchivedStatus.count : 0);
+      (standaloneSessionsVisible ? standaloneArchivedStatus.count : 0) +
+      (managedArchivedSessions?.count ?? 0);
     const archivedLoadingWithStandalone =
       effectiveArchivedLoading ||
-      (standaloneSessionsVisible && standaloneArchivedStatus.loading);
+      (standaloneSessionsVisible && standaloneArchivedStatus.loading) ||
+      managedArchivedSessions?.loading;
     const archivedErrorWithStandalone =
       effectiveArchivedError ||
       (standaloneSessionsVisible && standaloneArchivedStatus.error);
@@ -5758,7 +5806,11 @@ export function WebShellSidebar({
       archivedCount === 0
     ) {
       notice = retry;
-    } else if (!archivedLoadingWithStandalone && archivedCount === 0) {
+    } else if (
+      !archivedLoadingWithStandalone &&
+      archivedCount === 0 &&
+      !managedArchivedSessions?.error
+    ) {
       notice = (
         <div className={styles.notice}>{t('sidebar.archivedEmpty')}</div>
       );
@@ -5766,6 +5818,7 @@ export function WebShellSidebar({
 
     const content = (
       <>
+        {managedArchivedSessions?.content}
         {standaloneSessionsVisible &&
           onLoadStandaloneSession &&
           onStandaloneNotice && (
@@ -5841,6 +5894,7 @@ export function WebShellSidebar({
     effectiveArchivedLoading,
     handleStandaloneArchivedStatus,
     handleStandaloneMutation,
+    managedArchivedSessions,
     onError,
     onLoadStandaloneSession,
     onSessionRenameConfirmed,
@@ -6802,18 +6856,7 @@ export function WebShellSidebar({
                   <SquarePenIcon size={16} strokeWidth={1.2} />
                 </span>
                 {(!collapsed || homePreviewOpen) && (
-                  <span>
-                    {t('sidebar.newTask')}
-                    {managedWorkspaces !== undefined && (
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        {t(
-                          currentSessionActive
-                            ? 'managed.localMode'
-                            : 'managed.managedMode',
-                        )}
-                      </span>
-                    )}
-                  </span>
+                  <span>{t('sidebar.newTask')}</span>
                 )}
               </button>
             </div>
@@ -7182,7 +7225,7 @@ export function WebShellSidebar({
                             onNotice={onStandaloneNotice}
                           />
                         )}
-                      {projectWorkspaces.map((ws) => (
+                      {orderedProjectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
                             workspace={ws}
@@ -7366,6 +7409,15 @@ export function WebShellSidebar({
                                       ws.primary &&
                                       ws.trusted &&
                                       Boolean(onOpenWorkspaceManagement);
+                                    const workspaceIndex =
+                                      orderedProjectWorkspaces.findIndex(
+                                        (entry) => entry.cwd === ws.cwd,
+                                      );
+                                    const canMoveWorkspace =
+                                      !lockedWorkspaceCwd &&
+                                      ws.trusted &&
+                                      workspaceIndex >= 0 &&
+                                      orderedProjectWorkspaces.length > 1;
                                     const menuActions: WorkspaceMenuActions = {
                                       ...(canRename
                                         ? {
@@ -7419,6 +7471,20 @@ export function WebShellSidebar({
                                         ? {
                                             newWorktreeSession: () =>
                                               handleNewWorktreeSession(wsCwd),
+                                          }
+                                        : {}),
+                                      ...(canMoveWorkspace && workspaceIndex > 0
+                                        ? {
+                                            moveUp: () =>
+                                              moveWorkspaceInList(ws.cwd, -1),
+                                          }
+                                        : {}),
+                                      ...(canMoveWorkspace &&
+                                      workspaceIndex <
+                                        orderedProjectWorkspaces.length - 1
+                                        ? {
+                                            moveDown: () =>
+                                              moveWorkspaceInList(ws.cwd, 1),
                                           }
                                         : {}),
                                       ...(canManage

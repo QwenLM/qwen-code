@@ -929,20 +929,22 @@ test('message actions use a hoverable menu that also supports click and keyboard
   await page.mouse.move(triggerBox!.x + triggerBox!.width / 2, gapY);
   await page.clock.runFor(60);
   await expect(menu).toBeVisible();
-  const itemBox = await menu
-    .getByRole('menuitem', { name: 'Edit message', exact: true })
-    .boundingBox();
-  expect(itemBox).not.toBeNull();
-  await page.mouse.move(
-    itemBox!.x + itemBox!.width / 2,
-    itemBox!.y + itemBox!.height / 2,
-  );
-  await page.clock.runFor(180);
-  await expect(menu).toBeVisible();
   const hoveredItem = menu.getByRole('menuitem', {
     name: 'Edit message',
     exact: true,
   });
+  // Cross into the menu with raw pointer moves. `hoveredItem.hover()` spends
+  // its actionability budget (visible, stable for two frames, receives
+  // events) while the pointer is still parked in the gap, so on a busy pool
+  // host the menu's 120 ms close delay expires before the pointer arrives.
+  const hoveredItemBox = (await hoveredItem.boundingBox())!;
+  await page.mouse.move(
+    hoveredItemBox.x + hoveredItemBox.width / 2,
+    hoveredItemBox.y + hoveredItemBox.height / 2,
+    { steps: 5 },
+  );
+  await page.clock.runFor(180);
+  await expect(menu).toBeVisible();
   await expect(hoveredItem).toBeFocused();
   await expect(hoveredItem).toHaveAttribute('data-highlighted', '');
   await page.screenshot({

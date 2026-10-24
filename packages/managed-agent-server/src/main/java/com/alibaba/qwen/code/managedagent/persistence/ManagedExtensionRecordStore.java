@@ -1045,6 +1045,8 @@ public class ManagedExtensionRecordStore {
      */
     private static void requireDomainCommitted(JsonNode payload,
             String domain, boolean stageH) {
+        require(!HarnessPlacementStore.RELEASE_DOMAIN.equals(domain),
+                "Harness release receipts can only be written by the ownership release transaction.");
         try {
             ManagedExtensionRecords.closed(payload, PAYLOAD_FIELDS,
                     "event.payload");
@@ -1196,6 +1198,15 @@ public class ManagedExtensionRecordStore {
                 if (ref != null && !ref.isNull()) {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
                 }
+            }
+        }
+        if (domain.equals("automation_run")) {
+            // The gate probe output a claim recorded, closed over the Session's
+            // resources like every other reference a body names.
+            JsonNode gateOutputRef = record.get("gateOutputRef");
+            if (gateOutputRef != null && !gateOutputRef.isNull()) {
+                requireReference(resources.apply(gateOutputRef.get("resourceId").textValue()),
+                        gateOutputRef);
             }
         }
         if (domain.equals("schedule")) {
