@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFile, execFileSync } from 'child_process';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { InputPromptProps } from './input-prompt.js';
+import type { HistoryItem } from '../types.js';
 import { useTextBuffer } from '../components/shared/text-buffer.js';
 import type { LiveHistoryItem } from './live-session-model.js';
 import { createInteractiveModSession } from '../../services/interactive-mod-session.js';
@@ -66,6 +67,7 @@ const mocks = vi.hoisted(() => {
     items: [] as LiveHistoryItem[],
     appProps: null as {
       userMessages?: readonly string[];
+      onQuit?: (messages: readonly HistoryItem[]) => void;
       renderMain?: () => unknown;
       onToggleVim?: () => Promise<boolean>;
       vimMode?: string;
@@ -80,6 +82,7 @@ const mocks = vi.hoisted(() => {
       };
     } | null,
     resumeEvents: null as OpenTuiStreamEvent[] | null,
+    seedPromptCount: null as ((count: number) => void) | null,
     transcript: [] as OpenTuiStreamEvent[],
     replayOrder: [] as string[],
   };
@@ -160,16 +163,23 @@ vi.mock('./opentui-runtime.js', () => ({
     create: vi.fn(() => mocks.state.runtime),
   },
 }));
-vi.mock('./opentui-app-shell.js', () => ({
-  OpenTuiApp: (props: { renderMain?: () => unknown }) => {
-    mocks.state.appProps = props;
-    return null;
-  },
-}));
+vi.mock('./opentui-app-shell.js', async () => {
+  const { useSessionStats } = await import('../contexts/SessionContext.js');
+  return {
+    OpenTuiApp: (props: { renderMain?: () => unknown }) => {
+      mocks.state.appProps = props;
+      mocks.state.seedPromptCount = useSessionStats().seedPromptCount;
+      return 'ordinary-composer';
+    },
+  };
+});
 vi.mock('./transcript-view.js', () => ({
-  OpenTuiTranscriptView: () => null,
+  OpenTuiTranscriptView: ({ items }: { items: readonly LiveHistoryItem[] }) =>
+    items.map((item) => ('text' in item ? item.text : '')).join('\n'),
 }));
-vi.mock('./live-turn.js', () => ({
+vi.mock('./live-turn.js', async (importOriginal) => ({
+  foldBatch: (await importOriginal<typeof import('./live-turn.js')>())
+    .foldBatch,
   useOpenTuiLiveTurn: (options: unknown) => {
     mocks.state.liveOptions = options;
     return {
@@ -233,7 +243,7 @@ vi.mock('./resume-session.js', () => ({
 }));
 
 import type { ReactElement } from 'react';
-import { render, renderHook } from '@testing-library/react';
+import { render, renderHook, screen } from '@testing-library/react';
 import { act, cloneElement } from 'react';
 import { exitSession } from './exit-lifecycle.js';
 import { startOpenTuiUI } from './start-opentui-ui.js';
@@ -281,6 +291,7 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.items = [];
     mocks.state.interrupt.mockClear();
     mocks.state.appProps = null;
+    mocks.state.seedPromptCount = null;
     mocks.state.liveOptions = null;
     mocks.state.keyboard = [];
     vi.mocked(exitSession).mockClear();
@@ -313,6 +324,7 @@ describe('startOpenTuiUI fallback contract', () => {
 
   async function withEntryApp(
     check: (rerender: () => void) => void | Promise<void>,
+    config = buildConfig(),
   ) {
     const write = vi
       .spyOn(process.stdout, 'write')
@@ -320,7 +332,7 @@ describe('startOpenTuiUI fallback contract', () => {
     let view: ReturnType<typeof render> | undefined;
     try {
       await startOpenTuiUI(
-        buildConfig(),
+        config,
         settings,
         [],
         '/tmp/project',
@@ -436,6 +448,90 @@ describe('startOpenTuiUI fallback contract', () => {
     } finally {
       clipboard.mockReset().mockReturnValue('');
     }
+  });
+
+  it.each([
+    { recording: true, promptCount: 1, resumeHint: true },
+    { recording: true, promptCount: 0, resumeHint: false },
+    { recording: false, promptCount: 1, resumeHint: false },
+  ])(
+    'shows supplied quit messages before the single drain: %j',
+    async ({ recording, promptCount, resumeHint }) => {
+      const requestShutdown = vi.fn();
+      const config = {
+        ...buildConfig(),
+        getChatRecordingService: () => (recording ? {} : null),
+        getLlmClient: () => ({ requestShutdown }),
+      } as unknown as Config;
+      const messages: HistoryItem[] = [
+        { id: 41, type: 'user', text: '/quit' },
+        { id: 42, type: 'quit', duration: '2m 3s' },
+      ];
+      vi.useFakeTimers();
+      try {
+        await withEntryApp(() => {
+          act(() => mocks.state.seedPromptCount!(promptCount));
+          const onQuit = mocks.state.appProps!.onQuit!;
+          const history = [...mocks.state.transcript];
+          act(() => onQuit(messages));
+          expect(screen.queryByText('ordinary-composer')).toBeNull();
+          const summary = screen.getByText(/Agent powering down\. Goodbye!/);
+          expect(summary.textContent).toContain('/quit');
+          expect(summary.textContent).toContain('Interaction Summary');
+          expect(summary.textContent).toContain('Wall Time: 2m 3s');
+          expect(
+            summary.textContent?.includes('qwen --resume test-session-id'),
+          ).toBe(resumeHint);
+          expect(mocks.state.transcript).toEqual(history);
+          expect(messages).toEqual([
+            { id: 41, type: 'user', text: '/quit' },
+            { id: 42, type: 'quit', duration: '2m 3s' },
+          ]);
+          expect(requestShutdown).toHaveBeenCalledOnce();
+          expect(exitSession).not.toHaveBeenCalled();
+          act(() => vi.advanceTimersByTime(99));
+          act(() => onQuit([]));
+          expect(exitSession).not.toHaveBeenCalled();
+          act(() => vi.advanceTimersByTime(1));
+          expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+          act(() => onQuit(messages));
+          act(() => vi.advanceTimersByTime(100));
+          expect(exitSession).toHaveBeenCalledOnce();
+        }, config);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('cancels the committed quit timer when the entry unmounts', async () => {
+    const config = {
+      ...buildConfig(),
+      getLlmClient: () => ({ requestShutdown: vi.fn() }),
+    } as unknown as Config;
+    vi.useFakeTimers();
+    try {
+      await withEntryApp(() => {
+        act(() =>
+          mocks.state.appProps!.onQuit!([
+            { id: 1, type: 'quit', duration: '1s' },
+          ]),
+        );
+      }, config);
+      act(() => vi.advanceTimersByTime(100));
+      expect(exitSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('exits an empty settings restart immediately without a summary or timer', async () => {
+    await withEntryApp(() => {
+      act(() => mocks.state.appProps!.onQuit!([]));
+      expect(exitSession).toHaveBeenCalledOnce();
+      expect(exitSession).toHaveBeenCalledWith(expect.anything(), 0);
+      expect(screen.queryByText(/Agent powering down/)).toBeNull();
+    });
   });
 
   it('passes the runtime bridge to the actual rendered live hook', async () => {

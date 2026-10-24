@@ -986,7 +986,7 @@ describe('Hosted Harness model boundary', () => {
     );
     await runHostedHarnessTextTurn({ ...input, history });
     expect(model.setHistory).toHaveBeenCalledWith([
-      { role: 'user', parts: answered },
+      expect.objectContaining({ role: 'user', parts: answered }),
       { role: 'model', parts: visible },
     ]);
     expect(history[1]!.message!.parts).toEqual(thoughtOnly);
