@@ -640,7 +640,8 @@ export class LlmClient {
   /**
    * Promises for pending background memory tasks (dream / extract / skill review).
    * Each promise resolves with a count of memory files touched (0 = nothing written).
-   * Consumed by the CLI via `consumePendingMemoryTaskPromises()`.
+   * The TUI consumes these promises; headless waiters snapshot them without
+   * transferring ownership.
    */
   private pendingMemoryTaskPromises: Array<Promise<number>> = [];
 
@@ -3317,6 +3318,19 @@ export class LlmClient {
     const promises = this.pendingMemoryTaskPromises;
     this.pendingMemoryTaskPromises = [];
     return promises;
+  }
+
+  getPendingMemoryTaskPromises(): Array<Promise<number>> {
+    return [...this.pendingMemoryTaskPromises];
+  }
+
+  removePendingMemoryTaskPromises(
+    promises: ReadonlyArray<Promise<number>>,
+  ): void {
+    const completed = new Set(promises);
+    this.pendingMemoryTaskPromises = this.pendingMemoryTaskPromises.filter(
+      (promise) => !completed.has(promise),
+    );
   }
 
   recordCompletedToolCall(

@@ -121,9 +121,13 @@ function getNumericExitCode(errorCode: string | number): number {
 // caller's process.exit fires.
 let exiting = false;
 
-async function exitAfterCleanup(code: number): Promise<never> {
+async function exitAfterCleanup(
+  code: number,
+  onExitCommitted?: () => void,
+): Promise<never> {
   if (exiting) return new Promise<never>(() => {});
   exiting = true;
+  onExitCommitted?.();
   await runExitCleanup();
   // `return` so process.exit's `never` narrows the function's terminating
   // statement — without it TS reports "function returning 'never' cannot
@@ -262,7 +266,10 @@ export function handleToolError(
 /**
  * Handles cancellation/abort signals consistently.
  */
-export async function handleCancellationError(config: Config): Promise<never> {
+export async function handleCancellationError(
+  config: Config,
+  onExitCommitted?: () => void,
+): Promise<never> {
   const cancellationError = new FatalCancellationError('Operation cancelled.');
 
   if (config.getOutputFormat() === OutputFormat.JSON) {
@@ -276,7 +283,7 @@ export async function handleCancellationError(config: Config): Promise<never> {
   } else {
     writeStderrLine(cancellationError.message);
   }
-  return exitAfterCleanup(cancellationError.exitCode);
+  return exitAfterCleanup(cancellationError.exitCode, onExitCommitted);
 }
 
 /**
@@ -331,6 +338,7 @@ export async function handleMaxTurnsExceededError(
 export async function handleBudgetExceededError(
   config: Config,
   exceeded: BudgetExceeded,
+  onExitCommitted?: () => void,
 ): Promise<never> {
   const fatal = new FatalBudgetExceededError(exceeded.message);
   if (config.getOutputFormat() === OutputFormat.JSON) {
@@ -339,5 +347,5 @@ export async function handleBudgetExceededError(
   } else {
     writeStderrLine(fatal.message);
   }
-  return exitAfterCleanup(fatal.exitCode);
+  return exitAfterCleanup(fatal.exitCode, onExitCommitted);
 }
