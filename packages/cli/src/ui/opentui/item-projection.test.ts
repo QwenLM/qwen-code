@@ -1070,7 +1070,11 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
   it('routes the special kinds through projectSpecialItemText as info rows', () => {
     expect(
       projectItemToStreamEvent({ type: 'about', systemInfo: {} as never }, ctx),
-    ).toEqual({ type: 'info', text: expect.stringContaining('Status') });
+    ).toEqual({
+      type: 'info',
+      text: expect.stringContaining('Status'),
+      historyIsSynthetic: false,
+    });
     expect(
       projectItemToStreamEvent(
         {
@@ -1084,7 +1088,11 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
         },
         ctx,
       ),
-    ).toEqual({ type: 'info', text: 'Compressing chat history' });
+    ).toEqual({
+      type: 'info',
+      text: 'Compressing chat history',
+      historyIsSynthetic: false,
+    });
     expect(
       projectItemToStreamEvent({ type: 'stats', duration: '9m' }, ctx)?.type,
     ).toBe('info');

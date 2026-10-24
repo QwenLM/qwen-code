@@ -49,6 +49,7 @@ import { levelLabel } from '../utils/skill-level-label.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { redactProxy } from '../systemInfoFields.js';
+import { isSyntheticHistoryItem } from '../utils/historyUtils.js';
 
 /** Runtime state the host supplies for items that read it in ink. */
 export interface ItemProjectionContext {
@@ -1126,7 +1127,15 @@ export function projectItemToStreamEvent(
 ): OpenTuiStreamEvent | null {
   const viaSpecialText = (): OpenTuiStreamEvent | null => {
     const text = projectSpecialItemText(item, ctx);
-    return text === null ? null : { type: 'info', text };
+    return text === null
+      ? null
+      : {
+          type: 'info',
+          text,
+          ...(isSyntheticHistoryItem(item)
+            ? {}
+            : { historyIsSynthetic: false }),
+        };
   };
   switch (item.type) {
     case 'user':

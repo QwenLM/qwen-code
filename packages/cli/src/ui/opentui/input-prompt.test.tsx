@@ -3078,6 +3078,23 @@ describe('OpenTuiInputPrompt caret', () => {
 });
 
 describe('composer admission and attachment ownership', () => {
+  it('routes Ctrl+Y without submitting or replacing the current draft', async () => {
+    const retry = vi.fn();
+    const submit = vi.fn(() => true);
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={submit}
+        userMessages={[]}
+        onRetry={retry}
+      />,
+    );
+    await typeText('successor draft');
+    await press('y', true);
+    expect(retry).toHaveBeenCalledOnce();
+    expect(submit).not.toHaveBeenCalled();
+    expect(currentEditor().plainText).toBe('successor draft');
+  });
+
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
