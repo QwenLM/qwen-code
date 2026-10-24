@@ -36,13 +36,24 @@ function setup() {
   const rewindRecording = vi.fn(() => {
     order.push('record');
   });
-  const getSnapshots = vi.fn(() => ['before', 'first', 'second']);
+  const snapshots = [
+    { promptId: 'p1' },
+    { promptId: 'p2' },
+    { promptId: 'p3' },
+  ];
+  const getSnapshots = vi.fn(() => snapshots);
+  const getRewindTurnIndex = vi.fn((promptId: string) =>
+    snapshots.findIndex((snapshot) => snapshot.promptId === promptId),
+  );
   const client = { getHistoryShallow: () => api, truncateHistory };
   const config = {
     getShellExecutionSandbox: () => undefined,
     getLlmClient: vi.fn(() => client),
     getFileHistoryService: () => ({ rewind, getSnapshots }),
-    getChatRecordingService: () => ({ rewindRecording }),
+    getChatRecordingService: vi.fn(() => ({
+      rewindRecording,
+      getRewindTurnIndex,
+    })),
   } as unknown as Config;
   const commit = vi.fn(() => {
     order.push('ui');
@@ -55,12 +66,15 @@ function setup() {
     truncateHistory,
     rewindRecording,
     getSnapshots,
+    getRewindTurnIndex,
+    snapshots,
+    api,
     commit,
   };
 }
 
 describe('shared rewind transaction', () => {
-  it('uses identified duplicate text and real-user count, committing UI before the recording branch', async () => {
+  it('uses identified duplicate text and the recorded boundary, committing UI before the recording branch', async () => {
     const h = setup();
     const result = await rewindSession(
       h.config,
@@ -79,7 +93,7 @@ describe('shared rewind transaction', () => {
     expect(h.rewindRecording).toHaveBeenCalledExactlyOnceWith(
       1,
       { truncatedCount: 1 },
-      ['before', 'first'],
+      h.snapshots.slice(0, 2),
     );
     expect(h.order).toEqual(['files', 'core', 'ui', 'record']);
     expect(result).toEqual({
@@ -218,7 +232,89 @@ describe('shared rewind transaction', () => {
     expect(h.rewindRecording).toHaveBeenCalledExactlyOnceWith(
       1,
       { truncatedCount: 7 },
-      ['before', 'first'],
+      h.snapshots.slice(0, 2),
     );
+  });
+
+  it('retains hidden checkpoints through the identity-based recorded boundary', async () => {
+    const h = setup();
+    const snapshots = [
+      { promptId: 'p1' },
+      { promptId: 'evicted-record' },
+      { promptId: 'hidden-image' },
+      { promptId: 'p2' },
+      { promptId: 'p3' },
+    ];
+    h.getSnapshots.mockReturnValue(snapshots);
+    h.getRewindTurnIndex.mockImplementation((id) => (id === 'p2' ? 3 : -1));
+    await rewindSession(
+      h.config,
+      h.history,
+      h.history[3],
+      'both',
+      h.commit,
+      () => true,
+    );
+    expect(h.rewindRecording).toHaveBeenCalledExactlyOnceWith(
+      3,
+      { truncatedCount: 1 },
+      snapshots.slice(0, 4),
+    );
+  });
+
+  it.each([
+    'missing-record',
+    'duplicate-checkpoint',
+    'unlinked-legacy',
+  ] as const)(
+    'refuses %s before changing files or conversation',
+    async (scenario) => {
+      const h = setup();
+      if (scenario === 'missing-record') {
+        h.getRewindTurnIndex.mockReturnValue(-1);
+      } else if (scenario === 'duplicate-checkpoint') {
+        h.getSnapshots.mockReturnValue([
+          { promptId: 'p2' },
+          { promptId: 'p2' },
+        ]);
+      } else {
+        const key = 'legacy-record:target';
+        h.history[3] = { id: 4, type: 'user', text: 'same', rewindId: key };
+        markApiHistoryPrompt(h.api[2], key);
+        h.getSnapshots.mockReturnValue([{ promptId: 'unlinked' }]);
+        h.getRewindTurnIndex.mockImplementation((id) => (id === key ? 3 : -1));
+      }
+      const result = await rewindSession(
+        h.config,
+        h.history,
+        h.history[3],
+        'both',
+        h.commit,
+        () => true,
+      );
+      expect(result.messages).toEqual([
+        { type: 'error', text: expect.stringContaining('no unique') },
+      ]);
+      expect(h.rewind).not.toHaveBeenCalled();
+      expect(h.truncateHistory).not.toHaveBeenCalled();
+      expect(h.commit).not.toHaveBeenCalled();
+      expect(h.rewindRecording).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps conversation rewind available without a recorder', async () => {
+    const h = setup();
+    vi.mocked(h.config.getChatRecordingService).mockReturnValue(undefined);
+    await rewindSession(
+      h.config,
+      h.history,
+      h.history[3],
+      'conversation',
+      h.commit,
+      () => true,
+    );
+    expect(h.truncateHistory).toHaveBeenCalledExactlyOnceWith(2);
+    expect(h.commit).toHaveBeenCalled();
+    expect(h.rewindRecording).not.toHaveBeenCalled();
   });
 });

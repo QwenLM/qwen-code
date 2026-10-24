@@ -28,7 +28,7 @@ checkpoint writer 保存原逻辑 call ID，实际执行参数可被合法 hook 
 
 复用已有 active branch、topology fence、rewind record、strict append 和 metadata projection。唯一解析已持久的原 assistant-call anchor，保留完整 message、media 和兄弟调用。仅将所选重放的实际新结果以原逻辑 ID 发布；旧结果/回答离开 active ancestry，原 raw records 仍物理保留。未重放兄弟保持真实 missing/error 或实际 cancellation，不伪造 success；不悄悄引入 single-pending-only 拒绝策略。
 
-strict write 部分失败时保持真实 persisted cursor。若 rewind 已落盘而 NEW result 写入失败，应报告真实 partial branch，不宣称 atomic rollback，也不将未持久 result UUID 当 cursor。fence 释放时，buffered successor records 必须保持实际重新挂接的 topology、turn boundaries、title 和 snapshots。session、owner、writer lease、prompt 和 metadata guard 均绑定到捕获的操作。
+strict write 部分失败时保持真实 persisted cursor。若 rewind 已落盘而 NEW result 写入失败，应报告真实 partial branch，不宣称 atomic rollback，也不将未持久 result UUID 当 cursor。fence 释放时，buffered successor records 必须保持实际重新挂接的 topology、turn boundaries、title 和 snapshots。录制的提示身份与父边界须从同一批保留记录重建，确保后续提示的普通回退保留已恢复的祖先链。session、owner、writer lease、prompt 和 metadata guard 均绑定到捕获的操作。
 
 ## Confirmation 消费者
 

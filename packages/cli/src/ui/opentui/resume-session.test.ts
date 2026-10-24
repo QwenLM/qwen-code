@@ -17,7 +17,7 @@ import {
   resumeEventsFromConfig,
   resumeEventsFromSession as replaySession,
 } from './resume-session.js';
-import { foldLiveEvent } from './live-session-model.js';
+import { foldLiveEvent, rewindBoundaryHistory } from './live-session-model.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 
@@ -171,6 +171,7 @@ describe('opentui resume mapping', () => {
           id: expect.any(Number),
           type: 'user',
           text: '读一下 README',
+          rewindId: 'legacy-record:0',
         },
         historyId: expect.any(Number),
         promptId: undefined,
@@ -233,6 +234,25 @@ describe('opentui resume mapping', () => {
       },
       { type: 'done' },
     ]);
+  });
+
+  it('preserves recovered legacy identity through the displayed rewind boundary', () => {
+    const events = resumeEventsFromSession({
+      conversation: { messages: sampleMessages() },
+    });
+    const items = events.reduce(
+      (history, event) => foldLiveEvent(history, event),
+      [] as ReturnType<typeof foldLiveEvent>,
+    );
+    const boundary = rewindBoundaryHistory(items).find(
+      (item) => item.type === 'user',
+    );
+    expect(boundary).toMatchObject({
+      type: 'user',
+      text: '读一下 README',
+      rewindId: 'legacy-record:0',
+    });
+    expect(boundary).not.toHaveProperty('promptId', expect.any(String));
   });
 
   it('carries FileDiff tool results as structured diff events', () => {
@@ -490,6 +510,7 @@ describe('opentui resume mapping', () => {
         id: expect.any(Number),
         type: 'user',
         text: '读一下 README',
+        rewindId: 'legacy-record:0',
       },
       historyId: expect.any(Number),
       promptId: undefined,

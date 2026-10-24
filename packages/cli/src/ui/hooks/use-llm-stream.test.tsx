@@ -113,6 +113,13 @@ const MockedLlmClientClass = vi.hoisted(() =>
     this.getHistoryFunctionResponseIds = vi
       .fn()
       .mockReturnValue(new Set<string>());
+    // Same production-path rationale as getHistoryFunctionResponseIds:
+    // default to "no synthesized placeholders in history" so the dedup
+    // dispatcher keeps its old drop behavior unless a test opts in.
+    this.getSynthesizedRepairCallIds = vi
+      .fn()
+      .mockReturnValue(new Set<string>());
+    this.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(false);
     // Stream-side duplicate provider-id replay detection consults the
     // fingerprint map; default to empty (no handled calls in history).
     this.getHistoryToolCallFingerprints = vi
@@ -10582,12 +10589,13 @@ describe('useLlmStream', () => {
   });
 
   it('drops a late tool result whose callId is already paired in chat.history (Race A dedup)', async () => {
-    // Race A repro: the chat-internal repair pass already synthesized a
-    // functionResponse for this callId on the Retry push (because the
-    // partial-tool_use turn was orphan when Ctrl+Y landed). The live
-    // scheduler's late real result must NOT also be submitted, otherwise
-    // the wire payload would carry two functionResponse parts for the
-    // same callId and the second one would land as an orphan tool_result.
+    // Race A repro, DROP side of the boundary this PR introduces: history
+    // already carries a GENUINE functionResponse for this callId (recorded
+    // by the earlier push) and `getSynthesizedRepairCallIds` keeps its
+    // default empty Set, so the live scheduler's late real result must NOT
+    // be submitted -- otherwise the wire payload would carry two
+    // functionResponse parts for the same callId and the second one would
+    // land as an orphan tool_result.
     // The dedup MUST run regardless of `isResponding`, because the
     // scheduler's `onAllToolCallsComplete` is single-shot and would
     // otherwise leave the tool stuck in `completed-but-not-submitted`.
@@ -10628,9 +10636,9 @@ describe('useLlmStream', () => {
     } as unknown as TrackedCompletedToolCall;
 
     const client = new MockedLlmClientClass(mockConfig);
-    // Simulate the chat-internal repair pass having already planted a
-    // synthetic functionResponse for the same callId on the previous
-    // (Retry) push. The dedup dispatcher consults
+    // History already answers this callId with a genuine response from the
+    // previous (Retry) push, so this is the drop branch: the dispatcher
+    // must not offer the chat a swap. The dedup dispatcher consults
     // `getHistoryFunctionResponseIds` first; we override the default
     // empty-Set mock to return the matching callId so the fast path
     // is what production code exercises in this test (instead of
@@ -10661,7 +10669,7 @@ describe('useLlmStream', () => {
               id: 'call_race_A',
               name: 'read_file',
               response: {
-                error: 'Tool execution result was not recorded',
+                output: 'already-recorded file contents',
               },
             },
           },
@@ -10722,8 +10730,341 @@ describe('useLlmStream', () => {
       path: '/tmp/x.txt',
     });
 
-    // No follow-up submission: the synthetic in history already closes
+    // Widening `replaceableTools` to every deduped tool -- i.e. dropping
+    // the `synthesizedRepairCallIds.has(...)` filter -- turns this red:
+    // a genuine duplicate would then be offered to the replace path.
+    expect(client.replaceSynthesizedToolResponse).not.toHaveBeenCalled();
+
+    // No follow-up submission: the response already in history closes
     // the tool_use ↔ tool_result pair.
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('replaces a synthesized orphan-repair placeholder with the late real tool result (issue #15297)', async () => {
+    // Race C + interleaved send: the stream died after the functionCall
+    // chunks, a later send's inline repair synthesized the placeholder,
+    // and only then did the scheduler's real result complete. The
+    // placeholder is the only thing answering the callId, so the real
+    // result must REPLACE it (and be recorded) instead of being dropped
+    // — otherwise the model believes a successful tool "was not
+    // recorded" and re-applies edits that already landed.
+    const lateRealParts = [
+      {
+        functionResponse: {
+          id: 'call_15297',
+          name: 'edit',
+          response: { output: 'Edit applied' },
+        },
+      },
+    ];
+    const lateRealResult = {
+      request: {
+        callId: 'call_15297',
+        name: 'edit',
+        args: { path: '/tmp/x.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-15297',
+      },
+      status: 'success',
+      responseSubmittedToLlm: false,
+      response: {
+        callId: 'call_15297',
+        responseParts: lateRealParts,
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'edit',
+        displayName: 'Edit',
+        description: 'Edit a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'edit /tmp/x.txt',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    const client = new MockedLlmClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_15297']));
+    // The answering response is the synthesized repair placeholder, not
+    // a genuine result.
+    client.getSynthesizedRepairCallIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_15297']));
+    client.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(true);
+    const recordToolResult = vi.fn();
+    mockConfig.getChatRecordingService = vi
+      .fn()
+      .mockReturnValue({ recordToolResult });
+    mockUseDualOutput.mockReturnValue(mockDualOutput);
+    mockDualOutput.emitToolResult.mockClear();
+    // Pin the finalized value distinctly from the raw scheduler response.
+    // `finalizeToolResponses` returns entries untouched when no batch
+    // budget is configured, so without this the two are the same array by
+    // identity and the assertions below cannot tell them apart. In
+    // production an over-budget late result is truncated and its overflow
+    // persisted, so splicing or recording `response.responseParts` instead
+    // of the finalizer's `entry.responseParts` would put the untruncated
+    // payload back on the wire and defeat the batch budget.
+    const finalizedParts = [
+      {
+        functionResponse: {
+          id: 'call_15297',
+          name: 'edit',
+          response: { output: 'Edit applied (finalized)' },
+        },
+      },
+    ];
+    mockFinalizeToolResponses.mockResolvedValueOnce([
+      {
+        callId: 'call_15297',
+        toolName: 'edit',
+        responseParts: finalizedParts,
+        persistedOutputFiles: ['out.txt'],
+        artifacts: [],
+      },
+    ]);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([lateRealResult]);
+      }
+    });
+
+    // The placeholder is swapped for the finalized real parts in place…
+    expect(client.replaceSynthesizedToolResponse).toHaveBeenCalledWith(
+      'call_15297',
+      finalizedParts,
+    );
+    // …the real result reaches the transcript (the drop path never
+    // records, which is what produced phantom unanswered calls)…
+    expect(recordToolResult).toHaveBeenCalledWith(
+      finalizedParts,
+      expect.objectContaining({
+        callId: 'call_15297',
+        status: 'success',
+        persistedOutputFiles: ['out.txt'],
+      }),
+      undefined,
+    );
+    // …and the sidecar sees it too — every other completion path emits,
+    // so a stream-json consumer must not lose the late real result.
+    expect(mockDualOutput.emitToolResult).toHaveBeenCalledWith(
+      lateRealResult.request,
+      lateRealResult.response,
+    );
+    // …and the scheduler bookkeeping still reflects the executed tool.
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['call_15297']);
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('edit', {
+      path: '/tmp/x.txt',
+    });
+    // Replacement keeps the pair closed in place — no extra send.
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  // The two repair-dispatcher tests below differ only in callId/name/args,
+  // so build the completed-tool shape once.
+  const lateCompletedTool = (
+    callId: string,
+    name: string,
+    args: Record<string, unknown>,
+    output: string,
+  ) =>
+    ({
+      request: {
+        callId,
+        name,
+        args,
+        isClientInitiated: false,
+        prompt_id: `prompt-${callId}`,
+      },
+      status: 'success',
+      responseSubmittedToLlm: false,
+      response: {
+        callId,
+        responseParts: [
+          { functionResponse: { id: callId, name, response: { output } } },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name,
+        displayName: name,
+        description: name,
+        build: vi.fn(),
+      },
+      invocation: { getDescription: () => `${name} ${callId}` },
+    }) as unknown as TrackedCompletedToolCall;
+
+  it('skips the placeholder replacement when the session swaps during finalize', async () => {
+    // `finalizeToolResponses` is awaited between reading the synthesized
+    // set and splicing history (it can persist overflow output to disk),
+    // and `recordToolResult` resolves its session at write time. A /clear
+    // or /resume landing inside that await leaves the captured chat
+    // abandoned, so without the `isCurrentSession()` guard the abandoned
+    // session's result would be recorded into the NEW session's
+    // transcript. The ids fall through to the drop bookkeeping instead.
+    const late = lateCompletedTool(
+      'call_15297',
+      'edit',
+      { path: '/tmp/x.txt' },
+      'Edit applied',
+    );
+    const client = new MockedLlmClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_15297']));
+    client.getSynthesizedRepairCallIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_15297']));
+    client.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(true);
+    const recordToolResult = vi.fn();
+    mockConfig.getChatRecordingService = vi
+      .fn()
+      .mockReturnValue({ recordToolResult });
+    // Flip the session identity inside the finalize await, after
+    // `handleCompletedTools` captured `sessionId`.
+    mockFinalizeToolResponses.mockImplementationOnce(async () => {
+      mockConfig.getSessionId = () => 'swapped-session-id';
+      return [
+        {
+          callId: 'call_15297',
+          toolName: 'edit',
+          responseParts: late.response.responseParts,
+        },
+      ];
+    });
+
+    const { completeToolRound } = renderTestHook([], client);
+    await completeToolRound([late]);
+
+    expect(client.replaceSynthesizedToolResponse).not.toHaveBeenCalled();
+    expect(recordToolResult).not.toHaveBeenCalled();
+    // The dedup bookkeeping still runs, so the scheduler unblocks and the
+    // locally executed tool is still counted.
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['call_15297']);
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('edit', {
+      path: '/tmp/x.txt',
+    });
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('routes a mixed late-result batch: replaces the acknowledged placeholder, drops the refused one and the genuine duplicate', async () => {
+    // One batch, one tool per dispatcher branch:
+    // - `call_replaced`: synthesized placeholder, chat accepts the swap ->
+    //   splice + transcript record + sidecar emit.
+    // - `call_refused`: the synthesized set names it, but the chat's
+    //   splice-time re-check refuses (history was rewritten during the
+    //   await). Without the early return it would gain a second durable
+    //   tool result for one call and vanish from the `[REPAIR] Dropping`
+    //   breadcrumb.
+    // - `call_genuine`: only in `getHistoryFunctionResponseIds`, so the
+    //   `synthesizedRepairCallIds.has(...)` filter must keep it out of the
+    //   replace path entirely.
+    const replaced = lateCompletedTool(
+      'call_replaced',
+      'edit',
+      { path: '/tmp/a.txt' },
+      'A applied',
+    );
+    const refused = lateCompletedTool(
+      'call_refused',
+      'edit',
+      { path: '/tmp/b.txt' },
+      'B applied',
+    );
+    const genuine = lateCompletedTool(
+      'call_genuine',
+      'read_file',
+      { path: '/tmp/c.txt' },
+      'C contents',
+    );
+    const client = new MockedLlmClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(
+        new Set(['call_replaced', 'call_refused', 'call_genuine']),
+      );
+    client.getSynthesizedRepairCallIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_replaced', 'call_refused']));
+    client.replaceSynthesizedToolResponse = vi.fn(
+      (callId: string) => callId === 'call_replaced',
+    );
+    const recordToolResult = vi.fn();
+    mockConfig.getChatRecordingService = vi
+      .fn()
+      .mockReturnValue({ recordToolResult });
+    mockUseDualOutput.mockReturnValue(mockDualOutput);
+    mockDualOutput.emitToolResult.mockClear();
+
+    const { completeToolRound } = renderTestHook([], client);
+    await completeToolRound([replaced, refused, genuine]);
+
+    // Only the ids the synthesized set named are offered to the chat;
+    // dropping the filter turns the second assertion red.
+    expect(client.replaceSynthesizedToolResponse).toHaveBeenCalledTimes(2);
+    expect(client.replaceSynthesizedToolResponse).not.toHaveBeenCalledWith(
+      'call_genuine',
+      expect.anything(),
+    );
+    // The refused id is neither recorded nor emitted: deleting the
+    // replacement-refused early return turns both counts red.
+    expect(recordToolResult).toHaveBeenCalledTimes(1);
+    expect(recordToolResult).toHaveBeenCalledWith(
+      replaced.response.responseParts,
+      expect.objectContaining({ callId: 'call_replaced', status: 'success' }),
+      undefined,
+    );
+    expect(mockDualOutput.emitToolResult).toHaveBeenCalledTimes(1);
+    expect(mockDualOutput.emitToolResult).toHaveBeenCalledWith(
+      replaced.request,
+      replaced.response,
+    );
+    // All three still get the dedup bookkeeping.
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+      'call_replaced',
+      'call_refused',
+      'call_genuine',
+    ]);
+    expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(3);
     expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 

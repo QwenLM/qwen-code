@@ -840,8 +840,8 @@ describe('managed session per-kind rules', () => {
   });
 
   it('registers the v1 domains including file history and session source', () => {
-    expect(MANAGED_SESSION_DOMAINS).toHaveLength(34);
-    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(34);
+    expect(MANAGED_SESSION_DOMAINS).toHaveLength(35);
+    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(35);
     expect(MANAGED_SESSION_DOMAINS).toContain('session_command');
   });
 

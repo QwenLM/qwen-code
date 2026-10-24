@@ -37,7 +37,10 @@ import {
 import * as processLiveness from '../utils/process-liveness.js';
 import { SessionService } from './sessionService.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
-import { buildApiHistoryFromConversation } from './session-api-history.js';
+import {
+  buildApiHistoryFromConversation,
+  getRecordRewindId,
+} from './session-api-history.js';
 import { serializeSnapshot } from './fileHistoryService.js';
 import {
   getSessionWriterLockPath,
@@ -3343,6 +3346,53 @@ describe('restore checkpoint branch on confirmed real transcript bytes', () => {
       await recorder.close().catch(() => undefined);
     }
   }
+
+  it('keeps retained ancestry when a new prompt is rewound after restoring a tool branch', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      const original = await readRecords(fixture.transcriptPath);
+      const discarded = original.find(
+        (record) =>
+          record.type === 'user' &&
+          record.message?.parts?.some(
+            (part) => part.text === 'DISCARDED_LATER_USER',
+          ),
+      );
+      expect(discarded).toBeDefined();
+      const discardedId = getRecordRewindId(discarded!);
+      expect(discardedId).toBeDefined();
+      expect(await recorder.restoreToolBranch(input)).toBe(true);
+      expect(recorder.getRewindTurnIndex(input.promptId!)).toBe(0);
+      expect(recorder.getRewindTurnIndex(discardedId!)).toBe(-1);
+
+      const nextPromptId = `${input.sessionId}########2`;
+      recorder.recordUserMessage(
+        'NEXT_AFTER_RESTORE',
+        undefined,
+        undefined,
+        nextPromptId,
+      );
+      const index = recorder.getRewindTurnIndex(nextPromptId);
+      expect(index).toBe(1);
+      recorder.rewindRecording(index, { truncatedCount: 1 }, []);
+      recorder.recordUserMessage('SUCCESSOR_AFTER_REWIND');
+      await recorder.flush();
+      await recorder.close();
+
+      const active = prepareTranscriptRecords(
+        await readRecords(fixture.transcriptPath),
+      ).records as ChatRecord[];
+      const resumed = await sessionServiceFor(fixture).loadSession(
+        input.sessionId,
+      );
+      expect(resumed?.conversation.messages).toEqual(active);
+      const text = JSON.stringify(resumed?.conversation.messages);
+      expect(text).toContain('ORIGINAL_USER');
+      expect(text).toContain('NEW_A_ACTUAL_NOT_OLD');
+      expect(text).toContain('SUCCESSOR_AFTER_REWIND');
+      expect(text).not.toContain('DISCARDED_');
+      expect(text).not.toContain('NEXT_AFTER_RESTORE');
+    });
+  });
 
   it('retains all original parallel call parts, persists only selected NEW result and excludes old sibling success', async () => {
     await restoreFixture(async ({ fixture, recorder, input }) => {
