@@ -70,6 +70,9 @@ jobs:
       # record to the workflow's aggregate issue downstream.
       signature_title: '${{ steps.summary.outputs.signature_title }}'
       test_markers: '${{ steps.summary.outputs.test_markers }}'
+      # The newer run at main's tip had not settled when this report was
+      # prepared. The issue is still filed, with a note saying so.
+      provisional: '${{ steps.live.outputs.provisional }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -96,6 +99,7 @@ jobs:
         run: |-
           set -euo pipefail
           superseded=false
+          provisional=false
           if live_attempt="$(
             gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
               --jq '.run_attempt'
@@ -114,15 +118,26 @@ jobs:
           # repair issue for a head main has already replaced, which is how
           # #15259 was filed after #15128 fixed its host-lock timeout.
           #
-          # The successor must also be able to report the result. The job gate
-          # above admits only `failure` conclusions, so a run that ends
+          # Only a SETTLED successor can own the result. The job gate above
+          # admits only `failure` conclusions, so a successor that ends
           # cancelled, timed_out, skipped or startup_failure never re-enters
           # this workflow; crediting its mere existence would drop the only
-          # report of a real regression. A failed successor reports itself, and
-          # a queued or in-progress one is a genuine deferral. A path-filtered
-          # push arm (SDK Python) or a `[skip ci]` commit leaves no run at the
-          # new tip at all, and that also reports here. Read failures keep the
-          # old fail-open reporting.
+          # report of a real regression. A completed success means the tree is
+          # green at the tip, and a completed failure reports itself.
+          #
+          # A queued or in-progress successor proves nothing yet, and waiting
+          # for it is not possible here: this job runs on a pool that queued it
+          # for 20-100 minutes (#15470), so the tip's run is usually still
+          # young when the report is prepared, and the successor's own re-entry
+          # only covers the failure conclusion. Reporting is therefore the
+          # lesser mistake, marked provisional: the per-signature route files
+          # those for a human to triage and never routes them to autofix
+          # (#15405), so a stale one costs a close, while a dropped one costs
+          # the regression.
+          #
+          # A path-filtered push arm (SDK Python) or a `[skip ci]` commit
+          # leaves no run at the new tip at all, and that also reports here.
+          # Read failures keep the old fail-open reporting.
           #
           # Every attempt is compared, not just the first: #15259 itself was
           # filed by such an attempt-2 recovery run. The successor check is
@@ -141,7 +156,7 @@ jobs:
                   successor_owns=false
                   case "${successor_status}" in
                     queued | in_progress)
-                      successor_owns=true
+                      provisional=true
                       ;;
                     completed)
                       case "${successor_conclusion}" in
@@ -153,6 +168,8 @@ jobs:
                     superseded=true
                     echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA}, but main is now ${tip}; the newer push run owns its result."
                     echo "Superseded main-CI failure: run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA}, but main is now ${tip}; the newer push run owns the result." >> "${GITHUB_STEP_SUMMARY}"
+                  elif [[ "${provisional}" == 'true' ]]; then
+                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}; its newer push run is ${successor_status}, so this report is provisional."
                   elif [[ "${successor_status}" == 'none' ]]; then
                     echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but workflow ${WORKFLOW_ID} has no newer push run there; reporting this run."
                   else
@@ -167,6 +184,7 @@ jobs:
             fi
           fi
           echo "superseded=${superseded}" >> "${GITHUB_OUTPUT}"
+          echo "provisional=${provisional}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Select the failure destination'
         id: 'destination'
@@ -457,9 +475,20 @@ jobs:
           RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
           SIGNATURE_TITLE: '${{ needs.analyze.outputs.signature_title }}'
           TEST_MARKERS: '${{ needs.analyze.outputs.test_markers }}'
+          PROVISIONAL: '${{ needs.analyze.outputs.provisional }}'
           RUN_AT: '${{ github.event.workflow_run.updated_at }}'
         run: |-
           set -euo pipefail
+          if [[ "${PROVISIONAL}" == 'true' ]]; then
+            # The reader needs the caveat before the finding, and both the
+            # per-signature and the aggregate route build their body from this
+            # variable.
+            ISSUE_BODY="$(
+              printf '%s\n\n%s' \
+                '> **Provisional.** Main advanced past this head while the report was being prepared, and the newer push run at the tip had not finished. If that run passes, this failure is already covered and this issue can be closed.' \
+                "${ISSUE_BODY}"
+            )"
+          fi
           title="Main CI failed: ${WORKFLOW_NAME}"
           marker="<!-- main-ci-failure-aggregate:${WORKFLOW_ID} -->"
           # Embedded in every per-signature filing (and accreted onto every
