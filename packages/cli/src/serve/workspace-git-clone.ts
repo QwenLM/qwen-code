@@ -334,8 +334,8 @@ export const spawnGitClone: GitCloneProcess = {
           '-c',
           'credential.helper=!f() { echo username="$QWEN_GIT_USERNAME"; echo password="$QWEN_GIT_PASSWORD"; }; f',
         );
-        env.QWEN_GIT_USERNAME = credentials.username;
-        env.QWEN_GIT_PASSWORD = credentials.password;
+        env['QWEN_GIT_USERNAME'] = credentials.username;
+        env['QWEN_GIT_PASSWORD'] = credentials.password;
       }
       const child = spawn('git', args, {
         stdio: ['ignore', 'ignore', 'pipe'],
