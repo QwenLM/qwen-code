@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.91.0",
+    "version": "1.92.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes."
   },
   "servers": [
@@ -4068,7 +4068,7 @@
         "tags": ["WebShell"],
         "operationId": "changeWebShellSessionApproval",
         "x-qwen-implementation-status": "implemented",
-        "description": "Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable.",
+        "description": "Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads.",
         "requestBody": {
           "required": true,
           "content": {
@@ -7081,7 +7081,7 @@
           },
           "approvalMode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo"],
+            "enum": ["default", "auto", "auto-edit", "yolo"],
             "description": "Current effective approval policy; initialApprovalMode retains the immutable creation policy."
           },
           "modelContext": {
@@ -12112,7 +12112,7 @@
           },
           "approvalMode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo"]
+            "enum": ["default", "auto", "auto-edit", "yolo"]
           },
           "approvalRevision": {
             "type": "integer",
@@ -12124,7 +12124,7 @@
             "type": "array",
             "items": {
               "type": "string",
-              "enum": ["default", "auto-edit", "yolo"]
+              "enum": ["default", "auto", "auto-edit", "yolo"]
             }
           },
           "supported": {
@@ -12137,6 +12137,14 @@
           "planModeSupported": {
             "type": "boolean",
             "description": "Optional deployment capability; missing means false."
+          },
+          "permissionRules": {
+            "$ref": "#/components/schemas/ManagedPermissionRules",
+            "description": "Persisted rules, including when execution capability is unavailable. Omitted when empty."
+          },
+          "permissionRulesSupported": {
+            "type": "boolean",
+            "description": "Owner-authorized Session rule editing is available only with Harness permission-rules/1 support. Missing means false. Rule changes require an idle Session."
           }
         }
       },
@@ -12171,11 +12179,15 @@
           },
           "approvalMode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo"]
+            "enum": ["default", "auto", "auto-edit", "yolo"]
           },
           "planMode": {
             "type": "boolean",
             "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
+          },
+          "permissionRules": {
+            "$ref": "#/components/schemas/ManagedPermissionRules",
+            "description": "Omission preserves the persisted rules. Supplying three empty arrays clears them. Rule edits require an idle Session, and share the approval revision and idempotency receipt with mode changes."
           }
         }
       },
@@ -12193,7 +12205,7 @@
           },
           "approvalMode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo"]
+            "enum": ["default", "auto", "auto-edit", "yolo"]
           },
           "approvalRevision": {
             "type": "integer",
@@ -12207,6 +12219,10 @@
           "planMode": {
             "type": "boolean",
             "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
+          },
+          "permissionRules": {
+            "$ref": "#/components/schemas/ManagedPermissionRules",
+            "description": "Committed rules; omitted when empty. Replayed requests return their original policy receipt."
           }
         }
       },
@@ -12216,7 +12232,7 @@
         "properties": {
           "mode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo"]
+            "enum": ["default", "auto", "auto-edit", "yolo"]
           },
           "revision": {
             "type": "integer",
@@ -12227,6 +12243,10 @@
           "planMode": {
             "type": "boolean",
             "description": "Immutable Plan overlay for this approval selection."
+          },
+          "permissionRules": {
+            "$ref": "#/components/schemas/ManagedPermissionRules",
+            "description": "Immutable rules snapshot for this Turn; omitted when empty."
           }
         }
       },
@@ -13590,6 +13610,44 @@
           }
         },
         "description": "Durable Turn input or cancellation admission. The operation identifies the saved command and remains stable across idempotent retries."
+      },
+      "ManagedPermissionRules": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["allow", "ask", "deny"],
+        "properties": {
+          "allow": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "ask": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "deny": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        },
+        "description": "Session-scoped portable permission-rules/1. Each rule must be trimmed, nonempty, free of control characters, and at most 512 UTF-8 bytes. At most 32 unique strings per list, 64 across all lists and 8192 UTF-8 bytes of compact JSON. Tool names and aliases match whole tools; MCP names may end with a wildcard. Bash/Shell/run_shell_command/monitor command globs and WebFetch/web_fetch(domain:host) are supported; file-path specifiers and arbitrary tool predicates are rejected. Deny takes precedence over ask, then allow, in every mode. Rules do not provide filesystem or process isolation."
       }
     }
   }
