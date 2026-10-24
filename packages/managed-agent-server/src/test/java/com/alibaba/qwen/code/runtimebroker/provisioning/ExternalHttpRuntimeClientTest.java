@@ -145,6 +145,40 @@ class ExternalHttpRuntimeClientTest {
         }
     }
 
+    @Test
+    void boundsRequestAndValidJsonResponseBytes() throws Exception {
+        var response = new AtomicReference<byte[]>();
+        var requests = new java.util.concurrent.atomic.AtomicInteger();
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/runtime/provision", exchange -> {
+            try (exchange) {
+                requests.incrementAndGet();
+                byte[] body = response.get();
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            }
+        });
+        server.start();
+        try {
+            var client = client(server);
+            var oversized = assertThrows(CompletionException.class,
+                    () -> client.provision(Map.of("padding", "x".repeat(64 * 1024))).toCompletableFuture().join());
+            assertEquals(400, ((RuntimeBrokerException) oversized.getCause()).getStatusCode());
+            assertEquals(0, requests.get());
+            int overhead = JsonCodec.encode(Map.of("protocolVersion", 1, "padding", "")).length;
+            response.set(JsonCodec.encode(Map.of("protocolVersion", 1, "padding", "x".repeat(64 * 1024 - overhead))));
+            client.provision(Map.of("protocolVersion", 1)).toCompletableFuture().join();
+            response.set(JsonCodec.encode(Map.of("protocolVersion", 1, "padding", "x".repeat(64 * 1024 + 1 - overhead))));
+            var overflow = assertThrows(CompletionException.class,
+                    () -> client.provision(Map.of("protocolVersion", 1)).toCompletableFuture().join());
+            var failure = (RuntimeBrokerException) overflow.getCause();
+            assertEquals(502, failure.getStatusCode());
+            assertFalse(failure.isRetryable());
+        } finally {
+            server.stop(0);
+        }
+    }
+
     // The request-level timeout is satisfied once headers arrive; a body
     // that then stalls past the deadline is what .orTimeout exists for.
     // The handler needs its own dispatch thread or this test deadlocks.

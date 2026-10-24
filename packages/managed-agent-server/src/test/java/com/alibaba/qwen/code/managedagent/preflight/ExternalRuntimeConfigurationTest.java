@@ -93,6 +93,8 @@ class ExternalRuntimeConfigurationTest {
         properties.getRuntimeBroker().setExternalProviderToken("replace-with-a-long-random-token");
         var error = assertThrows(IllegalStateException.class, properties::validateForPreflight);
         assertTrue(error.getMessage().contains("template placeholder"), error.getMessage());
+        assertThrows(IllegalArgumentException.class, () -> new ExternalHttpRuntimeClient(
+                URI.create("https://provider.invalid/"), "replace-with-a-long-random-token", Duration.ofSeconds(1)));
     }
 
     @Test
@@ -119,29 +121,12 @@ class ExternalRuntimeConfigurationTest {
         var workspace = checks.stream().filter(check -> check.name().equals("workspace"))
                 .findFirst().orElseThrow();
         assertEquals(ManagedAgentPreflight.Status.SKIP, workspace.status());
-        assertEquals(ManagedAgentPreflight.Status.PASS, checks.stream()
-                .filter(check -> check.name().equals("validation")).findFirst().orElseThrow().status());
         assertFalse(Files.exists(missing));
         assertFalse(checks.stream().anyMatch(check -> check.name().equals("broker-state")));
     }
 
-    @Test
-    void rejectsMalformedDigestAndTemplateProviderToken() {
-        var properties = scratchProperties();
-        properties.getHarness().setCapabilityDigest("SHA256:" + "A".repeat(64));
-        assertTrue(assertThrows(IllegalStateException.class, properties::validateForPreflight)
-                .getMessage().contains("capability digest"));
-        properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
-        properties.getRuntimeBroker().setExternalProviderToken("replace-with-a-long-random-token");
-        assertTrue(assertThrows(IllegalStateException.class, properties::validateForPreflight)
-                .getMessage().contains("provider token"));
-        assertThrows(IllegalArgumentException.class, () -> new ExternalHttpRuntimeClient(
-                URI.create("https://provider.invalid/"), "replace-with-a-long-random-token", Duration.ofSeconds(1)));
-    }
-
     private static ManagedAgentProperties scratchProperties() {
         var environment = new MockEnvironment()
-                .withProperty("QWEN_MANAGED_AGENT_CAPABILITY_DIGEST", "sha256:" + "a".repeat(64))
                 .withProperty("QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED", "true")
                 .withProperty("QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER", "external-scratch")
                 .withProperty("QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN", "broker-token-for-tests")

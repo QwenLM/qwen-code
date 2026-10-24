@@ -1073,6 +1073,7 @@ export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN="$QWEN_EXTERNAL_BROKER_TOKEN"
 export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID='external-dev-v1'
 export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY="$QWEN_EXTERNAL_CREDENTIAL_KEY_BASE64"
+export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST="$QWEN_EXTERNAL_CAPABILITY_DIGEST"
 export QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER='external-scratch'
 export QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY='false'
 export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL='https://provider.example/'
@@ -1086,9 +1087,11 @@ export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/workspace'
 
 Keep Workspace files and Shell disabled. Fill the `$QWEN_EXTERNAL_*` variables
 with your own values from a secret store and pick a stable Workspace ID; they
-are placeholders for operator-supplied values, not usable defaults. The
-provider URL must be HTTP(S) without credentials, query or fragment, and the
-cwd is the worker-side path. The provider implements authenticated `provision`
+are placeholders for operator-supplied values, not usable defaults. Set the
+capability digest (`sha256:` plus 64 lowercase hexadecimal characters) even
+with Harness disabled; the embedded Broker requires it. The provider URL must
+be HTTP(S) without credentials, query or fragment, and the cwd is the
+worker-side path. The provider implements authenticated `provision`
 and `observe` routes and must persist its mapping from the Broker's logical
 handle to one immutable physical resource across restarts. There is no release
 route, so a closed Session's worker is not stopped and its provider TTL must be

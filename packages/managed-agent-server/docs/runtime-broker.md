@@ -182,9 +182,10 @@ Transient provider failures stay retryable against the same request and lease, s
 a temporary outage does not invalidate a healthy binding; endpoint or identity
 mismatch does. The provider ID, Workspace ID, Workspace generation, Workspace
 cwd and Harness capability digest are all digested into the handle identity
-described in the design; changing any of them after Sessions have been placed
-invalidates every existing binding, with no unblock path — set them once before
-the first Session. There is deliberately no `release` route. Release can run after an
+described in the design; the lease token is deliberately excluded so rotation
+does not replace identity. Changing any of the frozen inputs after Sessions
+have been placed invalidates every existing binding, with no unblock path —
+set them once before the first Session. There is deliberately no `release` route. Release can run after an
 operation loses its CAS or fails attestation, so it cannot authorize stopping a
 worker another Broker may own. Closing a Session therefore does not stop its
 scratch worker: budget the provider's own TTL and inspect retained resources.

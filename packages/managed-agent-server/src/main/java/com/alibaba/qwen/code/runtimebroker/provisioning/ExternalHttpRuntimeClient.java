@@ -36,7 +36,8 @@ public final class ExternalHttpRuntimeClient implements ExternalRuntimeClient {
                 || base.getFragment() != null) {
             throw new IllegalArgumentException("External Runtime provider URL must be an HTTP(S) URL");
         }
-        if (token == null || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
+        if (token == null || token.startsWith("replace-")
+                || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
             throw new IllegalArgumentException("External Runtime provider token must be at least 16 safe characters");
         }
         if (client == null || client.followRedirects() != HttpClient.Redirect.NEVER
