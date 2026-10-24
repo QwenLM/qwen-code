@@ -200,11 +200,12 @@ export function registerWorkspaceDirectoriesRoutes(
       res.status(200).json({
         v: 1,
         primaryDirectory: runtime.workspaceCwd,
+        // Only the runtime overlay carries a workspace `.env`. A
+        // parent-process runtime without one has no overlay to offer, and the
+        // route must not fall back to the daemon's ambient `process.env`.
         directories: readWorkspaceDirectories(
           runtime.workspaceCwd,
-          runtime.env.mode === 'runtime-overlay'
-            ? (runtime.env.effectiveEnv ?? {})
-            : (runtime.env.effectiveEnv ?? process.env),
+          runtime.env.effectiveEnv ?? {},
           runtime.trusted,
         ),
       });
