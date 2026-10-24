@@ -27,6 +27,19 @@ class SubmitHarnessTurnTest {
     }
 
     @Test
+    void carriesClassifierAndRuleSnapshotsAndOmitsEmptyRules() {
+        var rules = Map.of("allow", List.of("Read"), "ask", List.<String>of(), "deny", List.of("Bash(rm *)"));
+        assertEquals(Map.of("mode", "auto", "revision", 2L, "permissionRules", rules),
+                turn().approvalSelection("auto", 2, false, rules).build().getApprovalSelection());
+        assertThrows(IllegalArgumentException.class, () -> turn().approvalSelection("auto", 0));
+        assertThrows(IllegalArgumentException.class, () -> turn().approvalSelection("auto", 0, false, rules));
+        assertThrows(IllegalArgumentException.class, () -> turn().approvalSelection("default", 0, false, rules));
+        var empty = Map.of("allow", List.<String>of(), "ask", List.<String>of(), "deny", List.<String>of());
+        assertEquals(turn().approvalSelection("default", 1).build().getApprovalSelection(),
+                turn().approvalSelection("default", 1, false, empty).build().getApprovalSelection());
+    }
+
+    @Test
     void hashesEveryInlineAttachmentByteRatherThanOnlyThePromptText() {
         var first = List.<Map<String, Object>>of(Map.of("type", "resource", "resource",
                 Map.of("uri", "managed-input:///a.txt", "mimeType", "text/plain", "text", "first")));
