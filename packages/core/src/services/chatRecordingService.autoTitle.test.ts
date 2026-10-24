@@ -887,6 +887,39 @@ describe('ChatRecordingService - auto-title trigger', () => {
     );
   });
 
+  it('titles a projected session whose ring holds only empty projections', async () => {
+    // R18-1: an attachment-only turn records {displayText: '',
+    // displayProjection: true}, so the 20-slot ring can hold only '' instead
+    // of undefined. The retained text must still substitute, or the session
+    // reports empty_history over a full visible conversation.
+    mockOk('Retained Prompt');
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden model context' }],
+      undefined,
+      { displayText: 'visible prompt', hookContext: 'hidden context' },
+    );
+    for (let index = 0; index < 20; index++) {
+      chatRecordingService.recordUserMessage(
+        [{ text: `attachment ${index}` }],
+        undefined,
+        { displayText: '', displayProjection: true, hookContext: '' },
+      );
+    }
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      'visible prompt',
+    ]);
+
+    await assistantTurn();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      ['visible prompt'],
+      true,
+    );
+  });
+
   it('does not trigger in headless CLI mode (non-interactive, non-ACP)', async () => {
     vi.mocked(mockConfig.isInteractive).mockReturnValue(false);
     vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(false);

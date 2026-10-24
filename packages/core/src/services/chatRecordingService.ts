@@ -1501,11 +1501,6 @@ export class ChatRecordingService {
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
-      if (record.type === 'user' && record.subtype === undefined) {
-        this.trackUserDisplayTextForTitlePayload(
-          record.systemPayload as UserPromptRecordPayload | undefined,
-        );
-      }
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
         const payload = record.systemPayload as
@@ -2280,17 +2275,6 @@ export class ChatRecordingService {
         const active = prepareTranscriptRecords(records)
           .records as ChatRecord[];
         this.rebuildTurnBoundaries(active);
-        this.userDisplayTextsForTitle.length = 0;
-        this.turnTitleStates.length = 0;
-        this.displayProjectionForTitle = false;
-        this.lastProjectionTextForTitle = undefined;
-        for (const record of active) {
-          if (record.type === 'user' && record.subtype === undefined) {
-            this.trackUserDisplayTextForTitlePayload(
-              record.systemPayload as UserPromptRecordPayload | undefined,
-            );
-          }
-        }
         return result;
       });
     } finally {
@@ -2635,7 +2619,7 @@ export class ChatRecordingService {
   getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
     if (
       this.displayProjectionForTitle &&
-      this.userDisplayTextsForTitle.every((text) => text === undefined) &&
+      this.userDisplayTextsForTitle.every((text) => !text) &&
       this.lastProjectionTextForTitle !== undefined
     ) {
       return [this.lastProjectionTextForTitle];
@@ -3520,6 +3504,12 @@ export class ChatRecordingService {
             this.lastProjectionTextForTitle = turn.displayText;
           }
         }
+      } else {
+        // Misaligned per-turn state: keep the flag (fail closed) but never
+        // keep a retained text for a turn this rewind discarded.
+        this.lastProjectionTextForTitle = this.userDisplayTextsForTitle
+          .filter((text) => text !== undefined && text !== '')
+          .at(-1);
       }
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
@@ -3573,7 +3563,9 @@ export class ChatRecordingService {
    *
    * Call this after resuming a session so that subsequent rewinds within
    * the resumed session have correct boundary data. Also updates
-   * `lastRecordUuid` to the last record in the chain.
+   * `lastRecordUuid` to the last record in the chain and re-derives the
+   * title projection state from the same list, keeping its per-turn array
+   * index-aligned with the boundaries.
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.resetExternalRecordIndex();
@@ -3581,6 +3573,13 @@ export class ChatRecordingService {
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
+    // Re-bind title state to this boundary list: a caller can pass fewer
+    // records than the restore state carried (compression-excluded turns),
+    // and stale, misaligned state disables every later rewind re-derivation.
+    this.userDisplayTextsForTitle.length = 0;
+    this.turnTitleStates.length = 0;
+    this.displayProjectionForTitle = false;
+    this.lastProjectionTextForTitle = undefined;
 
     for (let i = 0; i < messages.length; i++) {
       const record = messages[i];
@@ -3597,6 +3596,9 @@ export class ChatRecordingService {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.
         this.turnParentUuids.push(record.parentUuid ?? null);
+        this.trackUserDisplayTextForTitlePayload(
+          record.systemPayload as UserPromptRecordPayload | undefined,
+        );
       }
     }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.

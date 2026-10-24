@@ -2987,6 +2987,58 @@ describe('ChatRecordingService', () => {
       expect(service.hasDisplayProjectionForTitle()).toBe(true);
     });
 
+    it('drops retained title text when the rewind discards its turn', () => {
+      // R18-2: a legacy restore state leaves the per-turn array misaligned.
+      // The flag stays fail-closed, but a retained text whose turn this
+      // rewind discarded must not survive as the sole title input.
+      const service = activateReduced({
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, null],
+        displayProjectionForTitle: true,
+        userDisplayTextsForTitle: ['visible prompt', undefined],
+        lastProjectionTextForTitle: 'visible prompt',
+      });
+
+      service.rewindRecording(0, { truncatedCount: 2 });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(true);
+      expect(service.getUserDisplayTextsForTitle()).toEqual([]);
+    });
+
+    it('realigns title state when a rebuilt boundary list shrinks', () => {
+      // R18-2 trigger 2: a cold-projection restore carries N aligned turns,
+      // then a rebuild sees the M < N post-compression records. The title
+      // state must be rebuilt with the boundaries instead of staying stale
+      // and misaligned, which disables every later rewind re-derivation.
+      const service = activateReduced({
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, null],
+        turnTitleStates: [
+          { projection: true, displayText: 'restored one' },
+          { projection: true, displayText: 'restored two' },
+        ],
+        displayProjectionForTitle: true,
+        userDisplayTextsForTitle: ['restored one', 'restored two'],
+        lastProjectionTextForTitle: 'restored two',
+      });
+
+      service.rebuildTurnBoundaries(
+        resumedChain(null, [
+          'compressed-user',
+          'user',
+          'post-compression turn',
+        ]),
+      );
+
+      expect(service.getUserDisplayTextsForTitle()).not.toContain(
+        'restored two',
+      );
+
+      service.rewindRecording(0, { truncatedCount: 1 });
+
+      expect(service.getUserDisplayTextsForTitle()).toEqual([]);
+    });
+
     it('does not inherit projection mode when the restore state carries none', () => {
       const service = activateReduced({
         lastCompletedUuid: 'plain-leaf',
