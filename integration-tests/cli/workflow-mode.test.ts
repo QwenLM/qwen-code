@@ -83,7 +83,13 @@ describe('DW04: persistent headless Workflow mode', () => {
       messages.filter((message) => message.role === 'user').at(-1)?.content,
     );
   };
-  const args = ['--auth-type', 'openai', '--model', 'fake-model'];
+  const args = [
+    '--auth-type',
+    'openai',
+    '--model',
+    'fake-model',
+    '--chat-recording',
+  ];
 
   it('persists on, resumes it, overrides with off, and resumes saved off', async () => {
     const id = randomUUID();
