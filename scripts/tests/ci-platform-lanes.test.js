@@ -181,7 +181,7 @@ const gateRunsOn = (cond, event) => {
     // evaluates here at the pin and may mis-report its reachability —
     // re-derive this helper's verdict before adding such a gate.
     [/needs\.classify_pr\.outputs\.skip_ci/g, '"false"'],
-    [/needs\.test\.outputs\.ci_profile/g, '"full"'],
+    [/needs\.classify_pr\.outputs\.ci_profile/g, '"full"'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name/g,
       event === 'pull_request' ? '"QwenLM/qwen-code"' : '""',
