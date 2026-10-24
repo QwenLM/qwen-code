@@ -972,7 +972,8 @@ export const useLlmStream = (
     promptId: string;
     ending?: 'aborted' | 'error';
   } | null>(null);
-  const cancelForModRef = useRef<() => void>(() => {});
+  // Whether the quiet cancel `$.turn.abort` asked for ended anything.
+  const cancelForModRef = useRef<() => boolean>(() => false);
   const quietCancelRef = useRef(false);
   // A turn whose stream ends at once may never render as Responding.
   const [modTurnId, setModTurnId] = useState<string>();
@@ -1430,7 +1431,7 @@ export const useLlmStream = (
     }
   }, [streamingState, config, history]);
 
-  const cancelOngoingRequest = useCallback(() => {
+  const cancelOngoingRequest = useCallback((): boolean => {
     // Set for one call by `$.turn.abort`: the same cancel, without its
     // notice, the loop stop or the composer restore.
     const quiet = quietCancelRef.current;
@@ -1441,14 +1442,14 @@ export const useLlmStream = (
         controller.abort();
       }
       detachedToolContinuationAbortControllersRef.current.clear();
-      return;
+      return false;
     }
     if (
       quiet
         ? streamingState === StreamingState.Idle
         : streamingState !== StreamingState.Responding
     ) {
-      return;
+      return false;
     }
     if (modTurnRef.current) modTurnRef.current.ending = 'aborted';
     // Flush throttled stream chunks FIRST so anything sitting in the
@@ -1578,6 +1579,7 @@ export const useLlmStream = (
       setIsResponding(false);
       setShellInputFocused(false);
     }
+    return true;
   }, [
     streamingState,
     addItem,
@@ -1595,7 +1597,7 @@ export const useLlmStream = (
   useLayoutEffect(() => {
     cancelForModRef.current = () => {
       quietCancelRef.current = true;
-      cancelOngoingRequest();
+      return cancelOngoingRequest();
     };
   }, [cancelOngoingRequest]);
 

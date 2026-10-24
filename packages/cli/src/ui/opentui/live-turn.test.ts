@@ -1659,7 +1659,7 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
   const installMods = () => {
     const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
     const startTurn = vi.fn(
-      (_text: string, _signal: AbortSignal, _abort: () => void) => turn,
+      (_text: string, _signal: AbortSignal, _abort: () => boolean) => turn,
     );
     vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
       startTurn,
@@ -1733,8 +1733,9 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
       result.current.submit('queued');
     });
     options(1).onPromptAdmitted?.();
-    act(() => startTurn.mock.calls[0][2]());
+    act(() => expect(startTurn.mock.calls[0][2]()).toBe(true));
     expect(live.signals[0].aborted).toBe(true);
+    expect(startTurn.mock.calls[0][2]()).toBe(false);
     await settle(result);
     expect(turn.complete).toHaveBeenCalledWith('aborted');
     // Unlike Esc, nothing returns to the composer: the queue goes on.

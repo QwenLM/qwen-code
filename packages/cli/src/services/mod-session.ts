@@ -99,7 +99,7 @@ interface RunningTurn {
   id: string;
   sessionId: string;
   startedAt: number;
-  abort: () => void;
+  abort: () => boolean;
   aborting: boolean;
   // The response arriving now, and the last one that finished.
   streaming: string;
@@ -543,12 +543,13 @@ export class ModSession implements ICommandLoader {
    * Starts a main-loop turn once its prompt is admitted, before its first
    * model request. `signal` is the turn's own: cancelling the turn ends its
    * `turn.start` hooks too. `abort` ends the turn as a cancel does, without
-   * the notice a person's cancel leaves; `$.turn.abort` calls it.
+   * the notice a person's cancel leaves, and returns whether it did;
+   * `$.turn.abort` calls it.
    */
   startTurn(
     text: string,
     signal: AbortSignal,
-    abort: () => void,
+    abort: () => boolean,
   ): ModTurn | undefined {
     const hooks = this.runtime?.turnHooks;
     if (!hooks || (!hooks.start && !hooks.complete.length) || this.closing)
@@ -703,9 +704,13 @@ export class ModSession implements ICommandLoader {
       );
     if (turn.aborting)
       throw new Error(`$.turn.abort: ${turnId} is already ending`);
-    logger.debug(`$.turn.abort: cancelled turn ${turnId}`);
     turn.aborting = true;
-    turn.abort();
+    // A turn the host finds already over or cancelled is not the Mod's end.
+    if (!turn.abort()) {
+      turn.aborting = false;
+      throw new Error(`$.turn.abort: ${turnId} is already ending`);
+    }
+    logger.debug(`$.turn.abort: cancelled turn ${turnId}`);
   }
 
   flushLogs(): void {

@@ -13682,7 +13682,7 @@ describe('useLlmStream', () => {
       const installModTurn = () => {
         const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
         const startTurn = vi.fn(
-          (_text: string, _signal: AbortSignal, _abort: () => void) => turn,
+          (_text: string, _signal: AbortSignal, _abort: () => boolean) => turn,
         );
         vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
           ready: Promise.resolve(),
@@ -13761,11 +13761,13 @@ describe('useLlmStream', () => {
           );
 
           act(() => {
-            if (byMod) startTurn.mock.calls[0][2]();
+            if (byMod) expect(startTurn.mock.calls[0][2]()).toBe(true);
             else result.current.cancelOngoingRequest();
           });
           // Either way the turn's own signal ends its turn.start hooks.
           expect(startTurn.mock.calls[0][1].aborted).toBe(true);
+          // A cancelled turn has nothing left for a Mod to end.
+          act(() => expect(startTurn.mock.calls[0][2]()).toBe(false));
 
           await waitFor(() =>
             expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted'),

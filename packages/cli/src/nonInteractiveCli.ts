@@ -581,9 +581,12 @@ export async function runNonInteractive(
     let chatRecordingSettlement: Promise<void> | undefined;
     const settleBeforeTerminalOutput = (): Promise<void> => {
       chatRecordingSettlement ??= (async () => {
-        // An exit that did not reach the answer ended the turn on its way.
+        // An exit that did not reach the answer ended the turn on its way. A
+        // tripped run budget aborts the same controller, but is an error.
         await modTurn?.complete(
-          abortController.signal.aborted ? 'aborted' : 'error',
+          abortController.signal.aborted && !budgetEnforcer.getExceeded()
+            ? 'aborted'
+            : 'error',
         );
         if (ownsModSession) await modSession?.close();
         modSession?.flushLogs();
@@ -2887,7 +2890,11 @@ export async function runNonInteractive(
                     ? ''
                     : (options.humanInput?.text ?? input),
                   abortController.signal,
-                  () => abortController.abort(new ModTurnAbortedError()),
+                  () => {
+                    if (abortController.signal.aborted) return false;
+                    abortController.abort(new ModTurnAbortedError());
+                    return true;
+                  },
                 );
               },
             }),

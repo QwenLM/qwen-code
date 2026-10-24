@@ -165,7 +165,7 @@ export class InteractiveModSession implements ICommandLoader {
   startTurn(
     text: string,
     signal: AbortSignal,
-    abort: () => void,
+    abort: () => boolean,
   ): ModTurn | undefined {
     return this.closing
       ? undefined

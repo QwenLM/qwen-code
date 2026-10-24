@@ -566,7 +566,9 @@ it through and before the first model request. A prompt they block has no turn.
 `e.text` is the prompt as submitted, with pasted text expanded, or `""` for a
 retry or a continuation. `e.turnId` is new for each turn. The model request does
 not wait for the hooks, but the turn's tool middleware and its `turn.complete`
-run after them. Cancelling the turn ends the `turn.start` hooks still running.
+run after them. Cancelling the turn ends the `turn.start` hooks still running,
+including one that calls `$.turn.abort` itself: its code after that call does
+not run.
 
 A prompt longer than 128 KiB as JSON reaches the hooks with its beginning and
 end around the line `[... truncated for Mods ...]`, and `e.isTextTruncated` is

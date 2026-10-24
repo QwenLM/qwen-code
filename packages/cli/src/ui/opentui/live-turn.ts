@@ -388,9 +388,11 @@ export function useOpenTuiLiveTurn(
                       ''),
                 abort.signal,
                 () => {
+                  if (abort.signal.aborted) return false;
                   // Ends the turn as Esc does; nothing returns to the composer.
                   modEnded = true;
                   abort.abort();
+                  return true;
                 },
               );
             },
@@ -470,7 +472,6 @@ export function useOpenTuiLiveTurn(
           );
           setItems(itemsRef.current);
         } else {
-          failed = true;
           apply({ type: 'thinking-end' });
           apply({ type: 'segment-end' });
           apply({

@@ -6571,7 +6571,7 @@ describe('runNonInteractive', () => {
     });
     const installModTurn = () => {
       const order: string[] = [];
-      let abort = () => {};
+      let abort = (): boolean => false;
       let ended: Promise<void> | undefined;
       // Like the real turn, only the first report counts.
       const turn = {
@@ -6583,7 +6583,7 @@ describe('runNonInteractive', () => {
         }),
       };
       const startTurn = vi.fn(
-        (_text: string, _signal: AbortSignal, abortTurn: () => void) => {
+        (_text: string, _signal: AbortSignal, abortTurn: () => boolean) => {
           order.push('start');
           abort = abortTurn;
           return turn;
@@ -6671,7 +6671,9 @@ describe('runNonInteractive', () => {
         const mod = installModTurn();
         admitting(async function* () {
           yield { type: LlmEventType.Content, value: 'Partial' };
-          mod.abort();
+          expect(mod.abort()).toBe(true);
+          // The run is already ending, so a second call ends nothing.
+          expect(mod.abort()).toBe(false);
           yield { type: LlmEventType.UserCancelled } as ServerLlmStreamEvent;
         });
 
@@ -6702,6 +6704,35 @@ describe('runNonInteractive', () => {
         }
       },
     );
+
+    it('ends a turn the run budget stops as an error', async () => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(0.01);
+      const mod = installModTurn();
+      mockLlmClient.sendMessageStream.mockImplementation(
+        (...args: unknown[]) => {
+          (args[3] as { onPromptAdmitted?: () => void })?.onPromptAdmitted?.();
+          const signal = args[1] as AbortSignal;
+          return (async function* () {
+            yield { type: LlmEventType.Content, value: 'Partial' };
+            await new Promise((_, reject) =>
+              signal.addEventListener(
+                'abort',
+                () => reject(new Error('stream aborted after budget expiry')),
+                { once: true },
+              ),
+            );
+          })();
+        },
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'Fix it', 'mod-budget'),
+      ).rejects.toThrow('process.exit(55) called');
+
+      // The budget aborts the run's controller, yet no one cancelled the turn.
+      expect(mod.turn.complete.mock.calls[0]).toEqual(['error']);
+    });
 
     it('lets a Mod end the turn from its tool.call hook', async () => {
       vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
