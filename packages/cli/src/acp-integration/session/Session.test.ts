@@ -85,6 +85,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
+import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -1184,6 +1185,10 @@ describe('Session', () => {
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
       getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
+      getSkillManager: vi.fn().mockReturnValue(null),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getActiveExtensions: vi.fn().mockReturnValue([]),
       getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
       isSkillEnabled: vi.fn(
@@ -11589,6 +11594,120 @@ describe('Session', () => {
   });
 
   describe('sendAvailableCommandsUpdate', () => {
+    it('publishes changed skill metadata from the refreshed cache until disposal', async () => {
+      const projectRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-skill-refresh-'),
+      );
+      const previousQwenHome = process.env['QWEN_HOME'];
+      process.env['QWEN_HOME'] = path.join(projectRoot, 'home');
+      const skillFile = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'review',
+        'SKILL.md',
+      );
+
+      try {
+        await fs.mkdir(path.dirname(skillFile), { recursive: true });
+        await fs.writeFile(
+          skillFile,
+          '---\nname: review\ndescription: Review\nargument-hint: ""\n---\n\nReview.\n',
+        );
+
+        session.dispose();
+        vi.mocked(mockConfig.getProjectRoot).mockReturnValue(projectRoot);
+        const skillManager = new core.SkillManager(mockConfig);
+        vi.mocked(mockConfig.getSkillManager).mockReturnValue(skillManager);
+        await skillManager.refreshCache();
+        let snapshotBuilds = 0;
+        getAvailableCommandsSpy.mockImplementation(async (_config, signal) => {
+          snapshotBuilds += 1;
+          if (snapshotBuilds > 1) throw new Error('recursive snapshot rebuild');
+          const commands = await new SkillCommandLoader(
+            mockConfig,
+          ).loadCommands(signal);
+          await skillManager.notifyConfigChanged();
+          return commands;
+        });
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+        vi.mocked(mockClient.sessionUpdate).mockClear();
+
+        await fs.writeFile(
+          skillFile,
+          '---\nname: review\ndescription: Review the staged diff\nargument-hint: "<path>"\n---\n\nReview.\n',
+        );
+        await skillManager.refreshCache();
+
+        await vi.waitFor(() => {
+          expect(snapshotBuilds).toBe(1);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({
+              update: expect.objectContaining({
+                sessionUpdate: 'available_commands_update',
+                availableCommands: expect.arrayContaining([
+                  expect.objectContaining({
+                    name: 'review',
+                    description: 'Review the staged diff',
+                    input: { hint: '<path>' },
+                  }),
+                ]),
+              }),
+            }),
+          );
+        });
+
+        session.dispose();
+        vi.mocked(mockClient.sessionUpdate).mockClear();
+        await fs.writeFile(
+          skillFile,
+          '---\nname: review\ndescription: Review again\n---\n\nReview.\n',
+        );
+        await skillManager.refreshCache();
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+      } finally {
+        if (previousQwenHome === undefined) {
+          delete process.env['QWEN_HOME'];
+        } else {
+          process.env['QWEN_HOME'] = previousQwenHome;
+        }
+        await fs.rm(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('does not block skill refresh on command publication', async () => {
+      session.dispose();
+      const skillManager = new core.SkillManager(mockConfig);
+      vi.mocked(mockConfig.getSkillManager).mockReturnValue(skillManager);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      getAvailableCommandsSpy.mockResolvedValue([]);
+      vi.mocked(mockClient.sessionUpdate).mockReturnValue(
+        new Promise(() => undefined),
+      );
+
+      const outcome = await Promise.race([
+        skillManager
+          .refreshCache({ throwOnError: true })
+          .then(() => 'resolved'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('blocked'), 100),
+        ),
+      ]);
+
+      expect(outcome).toBe('resolved');
+    });
+
     it('sends available_commands_update from getAvailableCommands()', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {
