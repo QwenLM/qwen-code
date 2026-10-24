@@ -4529,6 +4529,16 @@ const SETTINGS_SCHEMA = {
           'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
         showInDialog: true,
       },
+      unifiedAgentLoop: {
+        type: 'boolean',
+        label: 'Unified Agent Loop',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Run headless sessions (`-p` and stream-json) on the shared agent loop (experimental). Other surfaces keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
+        showInDialog: true,
+      },
       agentCollaboration: {
         type: 'boolean',
         label: 'Enable Agent Collaboration',
