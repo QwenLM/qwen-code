@@ -1939,7 +1939,7 @@ describe.skipIf(isWindows)('held message expiry', () => {
     const sender = await startSenderInbox();
     const { messaging } = await start(ApprovalMode.YOLO, {
       getPolicySetting: () => 'hold',
-      getHeldExpiryMs: () => 600,
+      getHeldExpiryMs: () => 3000,
     });
 
     await sendPeerFrame(
@@ -1951,8 +1951,11 @@ describe.skipIf(isWindows)('held message expiry', () => {
       { authToken: TEST_TOKEN },
     );
     await settle();
-    // Parked later, so it outlives the shorter id's window.
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Parked later, so it outlives the shorter id's window. The gap is
+    // half the lifetime, so the first assertion below still has ~1.4s of
+    // slack: on a loaded CI runner these sleeps overshoot by hundreds of
+    // ms, and a tighter gap expires `abc` before the assertion runs.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
     await sendPeerFrame(
       messaging.socketPath!,
       {
@@ -1969,8 +1972,8 @@ describe.skipIf(isWindows)('held message expiry', () => {
     messaging.recordHeldListing(messaging.getHeld());
     expect(messaging.heldSetChangedSinceListing()).toBe(false);
 
-    // `abc` ages past 600ms while `abc12345` has ~300ms left.
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    // `abc` ages past 3000ms while `abc12345` still has ~1.1s left.
+    await new Promise((resolve) => setTimeout(resolve, 1800));
     await settle();
     expect(messaging.getHeld().map((e) => e.frame.msgId)).toEqual(['abc12345']);
 
