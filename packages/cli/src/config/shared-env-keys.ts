@@ -15,6 +15,7 @@ import {
   RELAUNCH_SUPERVISED_ENV,
   NPM_RUNTIME_CONTEXT,
 } from '../utils/env-provenance.js';
+import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
 export { PRIVATE_RELAUNCH_ENV_PROVENANCE };
 
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
@@ -300,9 +301,9 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // `.env` or settings.env is repository-controlled, so letting either fill
   // these would send a maintainer's screenshots to a fork the operator did
   // not choose. The launch environment, a home `.env`, or the operator-scope
-  // `verifyPr.*` settings may supply them.
-  'QWEN_VERIFY_ASSETS_REPO',
-  'QWEN_VERIFY_ASSETS_BRANCH',
+  // `verifyPr.*` settings may supply them. Derived from the coordinate map so
+  // a coordinate added there is gated here without a second edit.
+  ...Object.values(VERIFY_PR_COORDINATE_ENV),
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
