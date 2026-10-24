@@ -73,7 +73,8 @@ Web Shell 的「添加工作区」对话框目前只能注册守护进程主机�
 - 拒绝非 `http(s)://`、`ssh://`、`git://`、`git+ssh://`、scp 形式（`user@host:path`）或 `file://` 的 URL；拒绝以 `-` 开头的 URL（选项注入）和 `ext::` remote-helper 传输。
 - Clone 上限 15 分钟并允许取消。取消会杀掉整个进程树，而不只是直接子进程。
 - 最多两个并发 clone、保留八个已结束任务、终态任务十分钟后回收，进度上报有界（百分比加一条脱敏短消息）。
-- 从任务状态、进度消息和错误响应中剥离 URL 的 userinfo，确保 URL 里的 HTTPS token 不会到达浏览器或日志。
+- 把 URL 的 userinfo 移出 git 的 argv：传给 git 的 URL 不含凭据，通过命令行 credential helper 从子进程环境读取密钥。因此 `.git/config` 里保存的 remote URL 也不含凭据，任务状态、进度消息和错误响应同样会脱敏。
+- 为 clone 子进程禁用全局/系统 git config（`GIT_CONFIG_NOSYSTEM=1`，`GIT_CONFIG_GLOBAL` 指向平台空设备），使仓库提交的 `.gitattributes` 无法在 clone 的 checkout 阶段选中宿主机配置的 filter 命令。
 
 ### 能力
 
@@ -109,7 +110,7 @@ Web Shell 的「添加工作区」对话框目前只能注册守护进程主机�
 
 ## 风险
 
-- clone 不可信仓库只有在用户于工作区里执行命令时才可能触发 Git hook 或 filter；clone 路径不授予信任，工作区沿用守护进程信任策略的判定，工具审批仍然生效。
+- clone 不可信仓库不会运行宿主机配置的 smudge/clean filter，因为 clone 子进程忽略全局/系统 git config。仓库内容仍可定义 hook 或 filter，它们只会在用户之后于工作区执行命令时运行；clone 路径不授予信任，工作区沿用守护进程信任策略的判定，工具审批仍然生效。
 - 超大仓库可能占满磁盘。15 分钟上限、取消和每守护进程并发限制可以约束影响，但不会预留空间。
 - 页面关闭后才完成的 clone 会留下未注册目录；它在文件系统里可见，之后可以添加。
 

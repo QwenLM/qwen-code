@@ -113,8 +113,15 @@ persistence, and trust logic inside the clone job.
 - Keep at most two clones running and eight finished jobs, drop finished jobs
   after ten minutes, and keep progress reporting bounded (a percentage plus a
   short sanitized message).
-- Strip URL userinfo from job state, progress messages, and error envelopes, so
-  an HTTPS token embedded in a URL never reaches the browser or logs.
+- Move URL userinfo out of git's argv: the clone URL passed to git is
+  credential-free and a command-line credential helper reads the secret from
+  the child environment. The remote URL stored in `.git/config` is therefore
+  credential-free, and job state, progress messages, and error envelopes are
+  redacted.
+- Disable global/system git config for the clone child (`GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_GLOBAL` pointed at the platform null device), so a repository's
+  committed `.gitattributes` cannot select host-configured filter commands
+  during the clone's checkout.
 
 ### Capability
 
@@ -162,10 +169,11 @@ Clients that do not see the tag keep the current dialog.
 
 ## Risks
 
-- Cloning an untrusted repository can execute Git hooks or filters only after
-  the user runs commands in the workspace; the clone path does not grant trust,
-  so the workspace keeps whatever the daemon's trust policy assigns, and tool
-  approvals still apply.
+- Cloning an untrusted repository does not run host-configured smudge/clean
+  filters because the clone child ignores global/system git config. Repository
+  content can still define hooks or filters that execute when the user later
+  runs commands in the workspace; the clone path does not grant trust, so the
+  workspace keeps the daemon's trust policy and tool approvals still apply.
 - Very large repositories can fill disk. The 15-minute cap, cancellation, and
   per-daemon concurrency limit bound the impact but do not reserve space.
 - A clone that finishes after the page closes leaves an unregistered

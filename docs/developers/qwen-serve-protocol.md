@@ -1443,6 +1443,8 @@ The Web Shell's product branding, for hosts that want to white-label the shell. 
 
 Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence. When `workspace_display_name` is advertised, the request may also include an optional `displayName`.
 
+When `git_workspace_clone` is advertised, the same route also accepts `{ "kind": "git", "url": "...", "target": "/absolute/new/path" }`. This form requires an absolute `target` that does not exist yet, starts an asynchronous clone, registers nothing, and returns `202 { "kind": "git-workspace-clone", "jobId": "..." }`. The `201` and `200` responses below describe only the `cwd` form; clone progress and cancellation use `GET`/`DELETE /workspace-git-clone-jobs/:jobId`.
+
 ```json
 {
   "cwd": "/canonical/path/to/secondary-workspace",
