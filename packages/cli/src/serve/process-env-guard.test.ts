@@ -38,6 +38,17 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
+    'packages/cli/src/serve/memory-import.ts',
+    {
+      reason:
+        'Import refuses process-global legacy memory path overrides because native memory readers still consume them, even if a runtime overlay clears them. Project scope uses the selected runtime snapshot; only parent-process runtimes without a snapshot use the process environment.',
+      accesses: {
+        'computed:key': 1,
+        'key:QWEN_CODE_MEMORY_PROJECT_SCOPE': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/hosted-harness-contract.ts',
     {
       reason:

@@ -647,12 +647,13 @@ LSP server configuration is done through `.lsp.json` files in your project root 
 
 #### serve
 
-Persistent sub-session concurrency settings for [`qwen serve`](../qwen-serve). Changes require restarting the daemon. Non-positive or non-integer concurrency limits produce a warning and fall back to their built-in defaults.
+Persistent [`qwen serve`](../qwen-serve) settings. Changes require restarting the daemon. Invalid values are reported and fall back to their built-in defaults; `serve.maxSessions: 0` disables its cap.
 
-| Setting                                   | Type    | Description                                                                                                                                                                            | Default |
-| ----------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `serve.maxConcurrentSubSessionsPerCaller` | integer | Maximum number of in-flight sub-sessions that one caller session can create through `create_sub_session`. Must be at least `1`.                                                        | `16`    |
-| `serve.maxConcurrentSubSessionsTotal`     | integer | Maximum number of in-flight sub-sessions across all callers in one workspace. Must be an integer from `1` through `1024`. Values above `1024` are clamped to `1024` without a warning. | `24`    |
+| Setting                                   | Type    | Description                                                                                                                                                                                                                                                                                                                             | Default |
+| ----------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `serve.maxSessions`                       | integer | Per-workspace cap on concurrent live sessions; new spawn requests beyond it return `503`, while attaching to an existing session still works. Set to `0` to disable. Honored from User, System, and SystemDefaults scopes only; `qwen serve --max-sessions` wins when passed. Editable from the Web Shell settings panel at user scope. | `32`    |
+| `serve.maxConcurrentSubSessionsPerCaller` | integer | Maximum number of in-flight sub-sessions that one caller session can create through `create_sub_session`. Must be at least `1`.                                                                                                                                                                                                         | `16`    |
+| `serve.maxConcurrentSubSessionsTotal`     | integer | Maximum number of in-flight sub-sessions across all callers in one workspace. Must be an integer from `1` through `1024`. Values above `1024` are clamped to `1024` without a warning.                                                                                                                                                  | `24`    |
 
 #### advanced
 
