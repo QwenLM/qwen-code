@@ -225,7 +225,7 @@ interface ServeArgs {
   'managed-data-dir'?: string;
   'hosted-harness-capability-digest'?: string;
   token?: string;
-  'max-sessions': number;
+  'max-sessions'?: number;
   'max-total-sessions'?: number;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
@@ -345,10 +345,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-sessions', {
         type: 'number',
-        default: 32,
         description:
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
-          'attach to existing sessions still works. Set to 0 to disable.',
+          'attach to existing sessions still works. Set to 0 to disable. ' +
+          'Defaults to 32, or to the serve.maxSessions setting (user, system, and ' +
+          'system-defaults scopes only); the flag wins when passed.',
       })
       .option('max-total-sessions', {
         type: 'number',

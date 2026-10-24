@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { isolateOperatorReviewSettings } from './lib/test-utils.js';
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   writeFileSync,
@@ -231,6 +232,54 @@ describe.skipIf(process.platform === 'win32')(
       expect(await gone(await pidIn(pidFile))).toBe(true);
     });
 
+    it.skipIf(!existsSync('/proc/self/stat'))(
+      'kills the whole tree while older processes exit during the walk',
+      async () => {
+        // awk stops at the first file it cannot open (mawk, gawk and busybox
+        // awk all do), and a process that exits between the glob and the read
+        // leaves exactly that; no file after it is read. With processes
+        // exiting all through the walk, the command's were among those.
+        // Bounded (~11 s): it runs in a session of its own, so a run that
+        // dies without reaching `finally` — a Ctrl+C, a cancelled job — would
+        // otherwise leave it forking on the host. That covers the 1.3 s the
+        // walk needs and the polls of a failing one. `$SECONDS` is not POSIX
+        // (dash has none), hence the counter.
+        const churn = spawn(
+          '/bin/sh',
+          [
+            '-c',
+            'i=0; while [ "$i" -lt 4000 ]; do i=$((i+1)); sleep 1 & sleep 0.002; done',
+          ],
+          { stdio: 'ignore', detached: true },
+        );
+        try {
+          // The deadline is shorter than a churn process lives, so what exits
+          // during the walk started before the command did.
+          await new Promise((r) => setTimeout(r, 700));
+          const pidFile = join(dir, 'pid');
+          const r = run(
+            `for n in 1 2 3 4; do sleep 300 & echo $! >> ${pidFile}; done; wait`,
+            dir,
+            600,
+          );
+          expect(r.timedOut).toBe(true);
+          const pids = readFileSync(pidFile, 'utf8')
+            .split('\n')
+            .filter(Boolean)
+            .map(Number);
+          // A loaded machine may reach the deadline before all four start; one
+          // that never started cannot leak, and every one that did is checked.
+          expect(pids.length).toBeGreaterThan(0);
+          // Every one checked, so a miss kills the rest too (see `gone`).
+          const missed: number[] = [];
+          for (const pid of pids) if (!(await gone(pid))) missed.push(pid);
+          expect(missed).toEqual([]);
+        } finally {
+          process.kill(-churn.pid!, 'SIGKILL');
+        }
+      },
+    );
+
     it("keeps the command's own exit status", () => {
       expect(run('exit 3', dir, 30_000).exitCode).toBe(3);
       expect(run('false; true', dir, 30_000).exitCode).toBe(0);
@@ -245,11 +294,33 @@ describe.skipIf(process.platform === 'win32')(
       );
       const pid = await pidIn(pidFile);
       shell.kill('SIGINT');
-      const [, signal] = await new Promise<[number | null, string | null]>(
-        (res) => shell.on('exit', (code, sig) => res([code, sig])),
+      const [code, signal] = await new Promise<[number | null, string | null]>(
+        (res) => shell.on('exit', (c, sig) => res([c, sig])),
       );
-      expect(signal).toBe('SIGINT');
+      // The re-raised SIGINT kills the wrapper. bash before 5.0 exits 130 on
+      // it instead — macOS's `/bin/sh` is bash 3.2, and an image that links
+      // `sh` to bash 4 (CentOS 7's 4.2) does the same — so only there is 130
+      // accepted; dash, busybox and bash 5 are held to dying of the signal.
+      const shBash = spawnSync('/bin/sh', ['-c', 'echo "${BASH_VERSINFO:-}"'], {
+        encoding: 'utf8',
+      }).stdout.trim();
+      const oldBash = /^[1-4]$/.test(shBash);
+      expect(signal ?? code).toBeOneOf(oldBash ? ['SIGINT', 130] : ['SIGINT']);
       expect(await gone(pid)).toBe(true);
+    });
+
+    it('installs its traps before it starts the command, and reads `$c`, never `$!`', () => {
+      // A signal between the job's start and the traps would kill only the
+      // shell and leave the job running. And zsh expands `$!` to 0 before
+      // any job: a trap reading it could walk from pid 0, which is every
+      // process on the machine.
+      const lines = REAPING_SHELL.split('\n');
+      const job = lines.indexOf('( eval "$cmd" ) &');
+      const traps = lines.flatMap((l, i) => (l.startsWith('trap ') ? [i] : []));
+      expect(job).toBeGreaterThan(-1);
+      expect(traps).toHaveLength(2);
+      for (const i of traps) expect(i).toBeLessThan(job);
+      expect(REAPING_SHELL).not.toContain('"$!"');
     });
   },
 );
