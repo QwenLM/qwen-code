@@ -108,6 +108,7 @@ import {
   findLastUserItemIndex,
   stripLeadingSystemReminders,
 } from '../utils/historyUtils.js';
+import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -1703,7 +1704,10 @@ export const useLlmStream = (
           displayText ??
           submittedPrompt ??
           (isSlash ? trimmedQuery : stripLeadingSystemReminders(trimmedQuery));
-        await logger?.logMessage(MessageSenderType.USER, userText);
+        const recallText = pasteExpansions?.size
+          ? expandPendingPastePlaceholders(userText, pasteExpansions)
+          : userText;
+        await logger?.logMessage(MessageSenderType.USER, recallText);
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
 
@@ -1824,6 +1828,7 @@ export const useLlmStream = (
             {
               type: MessageType.USER,
               text: userText,
+              ...(recallText !== userText ? { recallText } : {}),
               promptId: prompt_id,
               // The envelope masked a leading `?` from the lexical fallback in
               // isRealUserTurn; an un-noticed prompt keeps that fallback.

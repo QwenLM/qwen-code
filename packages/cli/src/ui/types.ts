@@ -210,6 +210,7 @@ export interface HistoryItemBase {
 export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
+  recallText?: string;
   promptId?: string;
   /**
    * Whether this UI history item represents a user turn that reached the model.
