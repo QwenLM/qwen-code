@@ -118,6 +118,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // hierarchical QWEN.md state and accepts append/replace writes scoped
   // to either the bound workspace or the global ~/.qwen directory.
   workspace_memory: { since: 'v1' },
+  memory_import_v1: { since: 'v1' },
   workspace_memory_remember: {
     since: 'v1',
     modes: ['workspace', 'clean'],

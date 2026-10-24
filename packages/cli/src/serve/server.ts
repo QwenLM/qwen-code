@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mountMemoryImportRoutes } from './memory-import.js';
+
 import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
@@ -3021,6 +3023,7 @@ export function createServeApp(
   });
 
   // Workspace memory + agents CRUD routes.
+  mountMemoryImportRoutes(app, { workspaceRegistry, mutate });
   mountWorkspaceMemoryRoutes(app, {
     bridge: primaryBridge,
     boundWorkspace: primaryBoundWorkspace,

@@ -1,0 +1,21 @@
+# Sidebar recent sessions
+
+[English](sidebar-recent-sessions.md) | [简体中文](sidebar-recent-sessions.zh-CN.md)
+
+## Purpose
+
+Add a collapsible Recent sessions section after Project and before Archived in the Home sidebar. Project and no-workspace lists remain available.
+
+## Behavior
+
+Merge top-level, unarchived ordinary sessions from trusted, visible workspaces on the current daemon with no-workspace sessions when supported. Exclude channel, Live and child sessions. Show the five newest sessions initially and expand to at most twenty. Exclude pinned sessions, including immediately after pinning. The header has a hover/focus New task action that invokes the same cwd-less creation flow as the top navigation button, expands Recent sessions, and selects the new session here once it receives an ID. Cancellation or failure clears that pending selection. Sort by activity (`updatedAt`, bounded below by `createdAt`) and show source information in the standard session details hover card. Preserve the collapse preference.
+
+## Implementation
+
+Reuse workspace-qualified and standalone list APIs, independently of project expansion. Use organized/all workspace pages when organization is supported so pinned metadata is available; skip pinned rows and continue each source until twenty eligible sessions or exhaustion, then merge and deduplicate by workspace scope and session ID. Route clicks through the existing workspace and standalone open callbacks. Require workspace-qualified REST capability. Limit aggregation to the focused daemon, respecting workspace locks; remote host fan-out is out of scope.
+
+Poll ten seconds after each completed read while expanded, refresh on session changes and standalone mutations, and stop scheduling when collapsed or unmounted. Ignore obsolete results after scope changes. Keep successful sources visible when a source fails and offer retry. Reuse the existing sidebar session row renderer, including its status indicators, title layout and details hover card. Show only Pin and Archive as inline actions, without source text. This dedicated Recent layout is independent of the standard-row inline layout, but both actions respect the host action-items policy. Workspace pins use the existing organization action and optimistic state; workspace archives use the existing scoped action. Standalone archives use their dedicated API and refresh both lists. Standalone Pin stays disabled with an explanatory title because the backend has no standalone pin API. Only the clicked list copy is highlighted: Recent sessions and the original project/no-workspace rows track the selected surface separately from the actual current session. If the selected Recent copy stops rendering (for example after pinning or collapsing), fall back to the original current-session row. Refreshes within the same catalog scope retain existing rows to avoid flashing during navigation; scope changes clear stale data. Pause directory reads and ignore pending responses during session restoration: standalone restore holds an exclusive lock and the directory can temporarily omit that session. Resume reads when connected. Standalone visual identity uses its own session-ID scope, independent of its hidden runtime directory. Clicking the current standalone row only transfers selection instead of restoring it again. Pass the known sidebar title into navigation so the header is seeded immediately, and refresh a new standalone title after its first turn. Current or running sessions cannot be archived. Existing project menus remain the place for rename, delete and grouping actions.
+
+## Validation and acceptance
+
+Verify placement after Project, equal row dimensions, hover details, pin/archive routing and disabled guards, sorting, pagination past excluded children, scoped identity, mixed-source navigation, trusted workspace filtering, collapse persistence, preview expansion, partial failure and periodic refresh. In the existing localhost:5173 service, verify the section while Project remains collapsed and open both workspace and standalone chats. No backend or SDK changes are required. Activity refresh can lag by one polling interval; archived or renamed chats reconcile on refresh.

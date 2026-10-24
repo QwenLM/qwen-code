@@ -397,7 +397,7 @@ public class ManagedSessionStore {
         }
         authorizeOrdinary(tenantId, sessionId, writerToken, request);
         var rows = jdbc.queryForList("SELECT agent_id, agent_definition_digest, tool_profile, workspace_id,"
-                + " approval_mode, selected_approval_mode, approval_revision FROM ma_session"
+                + " approval_mode, selected_approval_mode, approval_revision, permission_rules_json FROM ma_session"
                 + " WHERE tenant_id=? AND session_id=? FOR UPDATE", tenantId, sessionId);
         if (rows.size() != 1) {
             throw conflict("managed_session_scope_conflict", "The Managed Session is missing.");
@@ -408,6 +408,7 @@ public class ManagedSessionStore {
                 || ("qwen-code".equals(row.get("agent_id"))
                         ? row.get("agent_definition_digest") != null : row.get("agent_definition_digest") == null)
                 || !(com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES.equals(profile)
+                        || com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES_V3.equals(profile)
                         || com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
             return null;
         }
@@ -420,7 +421,19 @@ public class ManagedSessionStore {
                 || revision < 0 || revision > 9_007_199_254_740_991L) {
             throw conflict("approval_selection_conflict", "The approval selection is invalid.");
         }
-        return java.util.Map.of("mode", mode, "revision", revision);
+        java.util.Map<String, Object> result = new java.util.LinkedHashMap<>(java.util.Map.of("mode", mode, "revision", revision));
+        if (row.get("permission_rules_json") != null) {
+            try {
+                var rules = com.alibaba.qwen.code.daemon.HostedPermissionRules.nonEmpty(com.alibaba.qwen.code.daemon.HostedPermissionRules.copyOf(
+                        CSI_JSON.readValue((String) row.get("permission_rules_json"), java.util.Map.class)));
+                if (rules != null) {
+                    result.put("permissionRules", rules);
+                }
+            } catch (java.io.IOException | IllegalArgumentException invalid) {
+                throw conflict("approval_selection_conflict", "The permission rules are invalid.");
+            }
+        }
+        return result;
     }
 
     // An ordinary write against a v2-claimed Session must fail with the
