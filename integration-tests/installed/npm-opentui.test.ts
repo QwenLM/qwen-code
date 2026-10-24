@@ -143,6 +143,7 @@ async function command(
   let failure: unknown;
   let observerError: string | undefined;
   let captured: ReturnType<typeof descendants> = [];
+  let rootProcess: ReturnType<typeof descendants>[number] | undefined;
   let live: ReturnType<typeof descendants> = [];
   const cleanupErrors: string[] = [];
   try {
@@ -167,6 +168,7 @@ async function command(
     assert.ok(child.pid);
     // Capture before the pid-file write, whose failure must still clean this child.
     captured = descendants(child.pid);
+    rootProcess = captured.find((row) => row.pid === child!.pid);
     timeout = setTimeout(() => {
       timedOut = true;
       try {
@@ -270,6 +272,7 @@ async function command(
         signal,
         timedOut,
         rootPid: child?.pid,
+        rootProcess,
         error: failure ? String(failure) : undefined,
         observerError,
         captured,
@@ -1612,11 +1615,20 @@ console.log(JSON.stringify({ username, node: process.versions.node, id }));
       assert.equal(completed.timedOut, false);
       assert.deepEqual(completed.liveBeforeCleanup, []);
       assert.deepEqual(completed.cleanupErrors, []);
+      assert.ok(completed.rootProcess);
+      assert.equal(completed.rootProcess.pid, completed.rootPid);
+      assert.ok(completed.rootProcess.birth);
+      assert.ok(!completed.rootProcess.state.startsWith('Z'));
+      assert.ok(
+        completed.rootProcess.command.includes(
+          path.join(receipt.packageRoot, 'cli-entry.js'),
+        ),
+      );
       assert.ok(
         completed.captured.some(
-          (row: { pid: number; command: string }) =>
-            row.pid === completed.rootPid &&
-            row.command.includes('cli-entry.js'),
+          (row: { pid: number; birth: string }) =>
+            row.pid === completed.rootProcess.pid &&
+            row.birth === completed.rootProcess.birth,
         ),
       );
       assert.deepEqual(
