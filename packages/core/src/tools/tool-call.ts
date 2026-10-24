@@ -126,6 +126,11 @@ export async function resolveDeferredToolCall(
         `"${invocation.params.name}" matches more than one registered tool by case (${resolved.join(', ')}). Call tool_call with the exact name.`,
       ),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      // A stable, collision-free identity: every casing of one ambiguity
+      // resolves to the same candidate set, and joining the sorted names
+      // keeps the refusal out of any single registered tool's counter
+      // bucket (#13073).
+      targetName: resolved.join(','),
     };
   }
   if (resolved !== undefined) {
