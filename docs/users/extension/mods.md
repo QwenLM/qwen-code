@@ -134,13 +134,14 @@ this recovery exception.
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
 | Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                  |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
-| API events | `command.register`, `session.version` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                    |
+| API events | `command.register`, `ui.log` and the session and clock methods pass through the middleware chain with host-supplied origin                                                              |
+| Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-state/store, rendering, streaming events and hot reload are not implemented.
+`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, rendering, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -152,8 +153,9 @@ command names are matched against the resulting name.
 
 ## Middleware and recovery
 
-Patterns select among `session.start`, `session.end`, `command.run`,
-`command.register`, `session.version`, `ui.log`, `tool.call` and `tool.check`. Use an exact name, a prefix such as `command.*`,
+Patterns select among the engine events `session.start`, `session.end`,
+`command.run`, `tool.call` and `tool.check`, and the API event of each supported
+`$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
@@ -389,7 +391,8 @@ with tier `user`. Managed-tier `next.to`, tracing and custom namespace `lent`
 recovery are not available.
 
 API events begin at the chain head. Their input is the command specification,
-`{}` for `session.version`, or the `{text, to}` log payload. Return `next(e)`,
+the `{text, to}` log payload, `{ms}` for `clock.sleep`, the `{breakdown, columns}`
+arguments of `session.usage`, or `{}` for the other session and clock methods. Return `next(e)`,
 `{value}` to answer, or `{deny: reason}` to reject the API call. Registrations
 already in the event's call chain are skipped, including their catches. Other
 registrations in the same plugin remain eligible. This re-entry behavior follows
@@ -407,16 +410,40 @@ supports:
   "qwen": {
     "claudeCode": "2.1.308",
     "events": [
+      "clock.now",
+      "clock.sleep",
       "command.register",
       "command.run",
+      "session.cwd",
       "session.end",
+      "session.id",
+      "session.model",
+      "session.root",
       "session.start",
+      "session.surface",
+      "session.surfaces",
+      "session.turns",
+      "session.usage",
       "session.version",
       "tool.call",
       "tool.check",
       "ui.log"
     ],
-    "methods": ["command.register", "session.version", "ui.log"]
+    "methods": [
+      "clock.now",
+      "clock.sleep",
+      "command.register",
+      "session.cwd",
+      "session.id",
+      "session.model",
+      "session.root",
+      "session.surface",
+      "session.surfaces",
+      "session.turns",
+      "session.usage",
+      "session.version",
+      "ui.log"
+    ]
   }
 }
 ```
@@ -427,7 +454,7 @@ call. A Mod can use it to choose a fallback, such as a command reply where a
 drawing hook would not run.
 
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
-cross-plugin `next` or API calls. Pending void `ui.log` notifications do not pause
+cross-plugin `next` or API calls other than `$.clock.sleep`. Pending void `ui.log` notifications do not pause
 the caller's budget. Catch recovery uses a one-second budget.
 Qwen additionally caps each root dispatch at 60 seconds of charged time and each
 uninterrupted guest execution slice at 10 seconds. Only tool roots exclude the
@@ -463,6 +490,48 @@ Native Qwen extensions with an absolute or external hooks manifest path continue
 to use only the classic hook loader. Claude hooks paths that conversion already
 ignores because they are absolute or outside the extension are also skipped by
 Mod discovery. Mod manifests must be relative paths inside the extension.
+
+## Session facts and clock
+
+`$.plugin.name` is the plugin's manifest name and `$.plugin.root` its absolute
+directory, the one that holds `qwen-extension.json` or
+`.claude-plugin/plugin.json`. They are plain properties.
+
+The other methods are API events that resolve to the shapes Claude Code 2.1.308
+declares:
+
+| Method                                | Resolves to                                                                             |
+| ------------------------------------- | --------------------------------------------------------------------------------------- |
+| `$.session.id()`                      | the session's id; it changes after `/clear` and `/resume`                               |
+| `$.session.cwd()`, `$.session.root()` | the session's working directory; the two are the same in Qwen Code                      |
+| `$.session.model()`                   | the main model's id                                                                     |
+| `$.session.turns()`                   | the user turns in the session's transcript, counting resumed turns and not rewound ones |
+| `$.session.surfaces()`                | `["terminal"]` in a terminal, `[]` in a headless run                                    |
+| `$.session.surface()`                 | the first surface, or `null`                                                            |
+| `$.session.usage()`                   | `{startedAt, context: {tokens, window, percent}, rateLimits}`                           |
+| `$.clock.now()`                       | the current time in epoch milliseconds                                                  |
+| `$.clock.sleep(ms, {signal})`         | `undefined`, after `ms` milliseconds                                                    |
+
+`$.session.usage()` reports the figures the status line shows. `tokens` is the
+input of the main conversation's last response, including cached tokens, and
+`window` is the model's context window. `percent` is a whole number. When the
+window size is unknown, `window` is 0 and `percent` is absent. `startedAt` is when the session began;
+for a resumed session it is the session's first record. A branch made with
+`/branch` copies its parent's records, so it keeps the parent's `startedAt` and
+its `turns` include the parent's turns. Qwen Code keeps no cost
+ledger, so `cost` is absent, and `rateLimits` is always empty. `breakdown` and
+`columns` are accepted, but no breakdown is computed. With chat recording turned
+off, `turns` is 0.
+
+The facts are read when a dispatch starts. At a `session.end` caused by `/clear`
+or `/resume`, the id, turns, start time and context figures still describe the
+session that is ending.
+
+Unlike other `$` calls, `$.clock.sleep` charges its wait to the calling hook's
+budget, so a sleep longer than the remaining budget times the hook out. Its
+`signal` option rejects the wait at once when it aborts; pass `next.signal`,
+because the Mod environment has no `AbortController`. A sleep ends with the hook
+that started it, so a sleep the hook does not await cannot hold up the dispatch.
 
 ## TypeScript and relative imports
 

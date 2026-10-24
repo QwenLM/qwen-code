@@ -52,6 +52,7 @@ const SETTING_KEYS = {
   'setting:workflow-size': 'tools.workflowSizeGuideline',
   'setting:workflow-name-only': 'tools.workflowNameOnly',
   'setting:permission-strategy': 'policy.permissionStrategy',
+  'setting:max-sessions': 'serve.maxSessions',
   'setting:model-proposed-goals': 'goals.modelProposed',
   'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
   'setting:session-workflow': 'experimental.sessionWorkflow',

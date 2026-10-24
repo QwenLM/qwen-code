@@ -738,6 +738,8 @@ export interface ResumeSessionRequest {
    * timer and relies on the daemon's own restore deadline.
    */
   timeoutMs?: number;
+  /** Aborts the restore and, for load, replay attachment hydration. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -4239,6 +4241,7 @@ export class DaemonClient {
           ...(sourceType !== undefined ? { sourceType } : {}),
           ...(sourceId !== undefined ? { sourceId } : {}),
         }),
+        signal: req.signal,
       },
       async (res) => {
         if (!res.ok) {

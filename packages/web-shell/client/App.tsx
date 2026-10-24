@@ -4454,6 +4454,14 @@ export function App({
   // a mismatch means connection.sessionId moved on (reconnect cycling or a
   // user-initiated switch) and the stale response is dropped.
   const worktreeSessionKeyRef = useRef<string | undefined>(undefined);
+  const sidebarStandaloneTitleRef = useRef<
+    | {
+        sessionId: string;
+        displayName?: string;
+        client: typeof workspace.client;
+      }
+    | undefined
+  >(undefined);
   const sessionStatusRequestRef = useRef(0);
   useLayoutEffect(() => {
     setSessionWorktree(undefined);
@@ -4472,17 +4480,22 @@ export function App({
     // session switch still starts from an empty title.
     setSessionStatusDisplayName(
       (prev) =>
-        peekSessionCatalogDisplayName(
-          workspace.client,
-          connection.sessionId,
-          connection.workspaceCwd,
-        ) ?? prev,
+        (connection.sessionContext?.kind === 'standalone' &&
+        sidebarStandaloneTitleRef.current?.client === workspace.client &&
+        sidebarStandaloneTitleRef.current.sessionId === connection.sessionId
+          ? sidebarStandaloneTitleRef.current.displayName
+          : peekSessionCatalogDisplayName(
+              workspace.client,
+              connection.sessionId,
+              connection.workspaceCwd,
+            )) ?? prev,
     );
   }, [
     logicalSessionKey,
     workspace.client,
     connection.sessionId,
     connection.workspaceCwd,
+    connection.sessionContext?.kind,
   ]);
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
@@ -11171,6 +11184,28 @@ export function App({
   const refreshActiveSessionDisplayName = useCallback(async () => {
     const activeConnection = connectionRef.current;
     if (
+      activeConnection.sessionId &&
+      activeConnection.sessionContext?.kind === 'standalone'
+    ) {
+      const owner = sessionOwnerGuard.capture();
+      try {
+        const summary = await workspace.client.getStandaloneSession(
+          activeConnection.sessionId,
+        );
+        if (
+          owner.isCurrent() &&
+          connectionRef.current.sessionId === activeConnection.sessionId &&
+          !('state' in summary) &&
+          summary.displayName?.trim()
+        ) {
+          setSessionStatusDisplayName(summary.displayName);
+        }
+      } catch {
+        // A title refresh must not disrupt the completed conversation.
+      }
+      return;
+    }
+    if (
       !activeConnection.sessionId ||
       !activeConnection.workspaceCwd ||
       (activeConnection.sessionContext &&
@@ -14457,6 +14492,9 @@ export function App({
             void refreshActiveSessionDisplayNameRef.current();
           }
         }
+      }
+      if (productContext?.kind === 'standalone' && !sessionDisplayName) {
+        void refreshActiveSessionDisplayNameRef.current();
       }
       dispatchSessionChangeRef.current?.({
         type: 'turn_complete',
@@ -22038,7 +22076,8 @@ export function App({
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
                   onOpenHostSession={handleOpenHostSession}
-                  onLoadStandaloneSession={(sessionId) => {
+                  onLoadStandaloneSession={(sessionId, displayName) => {
+                    sidebarStandaloneTitleRef.current = { sessionId, displayName, client: workspace.client };
                     setMainView('chat');
                     return loadSidebarSession(
                       sessionId,
