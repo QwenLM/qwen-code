@@ -6953,7 +6953,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('surfaces rewind artifact snapshot persistence warnings', async () => {
+  it('surfaces rewind artifact snapshot persistence warnings and preserves the target identity', async () => {
     const bridge = makeBridge({
       channelFactory: async () =>
         makeChannel({
@@ -6966,7 +6966,8 @@ describe('createAcpSessionBridge', () => {
             }
             expect(method).toBe('qwen/control/session/rewind');
             return {
-              targetTurnIndex: 0,
+              targetTurnIndex: 2,
+              daemonPromptId: 'daemon-B',
               filesChanged: [],
               filesFailed: [],
               artifactSnapshot: {
@@ -7000,12 +7001,16 @@ describe('createAcpSessionBridge', () => {
         { clientId: session.clientId },
       ),
     ).resolves.toMatchObject({
-      targetTurnIndex: 0,
+      targetTurnIndex: 2,
       warnings: ['artifact snapshot not persisted'],
     });
     await expect(rewoundEvent).resolves.toMatchObject({
       type: 'session_rewound',
-      data: { warnings: ['artifact snapshot not persisted'] },
+      data: {
+        targetTurnIndex: 2,
+        daemonPromptId: 'daemon-B',
+        warnings: ['artifact snapshot not persisted'],
+      },
     });
     abort.abort();
 

@@ -104,25 +104,56 @@ turn; retain those at or before the recorded cut. An empty checkpoint set is
 valid. Ambiguous checkpoint ownership refuses instead of losing or reviving
 checkpoints through a visible-row count.
 
-### Delivery boundary
+### ACP and daemon delivery
 
-The legacy compatibility change covers the shared record-backed association and
-live Ink rewind. ACP keeps its existing rewind implementation in this slice.
-The common transport-id lookup excludes `legacy-record:` keys, so recovering an
-old record does not turn its conversation-only key into a new ACP prompt id.
+The shared record-backed association and Ink behavior are delivered by #13737.
+This dependent change delivers ACP producers, strict rewind selection, JSON
+rollback, bridge transport and SDK/Web Shell/VS Code consumers together. The
+common transport lookup excludes recovered `legacy-record:` keys. The separate
+VS Code fix that exits edit mode after a refused submission must also land
+before this dependent change is ready to ship. Acceptance for #9437 spans the
+shared/Ink and ACP deliveries; landing #13737 alone does not complete it.
 
-ACP identity-based rewind is a separate dependent change. Its strict resolver,
-fresh/retry/cancel identity producers, JSON rollback, checkpoint catalog and
-notification transport, and SDK/Web Shell/VS Code consumers must move together.
-Raw snapshot positions can contain retry gaps and cannot identify visible user
-rows. The dependent change must carry the existing admitted daemon identity
-through that entire chain rather than reverting only its client consumers.
+This delivery remains a draft. A successful rewind to a checkpoint outside the
+loaded transcript can leave discarded blocks visible. Readiness requires
+reconciliation from authoritative surviving history and proof that cached replay
+and reconnect cannot resurrect discarded turns, including live sessions with
+recording disabled. The current identity-miss no-op and a mocked fresh reload do
+not satisfy that acceptance.
 
-Acceptance for this slice requires the same legacy fixture to cut at its source
-record in Ink, identified turns to keep resolving, unlinked/ambiguous targets to
-refuse before mutation, and recovered record keys never to authorize file
-restore. Resume and compression must preserve these associations. ACP acceptance
-remains with the dependent change; this slice alone does not complete #9437.
+ACP selects targets by their snapshot identity, not a second classification of
+model text. It resolves the recorder's complete-branch boundary by that same
+prompt ID: retries can add snapshots without adding recorded user turns, so a
+snapshot index is not a recorder index. The derived association survives full
+and selective cold restore; missing or duplicated recorded identities refuse.
+When chat recording is disabled, no recorded boundary is required; the unique
+snapshot/model association still permits rewind without a recording write.
+Without snapshots, the model's retained turn ordinals cannot safely
+identify the recorder's complete-branch ordinals, so ACP conversation rewind
+refuses rather than guessing. Only the initial ordinary
+prompt send acquires its prompt identity; retry and interrupted-prompt resend
+reuse the sole identity of the entries actually stripped from history, while a
+tool/automatic continuation never acquires an identity of its own.
+Unavailable or ambiguous associations refuse before changing conversation,
+files, or recording. Snapshot-list eligibility follows the same resolver.
+ACP history rollback carries each entry's `rewindId` through JSON and removes
+that transport metadata before restoring model content. Existing clients
+already echo the history array, so no new option or client-side counter is needed.
+
+Daemon-backed surfaces carry the existing admitted `daemonPromptId` on the
+checkpoint catalog and the rewind notification; `turnIndex` remains the raw
+snapshot position, including retry gaps and compressed prefixes. Recorder
+projections recover the association from existing records, and with recording
+disabled ACP retains it only for live file-history snapshots. Web Shell and
+VS Code select a uniquely associated user block and checkpoint by this ID;
+the SDK applies the rewind notification at that block, not the raw index.
+Missing or ambiguous associations disable the target rather than guessing.
+Admission binds the existing optimistic block, including a failed submission
+reused by retry; no new transcript event or identity counter is needed.
+
+Acceptance requires the same legacy fixture to cut at its source record,
+identified turns to keep resolving, unlinked/ambiguous targets to refuse, and
+resume/compression plus both live Ink and ACP entrances to obey these rules.
 OpenTUI's currently unconnected rewind selector is not wired by this change;
 its dormant positional helper is separate follow-up cleanup, not an authority
 for a live rewind operation.

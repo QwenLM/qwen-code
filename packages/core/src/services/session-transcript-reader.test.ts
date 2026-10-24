@@ -1214,6 +1214,7 @@ describe('SessionTranscriptReader', () => {
       {
         ...record('u1', 'source', 'first prompt'),
         promptId: `${sessionId}########3`,
+        daemonPromptId: 'daemon-prompt-3',
       } as ChatRecord,
       {
         ...record('a1', 'u1', 'first answer'),
@@ -1312,6 +1313,7 @@ describe('SessionTranscriptReader', () => {
       turnState.turnParentUuids,
     );
     expect(runtime?.recording.turnPromptIds).toEqual([`${sessionId}########3`]);
+    expect(runtime?.recording.turnDaemonPromptIds).toEqual(['daemon-prompt-3']);
     expect(runtime?.initialTurn).toBe(turnState.initialTurn);
     expect(runtime?.backgroundNotificationTaskIds).toEqual(
       turnState.backgroundNotificationTaskIds,

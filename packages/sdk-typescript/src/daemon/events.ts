@@ -883,6 +883,7 @@ export interface DaemonSessionMessagesDeletedData {
 export interface DaemonSessionRewoundData {
   sessionId: string;
   promptId: string;
+  daemonPromptId?: string;
   targetTurnIndex: number;
   filesChanged: string[];
   filesFailed: string[];

@@ -5096,7 +5096,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...snapshot,
                 retainedBytes: undefined,
                 blocks: snapshot.blocks.map((block) =>
-                  block.id === admission.blockId && block.kind === 'user'
+                  block.id === admission.blockId &&
+                  block.kind === 'user' &&
+                  (block.promptId === undefined ||
+                    block.promptId === admission.promptId)
                     ? { ...block, promptId: admission.promptId }
                     : block,
                 ),
