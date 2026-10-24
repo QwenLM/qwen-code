@@ -634,3 +634,51 @@ describe('OpenTuiMcpDialog list windows', () => {
     expect(screen.getByText(/Esc to back/)).toBeTruthy();
   });
 });
+
+describe('OpenTuiMcpDialog server-detail action cursor', () => {
+  beforeEach(() => {
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
+  });
+
+  it('keeps the cursor on its action when a rebuild removes an earlier row', async () => {
+    // A disconnected server offers Reconnect; running it succeeds and the
+    // host rebuilds the list, dropping the Reconnect row. ink keeps the
+    // active action by key (BaseSelectionList's INITIALIZE) and falls back to
+    // the first row when it is gone; an index-keyed cursor instead walks down
+    // onto Disable, so the next Enter toggles the server.
+    const onServerAction = vi.fn();
+    const tools: McpToolInfo[] = [{ name: 'tool_0', isValid: true }];
+    const dialog = (status: MCPServerStatus) => (
+      <OpenTuiMcpDialog
+        servers={[serverWith({ status, toolCount: 1 })]}
+        getServerTools={() => tools}
+        onServerAction={onServerAction}
+        availableTerminalHeight={20}
+        onClose={() => {}}
+      />
+    );
+
+    const { rerender } = render(dialog(MCPServerStatus.DISCONNECTED));
+    await press('return'); // server list → server detail
+    await press('down'); // View tools → Reconnect
+    await press('return'); // run Reconnect
+    expect(onServerAction).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: 'srv' }),
+      'reconnect',
+    );
+
+    // The reconnect lands: the action list no longer has a Reconnect row.
+    rerender(dialog(MCPServerStatus.CONNECTED));
+    await press('return');
+
+    // Enter must not fall through to the row that inherited Reconnect's slot
+    // (Disable); the cursor is back on View tools, which opens the tool list.
+    expect(onServerAction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'srv' }),
+      'toggle-disable',
+    );
+    expect(onServerAction).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Tools for srv/)).toBeTruthy();
+  });
+});
