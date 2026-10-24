@@ -111,17 +111,35 @@ export async function getLintScope({
         throw error;
       }
     });
-    const changedScripts = shellScripts(files, cwd);
-    // Sourced helpers affect unchanged entry scripts, including deleted helpers.
+    // Mirror the lane's own terminal-bench exclusion (getLinters().shellcheck
+    // in lint.js): those paths are grep-ed out of the full lane too, so a
+    // change there must not pay for a whole-repository ShellCheck.
+    const shellCandidates = changed.filter(
+      (file) => !file.startsWith('integration-tests/terminal-bench/'),
+    );
+    const existing = new Set(files);
+    const changedScripts = shellScripts(
+      shellCandidates.filter((file) => existing.has(file)),
+      cwd,
+    );
+    // Sourced helpers affect unchanged entry scripts, including deleted
+    // helpers. The extensionless arm stays deliberately conservative — it
+    // cannot tell a sourced helper from a Dockerfile or LICENSE — because the
+    // full lane's own `file`-based selection cannot see an extensionless
+    // helper either, so narrowing it here would drop coverage.
     const shellChanged =
       changedScripts.length > 0 ||
-      changed.some(
+      shellCandidates.some(
         (file) =>
           /\.(?:sh|bash|zsh)$/.test(file) || !basename(file).includes('.'),
       );
     return {
       full: false,
-      eslint: files.filter((file) => /\.(?:[cm]?js|jsx|ts|tsx)$/.test(file)),
+      // Must stay a superset of what `lint:ci` lints. Flat-config `--ext` is
+      // additive to the config's own `files` scope, so the full lane also
+      // lints `.mts`/`.cts` (tracked today: scripts/review-audit-layers.mts);
+      // dropping them here would report green without opening the file.
+      eslint: files.filter((file) => /\.[cm]?[jt]sx?$/.test(file)),
       prettier: files,
       shellcheck: shellChanged,
       yamllint: files.filter((file) => /\.ya?ml$/.test(file)),

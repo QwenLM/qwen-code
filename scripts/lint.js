@@ -387,11 +387,17 @@ function runChangedFiles(command, options, files) {
     command === 'prettier'
       ? Object.groupBy(files, (file) => dirname(file))
       : { '.': files };
+  // Accumulate failures instead of exiting on the first non-zero status:
+  // Prettier runs per directory with basename targets, so its own output never
+  // names the directory, and aborting would leave the remaining directories
+  // unchecked and unreported in the same run.
+  let failed = false;
   for (const [directory, selected] of Object.entries(groups)) {
     const targets =
       command === 'prettier'
         ? selected.map((file) => basename(file))
         : selected;
+    if (command === 'prettier') console.log(`\nChecking ${directory}`);
     for (let index = 0; index < targets.length; index += 50) {
       const result = spawnSync(
         command,
@@ -411,9 +417,10 @@ function runChangedFiles(command, options, files) {
         },
       );
       if (result.error) console.error(result.error.message);
-      if (result.status !== 0) process.exit(1);
+      if (result.status !== 0) failed = true;
     }
   }
+  if (failed) process.exit(1);
 }
 
 async function main() {
@@ -443,6 +450,12 @@ async function main() {
         ? runESLint()
         : runChangedFiles(
             'eslint',
+            // `lint:ci` in package.json stays the source of truth for the
+            // policy: flat-config `--ext` is additive to the config's own
+            // `files` scope, and `lint-scope.js` selects the same file types.
+            // Keep the three in step — a flag added only there is not applied
+            // to this path, and `--no-warn-ignored` is required because
+            // eslint.config.js globally ignores tracked vendored trees.
             ['--ext', '.ts,.tsx', '--max-warnings', '0', '--no-warn-ignored'],
             scope.eslint,
           ),

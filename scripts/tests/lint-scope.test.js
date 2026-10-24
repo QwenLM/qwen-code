@@ -88,6 +88,19 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.prettier).toEqual(['pr-only.ts']);
     });
 
+    it('selects the .mts and .cts files the full lane lints', async () => {
+      // `lint:ci` runs `eslint . --ext .ts,.tsx`, and flat-config `--ext` is
+      // additive to the config's own `files` scope, which typescript-eslint
+      // opens to *.mts/*.cts. Selecting only .ts/.tsx here would report green
+      // without ever opening a changed .mts file.
+      put('changed.mts');
+      put('changed.cts');
+      commit();
+      const result = await scope();
+      expect(result.full).toBe(false);
+      expect(result.eslint.sort()).toEqual(['changed.cts', 'changed.mts']);
+    });
+
     it('uses existing rename destinations and preserves spaced, newline and shell-special paths', async () => {
       put('old.ts');
       put('deleted.yaml', 'name: removed\n');
@@ -168,6 +181,19 @@ describe.skipIf(process.platform === 'win32')(
         });
       },
     );
+
+    it('does not extend the shell lane to paths that lane excludes', async () => {
+      // The full lane greps terminal-bench out of its candidates, but the
+      // escalation arm was evaluated over every changed path, so a PR whose
+      // only shell change lived there still staged a whole-repository
+      // ShellCheck for a file the lane would never read.
+      put(
+        'integration-tests/terminal-bench/task.sh',
+        '#!/bin/sh\necho hello\n',
+      );
+      commit();
+      expect(await scope()).toMatchObject({ full: false, shellcheck: false });
+    });
 
     it('rechecks unchanged entry scripts when a sourced helper changes or is deleted', async () => {
       put('entry.sh', '#!/bin/sh\n. ./helper\n');
@@ -261,6 +287,14 @@ describe.skipIf(process.platform === 'win32')(
           encoding: 'utf8',
           env: {
             ...process.env,
+            // Pin the environment-derived linter temp directory into the
+            // fixture. `setupLinters` starts with rmSync(TEMP_DIR), and
+            // getLinterTempDir() keys on RUNNER_TEMP plus GITHUB_RUN_ID, so an
+            // unpinned child deletes the ambient runner directory.
+            RUNNER_TEMP: repo,
+            GITHUB_RUN_ID: '1',
+            GITHUB_RUN_ATTEMPT: '1',
+            GITHUB_JOB: 'lint-scope-test',
             LINT_BASE_SHA: baseSha,
             LINT_LOG: log,
             FAIL_LINTER: fail,
@@ -331,7 +365,11 @@ describe.skipIf(process.platform === 'win32')(
         commit();
         const result = run([lane], lane);
         expect(result.status).toBe(1);
-        expect(result.calls.map(({ name }) => name)).toEqual([lane]);
+        // Prettier runs once per selected directory and now reports all of
+        // them in one pass; every other lane is a single invocation.
+        expect(result.calls.map(({ name }) => name)).toEqual(
+          lane === 'prettier' ? [lane, lane] : [lane],
+        );
       },
     );
 
@@ -399,6 +437,43 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.stdout).toContain('Skipping eslint');
       expect(result.stdout).toContain('Skipping prettier');
       expect(result.stdout).toContain('Skipping shellcheck');
+    });
+
+    it('keeps the spawned linter temp dir inside the fixture', () => {
+      put('changed.ts');
+      commit();
+      const result = run(['setup']);
+      expect(result.status, result.stderr).toBe(0);
+      // The child resolves RUNNER_TEMP/qwen-code-linters/<run>-<attempt>-<job>
+      // from the pinned env, so its rmSync/mkdirSync stays in the fixture.
+      expect(
+        existsSync(join(repo, 'qwen-code-linters', '1-1-lint-scope-test')),
+      ).toBe(true);
+    });
+
+    it('reports every failing directory in one Prettier run', () => {
+      // Prettier runs from each file's own directory with basename targets, so
+      // neither its output nor its cwd names the directory. Exiting on the
+      // first non-zero status both hid the location and skipped the rest.
+      put('package.json', '{"type":"module"}\n');
+      baseSha = commit();
+      put('packages/alpha/src/one.js', 'const  one=1;\n');
+      put('packages/beta/src/two.js', 'const  two=2;\n');
+      commit();
+      const result = spawnSync(process.execPath, [lintScript, '--prettier'], {
+        cwd: repo,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          LINT_BASE_SHA: baseSha,
+          PATH: `${fileURLToPath(new URL('../../node_modules/.bin', import.meta.url))}:${process.env.PATH}`,
+        },
+      });
+      expect(result.status, result.stdout + result.stderr).toBe(1);
+      expect(result.stdout).toContain('Checking packages/alpha/src');
+      expect(result.stdout).toContain('Checking packages/beta/src');
+      expect(result.stdout + result.stderr).toContain('one.js');
+      expect(result.stdout + result.stderr).toContain('two.js');
     });
 
     it.each(['eslint', 'prettier'])(
