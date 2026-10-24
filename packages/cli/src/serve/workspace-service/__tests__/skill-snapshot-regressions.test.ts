@@ -571,4 +571,43 @@ describe('Skill snapshot correctness regressions', () => {
       }
     });
   });
+
+  it('traces discarded error cells with a retained catalog', async () => {
+    const failed: ServeWorkspaceSkillsStatus = {
+      ...inventory([]),
+      errors: [{ kind: 'skills', status: 'error', error: 'bad manifest' }],
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce(inventory(['retained-review']))
+      .mockResolvedValue(failed);
+    const svc = service({ queryWorkspaceStatus: query });
+    await svc.getWorkspaceSkillsStatus(ctx);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    const warm = await svc.getWorkspaceSkillsStatus(ctx);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(warm.skills[0]?.name).toBe('retained-review');
+    expect(warm.errors).toBeUndefined();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('bad manifest'),
+    );
+  });
+
+  it('counts observation time in the published snapshot age', async () => {
+    const query = vi.fn().mockImplementation(
+      () =>
+        new Promise<ServeWorkspaceSkillsStatus>((resolve) => {
+          setTimeout(() => resolve(inventory(['slow-review'])), 2_000);
+        }),
+    );
+    const svc = service({ queryWorkspaceStatus: query });
+    const read = svc.getWorkspaceSkillsStatus(ctx);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await read;
+
+    expect(result.skills[0]?.name).toBe('slow-review');
+    expect(result.snapshot?.ageMs).toBeGreaterThanOrEqual(1_500);
+  });
 });

@@ -364,6 +364,13 @@ export function createDaemonWorkspaceService(
       (status.initialized && !status.errors?.length) ||
       (allowRetainedSnapshot && lastWorkspaceSkillsStatus)
     ) {
+      if (status.errors?.length) {
+        writeStderrLine(
+          `qwen serve: workspace skills observation reported errors, keeping the retained catalog: ${status.errors
+            .map((cell) => cell.error)
+            .join('; ')}`,
+        );
+      }
       return status;
     }
     // Fall back to daemon-local enumeration, so a child that has not
