@@ -4,13 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { OverlayFs } from './overlayFs.js';
-import { writeFile, readFile, mkdir, rm } from 'node:fs/promises';
+import {
+  writeFile,
+  readFile,
+  mkdir,
+  rm,
+  stat,
+  copyFile,
+} from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+
+// The copy-stage failure test needs to truncate the destination and then fail,
+// which is what `copyFile` does on ENOSPC. Delegate every other call to the real
+// implementation so the rest of the suite is unchanged.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, copyFile: vi.fn(actual.copyFile) };
+});
 
 describe('OverlayFs', () => {
   let testDir: string;
@@ -144,6 +159,229 @@ describe('OverlayFs', () => {
       expect(applied).toContain(newFile);
       const content = await readFile(newFile, 'utf-8');
       expect(content).toBe('new file content');
+    });
+
+    it('reports a file it could not copy back to disk', async () => {
+      // `blocker` is a file, so the directory the child needs cannot be made.
+      await writeFile(join(testDir, 'blocker'), 'not a directory');
+      const realFile = join(testDir, 'blocker', 'file.ts');
+      const overlayPath = await overlay.redirectWrite(realFile);
+      await writeFile(overlayPath, 'modified in overlay');
+
+      // Dropping it silently would let the caller report the edit as accepted
+      // while nothing reached disk.
+      await expect(overlay.applyToReal()).rejects.toThrow(/file\.ts/);
+    });
+
+    it('ignores a redirected path nothing was ever written to', async () => {
+      // `redirectWrite` registers the path so later reads see the overlay, but for a
+      // file that does not exist yet it only makes the directory — no overlay file is
+      // created. A tool that redirects a write and then fails (an `edit` of a path
+      // that is not there) leaves exactly that: an entry with nothing behind it.
+      // Counting it as "could not apply" rejects the whole accept, discarding edits
+      // that did land, even though this entry has no content to copy.
+      const neverWritten = join(testDir, 'brand-new.ts');
+      await overlay.redirectWrite(neverWritten);
+
+      const realFile = join(testDir, 'src', 'app.ts');
+      await mkdir(join(testDir, 'src'), { recursive: true });
+      await writeFile(realFile, 'original');
+      await writeFile(await overlay.redirectWrite(realFile), 'edited');
+
+      const applied = await overlay.applyToReal();
+
+      // Resolves: there is no real failure here to report.
+      expect(applied).toContain(realFile);
+      expect(applied).not.toContain(neverWritten);
+      expect(await readFile(realFile, 'utf-8')).toBe('edited');
+      // Nothing was ever written, so nothing is created on the real side either.
+      expect(existsSync(neverWritten)).toBe(false);
+    });
+
+    it('ignores an existing file that was redirected but never written', async () => {
+      // For a path that already exists, `redirectWrite` preloads the original
+      // bytes into the overlay. A tool that then fails without writing leaves an
+      // overlay file holding the original content, which the old existence check
+      // counted as applied. That would report an unchanged file as landed and
+      // suppress a resubmit that was safe.
+      const realFile = join(testDir, 'existing.ts');
+      await writeFile(realFile, 'original content');
+      const before = (await stat(realFile)).mtimeMs;
+      await overlay.redirectWrite(realFile);
+
+      const applied = await overlay.applyToReal();
+
+      expect(applied).toEqual([]);
+      expect(await readFile(realFile, 'utf-8')).toBe('original content');
+      expect((await stat(realFile)).mtimeMs).toBe(before);
+    });
+
+    it('does not overwrite a real file that changed after the snapshot', async () => {
+      // A user save or a watcher can rewrite the real file while speculation is
+      // in flight. The overlay still holds the pre-speculation snapshot, so
+      // deciding "was this written?" against the current real file would copy
+      // the stale snapshot back over the newer content and report it applied.
+      const realFile = join(testDir, 'existing.ts');
+      await writeFile(realFile, 'original content');
+      await overlay.redirectWrite(realFile);
+      await writeFile(realFile, 'newer content from the user');
+
+      const applied = await overlay.applyToReal();
+
+      expect(applied).toEqual([]);
+      expect(await readFile(realFile, 'utf-8')).toBe(
+        'newer content from the user',
+      );
+    });
+
+    it('skips a registered parent path that becomes a directory', async () => {
+      const parent = join(testDir, 'src');
+      const parentOverlayPath = await overlay.redirectWrite(parent);
+      const nestedFile = join(parent, 'app.ts');
+      await writeFile(await overlay.redirectWrite(nestedFile), 'nested edit');
+
+      // Registering the parent before its child is realistic for a tool that
+      // first targets a path as a file, then creates a nested file beneath it.
+      // The child's redirect creates the parent's overlay path as a directory.
+      expect(existsSync(parentOverlayPath)).toBe(true);
+      expect(await overlay.applyToReal()).toEqual([nestedFile]);
+      expect(await readFile(nestedFile, 'utf-8')).toBe('nested edit');
+    });
+
+    it('counts only the files it attempted when one entry has nothing behind it', async () => {
+      // A registered path with no overlay file is skipped, so it must not inflate
+      // the total: the count sits next to the path list, and "1 of 2" beside one
+      // path is the kind of mismatch that sends someone looking for a second
+      // failure that does not exist.
+      await overlay.redirectWrite(join(testDir, 'never-written.ts'));
+
+      await writeFile(join(testDir, 'blocker'), 'not a directory');
+      const blocked = join(testDir, 'blocker', 'file.ts');
+      await writeFile(await overlay.redirectWrite(blocked), 'blocked edit');
+
+      await expect(overlay.applyToReal()).rejects.toThrow(
+        'Could not apply 1 of 1 file(s) to disk',
+      );
+    });
+
+    it('lands the files it can and reports the one it cannot', async () => {
+      // A file that cannot be copied must not stop the others: the point of
+      // collecting the failures is that the writable ones still land.
+      await writeFile(join(testDir, 'blocker'), 'not a directory');
+      const blocked = join(testDir, 'blocker', 'file.ts');
+      const writable = join(testDir, 'writable.ts');
+      await writeFile(await overlay.redirectWrite(blocked), 'blocked edit');
+      await writeFile(await overlay.redirectWrite(writable), 'applied edit');
+
+      const error = await overlay.applyToReal().catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
+        `Could not apply 1 of 2 file(s) to disk: ${blocked}`,
+      );
+      expect((error as { applied?: string[] }).applied).toEqual([writable]);
+      expect((error as { failed?: string[] }).failed).toEqual([blocked]);
+
+      // The file that could be copied is on disk with the edit in it.
+      expect(await readFile(writable, 'utf-8')).toBe('applied edit');
+    });
+
+    it('reports a failed copy as damaged so the caller does not resubmit over it', async () => {
+      const realFile = join(testDir, 'app.ts');
+      await writeFile(realFile, 'original content');
+      await writeFile(await overlay.redirectWrite(realFile), 'edited content');
+
+      const mockedCopyFile = vi.mocked(copyFile);
+      mockedCopyFile.mockImplementationOnce(async (_src, dest) => {
+        // copyFile opens the destination with O_TRUNC and libuv unlinks it when
+        // the write fails; leave the destination truncated to model that.
+        await writeFile(dest as string, '');
+        throw Object.assign(new Error('no space left on device'), {
+          code: 'ENOSPC',
+        });
+      });
+
+      const error = await overlay.applyToReal().catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as { applied?: string[] }).applied).toEqual([]);
+      expect((error as { failed?: string[] }).failed).toEqual([realFile]);
+      expect((error as { damaged?: string[] }).damaged).toEqual([realFile]);
+      expect((error as Error).message).toContain(
+        'Could not apply 1 of 1 file(s) to disk',
+      );
+      // The fixture truncated the file; the point is that the caller is told it
+      // is damaged instead of silently resubmitting over it.
+      expect(await readFile(realFile, 'utf-8')).toBe('');
+    });
+
+    it('does not call an open-stage failure damaged when the file is unchanged', async () => {
+      // A read-only destination fails at open() before anything is truncated.
+      // The resubmit fallback is still safe there, so it must stay in `failed`
+      // rather than being reported as possibly truncated.
+      const realFile = join(testDir, 'app.ts');
+      await writeFile(realFile, 'original content');
+      await writeFile(await overlay.redirectWrite(realFile), 'edited content');
+      const before = await stat(realFile);
+
+      const mockedCopyFile = vi.mocked(copyFile);
+      mockedCopyFile.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('permission denied'), {
+          code: 'EACCES',
+        });
+      });
+
+      const error = await overlay.applyToReal().catch((err: unknown) => err);
+      expect((error as { failed?: string[] }).failed).toEqual([realFile]);
+      expect((error as { damaged?: string[] }).damaged).toEqual([]);
+      const after = await stat(realFile);
+      expect(after.size).toBe(before.size);
+      expect(after.mtimeMs).toBe(before.mtimeMs);
+      expect(await readFile(realFile, 'utf-8')).toBe('original content');
+    });
+
+    it('carries the underlying failure as the cause', async () => {
+      await writeFile(join(testDir, 'blocker'), 'not a directory');
+      const blocked = join(testDir, 'blocker', 'file.ts');
+      await writeFile(await overlay.redirectWrite(blocked), 'blocked edit');
+
+      // A bare `catch` would leave the caller unable to tell EACCES from
+      // ENOSPC from ENOTDIR. Asserting only that a cause exists would survive
+      // both losing it and replacing it with something unrelated, so check the
+      // errno code survives the trip.
+      const error = await overlay.applyToReal().catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(Error);
+      const cause = (error as Error).cause;
+      expect(cause).toBeInstanceOf(Error);
+      // `mkdir(..., { recursive: true })` under an existing file reports EEXIST.
+      expect((cause as NodeJS.ErrnoException).code).toBe('EEXIST');
+    });
+
+    it('keeps the first failure as the cause when several fail', async () => {
+      // Two failures with *different* errno codes, so first-versus-last is
+      // decidable: `mkdir` under an existing file reports EEXIST, while
+      // `copyFile` onto a directory reports EISDIR. Map iteration is insertion
+      // order, so the EEXIST one is registered first and must be the cause.
+      await writeFile(join(testDir, 'mkdir-blocked'), 'not a directory');
+      await writeFile(
+        await overlay.redirectWrite(join(testDir, 'mkdir-blocked', 'file.ts')),
+        'blocked edit',
+      );
+      await mkdir(join(testDir, 'copy-blocked'), { recursive: true });
+      await writeFile(
+        await overlay.redirectWrite(join(testDir, 'copy-blocked')),
+        'blocked edit',
+      );
+
+      const error = await overlay.applyToReal().catch((err: unknown) => err);
+      const message = (error as Error).message;
+
+      // Both are reported by path...
+      expect(message).toContain('Could not apply 2 of 2 file(s) to disk');
+      expect(message).toContain('mkdir-blocked');
+      expect(message).toContain('copy-blocked');
+      // ...but only the first failure's reason survives as the cause, and
+      // `firstError ??= err` is what makes that the first rather than the last.
+      const cause = (error as Error).cause as NodeJS.ErrnoException;
+      expect(cause.code).toBe('EEXIST');
     });
 
     it('returns empty array when no files written', async () => {
