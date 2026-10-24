@@ -37186,12 +37186,18 @@ describe('sessionLanguage multi-session propagation', () => {
       const settings = {
         merged: {},
         workspaceSettingsActive: true,
-        workspace: { originalSettings: {} },
+        workspace: {
+          originalSettings: {},
+          settings: { context: { includeDirectories: [] } },
+        },
         reloadScopeFromDisk: vi.fn().mockReturnValue(true),
         setValue: vi.fn((scope: SettingScope, key: string, value: unknown) => {
           expect(scope).toBe(SettingScope.Workspace);
           expect(key).toBe('context.includeDirectories');
           settings.workspace.originalSettings = {
+            context: { includeDirectories: value as string[] },
+          };
+          settings.workspace.settings = {
             context: { includeDirectories: value as string[] },
           };
         }),
@@ -37254,17 +37260,26 @@ describe('sessionLanguage multi-session propagation', () => {
       );
       expect(addDirectoryContext).toHaveBeenCalled();
 
-      // A settings file written by another owner may store a relative entry.
-      // The resolved spelling GET returns must still remove it.
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {
+          action: 'add',
+          path: workspaceRoot,
+        }),
+      ).rejects.toMatchObject({ data: { errorKind: 'primary_directory' } });
+
+      // A settings file written by another owner may store a relative entry;
+      // removal must accept that spelling as well as the absolute display form.
+      const relativeExtra = path.relative(workspaceRoot, extra);
       settings.workspace.originalSettings = {
-        context: {
-          includeDirectories: [path.relative(workspaceRoot, extra)],
-        },
+        context: { includeDirectories: [relativeExtra] },
+      };
+      settings.workspace.settings = {
+        context: { includeDirectories: [relativeExtra] },
       };
       await expect(
         agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {
           action: 'remove',
-          path: extra,
+          path: relativeExtra,
         }),
       ).resolves.toMatchObject({ directories: [], changed: true });
       expect(settings.setValue).toHaveBeenLastCalledWith(
@@ -37291,6 +37306,34 @@ describe('sessionLanguage multi-session propagation', () => {
           path: stale,
         }),
       ).resolves.toMatchObject({ directories: [], changed: true });
+
+      // A `$VAR` entry is listed and removed using the runtime-resolved value,
+      // while the original spelling is what gets persisted.
+      const outside = path.join(scratch, 'outside');
+      await fs.mkdir(outside);
+      workspaceContext.addDirectory(outside);
+      sessionContext.addDirectory(outside);
+      settings.workspace.originalSettings = {
+        context: { includeDirectories: ['${EXTRA_DIR}'] },
+      };
+      settings.workspace.settings = {
+        context: { includeDirectories: [outside] },
+      };
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {
+          action: 'remove',
+          path: outside,
+        }),
+      ).resolves.toMatchObject({ directories: [], changed: true });
+      expect(workspaceContext.getDirectories()).not.toContain(outside);
+      expect(sessionContext.getDirectories()).not.toContain(outside);
+      expect(settings.setValue).toHaveBeenLastCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [],
+        undefined,
+        { throwOnWriteFailure: true },
+      );
 
       await expect(
         agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {

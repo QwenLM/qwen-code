@@ -161,6 +161,28 @@ describe('POST /workspaces/:workspace/directories', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  it('maps a primary-directory add to 400', async () => {
+    const invoke = vi.fn().mockRejectedValue(
+      Object.assign(
+        new Error(
+          'The primary workspace directory is already part of the workspace',
+        ),
+        {
+          code: -32602,
+          data: { errorKind: 'primary_directory' },
+        },
+      ),
+    );
+    const { app } = makeApp({ invoke });
+
+    const res = await request(app)
+      .post('/workspaces/ws-1/directories')
+      .send({ path: workspace });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('primary_directory');
+  });
+
   it('maps a missing directory to 404', async () => {
     const invoke = vi.fn().mockRejectedValue(
       Object.assign(new Error('Directory not found'), {

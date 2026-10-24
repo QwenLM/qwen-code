@@ -54,10 +54,10 @@ GET 直接读工作区设置文件，不经过 ACP 子进程。持久化列表�
 POST 与 DELETE 转发到一个新的 ACP 控制方法 `qwen/control/workspace/directories`，参数 `{ action: 'add' | 'remove', path }`。`acpAgent.ts` 中的处理函数承担整个变更，与 CLI 命令对齐：
 
 1. 拒绝条件：运行时处于 restrictive sandbox、会话来源是 standalone/managed-conversation-bound、或工作区 cwd 不是本地路径。
-2. 规范化路径（`fs.stat` + `fs.realpath`）。拒绝相对路径、含 NUL 的路径、不存在的路径、非目录路径。
-3. 移除时拒绝删除工作区主目录。若某个会话已 `/cd` 到该额外目录、把它当作自己的工作目录，则跳过该会话并记录警告，而不是让整个工作区级移除失败。
-4. 把增量应用到每个运行中配置：工作区基础配置加每个活动会话的配置。添加走 `WorkspaceContext.addDirectory`，移除走 `removeDirectory`。
-5. 把新列表持久化到工作区设置 `context.includeDirectories`（去重的规范化路径；主目录永不写入）。
+2. 添加要求绝对路径：拒绝含 NUL、不存在或非目录的路径，再用 `fs.stat` + `fs.realpath` 规范化；移除接受持久化/展示写法（绝对、相对或 `~`），按工作区根解析，仍拒绝含 NUL 的路径。
+3. 移除时拒绝删除工作区主目录；添加时拒绝把主目录再加入（`primary_directory`），因为它本来就属于工作区。若某个会话已 `/cd` 到该额外目录、把它当作自己的工作目录，则跳过该会话并记录警告，而不是让整个工作区级移除失败。
+4. 从环境变量已解析的设置层读取变更基线，并用解析后的值做匹配与运行中根目录的增删。把增量应用到每个运行中配置：工作区基础配置加每个活动会话的配置。添加走 `WorkspaceContext.addDirectory`，移除走 `removeDirectory`。
+5. 把新列表按原始写法持久化到工作区设置 `context.includeDirectories`（去重；主目录永不写入）。
 6. 对每个发生变化且开启了 `shouldLoadMemoryFromIncludeDirectories()` 的配置调用 `refreshHierarchicalMemory()`。
 7. 对每个发生变化的会话调用 `getLlmClient()?.addDirectoryContext()`，让模型知道新的根目录。
 

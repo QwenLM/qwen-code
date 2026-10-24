@@ -53,8 +53,9 @@ function resolveWorkspaceDirectory(
 /** Extra directories persisted at workspace scope. */
 function readWorkspaceDirectories(workspaceCwd: string): string[] {
   const settings = loadSettings(workspaceCwd, { skipLoadEnvironment: true });
-  const configured =
-    settings.workspace.originalSettings.context?.includeDirectories;
+  // `settings` is the layer with environment variables resolved by normal
+  // settings loading, matching what sessions and the mutation handler use.
+  const configured = settings.workspace.settings.context?.includeDirectories;
   return Array.isArray(configured)
     ? configured
         .filter((entry): entry is string => typeof entry === 'string')
@@ -93,6 +94,13 @@ function sendBridgeError(res: Response, error: unknown, route: string): void {
       res.status(400).json({
         error: 'The primary workspace directory cannot be removed.',
         code: 'initial_directory',
+      });
+      return;
+    case 'primary_directory':
+      res.status(400).json({
+        error:
+          'The primary workspace directory is already part of the workspace.',
+        code: 'primary_directory',
       });
       return;
     case 'directory_management_unsupported':

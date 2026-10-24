@@ -15645,9 +15645,11 @@ class QwenAgent implements Agent {
         if (
           typeof rawPath !== 'string' ||
           rawPath.length === 0 ||
-          rawPath.includes('\0') ||
-          !path.isAbsolute(rawPath)
+          rawPath.includes('\0')
         ) {
+          throw RequestError.invalidParams(undefined, 'path is required');
+        }
+        if (action === 'add' && !path.isAbsolute(rawPath)) {
           throw RequestError.invalidParams(
             undefined,
             'path must be an absolute directory path',
@@ -15733,6 +15735,13 @@ class QwenAgent implements Agent {
             { errorKind: 'initial_directory' },
           );
         }
+        if (action === 'add' && canonicalPath === canonicalPrimary) {
+          throw new RequestError(
+            -32602,
+            'The primary workspace directory is already part of the workspace',
+            { errorKind: 'primary_directory' },
+          );
+        }
 
         // The child's LoadedSettings snapshot can lag a write made by another
         // owner (for example a session's `/directory add`). Re-read the
@@ -15755,29 +15764,49 @@ class QwenAgent implements Agent {
               (entry): entry is string => typeof entry === 'string',
             )
           : [];
-        // Existing entries may be relative, use `~`, be non-canonical, or
-        // already be deleted; resolve them the same way runtime configuration
-        // does so a displayed entry can always be matched and removed.
+        // `settings` is the layer with environment variables resolved by normal
+        // settings loading; `originalSettings` keeps the spelling to persist.
+        const resolvedConfigured =
+          workspaceFile.settings.context?.includeDirectories;
+        const resolvedExisting = Array.isArray(resolvedConfigured)
+          ? resolvedConfigured.filter(
+              (entry): entry is string => typeof entry === 'string',
+            )
+          : [];
+        // Existing entries may be relative, use `~`, contain environment
+        // variables, be non-canonical, or already be deleted. Resolve the
+        // runtime value for matching and display while persisting the original
+        // spelling.
         const entries = await Promise.all(
-          existing.map(async (entry) => ({
-            entry,
-            canonical: await resolveDirectoryEntry(entry),
-          })),
+          existing.map(async (entry, index) => {
+            const resolved = resolvedExisting[index] ?? entry;
+            return {
+              entry,
+              resolved,
+              canonical: await resolveDirectoryEntry(resolved),
+            };
+          }),
         );
         const normalizedRawPath = path.resolve(rawPath);
-        const next =
+        const nextEntries =
           action === 'add'
             ? entries.some(({ canonical }) => canonical === canonicalPath)
-              ? existing
-              : [...existing, canonicalPath]
-            : entries
-                .filter(
-                  ({ entry, canonical }) =>
-                    canonical !== canonicalPath &&
-                    entry !== rawPath &&
-                    entry !== normalizedRawPath,
-                )
-                .map(({ entry }) => entry);
+              ? entries
+              : [
+                  ...entries,
+                  {
+                    entry: canonicalPath,
+                    resolved: canonicalPath,
+                    canonical: canonicalPath,
+                  },
+                ]
+            : entries.filter(
+                ({ entry, canonical }) =>
+                  canonical !== canonicalPath &&
+                  entry !== rawPath &&
+                  entry !== normalizedRawPath,
+              );
+        const next = nextEntries.map(({ entry }) => entry);
         const listChanged =
           next.length !== existing.length ||
           next.some((entry, index) => entry !== existing[index]);
@@ -15838,7 +15867,9 @@ class QwenAgent implements Agent {
 
         return {
           primaryDirectory: this.config.getTargetDir(),
-          directories: await Promise.all(next.map(resolveDirectoryEntry)),
+          directories: await Promise.all(
+            nextEntries.map(({ resolved }) => resolveDirectoryEntry(resolved)),
+          ),
           changed: listChanged,
           warnings,
         };

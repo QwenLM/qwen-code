@@ -95,17 +95,23 @@ The handler in `acpAgent.ts` owns the whole mutation, mirroring the CLI command:
 1. Reject when the runtime is in restrictive sandbox mode, when the session
    source is standalone/managed-conversation-bound, or when the workspace cwd is
    not a local path.
-2. Canonicalize the path (`fs.stat` + `fs.realpath`). Reject relative paths,
-   NUL bytes, missing paths, and paths that are not directories.
-3. Remove: refuse to remove the workspace's primary directory. A session that
-   `/cd`'d into the extra directory treats it as its own working directory, so
-   that session is skipped with a warning instead of failing the whole
-   workspace-level removal.
-4. Apply the delta to every live config: the workspace base config plus each
-   active session's config. Add via `WorkspaceContext.addDirectory`; remove via
+2. Add requires an absolute path: reject NUL bytes, missing paths, and
+   non-directories, then canonicalize with `fs.stat` + `fs.realpath`. Remove
+   accepts the persisted or display spelling (absolute, relative, or `~`) and
+   resolves it against the workspace root; NUL bytes are still rejected.
+3. Remove: refuse to remove the workspace's primary directory. Add: refuse to
+   add it (`primary_directory`), because it is always part of the workspace. A
+   session that `/cd`'d into the extra directory treats it as its own working
+   directory, so that session is skipped with a warning instead of failing the
+   whole workspace-level removal.
+4. Read the mutation base from the settings layer with environment variables
+   resolved, and match/remove live roots using those resolved values. Apply the
+   delta to every live config: the workspace base config plus each active
+   session's config. Add via `WorkspaceContext.addDirectory`; remove via
    `removeDirectory`.
 5. Persist the new list to workspace settings `context.includeDirectories`
-   (deduplicated canonical paths; the primary directory is never written).
+   using the original spelling (deduplicated; the primary directory is never
+   written).
 6. For each changed config with `shouldLoadMemoryFromIncludeDirectories()`,
    call `refreshHierarchicalMemory()`.
 7. For each changed session, call `getLlmClient()?.addDirectoryContext()` so the
@@ -240,8 +246,12 @@ managed parity table (no managed equivalent), and the conditional table in
   settings; the primary directory cannot be removed.
 - Untrusted, SSH, managed, and standalone workspaces do not offer the section or
   answer a mutation successfully.
-- A relative path or a path containing NUL returns `invalid_path`; a missing
-  path or a file returns `directory_not_found`. Neither changes anything.
+- An add with a relative path or any path containing NUL returns `invalid_path`;
+  a missing path or a file returns `directory_not_found`. Adding the primary
+  directory returns `primary_directory`. Remove accepts relative and `~`
+  spellings.
+- Existing relative, `~`, or environment-variable entries are listed as the
+  runtime resolves them, and removing one clears it from every live session.
 
 ## Open questions
 
