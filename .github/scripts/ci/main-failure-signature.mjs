@@ -287,6 +287,7 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
   const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
   return {
     workflow: workflowName,
+    logCount: logTexts.length,
     tests,
     failedJobs,
     signature: tests.length
@@ -404,20 +405,24 @@ function cappedTestLines(tests) {
 
 export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
   const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
+  const failedJobs = jobs.filter((job) => job.conclusion === 'failure');
+  const coverage = failedJobs.length
+    ? `${analysis.logCount} of ${failedJobs.length} failed-job logs${analysis.logCount === failedJobs.length ? '' : ' (incomplete coverage)'}.`
+    : `${analysis.logCount}; failed-job entries empty or unavailable.`;
   return [
     `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
     `### ${code(analysis.workflow)} failed`,
     '',
     `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
     '',
-    ...jobs
-      .filter((job) => job.conclusion === 'failure')
-      .map((job) => {
-        const steps = (job.steps ?? [])
-          .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
-          .map((step) => code(step.name));
-        return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
-      }),
+    `- Job logs analyzed: ${coverage}`,
+    '',
+    ...failedJobs.map((job) => {
+      const steps = (job.steps ?? [])
+        .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
+        .map((step) => code(step.name));
+      return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
+    }),
     '',
     ...(analysis.tests.length
       ? [
