@@ -280,7 +280,7 @@ export async function handleCancellationError(config: Config): Promise<never> {
 }
 
 /**
- * Handles max session turns exceeded consistently.
+ * Builds the message reported when `maxSessionTurns` refuses a send.
  *
  * When `--json-schema` is active the error gets an extra hint pointing at the
  * common reasons a structured-output run never terminated: the model never
@@ -288,17 +288,28 @@ export async function handleCancellationError(config: Config): Promise<never> {
  * `--exclude-tools`, or the schema is unsatisfiable. Without this, all three
  * failure modes surface as the same generic "increase maxSessionTurns" line
  * even though the fix is a permissions / schema change, not a turns bump.
+ *
+ * Shared by the headless exit path below and the JSON output adapters, so a
+ * stream-json session that trips the limit reports the same text as `-p`.
+ */
+export function formatMaxSessionTurnsMessage(config: Config): string {
+  const baseMessage =
+    'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
+  const jsonSchemaActive = config.getJsonSchema?.() !== undefined;
+  return jsonSchemaActive
+    ? `${baseMessage}\nNote: --json-schema is active. If the model never called structured_output, verify it isn't denied by permissions.deny / --exclude-tools and that the schema is satisfiable.`
+    : baseMessage;
+}
+
+/**
+ * Handles max session turns exceeded consistently.
  */
 export async function handleMaxTurnsExceededError(
   config: Config,
 ): Promise<never> {
-  const baseMessage =
-    'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
-  const jsonSchemaActive = config.getJsonSchema?.() !== undefined;
-  const message = jsonSchemaActive
-    ? `${baseMessage}\nNote: --json-schema is active. If the model never called structured_output, verify it isn't denied by permissions.deny / --exclude-tools and that the schema is satisfiable.`
-    : baseMessage;
-  const maxTurnsError = new FatalTurnLimitedError(message);
+  const maxTurnsError = new FatalTurnLimitedError(
+    formatMaxSessionTurnsMessage(config),
+  );
 
   if (config.getOutputFormat() === OutputFormat.JSON) {
     const formatter = new JsonFormatter();
