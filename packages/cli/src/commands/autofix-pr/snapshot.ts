@@ -1125,24 +1125,27 @@ function graphql(query: string, target: PrTarget, extra: string[]): unknown {
   );
 }
 
-/** Review comments listed over REST for `in_reply_to_id`: pages of 100. */
-const MAX_REVIEW_COMMENT_PAGES = 10;
+/** Bot comments asked about over REST in one run; the rest wait. */
+const MAX_REPLY_CHECKS = 20;
 
 /**
  * Marks the bot comments that look as if they opened a thread but answer
  * a comment since deleted: GraphQL drops `replyTo` along with the parent,
- * while REST keeps `in_reply_to_id`. Asked only when an open thread starts
- * with a bot comment `known` (what the caller has reported or handled)
- * does not hold yet, with one listing of the PR's review comments. When
- * GitHub does not answer, those comments are neither requests nor seen
- * this time, and are asked about again.
+ * while REST keeps `in_reply_to_id` on the comment itself. Asked only for
+ * an open thread whose first comment is a bot's that `known` (what the
+ * caller has reported or handled) does not hold yet, one comment at a
+ * time and at most `MAX_REPLY_CHECKS` a run. One not asked, or that GitHub
+ * does not answer about, is neither a request nor seen this time
+ * (`replyUnknown`) — unless `strict`, when an unanswered question fails the
+ * run, as a round must not drop a request the gate already reported.
  */
 function markOrphanReplies(
   target: PrTarget,
   pr: PrData,
   known: (id: string) => boolean,
+  strict: boolean,
 ): void {
-  const candidates: CommentNode[] = [];
+  let asked = 0;
   for (const thread of pr.reviewThreads.nodes) {
     const first = thread.comments.nodes[0];
     if (
@@ -1156,38 +1159,39 @@ function markOrphanReplies(
     ) {
       continue;
     }
-    candidates.push(first);
-  }
-  if (candidates.length === 0) return;
-  const parents = new Map<number, string>();
-  try {
-    for (let page = 1; page <= MAX_REVIEW_COMMENT_PAGES; page++) {
-      const listed = JSON.parse(
-        gh(
-          'api',
-          `repos/${target.owner}/${target.repo}/pulls/${target.prNumber}/comments?per_page=100&page=${page}`,
-          '--jq',
-          '[.[] | [.id, .in_reply_to_id]]',
-        ),
-      ) as Array<[number, number | null]>;
-      for (const [id, parent] of listed) {
-        if (parent !== null) parents.set(id, String(parent));
+    if (asked >= MAX_REPLY_CHECKS) {
+      if (strict) {
+        throw new Error(
+          `more than ${MAX_REPLY_CHECKS} new bot threads to check on PR #${target.prNumber}; run snapshot again`,
+        );
       }
-      if (listed.length < 100) break;
+      first.replyUnknown = true;
+      continue;
     }
-  } catch {
-    for (const node of candidates) node.replyUnknown = true;
-    return;
-  }
-  for (const node of candidates) {
-    const parent = parents.get(node.databaseId!);
-    if (parent !== undefined) node.replyTo = { id: `#${parent}` };
+    asked += 1;
+    let parent: string;
+    try {
+      parent = gh(
+        'api',
+        `repos/${target.owner}/${target.repo}/pulls/comments/${first.databaseId}`,
+        '--jq',
+        '.in_reply_to_id',
+      ).trim();
+    } catch (err) {
+      if (strict) throw err;
+      first.replyUnknown = true;
+      continue;
+    }
+    if (parent !== '' && parent !== 'null') {
+      first.replyTo = { id: `#${parent}` };
+    }
   }
 }
 
 export function fetchPrData(
   target: PrTarget,
   known?: (id: string) => boolean,
+  strict = true,
 ): { pr: PrData; viewer: string } {
   const data = graphql(PR_QUERY, target, []) as {
     data: {
@@ -1292,7 +1296,9 @@ export function fetchPrData(
     threads.pageInfo = more.pageInfo;
   }
   // A merged or closed PR asks nothing more: its `stop` must get through.
-  if (known && pr.state === 'OPEN') markOrphanReplies(target, pr, known);
+  if (known && pr.state === 'OPEN') {
+    markOrphanReplies(target, pr, known, strict);
+  }
   return { pr, viewer: data.data.viewer.login };
 }
 
@@ -1387,8 +1393,12 @@ function runGate(args: SnapshotArgs): void {
     ...(existing?.reportedCommentIds ?? []),
     ...watch.seenCommentIds,
   ]);
-  const { pr, viewer } = fetchPrData({ ...target, prNumber: args.pr }, (id) =>
-    reportedBefore.has(id),
+  // The gate goes on without an answer: the comment is asked about again
+  // at the next fire.
+  const { pr, viewer } = fetchPrData(
+    { ...target, prNumber: args.pr },
+    (id) => reportedBefore.has(id),
+    false,
   );
   const cursor: AutofixPrGateCursor = {
     ...(existing ?? {

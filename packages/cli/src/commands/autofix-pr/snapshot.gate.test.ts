@@ -792,33 +792,30 @@ describe('fetchPrData', () => {
     const resolved = botThread('RESOLVED', 13);
     resolved.isResolved = true;
     data.reviewThreads.nodes.push(resolved as never);
-    const respondWith = (listing: () => string) => {
-      mockGh
-        .mockReturnValueOnce(
-          JSON.stringify({
-            data: {
-              viewer: { login: 'me' },
-              repository: { pullRequest: structuredClone(data) },
-            },
-          }),
-        )
-        .mockImplementationOnce(listing);
+    const respondWith = (...answers: Array<() => string>) => {
+      mockGh.mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: { pullRequest: structuredClone(data) },
+          },
+        }),
+      );
+      for (const answer of answers) mockGh.mockImplementationOnce(answer);
     };
-    respondWith(() =>
-      JSON.stringify([
-        [3764221067, 3763973590],
-        [11, null],
-      ]),
+    const target = { owner: 'o', repo: 'r', prNumber: 7 };
+    respondWith(
+      () => '3763973590\n',
+      () => 'null\n',
     );
-    const { pr: fetched } = fetchPrData(
-      { owner: 'o', repo: 'r', prNumber: 7 },
-      (id) => id === 'SEEN',
-    );
-    // One listing of the PR's review comments, not one call per comment.
-    expect(mockGh).toHaveBeenCalledTimes(2);
+    const { pr: fetched } = fetchPrData(target, (id) => id === 'SEEN');
+    // The two not known yet, each asked about on its own; not the seen
+    // one, nor the resolved thread.
+    expect(mockGh).toHaveBeenCalledTimes(3);
     expect(mockGh.mock.calls[1]).toContain(
-      'repos/o/r/pulls/7/comments?per_page=100&page=1',
+      'repos/o/r/pulls/comments/3764221067',
     );
+    expect(mockGh.mock.calls[2]).toContain('repos/o/r/pulls/comments/11');
     const replyTo = fetched.reviewThreads.nodes.map(
       (t) => t.comments.nodes[0]!.replyTo,
     );
@@ -829,15 +826,23 @@ describe('fetchPrData', () => {
     );
     expect(ids).toEqual(['REAL', 'SEEN']);
 
-    // GitHub does not answer: the bot comments are neither requests nor
-    // seen, and are asked about on the next run.
-    mockGh.mockReset();
-    respondWith(() => {
+    // GitHub does not answer. A round fails rather than drop a request the
+    // gate reported; the gate goes on, with the bot comments neither
+    // requests nor seen, asked about at its next fire.
+    const refuse = () => {
       throw new Error('HTTP 403: API rate limit exceeded');
-    });
+    };
+    mockGh.mockReset();
+    respondWith(refuse);
+    expect(() => fetchPrData(target, (id) => id === 'SEEN')).toThrow(
+      /rate limit/,
+    );
+    mockGh.mockReset();
+    respondWith(refuse, refuse);
     const { pr: unanswered } = fetchPrData(
-      { owner: 'o', repo: 'r', prNumber: 7 },
+      target,
       (id) => id === 'SEEN',
+      false,
     );
     const quiet = buildGateSnapshot(unanswered, cursor());
     expect(
@@ -860,7 +865,7 @@ describe('fetchPrData', () => {
         },
       }),
     );
-    fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 }, () => false);
+    fetchPrData(target, () => false);
     expect(mockGh).toHaveBeenCalledTimes(1);
 
     // Nor does a resolved thread, which no round reads.
@@ -883,6 +888,60 @@ describe('fetchPrData', () => {
     );
     fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 }, () => false);
     expect(mockGh).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks about 20 bot threads a run at most, leaving the rest for the next', () => {
+    const threads = Array.from({ length: 21 }, (_, index) => ({
+      id: `T${index}`,
+      isResolved: false,
+      isOutdated: false,
+      path: 'src/a.ts',
+      line: 3,
+      root: { nodes: [{ databaseId: 100 + index }] },
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [
+          {
+            ...comment(`B${index}`, 'review-bot', 'NONE'),
+            author: { __typename: 'Bot', login: 'review-bot' },
+            databaseId: 100 + index,
+            replyTo: null,
+          },
+        ],
+      },
+    }));
+    const data = pr({
+      reviewThreads: { pageInfo: { hasNextPage: false }, nodes: threads },
+    } as Partial<PrData>);
+    const respond21 = () => {
+      mockGh.mockReset();
+      mockGh.mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: { pullRequest: structuredClone(data) },
+          },
+        }),
+      );
+      mockGh.mockImplementation(() => 'null\n');
+    };
+    respond21();
+    const { pr: fetched } = fetchPrData(
+      { owner: 'o', repo: 'r', prNumber: 7 },
+      () => false,
+      false,
+    );
+    expect(mockGh).toHaveBeenCalledTimes(21);
+    expect(
+      fetched.reviewThreads.nodes.filter(
+        (t) => t.comments.nodes[0]!.replyUnknown,
+      ),
+    ).toHaveLength(1);
+    respond21();
+    expect(() =>
+      fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 }, () => false),
+    ).toThrow(/more than 20 new bot threads/);
+    mockGh.mockReset();
   });
 
   it('pages check suites back to the oldest, where a push put the code triggered ones', () => {

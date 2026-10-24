@@ -310,10 +310,11 @@ Event rules:
   thread (and in a review); its replies answer someone and are not
   requests. Once the comment a reply answered is deleted, GraphQL drops its
   `replyTo` and lists it first in the thread, so a bot comment that looks
-  as if it opened one, and is not known yet, is asked about over REST, with one
-  listing of the PR's review comments (`in_reply_to_id` stays) and only for
-  an open thread of an open PR; when GitHub does not answer, such a comment
-  is neither a request nor seen until it does. The gate keeps bot replies
+  as if it opened one, and is not known yet, is asked about over REST, one comment
+  at a time (`in_reply_to_id` stays on it) and at most 20 a run, only for
+  an open thread of an open PR. The gate leaves one GitHub does not answer
+  about, or past the 20, for its next fire, neither a request nor seen; a
+  round fails instead, so it never drops a request the gate reported. The gate keeps bot replies
   as seen.
   Otherwise a review bot that answers every reply would keep a
   round going for each, and an untrusted commenter could have a bot speak
