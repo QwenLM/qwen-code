@@ -202,22 +202,16 @@ class HostedMcpRestartFaultGatesIT {
                 + json.writeValueAsString(cli.toString())
                 + "; await import("
                 + json.writeValueAsString(cli.toUri().toString()) + ");\n");
-        try (var control = new ServerSocket(0, 1,
-                InetAddress.getByName("127.0.0.1"));
-                var hosted = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"));
-                var runtime = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"))) {
-            port = control.getLocalPort();
-            harnessPort = hosted.getLocalPort();
-            brokerPort = runtime.getLocalPort();
-        }
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
-        startSpring();
+        spring = (ServletWebServerApplicationContext) HostedGateTestSupport
+                .bootWithFreshPorts(this::probePorts, () -> {
+                    startSpring();
+                    return spring;
+                });
         startBrokerProxy();
         startHarness();
     }
@@ -1950,6 +1944,25 @@ class HostedMcpRestartFaultGatesIT {
             int status, String operationId, int seq) {
         ProxyCall complete(int value) {
             return new ProxyCall(method, path, kind, value, operationId, seq);
+        }
+    }
+
+    // The advertised ports are probed and then rebound by the application; a
+    // bind conflict there is retried with fresh ports (see
+    // HostedGateTestSupport#bootWithFreshPorts). restartSpring keeps the
+    // current ports because the harness and the proxy already point at them.
+    private void probePorts() {
+        try (var control = new ServerSocket(0, 1,
+                InetAddress.getByName("127.0.0.1"));
+                var hosted = new ServerSocket(0, 1,
+                        InetAddress.getByName("127.0.0.1"));
+                var runtime = new ServerSocket(0, 1,
+                        InetAddress.getByName("127.0.0.1"))) {
+            port = control.getLocalPort();
+            harnessPort = hosted.getLocalPort();
+            brokerPort = runtime.getLocalPort();
+        } catch (java.io.IOException error) {
+            throw new java.io.UncheckedIOException(error);
         }
     }
 }

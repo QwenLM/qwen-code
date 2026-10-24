@@ -1110,6 +1110,232 @@ describe('DaemonSessionClient', () => {
     ).toHaveLength(0);
   });
 
+  it('returns a detachable client when replay hydration is aborted', async () => {
+    const controller = new AbortController();
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          clientId: 'client-1',
+          compactedReplay: [
+            {
+              id: 1,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: {
+                    type: 'image',
+                    attachmentId: 'media-1',
+                    mimeType: 'image/png',
+                    size: 3,
+                  },
+                },
+              },
+            },
+          ],
+        });
+      }
+      if (req.url.endsWith('/session/s-1/attachments/media-1')) {
+        return new Promise<Response>((_resolve, reject) => {
+          const rejectOnAbort = (): void => reject(req.signal?.reason);
+          if (req.signal?.aborted) {
+            rejectOnAbort();
+            return;
+          }
+          req.signal?.addEventListener('abort', rejectOnAbort, { once: true });
+        });
+      }
+      if (req.url.endsWith('/session/s-1/detach')) {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const loading = DaemonSessionClient.load(client, 's-1', {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => {
+      expect(
+        calls.some((call) => call.url.endsWith('/attachments/media-1')),
+      ).toBe(true);
+    });
+    controller.abort();
+    const session = await loading;
+
+    expect(session.replaySnapshot.compactedReplay[0]?.data).toMatchObject({
+      update: { content: { attachmentId: 'media-1' } },
+    });
+    expect(
+      calls.find((call) => call.url.endsWith('/attachments/media-1'))?.signal
+        ?.aborted,
+    ).toBe(true);
+    await session.detach();
+    expect(calls.filter((call) => call.url.endsWith('/detach'))).toHaveLength(
+      1,
+    );
+  });
+
+  it('aborts live attachment hydration with the subscription signal', async () => {
+    const controller = new AbortController();
+    const { fetch, calls } = recordingFetch((req) => {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
+        return sseResponse(
+          'id: 1\nevent: session_update\ndata: {"id":1,"v":1,"type":"session_update","data":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"image","attachmentId":"media-1","mimeType":"image/png","size":3}}}}\n\n',
+        );
+      }
+      if (req.url.endsWith('/session/s-1/attachments/media-1')) {
+        return new Promise<Response>((_resolve, reject) => {
+          const rejectOnAbort = (): void => reject(req.signal?.reason);
+          if (req.signal?.aborted) {
+            rejectOnAbort();
+            return;
+          }
+          req.signal?.addEventListener('abort', rejectOnAbort, { once: true });
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+    const iterator = session.events({ signal: controller.signal });
+    const next = iterator.next();
+    await vi.waitFor(() => {
+      expect(
+        calls.some((call) => call.url.endsWith('/attachments/media-1')),
+      ).toBe(true);
+    });
+    controller.abort();
+
+    await expect(next).resolves.toMatchObject({
+      done: false,
+      value: {
+        data: { update: { content: { attachmentId: 'media-1' } } },
+      },
+    });
+    await iterator.return(undefined);
+  });
+
+  it.each([true, false])(
+    'keeps attachment cancellation scoped to its consumer (subscription first: %s)',
+    async (subscriptionFirst) => {
+      const controller = new AbortController();
+      const attachmentReads: CapturedRequest[] = [];
+      const attachmentResolvers: Array<(response: Response) => void> = [];
+      const { fetch } = recordingFetch((req) => {
+        if (requestPathEndsWith(req, '/session/s-1/events')) {
+          return sseResponse(
+            'id: 1\nevent: session_update\ndata: {"id":1,"v":1,"type":"session_update","data":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"image","attachmentId":"media-1","mimeType":"image/png","size":3}}}}\n\n',
+          );
+        }
+        if (requestPathEndsWith(req, '/session/s-1/transcript')) {
+          return jsonResponse(200, {
+            v: 1,
+            sessionId: 's-1',
+            hasMore: false,
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: {
+                    type: 'image',
+                    attachmentId: 'media-1',
+                    mimeType: 'image/png',
+                    size: 3,
+                  },
+                },
+              },
+            ],
+          });
+        }
+        if (req.url.endsWith('/session/s-1/attachments/media-1')) {
+          attachmentReads.push(req);
+          return new Promise<Response>((resolve, reject) => {
+            attachmentResolvers.push(resolve);
+            const rejectOnAbort = (): void => reject(req.signal?.reason);
+            if (req.signal?.aborted) {
+              rejectOnAbort();
+              return;
+            }
+            req.signal?.addEventListener('abort', rejectOnAbort, {
+              once: true,
+            });
+          });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+        session: {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+        },
+      });
+      const iterator = session.events({ signal: controller.signal });
+      let next: ReturnType<typeof iterator.next> | undefined;
+      let page: ReturnType<typeof session.getTranscriptPage> | undefined;
+      if (subscriptionFirst) {
+        next = iterator.next();
+        await vi.waitFor(() => expect(attachmentReads).toHaveLength(1));
+        page = session.getTranscriptPage();
+      } else {
+        page = session.getTranscriptPage();
+        await vi.waitFor(() => expect(attachmentReads).toHaveLength(1));
+        next = iterator.next();
+      }
+      await vi.waitFor(() => expect(attachmentReads).toHaveLength(2));
+
+      controller.abort();
+      const subscriptionRead = attachmentReads[subscriptionFirst ? 0 : 1];
+      const transcriptRead = attachmentReads[subscriptionFirst ? 1 : 0];
+      expect(subscriptionRead?.signal?.aborted).toBe(true);
+      expect(transcriptRead?.signal?.aborted).toBe(false);
+      await expect(next).resolves.toMatchObject({
+        done: false,
+        value: {
+          data: { update: { content: { attachmentId: 'media-1' } } },
+        },
+      });
+      attachmentResolvers[subscriptionFirst ? 1 : 0]?.(
+        new Response(Uint8Array.from([1, 2, 3]), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+      );
+      await expect(page).resolves.toMatchObject({
+        events: [
+          {
+            data: {
+              sessionUpdate: 'user_message_chunk',
+              content: {
+                type: 'image',
+                data: 'AQID',
+                mimeType: 'image/png',
+                attachmentId: 'media-1',
+              },
+            },
+          },
+        ],
+      });
+      await iterator.return(undefined);
+    },
+  );
+
   it('keeps a visible placeholder when replay media is unavailable', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/load')) {
