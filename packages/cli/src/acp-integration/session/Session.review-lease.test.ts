@@ -80,6 +80,7 @@ describe('Session review-worktree lease sweep', () => {
       }),
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      peekLastHistoryEntry: vi.fn(() => mockChat.getHistory().at(-1)),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
@@ -96,6 +97,7 @@ describe('Session review-worktree lease sweep', () => {
         .fn()
         .mockResolvedValue(undefined),
       beginManagedAutoMemoryRecall: vi.fn(),
+      drainPendingMcpReminders: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
       commitManagedAutoMemoryRecallDelivery: vi.fn(),
       discardManagedAutoMemoryRecallDelivery: vi.fn(),
