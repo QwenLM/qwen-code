@@ -1533,6 +1533,14 @@ interface CoreToolSchedulerOptions {
    */
   chatRecordingService?: ChatRecordingService;
   onToolResultFullTurnModel?: (model: string) => boolean;
+  /**
+   * Runs serially, in request order, before each scheduled call is launched,
+   * so an owner can count or stop launches exactly. A concurrent batch asks
+   * for every call that fits in flight before launching any of them. Calls
+   * an `exec` script makes are not asked. Returning false cancels the call
+   * as `not_started`.
+   */
+  beforeToolLaunch?: (call: ScheduledToolCall) => boolean | Promise<boolean>;
   /** Lets an outer owner suppress a scheduler result it already emitted. */
   shouldObserveProducer?: (callId: string) => boolean;
   /**
@@ -1827,6 +1835,7 @@ export class CoreToolScheduler {
   private config: Config;
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
+  private readonly launchRefusedCallIds = new Set<string>();
   private onToolResultFullTurnModel?: (model: string) => boolean;
   private shouldObserveProducer: (callId: string) => boolean;
   private hasSkillToolOverride?: () => boolean;
@@ -1949,6 +1958,7 @@ export class CoreToolScheduler {
     this.nestedToolScheduler = new CoreToolScheduler({
       ...this.schedulerOptions,
       modToolCheck: undefined,
+      beforeToolLaunch: undefined,
       onAllToolCallsComplete: async (calls) => {
         for (const call of calls) {
           const resolver = this.nestedResolvers.get(call.request.callId);
@@ -5458,6 +5468,12 @@ export class CoreToolScheduler {
           }
         } else {
           for (const call of batch.calls) {
+            if (
+              this.schedulerOptions.beforeToolLaunch &&
+              (await this.launchRefused(call))
+            ) {
+              continue;
+            }
             await this.executeSingleToolCall(call, signal);
             if (this.hasExecutingOrAwaitingApprovalCall()) {
               return;
@@ -5466,6 +5482,26 @@ export class CoreToolScheduler {
         }
       }
     }
+  }
+
+  private async launchRefused(call: ScheduledToolCall): Promise<boolean> {
+    const beforeToolLaunch = this.schedulerOptions.beforeToolLaunch;
+    if (!beforeToolLaunch || (await beforeToolLaunch(call))) return false;
+    const { callId } = call.request;
+    this.launchRefusedCallIds.add(callId);
+    this.setStatusInternal(
+      callId,
+      'cancelled',
+      'Tool call was not started.',
+      'not_started',
+    );
+    this.finalizeBlockedSpan(callId, 'aborted', 'system');
+    const toolSpan = this.toolSpans.get(callId);
+    if (toolSpan) {
+      setToolSpanCancelled(toolSpan);
+    }
+    this.finalizeToolSpan(callId);
+    return true;
   }
 
   private hasExecutingOrAwaitingApprovalCall(): boolean {
@@ -5487,16 +5523,30 @@ export class CoreToolScheduler {
       10,
     );
     const executing = new Set<Promise<void>>();
+    const admitted: ScheduledToolCall[] = [];
+    const launchAdmitted = () => {
+      for (const call of admitted.splice(0)) {
+        const p = this.executeSingleToolCall(call, signal).finally(() => {
+          executing.delete(p);
+        });
+        executing.add(p);
+      }
+    };
 
     for (const call of calls) {
-      const p = this.executeSingleToolCall(call, signal).finally(() => {
-        executing.delete(p);
-      });
-      executing.add(p);
-      if (executing.size >= maxConcurrency) {
+      if (
+        this.schedulerOptions.beforeToolLaunch &&
+        (await this.launchRefused(call))
+      ) {
+        continue;
+      }
+      admitted.push(call);
+      if (executing.size + admitted.length >= maxConcurrency) {
+        launchAdmitted();
         await Promise.race(executing);
       }
     }
+    launchAdmitted();
     await Promise.all(executing);
   }
 
@@ -7870,7 +7920,10 @@ export class CoreToolScheduler {
             },
           );
           this.runtimeContentGeneratorViews.delete(call.request.callId);
-          logToolCall(this.config, new ToolCallEvent(call, this.config));
+          // A call its owner refused to launch never ran.
+          if (!this.launchRefusedCallIds.delete(call.request.callId)) {
+            logToolCall(this.config, new ToolCallEvent(call, this.config));
+          }
         }
 
         this.recordToolResults(completedCalls);
