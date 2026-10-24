@@ -297,6 +297,10 @@ jobs:
             # PR's build must never reach the host-shared ~/.m2.
             repo="${RUNNER_TEMP}/m2-repo"
             cp -aln "${HOME}/.m2/repository" "${repo}" 2>/dev/null || true
+            # Maven truncate-and-rewrites its tracking files in place, and as
+            # hardlinks those writes would reach host-shared bytes with no
+            # lock held. Break only those links so the job re-creates its own.
+            find "${repo}" -type f -links +1 \( -name '_remote.repositories' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' -o -name 'maven-metadata-*.xml' \) -delete 2>/dev/null || true
             rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/qwen-managed-agent-server"
             MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"
           fi
