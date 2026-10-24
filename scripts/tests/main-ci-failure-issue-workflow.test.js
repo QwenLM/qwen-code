@@ -241,20 +241,24 @@ cat "\${RUNNER_TEMP}/pulls.json"
         'pr_number=14472\nfile_issue=true\n',
       );
     });
-    it('does not file for a rerun of a merged PR workflow', () => {
-      // Run 39768204855's attempt 2 re-ran the PR's pre-merge workflow; the
-      // lock timeout it hit could not describe main, and filing it created
-      // #15239. Main's own push and nightly runs carry that signal. That
-      // rerun carried `pull_request`, not the harness's approval default.
-      const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
-        EVENT_NAME: 'pull_request',
-        RUN_ATTEMPT: '2',
-      });
-      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
-      expect(resolved.stdout).toContain(
-        "Attempt 2 of the PR's pre-merge workflow",
-      );
-    });
+    it.each(['pull_request', 'pull_request_review'])(
+      'does not file for a %s rerun of a merged PR workflow',
+      (eventName) => {
+        // Run 39768204855's attempt 2 re-ran the PR's pre-merge workflow; the
+        // lock timeout it hit could not describe main, and filing it created
+        // #15239. Main's own push and nightly runs carry that signal. That
+        // rerun carried `pull_request`; a rerun of an approval run carries
+        // the harness's default. Both are the PR's pre-merge workflow.
+        const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
+          EVENT_NAME: eventName,
+          RUN_ATTEMPT: '2',
+        });
+        expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+        expect(resolved.stdout).toContain(
+          "Attempt 2 of the PR's pre-merge workflow",
+        );
+      },
+    );
     it('files a fresh dispatch on a merged PR branch', () => {
       // A maintainer's manual run is attempt 1 even when it starts long
       // after the merge; only reruns are stale.
@@ -2289,10 +2293,10 @@ printf '%s\\n' '{"jobs":[]}'
       expect(condition).toContain("needs.rerun_infra.result != 'success'");
     });
 
-    it('suppresses the issue and the rerun for a merged PR rerun', () => {
-      // The comments above the infra path promise a persistent break files
-      // at attempt 2; that holds for main only. A merged PR's rerun keeps
-      // the comment, but neither re-runs nor opens an issue.
+    it('reports an open PR infra-only run without rerunning or filing', () => {
+      // infra_only is only ever true at attempt 1, so this fixture is an
+      // open PR's infra death, not a merged PR rerun: an untrusted run gets
+      // neither actions: write nor an issue, only the comment on the PR.
       const evaluate = (condition, needs) =>
         new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
           needs,
@@ -2312,6 +2316,32 @@ printf '%s\\n' '{"jobs":[]}'
       };
       expect(evaluate(String(rerunJob.if), needs)).toBe(false);
       expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+    });
+
+    it('keeps the comment but suppresses the issue and rerun for a merged PR rerun', () => {
+      // The reachable shape for a merged PR's attempt >= 2: infra_only is
+      // forced false outside attempt 1, and the destination cleared
+      // file_issue. The comment is then the failure's only record.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'false',
+            file_issue: 'false',
+            comment_body: 'body',
+            pr_number: '14472',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(rerunJob.if), needs)).toBe(false);
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+      expect(evaluate(String(jobs.report_pr.if), needs)).toBe(true);
     });
 
     it.each([
