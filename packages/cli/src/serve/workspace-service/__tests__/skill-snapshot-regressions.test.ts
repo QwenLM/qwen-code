@@ -9,7 +9,15 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
-import { createDaemonWorkspaceService } from '../index.js';
+
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: mockWriteStderrLine,
+}));
+
+const { createDaemonWorkspaceService } = await import('../index.js');
 import { createWorkspaceSkillsStatusProvider } from '../../workspace-skills-status.js';
 import type {
   DaemonWorkspaceServiceDeps,
@@ -101,6 +109,7 @@ describe('Skill snapshot correctness regressions', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
+    mockWriteStderrLine.mockClear();
   });
 
   afterEach(() => {
@@ -250,6 +259,9 @@ describe('Skill snapshot correctness regressions', () => {
         'local-review',
       ]);
       expect(result.errors).toBeUndefined();
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('bad manifest'),
+      );
       expect(local).toHaveBeenCalledExactlyOnceWith('/workspace');
       expect(invalidate).toHaveBeenCalledTimes(requireFresh ? 1 : 0);
     },

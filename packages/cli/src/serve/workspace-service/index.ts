@@ -372,6 +372,13 @@ export function createDaemonWorkspaceService(
     // handles its own errors, but it is injected, so guard the call too and
     // report unavailability rather than failing the request —
     // matching getWorkspaceEnvStatus / getWorkspacePreflightStatus.
+    if (status.errors?.length) {
+      writeStderrLine(
+        `qwen serve: workspace skills observation reported errors, falling back to daemon-local enumeration: ${status.errors
+          .map((cell) => cell.error)
+          .join('; ')}`,
+      );
+    }
     if (workspaceSkillsStatusProvider) {
       try {
         if (!allowRetainedSnapshot) {
