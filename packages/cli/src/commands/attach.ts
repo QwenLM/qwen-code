@@ -105,9 +105,20 @@ export function resolveAttachWorkspace(
 async function handleAttach(argv: AttachArgs): Promise<void> {
   ignoreBrokenPipe();
   let shuttingDown = false;
+  const earlyState: { session?: DaemonSessionClient } = {};
   const earlyShutdown = (): void => {
     shuttingDown = true;
     process.exitCode = 130;
+    const finish = (): never => process.exit(130);
+    if (earlyState.session) {
+      void earlyState.session
+        .detach()
+        .catch(() => {})
+        .finally(finish);
+      setTimeout(finish, 500).unref();
+      return;
+    }
+    finish();
   };
   process.once('SIGINT', earlyShutdown);
   process.once('SIGTERM', earlyShutdown);
@@ -150,6 +161,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  earlyState.session = session;
 
   if (shuttingDown) {
     await session.detach().catch(() => {});
@@ -198,6 +210,16 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
       } else if (item.type === 'error') {
         endLine();
         writeStderrLine(`qwen attach: ${sanitizeTerminalText(item.text)}`);
+      } else if (item.type === 'session.state_resync_required') {
+        endLine();
+        const start = item.lastDeliveredId + 1;
+        const end = item.earliestAvailableId - 1;
+        writeStderrLine(
+          `qwen attach: state resync required (${sanitizeTerminalText(
+            item.reason,
+          )}); missed events ${start}..${end}; reattach to reload the session.`,
+        );
+        process.exitCode = 1;
       }
     }
     if (settled) notifyTurnSettled();
