@@ -12301,6 +12301,7 @@ Other open files:
           undefined,
           {
             displayText: 'raw @file prompt',
+            displayProjection: true,
             hookContext: '&lt;hook-only context&gt;',
           },
           'prompt-hook-display-text',
@@ -12377,7 +12378,11 @@ Other open files:
           expect(recordUserMessage).toHaveBeenCalledWith(
             [{ text: 'expanded body' }, { text: taggedContext }],
             undefined,
-            { displayText: '/deploy prod', hookContext: 'extra hook context' },
+            {
+              displayText: '/deploy prod',
+              displayProjection: true,
+              hookContext: 'extra hook context',
+            },
             'prompt-admitted',
           );
           expect(getLastTurnRequestText().split(taggedContext)).toHaveLength(2);
@@ -12595,6 +12600,7 @@ Other open files:
           undefined,
           {
             displayText: 'my prompt',
+            displayProjection: true,
             hookContext: 'extra hook context',
           },
           'prompt-hook-context-tag',

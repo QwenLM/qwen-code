@@ -44,6 +44,7 @@ import {
   type SessionSourceRecordPayload,
   type TitleSource,
   type UiTelemetryRecordPayload,
+  type UserPromptRecordPayload,
 } from './chatRecordingService.js';
 import {
   isApiHistoryCompressionCandidate,
@@ -281,6 +282,11 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   recording: {
     lastCompletedUuid: string;
     turnParentUuids: Array<string | null>;
+    /** Per-turn projection state, index-aligned with `turnParentUuids`. */
+    turnTitleStates?: Array<{
+      projection: boolean;
+      displayText: string | undefined;
+    }>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
@@ -307,6 +313,69 @@ export interface SessionRestoreProjection {
   runtime: SessionRuntimeResumeState;
   executionEngine?: SessionExecutionEngineState;
   replay?: SessionRestoreReplayPage;
+}
+
+const MAX_TITLE_USER_DISPLAY_TEXTS = 20;
+
+/**
+ * Rebuilds the recorder's title-projection state from the journal, matching
+ * `ChatRecordingService.restoreSessionState`: one entry per user turn, a
+ * marker-less payload counts as a projection (legacy journals), and
+ * `displayProjection: false` with an empty text contributes `undefined`.
+ * The ring is capped; the newest non-empty projected text is retained
+ * separately so eviction does not make a projected session untitleable.
+ */
+function deriveTitleProjectionState(records: readonly ChatRecord[]): {
+  displayProjectionForTitle: boolean;
+  userDisplayTexts: Array<string | undefined>;
+  turnTitleStates: Array<{
+    projection: boolean;
+    displayText: string | undefined;
+  }>;
+  lastProjectionText?: string;
+} {
+  const userDisplayTexts: Array<string | undefined> = [];
+  const turnTitleStates: Array<{
+    projection: boolean;
+    displayText: string | undefined;
+  }> = [];
+  let displayProjectionForTitle = false;
+  let lastProjectionText: string | undefined;
+  for (const record of records) {
+    // Match `SessionTurnStateAccumulator`'s turn boundary exactly so this
+    // array stays index-aligned with `turnParentUuids`; the recorder prunes
+    // both by the same turn index on rewind.
+    if (
+      getSessionTurnRecordHint(record, record.sessionId).turnParentUuid ===
+      undefined
+    ) {
+      continue;
+    }
+    const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+    const projection =
+      payload !== undefined && payload.displayProjection !== false;
+    const displayText =
+      payload?.displayProjection === false && payload.displayText === ''
+        ? undefined
+        : payload?.displayText;
+    turnTitleStates.push({ projection, displayText });
+    if (projection) {
+      displayProjectionForTitle = true;
+      if (displayText !== undefined && displayText !== '') {
+        lastProjectionText = displayText;
+      }
+    }
+    userDisplayTexts.push(displayText);
+    if (userDisplayTexts.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
+      userDisplayTexts.shift();
+    }
+  }
+  return {
+    displayProjectionForTitle,
+    userDisplayTexts,
+    turnTitleStates,
+    ...(lastProjectionText !== undefined ? { lastProjectionText } : {}),
+  };
 }
 
 interface ManagedSessionRestoreProjectionInput {
@@ -398,6 +467,7 @@ function buildManagedSessionRestoreProjection(
   }
   if (lastTokenCountsRecord) resumeTokenCounts.add(lastTokenCountsRecord);
   const turnStateValue = turnState.finish();
+  const titleProjection = deriveTitleProjectionState(records);
   const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
   const restoredTokenCounts = resumeTokenCounts.finish();
   const restoredFileHistory = fileHistory.finish();
@@ -410,6 +480,18 @@ function buildManagedSessionRestoreProjection(
       lastCompletedUuid:
         records[records.length - 1]?.uuid ?? input.fallbackLastCompletedUuid,
       turnParentUuids: turnStateValue.turnParentUuids,
+      ...(titleProjection.turnTitleStates.length > 0
+        ? { turnTitleStates: titleProjection.turnTitleStates }
+        : {}),
+      ...(titleProjection.displayProjectionForTitle
+        ? { displayProjectionForTitle: true }
+        : {}),
+      ...(titleProjection.userDisplayTexts.length > 0
+        ? { userDisplayTextsForTitle: titleProjection.userDisplayTexts }
+        : {}),
+      ...(titleProjection.lastProjectionText !== undefined
+        ? { lastProjectionTextForTitle: titleProjection.lastProjectionText }
+        : {}),
       ...(input.customTitle !== undefined
         ? { customTitle: input.customTitle }
         : {}),
@@ -1239,6 +1321,15 @@ export function navigationKindForRecord(
           typeof reference['attachmentId'] === 'string' &&
           typeof reference['mimeType'] === 'string' &&
           typeof reference['size'] === 'number',
+      )) ||
+    (isObjectRecord(record.systemPayload) &&
+      Array.isArray(record.systemPayload['embeddedResources']) &&
+      record.systemPayload['embeddedResources'].some(
+        (resource) =>
+          isObjectRecord(resource) &&
+          resource['type'] === 'resource' &&
+          isObjectRecord(resource['resource']) &&
+          typeof resource['resource']['uri'] === 'string',
       ));
   if (!hasVisibleText && !hasVisibleAttachment) return undefined;
   return record.subtype === 'realtime_message' ? 'realtime' : 'prompt';
@@ -3269,7 +3360,11 @@ export class SessionTranscriptReader {
     let lastAssistantModel: string | undefined;
     let firstRecordSeen = false;
     const deferredPreReadRecords = new Map<string, ChatRecord>();
+    const titleProjectionRecords: ChatRecord[] = [];
     const dispatchRecord = (record: ChatRecord): void => {
+      if (record.type === 'user' && record.subtype === undefined) {
+        titleProjectionRecords.push(record);
+      }
       if (modelSet.has(record.uuid)) apiHistory.add(record);
       if (record.uuid === tokenUuid) resumeTokenCounts.add(record);
       if (uiTelemetrySet.has(record.uuid)) {
@@ -3386,7 +3481,9 @@ export class SessionTranscriptReader {
                 uiTelemetrySet.has(record.uuid) ||
                 fileHistorySet.has(record.uuid) ||
                 artifactSet.has(record.uuid) ||
-                record.uuid === sourcesUuid;
+                record.uuid === sourcesUuid ||
+                index.byUuid.get(record.uuid)?.turnHint.turnParentUuid !==
+                  undefined;
               if (needsDeferredDispatch) {
                 if (
                   record.uuid === index.firstRecordUuid &&
@@ -3414,7 +3511,11 @@ export class SessionTranscriptReader {
               metadataSet.has(uuid) ||
               uiTelemetrySet.has(uuid) ||
               fileHistorySet.has(uuid) ||
-              replaySet.has(uuid),
+              replaySet.has(uuid) ||
+              // Title-projection state is index-aligned with every turn
+              // boundary, so each turn's user record must be read even when
+              // a compression checkpoint removed it from the model set.
+              index.byUuid.get(uuid)?.turnHint.turnParentUuid !== undefined,
           );
           const preReadSet = new Set(preReadUuids);
           readContext.preloadedRecords = deferredPreReadRecords;
@@ -3508,6 +3609,7 @@ export class SessionTranscriptReader {
     const restoredTokenCounts = resumeTokenCounts.finish();
     const restoredFileHistory = fileHistory.finish();
     const artifactSnapshot = artifacts.finish();
+    const titleProjection = deriveTitleProjectionState(titleProjectionRecords);
     const completedToolCallIds = apiHistory.getCompletedToolCallIds();
     const runtime: SessionRuntimeResumeState = {
       apiHistory: apiHistory.finish(),
@@ -3521,6 +3623,18 @@ export class SessionTranscriptReader {
       recording: {
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
+        ...(titleProjection.turnTitleStates.length > 0
+          ? { turnTitleStates: titleProjection.turnTitleStates }
+          : {}),
+        ...(titleProjection.displayProjectionForTitle
+          ? { displayProjectionForTitle: true }
+          : {}),
+        ...(titleProjection.userDisplayTexts.length > 0
+          ? { userDisplayTextsForTitle: titleProjection.userDisplayTexts }
+          : {}),
+        ...(titleProjection.lastProjectionText !== undefined
+          ? { lastProjectionTextForTitle: titleProjection.lastProjectionText }
+          : {}),
         ...(customTitle !== undefined ? { customTitle } : {}),
         ...(titleSource !== undefined ? { titleSource } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),

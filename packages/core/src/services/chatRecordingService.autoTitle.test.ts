@@ -398,7 +398,348 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['你好'],
+      true,
     );
+  });
+
+  it('does not treat a resource-only record as a title projection marker', async () => {
+    mockOk('Inspect embedded resource replay');
+    chatRecordingService.recordUserMessage(
+      [{ text: '@context://example/selection {"items":["example"]}' }],
+      undefined,
+      {
+        displayText: '',
+        displayProjection: false,
+        hookContext: '',
+        embeddedResources: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/selection',
+              mimeType: 'application/json',
+              text: '{"items":["example"]}',
+            },
+          },
+        ],
+      },
+    );
+    chatRecordingService.recordUserMessage(
+      [{ text: 'visible question' }],
+      undefined,
+      { displayText: 'visible question', hookContext: '' },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      undefined,
+      'visible question',
+    ]);
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'reply' }],
+    });
+    await flushMicrotasks();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      [undefined, 'visible question'],
+      true,
+    );
+  });
+
+  it('keeps resource-only sessions eligible for auto-titling', async () => {
+    mockOk('Inspect embedded resource replay');
+    chatRecordingService.recordUserMessage(
+      [{ text: '@context://example/selection {"items":["example"]}' }],
+      undefined,
+      {
+        displayText: '',
+        displayProjection: false,
+        hookContext: '',
+        embeddedResources: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/selection',
+              mimeType: 'application/json',
+              text: '{"items":["example"]}',
+            },
+          },
+        ],
+      },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      undefined,
+    ]);
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'reply' }],
+    });
+    await flushMicrotasks();
+
+    // No projection anywhere in the session: the title input is the full
+    // history, not the recorded texts.
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      [],
+      false,
+    );
+  });
+
+  it('keeps truncation-only resource records eligible for auto-titling', async () => {
+    mockOk('Inspect embedded resource replay');
+    chatRecordingService.recordUserMessage('', undefined, {
+      displayText: '',
+      displayProjection: false,
+      hookContext: '',
+      embeddedResourcesTruncated: true,
+    });
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      undefined,
+    ]);
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'reply' }],
+    });
+    await flushMicrotasks();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      [],
+      false,
+    );
+  });
+
+  it('keeps an empty channel display projection as a title projection marker', () => {
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden channel instructions' }],
+      undefined,
+      { displayText: '', hookContext: '' },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual(['']);
+  });
+
+  it('keeps an empty client projection as a title projection marker beside embedded resources', () => {
+    // R8-1: a trusted ACP parent can send promptDisplayText '' on a prompt
+    // that also carries an inline text resource. The projection marker must
+    // win over the resource-only shape: tracking undefined would read as "no
+    // projection" and fall back to the raw model history — precisely the
+    // content the client hid behind the empty projection.
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden channel instructions' }],
+      undefined,
+      {
+        displayText: '',
+        hookContext: '',
+        displayProjection: true,
+        embeddedResources: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/selection',
+              mimeType: 'application/json',
+              text: '{"items":["example"]}',
+            },
+          },
+        ],
+      },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual(['']);
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(true);
+  });
+
+  it('titles a session mixing a client projection with a raw-text turn', async () => {
+    // R8-1 loss arm: the projection decision and the per-turn text are
+    // separate answers. A raw-text record (displayProjection:false) must
+    // contribute its text — tracking undefined would leave ['', undefined],
+    // whose projection-mode dialog is empty and loses the title even though
+    // the second turn is fully visible.
+    mockOk('Advisor Review Session');
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden channel instructions' }],
+      undefined,
+      {
+        displayText: '',
+        hookContext: '',
+        displayProjection: true,
+        embeddedResources: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/selection',
+              mimeType: 'application/json',
+              text: '{"items":["example"]}',
+            },
+          },
+        ],
+      },
+    );
+    chatRecordingService.recordUserMessage(
+      [{ text: '/advisor check my work' }],
+      undefined,
+      {
+        displayText: '/advisor check my work',
+        displayProjection: false,
+        hookContext: '',
+      },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      '',
+      '/advisor check my work',
+    ]);
+
+    await assistantTurn();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      ['', '/advisor check my work'],
+      true,
+    );
+    expect(findCustomTitleRecord()?.systemPayload).toEqual({
+      customTitle: 'Advisor Review Session',
+      titleSource: 'auto',
+    });
+  });
+
+  it('keeps an explicit display projection as a title projection marker', () => {
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden channel instructions' }],
+      undefined,
+      { displayText: '你好', hookContext: '', displayProjection: true },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      '你好',
+    ]);
+  });
+
+  it('does not treat a resource-carrying raw-text record as a title projection marker', () => {
+    // The ACP record site writes displayProjection:false when displayText is
+    // the raw request text rather than a client projection. The raw text
+    // still contributes to the tracked texts, but the session must NOT flip
+    // into projection mode — that would drop every payload-less turn from
+    // the title input.
+    chatRecordingService.recordUserMessage([{ text: 'hi' }]);
+    chatRecordingService.recordUserMessage(
+      [{ text: 'here is the log @context://example/selection' }],
+      undefined,
+      {
+        displayText: 'here is the log @context://example/selection',
+        displayProjection: false,
+        hookContext: '',
+        embeddedResources: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/selection',
+              mimeType: 'application/json',
+              text: '{"items":["example"]}',
+            },
+          },
+        ],
+      },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      undefined,
+      'here is the log @context://example/selection',
+    ]);
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(false);
+  });
+
+  it('restores resource-only records without a title projection marker', () => {
+    const messages: ChatRecord[] = [
+      {
+        uuid: 'user-1',
+        parentUuid: null,
+        sessionId: 'test-session-id',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        type: 'user',
+        provenance: 'real_user',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        message: {
+          role: 'user',
+          parts: [
+            { text: '@context://example/selection {"items":["example"]}' },
+          ],
+        },
+        systemPayload: {
+          displayText: '',
+          displayProjection: false,
+          hookContext: '',
+          embeddedResources: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'context://example/selection',
+                mimeType: 'application/json',
+                text: '{"items":["example"]}',
+              },
+            },
+          ],
+        },
+      },
+    ];
+    const resumedConfig = {
+      ...mockConfig,
+      getResumedSessionData: vi.fn().mockReturnValue({
+        conversation: { messages },
+        lastCompletedUuid: 'user-1',
+      }),
+    } as unknown as Config;
+    const service = activateRecording(
+      new ChatRecordingService(resumedConfig, undefined, true),
+      resumedConfig,
+    );
+
+    expect(service.getUserDisplayTextsForTitle()).toEqual([undefined]);
+  });
+
+  it('restores truncation-only resource records without a title projection marker', () => {
+    const messages: ChatRecord[] = [
+      {
+        uuid: 'user-1',
+        parentUuid: null,
+        sessionId: 'test-session-id',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        type: 'user',
+        provenance: 'real_user',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: '' }] },
+        systemPayload: {
+          displayText: '',
+          displayProjection: false,
+          hookContext: '',
+          embeddedResourcesTruncated: true,
+        },
+      },
+    ];
+    const resumedConfig = {
+      ...mockConfig,
+      getResumedSessionData: vi.fn().mockReturnValue({
+        conversation: { messages },
+        lastCompletedUuid: 'user-1',
+      }),
+    } as unknown as Config;
+    const service = activateRecording(
+      new ChatRecordingService(resumedConfig, undefined, true),
+      resumedConfig,
+    );
+
+    expect(service.getUserDisplayTextsForTitle()).toEqual([undefined]);
   });
 
   it('restores channel display projections for automatic rename and retries', async () => {
@@ -453,6 +794,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       resumedConfig,
       expect.any(AbortSignal),
       ['你好', '再见'],
+      true,
     );
   });
 
@@ -471,6 +813,77 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(chatRecordingService.getUserDisplayTextsForTitle()).toHaveLength(20);
     expect(chatRecordingService.getUserDisplayTextsForTitle()[0]).toBe(
       'visible 1',
+    );
+  });
+
+  it('keeps projection mode authoritative after the ring shifts every entry out', async () => {
+    // R12-1: the 20-slot ring keeps only the last 20 turns. A session whose
+    // first turn hid instructions behind an empty client projection and
+    // whose next 20 turns carry no payload shifts the recorded '' out
+    // entirely — but the session is still in projection mode. The title
+    // pipeline must receive the authoritative flag beside the (now
+    // all-undefined) texts; re-deriving the mode from the surviving entries
+    // reads as "no projection" and titles from the raw history — the hidden
+    // channel instructions the client projected away. The generation mock
+    // answers the way the real pipeline does for an all-undefined
+    // projection-mode array (empty_history, pinned in sessionTitle.test.ts),
+    // so no title is written.
+    tryGenerateSessionTitleMock.mockResolvedValue({
+      ok: false,
+      reason: 'empty_history',
+    });
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden channel instructions' }],
+      undefined,
+      { displayText: '', hookContext: '' },
+    );
+    for (let index = 0; index < 20; index++) {
+      chatRecordingService.recordUserMessage([{ text: `bare ${index}` }]);
+    }
+
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(true);
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual(
+      Array.from({ length: 20 }, () => undefined),
+    );
+
+    await assistantTurn();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      Array.from({ length: 20 }, () => undefined),
+      true,
+    );
+    expect(findCustomTitleRecord()).toBeUndefined();
+  });
+
+  it('titles a projected session after the ring shifts its newest text out', async () => {
+    // R8-1: one marker-less hook-context payload flips the session into
+    // projection mode; 20 payload-less turns then evict every ring entry.
+    // The recorder must keep the newest projected text beside the flag, or
+    // the session reports empty_history over a full visible conversation.
+    tryGenerateSessionTitleMock.mockResolvedValue({
+      ok: true,
+      title: 'Retained Prompt',
+      modelUsed: 'qwen-turbo',
+    });
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden model context' }],
+      undefined,
+      { displayText: 'visible prompt', hookContext: 'hidden context' },
+    );
+    for (let index = 0; index < 20; index++) {
+      chatRecordingService.recordUserMessage([{ text: `bare ${index}` }]);
+    }
+
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(true);
+    await assistantTurn();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      ['visible prompt'],
+      true,
     );
   });
 
