@@ -25,7 +25,14 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 import { runCleanup } from './cleanup.js';
-import { autofixPrPaths, writeState, type AutofixPrState } from './state.js';
+import {
+  autofixPrPaths,
+  historyPath,
+  readHistory,
+  readState,
+  writeState,
+  type AutofixPrState,
+} from './state.js';
 
 describe('runCleanup (real git)', () => {
   let repo: string;
@@ -100,6 +107,11 @@ describe('runCleanup (real git)', () => {
     expect(lastReport()).toEqual({
       removed: true,
       worktreePath: paths.worktreePath,
+      history: historyPath(paths, {
+        host: 'github.com',
+        owner: 'o',
+        repo: 'r',
+      }),
     });
   });
 
@@ -112,6 +124,54 @@ describe('runCleanup (real git)', () => {
       removed: true,
       worktreePath: paths.worktreePath,
       gateCursor: paths.gatePath,
+      history: historyPath(paths, {
+        host: 'github.com',
+        owner: 'o',
+        repo: 'r',
+      }),
+    });
+  });
+
+  it('with --force removes a lock a killed helper left behind', () => {
+    writeFileSync(
+      paths.lockPath,
+      JSON.stringify({ pid: 1, ns: 'pid:[1]', at: Date.now(), id: 'x' }),
+    );
+    runCleanup(7, true);
+    expect(existsSync(paths.lockPath)).toBe(false);
+  });
+
+  it('keeps what the watch posted and handled, adding to an earlier watch of the PR', () => {
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      handledCommentIds: ['C2'],
+      postedCommentIds: ['P2'],
+      rerunChecks: ['run:1:2:push:Test@x'],
+    });
+    writeFileSync(
+      historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
+      JSON.stringify({
+        version: 1,
+        host: 'github.com',
+        owner: 'O',
+        repo: 'R',
+        prNumber: 7,
+        handledCommentIds: ['C1'],
+        postedCommentIds: ['P1'],
+        handledChecks: [],
+        rerunChecks: [],
+      }),
+    );
+    runCleanup(7, false);
+    expect(
+      readHistory(
+        historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
+      ),
+    ).toMatchObject({
+      owner: 'o',
+      handledCommentIds: ['C1', 'C2'],
+      postedCommentIds: ['P1', 'P2'],
+      rerunChecks: ['run:1:2:push:Test@x'],
     });
   });
 
@@ -223,6 +283,11 @@ describe('runCleanup (real git)', () => {
       expect(lastReport()).toEqual({
         removed: true,
         worktreePath: paths.worktreePath,
+        history: historyPath(paths, {
+          host: 'github.com',
+          owner: 'o',
+          repo: 'r',
+        }),
       });
       expect(branchExists()).toBe(false);
     } finally {

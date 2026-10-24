@@ -1902,6 +1902,7 @@ describe('bootstrap import boundaries', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
       ['agentsCommand', 'agents'],
+      ['attachCommand', 'attach'],
       ['autofixPrCommand', 'autofix-pr'],
       ['authCommand', 'auth'],
       ['batchCommand', 'batch'],
