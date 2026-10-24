@@ -10947,6 +10947,22 @@ describe('LlmChat', async () => {
       return { result, history: chat.getHistory() };
     }
 
+    it('reports synthesized ids back through getSynthesizedRepairCallIds', () => {
+      chat.setHistory([
+        userText('open /tmp/a.txt'),
+        callTurn('call-rt'),
+        userText('unrelated'),
+      ]);
+
+      expect(chat.repairOrphanedToolUseTurns().injected).toEqual([
+        { callId: 'call-rt', name: 'read_file' },
+      ]);
+      // Nothing else binds the shape `applyRepair` synthesizes to the shape
+      // `isSynthesizedRepairPart` accepts. If the two drift, a late real
+      // result stops replacing the placeholder and #15297 silently returns.
+      expect(chat.getSynthesizedRepairCallIds()).toEqual(new Set(['call-rt']));
+    });
+
     it('keeps a tool result adjacent across a removable degraded placeholder', () => {
       const history = [
         userText('open /tmp/a.txt'),

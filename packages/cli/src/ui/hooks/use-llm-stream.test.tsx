@@ -10320,6 +10320,8 @@ describe('useLlmStream', () => {
     mockConfig.getChatRecordingService = vi
       .fn()
       .mockReturnValue({ recordToolResult });
+    mockUseDualOutput.mockReturnValue(mockDualOutput);
+    mockDualOutput.emitToolResult.mockClear();
 
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
@@ -10370,6 +10372,12 @@ describe('useLlmStream', () => {
       lateRealParts,
       expect.objectContaining({ callId: 'call_15297', status: 'success' }),
       undefined,
+    );
+    // …and the sidecar sees it too — every other completion path emits,
+    // so a stream-json consumer must not lose the late real result.
+    expect(mockDualOutput.emitToolResult).toHaveBeenCalledWith(
+      lateRealResult.request,
+      lateRealResult.response,
     );
     // …and the scheduler bookkeeping still reflects the executed tool.
     expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['call_15297']);

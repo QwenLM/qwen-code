@@ -5073,6 +5073,7 @@ export const useLlmStream = (
           synthesizedRepairCallIds.has(tc.request.callId),
         );
         const replacedCallIds: string[] = [];
+        let abandonedSessionId: string | null = null;
         if (replaceableTools.length > 0 && llmClient) {
           const finalizedReplaceable = await finalizeToolResponses(
             config,
@@ -5109,14 +5110,19 @@ export const useLlmStream = (
                 return;
               }
               replacedCallIds.push(entry.callId);
+              // Every other completion path emits to the sidecar; without
+              // this a stream-json consumer never sees the late real result.
+              dualOutput?.emitToolResult(request, response);
               // The drop path never reaches `recordToolResult`, so without
               // this the transcript keeps a `model[functionCall]` whose
               // response exists nowhere on disk — the exact phantom shape
               // reported in issue #15297. The placeholder was itself
               // in-memory only, so the real result is the first durable
-              // answer for this callId; a `--resume` rehydrates it
-              // (non-adjacent placement is hoisted back by the repair
-              // pass on load).
+              // answer for this callId. On `--resume` the repair pass hoists
+              // it back only while it still sits in the user run right after
+              // the call; once a model turn intervenes the scan stops there
+              // and synthesizes a fresh placeholder instead, leaving the
+              // recorded result durable but unreferenced.
               config.getChatRecordingService?.()?.recordToolResult?.(
                 entry.responseParts,
                 {
@@ -5139,6 +5145,8 @@ export const useLlmStream = (
                   `${replacedCallIds.join(', ')}`,
               );
             }
+          } else {
+            abandonedSessionId = sessionId;
           }
         }
         const replacedSet = new Set(replacedCallIds);
@@ -5149,7 +5157,13 @@ export const useLlmStream = (
           debugLogger.warn(
             `[REPAIR] Dropping ${droppedCallIds.length} late tool result(s) ` +
               `whose callId already has a functionResponse in history: ` +
-              `${droppedCallIds.join(', ')}`,
+              `${droppedCallIds.join(', ')}` +
+              // Without this the warning reads as "genuine duplicate" for
+              // ids that were only skipped because the session moved on.
+              (abandonedSessionId
+                ? ` (session ${abandonedSessionId} was abandoned during ` +
+                  `finalize, so its placeholder(s) were not replaced)`
+                : ``),
           );
         }
         // Even though the wire-side submission is dropped, the tool DID
