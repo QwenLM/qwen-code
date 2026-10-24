@@ -47,6 +47,7 @@ import {
   type Logger,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
+import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { VimMode } from '../contexts/VimModeContext.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
@@ -160,6 +161,8 @@ export interface OpenTuiAppProps {
     imagePaths?: readonly string[],
     options?: OpenTuiSubmitOptions,
   ) => boolean;
+  onRetryPrompt?: () => void;
+  onInputProcessed?: () => void;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
   onQuit?: (messages: readonly HistoryItem[]) => void;
   /** Replays a transcript batch (session switch / resume). */
@@ -257,6 +260,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onQuit,
     onTranscriptReset,
     onTranscriptEvent,
+    onInputProcessed,
     onStartNewSession,
     onToggleVim,
     updateNotice,
@@ -380,17 +384,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     }
     adoptApprovalMode(next);
   }, [config, addInfoItem, adoptApprovalMode]);
-  // Shift+Tab lives here, not in the composer: ink mounts useAutoAcceptIndicator
-  // at App level (disabled only for the agent-tab view), so it still cycles
-  // while a dialog or a confirmation has the composer unmounted. The composer
-  // keeps only the Windows bare-Tab fallback — the one route that has to know
-  // whether Tab was already spent on a completion.
-  useKeyboard((key: KeyEvent) => {
-    const { name, shift, ctrl } = toOriginalKey(key);
-    if (name !== 'tab' || !shift || ctrl) return;
-    key.preventDefault();
-    cycleApprovalMode();
-  });
   // ink announces AUTO on mount too, so `--approval-mode auto` and
   // `tools.approvalMode: "auto"` do not open a session silently in AUTO. The
   // keypress and dialog routes above never fire for a mode set before start.
@@ -408,20 +401,27 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       if (!emit) return;
       const controller = new AbortController();
       shellControllersRef.current.add(controller);
-      return executeUserShell(
-        config,
-        command,
-        emit,
-        controller.signal,
-        // The `!` row renders behind the 2-col input indicator, and the child
-        // runs over that inner width (ink parity: it also passes the raw
-        // terminal width to its `!` child — no SHELL_WIDTH_FRACTION here,
-        // which only reaches the model-driven tool).
-        {
-          width: Math.max(terminalWidth - STATUS_INDICATOR_WIDTH, 10),
-          height: terminalHeight,
-        },
-      )
+      const sessionId = config.getSessionId();
+      onInputProcessed?.();
+      return (async () => {
+        await logger?.logMessage(MessageSenderType.USER, command);
+        if (controller.signal.aborted || sessionId !== config.getSessionId())
+          return;
+        return executeUserShell(
+          config,
+          command,
+          emit,
+          controller.signal,
+          // The `!` row renders behind the 2-col input indicator, and the child
+          // runs over that inner width (ink parity: it also passes the raw
+          // terminal width to its `!` child — no SHELL_WIDTH_FRACTION here,
+          // which only reaches the model-driven tool).
+          {
+            width: Math.max(terminalWidth - STATUS_INDICATOR_WIDTH, 10),
+            height: terminalHeight,
+          },
+        );
+      })()
         .catch((error: unknown) => {
           // executeUserShell reports its own failures; this guards the seam
           // itself so a rejection can neither strand the controller in the
@@ -440,7 +440,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           setDeferredRevision((revision) => revision + 1);
         });
     },
-    [config, props.onTranscriptEvent, terminalWidth, terminalHeight],
+    [
+      config,
+      logger,
+      onInputProcessed,
+      props.onTranscriptEvent,
+      terminalWidth,
+      terminalHeight,
+    ],
   );
 
   // A render teardown (error bailout, unmount) must not leave `!` children
@@ -532,6 +539,31 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // offered here and its servers stay silently disconnected.
   const mcpApproval = useMcpApproval(config);
 
+  // Shift+Tab lives here, not in the composer: ink mounts useAutoAcceptIndicator
+  // at App level (disabled only for the agent-tab view), so it still cycles
+  // while a dialog or a confirmation has the composer unmounted. The composer
+  // keeps only the Windows bare-Tab fallback — the one route that has to know
+  // whether Tab was already spent on a completion.
+  useKeyboard((key: KeyEvent) => {
+    const { name, shift, ctrl } = toOriginalKey(key);
+    if (
+      key.eventType !== 'release' &&
+      !streaming &&
+      !dialog &&
+      !activeModal &&
+      !activeToolCall &&
+      !mcpApproval.isMcpApprovalDialogOpen &&
+      (name === 'escape' || (name === 'c' && ctrl))
+    ) {
+      for (const controller of shellControllersRef.current) {
+        controller.abort();
+      }
+    }
+    if (name !== 'tab' || !shift || ctrl) return;
+    key.preventDefault();
+    cycleApprovalMode();
+  });
+
   // ink AppContainer's contextFilesAnnouncedRef: the context-file set is
   // announced once per session, on the first submission that reaches a model.
   const contextFilesAnnouncedRef = useRef(false);
@@ -556,12 +588,16 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     };
   }, [onTranscriptReset, onTranscriptEvent]);
 
+  const loggerRef = useRef(logger);
+  loggerRef.current = logger;
   const host = useMemo(
     () =>
       new OpenTuiAppHost({
         config,
         settings,
-        logger,
+        get logger() {
+          return loggerRef.current;
+        },
         transcript,
         confirmations,
         onChange: () => {},
@@ -576,7 +612,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     [
       config,
       settings,
-      logger,
       transcript,
       confirmations,
       onStartNewSession,
@@ -711,7 +746,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   useEffect(() => {
     const dispatcher = new OpenTuiSlashDispatcher(
       host,
-      { config, settings, logger, extensionRefreshState },
+      {
+        config,
+        settings,
+        get logger() {
+          return loggerRef.current;
+        },
+        extensionRefreshState,
+        onInputProcessed,
+      },
       commands ?? [],
     );
     reloadRef.current = async () => {
@@ -739,9 +782,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     gateway,
     config,
     settings,
-    logger,
     commands,
     extensionRefreshState,
+    onInputProcessed,
   ]);
 
   const applyOutcome = useCallback(
@@ -755,6 +798,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         case 'submit_prompt':
           if (onSubmitPrompt)
             return onSubmitPrompt(outcome.content, undefined, {
+              promptId: outcome.promptId,
               modelOverride: outcome.modelOverride,
               refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
               onComplete: outcome.onComplete,
@@ -803,6 +847,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         notify(
           'Image attachments cannot be submitted in shell mode. Exit shell mode and try again.',
         );
+        return false;
+      }
+      if (hasImages && gateway.isBusy()) {
+        notify('A slash command is already running.');
         return false;
       }
       setNoticeText(null);
@@ -1238,6 +1286,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 focus
                 streaming={streaming}
                 onInterrupt={onInterrupt}
+                onRetry={
+                  props.onRetryPrompt
+                    ? () => {
+                        if (shellControllersRef.current.size > 0) return;
+                        if (gateway.isBusy()) {
+                          notify('A slash command is already running.');
+                          return;
+                        }
+                        props.onRetryPrompt?.();
+                      }
+                    : undefined
+                }
                 onCancelCommand={() => {
                   if (!gateway.isBusy()) return false;
                   gateway.cancel();
