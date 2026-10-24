@@ -40,6 +40,7 @@ import {
   type HostedSessionLineage,
 } from './hosted-session-message-session.js';
 import { hostedPromptKey, teamMemberPreamble } from './hosted-member-chain.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 // H4e-b3: a member Session's board tools ride the command channel. The
 // suite runs the real funnel chain — the park checkpoint, the outbound
@@ -1535,37 +1536,41 @@ it('routes a parked command wait to the recovery cancel, never the plain settle'
 // A budget refusal is a normal local answer, so it owes the parked wait
 // its fold: a durable wait left behind turns the Turn's next call into a
 // recovery fault instead of the same local refusal.
-it('folds the parked wait on a budget refusal, so the next call refuses the same way', async () => {
-  await seedFirstInput(
-    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
-      'write the board forever',
-  );
-  // Mint the per-run budget by hand: a direct count of outbound records
-  // is the rule's own evidence.
-  for (let index = 0; index < 256; index += 1) {
-    await commands.runCommand({
-      commandId: commandIdOf(`budget-seed-${index}`),
-      kind: 'board_read',
-      args: { filter: 'all' },
-      executionCallId: `budget-seed-${index}`,
-      closing: false,
-    });
-  }
-  const parts = await execute(createTurn(), [
-    call({ subject: 'x', description: 'y' }, 'call-over', 'task_create'),
-  ]);
-  expect(texts(parts)).toContain('budget_exhausted');
-  const folded = await session.authority.harnessRunAuthorization();
-  if (folded.status !== 'runnable')
-    throw new Error(`expected runnable, got ${folded.status}`);
-  expect(folded.checkpoint.continuation.phase).toBe('model_output_committed');
-  // The Turn's next call meets the same local refusal, never a recovery
-  // fault from its own durable wait.
-  const again = await execute(createTurn(), [
-    call({ subject: 'x', description: 'y' }, 'call-over-2', 'task_create'),
-  ]);
-  expect(texts(again)).toContain('budget_exhausted');
-}, 60_000);
+it(
+  'folds the parked wait on a budget refusal, so the next call refuses the same way',
+  async () => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+        'write the board forever',
+    );
+    // Mint the per-run budget by hand: a direct count of outbound records
+    // is the rule's own evidence.
+    for (let index = 0; index < 256; index += 1) {
+      await commands.runCommand({
+        commandId: commandIdOf(`budget-seed-${index}`),
+        kind: 'board_read',
+        args: { filter: 'all' },
+        executionCallId: `budget-seed-${index}`,
+        closing: false,
+      });
+    }
+    const parts = await execute(createTurn(), [
+      call({ subject: 'x', description: 'y' }, 'call-over', 'task_create'),
+    ]);
+    expect(texts(parts)).toContain('budget_exhausted');
+    const folded = await session.authority.harnessRunAuthorization();
+    if (folded.status !== 'runnable')
+      throw new Error(`expected runnable, got ${folded.status}`);
+    expect(folded.checkpoint.continuation.phase).toBe('model_output_committed');
+    // The Turn's next call meets the same local refusal, never a recovery
+    // fault from its own durable wait.
+    const again = await execute(createTurn(), [
+      call({ subject: 'x', description: 'y' }, 'call-over-2', 'task_create'),
+    ]);
+    expect(texts(again)).toContain('budget_exhausted');
+  },
+  isSlowTestHost() ? 120_000 : 60_000,
+);
 
 it('declares the widened send_message beside the member tools (b3c)', async () => {
   await seedFirstInput(

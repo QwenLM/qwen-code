@@ -1470,6 +1470,29 @@ describe('ChatRecordingService', () => {
       expect(rewind?.parentUuid).toBe('assistant-2');
     });
 
+    it('counts the user turns that rewind boundaries track', async () => {
+      svc.rebuildTurnBoundaries(
+        resumedChain(
+          null,
+          ['user-1', 'user', 'first turn'],
+          ['assistant-1', 'assistant', 'response'],
+          [
+            'goal-runtime-1',
+            'user',
+            'Continue working.',
+            { subtype: 'goal_runtime', provenance: 'goal_runtime' },
+          ],
+          ['user-2', 'user', 'second turn'],
+        ),
+      );
+      expect(svc.getUserTurnCount()).toBe(2);
+      displayed('third');
+      expect(svc.getUserTurnCount()).toBe(3);
+      svc.rewindRecording(1, { truncatedCount: 2 });
+      expect(svc.getUserTurnCount()).toBe(1);
+      await svc.flush();
+    });
+
     it('restores a rebuilt persisted tail after a failed append', async () => {
       svc.rebuildTurnBoundaries(
         resumedChain(null, [
