@@ -1820,6 +1820,60 @@ describe('serve fast path environment bootstrap', () => {
     expect(fromUserScope.ignoredWorkspaceKeys).toEqual(['serve.tokenQr']);
   });
 
+  it('loads serve.maxSessions from user scope but never from workspace scope', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-max-sessions-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    // A workspace file must never raise a daemon-wide resource cap.
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { maxSessions: 4 } }),
+    );
+    const workspaceScoped = loadServeFastPathSettings(tempWorkspace);
+    expect(workspaceScoped.serve?.maxSessions).toBeUndefined();
+    expect(workspaceScoped.ignoredWorkspaceKeys).toEqual(['serve.maxSessions']);
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { maxSessions: 64 } }),
+    );
+    const fromUserScope = loadServeFastPathSettings(tempWorkspace);
+    expect(fromUserScope.serve?.maxSessions).toBe(64);
+    // A workspace value stays ignored — and reported — even when an
+    // operator scope also sets the key.
+    expect(fromUserScope.ignoredWorkspaceKeys).toEqual(['serve.maxSessions']);
+  });
+
+  it('loads serve.maxSessions from operator scopes and lets system override user', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-max-sessions-system-')),
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']!,
+      JSON.stringify({ serve: { maxSessions: 8 } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.maxSessions).toBe(8);
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { maxSessions: 64 } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.maxSessions).toBe(
+      64,
+    );
+
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
+      JSON.stringify({ serve: { maxSessions: 16 } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.maxSessions).toBe(
+      16,
+    );
+  });
+
   it('keeps user-scope serve.tokenQr when workspace startup channels merge', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(

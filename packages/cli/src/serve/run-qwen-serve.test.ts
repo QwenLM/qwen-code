@@ -41,6 +41,7 @@ import {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,
+  maxSessionsFromSettings,
   subSessionConcurrencyCapsFromSettings,
   validatePolicyConfig,
   verifyWorkerTlsTrust,
@@ -2092,6 +2093,34 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
     const onWarning = vi.fn();
     subSessionConcurrencyCapsFromSettings({}, onWarning);
     expect(onWarning).not.toHaveBeenCalled();
+  });
+});
+
+describe('maxSessionsFromSettings', () => {
+  it('honors non-negative integers and Infinity', () => {
+    expect(maxSessionsFromSettings({ maxSessions: 0 })).toBe(0);
+    expect(maxSessionsFromSettings({ maxSessions: 64 })).toBe(64);
+    expect(
+      maxSessionsFromSettings({ maxSessions: Number.POSITIVE_INFINITY }),
+    ).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('omits an absent key so the built-in default applies', () => {
+    const onWarning = vi.fn();
+    expect(maxSessionsFromSettings({}, onWarning)).toBeUndefined();
+    expect(maxSessionsFromSettings(undefined, onWarning)).toBeUndefined();
+    expect(onWarning).not.toHaveBeenCalled();
+  });
+
+  it('rejects values the bridge would refuse and warns', () => {
+    const onWarning = vi.fn();
+    for (const value of [-1, 2.5, Number.NaN, '32', true, null]) {
+      expect(maxSessionsFromSettings({ maxSessions: value }, onWarning)) //
+        .toBeUndefined();
+    }
+    expect(onWarning).toHaveBeenCalledTimes(6);
+    expect(onWarning.mock.calls[0][0]).toContain('serve.maxSessions');
+    expect(onWarning.mock.calls[0][0]).toContain('-1');
   });
 });
 
@@ -4772,6 +4801,61 @@ describe('runQwenServe daemon logger wiring', () => {
       }
     }
   }, 10_000);
+});
+
+describe('serve.maxSessions boot resolution', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function bootAndAdvertise(
+    optionMaxSessions: number | undefined,
+    settingsMaxSessions: unknown,
+  ): Promise<number | null> {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ms-')));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        ...(optionMaxSessions !== undefined
+          ? { maxSessions: optionMaxSessions }
+          : {}),
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        preheatBridge: false,
+        bootSettings: { serve: { maxSessions: settingsMaxSessions } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const res = await fetch(`${handle.url}/capabilities`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: { maxSessionsPerWorkspace: number | null };
+      };
+      return body.limits.maxSessionsPerWorkspace;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  it('applies serve.maxSessions when the flag is omitted', async () => {
+    await expect(bootAndAdvertise(undefined, 7)).resolves.toBe(7);
+  });
+
+  it('lets the flag win over serve.maxSessions', async () => {
+    await expect(bootAndAdvertise(5, 7)).resolves.toBe(5);
+  });
+
+  it('keeps the built-in default for an invalid setting', async () => {
+    await expect(bootAndAdvertise(undefined, -1)).resolves.toBe(32);
+  });
 });
 
 describe('runQwenServe telemetry validation', () => {
