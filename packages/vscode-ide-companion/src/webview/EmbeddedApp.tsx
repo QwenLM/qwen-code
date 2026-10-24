@@ -16,6 +16,8 @@ import {
 } from '@qwen-code/web-shell';
 import {
   DaemonClient,
+  findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock,
   type DaemonSessionSummary,
   type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
@@ -44,20 +46,21 @@ const SESSION_SWITCH_MIN_VISIBLE_MS = 120;
 /** Longest an edit submit waits for the rewind to land in the transcript. */
 const REWIND_APPLIED_TIMEOUT_MS = 2_000;
 
-/** Conversational user turns — the blocks a rewind indexes against. */
+/**
+ * Conversational user turns — the blocks a rewind indexes against.
+ * `mid_turn_message_injected` renders as `role: 'system'`, so the web shell's
+ * ordinal never numbers it; counting it here shifts every later index.
+ */
+function isEditableUserBlock(
+  block: DaemonTranscriptBlock | undefined,
+): boolean {
+  return isDaemonRewindUserBlock(block);
+}
+
 function countEditableUserTurns(
   blocks: readonly DaemonTranscriptBlock[],
 ): number {
-  let count = 0;
-  for (const block of blocks) {
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
-      count += 1;
-    }
-  }
-  return count;
+  return blocks.filter(isEditableUserBlock).length;
 }
 
 function waitForRewindApplied(
@@ -300,7 +303,7 @@ interface InsightProgress {
 }
 
 interface EditingMessage {
-  turnIndex?: number;
+  blockId?: string;
 }
 
 function isAutomaticApprovalMode(modeId: unknown): boolean {
@@ -1576,11 +1579,16 @@ export function EmbeddedApp() {
             const editContent = queuedPromptForEdit
               ? queuedPromptForEdit.prompt
               : content;
+            const target =
+              transcriptBlocksRef.current.filter(isEditableUserBlock)[
+                turnIndex
+              ];
+            if (!editsQueuedPrompt && !target) return false;
             composerRef.current?.clear({ text: true, tags: true });
             composerRef.current?.setText(editContent);
             composerRef.current?.focus?.();
             setEditingMessage({
-              turnIndex: editsQueuedPrompt ? undefined : turnIndex,
+              blockId: editsQueuedPrompt ? undefined : target?.id,
             });
             return true;
           }}
@@ -1614,10 +1622,17 @@ export function EmbeddedApp() {
           prepareSubmit={async (submission) => {
             if (submission.source === 'mcp-app') return undefined;
             if (editingMessage) {
+              const { blockId } = editingMessage;
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
+              const blocks = transcriptBlocksRef.current;
+              const userBlocks = blocks.filter(isEditableUserBlock);
+              const target =
+                blockId === undefined
+                  ? userBlocks.at(-1)
+                  : userBlocks.find((block) => block.id === blockId);
               let snapshots: Awaited<
                 ReturnType<typeof daemonClient.getRewindSnapshots>
               >['snapshots'];
@@ -1627,19 +1642,16 @@ export function EmbeddedApp() {
               } catch (err) {
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
-              const snapshot =
-                editingMessage.turnIndex === undefined
-                  ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
-                      (latest, entry) =>
-                        !latest || entry.turnIndex > latest.turnIndex
-                          ? entry
-                          : latest,
-                      undefined,
+              const matches =
+                target?.promptId &&
+                findDaemonRewindUserBlock(blocks, target.promptId)?.id ===
+                  target.id
+                  ? snapshots.filter(
+                      (entry) => entry.daemonPromptId === target.promptId,
                     )
-                  : snapshots.find(
-                      (entry) => entry.turnIndex === editingMessage.turnIndex,
-                    );
-              if (!snapshot) {
+                  : [];
+              const snapshot = matches.length === 1 ? matches[0] : undefined;
+              if (!snapshot || !target) {
                 throw new Error(t('composer.editExpired'));
               }
               try {
@@ -1669,7 +1681,7 @@ export function EmbeddedApp() {
               if (
                 !(await waitForRewindApplied(
                   () => transcriptBlocksRef.current,
-                  snapshot.turnIndex,
+                  userBlocks.indexOf(target),
                 )) &&
                 runtimeRef.current?.sessionId === sessionId
               ) {

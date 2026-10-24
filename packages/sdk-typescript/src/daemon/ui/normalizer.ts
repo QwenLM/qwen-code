@@ -585,11 +585,13 @@ function normalizeSessionRewound(
     return fallbackDebug(event, base, 'malformed session_rewound payload');
   }
   const sessionId = getString(event.data, 'sessionId');
+  const daemonPromptId = getString(event.data, 'daemonPromptId');
   return [
     {
       ...base,
       type: 'session.rewound',
       promptId,
+      ...(daemonPromptId ? { daemonPromptId } : {}),
       targetTurnIndex,
       ...(sessionId ? { sessionId } : {}),
     },
