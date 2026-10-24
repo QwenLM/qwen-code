@@ -362,8 +362,9 @@ export const reconnectCommand: CommandModule = {
         alias: 'a',
         describe: 'Reconnect all configured servers',
         type: 'boolean',
-        default: false,
       })
+      // No `default: false` on --all: yargs treats a defaulted option as set,
+      // so `.conflicts` would reject every `reconnect <server-name>`.
       .conflicts('server-name', 'all')
       .check((argv) => {
         const serverName = argv['server-name'];
@@ -377,7 +378,7 @@ export const reconnectCommand: CommandModule = {
       }),
   handler: async (argv) => {
     const serverName = argv['server-name'] as string | undefined;
-    const all = argv['all'] as boolean;
+    const all = argv['all'] === true;
 
     try {
       if (all) {
