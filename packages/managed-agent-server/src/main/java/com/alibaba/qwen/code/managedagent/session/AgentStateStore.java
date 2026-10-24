@@ -875,6 +875,16 @@ public interface AgentStateStore {
     boolean bindHarness(String tenantId, String sessionId, String turnId,
             String owner, String harnessBootId);
 
+    /**
+     * Binds the Harness boot id of a Session that has no Turn to hang
+     * {@link #bindHarness} on — the automation verbs' create of a
+     * never-attached Session. Fills the column only when it is still
+     * empty, so a Turn that concurrently bound another generation keeps
+     * its own binding.
+     */
+    void bindSessionHarness(String tenantId, String sessionId,
+            String harnessBootId);
+
     boolean bindRecoveredHarness(String tenantId, String sessionId,
             String turnId, String owner, String expectedHarnessBootId,
             String harnessBootId);
