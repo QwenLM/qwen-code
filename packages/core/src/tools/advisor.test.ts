@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  runWithAgentChat,
+  runWithAgentContext,
+} from '../agents/runtime/agent-context.js';
+import type { LlmChat } from '../core/llm-chat.js';
 import type { Content } from '@google/genai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
@@ -11,6 +16,7 @@ import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { AdvisorTool, ADVISOR_SYSTEM_INSTRUCTION } from './advisor.js';
 import { ToolNames } from './tool-names.js';
 import { Kind } from './tools.js';
+import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
 
 const mockRunForkedAgent = vi.hoisted(() => vi.fn());
 
@@ -25,10 +31,20 @@ const review = {
   recommendation: 'Add one focused regression test.',
 };
 
+// A runForkedAgent result from the advisor model.
+function forked(
+  text: string,
+  jsonResult: unknown,
+  usage = { inputTokens: 10, outputTokens: 5, cacheHitTokens: 0 },
+) {
+  return { text, jsonResult, usage, model: 'advisor-model' };
+}
+
 function makeConfig(history?: Content[]): Config {
   return {
     getModel: () => 'executor-model',
     getAdvisorModel: () => 'advisor-model',
+    tryConsumeAdvisorUse: () => true,
     getContentGeneratorConfig: () => undefined,
     getFastModel: () => undefined,
     getAllConfiguredModels: () => [],
@@ -42,57 +58,48 @@ function makeConfig(history?: Content[]): Config {
           history ??
           ([
             { role: 'user', parts: [{ text: 'fix the bug' }] },
-            {
-              role: 'model',
-              parts: [
-                {
-                  functionCall: {
-                    id: 'read-1',
-                    name: 'read_file',
-                    args: { path: 'package.json' },
-                  },
-                },
-              ],
-            },
-            {
-              role: 'user',
-              parts: [
-                {
-                  functionResponse: {
-                    id: 'read-1',
-                    name: 'read_file',
-                    response: { output: '{"name":"qwen-code"}' },
-                  },
-                },
-              ],
-            },
-            {
-              role: 'model',
-              parts: [
-                { text: 'I inspected the package.' },
-                { text: 'hidden reasoning', thought: true },
-                {
-                  inlineData: { mimeType: 'image/png', data: 'raw-bytes' },
-                },
-                { functionCall: { name: ToolNames.ADVISOR, args: {} } },
-                { text: 'text after the call must not be forwarded' },
-              ],
-            },
+            content(
+              'model',
+              fnCall('read_file', { path: 'package.json' }, 'read-1'),
+            ),
+            content(
+              'user',
+              fnResponse(
+                'read_file',
+                { output: '{"name":"qwen-code"}' },
+                'read-1',
+              ),
+            ),
+            content(
+              'model',
+              { text: 'I inspected the package.' },
+              { text: 'hidden reasoning', thought: true },
+              {
+                inlineData: { mimeType: 'image/png', data: 'raw-bytes' },
+              },
+              fnCall(ToolNames.ADVISOR, {}),
+              { text: 'text after the call must not be forwarded' },
+            ),
           ] as Content[]),
       }),
     }),
   } as unknown as Config;
 }
 
+const run = (config = makeConfig()) =>
+  new AdvisorTool(config).build({}).execute(new AbortController().signal);
+
+// The JSON user message of the first runForkedAgent call.
+const forkedInput = () =>
+  JSON.parse(mockRunForkedAgent.mock.calls[0][0].userMessage) as Record<
+    string,
+    unknown
+  >;
+
 describe('AdvisorTool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockRunForkedAgent.mockResolvedValue({
-      text: JSON.stringify(review),
-      jsonResult: review,
-      usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 0 },
-      model: 'advisor-model',
-    });
+    mockRunForkedAgent.mockResolvedValue(forked(review.recommendation, review));
   });
 
   it.each(['https://advisor.example/v1', ''])(
@@ -113,28 +120,19 @@ describe('AdvisorTool', () => {
   );
 
   it('takes the transcript before a deferred Advisor invocation', async () => {
-    const config = makeConfig([
-      { role: 'user', parts: [{ text: 'fix the bug' }] },
-      {
-        role: 'model',
-        parts: [
+    const result = await run(
+      makeConfig([
+        { role: 'user', parts: [{ text: 'fix the bug' }] },
+        content(
+          'model',
           { text: 'I inspected the package.' },
-          {
-            functionCall: {
-              name: ToolNames.TOOL_CALL,
-              args: { name: 'Advisor', arguments: {} },
-            },
-          },
+          fnCall(ToolNames.TOOL_CALL, { name: 'Advisor', arguments: {} }),
           { text: 'after consultation' },
-        ],
-      },
-    ]);
-    const result = await new AdvisorTool(config)
-      .build({})
-      .execute(new AbortController().signal);
+        ),
+      ]),
+    );
     expect(result.error).toBeUndefined();
-    const input = JSON.parse(mockRunForkedAgent.mock.calls[0][0].userMessage);
-    expect(input.transcript).toEqual([
+    expect(forkedInput()['transcript']).toEqual([
       { role: 'user', parts: [{ text: 'fix the bug' }] },
       { role: 'model', parts: [{ text: 'I inspected the package.' }] },
     ]);
@@ -158,12 +156,7 @@ describe('AdvisorTool', () => {
     let source: string | undefined;
     mockRunForkedAgent.mockImplementationOnce(async () => {
       source = subagentNameContext.getStore();
-      return {
-        text: JSON.stringify(review),
-        jsonResult: review,
-        usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 0 },
-        model: 'advisor-model',
-      };
+      return forked(review.recommendation, review);
     });
     const signal = new AbortController().signal;
     const config = makeConfig();
@@ -177,9 +170,6 @@ describe('AdvisorTool', () => {
         model: 'advisor-model',
         abortSignal: signal,
         disableModelFallbacks: true,
-        jsonSchema: expect.objectContaining({
-          required: ['verdict', 'risks', 'missingEvidence', 'recommendation'],
-        }),
         cacheSafeParams: {
           generationConfig: {
             systemInstruction: ADVISOR_SYSTEM_INSTRUCTION,
@@ -190,9 +180,7 @@ describe('AdvisorTool', () => {
         },
       }),
     );
-    const input = JSON.parse(
-      mockRunForkedAgent.mock.calls[0][0].userMessage,
-    ) as Record<string, unknown>;
+    const input = forkedInput();
     expect(input['executorSystemInstruction']).toEqual({
       parts: [{ text: 'executor system' }],
     });
@@ -209,17 +197,18 @@ describe('AdvisorTool', () => {
     expect(transcript).not.toContain('text after the call');
     expect(transcript).not.toContain('"name":"advisor"');
     expect(result).toEqual({
-      llmContent: expect.stringContaining('## Verdict'),
+      llmContent: expect.stringContaining(review.recommendation),
       returnDisplay: {
-        type: 'advisor_review',
+        type: 'advisor_advice',
         model: 'advisor-model',
-        ...review,
+        text: review.recommendation,
       },
     });
-    expect(String(result.llmContent)).toContain('## Recommendation');
+    expect(String(result.llmContent)).toContain('does not grant permission');
+    expect(mockRunForkedAgent.mock.calls[0][0].jsonSchema).toBeUndefined();
   });
 
-  it('returns provider and schema failures to the executor without throwing', async () => {
+  it('returns provider and empty-response failures to the executor without throwing', async () => {
     mockRunForkedAgent.mockRejectedValueOnce(new Error('provider unavailable'));
     const tool = new AdvisorTool(makeConfig());
 
@@ -229,16 +218,13 @@ describe('AdvisorTool', () => {
     expect(providerFailure.error?.message).toBe('provider unavailable');
     expect(providerFailure.llmContent).toContain('Continue the task');
 
-    mockRunForkedAgent.mockResolvedValueOnce({
-      text: '{}',
-      jsonResult: {},
-      usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-      model: 'advisor-model',
-    });
+    mockRunForkedAgent.mockResolvedValueOnce(
+      forked('   ', {}, { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 }),
+    );
     const schemaFailure = await tool
       .build({})
       .execute(new AbortController().signal);
-    expect(schemaFailure.error?.message).toContain('invalid structured output');
+    expect(schemaFailure.error?.message).toContain('no readable guidance');
   });
 
   it('does not fall back to the executor when the Advisor model no longer resolves', async () => {
@@ -247,72 +233,70 @@ describe('AdvisorTool', () => {
       getAdvisorModel: () => 'fast',
     } as Config;
 
-    const result = await new AdvisorTool(config)
-      .build({})
-      .execute(new AbortController().signal);
+    const result = await run(config);
 
     expect(mockRunForkedAgent).not.toHaveBeenCalled();
     expect(result.error?.message).toBe('Advisor model is no longer available.');
   });
 
-  it('accepts structured Advisor JSON returned as text', async () => {
+  it('keeps free-form advice without requiring review fields', async () => {
+    const advice =
+      '## Next step\nInspect the failing request, then revise the hypothesis.';
     mockRunForkedAgent.mockResolvedValueOnce({
-      text: `\`\`\`json\n${JSON.stringify(review)}\n\`\`\``,
-      jsonResult: undefined,
-      usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 0 },
+      text: advice,
       model: 'advisor-model',
     });
-
     const result = await new AdvisorTool(makeConfig())
       .build({})
       .execute(new AbortController().signal);
-
     expect(result.error).toBeUndefined();
     expect(result.returnDisplay).toEqual({
-      type: 'advisor_review',
+      type: 'advisor_advice',
       model: 'advisor-model',
-      ...review,
+      text: advice,
     });
   });
 
-  it('ignores extra fields in an otherwise valid review', async () => {
-    mockRunForkedAgent.mockResolvedValueOnce({
-      text: JSON.stringify({ ...review, extra: 'ignored' }),
-      jsonResult: { ...review, extra: 'ignored' },
-      usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 0 },
-      model: 'advisor-model',
-    });
-
-    const result = await new AdvisorTool(makeConfig())
+  it('returns the usage limit without issuing another request', async () => {
+    const config = makeConfig();
+    config.tryConsumeAdvisorUse = () => false;
+    const result = await new AdvisorTool(config)
       .build({})
       .execute(new AbortController().signal);
-
-    expect(result.error).toBeUndefined();
-    expect(result.returnDisplay).toEqual({
-      type: 'advisor_review',
-      model: 'advisor-model',
-      ...review,
-    });
+    expect(result.llmContent).toContain('usage limit reached');
+    expect(result.llmContent).toContain('Continue the task');
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
   });
 
-  it('recovers an array-wrapped review from the text fallback', async () => {
-    mockRunForkedAgent.mockResolvedValueOnce({
-      text: JSON.stringify([review]),
-      jsonResult: undefined,
-      usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 0 },
-      model: 'advisor-model',
-    });
-
-    const result = await new AdvisorTool(makeConfig())
-      .build({})
-      .execute(new AbortController().signal);
-
-    expect(result.error).toBeUndefined();
-    expect(result.returnDisplay).toEqual({
-      type: 'advisor_review',
-      model: 'advisor-model',
-      ...review,
-    });
+  it('uses the active subagent conversation and fails closed without it', async () => {
+    const config = makeConfig();
+    const child = makeConfig([
+      { role: 'user', parts: [{ text: 'child-only evidence' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'advisor', args: {} } }],
+      },
+    ])
+      .getGeminiClient()
+      .getChat() as LlmChat;
+    await runWithAgentContext('child', () =>
+      runWithAgentChat(child, () =>
+        new AdvisorTool(config).build({}).execute(new AbortController().signal),
+      ),
+    );
+    const input = mockRunForkedAgent.mock.calls[0][0].userMessage;
+    expect(input).toContain('child-only evidence');
+    expect(input).not.toContain('fix the bug');
+    mockRunForkedAgent.mockClear();
+    const missing = await runWithAgentContext('child', () =>
+      runWithAgentChat(undefined, () =>
+        new AdvisorTool(config).build({}).execute(new AbortController().signal),
+      ),
+    );
+    expect(missing.error?.message).toContain(
+      'no conversation for the active agent',
+    );
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
   });
 
   it('propagates cancellation', async () => {

@@ -50,6 +50,15 @@ export const OWNED_MANAGED_RUNTIME_ROUTES = Object.freeze([
     responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
     cacheControl: 'no-store',
   }),
+  Object.freeze({
+    key: 'acknowledge',
+    method: 'POST',
+    path: '/internal/managed-runtime/v2/acknowledge',
+    protocolVersion: 2,
+    requestBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
+    responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
+    cacheControl: 'no-store',
+  }),
 ] as const);
 
 export type OwnedManagedRuntimeRoute =
@@ -82,6 +91,12 @@ export interface ManagedRuntimeAttestationIdentity {
   readonly capabilityDigest: string;
   readonly isolationClass: 'session' | 'workspace';
 }
+
+/** The boot values that the request headers of every owned route carry. */
+export type ManagedRuntimeRequestIdentity = Pick<
+  ManagedRuntimeAttestationIdentity,
+  'token' | 'leaseId' | 'epoch'
+>;
 
 type ManagedRuntimeAttestationResponse = Omit<
   ManagedRuntimeAttestationIdentity,
@@ -162,13 +177,26 @@ function isClosedAttestationRequest(
   );
 }
 
+/** The JSON body parser of every owned route, limited to `limit` bytes. */
+export function managedRuntimeJsonBody(limit: number): RequestHandler {
+  return express.json({
+    // Compressed private requests add no value at these sizes. Refusing them
+    // keeps the limit on wire bytes and makes corrupt streams use the JSON
+    // protocol error instead of Express' HTML error handler.
+    inflate: false,
+    limit,
+    strict: true,
+    type: 'application/json',
+  });
+}
+
 export const managedRuntimeNoStore: RequestHandler = (_req, res, next) => {
   res.setHeader('Cache-Control', ATTEST_ROUTE.cacheControl);
   next();
 };
 
 export function authorizeManagedRuntime(
-  identity: ManagedRuntimeAttestationIdentity,
+  identity: ManagedRuntimeRequestIdentity,
 ): RequestHandler {
   return (req, res, next): void => {
     const authorization = req.get('Authorization');
@@ -199,6 +227,27 @@ export function authorizeManagedRuntime(
       });
       return;
     }
+    next();
+  };
+}
+
+/**
+ * The response header in which a v2 tool route names the worker's
+ * incarnation. No request carries the incarnation, so a process that took
+ * the port of a worker that exited cannot answer as that worker.
+ */
+export const MANAGED_RUNTIME_INCARNATION_HEADER =
+  'X-Qwen-Managed-Runtime-Incarnation';
+
+/** Names the worker's incarnation on every answer to an authorized request. */
+export function nameManagedRuntimeIncarnation(
+  identity: Pick<ManagedRuntimeAttestationIdentity, 'runtimeIncarnation'>,
+): RequestHandler {
+  return (_req, res, next): void => {
+    res.setHeader(
+      MANAGED_RUNTIME_INCARNATION_HEADER,
+      identity.runtimeIncarnation,
+    );
     next();
   };
 }
@@ -298,35 +347,33 @@ export function registerManagedRuntimeAttestationRoute(
     ATTEST_ROUTE.path,
     managedRuntimeNoStore,
     authorizeManagedRuntime(identitySnapshot),
-    express.json({
-      // Compressed private requests add no value at 16 KiB. Refusing them
-      // keeps the limit on wire bytes and makes corrupt streams use the JSON
-      // protocol error instead of Express' HTML error handler.
-      inflate: false,
-      limit: ATTEST_ROUTE.requestBodyLimitBytes,
-      strict: true,
-      type: 'application/json',
-    }),
+    managedRuntimeJsonBody(ATTEST_ROUTE.requestBodyLimitBytes),
     handleAttestation(identitySnapshot, responseJson),
     handleManagedRuntimeJsonError,
   );
 }
 
+interface DeclaredManagedRuntimeRoute {
+  readonly method: string;
+  readonly path: string;
+}
+
 export function isOwnedManagedRuntimeRoute(
   method: string | undefined,
   url: string | undefined,
+  routes: readonly DeclaredManagedRuntimeRoute[],
 ): boolean {
-  return OWNED_MANAGED_RUNTIME_ROUTES.some(
-    (route) => method === route.method && url === route.path,
-  );
+  return routes.some((route) => method === route.method && url === route.path);
 }
 
+/** Admits exactly the declared routes, by default those of boot v1. */
 export function ownedManagedRuntimeRouteGate(
   next: RequestListener,
+  routes: readonly DeclaredManagedRuntimeRoute[] = OWNED_MANAGED_RUNTIME_ROUTES,
 ): RequestListener {
   return (req, res): void => {
     res.setHeader('Cache-Control', ATTEST_ROUTE.cacheControl);
-    if (!isOwnedManagedRuntimeRoute(req.method, req.url)) {
+    if (!isOwnedManagedRuntimeRoute(req.method, req.url, routes)) {
       res.writeHead(404);
       res.end();
       return;

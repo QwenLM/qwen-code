@@ -201,6 +201,7 @@ const {
 });
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useConnection: () => connection,
   useActions: () => sessionActions,
   useStreamingState: () => 'idle',
@@ -3136,7 +3137,8 @@ describe('WebShellSidebar workspace removal', () => {
     };
     renderSidebar();
 
-    // The trusted row keeps its other workspace actions; only Remove is gone.
+    // The trusted row keeps its other workspace actions (including the
+    // display-order moves); only Remove is gone.
     const trigger = workspaceAction('/tmp/other');
     expect(trigger).toBeDefined();
     act(() => click(trigger!));
@@ -3144,6 +3146,8 @@ describe('WebShellSidebar workspace removal', () => {
     expect(menuItemLabels()).toEqual([
       'Copy path',
       'New task',
+      'Move up',
+      'Move down',
       'Reload runtime',
     ]);
     expect(

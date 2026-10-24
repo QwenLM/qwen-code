@@ -12,6 +12,7 @@ import {
   isGoalLimitKind,
   GOAL_PAUSE_REASON_COMMAND,
   GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+  GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
   GOAL_PAUSE_REASON_MAX_CHARACTERS,
   GOAL_PAUSE_REASON_NO_PROGRESS,
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
@@ -22,6 +23,7 @@ import {
   goalPauseReasonForFailure,
   goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
+  goalTokenBudgetReason,
   goalTurnBudgetReason,
   validateGoalPauseReason,
 } from './goal-protocol.js';
@@ -41,6 +43,7 @@ describe('goal pause reasons', () => {
       GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
       GOAL_PAUSE_REASON_STOP_HOOK_CAP,
       GOAL_PAUSE_REASON_SESSION_DISPOSED,
+      GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
       GOAL_PAUSE_REASON_NO_PROGRESS,
     ]) {
       expect(validateGoalPauseReason(reason)).toBeNull();
@@ -142,6 +145,11 @@ describe('legacy evidence limit reasons', () => {
 });
 
 describe('Goal cadence budget reasons', () => {
+  it('formats singular and plural token budgets', () => {
+    expect(goalTokenBudgetReason(1)).toContain('(1 token)');
+    expect(goalTokenBudgetReason(2)).toContain('(2 tokens)');
+  });
+
   it('formats singular and plural turn budgets', () => {
     expect(goalTurnBudgetReason(1)).toContain('(1 turn)');
     expect(goalTurnBudgetReason(2)).toContain('(2 turns)');

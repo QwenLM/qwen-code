@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { measureToolOutput } from './tool-output-size.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -11,6 +12,7 @@ import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
+import { assertShellSandboxCwd } from '../sandbox/runtime-shell-policy.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
@@ -62,6 +64,7 @@ import type {
   ShellOutputEvent,
   ShellPostPromoteHandlers,
   ShellPostPromoteSettleInfo,
+  ShellRawCaptureSink,
 } from '../services/shellExecutionService.js';
 import {
   getShellAbortReasonKind,
@@ -77,6 +80,7 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpaths, makeRelative, shortenPath } from '../utils/paths.js';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   detectSelfKillCommand,
   getCommandRoot,
@@ -113,6 +117,9 @@ const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
 // (long-run advisory, attribution warning). The reservation math and the
 // append loop share it so the two cannot drift.
 const APPENDED_METADATA_SEPARATOR = '\n\n';
+
+export const SHELL_RECORD_ARTIFACT_REMINDER =
+  'If this command created or rewrote a deliverable file (csv, html, sql, py, md, json, notebook, image, pdf, or an office document), call record_artifact for each one. workspacePath is relative to the current execution directory, and title is required. Do not call it for files already recorded by write_file, edit, or notebook_edit.';
 
 function getShellOutputThreshold(config: Config): number {
   return config.isTruncateToolOutputThresholdExplicit()
@@ -2181,8 +2188,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return description;
   }
 
+  private isDirectoryOutsideWorkspace(): boolean {
+    return (
+      !!this.params.directory &&
+      !this.config
+        .getWorkspaceContext()
+        .isPathWithinWorkspace(this.params.directory)
+    );
+  }
+
   /**
    * AST-based permission check for the shell command.
+   * - An explicit `directory` outside the workspace → 'ask'
    * - Substitution-bearing commands (any form, including inside an
    *   env-prefix wrapper that `stripShellWrapper` would discard) → 'ask'
    * - Read-only commands (via AST analysis) → 'allow'
@@ -2190,6 +2207,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     if (this.config.getShellExecutionSandbox?.()) return 'ask';
+    // Like read_file outside the workspace: ask rather than reject at build
+    // time, so an approval (or YOLO) can let it run.
+    if (this.isDirectoryOutsideWorkspace()) return 'ask';
     // Gate on the RAW command before `stripShellWrapper` runs.
     // `stripShellWrapper` drops leading env-assignment tokens AND
     // unwraps `bash -c '...'` to its inner script — so for
@@ -2345,6 +2365,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const warnings = [
       ...(buildShellExecWarnings(command, this.params.command) ?? []),
       ...(sedEditPreviewWarning ? [sedEditPreviewWarning] : []),
+      ...(this.params.directory && this.isDirectoryOutsideWorkspace()
+        ? [buildOutsideWorkspaceWarning(this.params.directory)]
+        : []),
     ];
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
@@ -2373,6 +2396,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     setPidCallback?: (pid: number) => void,
     setPromoteAbortControllerCallback?: (ac: AbortController) => void,
     canPromoteForegroundShell?: () => boolean,
+    rawCapture?: ShellRawCaptureSink,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
 
@@ -2776,9 +2800,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
         cwd,
         onShellOutputEvent,
         combinedSignal,
-        this.config.getShouldUseNodePtyShell(),
-        shellExecutionConfig ?? {},
-        { postPromote },
+        rawCapture ? false : this.config.getShouldUseNodePtyShell(),
+        {
+          ...shellExecutionConfig,
+          ...(rawCapture ? { maxBufferedOutputBytes: 64 * 1024 } : {}),
+        },
+        { postPromote, ...(rawCapture ? { rawCapture } : {}) },
       );
     } catch (err) {
       // ShellExecutionService.execute() can throw before resolving (e.g.
@@ -2792,6 +2819,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
       throw err;
     }
     const { result: resultPromise, pid } = executionHandle;
+
+    if (pid) rawCapture?.setStarted(pid);
 
     if (pid && setPidCallback) {
       setPidCallback(pid);
@@ -2857,6 +2886,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let result;
     try {
       result = await resultPromise;
+      rawCapture?.setProcessResult(result);
     } finally {
       // Cancel any pending trailing flush — the command has settled (or
       // threw) and either the final ToolResult carries the complete output
@@ -3152,21 +3182,37 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // below (deliberately outside the truncation envelope — see the append
     // loop), so their size comes out of the body budget here: the marker
     // asserts the ASSEMBLED string fits the declared budget, and a body that
-    // fits whole must still fit once they land. The reservation and the
-    // append loop both iterate this one list, so the two cannot disagree.
+    // fits whole must still fit once they land. The reservation counts every
+    // model-facing notice; the record-artifact reminder is not shown in the TUI.
     const longRunHint = shouldAppendLongRunHint
       ? buildLongRunningForegroundHint(elapsedMs)
+      : null;
+    const recordArtifactReminder = (await this.shouldRemindToRecordArtifact(
+      result,
+    ))
+      ? SHELL_RECORD_ARTIFACT_REMINDER
       : null;
     const appendedMetadata = [longRunHint, attributionWarning].filter(
       (s): s is string => s !== null,
     );
-    const appendedMetadataChars = appendedMetadata.reduce(
+    const modelNotices = [...appendedMetadata, recordArtifactReminder].filter(
+      (s): s is string => s !== null,
+    );
+    const appendedMetadataChars = modelNotices.reduce(
       (total, s) => total + APPENDED_METADATA_SEPARATOR.length + s.length,
       0,
     );
 
-    // Truncate large output and save full content to a temp file.
-    if (typeof llmContent === 'string') {
+    // A capture-bound discard leaves llmContent a retained prefix, so the
+    // pre-reduction size is unrecoverable: declare it unknown, not the bound.
+    const rawOutputSize =
+      rawCapture || result.outputCaptureLimitExceeded
+        ? null
+        : measureToolOutput(llmContent);
+
+    // Raw capture owns full output; result.output is only a bounded preview.
+    // Otherwise truncate large output and save full content to a temp file.
+    if (!rawCapture && typeof llmContent === 'string') {
       const originalLlmContent = llmContent;
       const outputThreshold = getShellOutputThreshold(this.config);
       // Clamp at 1: truncateToolOutput returns the body untouched on
@@ -3199,6 +3245,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
+          layer: 'producer',
+          source: this.config.isTruncateToolOutputThresholdExplicit?.()
+            ? 'explicit'
+            : 'per_tool',
           threshold: bodyBudgetChars,
           previewChars: Math.min(4000, bodyBudgetChars),
           keep: 'both',
@@ -3256,9 +3306,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // hint to error.message too so the advisory survives whichever
     // branch the scheduler takes.
     //
-    // Note on reach: `ShellExecutionResult.error` is reserved for
-    // SPAWN / setup failures (per the field's doc comment in
-    // shellExecutionService.ts); non-zero exits leave it null. Real
+    // Note on reach: `ShellExecutionResult.error` includes PTY resource
+    // failures as well as SPAWN / setup failures; non-zero exits leave it
+    // null. Resource failures retain the bounded output body below. Real
     // spawn failures (ENOENT, permission denied) typically resolve in
     // <1s, so the elapsed >= threshold + spawn-error combination is
     // rare. The preservation is here for the slow-spawn edge cases
@@ -3271,6 +3321,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // SIEM alerting, hook-side error parsers) have an unambiguous
     // boundary they can split on rather than getting ~400 chars of
     // advisory text mixed inline with the original error body.
+    const isPtyResourceFailure =
+      isNodeError(result.error) && result.error.code === 'QWEN_PTY_WRITE_LIMIT';
     const executionError = timeoutSummary
       ? {
           error: {
@@ -3281,9 +3333,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       : result.error
         ? {
             error: {
-              message:
-                result.error.message +
-                (longRunHint ? `\n\n---\n${longRunHint}` : ''),
+              message: isPtyResourceFailure
+                ? typeof llmContent === 'string'
+                  ? llmContent
+                  : returnDisplayMessage
+                : result.error.message +
+                  (longRunHint ? `\n\n---\n${longRunHint}` : ''),
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
@@ -3301,8 +3356,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
             }
           : {};
 
+    // Shell cannot see which files the command wrote. Ask only the model,
+    // after truncation, and not on a failure the scheduler reports via error.message.
+    if (recordArtifactReminder && typeof llmContent === 'string') {
+      llmContent += `${APPENDED_METADATA_SEPARATOR}${recordArtifactReminder}`;
+    }
+
     return {
       llmContent,
+      rawOutputSize,
+      // `rawCapture` alone may still carry the complete output in its bounded
+      // preview; only a capture-bound discard means the body was cut.
+      ...(result.outputCaptureLimitExceeded
+        ? { truncatedByProducer: true }
+        : {}),
       returnDisplay: {
         type: 'shell_result',
         version: 1,
@@ -3337,6 +3404,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ...(outputBudgetApplied ? { outputBudgetApplied } : {}),
       ...executionError,
     };
+  }
+
+  /**
+   * The model only sees this after a command that may have written a file.
+   * Disabled sessions have no record_artifact tool. Commands the AST proves
+   * read-only did not create one.
+   */
+  private async shouldRemindToRecordArtifact(
+    result: ShellExecutionResult,
+  ): Promise<boolean> {
+    if (this.config.isRecordArtifactEnabled?.() !== true) return false;
+    if (
+      result.aborted ||
+      result.error ||
+      isSignalTermination(result.signal) ||
+      isShellExitError(this.params.command, result.exitCode)
+    ) {
+      return false;
+    }
+    try {
+      const readOnly = await isShellCommandReadOnlyASTInDirectory(
+        stripShellWrapper(this.params.command),
+        this.params.directory || this.config.getTargetDir(),
+      );
+      return !readOnly;
+    } catch {
+      return true;
+    }
   }
 
   /**
@@ -3381,13 +3476,29 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // An ERRORED pre-run fetch proved nothing about the branch's prior
         // PRs — decline instead of failing open, or a branch whose snapshot
         // flaked would bind its existing PR as this session's creation.
-        if (preRunPrSnapshot?.status === 'error') return;
+        if (preRunPrSnapshot?.status === 'error') {
+          debugLogger.debug(
+            'gh pr create not bound: pre-run PR snapshot unavailable',
+          );
+          return;
+        }
         // The launch directory (`directory` param, else target dir), not a
         // repo the command may have `cd`'d into: gh resolves THIS repo's
         // branch, so an internal-`cd` create binds only when this branch's
         // PR URL is what the output carries — backfill recovers the rest.
         const created = await fetchCurrentBranchPullRequest(cwd, ghCreateEnv);
-        if (created.status !== 'pr' || created.state !== 'open') return;
+        if (created.status !== 'pr' || created.state !== 'open') {
+          // Keep the facts distinct: `none` is gh's proved absence for this
+          // branch; `error` means gh could not answer at all; a merged/closed
+          // PR arrives as status `pr` with a non-open state. A paraphrase that
+          // names only one cause sends the operator hunting for a PR this gate
+          // already ruled on.
+          debugLogger.debug('gh pr create not bound: post-run gh resolution', {
+            status: created.status,
+            ...(created.status === 'pr' ? { state: created.state } : {}),
+          });
+          return;
+        }
         // The run resolved the branch's EXISTING PR — nothing was created
         // (a retry's view segment exits 0 and prints the existing URL).
         // Binding would stamp this session as creator of a PR it did not
@@ -3397,6 +3508,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
           preRunPrSnapshot?.status === 'pr' &&
           created.number === preRunPrSnapshot.number
         ) {
+          debugLogger.debug(
+            'gh pr create not bound: PR already existed before the run',
+            { number: created.number },
+          );
           return;
         }
         // Repo identity lives in on-disk state an in-command
@@ -3413,6 +3528,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
           (createdRepoKey !== preRunRepoKeys.resolved &&
             createdRepoKey !== preRunRepoKeys.parent)
         ) {
+          debugLogger.debug('gh pr create not bound: repo identity mismatch', {
+            created: createdRepoKey ?? 'unknown',
+            expected: preRunRepoKeys?.resolved ?? 'unknown',
+            parent: preRunRepoKeys?.parent ?? 'unknown',
+          });
           return;
         }
         // Branch identity: a command that switched branches mid-run
@@ -3425,9 +3545,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
           preRunBranch === undefined ||
           created.headRefName !== preRunBranch
         ) {
+          debugLogger.debug('gh pr create not bound: branch mismatch', {
+            created: created.headRefName ?? 'unknown',
+            expected: preRunBranch ?? 'unknown',
+          });
           return;
         }
-        if (!output.includes(created.url)) return;
+        if (!output.includes(created.url)) {
+          debugLogger.debug(
+            'gh pr create not bound: URL absent from the command output',
+          );
+          return;
+        }
         const sessionService = this.config.getSessionService();
         // Re-resolve the session's archive location immediately before the
         // locked mutation: an archive transition landing during the gh
@@ -3461,15 +3590,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
         const applied = await upsertSessionPrs(prPath, [
           { ...createdPr, source: 'create' },
         ]);
-        if (!applied.added.includes(created.number)) return;
+        if (!applied.added.includes(created.number)) {
+          debugLogger.debug('gh pr create not bound: already bound', {
+            number: created.number,
+          });
+          return;
+        }
         // The daemon never sees this write; the notification carries the
         // catalog mark so live-state clients refetch it (~2s) instead of
         // waiting for unrelated catalog churn.
         this.config
           .getSessionService()
           .emitSessionPrBound(this.config.getSessionId(), createdPr);
-      } catch {
-        /* best-effort binding */
+      } catch (error) {
+        // Best-effort binding; name the swallowed cause so silence reads as a
+        // failure, not as "the gate never ran".
+        debugLogger.debug('gh pr create binding failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     })();
   }
@@ -5599,13 +5737,13 @@ function getShellCommandSequencingGuidance({
   shell,
 }: ShellConfiguration): string {
   const independentGuidance =
-    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.';
+    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message.';
 
   switch (shell) {
     case 'bash':
       return `- When issuing multiple commands:
   ${independentGuidance}
-  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).
   - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
   - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
     case 'cmd':
@@ -5654,9 +5792,7 @@ function getShellToolDescription(
 IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
 **Usage notes**:
-- The command argument is required.
 - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes). For longer commands, use \`is_background: true\` and observe the managed task instead of passing a larger timeout.
-- It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
 
 - Avoid using run_shell_command with the \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
   - File search: Use ${ToolNames.GLOB} (NOT find or ls)
@@ -5684,12 +5820,7 @@ ${getShellCommandSequencingGuidance(shellConfiguration)}
   - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
   - Any command expected to run indefinitely until manually stopped
 ${processGroupNote}${processStopNote}
-- Use foreground execution (is_background: false) for:
-  - One-time commands: \`ls\`, \`cat\`, \`grep\`
-  - Build commands: \`npm run build\`, \`make\`
-  - Installation commands: \`npm install\`, \`pip install\`
-  - Git operations: \`git commit\`, \`git push\`
-  - Test runs: \`npm test\`, \`pytest\`
+- Use foreground execution (the default) for commands that finish on their own, such as builds, installs, git operations, and test runs.
 `;
 }
 
@@ -5755,7 +5886,7 @@ export class ShellTool extends BaseDeclarativeTool<
           directory: {
             type: 'string',
             description:
-              '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be a directory within the workspace and must already exist.',
+              '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must already exist. A directory outside the workspace requires approval.',
           },
         },
         required: ['command'],
@@ -5817,9 +5948,15 @@ export class ShellTool extends BaseDeclarativeTool<
         return `Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.`;
       }
 
-      const workspaceContext = this.config.getWorkspaceContext();
-      if (!workspaceContext.isPathWithinWorkspace(params.directory)) {
-        return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
+      // The sandbox refuses any other cwd at run time, so reject now rather
+      // than ask for approval of a command that cannot start.
+      const sandbox = this.config.getShellExecutionSandbox?.();
+      if (sandbox) {
+        try {
+          assertShellSandboxCwd(sandbox, params.directory);
+        } catch {
+          return `Directory '${params.directory}' must be an existing directory inside the execution sandbox workspace.`;
+        }
       }
     }
     // Sleep interception: block sleep >= 2s in foreground, suggest Monitor.

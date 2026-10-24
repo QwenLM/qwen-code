@@ -34,6 +34,14 @@ const mockGetIdeClientInstance = vi.hoisted(() =>
 );
 const mockInitializeTelemetry = vi.hoisted(() => vi.fn());
 const mockStartBackgroundHousekeeping = vi.hoisted(() => vi.fn());
+const mockStartBatchAutoCollect = vi.hoisted(() => vi.fn());
+const mockResolveEndpoint = vi.hoisted(() =>
+  vi.fn((..._args: unknown[]) => ({
+    apiKey: 'k',
+    baseUrl: 'http://b',
+    model: 'm',
+  })),
+);
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => ({
@@ -98,6 +106,15 @@ vi.mock('../services/housekeeping/scheduler.js', () => ({
     mockStartBackgroundHousekeeping(...args),
 }));
 
+vi.mock('../commands/batch-auto-collect.js', () => ({
+  startBatchAutoCollect: (...args: unknown[]) =>
+    mockStartBatchAutoCollect(...args),
+}));
+
+vi.mock('../commands/batch.js', () => ({
+  resolveEndpoint: (...args: unknown[]) => mockResolveEndpoint(...args),
+}));
+
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     getModelsConfig: () => ({
@@ -106,6 +123,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     }),
     getProxy: () => 'http://proxy.example',
     getProjectRoot: () => '/repo',
+    getWorkingDir: () => '/repo',
     getIdeMode: () => true,
     isInteractive: () => true,
     ...overrides,
@@ -738,6 +756,53 @@ describe('startupPrefetch', () => {
     expect(mockStartBackgroundHousekeeping).not.toHaveBeenCalled();
   });
 
+  it('starts batch auto-collect for interactive sessions by default', async () => {
+    // Update check off: when it and auto-collect import the mocked update
+    // emitter in the same tick, vitest hands one of them the real module.
+    const settings = makeSettings(false);
+    // The working directory, not the project root, scopes the collector.
+    startPostRenderPrefetches(
+      makeConfig({ getWorkingDir: () => '/repo/sub' } as Partial<Config>),
+      settings,
+    );
+
+    await vi.dynamicImportSettled();
+
+    expect(mockStartBatchAutoCollect).toHaveBeenCalledTimes(1);
+    const options = mockStartBatchAutoCollect.mock.calls[0][0] as {
+      projectRoot: string;
+      notify: (message: string) => void;
+    };
+    expect(options).toMatchObject({ projectRoot: '/repo/sub' });
+    expect(
+      (
+        options as unknown as { resolveEndpoint: () => unknown }
+      ).resolveEndpoint(),
+    ).toMatchObject({ baseUrl: 'http://b' });
+    // The session's own loaded settings, not a re-read from disk.
+    expect(mockResolveEndpoint).toHaveBeenCalledWith(
+      process.env,
+      expect.objectContaining({ settings: settings.merged }),
+    );
+    // Notices go through the update-notice channel, deferred while streaming.
+    options.notify('Batch task t: 2 result(s) delivered.');
+    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-info', {
+      message: 'Batch task t: 2 result(s) delivered.',
+    });
+  });
+
+  it('honors general.batchAutoCollect and skips non-interactive sessions', async () => {
+    startPostRenderPrefetches(makeConfig(), {
+      merged: { general: { batchAutoCollect: false } },
+    } as LoadedSettings);
+    startPostRenderPrefetches(
+      makeConfig({ isInteractive: () => false } as Partial<Config>),
+      makeSettings(),
+    );
+    await vi.dynamicImportSettled();
+    expect(mockStartBatchAutoCollect).not.toHaveBeenCalled();
+  });
+
   it('starts post-render prefetch only once per config', async () => {
     const config = makeConfig();
 
@@ -747,5 +812,6 @@ describe('startupPrefetch', () => {
     await settle();
 
     expect(mockCheckForUpdatesDetailed).toHaveBeenCalledTimes(1);
+    expect(mockStartBatchAutoCollect).toHaveBeenCalledTimes(1);
   });
 });

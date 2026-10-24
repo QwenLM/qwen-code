@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 import {
   useState,
   useRef,
@@ -83,14 +84,18 @@ import {
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   type BackgroundNotificationKind,
   renderGoalContinuationTurn,
+  getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
   HistoryItem,
   HistoryItemWithoutId,
   HistoryItemToolGroup,
   HistoryItemLlm,
   InlineImageData,
+  LoopDetectionConfirmationRequest,
   SlashCommandProcessorResult,
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
@@ -99,7 +104,10 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
-import { findLastUserItemIndex } from '../utils/historyUtils.js';
+import {
+  findLastUserItemIndex,
+  stripLeadingSystemReminders,
+} from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -109,7 +117,7 @@ import {
   findLastSafeSplitPoint,
   splitFencedMarkdown,
   getEnclosingFenceInfo,
-} from '../utils/markdownUtilities.js';
+} from '../utils/markdown-utilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
@@ -139,6 +147,15 @@ import {
   type QueuedGoalTurn,
 } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
+import {
+  describeLoopStop,
+  formatInteractiveLoopDetectedMessage,
+} from '../../utils/loop-detected-message.js';
+import type { LoopStop } from '../../utils/loop-detected-message.js';
+import {
+  LoopReason,
+  LoopType,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import {
   getInlineImageData,
@@ -519,6 +536,11 @@ export interface CancelSubmitInfo {
     id: number;
     text: string;
     submittedPrompt?: string;
+    humanInput?: HumanPromptInput;
+    hasUnknownInput?: boolean;
+    pasteExpansions?: ReadonlyMap<string, string>;
+    /** Prompt as sent to the model, when it differed from `text`. */
+    modelText?: string;
   } | null;
   /**
    * Whether removing the Logger's latest USER entry can only target
@@ -558,6 +580,10 @@ export const useLlmStream = (
   onDebugMessage: (message: string) => void,
   handleSlashCommand: (
     cmd: PartListUnion,
+    oneTimeShellAllowlist?: Set<string>,
+    overwriteConfirmed?: boolean,
+    existingInvocationItemId?: number,
+    invocationPromptId?: string,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -594,6 +620,9 @@ export const useLlmStream = (
     onSubmissionSettled?: () => void;
   } | null>,
 ) => {
+  const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
+  const workflowConfigRef = useRef(config);
+  workflowConfigRef.current = config;
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeInteractionPromptIdRef = useRef<string | undefined>(undefined);
@@ -820,6 +849,11 @@ export const useLlmStream = (
     id: number;
     text: string;
     submittedPrompt?: string;
+    humanInput?: HumanPromptInput;
+    hasUnknownInput?: boolean;
+    pasteExpansions?: ReadonlyMap<string, string>;
+    /** Prompt as sent to the model, when it differed from `text`. */
+    modelText?: string;
   } | null>(null);
   const canUndoLastLoggedUserMessageRef = useRef(false);
   // Set to true the first time a content event lands this turn — even
@@ -987,6 +1021,7 @@ export const useLlmStream = (
     setPendingRetryCountdownItem,
   ] = useStateAndRef<HistoryItemWithoutId | null>(null);
   const clearPendingState = useCallback(() => {
+    setWorkflowKeywordActive(false);
     setPendingAssistantItems([]);
     setPendingHistoryItem(null);
     setPendingRetryErrorItem(null);
@@ -1148,6 +1183,12 @@ export const useLlmStream = (
       getPreferredEditor,
       onEditorClose,
       canUseToolResultFullTurnModel,
+      (call) =>
+        observeInteractiveModTool(
+          config,
+          call,
+          refreshContextFilesOnWriteRef.current,
+        ),
     );
 
   const pendingToolCallGroupDisplay = useMemo(() => {
@@ -1172,12 +1213,13 @@ export const useLlmStream = (
   }, [toolCalls]);
 
   const loopDetectedRef = useRef(false);
+  // Type and reason of the stop behind loopDetectedRef, for the dialog and
+  // the message after it.
+  const loopStopRef = useRef<LoopStop | undefined>(undefined);
   const [
     loopDetectionConfirmationRequest,
     setLoopDetectionConfirmationRequest,
-  ] = useState<{
-    onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
-  } | null>(null);
+  ] = useState<LoopDetectionConfirmationRequest | null>(null);
 
   const stopRetryCountdownTimer = useCallback(() => {
     if (retryCountdownTimerRef.current) {
@@ -1323,6 +1365,13 @@ export const useLlmStream = (
   }, [isResponding, toolCalls]);
 
   useEffect(() => {
+    if (streamingState === StreamingState.Idle) setWorkflowKeywordActive(false);
+  }, [streamingState]);
+  useEffect(() => {
+    setWorkflowKeywordActive(false);
+  }, [config, sessionStates.sessionId]);
+
+  useEffect(() => {
     if (
       config.getApprovalMode() === ApprovalMode.YOLO &&
       streamingState === StreamingState.Idle
@@ -1342,6 +1391,7 @@ export const useLlmStream = (
   }, [streamingState, config, history]);
 
   const cancelOngoingRequest = useCallback(() => {
+    setWorkflowKeywordActive(false);
     if (turnCancelledRef.current) {
       for (const controller of detachedToolContinuationAbortControllersRef.current) {
         controller.abort();
@@ -1584,6 +1634,10 @@ export const useLlmStream = (
       submittedPrompt: string | undefined,
       preserveTurnOwnership: boolean,
       shellModeIntent?: boolean,
+      displayText?: string,
+      humanInput?: HumanPromptInput,
+      pasteExpansions?: ReadonlyMap<string, string>,
+      hasUnknownInput?: boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -1636,13 +1690,31 @@ export const useLlmStream = (
         }
 
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
-        await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
+        // Handle UI-only commands first
+        const isSlash = isSlashCommand(trimmedQuery);
+        // One-shot notices the TUI folded into this prompt stay on the model
+        // side only: the recall log, the transcript row and the cancel-restore
+        // buffer use the composer's projection (#11553), since reverse-parsing
+        // cannot tell an injected envelope from one the user typed. The strip
+        // is the fallback for producers outside this process; slash commands
+        // keep their own text. Logged before the slash and shell arms can
+        // return, so handled commands stay recallable.
+        const userText =
+          displayText ??
+          submittedPrompt ??
+          (isSlash ? trimmedQuery : stripLeadingSystemReminders(trimmedQuery));
+        await logger?.logMessage(MessageSenderType.USER, userText);
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
 
-        // Handle UI-only commands first
-        const slashCommandResult = isSlashCommand(trimmedQuery)
-          ? await handleSlashCommand(trimmedQuery)
+        const slashCommandResult = isSlash
+          ? await handleSlashCommand(
+              trimmedQuery,
+              undefined,
+              undefined,
+              undefined,
+              submitType === SendMessageType.UserQuery ? prompt_id : undefined,
+            )
           : false;
 
         if (slashCommandResult) {
@@ -1751,8 +1823,11 @@ export const useLlmStream = (
           const insertedId = addItem(
             {
               type: MessageType.USER,
-              text: trimmedQuery,
+              text: userText,
               promptId: prompt_id,
+              // The envelope masked a leading `?` from the lexical fallback in
+              // isRealUserTurn; an un-noticed prompt keeps that fallback.
+              ...(userText === trimmedQuery ? {} : { sentToModel: true }),
             } as HistoryItemWithoutId,
             userMessageTimestamp,
           );
@@ -1764,8 +1839,14 @@ export const useLlmStream = (
           if (!preserveTurnOwnership) {
             lastTurnUserItemRef.current = {
               id: insertedId,
-              text: trimmedQuery,
+              text: userText,
               ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+              ...(humanInput === undefined ? {} : { humanInput }),
+              ...(pasteExpansions?.size ? { pasteExpansions } : {}),
+              ...(hasUnknownInput ? { hasUnknownInput } : {}),
+              // What the model actually read, so a cancel + resubmit does not
+              // drop the one-shot notice this turn consumed.
+              ...(userText === trimmedQuery ? {} : { modelText: trimmedQuery }),
             };
           }
 
@@ -2278,7 +2359,9 @@ export const useLlmStream = (
       eventValue: LlmErrorEventValue,
       userMessageTimestamp: number,
       submitType: SendMessageType,
+      ownsTurn: boolean,
     ) => {
+      if (ownsTurn) setWorkflowKeywordActive(false);
       if (submitType !== SendMessageType.Goal) {
         lastPromptErroredRef.current = true;
       } else {
@@ -2501,7 +2584,10 @@ export const useLlmStream = (
   );
 
   const handleLoopDetectionConfirmation = useCallback(
-    (result: { userSelection: 'disable' | 'keep' }) => {
+    (
+      result: { userSelection: 'disable' | 'keep' },
+      stop: LoopStop | undefined,
+    ) => {
       setLoopDetectionConfirmationRequest(null);
 
       if (result.userSelection === 'disable') {
@@ -2517,7 +2603,7 @@ export const useLlmStream = (
         addItem(
           {
             type: 'info',
-            text: `A potential loop was detected. This can happen due to repetitive tool calls or other model behavior. The request has been halted.`,
+            text: formatInteractiveLoopDetectedMessage(stop),
           },
           Date.now(),
         );
@@ -2526,12 +2612,16 @@ export const useLlmStream = (
     [config, addItem],
   );
 
-  const handleLoopDetectedEvent = useCallback(() => {
-    // Show the confirmation dialog to choose whether to disable loop detection
-    setLoopDetectionConfirmationRequest({
-      onComplete: handleLoopDetectionConfirmation,
-    });
-  }, [handleLoopDetectionConfirmation]);
+  const handleLoopDetectedEvent = useCallback(
+    (stop: LoopStop | undefined) => {
+      // Show the confirmation dialog to choose whether to disable loop detection
+      setLoopDetectionConfirmationRequest({
+        cause: describeLoopStop(stop),
+        onComplete: (result) => handleLoopDetectionConfirmation(result, stop),
+      });
+    },
+    [handleLoopDetectionConfirmation],
+  );
 
   const handleUserPromptSubmitBlockedEvent = useCallback(
     (
@@ -2848,7 +2938,16 @@ export const useLlmStream = (
               };
             case ServerLlmEventType.Error:
               flushBufferedStreamEvents();
-              handleErrorEvent(event.value, userMessageTimestamp, submitType);
+              handleErrorEvent(
+                event.value,
+                userMessageTimestamp,
+                submitType,
+                trackInteractionOwner &&
+                  toolContinuationOwner?.foregroundAbortController !==
+                    undefined &&
+                  abortControllerRef.current ===
+                    toolContinuationOwner.foregroundAbortController,
+              );
               break;
             case ServerLlmEventType.ChatCompressed:
               flushBufferedStreamEvents();
@@ -2929,6 +3028,7 @@ export const useLlmStream = (
               // handle later because we want to move pending history to history
               // before we add loop detected message to history
               loopDetectedRef.current = true;
+              loopStopRef.current = event.value;
               break;
             case ServerLlmEventType.Retry:
               // On fresh restart (escalation / rate-limit / invalid stream),
@@ -3144,6 +3244,10 @@ export const useLlmStream = (
             `[processLlmStreamEvents] Dropping batch after repeated duplicate provider tool-call id: ${repeatedDuplicateRequest.providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
           );
           loopDetectedRef.current = true;
+          loopStopRef.current = {
+            loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+            loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
+          };
           return {
             status: StreamProcessingStatus.Completed,
             scheduledToolContinuation: false,
@@ -3556,6 +3660,10 @@ export const useLlmStream = (
         onRequestStarted?: () => void;
         steerInput?: SteerInput;
         submittedPrompt?: string;
+        displayText?: string;
+        humanInput?: HumanPromptInput;
+        hasUnknownInput?: boolean;
+        pasteExpansions?: ReadonlyMap<string, string>;
         /**
          * Shell intent recorded when the user submitted this query
          * (queued submissions carry it from the message queue). When set,
@@ -3570,6 +3678,29 @@ export const useLlmStream = (
         toolContinuationOwner?: ToolContinuationOwner;
       },
     ) => {
+      const mods = getInteractiveModSession(config);
+      const dispatchesSlashCommand =
+        (submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron) &&
+        typeof query === 'string' &&
+        isSlashCommand(query.trim());
+      if (mods && !dispatchesSlashCommand) {
+        try {
+          await mods.ready;
+        } catch {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: 'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.',
+            },
+            Date.now(),
+          );
+          await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+          metadata?.onAdmissionFailed?.();
+          metadata?.onDeliveryFailed?.();
+          return;
+        }
+      }
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
         streamingState === StreamingState.Responding &&
@@ -3641,6 +3772,7 @@ export const useLlmStream = (
       // continuation never carries a pending loop (a detected loop schedules
       // nothing), so clearing it here is a no-op for those paths.
       loopDetectedRef.current = false;
+      loopStopRef.current = undefined;
 
       // Reset turn-local ownership trackers at the very top of every
       // top-level submit (UserQuery, Retry, Cron, Notification, etc.).
@@ -3820,7 +3952,10 @@ export const useLlmStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: renderGoalContinuationTurn(queuedGoal),
+                    queryToSend: renderGoalContinuationTurn(
+                      queuedGoal,
+                      config.getToolRegistry?.(),
+                    ),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }
@@ -3836,6 +3971,10 @@ export const useLlmStream = (
                     allowConcurrentBtwDuringResponse ||
                       isDetachedToolContinuation,
                     metadata?.shellMode,
+                    metadata?.displayText,
+                    metadata?.humanInput,
+                    metadata?.pasteExpansions,
+                    metadata?.hasUnknownInput,
                   );
         } catch (error) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
@@ -4041,6 +4180,16 @@ export const useLlmStream = (
             dualOutput.emitUserMessage(userParts);
           }
 
+          const workflowSessionId = config.getSessionId();
+          const humanInput =
+            submitType === SendMessageType.UserQuery &&
+            !allowConcurrentBtwDuringResponse &&
+            !isDetachedToolContinuation &&
+            !(metadata?.shellMode ?? shellModeActive) &&
+            !dispatchesSlashCommand &&
+            !(typeof query === 'string' && isBtwCommand(query))
+              ? metadata?.humanInput
+              : undefined;
           const sendOptions = {
             type: submitType,
             notificationDisplayText: metadata?.notificationDisplayText,
@@ -4051,6 +4200,25 @@ export const useLlmStream = (
               ? { isConcurrentSideQuery: true }
               : {}),
             ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
+            ...(humanInput === undefined
+              ? {}
+              : {
+                  humanInput,
+                  onWorkflowIntentApplied: () => {
+                    if (
+                      workflowConfigRef.current === config &&
+                      !abortSignal.aborted &&
+                      foregroundAbortController !== undefined &&
+                      abortControllerRef.current ===
+                        foregroundAbortController &&
+                      submissionGeneration ===
+                        submissionLeaseGenerationRef.current &&
+                      config.getSessionId() === workflowSessionId
+                    ) {
+                      setWorkflowKeywordActive(true);
+                    }
+                  },
+                }),
             ...(!allowConcurrentBtwDuringResponse &&
             !isDetachedToolContinuation &&
             midTurnDrainRef
@@ -4180,7 +4348,10 @@ export const useLlmStream = (
                     errorType: response.errorType,
                     executionStatus: response.executionStatus,
                   },
-                  goalToolResultProvenance(request),
+                  goalToolResultProvenance(
+                    request,
+                    finalized[index].responseParts,
+                  ),
                 );
               },
             );
@@ -4223,7 +4394,9 @@ export const useLlmStream = (
           if (loopDetected) {
             cleanupReviewLease = true;
             loopDetectedRef.current = false;
-            handleLoopDetectedEvent();
+            const loopStop = loopStopRef.current;
+            loopStopRef.current = undefined;
+            handleLoopDetectedEvent(loopStop);
           }
 
           if (
@@ -4371,6 +4544,7 @@ export const useLlmStream = (
     },
     [
       streamingState,
+      shellModeActive,
       setModelSwitchedFromQuotaError,
       prepareQueryForLlm,
       processLlmStreamEvents,
@@ -4828,6 +5002,10 @@ export const useLlmStream = (
 
   const handleCompletedTools = useCallback(
     async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
+      const sessionId = config.getSessionId();
+      const chat = llmClient?.getChat();
+      const isCurrentSession = () =>
+        config.getSessionId() === sessionId && llmClient?.getChat() === chat;
       const completedAndReadyToSubmitTools =
         completedToolCallsFromScheduler.filter(
           (
@@ -4908,7 +5086,7 @@ export const useLlmStream = (
         // never-executed skill-write).
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (tc.status === 'cancelled') continue;
+          if (tc.status === 'cancelled' || tc.nativeAttemptsObserved) continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
@@ -4998,6 +5176,7 @@ export const useLlmStream = (
       // Identify new, successful save_memory calls that we haven't processed yet.
       const newSuccessfulMemorySaves = completedAndReadyToSubmitTools.filter(
         (t) =>
+          !t.nativeAttemptsObserved &&
           t.request.name === 'save_memory' &&
           t.status === 'success' &&
           !processedMemoryToolsRef.current.has(t.request.callId),
@@ -5064,7 +5243,10 @@ export const useLlmStream = (
             toolCall.request.prompt_id,
           );
         }
-        if (toolCall.status !== 'cancelled') {
+        if (
+          toolCall.status !== 'cancelled' &&
+          !toolCall.nativeAttemptsObserved
+        ) {
           llmClient?.recordCompletedToolCall(
             toolCall.request.name,
             toolCall.request.args as Record<string, unknown>,
@@ -5276,13 +5458,13 @@ export const useLlmStream = (
             'runtime',
           );
       }
-      const memoryWriteCandidates = completedAndReadyToSubmitTools.map(
-        (toolCall) => ({
+      const memoryWriteCandidates = completedAndReadyToSubmitTools
+        .filter((call) => !call.nativeAttemptsObserved)
+        .map((toolCall) => ({
           toolName: toolCall.request.name,
           args: toolCall.request.args as Record<string, unknown>,
           status: toolCall.status,
-        }),
-      );
+        }));
       const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
         config,
         memoryWriteCandidates,
@@ -5304,6 +5486,10 @@ export const useLlmStream = (
             logContext: 'interactive context-file memory tool batch',
           });
         }
+      }
+      if (!isCurrentSession()) {
+        if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+        return;
       }
       if (newSuccessfulMemorySaves.length > 0) {
         if (!didRefreshManagedMemory) {
@@ -5352,6 +5538,7 @@ export const useLlmStream = (
       }
 
       for (const toolCall of llmTools) {
+        if (toolCall.nativeAttemptsObserved) continue;
         llmClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
@@ -5455,6 +5642,10 @@ export const useLlmStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
+      if (!isCurrentSession()) {
+        if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+        return;
+      }
       orderedResponses.forEach(({ request, response, status }, index) => {
         config.getChatRecordingService?.()?.recordToolResult?.(
           finalizedResponses[index].responseParts,
@@ -5469,23 +5660,31 @@ export const useLlmStream = (
             errorType: response.errorType,
             executionStatus: response.executionStatus,
           },
-          goalToolResultProvenance(request),
+          goalToolResultProvenance(
+            request,
+            finalizedResponses[index].responseParts,
+          ),
         );
       });
 
       if (continuationWasCancelled()) {
-        // This is the branch a cancelled Goal tool batch actually takes: the
+        // This is the branch a cancelled tool batch actually takes: the
         // controller retained across tool execution feeds the continuation
         // owner's signal, so pressing Esc while tools run aborts it here
         // rather than at either of the branches below. `markToolsAsSubmitted`
         // stops these callIds ever being submitted, so unless the responses
         // are written now the model's function calls stay unanswered and the
-        // next `/goal resume` sends a history with an unpaired call. The
+        // next turn sends a history with an unpaired call. The
         // all-cancelled branch below writes them for the batch it handles;
         // this branch owes its own batch the same pairing, whether or not
         // every tool in it was cancelled.
-        if (toolGoalBinding && llmClient) {
-          llmClient.addHistory({ role: 'user', parts: responsesToSend });
+        if (llmClient) {
+          const pairedCallIds = llmClient.getHistoryFunctionResponseIds();
+          const unpairedParts = finalizedResponses
+            .filter((entry) => !pairedCallIds.has(entry.callId))
+            .flatMap((entry) => entry.responseParts);
+          if (unpairedParts.length > 0)
+            llmClient.addHistory({ role: 'user', parts: unpairedParts });
         }
         markToolsAsSubmitted(
           llmTools.map((toolCall) => toolCall.request.callId),
@@ -6114,6 +6313,11 @@ export const useLlmStream = (
             const fileName = path.basename(filePath);
             const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
             const clientHistory = llmClient?.getHistoryShallow();
+            // JSON.stringify drops the Symbol-keyed prompt identity, so
+            // persist it as a parallel array for /restore to re-mark against.
+            const promptIds = clientHistory?.map(
+              (content) => getApiHistoryPromptId(content) ?? null,
+            );
             const toolCallWithSnapshotFilePath = path.join(
               checkpointDir,
               toolCallWithSnapshotFileName,
@@ -6125,6 +6329,7 @@ export const useLlmStream = (
                 {
                   history,
                   clientHistory,
+                  ...(promptIds?.some(Boolean) ? { promptIds } : {}),
                   toolCall: {
                     name: toolCall.request.name,
                     args: toolCall.request.args,
@@ -6397,11 +6602,17 @@ export const useLlmStream = (
     };
   }, [admitNotification, config]);
 
-  // Register background workflow completions onto the shared queue. The
-  // registry keeps this separate from its terminal-bell subscriber.
+  // Register background and client-started foreground workflow completions.
+  // The registry keeps this separate from its terminal-bell subscriber.
   useEffect(() => {
     const registry = config.getWorkflowRunRegistry();
     registry.setCompletionCallback((displayText, modelText, meta) => {
+      // The result must remain visible even if the model request is delayed
+      // or fails. Background notifications retain their existing drain timing.
+      const displayed = meta.isBackgrounded === false;
+      if (displayed) {
+        addItem({ type: 'notification', text: displayText }, Date.now());
+      }
       admitNotification({
         displayText,
         modelText,
@@ -6409,12 +6620,13 @@ export const useLlmStream = (
         kind: 'workflow',
         taskId: meta.runId,
         todoWorkChainId: meta.todoWorkChainId,
+        displayed,
       });
     });
     return () => {
       registry.setCompletionCallback(undefined);
     };
-  }, [admitNotification, config]);
+  }, [addItem, admitNotification, config]);
 
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {
@@ -6573,6 +6785,10 @@ export const useLlmStream = (
           void submitQuery(item.modelText, item.sendMessageType, undefined, {
             notificationDisplayText: item.displayText,
             todoWorkChainId: item.todoWorkChainId,
+            // A cron prompt is never a shell command, whatever mode the
+            // composer happens to be in when the queue drains — with a gate
+            // the text also carries a command's untrusted output.
+            shellMode: false,
             onDelivered: item.onDelivered,
             onDeliveryFailed: () => {
               restoreDroppedSummary();
@@ -6764,6 +6980,7 @@ export const useLlmStream = (
 
   return {
     streamingState,
+    workflowKeywordActive,
     submitQuery,
     initError,
     pendingHistoryItems,

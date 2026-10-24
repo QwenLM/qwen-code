@@ -10,6 +10,50 @@ export function getDaemonBaseUrl(): string {
   return getAllowedDaemonOrigin(raw);
 }
 
+/**
+ * Repeated `?fanout=` values validated into daemon origins. Fanout params
+ * name the hosts this page connects to simultaneously (multi-daemon view,
+ * #13727): the served CSP covers exactly the `daemon` + `fanout` set, so a
+ * focused-host switch inside that set never reloads the document. The page
+ * origin is dropped — `'self'` already covers it.
+ */
+export function getFanoutOrigins(): string[] {
+  if (typeof window === 'undefined') return [];
+  const seen = new Set<string>();
+  for (const raw of new URLSearchParams(window.location.search).getAll(
+    'fanout',
+  )) {
+    const origin = getAllowedDaemonOrigin(raw);
+    if (origin && origin !== window.location.origin) seen.add(origin);
+  }
+  return [...seen];
+}
+
+/**
+ * Point the URL's `fanout` params at exactly `origins`, preserving every
+ * other param. `replaceState` only: this cannot widen the CURRENT document's
+ * CSP (the header is fixed at load) — it keeps the NEXT load in sync, so the
+ * host set stays covered without a reload. A newly-connected host therefore
+ * navigates once before it can be used; every switch after that is in-app.
+ */
+export function syncFanoutParams(origins: readonly string[]): void {
+  if (typeof window === 'undefined') return;
+  const seen = new Set(
+    origins.filter((origin) => origin !== window.location.origin),
+  );
+  const url = new URL(window.location.href);
+  const current = new Set(url.searchParams.getAll('fanout'));
+  if (
+    current.size === seen.size &&
+    [...seen].every((origin) => current.has(origin))
+  ) {
+    return;
+  }
+  url.searchParams.delete('fanout');
+  for (const origin of seen) url.searchParams.append('fanout', origin);
+  window.history.replaceState(window.history.state, '', url);
+}
+
 function isLoopbackHostname(hostname: string): boolean {
   const ipv4 = hostname.split('.');
   return (
@@ -253,8 +297,9 @@ export function getAllowedDaemonOrigin(raw: string): string {
       return '';
     }
     // A bracketed IPv6 literal is not a valid CSP host-source (CSP3 host-part
-    // excludes '[', ']' and ':'), so a remote http://[::1]:4170 target would
-    // be served a connect-src every browser drops, and the gate would loop on
+    // excludes '[', ']' and ':'). The invalid source expression is ignored
+    // while the rest of connect-src stays in effect, so a remote
+    // http://[::1]:4170 target remains blocked and the gate would loop on
     // "unreachable" with only a console violation as evidence. Exempt the
     // page's own origin: 'self' covers it, and qwen serve --hostname '[::1]'
     // is a documented deployment.

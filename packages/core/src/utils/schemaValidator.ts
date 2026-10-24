@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import AjvPkg, { type AnySchema, type Ajv } from 'ajv';
+import AjvPkg, { type AnySchema, type Ajv, type ValidateFunction } from 'ajv';
 // Ajv2020 is the documented way to use draft-2020-12: https://ajv.js.org/json-schema.html#draft-2020-12
 // eslint-disable-next-line import/no-internal-modules
 import Ajv2020Pkg from 'ajv/dist/2020.js';
@@ -84,6 +84,124 @@ function getValidator(schema: AnySchema): Ajv {
   return ajvDefault;
 }
 
+// Ajv caches every compiled schema by object identity for the life of the
+// process. Callers that rebuild their tools (and so their schema objects) for
+// each call would otherwise add one compiled validator per call. Equal schemas
+// therefore share one validator, keyed by their JSON text and compiled from a
+// copy parsed from that text, so an entry always matches its key even if a
+// caller later mutates its own schema object. A schema that JSON text does not
+// describe exactly, such as one holding NaN or undefined, or whose copy fails
+// to compile, is compiled as Ajv always compiled it, without sharing.
+interface CompiledSchemas {
+  readonly bySchema: WeakMap<object, ValidateFunction>;
+  readonly byText: Map<string, ValidateFunction>;
+  readonly failedTexts: Set<string>;
+  /** Schema objects that are compiled as Ajv always compiled them. */
+  readonly direct: WeakSet<object>;
+}
+const compiledSchemas = new WeakMap<Ajv, CompiledSchemas>();
+
+function compileOnce(validator: Ajv, schema: AnySchema): ValidateFunction {
+  if (typeof schema !== 'object' || schema === null) {
+    return validator.compile(schema);
+  }
+  let compiled = compiledSchemas.get(validator);
+  if (!compiled) {
+    compiled = {
+      bySchema: new WeakMap(),
+      byText: new Map(),
+      failedTexts: new Set(),
+      direct: new WeakSet(),
+    };
+    compiledSchemas.set(validator, compiled);
+  }
+  // A schema object seen before is answered as it was then, without being
+  // serialized again.
+  let validate = compiled.bySchema.get(schema);
+  if (validate) {
+    return validate;
+  }
+  if (compiled.direct.has(schema)) {
+    return validator.compile(schema);
+  }
+  const key = exactJsonText(schema);
+  if (key === undefined || compiled.failedTexts.has(key)) {
+    compiled.direct.add(schema);
+    return validator.compile(schema);
+  }
+  validate = compiled.byText.get(key);
+  if (!validate) {
+    try {
+      validate = validator.compile(JSON.parse(key) as AnySchema);
+    } catch (copyError) {
+      // Ajv keeps a schema object whose compile fails after its references
+      // were collected, and compiles it on a later call, so such schemas
+      // keep that behavior.
+      compiled.failedTexts.add(key);
+      compiled.direct.add(schema);
+      try {
+        return validator.compile(schema);
+      } catch {
+        // The object fails as its copy did, or as a duplicate of the $id its
+        // copy claimed first. Either way the copy's error is its own.
+        throw copyError;
+      }
+    }
+    compiled.byText.set(key, validate);
+  }
+  compiled.bySchema.set(schema, validate);
+  return validate;
+}
+
+/**
+ * The JSON text of a value, if it describes the value exactly. The value is
+ * read as data, so a Proxy or a getter is taken at what its text records.
+ */
+function exactJsonText(value: object): string | undefined {
+  try {
+    return JSON.stringify(value, function (this: unknown, key, converted) {
+      // `this` holds the value before any toJSON conversion.
+      if (!isExactJsonValue((this as Record<string, unknown>)[key])) {
+        throw new TypeError('The schema is not exact JSON.');
+      }
+      return converted;
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function isExactJsonValue(value: unknown): boolean {
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return true;
+    case 'number':
+      // The text writes -0 as 0, which Ajv validates alike.
+      return Number.isFinite(value);
+    case 'object': {
+      if (value === null) {
+        return true;
+      }
+      const array = Array.isArray(value);
+      const prototype: unknown = Object.getPrototypeOf(value);
+      return (
+        // Ajv's const and enum tell an object without a prototype from a
+        // plain one.
+        prototype === (array ? Array.prototype : Object.prototype) &&
+        typeof (value as Record<string, unknown>)['toJSON'] !== 'function' &&
+        // Only enumerable string keys reach the text, and of an array only its
+        // indexes, which with its length must be all its keys: a JSON pointer
+        // in a $ref can reach any key.
+        Reflect.ownKeys(value).length ===
+          (array ? (value as unknown[]).length + 1 : Object.keys(value).length)
+      );
+    }
+    default:
+      return false;
+  }
+}
+
 /**
  * Simple utility to validate objects against JSON Schemas.
  * Supports both draft-07 (default) and draft-2020-12 schemas.
@@ -123,8 +241,15 @@ export class SchemaValidator {
    * silently skip on compile failure — callers (e.g. the CLI's
    * `--json-schema` parser) need to surface invalid schemas instead of
    * letting them no-op at runtime.
+   *
+   * `options.allowMatchingProperties` lets a property named in `properties`
+   * also match a `patternProperties` pattern, which JSON Schema permits (both
+   * apply); every other strict check stays on.
    */
-  static compileStrict(schema: unknown): string | null {
+  static compileStrict(
+    schema: unknown,
+    options: { allowMatchingProperties?: boolean } = {},
+  ): string | null {
     if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
       return 'schema must be a JSON object';
     }
@@ -148,6 +273,7 @@ export class SchemaValidator {
       strictTypes: false, // allow inferred / partial type info
       validateFormats: false, // unknown `format` values don't fail
       allowUnionTypes: true, // type: ["a","b"]
+      allowMatchingProperties: options.allowMatchingProperties === true,
     };
     const strictAjv: Ajv = isDraft2020Uri(
       (schema as { $schema?: unknown }).$schema,
@@ -166,6 +292,9 @@ export class SchemaValidator {
   /**
    * Returns null if the data conforms to the schema described by schema (or if schema
    *  is null). Otherwise, returns a string describing the error.
+   *
+   * Once a schema object has compiled, its validator is reused, so a schema
+   * object must not be changed after it has been passed here.
    */
   static validate(schema: unknown | undefined, data: unknown): string | null {
     if (!schema) {
@@ -184,7 +313,7 @@ export class SchemaValidator {
     // This matches LenientJsonSchemaValidator behavior in mcp-client.ts.
     let validate;
     try {
-      validate = validator.compile(anySchema);
+      validate = compileOnce(validator, anySchema);
     } catch (error) {
       // Schema compilation failed (unsupported version, invalid $ref, etc.)
       // Skip validation rather than blocking tool usage.
@@ -197,83 +326,150 @@ export class SchemaValidator {
       return null;
     }
 
-    let valid = validate(data);
-    if (!valid && validate.errors) {
-      // --- Four-pass coercion ---
-      //
-      // The four passes run in a fixed order. Each pass targets a specific
-      // class of model output error and is guarded by schema-aware skip logic
-      // so it never coerces a value whose current type is already accepted.
-      //
-      // 1. fixBooleanValues  — "true"/"false" → true/false
-      //    Runs first because string→boolean is the most common LLM error
-      //    and is unambiguous: only triggers when schema accepts boolean.
-      //
-      // 2. fixStringValues   — number/boolean → string
-      //    Runs second because it must see the post-pass-1 value. If pass 1
-      //    coerced "true" → true and the schema accepts both boolean and
-      //    string, pass 2 skips (boolean is already accepted). This prevents
-      //    the boolean→string round-trip (Finding #5).
-      //
-      // 3. fixStringifiedJsonValues — '["a"]' → ["a"], '{"k":"v"}' → {k:"v"}
-      //    Runs third; it only touches string values that look like JSON. By
-      //    this point, plain strings are still strings (pass 2 only coerces
-      //    non-strings), so pass 3 can safely parse without re-stringifying.
-      //
-      // 4. fixNumericValues  — "3"/"5.0" → 3/5.0
-      //    Runs last. Only fires when the schema accepts integer/number and
-      //    NOT string, which makes it mutually exclusive with pass 2 (pass 2
-      //    requires string to be accepted). So it cannot round-trip pass 2's
-      //    output, and it never sees pass 3's output (already an array/object,
-      //    not a string).
-      //
-      // Invariant: passes 2–4 only coerce when the current type is NOT already
-      // accepted. Pass 1 (boolean) coerces unconditionally when boolean is
-      // accepted, because "true"/"false" strings are never intentional when
-      // boolean is a valid type. The round-trip is prevented by pass 2 checking
-      // typeIsAccepted before coercing.
-      //
-      // Adding a fifth pass or reordering requires verifying that the new pass
-      // does not undo the work of earlier passes. See Finding #5 for a past
-      // round-trip bug caused by violating this invariant.
-      //
-      // Coerce string boolean values ("true"/"false") to actual booleans
-      fixBooleanValues(
-        data as Record<string, unknown>,
-        anySchema as Record<string, unknown>,
-        anySchema as Record<string, unknown>,
-      );
-      // Coerce non-string values to strings where the schema expects strings.
-      // Some self-hosted LLMs return numbers or booleans for tool parameters
-      // that expect strings (e.g., `old_string`, `content`).
-      fixStringValues(
-        data as Record<string, unknown>,
-        anySchema as Record<string, unknown>,
-        anySchema as Record<string, unknown>,
-      );
-      // Coerce stringified JSON values (arrays/objects) back to their proper types.
-      // Some LLMs serialize complex values as strings when the schema uses
-      // anyOf/oneOf (e.g., '["url"]' instead of ["url"] for anyOf: [array, null]).
-      fixStringifiedJsonValues(
-        data as Record<string, unknown>,
-        anySchema as Record<string, unknown>,
-        anySchema as Record<string, unknown>,
-      );
-      // Coerce numeric strings ("3", "5.0") to actual numbers when the schema
-      // expects integer/number. LLMs frequently emit numeric parameters as
-      // strings which strict MCP servers (e.g. Playwright) reject.
-      fixNumericValues(
-        data as Record<string, unknown>,
-        anySchema as Record<string, unknown>,
-      );
-
-      valid = validate(data);
-      if (!valid && validate.errors) {
-        return validator.errorsText(validate.errors, { dataVar: 'params' });
-      }
-    }
-    return null;
+    return validateWithCoercion(
+      validator,
+      validate,
+      anySchema,
+      data as Record<string, unknown>,
+    );
   }
+
+  /**
+   * Compiles `schema` into a parameter validator of its own: a fresh Ajv
+   * instance with the runtime options {@link validate} uses, so the validator
+   * applies the same four-pass coercion and format rules. Unlike
+   * {@link validate}, a schema that fails to compile is reported instead of
+   * skipped, and no Ajv registry is shared with other schemas, so a schema
+   * whose `$id` another schema already claimed is still enforced from its
+   * first call. Asynchronous schemas (`$async`) are refused: callers read the
+   * result synchronously.
+   *
+   * The returned function may coerce the `data` it is given, like
+   * {@link validate}. `schema` must not be changed after this call.
+   */
+  static compileIsolated(
+    schema: unknown,
+  ):
+    | { validate: (data: unknown) => string | null; error?: undefined }
+    | { error: string } {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+      return { error: 'schema must be a JSON object' };
+    }
+    const anySchema = schema as AnySchema;
+    const validator: Ajv = isDraft2020Uri(
+      (schema as { $schema?: unknown }).$schema,
+    )
+      ? new Ajv2020Class(ajvOptions)
+      : new AjvClass(ajvOptions);
+    addFormatsFunc(validator);
+    let validate: ValidateFunction;
+    try {
+      validate = validator.compile(anySchema);
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+    if ((validate as { $async?: unknown }).$async === true) {
+      return { error: 'asynchronous schemas ($async) are not supported' };
+    }
+    return {
+      validate: (data) => {
+        if (typeof data !== 'object' || data === null) {
+          return 'Value of params must be an object';
+        }
+        return validateWithCoercion(
+          validator,
+          validate,
+          anySchema,
+          data as Record<string, unknown>,
+        );
+      },
+    };
+  }
+}
+
+/**
+ * Validates `data`, and when it fails, applies the four coercion passes to it
+ * in place and validates again. Returns the remaining error text, or null.
+ */
+function validateWithCoercion(
+  validator: Ajv,
+  validate: ValidateFunction,
+  anySchema: AnySchema,
+  data: Record<string, unknown>,
+): string | null {
+  let valid = validate(data);
+  if (!valid && validate.errors) {
+    // --- Four-pass coercion ---
+    //
+    // The four passes run in a fixed order. Each pass targets a specific
+    // class of model output error and is guarded by schema-aware skip logic
+    // so it never coerces a value whose current type is already accepted.
+    //
+    // 1. fixBooleanValues  — "true"/"false" → true/false
+    //    Runs first because string→boolean is the most common LLM error
+    //    and is unambiguous: only triggers when schema accepts boolean.
+    //
+    // 2. fixStringValues   — number/boolean → string
+    //    Runs second because it must see the post-pass-1 value. If pass 1
+    //    coerced "true" → true and the schema accepts both boolean and
+    //    string, pass 2 skips (boolean is already accepted). This prevents
+    //    the boolean→string round-trip (Finding #5).
+    //
+    // 3. fixStringifiedJsonValues — '["a"]' → ["a"], '{"k":"v"}' → {k:"v"}
+    //    Runs third; it only touches string values that look like JSON. By
+    //    this point, plain strings are still strings (pass 2 only coerces
+    //    non-strings), so pass 3 can safely parse without re-stringifying.
+    //
+    // 4. fixNumericValues  — "3"/"5.0" → 3/5.0
+    //    Runs last. Only fires when the schema accepts integer/number and
+    //    NOT string, which makes it mutually exclusive with pass 2 (pass 2
+    //    requires string to be accepted). So it cannot round-trip pass 2's
+    //    output, and it never sees pass 3's output (already an array/object,
+    //    not a string).
+    //
+    // Invariant: passes 2–4 only coerce when the current type is NOT already
+    // accepted. Pass 1 (boolean) coerces unconditionally when boolean is
+    // accepted, because "true"/"false" strings are never intentional when
+    // boolean is a valid type. The round-trip is prevented by pass 2 checking
+    // typeIsAccepted before coercing.
+    //
+    // Adding a fifth pass or reordering requires verifying that the new pass
+    // does not undo the work of earlier passes. See Finding #5 for a past
+    // round-trip bug caused by violating this invariant.
+    //
+    // Coerce string boolean values ("true"/"false") to actual booleans
+    fixBooleanValues(
+      data,
+      anySchema as Record<string, unknown>,
+      anySchema as Record<string, unknown>,
+    );
+    // Coerce non-string values to strings where the schema expects strings.
+    // Some self-hosted LLMs return numbers or booleans for tool parameters
+    // that expect strings (e.g., `old_string`, `content`).
+    fixStringValues(
+      data,
+      anySchema as Record<string, unknown>,
+      anySchema as Record<string, unknown>,
+    );
+    // Coerce stringified JSON values (arrays/objects) back to their proper types.
+    // Some LLMs serialize complex values as strings when the schema uses
+    // anyOf/oneOf (e.g., '["url"]' instead of ["url"] for anyOf: [array, null]).
+    fixStringifiedJsonValues(
+      data,
+      anySchema as Record<string, unknown>,
+      anySchema as Record<string, unknown>,
+    );
+    // Coerce numeric strings ("3", "5.0") to actual numbers when the schema
+    // expects integer/number. LLMs frequently emit numeric parameters as
+    // strings which strict MCP servers (e.g. Playwright) reject.
+    fixNumericValues(data, anySchema as Record<string, unknown>);
+
+    valid = validate(data);
+    if (!valid && validate.errors) {
+      return validator.errorsText(validate.errors, { dataVar: 'params' });
+    }
+  }
+  return null;
 }
 
 /**

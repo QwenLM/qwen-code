@@ -122,7 +122,7 @@ describe('ContextUsagePanel', () => {
       )!;
       expect(button.disabled).toBe(true);
       expect(button.parentElement?.title).toContain(
-        'Requires an idle, connected, writable session',
+        'Requires an idle, connected session with permission to compress context.',
       );
       act(() => button.click());
     }
@@ -747,12 +747,29 @@ describe('ContextUsagePanel', () => {
   it('explains unavailable usage without assuming no API responses', async () => {
     const snapshot = fixture();
     snapshot.usage.totalTokens = 0;
+    snapshot.usage.breakdown.messages = 0;
     const { container } = renderPanel(vi.fn().mockResolvedValue(snapshot));
     await act(async () => {});
     expect(container.textContent).toContain(
       'Current context usage is unavailable.',
     );
     expect(container.textContent).toContain('Estimated base overhead');
+  });
+
+  it('captions an estimated history as including the conversation (#12235)', async () => {
+    // After /model, /restore or a resume the provider total is 0 while the
+    // history is intact, so the rows include the conversation.
+    const snapshot = fixture();
+    snapshot.usage.totalTokens = 0;
+    const { container } = renderPanel(vi.fn().mockResolvedValue(snapshot));
+    await act(async () => {});
+    expect(container.textContent).toContain(
+      'The estimates below include the conversation.',
+    );
+    expect(container.textContent).toContain(
+      'Estimated usage, including the conversation',
+    );
+    expect(container.textContent).not.toContain('Estimated base overhead');
   });
 
   it.each(['session', 'actions'])(

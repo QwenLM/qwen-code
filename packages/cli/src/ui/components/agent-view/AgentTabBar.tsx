@@ -37,6 +37,7 @@ import {
 } from '../../contexts/BackgroundTaskViewContext.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useUIState } from '../../contexts/UIStateContext.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 import { theme } from '../../semantic-colors.js';
 import { isLiveAgentPanelVisibleEntry } from '../background-view/liveAgentPanelVisibility.js';
 
@@ -75,6 +76,12 @@ export const AgentTabBar: React.FC = () => {
   const { setLivePanelFocused, setPillFocused } =
     useBackgroundTaskViewActions();
   const { embeddedShellFocused } = useUIState();
+  // An open right-click menu owns the arrow keys. KeypressContext broadcasts to
+  // every subscriber and discards return values, so the overlay cannot consume
+  // a key for us — without this the tab bar keeps switching tabs (remounting
+  // the active tab, away from a teammate awaiting approval) and keeps releasing
+  // its own focus under the menu, and nothing restores it afterwards.
+  const { menu: contextMenu } = useContextMenu();
   const hasVisibleBgAgentRoster = () =>
     bgEntries.some((e) => isLiveAgentPanelVisibleEntry(e, Date.now()));
 
@@ -118,7 +125,7 @@ export const AgentTabBar: React.FC = () => {
         setAgentTabBarFocused(false);
       }
     },
-    { isActive: true },
+    { isActive: contextMenu === null },
   );
 
   // Subscribe to STATUS_CHANGE events from all agents so the tab bar

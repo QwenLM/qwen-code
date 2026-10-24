@@ -29,9 +29,7 @@ async function main(): Promise<void> {
   const shutdown = (code = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    dispose();
-    void server
-      .close()
+    void Promise.all([dispose(), server.close()])
       .catch(() => undefined)
       .finally(() => process.exit(code));
   };
@@ -45,7 +43,9 @@ async function main(): Promise<void> {
   process.stdin.once('end', () => shutdown());
   process.stdin.once('close', () => shutdown());
   // Best-effort synchronous cleanup for any other exit path.
-  process.on('exit', () => dispose());
+  process.on('exit', () => {
+    void dispose();
+  });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -68,7 +68,16 @@ function isEntryPoint(): boolean {
 }
 
 if (isEntryPoint()) {
-  main().catch((error) => {
+  const [command, ...rest] = process.argv.slice(2);
+  // `desktop-relay` lends this server to a remote Qwen Code session; loaded
+  // lazily so the plain MCP server never pulls in its WebSocket client.
+  const run =
+    command === 'desktop-relay'
+      ? import('./desktop-relay/cli.js')
+          .then(({ runDesktopRelayCommand }) => runDesktopRelayCommand(rest))
+          .then((code) => process.exit(code))
+      : main();
+  run.catch((error) => {
     // stderr — stdout is the JSON-RPC protocol channel.
     process.stderr.write(
       `[node-repl] fatal: ${

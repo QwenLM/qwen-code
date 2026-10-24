@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
 import {
   startManagedRuntimeAttestationWorker,
@@ -54,6 +55,16 @@ const HEADERS = {
   'x-qwen-managed-lease-id': 'lease-01',
   'x-qwen-managed-lease-epoch': '4',
 };
+
+/**
+ * A shell command that writes the session and project directory its shell
+ * sees to `file`, in any shell the Shell tool picks.
+ */
+function writeShellEnvironment(file: string): string {
+  const script =
+    "process.stdout.write([process.env.QWEN_CODE_SESSION_ID, process.env.QWEN_CODE_PROJECT_DIR].join('|'))";
+  return `"${process.execPath}" -e "${script}" > ${file}`;
+}
 
 interface ToolSuite {
   readonly route: string;
@@ -171,6 +182,13 @@ describe('Managed Runtime tool worker', () => {
             });
           }
           expect(response.headers.get('cache-control')).toBe('no-store');
+          // A request without the token never learns the worker's
+          // incarnation.
+          if (fixture.expected.status === 401) {
+            expect(
+              response.headers.get('x-qwen-managed-runtime-incarnation'),
+            ).toBeNull();
+          }
         });
       }
     }
@@ -190,6 +208,9 @@ describe('Managed Runtime tool worker', () => {
       },
     );
     expect(executeResponse.status).toBe(200);
+    expect(
+      executeResponse.headers.get('x-qwen-managed-runtime-incarnation'),
+    ).toBe(BOOT.runtimeIncarnation);
     const settled = (await executeResponse.json()) as {
       state: string;
       result: { executionStatus: string; responseParts: unknown[] };
@@ -213,6 +234,9 @@ describe('Managed Runtime tool worker', () => {
       },
     );
     expect(statusResponse.status).toBe(200);
+    expect(
+      statusResponse.headers.get('x-qwen-managed-runtime-incarnation'),
+    ).toBe(BOOT.runtimeIncarnation);
     const view = (await statusResponse.json()) as {
       state: string;
       lastSequence: number;
@@ -256,6 +280,97 @@ describe('Managed Runtime tool worker', () => {
       });
       expect(JSON.stringify(settled)).toContain('file contents');
     }
+  });
+
+  it('takes the workspace at startup, as it always has', async () => {
+    // The workspace is missing at startup, so it never covers a directory
+    // created later, whatever the first call finds.
+    const late = path.join(workspace, 'late');
+    worker = await startManagedRuntimeAttestationWorker({
+      ...BOOT,
+      workspaceCwd: late,
+    });
+    fs.mkdirSync(path.join(late, 'sub'), { recursive: true });
+
+    const response = await fetch(
+      `${worker.ready.url}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({
+          ...executeBody({
+            command: 'echo probe > probe.txt',
+            directory: path.join(late, 'sub'),
+          }),
+          toolName: 'run_shell_command',
+        }),
+      },
+    );
+
+    expect(await response.json()).toMatchObject({
+      state: 'settled',
+      result: { executionStatus: 'error' },
+    });
+    expect(fs.existsSync(path.join(late, 'sub', 'probe.txt'))).toBe(false);
+  });
+
+  it('keeps unapproved managed shells inside their workspace', async () => {
+    const outside = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-managed-outside-'),
+    );
+    try {
+      const origin = await start();
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/execute`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({
+            ...executeBody({
+              command: 'echo probe > probe.txt',
+              directory: outside,
+            }),
+            toolName: 'run_shell_command',
+          }),
+        },
+      );
+
+      expect(response.status).toBe(200);
+      const settled = await response.json();
+      expect(settled).toMatchObject({
+        state: 'settled',
+        result: { executionStatus: 'error' },
+      });
+      expect(JSON.stringify(settled)).toContain(
+        'not within any of the registered workspace directories',
+      );
+      expect(fs.existsSync(path.join(outside, 'probe.txt'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("gives shells the Runtime's session and project directory, as before", async () => {
+    const origin = await start();
+
+    const response = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({
+          ...executeBody({
+            command: writeShellEnvironment('env.txt'),
+          }),
+          toolName: 'run_shell_command',
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(fs.readFileSync(path.join(workspace, 'env.txt'), 'utf8')).toBe(
+      `${BOOT.runtimeInstanceId}|${new Storage(workspace).getProjectDir()}`,
+    );
   });
 
   it('answers unknown for a reference the Runtime never saw', async () => {
@@ -711,6 +826,9 @@ describe('Managed Runtime tool worker', () => {
       },
     );
     expect(cancelResponse.status).toBe(200);
+    expect(
+      cancelResponse.headers.get('x-qwen-managed-runtime-incarnation'),
+    ).toBe(BOOT.runtimeIncarnation);
     expect(await cancelResponse.json()).toMatchObject({
       state: 'cancel_requested',
     });
@@ -721,5 +839,165 @@ describe('Managed Runtime tool worker', () => {
     };
     expect(settled.state).toBe('settled');
     expect(settled.result.executionStatus).toBe('cancelled');
+  }, 15_000);
+
+  it('forgets a settled call on acknowledge and refuses its repeat', async () => {
+    const origin = await start();
+    const reference = executeBody({}).reference;
+    const executeResponse = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify(
+          executeBody({ file_path: path.join(workspace, 'README.md') }),
+        ),
+      },
+    );
+    expect(executeResponse.status).toBe(200);
+    expect(await executeResponse.json()).toMatchObject({
+      state: 'settled',
+      result: { executionStatus: 'success' },
+    });
+
+    const acknowledge = async () => {
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/acknowledge`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({ protocolVersion: 2, reference }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get('x-qwen-managed-runtime-incarnation')).toBe(
+        BOOT.runtimeIncarnation,
+      );
+      return response.json() as Promise<{ state: string }>;
+    };
+    expect(await acknowledge()).toEqual({
+      protocolVersion: 2,
+      state: 'acknowledged',
+    });
+    expect(await acknowledge()).toEqual({
+      protocolVersion: 2,
+      state: 'acknowledged',
+    });
+
+    const statusResponse = await fetch(
+      `${origin}/internal/managed-runtime/v2/status`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({ protocolVersion: 2, reference }),
+      },
+    );
+    expect(statusResponse.status).toBe(200);
+    const view = (await statusResponse.json()) as {
+      state: string;
+      lastSequence: number;
+      result?: unknown;
+    };
+    expect(view.state).toBe('acknowledged');
+    expect(view.result).toBeUndefined();
+    expect(view.lastSequence).toBeGreaterThan(0);
+
+    const repeat = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify(
+          executeBody({ file_path: path.join(workspace, 'README.md') }),
+        ),
+      },
+    );
+    expect(repeat.status).toBe(409);
+    expect(await repeat.json()).toMatchObject({
+      code: 'managed_runtime_identity_conflict',
+    });
+
+    const unknown = await fetch(
+      `${origin}/internal/managed-runtime/v2/acknowledge`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({
+          protocolVersion: 2,
+          reference: { ...reference, callId: 'call-never-seen' },
+        }),
+      },
+    );
+    expect(unknown.status).toBe(200);
+    expect(await unknown.json()).toEqual({
+      protocolVersion: 2,
+      state: 'unknown',
+    });
+  });
+
+  it('refuses to acknowledge a call still in flight', async () => {
+    const origin = await start();
+    const reference = {
+      sessionId: 'runtime-session-01',
+      promptId: 'prompt-01',
+      callId: 'call-ack-in-flight',
+      argsDigest: 'digest-ack-in-flight',
+    };
+    const running = fetch(`${origin}/internal/managed-runtime/v2/execute`, {
+      method: 'POST',
+      headers: HEADERS,
+      body: JSON.stringify({
+        protocolVersion: 2,
+        reference,
+        toolName: 'run_shell_command',
+        input: {
+          command:
+            'sleep 30 # intentional-sleep: probe for in-flight acknowledgement',
+        },
+      }),
+    });
+    await vi.waitFor(async () => {
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/status`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({ protocolVersion: 2, reference }),
+        },
+      );
+      expect(await response.json()).toMatchObject({ state: 'executing' });
+    });
+
+    const refused = await fetch(
+      `${origin}/internal/managed-runtime/v2/acknowledge`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({ protocolVersion: 2, reference }),
+      },
+    );
+    expect(refused.status).toBe(409);
+
+    await fetch(`${origin}/internal/managed-runtime/v2/cancel`, {
+      method: 'POST',
+      headers: HEADERS,
+      body: JSON.stringify({ protocolVersion: 2, reference }),
+    });
+    const settled = (await (await running).json()) as { state: string };
+    expect(settled.state).toBe('settled');
+
+    const settledAck = await fetch(
+      `${origin}/internal/managed-runtime/v2/acknowledge`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({ protocolVersion: 2, reference }),
+      },
+    );
+    expect(settledAck.status).toBe(200);
+    expect(await settledAck.json()).toEqual({
+      protocolVersion: 2,
+      state: 'acknowledged',
+    });
   }, 15_000);
 });

@@ -20,6 +20,10 @@
  * this slice may only touch opentui/**).
  */
 
+import {
+  isAdvisorDisplay,
+  formatAdvisorDisplay,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { GoalSnapshotLike } from '../utils/goal-card-view.js';
 import type {
   AnsiToken,
@@ -36,6 +40,8 @@ import { AGENT_TOOL_NAMES } from '../utils/agent-tool-names.js';
 import { formatDuration, formatTokenCount } from '../utils/formatters.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
+import { formatInteractiveLoopDetectedMessage } from '../../utils/loop-detected-message.js';
+import type { LoopStop } from '../../utils/loop-detected-message.js';
 
 /**
  * Neutral-model union extension: tool detail events the backend folds into
@@ -43,7 +49,8 @@ import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
  * segmentation and inline images.
  */
 export type OpenTuiStreamEvent =
-  | Exclude<StreamEvent, { type: 'text' }>
+  | Exclude<StreamEvent, { type: 'text' | 'user' }>
+  | (Extract<StreamEvent, { type: 'user' }> & { recallText?: string })
   /** Widened over the neutral `text` event: a replayed assistant record
    * carries its own recorded time, which ink stamps on the first display run
    * of that record. Live deltas leave it unset and fold as "now". */
@@ -288,6 +295,7 @@ export function extractAnsiOutput(
 
 /** Stringifies a ToolResultDisplay (string | FileDiff | structured) losslessly. */
 export function renderResultDisplay(display: unknown): string {
+  if (isAdvisorDisplay(display)) return formatAdvisorDisplay(display);
   if (display == null) return '';
   if (typeof display === 'string') return display;
   if (typeof display === 'object') {
@@ -764,9 +772,9 @@ export function createEventMapper(
         // which ink adds as `{type: 'info'}`).
         out.push({
           type: 'info',
-          text:
-            'A potential loop was detected. This can happen due to repetitive ' +
-            'tool calls or other model behavior. The request has been halted.',
+          text: formatInteractiveLoopDetectedMessage(
+            ev.value as LoopStop | undefined,
+          ),
         });
         break;
       }

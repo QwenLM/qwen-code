@@ -5,8 +5,225 @@
  */
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
+
+describe('TUI product evidence', () => {
+  const workflow = parse(
+    readFileSync('.github/workflows/tui-parity.yml', 'utf8'),
+  );
+  const steps = workflow.jobs.parity.steps;
+  const classify = new (Object.getPrototypeOf(async () => {}).constructor)(
+    'github',
+    'context',
+    workflow.jobs.changes.steps[0].with.script,
+  );
+  const serverFile = 'packages/managed-agent-server/src/main/java/Service.java';
+  async function required(
+    files,
+    count = files.length,
+    eventName = 'pull_request',
+  ) {
+    const github = {
+      paginate: vi.fn().mockResolvedValue(files),
+      rest: { pulls: { listFiles: vi.fn() } },
+    };
+    // A real dispatch payload carries no `pull_request` key. Handing the
+    // dispatch case a populated one would keep this suite green if the
+    // `context.payload.pull_request` read were ever hoisted above the
+    // eventName guard, while every real dispatch then throws.
+    const payload =
+      eventName === 'pull_request'
+        ? { pull_request: { number: 15261, changed_files: count } }
+        : {};
+    const result = await classify(github, {
+      eventName,
+      repo: { owner: 'QwenLM', repo: 'qwen-code' },
+      payload,
+    });
+    if (eventName === 'pull_request') {
+      expect(github.paginate).toHaveBeenCalledWith(
+        github.rest.pulls.listFiles,
+        {
+          owner: 'QwenLM',
+          repo: 'qwen-code',
+          pull_number: 15261,
+          per_page: 100,
+        },
+      );
+    } else {
+      expect(github.paginate).not.toHaveBeenCalled();
+    }
+    return result;
+  }
+
+  it('cancels superseded PRs while keeping dispatches independent', () => {
+    expect(workflow.concurrency).toEqual({
+      group:
+        '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}',
+      'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
+    });
+  });
+
+  it('skips Java service changes with accompanying design documentation', async () => {
+    expect(
+      await required([
+        { filename: serverFile },
+        { filename: 'docs/design/runtime.md' },
+      ]),
+    ).toBe(false);
+  });
+
+  it.each([
+    'packages/cli/src/ui/App.tsx',
+    'packages/core/src/core/client.ts',
+    'packages/channels/base/index.ts',
+    'packages/web-templates/package.json',
+    'packages/new-cli-dependency/index.ts',
+    'packages/managed-agent-server-extra/index.ts',
+    'integration-tests/interactive/tui-migration.test.ts',
+    'scripts/copy_bundle_assets.js',
+    'integrations/generated-ui/package.json',
+    'patches/ink+7.0.3.patch',
+    'pnpm-lock.yaml',
+    'pnpm-workspace.yaml',
+    'tsconfig.json',
+    '.nvmrc',
+    '.github/workflows/tui-parity.yml',
+  ])('runs mixed PRs touching %s', async (filename) => {
+    expect(await required([{ filename: serverFile }, { filename }])).toBe(true);
+  });
+
+  it('checks the source of a rename into an unrelated directory', async () => {
+    expect(
+      await required([
+        {
+          filename: serverFile,
+          previous_filename: 'packages/cli/src/index.ts',
+        },
+      ]),
+    ).toBe(true);
+  });
+
+  it('still skips a rename contained within the unrelated subtrees', async () => {
+    // Pins the negative arm: `previous_filename` present, but itself
+    // unrelated. Without it, weakening that arm to a presence check keeps the
+    // suite green while re-running both gates on any server-side restructure.
+    expect(
+      await required([
+        {
+          filename: serverFile,
+          previous_filename:
+            'packages/managed-agent-server/src/main/java/Old.java',
+        },
+      ]),
+    ).toBe(false);
+  });
+
+  it('uses files beyond the first API page and runs on incomplete diffs', async () => {
+    const files = Array.from({ length: 101 }, () => ({ filename: serverFile }));
+    expect(
+      await required([...files, { filename: 'packages/cli/src/index.ts' }]),
+    ).toBe(true);
+    expect(await required(files, 102)).toBe(true);
+    expect(await required(files, null)).toBe(true);
+    expect(
+      await required(
+        Array.from({ length: 3000 }, () => ({ filename: serverFile })),
+      ),
+    ).toBe(true);
+  });
+
+  it('always runs manual dispatches without querying PR files', async () => {
+    expect(await required([], 0, 'workflow_dispatch')).toBe(true);
+  });
+
+  it('retains named checks and runs them when impact detection fails', () => {
+    expect(workflow.jobs.changes.permissions).toEqual({
+      'pull-requests': 'read',
+    });
+    expect(workflow.jobs.changes.outputs.required).toBe(
+      '${{ steps.changes.outputs.result }}',
+    );
+    for (const job of [workflow.jobs.parity, workflow.jobs.noflicker]) {
+      expect(job.needs).toBe('changes');
+      expect(job.if).toBe(
+        "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}",
+      );
+      expect(job.steps.find((step) => step.name === 'Build cli').run).toBe(
+        'npm run build -- --cli-only',
+      );
+    }
+    expect(workflow.jobs.parity.name).toBe(
+      'TUI parity snapshots (ink vs opentui)',
+    );
+    expect(workflow.jobs.noflicker.name).toBe('OpenTUI no-flicker gate');
+  });
+
+  it('watches shared build inputs and retains all package dependencies', () => {
+    // Exact set, not arrayContaining: a floor still passes when a later PR
+    // drops a trigger, and the three entries it hides are load-bearing —
+    // esbuild.config.js drives the bundle step, package.json drives the
+    // --cli-only filter, tui-parity.yml is this workflow's own self-trigger.
+    expect([...workflow.on.pull_request.paths].sort()).toEqual(
+      [
+        '.github/actions/**',
+        '.github/scripts/**',
+        '.github/workflows/tui-parity.yml',
+        '.npmrc',
+        '.nvmrc',
+        'esbuild.config.js',
+        'integration-tests/**',
+        'integrations/**',
+        'package.json',
+        'packages/**',
+        'patches/**',
+        'pnpm-lock.yaml',
+        'pnpm-workspace.yaml',
+        'scripts/**',
+        'tsconfig.json',
+      ].sort(),
+    );
+    expect(
+      workflow.on.pull_request.paths.some((path) => path.startsWith('!')),
+    ).toBe(false);
+  });
+
+  it('budgets cold setup and all three serial product acceptance legs', () => {
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+  });
+
+  it('treats unhandled errors as acceptance failures on every runner', () => {
+    const product = steps.find((step) =>
+      step.name?.startsWith('Three-leg product acceptance'),
+    );
+    const commands = product.run
+      .split('\n')
+      .filter((line) => line.includes('npx vitest run'));
+    expect(commands).toHaveLength(2);
+    for (const command of commands) {
+      expect(command).toContain('--dangerouslyIgnoreUnhandledErrors=false');
+    }
+  });
+
+  it('keeps fresh evidence retrievable when the same head is rerun', () => {
+    const upload = steps.find(
+      (step) => step.name === 'Upload product acceptance evidence',
+    );
+    const product = steps.find((step) =>
+      step.name?.startsWith('Three-leg product acceptance'),
+    );
+    expect(upload.if).toContain('always()');
+    expect(upload.with.name).toContain('github.event.pull_request.head.sha');
+    expect(upload.with.name).toContain('${{ github.run_attempt }}');
+    const artifactName = (attempt) =>
+      upload.with.name.replace('${{ github.run_attempt }}', String(attempt));
+    expect(artifactName(1)).not.toBe(artifactName(2));
+    expect(upload.with.path.replace(/\/$/, '')).toBe(
+      product.env.QWEN_TUI_ACCEPTANCE_OUT,
+    );
+  });
+});
 
 describe('e2e workflow', () => {
   const workflow = readFileSync('.github/workflows/e2e.yml', 'utf8');
@@ -116,6 +333,28 @@ describe('e2e workflow', () => {
       expect(e2eRunScript).toContain(
         'if [ "$RUNNER_ENVIRONMENT" = \'self-hosted\' ]',
       );
+    });
+
+    it('limits image cleanup to less than the build-lock wait', () => {
+      const pruneMatch = e2eRunScript
+        .replace(/\\\r?\n/g, '')
+        .match(
+          /^[ \t]*timeout[ \t]+(?:(?:-[ks][ \t]*|--(?:kill-after|signal)(?:=|[ \t]+))\S+[ \t]+)*(\d+)([smhd]?)[ \t]+docker[ \t]+image[ \t]+prune\b/m,
+        );
+      expect(
+        pruneMatch,
+        'Expected a timeout on docker image prune',
+      ).not.toBeNull();
+
+      const unitSeconds = { s: 1, m: 60, h: 3600, d: 86400 };
+      const pruneSeconds =
+        Number(pruneMatch[1]) * unitSeconds[pruneMatch[2] || 's'];
+      const lockWaitSeconds = Number(
+        e2eRunScript.match(/flock --wait (\d+) 7/)?.[1],
+      );
+
+      expect(pruneSeconds).toBeGreaterThan(0);
+      expect(pruneSeconds).toBeLessThan(lockWaitSeconds);
     });
 
     it('reuses a commit-qualified image', () => {
@@ -345,6 +584,54 @@ describe('e2e workflow', () => {
       expect(names.indexOf('Restore workspace ownership')).toBeLessThan(
         names.indexOf('Prune dangling docker images'),
       );
+    });
+  });
+
+  describe('disk floor gate', () => {
+    // The E2E lane's slice of #10035 (#12764): run 36241138248 lost the
+    // sandbox:none leg when the saturated pool host's runner worker died on
+    // ENOSPC writing its own diag log — no failed step, no test result, one
+    // per-commit issue. ci.yml has gated its heavy jobs on
+    // check-disk-floor.sh since #10035 and the release lane since #11972;
+    // the pool-routed E2E leg went without. The gate fails the job fast
+    // with a DISKFLOOR sample naming the runner, and a re-run lands on an
+    // instance with headroom.
+    const steps = yml.jobs['e2e-test-linux'].steps;
+    const names = steps.map((step) => step.name);
+    const gateIndex = names.indexOf('Disk floor gate (self-hosted)');
+
+    it('gates the pool-routed Linux leg on a disk floor before its install', () => {
+      expect(gateIndex).toBeGreaterThanOrEqual(0);
+      const gate = steps[gateIndex];
+      expect(gate.if).toBe("${{ runner.environment == 'self-hosted' }}");
+      // The same direct call as ci.yml: this workflow only ever runs the
+      // pushed or current ref, so unlike the release lane the script always
+      // exists in the checkout and needs no presence guard.
+      expect(gate.run).toBe(
+        'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+      );
+      const checkoutIndex = steps.findIndex((step) =>
+        String(step.uses ?? '').includes('actions/checkout'),
+      );
+      // The script rides the checkout, so the gate can only stand between
+      // it and the install that turns a near-full disk into a dead runner.
+      expect(gateIndex).toBeGreaterThan(checkoutIndex);
+      expect(gateIndex).toBeLessThan(names.indexOf('Install dependencies'));
+    });
+
+    it('keeps the gate on every pool-routed job', () => {
+      // A new pool-routed leg without the gate reddens here instead of on a
+      // saturated host; the hosted legs stay ungated on fresh VMs.
+      const poolJobs = Object.entries(yml.jobs).filter(([, job]) =>
+        String(job['runs-on'] ?? '').includes('ecs-qwen'),
+      );
+      expect(poolJobs.map(([id]) => id)).toEqual(['e2e-test-linux']);
+      for (const [id, job] of poolJobs) {
+        const gate = (job.steps ?? []).find(
+          (step) => step.name === 'Disk floor gate (self-hosted)',
+        );
+        expect(gate, id).toBeDefined();
+      }
     });
   });
 

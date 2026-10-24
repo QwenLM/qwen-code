@@ -63,9 +63,8 @@ function stubConfig(options: StubOptions = {}) {
     disabledLevels = [],
     toolMode = ToolMode.Direct,
   } = options;
-  // Models the real `Config.isSkillEnabled`: a level other than the bundled one
-  // for this skill finds no owner and answers false, so a drift in the level
-  // the production code passes turns every row below red.
+  // Like the real one, a level other than `bundled` finds no owner and answers
+  // false, so a drift in the level the production code passes fails every row.
   const isSkillEnabled = vi.fn(
     (skill: { name: string; level?: string }) =>
       skill.level === 'bundled' && !disabledNames.includes(skill.name),
@@ -79,11 +78,15 @@ function stubConfig(options: StubOptions = {}) {
     }),
     getVisibleTools: () => new Set(visibleTools),
     getToolMode: () => toolMode,
+    getCodeModeOnly: () => toolMode === ToolMode.CodeModeOnly,
     isSkillEnabled,
     getDisabledSkillLevels: () => new Set(disabledLevels),
   } as unknown as Config;
   return { config, isSkillEnabled };
 }
+
+const route = (options?: StubOptions) =>
+  resolveWorkflowAuthoringRoute(stubConfig(options).config);
 
 describe('readWorkflowAuthoringReference', () => {
   it('reads the bundled SKILL.md the Skill tool would load', () => {
@@ -115,8 +118,7 @@ describe('resolveWorkflowAuthoringRoute', () => {
   });
 
   it('is not affected by a different skill being disabled', () => {
-    const { config } = stubConfig({ disabledNames: ['some-other-skill'] });
-    expect(resolveWorkflowAuthoringRoute(config)).toBe('skill');
+    expect(route({ disabledNames: ['some-other-skill'] })).toBe('skill');
   });
 
   // A user who turned the reference off asked for the text to go away.
@@ -145,9 +147,7 @@ describe('resolveWorkflowAuthoringRoute', () => {
       },
     ],
   ])('withholds the reference when %s', (_case, options: StubOptions) => {
-    expect(resolveWorkflowAuthoringRoute(stubConfig(options).config)).toBe(
-      'withheld',
-    );
+    expect(route(options)).toBe('withheld');
   });
 
   // No route to any skill: the reference has to travel in the description.
@@ -161,10 +161,9 @@ describe('resolveWorkflowAuthoringRoute', () => {
         deferred: [ToolNames.SKILL],
       },
     ],
-    // R27-2: tool_search alone is half a bridge — the schema can be reviewed
-    // but never invoked, so the reference must inline rather than point at a
-    // route the session cannot serve. Mutation check: dropping the TOOL_CALL
-    // half of the route gate turns this red.
+    // R27-2: tool_search alone is half a bridge (schema reviewable, never
+    // invocable), so inline rather than point at a route the session cannot
+    // serve. Mutation check: dropping the TOOL_CALL half of the gate fails it.
     [
       'the Skill tool is deferred and tool_call is missing',
       {
@@ -173,58 +172,51 @@ describe('resolveWorkflowAuthoringRoute', () => {
       },
     ],
   ])('inlines when %s', (_case, options: StubOptions) => {
-    expect(resolveWorkflowAuthoringRoute(stubConfig(options).config)).toBe(
-      'inline',
-    );
+    expect(route(options)).toBe('inline');
   });
 
   // A `tools.eager` allowlist that omits the Skill tool keeps its schema out
   // of the request while leaving it registered. The pointer still works, one
   // bridge hop (tool_search review, then tool_call) away, and has to say so.
   it('routes through ToolSearch when the Skill tool is deferred', () => {
-    const { config } = stubConfig({ deferred: [ToolNames.SKILL] });
-    expect(resolveWorkflowAuthoringRoute(config)).toBe('skill-via-tool-search');
+    expect(route({ deferred: [ToolNames.SKILL] })).toBe(
+      'skill-via-tool-search',
+    );
   });
 
-  // R1-21: CodeModeOnly hides both bridge tools (`code-mode.ts`
-  // HIDDEN_TOOLS), so a deferred Skill tool there is reached through the
-  // `exec` binding, not the bridge — the route must stay `skill`, because a
-  // bridge pointer would name tools the session cannot call, and a tool that
+  // R1-21: CodeModeOnly hides `tool_call` (`code-mode.ts` HIDDEN_TOOLS), so
+  // a deferred Skill tool there is reached through the `exec` binding, not
+  // the bridge — the route must stay `skill`, because a bridge pointer would
+  // send the model to `tool_call`, which it cannot call, and a tool that
   // freezes its surface at construction (AgentTool) would carry the dead
   // instruction for the whole session. Mutation check: dropping the
   // CodeModeOnly guard in bundled-reference.ts turns this red.
   it('points straight at the skill when CodeModeOnly hides the bridge', () => {
-    const { config } = stubConfig({
-      toolMode: ToolMode.CodeModeOnly,
-      deferred: [ToolNames.SKILL],
-    });
-    expect(resolveWorkflowAuthoringRoute(config)).toBe('skill');
+    expect(
+      route({ toolMode: ToolMode.CodeModeOnly, deferred: [ToolNames.SKILL] }),
+    ).toBe('skill');
   });
 
   // Deferred is not the same as hidden: `tools.visible` declares the schema
   // from session start, so the Skill tool is in every request and a detour
   // note would be false.
   it('points straight at the skill when a deferred Skill tool is listed in tools.visible', () => {
-    const { config } = stubConfig({
-      deferred: [ToolNames.SKILL],
-      visibleTools: [ToolNames.SKILL],
-    });
-    expect(resolveWorkflowAuthoringRoute(config)).toBe('skill');
+    expect(
+      route({ deferred: [ToolNames.SKILL], visibleTools: [ToolNames.SKILL] }),
+    ).toBe('skill');
   });
 
-  // A ToolSearch reveal is not like `tools.visible`: `/clear` drops it, while
-  // the route is recorded once for the session. Pointing straight at the skill
-  // because it happened to be revealed when the Workflow tool was built would
-  // leave the pointer wrong after the next `/clear`; the conditional detour
-  // stays true either way.
+  // A ToolSearch reveal, unlike `tools.visible`, is dropped by `/clear`, while
+  // the route is recorded once per session: pointing straight at a skill that
+  // happened to be revealed at build time goes wrong after the next `/clear`;
+  // the conditional detour stays true either way.
   it.each([
     ['revealed when the route is decided', [ToolNames.SKILL]],
     ['un-revealed again, as after /clear', []],
   ])(
     'keeps the ToolSearch detour for a deferred Skill tool %s',
     (_case, revealed: string[]) => {
-      const { config } = stubConfig({ deferred: [ToolNames.SKILL], revealed });
-      expect(resolveWorkflowAuthoringRoute(config)).toBe(
+      expect(route({ deferred: [ToolNames.SKILL], revealed })).toBe(
         'skill-via-tool-search',
       );
     },
@@ -233,14 +225,9 @@ describe('resolveWorkflowAuthoringRoute', () => {
   // A config that cannot answer is not evidence of absence. Guessing "inline"
   // would put the whole reference into every request of the session; guessing
   // "skill" costs at most one failed Skill call.
-  it.each([['the registry has no tool list', { toolNames: null }]])(
-    'assumes the skill is reachable when %s',
-    (_case, options: StubOptions) => {
-      expect(resolveWorkflowAuthoringRoute(stubConfig(options).config)).toBe(
-        'skill',
-      );
-    },
-  );
+  it('assumes the skill is reachable when the registry has no tool list', () => {
+    expect(route({ toolNames: null })).toBe('skill');
+  });
 
   it('assumes the skill is reachable when the config throws', () => {
     const config = {
@@ -275,9 +262,8 @@ describe('resolveWorkflowAuthoringSurface', () => {
     [{ toolNames: [ToolNames.WORKFLOW] }, 'inline'],
     [{ disabledNames: [WORKFLOW_AUTHORING_SKILL_NAME] }, 'withheld'],
   ])('maps %o to %s', (options: StubOptions, surface) => {
-    expect(resolveWorkflowAuthoringSurface(stubConfig(options).config)).toBe(
-      surface,
-    );
+    const { config } = stubConfig(options);
+    expect(resolveWorkflowAuthoringSurface(config)).toBe(surface);
   });
 });
 
@@ -297,13 +283,19 @@ describe('isToolHiddenBehindToolSearch', () => {
       false,
     ],
     ['not deferred', {}, false],
+    [
+      'deferred but CodeModeOnly hides the bridge',
+      {
+        deferred: [ToolNames.WORKFLOW],
+        toolMode: ToolMode.CodeModeOnly,
+      },
+      false,
+    ],
   ])('answers for a tool that is %s', (_case, options: StubOptions, hidden) => {
-    expect(
-      isToolHiddenBehindToolSearch(
-        stubConfig(options).config,
-        ToolNames.WORKFLOW,
-      ),
-    ).toBe(hidden);
+    const { config } = stubConfig(options);
+    expect(isToolHiddenBehindToolSearch(config, ToolNames.WORKFLOW)).toBe(
+      hidden,
+    );
   });
 });
 
@@ -319,16 +311,13 @@ describe('when the bundled reference cannot be read', () => {
 
   it('degrades to no reference and a pointer, without throwing', async () => {
     vi.resetModules();
+    const unreadable = path.join(WORKFLOW_AUTHORING_SKILL_NAME, 'SKILL.md');
     vi.doMock('node:fs', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:fs')>();
       return {
         ...actual,
         readFileSync: ((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
-          if (
-            String(file).endsWith(
-              path.join(WORKFLOW_AUTHORING_SKILL_NAME, 'SKILL.md'),
-            )
-          ) {
+          if (String(file).endsWith(unreadable)) {
             throw new Error('EACCES: permission denied');
           }
           return (actual.readFileSync as (...args: unknown[]) => unknown)(

@@ -15,6 +15,11 @@ import { rm } from 'node:fs/promises';
 // this nesting.
 export const ACP_HOME_PREFIX = 'qwen-e2e-home-acp-';
 
+// Per-case roots of the Hosted process suite (helpers/hosted-*.ts), under the
+// same sweeper contract.
+export const HOSTED_HOME_PREFIX = 'qwen-e2e-home-hosted-';
+export const HOSTED_STORE_PREFIX = 'qwen-e2e-home-hosted-store-';
+
 export async function removeScratchDir(dir: string): Promise<void> {
   try {
     // A CLI child outliving its test keeps writing under its scratch dir, so

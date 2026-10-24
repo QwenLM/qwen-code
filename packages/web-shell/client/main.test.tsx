@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonProductSessionContext } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { WebShellProps } from './App';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import type { WebShellResolvedBrand } from './brandContext';
 import { extractInlineScript, readIndexHtml } from './test/indexHtmlTestUtils';
@@ -47,6 +48,8 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 }));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
+  getFanoutOrigins: () => [],
+  syncFanoutParams: vi.fn(),
   getAllowedDaemonOrigin: (value: string) => value,
   confirmDaemonTarget: vi.fn(),
   isKnownDaemonTarget: () => false,
@@ -96,6 +99,14 @@ describe('StandaloneApp', () => {
   it('enables the tool calls entry in the standalone app', () => {
     act(() => root.render(<StandaloneApp daemonToken="token" />));
     expect(testState.props?.webShellProps.showToolCalls).toBe(true);
+  });
+
+  it('offers the sidebar defaults, including Agents, in the standalone shell', () => {
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    const sidebar = testState.props?.webShellProps.sidebar;
+    const items =
+      sidebar && typeof sidebar === 'object' ? sidebar.primaryNav?.items : [];
+    expect(items).toContain('agents');
   });
 
   it('reloads the page when the root error fallback retry is clicked', () => {
@@ -348,6 +359,8 @@ describe('StandaloneApp brand', () => {
     container.remove();
     icon.remove();
     window.localStorage.clear();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   function resolveBrand(brand: WebShellResolvedBrand): void {
@@ -456,5 +469,70 @@ describe('StandaloneApp brand', () => {
 
     expect(stubDocument.title).toBe('QiuQiu Code Web chat');
     expect(stubIcon.href).toBe('data:image/svg+xml,LOGO');
+  });
+
+  it('keeps the managedSession parameter on a Managed history link', () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/session/old-runtime?workspace=removed-workspace&managed=1&managedSession=gateway-session',
+    );
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    expect(
+      new URLSearchParams(window.location.search).get('managedSession'),
+    ).toBe('gateway-session');
+  });
+
+  it('supplies the authenticated Managed provider to the full shell instead of browser development options', () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managedProvider=java&tenant=attacker',
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: window.location.origin,
+      productScope: 'local:installation-1',
+      agentId: 'local-agent',
+      enableWorkspaceBinding: true,
+    });
+    act(() =>
+      root.render(
+        <StandaloneApp daemonToken="token" managedAgentProvider={provider} />,
+      ),
+    );
+    expect(testState.props?.webShellProps.managedAgentProvider).toBe(provider);
+  });
+
+  it('injects the Java provider into the full shell in development mode', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedProvider=java&tenant=tenant-a',
+    );
+    const fetchMock = vi.fn(async () =>
+      Response.json({ data: [], hasMore: false }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    const provider = testState.props?.webShellProps.managedAgentProvider;
+    expect(provider?.storageKey).toBe(
+      `${window.location.origin}:managed:tenant-a`,
+    );
+
+    await provider?.listSessions({ clientId: 'test-client' });
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(new Headers(request?.headers).get('X-Qwen-Tenant-Id')).toBe(
+      'tenant-a',
+    );
+  });
+
+  it('keeps the daemon Managed provider unless Java is explicitly selected', () => {
+    window.history.replaceState(null, '', '/?managed=1&tenant=tenant-a');
+
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    expect(testState.props?.webShellProps.managedAgentProvider).toBeUndefined();
   });
 });

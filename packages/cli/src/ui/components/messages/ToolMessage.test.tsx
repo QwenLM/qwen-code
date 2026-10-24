@@ -861,6 +861,25 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
+  it('renders free-form Advisor guidance in its card', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="advisor"
+        description="advisor-model"
+        resultDisplay={{
+          type: 'advisor_advice',
+          model: 'advisor-model',
+          text: 'Check the retry boundary first.',
+        }}
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame()).toContain('Check the retry boundary first.');
+    expect(lastFrame()).not.toContain('"advisor_advice"');
+  });
+
   it('renders structured Advisor feedback instead of JSON', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage

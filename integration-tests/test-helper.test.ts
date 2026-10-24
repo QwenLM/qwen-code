@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TestRig } from './test-helper.js';
 
@@ -27,6 +28,24 @@ describe('TestRig', () => {
       process.env['KEEP_OUTPUT'] = originalKeepOutput;
     }
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('pins getDefaultTimeout to the CI-first environment table', () => {
+    const rig = new TestRig();
+
+    vi.stubEnv('CI', 'true');
+    vi.stubEnv('QWEN_SANDBOX', 'docker');
+    expect(rig.getDefaultTimeout()).toBe(60_000);
+
+    // The documented scripts export QWEN_SANDBOX=false, which the helper's
+    // truthiness check still treats as a container.
+    vi.stubEnv('CI', '');
+    vi.stubEnv('QWEN_SANDBOX', 'false');
+    expect(rig.getDefaultTimeout()).toBe(30_000);
+
+    vi.stubEnv('QWEN_SANDBOX', '');
+    expect(rig.getDefaultTimeout()).toBe(15_000);
   });
 
   it('resets a reused test directory during setup', async () => {
@@ -39,6 +58,31 @@ describe('TestRig', () => {
     expect(existsSync(staleFile)).toBe(false);
     expect(rig.testDir).not.toBeNull();
     expect(existsSync(rig.testDir!)).toBe(true);
+  });
+
+  it('disables managed auto-memory by default and honors a suite override', async () => {
+    const rig = new TestRig();
+    await rig.setup('managed memory default off');
+
+    const written = JSON.parse(
+      readFileSync(join(rig.testDir!, '.qwen', 'settings.json'), 'utf-8'),
+    ) as { memory?: Record<string, unknown> };
+    expect(written.memory).toEqual({
+      enableManagedAutoMemory: false,
+      enableManagedAutoDream: false,
+    });
+
+    const override = new TestRig();
+    await override.setup('managed memory opted back in', {
+      settings: { memory: { enableManagedAutoMemory: true } },
+    });
+    const overridden = JSON.parse(
+      readFileSync(join(override.testDir!, '.qwen', 'settings.json'), 'utf-8'),
+    ) as { memory?: Record<string, unknown> };
+    expect(overridden.memory).toEqual({
+      enableManagedAutoMemory: true,
+      enableManagedAutoDream: false,
+    });
   });
 
   it('removes the test directory during cleanup', async () => {

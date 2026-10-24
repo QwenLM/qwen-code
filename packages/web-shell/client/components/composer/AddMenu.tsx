@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import { ArrowLeftIcon, PlusIcon, SlashIcon, XIcon } from 'lucide-react';
+import {
+  ArrowLeftIcon,
+  MessageCircleQuestionIcon,
+  PlusIcon,
+  SlashIcon,
+  XIcon,
+} from 'lucide-react';
 import { useI18n } from '../../i18n';
 import type { CommandInfo } from '../../adapters/types';
 import {
@@ -21,6 +27,7 @@ import {
   escapeAtReferenceText,
   EXTENSIONS_PROVIDER_ID,
   FILE_PROVIDER_ID,
+  MCP_RESOURCES_PROVIDER_ID,
   sanitizeInsertText,
 } from '../../hooks/useAtMentionSources';
 import type {
@@ -71,6 +78,7 @@ export interface AddMenuProps {
    * Omitted when the host has not enabled Plan.
    */
   plan?: AddMenuPlanControl;
+  btw?: { onSelect: () => void; disabledReason?: string };
   mobileActions?: {
     commands: readonly CommandInfo[];
     categoryOrder?: CommandDisplayCategoryOrder;
@@ -198,7 +206,7 @@ function SearchableProviderSubmenu({
       className={
         mobile
           ? 'flex w-full flex-col gap-2'
-          : 'flex w-52 max-w-[calc(100vw-1rem)] flex-col gap-1 p-1 sm:w-72'
+          : 'flex w-52 max-w-[min(calc(100vw-1rem),var(--radix-dropdown-menu-content-available-width))] flex-col gap-1 p-1 sm:w-72'
       }
     >
       {placeholder ? (
@@ -250,10 +258,11 @@ function SearchableProviderSubmenu({
                   : item.description) && provider.id !== FILE_PROVIDER_ID ? (
                   <span
                     className={
-                      mobile
+                      mobile || provider.id === MCP_RESOURCES_PROVIDER_ID
                         ? '[overflow-wrap:anywhere] text-xs text-muted-foreground'
                         : 'hidden truncate text-xs text-muted-foreground sm:block'
                     }
+                    title={item.description}
                   >
                     {provider.id === EXTENSIONS_PROVIDER_ID
                       ? item.detail
@@ -307,6 +316,7 @@ export function AddMenu({
   skillsLoadError,
   skillsLoaded = false,
   plan,
+  btw,
   mobileActions,
   commandsOnly = false,
 }: AddMenuProps) {
@@ -682,6 +692,27 @@ export function AddMenu({
                       onClick={() => closeAndRun(mobileActions.onLiveVoice!)}
                     />
                   )}
+                  {btw && (
+                    <Button
+                      variant="ghost"
+                      className={`${mobileRowClass} py-2`}
+                      disabled={Boolean(btw.disabledReason)}
+                      data-testid="composer-add-menu-btw"
+                      onClick={() => closeAndRun(btw.onSelect)}
+                    >
+                      <MessageCircleQuestionIcon />
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span>{t('composerAdd.btw.label')}</span>
+                        <span className="truncate text-xs text-muted-foreground">
+                          {btw.disabledReason ??
+                            t('composerAdd.btw.description')}
+                        </span>
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        /btw
+                      </span>
+                    </Button>
+                  )}
                   {plan && (
                     <Button
                       variant="ghost"
@@ -846,9 +877,11 @@ export function AddMenu({
             }}
           >
             {!anyAvailable ? (
-              <DropdownMenuLabel data-testid="composer-add-menu-empty">
-                {t('composerAdd.emptyState')}
-              </DropdownMenuLabel>
+              !btw && (
+                <DropdownMenuLabel data-testid="composer-add-menu-empty">
+                  {t('composerAdd.emptyState')}
+                </DropdownMenuLabel>
+              )
             ) : (
               <>
                 {addFileAvailable || uploadAvailable ? (
@@ -1023,6 +1056,25 @@ export function AddMenu({
                 </DropdownMenuSub>
               </>
             )}
+            {btw ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  disabled={Boolean(btw.disabledReason)}
+                  data-testid="composer-add-menu-btw"
+                  onSelect={() => closeAndRun(btw.onSelect)}
+                >
+                  <MessageCircleQuestionIcon />
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span>{t('composerAdd.btw.label')}</span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {btw.disabledReason ?? t('composerAdd.btw.description')}
+                    </span>
+                  </span>
+                  <span className="text-xs text-muted-foreground">/btw</span>
+                </DropdownMenuItem>
+              </>
+            ) : null}
             {plan ? (
               <>
                 <DropdownMenuSeparator />

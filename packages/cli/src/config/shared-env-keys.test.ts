@@ -171,6 +171,20 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     }
   });
 
+  // Where a `/verify-pr --publish` round publishes its screenshots. A project
+  // `.env` or settings.env is repository-controlled, so either could redirect
+  // a maintainer's evidence to a fork the operator did not choose; only the
+  // launch env, a home `.env`, or the operator-scope `verifyPr.*` may set them.
+  it('excludes QWEN_VERIFY_ASSETS_* so a project .env cannot redirect published evidence', () => {
+    for (const key of [
+      'QWEN_VERIFY_ASSETS_REPO',
+      'QWEN_VERIFY_ASSETS_BRANCH',
+    ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+      expect(isHardcodedProjectEnvExclusion(key.toLowerCase())).toBe(true);
+    }
+  });
+
   // npm treats underscore/hyphen spellings of a config key as the same key,
   // so the hyphen twin of npm_config_strict_ssl must be excluded too.
   it('excludes both spellings of the npm strict-ssl knob', () => {
@@ -307,6 +321,22 @@ describe('isHardcodedProjectEnvExclusion', () => {
   });
 
   it('matches the newly added hardcoded exclusions case-insensitively', () => {
+    expect(isHardcodedProjectEnvExclusion('QWEN_CODE_MODELS_DEV_URL')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('qwen_code_models_dev_url')).toBe(
+      true,
+    );
+    // The two switches the URL key sits beside: a project must not flip the
+    // catalog daemon-wide (or over the operator's exported `off`) either.
+    expect(isHardcodedProjectEnvExclusion('QWEN_CODE_MODELS_DEV')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_code_models_dev')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_CODE_MODELS_DEV_REFRESH')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('qwen_code_models_dev_refresh')).toBe(
+      true,
+    );
     expect(isHardcodedProjectEnvExclusion('SSL_CERT_FILE')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('ssl_cert_file')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('GIT_SSH_COMMAND')).toBe(true);

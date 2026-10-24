@@ -243,13 +243,6 @@ describe('BINARY_EXTENSIONS', () => {
 });
 
 describe('extractExtensionsFromPatterns', () => {
-  it('should extract simple extensions', () => {
-    const patterns = ['**/*.exe', '**/*.jar', '**/*.zip'];
-    const result = extractExtensionsFromPatterns(patterns);
-
-    expect(result).toEqual(['.exe', '.jar', '.zip']);
-  });
-
   it('should handle brace expansion patterns', () => {
     const patterns = ['**/*.{js,ts}', '**/*.{jpg,png}'];
     const result = extractExtensionsFromPatterns(patterns);
@@ -287,41 +280,40 @@ describe('extractExtensionsFromPatterns', () => {
     expect(result).toHaveLength(0);
   });
 
-  it('should remove duplicates and sort results', () => {
-    const patterns = ['**/*.js', '**/*.{js,ts}', '**/*.ts'];
-    const result = extractExtensionsFromPatterns(patterns);
-
-    expect(result).toEqual(['.js', '.ts']);
-  });
-
-  it('should handle complex brace patterns with multiple extensions', () => {
-    const patterns = ['**/*.{html,css,js,jsx,ts,tsx}'];
-    const result = extractExtensionsFromPatterns(patterns);
-
-    expect(result).toEqual(['.css', '.html', '.js', '.jsx', '.ts', '.tsx']);
-  });
-
-  it('should handle compound extensions correctly using path.extname', () => {
-    const patterns = ['**/*.tar.gz', '**/*.min.js', '**/*.d.ts'];
-    const result = extractExtensionsFromPatterns(patterns);
-
+  it.each([
+    [
+      'should extract simple extensions',
+      ['**/*.exe', '**/*.jar', '**/*.zip'],
+      ['.exe', '.jar', '.zip'],
+    ],
+    [
+      'should remove duplicates and sort results',
+      ['**/*.js', '**/*.{js,ts}', '**/*.ts'],
+      ['.js', '.ts'],
+    ],
+    [
+      'should handle complex brace patterns with multiple extensions',
+      ['**/*.{html,css,js,jsx,ts,tsx}'],
+      ['.css', '.html', '.js', '.jsx', '.ts', '.tsx'],
+    ],
     // Should extract the final extension part only
-    expect(result).toEqual(['.gz', '.js', '.ts']);
-  });
-
-  it('should handle dotfiles correctly', () => {
-    const patterns = ['**/*.gitignore', '**/*.profile', '**/*.bashrc'];
-    const result = extractExtensionsFromPatterns(patterns);
-
-    // Dotfiles should be extracted properly
-    expect(result).toEqual(['.bashrc', '.gitignore', '.profile']);
-  });
-
-  it('should handle edge cases with path.extname', () => {
-    const patterns = ['**/*.hidden.', '**/*.config.json'];
-    const result = extractExtensionsFromPatterns(patterns);
-
+    [
+      'should handle compound extensions correctly using path.extname',
+      ['**/*.tar.gz', '**/*.min.js', '**/*.d.ts'],
+      ['.gz', '.js', '.ts'],
+    ],
+    [
+      'should handle dotfiles correctly',
+      ['**/*.gitignore', '**/*.profile', '**/*.bashrc'],
+      ['.bashrc', '.gitignore', '.profile'],
+    ],
     // Should handle edge cases properly (trailing dots are filtered out)
-    expect(result).toEqual(['.json']);
+    [
+      'should handle edge cases with path.extname',
+      ['**/*.hidden.', '**/*.config.json'],
+      ['.json'],
+    ],
+  ])('%s', (_title, patterns, expected) => {
+    expect(extractExtensionsFromPatterns(patterns)).toEqual(expected);
   });
 });

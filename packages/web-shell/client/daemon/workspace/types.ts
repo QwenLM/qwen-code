@@ -56,6 +56,8 @@ import type {
   DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceExtensionsStatus,
+  DaemonWorkspaceExtensionSummaries,
+  DaemonExtensionEntry,
   DaemonWorkspaceFile,
   DaemonWorkspaceFileBytes,
   DaemonWorkspaceFileEditRequest,
@@ -273,11 +275,26 @@ export interface DaemonScheduledTaskRun {
   sessionId?: string;
   /** The daemon could not create the fresh session requested for this run. */
   sessionDispatchFailed?: boolean;
+  /** How the task's gate decided this fire; quiet fires are never recorded. */
+  gate?: 'delivered' | 'failed' | 'blocked';
   /** READ-ONLY legacy compat: a pre-removal version stamped this on a fire whose
    * precondition withheld the prompt. Never written now, but kept so the UI can
    * still mark such stored entries "skipped" instead of showing them as ordinary
    * successful runs. Absent = a real dispatched run. */
   withheld?: boolean;
+}
+
+/** Summary of a gated task's recent gate runs, as the daemon keeps it. */
+export interface DaemonScheduledTaskGateStatus {
+  /** Fire time (epoch ms) of the most recent gate run. */
+  lastAt: number;
+  lastOutcome: 'quiet' | 'delivered' | 'failed' | 'blocked';
+  /** Quiet fires since the last delivery. */
+  quietSinceDelivery: number;
+  lastDeliveredAt?: number;
+  /** Failed and blocked fires since the last quiet or delivered one. */
+  consecutiveFailures: number;
+  lastError?: string;
 }
 
 export interface DaemonScheduledTask {
@@ -287,6 +304,12 @@ export interface DaemonScheduledTask {
   prompt: string;
   recurring: boolean;
   enabled: boolean;
+  /** Shell command the owning session runs at each fire outside the model;
+   * silence skips the fire, output wakes the session. Null for an ungated task.
+   * Views carry it whether or not the daemon advertises `scheduled_task_gate`;
+   * the capability says whether POST and PATCH accept it. */
+  gate?: string | null;
+  gateStatus?: DaemonScheduledTaskGateStatus | null;
   createdAt: number;
   lastFiredAt: number | null;
   /** Next scheduled fire (epoch ms), or null for a disabled task. A GET-time
@@ -331,6 +354,9 @@ export interface DaemonCreateScheduledTaskRequest {
   modelServiceId?: string;
   /** Named group for fresh per-run sessions. */
   groupId?: string;
+  /** Gate command; only to a daemon advertising `scheduled_task_gate`, and
+   * only on a recurring task. */
+  gate?: string;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -346,6 +372,8 @@ export interface DaemonUpdateScheduledTaskRequest {
   modelServiceId?: string | null;
   /** Null clears the selected group. */
   groupId?: string | null;
+  /** Null (or '') removes the gate. */
+  gate?: string | null;
 }
 
 export interface DaemonAddWorkspaceResult {
@@ -539,6 +567,8 @@ export interface DaemonWorkspaceActions {
 
   // Extensions
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
+  loadExtensionSummaries(): Promise<DaemonWorkspaceExtensionSummaries>;
+  loadExtensionDetails(name: string): Promise<DaemonExtensionEntry>;
 
   // Tools
   preheatAcp(timeoutMs?: number): Promise<DaemonWorkspaceAcpPreheatResult>;
@@ -557,7 +587,9 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonSettingUpdateResult>;
 
   // Memory
-  loadMemoryStatus(): Promise<DaemonWorkspaceMemoryStatus>;
+  loadMemoryStatus(options?: {
+    includeContent?: boolean;
+  }): Promise<DaemonWorkspaceMemoryStatus>;
   /**
    * `opts.maxBytes` is how a caller accepts partial content: without a window
    * argument the daemon refuses any file above its own read cap instead of

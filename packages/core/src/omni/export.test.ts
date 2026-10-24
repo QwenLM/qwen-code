@@ -25,6 +25,7 @@ import {
   type OmniTrajectoryFileRecord,
   type OmniTrajectoryTurnRecord,
 } from './export.js';
+import { fnCall } from '../test-utils/model-fixtures.js';
 
 describe('exportOmniTrajectory', () => {
   let tmpDir: string;
@@ -441,13 +442,11 @@ describe('exportOmniTrajectory', () => {
         type: 'assistant',
         message: {
           parts: [
-            {
-              functionCall: {
-                id: 'call-77',
-                name: 'omni_downsample_image',
-                args: { inputPath: '/data/photo.png', quality: 7 },
-              },
-            },
+            fnCall(
+              'omni_downsample_image',
+              { inputPath: '/data/photo.png', quality: 7 },
+              'call-77',
+            ),
           ],
         },
       }),
@@ -632,13 +631,11 @@ describe('exportOmniTrajectory', () => {
         type: 'assistant',
         message: {
           parts: [
-            {
-              functionCall: {
-                id: 'exec-1',
-                name: 'exec',
-                args: { source: 'await tools.omni_extract_keyframes({});' },
-              },
-            },
+            fnCall(
+              'exec',
+              { source: 'await tools.omni_extract_keyframes({});' },
+              'exec-1',
+            ),
           ],
         },
       }),

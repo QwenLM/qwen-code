@@ -18,7 +18,7 @@ import {
   type BackgroundApproval,
 } from '@qwen-code/qwen-code-core';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
-import * as useStatusLineModule from '../hooks/useStatusLine.js';
+import * as useStatusLineModule from '../hooks/use-ink-status-line.js';
 import * as useMCPHealthModule from '../hooks/useMCPHealth.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
 import {
@@ -36,7 +36,7 @@ import { StreamingState } from '../types.js';
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
-vi.mock('../hooks/useStatusLine.js');
+vi.mock('../hooks/use-ink-status-line.js');
 const useStatusLineMock = vi.mocked(useStatusLineModule.useStatusLine);
 
 vi.mock('../hooks/useMCPHealth.js');
@@ -287,12 +287,14 @@ describe('<Footer />', () => {
     const { lastFrame } = renderWithWidth(180, createMockUIState(), {
       getShellExecutionSandbox: () => ({
         requestedBackend: 'bwrap',
+        effectiveBackend: 'bwrap',
+        enforcement: 'full',
         filesystem: 'read-only',
         network: 'closed',
       }),
     });
     expect(lastFrame()).toContain(
-      'tools / bwrap → bwrap / read-only / command network: closed',
+      'tools / bwrap → bwrap (full) / read-only / command network: closed',
     );
   });
 

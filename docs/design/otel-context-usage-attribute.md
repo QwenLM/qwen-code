@@ -1,5 +1,7 @@
 # OpenTelemetry context usage attribute
 
+[English](otel-context-usage-attribute.md) | [简体中文](otel-context-usage-attribute.zh-CN.md)
+
 ## Status and scope
 
 This design adds one private OpenTelemetry attribute to each user-facing
@@ -135,15 +137,15 @@ while treating it as an empty declaration would silently misclassify its token
 cost. Normal Qwen Code request construction supplies materialized function
 declarations and is unaffected.
 
-| JSON field             | Source and attribution rule                                                                                                                                                                                                                   |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `window_size_tokens`   | The `ContentGeneratorConfig` owned by the wrapped generator, falling back to `DEFAULT_TOKEN_LIMIT`. This avoids accidentally using the main model's window for a fallback or side model.                                                      |
-| `system_prompt_tokens` | The effective request system instruction, excluding recognized memory segments. Base prompt, append prompt, git status, and any unclassified system text remain here.                                                                         |
-| `builtin_tools_tokens` | Tool declarations present in the logical request, excluding MCP declarations and the Skill tool declaration. Deferred tools that have not been revealed are absent because they are absent from the request.                                  |
-| `mcp_tools_tokens`     | Logical request declarations whose matching registry entries are `DiscoveredMCPTool` instances. No server or tool name is serialized.                                                                                                         |
-| `memory_files_tokens`  | `Config.getUserMemory()` and `Config.getAutoMemoryPrompt()` only when the corresponding text is present in the effective system instruction. This includes context files, memory, and auto memory without exposing paths or contents.         |
-| `skills_tokens`        | The Skill tool declaration plus loaded `SKILL.md` bodies that exactly match immutable LLM-facing outputs retained when the Skill tool inserted them into request history.                                                                     |
-| `messages_tokens`      | User, assistant, and tool-result content in the request, excluding loaded skill bodies already attributed to `skills_tokens`. On finalization it becomes the residual after the fixed categories are normalized against provider input usage. |
+| JSON field             | Source and attribution rule                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `window_size_tokens`   | The `ContentGeneratorConfig` owned by the wrapped generator, falling back to `DEFAULT_TOKEN_LIMIT`. This avoids accidentally using the main model's window for a fallback or side model.                                                                                                                                                                                                                                                                           |
+| `system_prompt_tokens` | The effective request system instruction, excluding recognized memory segments. Base prompt, append prompt, git status, and any unclassified system text remain here.                                                                                                                                                                                                                                                                                              |
+| `builtin_tools_tokens` | Tool declarations present in the logical request, excluding MCP declarations and the Skill tool declaration. Deferred tools that have not been revealed are absent because they are absent from the request.                                                                                                                                                                                                                                                       |
+| `mcp_tools_tokens`     | Logical request declarations whose matching registry entries are `DiscoveredMCPTool` instances. No server or tool name is serialized.                                                                                                                                                                                                                                                                                                                              |
+| `memory_files_tokens`  | The effective system-instruction memory policy from `Config.getUserMemory()` and `Config.getAutoMemoryPrompt()` when each exact trimmed segment is present, plus `Config.getAutoMemoryContext()` only when it exactly matches the final text part of the final user `Content`. The matched catalog part is removed only from the message estimate; other user parts and earlier identical user text remain in `messages_tokens`. No paths or contents are exposed. |
+| `skills_tokens`        | The Skill tool declaration plus loaded `SKILL.md` bodies that exactly match immutable LLM-facing outputs retained when the Skill tool inserted them into request history.                                                                                                                                                                                                                                                                                          |
+| `messages_tokens`      | User, assistant, and tool-result content in the request, excluding the matched final catalog part attributed to `memory_files_tokens` and loaded skill bodies attributed to `skills_tokens`. On finalization it becomes the residual after the fixed categories are normalized against provider input usage.                                                                                                                                                       |
 
 Memory attribution uses exact segment removal. For each non-empty value from
 `getUserMemory()` and `getAutoMemoryPrompt()`, remove its exact trimmed text
@@ -152,6 +154,16 @@ from the effective system instruction before estimating
 `memory_files_tokens`. A configured block that is absent from the request, or
 whose exact match fails, remains part of `system_prompt_tokens` and is not also
 added to `memory_files_tokens`.
+
+Catalog attribution uses a separate exact boundary check. A non-empty
+`Config.getAutoMemoryContext()` value is counted in `memory_files_tokens` only
+when it exactly matches the final text part of the final user `Content`. When
+it matches, only that final catalog part is removed before estimating
+`messages_tokens`; other parts of that user content and earlier identical user
+text remain in `messages_tokens`. Part metadata does not contribute to token
+estimation. If the final text part
+does not match exactly, the catalog is left entirely in `messages_tokens` and
+is not also added to `memory_files_tokens`.
 
 System instructions, tool definitions, memory, and skill text use the
 CJK-aware heuristic already used by `/context`: ASCII characters are estimated
@@ -209,6 +221,10 @@ process or session boundary without reading files on the request path.
 At request start, every category is a local estimate and
 `available_before_compaction_tokens` is omitted. If the provider later reports
 a valid `gen_ai.usage.input_tokens`, finalization applies the following rules:
+
+The valid provider-reported `gen_ai.usage.input_tokens` value is authoritative
+for the final total. Local estimates never override it; they only determine
+the fixed-category allocation and the message residual described below.
 
 1. Preserve the five fixed-category proportions: system prompt, built-in
    tools, MCP tools, memory files, and skills.
@@ -410,6 +426,11 @@ Unit tests for the context-usage module cover:
 - CJK and ASCII estimation parity with `/context`;
 - structured messages with inline media, without base64-size inflation;
 - system-prompt versus memory attribution;
+- exact final-user-content catalog attribution that removes only the final
+  catalog part, leaving other user parts and earlier identical user text in
+  messages;
+- catalog exact-match failure that leaves the catalog in messages without
+  adding it to `memory_files_tokens`;
 - exact-match failure that leaves memory only in the system-prompt category;
 - built-in, revealed MCP, hidden deferred, and Skill tool attribution from the
   logical request;

@@ -39,21 +39,36 @@ describe('MessageBus', () => {
     bus.removeAllListeners();
   });
 
+  /** Subscribes to `type` and returns the array the messages land in. */
+  const receive = <T extends Message>(type: MessageBusType): T[] => {
+    const out: T[] = [];
+    bus.subscribe<T>(type, (msg) => out.push(msg));
+    return out;
+  };
+
+  const requestHook = (timeoutMs?: number, signal?: AbortSignal) =>
+    bus.request<HookExecutionRequest, HookExecutionResponse>(
+      {
+        type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner: { runtimeId: 'runtime', sessionId: 'session', agentId: null },
+        eventName: 'TestEvent',
+        input: {},
+      },
+      MessageBusType.HOOK_EXECUTION_RESPONSE,
+      timeoutMs,
+      signal,
+    );
+
   describe('publish', () => {
     it('should auto-confirm tool confirmation requests', async () => {
-      const responses: ToolConfirmationResponse[] = [];
-      bus.subscribe<ToolConfirmationResponse>(
+      const responses = receive<ToolConfirmationResponse>(
         MessageBusType.TOOL_CONFIRMATION_RESPONSE,
-        (msg) => responses.push(msg),
       );
-
-      const request: ToolConfirmationRequest = {
+      await bus.publish({
         type: MessageBusType.TOOL_CONFIRMATION_REQUEST,
         toolCall: { name: 'test_tool', args: {} },
         correlationId: 'test-123',
-      };
-
-      await bus.publish(request);
+      } satisfies ToolConfirmationRequest);
 
       expect(responses).toHaveLength(1);
       expect(responses[0].confirmed).toBe(true);
@@ -61,20 +76,16 @@ describe('MessageBus', () => {
     });
 
     it('should emit hook execution requests directly', async () => {
-      const received: HookExecutionRequest[] = [];
-      bus.subscribe<HookExecutionRequest>(
+      const received = receive<HookExecutionRequest>(
         MessageBusType.HOOK_EXECUTION_REQUEST,
-        (msg) => received.push(msg),
       );
-
-      const request: HookExecutionRequest = {
+      await bus.publish({
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner: { runtimeId: 'runtime', sessionId: 'session', agentId: null },
         eventName: 'UserPromptSubmit',
         input: { prompt: 'test' },
         correlationId: 'hook-123',
-      };
-
-      await bus.publish(request);
+      } satisfies HookExecutionRequest);
 
       expect(received).toHaveLength(1);
       expect(received[0].eventName).toBe('UserPromptSubmit');
@@ -82,72 +93,57 @@ describe('MessageBus', () => {
     });
 
     it('should emit other message types directly', async () => {
-      const received: ToolExecutionSuccess[] = [];
-      bus.subscribe<ToolExecutionSuccess>(
+      const received = receive<ToolExecutionSuccess>(
         MessageBusType.TOOL_EXECUTION_SUCCESS,
-        (msg) => received.push(msg),
       );
-
-      const message: ToolExecutionSuccess = {
+      await bus.publish({
         type: MessageBusType.TOOL_EXECUTION_SUCCESS,
         toolCall: { name: 'test_tool', args: {} },
         result: { data: 'test' },
-      };
-
-      await bus.publish(message);
+      } satisfies ToolExecutionSuccess);
 
       expect(received).toHaveLength(1);
       expect(received[0].result).toEqual({ data: 'test' });
     });
 
-    it('should emit error for invalid messages', async () => {
+    const publishInvalid = async (msg: unknown) => {
       const errors: Error[] = [];
       bus.on('error', (err) => errors.push(err));
-
-      await bus.publish(null as unknown as Message);
-
+      await bus.publish(msg as Message);
       expect(errors).toHaveLength(1);
-      expect(errors[0].message).toContain('Invalid message structure');
-    });
+      return errors;
+    };
 
-    it('should emit error for tool confirmation request without correlationId', async () => {
-      const errors: Error[] = [];
-      bus.on('error', (err) => errors.push(err));
-
-      await bus.publish({
-        type: MessageBusType.TOOL_CONFIRMATION_REQUEST,
-        toolCall: { name: 'test', args: {} },
-      } as unknown as Message);
-
-      expect(errors).toHaveLength(1);
+    it.each([
+      ['should emit error for invalid messages', null],
+      [
+        'should emit error for tool confirmation request without correlationId',
+        {
+          type: MessageBusType.TOOL_CONFIRMATION_REQUEST,
+          toolCall: { name: 'test', args: {} },
+        },
+      ],
+    ])('%s', async (_title, msg) => {
+      const errors = await publishInvalid(msg);
       expect(errors[0].message).toContain('Invalid message structure');
     });
 
     it('should emit error for message without type', async () => {
-      const errors: Error[] = [];
-      bus.on('error', (err) => errors.push(err));
-
-      await bus.publish({} as unknown as Message);
-
-      expect(errors).toHaveLength(1);
+      await publishInvalid({});
     });
   });
 
   describe('subscribe / unsubscribe', () => {
+    const response: HookExecutionResponse = {
+      type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+      correlationId: 'resp-123',
+      success: true,
+    };
+
     it('should subscribe and receive messages', async () => {
-      const received: HookExecutionResponse[] = [];
-      const listener = (msg: HookExecutionResponse) => received.push(msg);
-      bus.subscribe<HookExecutionResponse>(
+      const received = receive<HookExecutionResponse>(
         MessageBusType.HOOK_EXECUTION_RESPONSE,
-        listener,
       );
-
-      const response: HookExecutionResponse = {
-        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-        correlationId: 'resp-123',
-        success: true,
-      };
-
       await bus.publish(response);
       expect(received).toHaveLength(1);
     });
@@ -155,20 +151,8 @@ describe('MessageBus', () => {
     it('should unsubscribe and stop receiving messages', async () => {
       const received: HookExecutionResponse[] = [];
       const listener = (msg: HookExecutionResponse) => received.push(msg);
-      bus.subscribe<HookExecutionResponse>(
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-        listener,
-      );
-      bus.unsubscribe<HookExecutionResponse>(
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-        listener,
-      );
-
-      const response: HookExecutionResponse = {
-        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-        correlationId: 'resp-123',
-        success: true,
-      };
+      bus.subscribe(MessageBusType.HOOK_EXECUTION_RESPONSE, listener);
+      bus.unsubscribe(MessageBusType.HOOK_EXECUTION_RESPONSE, listener);
 
       await bus.publish(response);
       expect(received).toHaveLength(0);
@@ -176,119 +160,60 @@ describe('MessageBus', () => {
   });
 
   describe('request', () => {
-    it('should correlate request and response', async () => {
-      // Set up a handler that responds to hook execution requests
+    /** Answers each hook request with `replies`, in order; a reply without
+     * its own correlationId carries the request's. */
+    const respondWith = (
+      ...replies: Array<Partial<HookExecutionResponse> & { success: boolean }>
+    ) =>
       bus.subscribe<HookExecutionRequest>(
         MessageBusType.HOOK_EXECUTION_REQUEST,
         (msg) => {
-          void bus.publish({
-            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-            correlationId: msg.correlationId,
-            success: true,
-            output: { result: 'done' },
-          });
+          for (const reply of replies) {
+            void bus.publish({
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: msg.correlationId,
+              ...reply,
+            });
+          }
         },
       );
 
-      const response = await bus.request<
-        HookExecutionRequest,
-        HookExecutionResponse
-      >(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'TestEvent',
-          input: {},
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
+    it('should correlate request and response', async () => {
+      respondWith({ success: true, output: { result: 'done' } });
+      const response = await requestHook();
 
       expect(response.success).toBe(true);
       expect(response.output).toEqual({ result: 'done' });
     });
 
     it('should ignore responses with non-matching correlationId', async () => {
-      // Emit a response with wrong correlation ID, then the correct one
-      bus.subscribe<HookExecutionRequest>(
-        MessageBusType.HOOK_EXECUTION_REQUEST,
-        (msg) => {
-          // First emit a wrong correlation ID
-          void bus.publish({
-            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-            correlationId: 'wrong-id',
-            success: false,
-          });
-          // Then emit the correct one
-          void bus.publish({
-            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-            correlationId: msg.correlationId,
-            success: true,
-          });
-        },
+      // A wrong correlation ID first, then the correct one.
+      respondWith(
+        { correlationId: 'wrong-id', success: false },
+        { success: true },
       );
-
-      const response = await bus.request<
-        HookExecutionRequest,
-        HookExecutionResponse
-      >(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'TestEvent',
-          input: {},
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
+      const response = await requestHook();
 
       expect(response.success).toBe(true);
     });
 
     it('should timeout if no response is received', async () => {
-      await expect(
-        bus.request<HookExecutionRequest, HookExecutionResponse>(
-          {
-            type: MessageBusType.HOOK_EXECUTION_REQUEST,
-            eventName: 'TestEvent',
-            input: {},
-          },
-          MessageBusType.HOOK_EXECUTION_RESPONSE,
-          50, // 50ms timeout
-        ),
-      ).rejects.toThrow('Request timed out');
+      await expect(requestHook(50)).rejects.toThrow('Request timed out');
     });
 
     it('should reject immediately when signal is already aborted', async () => {
       const controller = new AbortController();
       controller.abort();
 
-      await expect(
-        bus.request<HookExecutionRequest, HookExecutionResponse>(
-          {
-            type: MessageBusType.HOOK_EXECUTION_REQUEST,
-            eventName: 'TestEvent',
-            input: {},
-          },
-          MessageBusType.HOOK_EXECUTION_RESPONSE,
-          5000,
-          controller.signal,
-        ),
-      ).rejects.toThrow('Request aborted');
+      await expect(requestHook(5000, controller.signal)).rejects.toThrow(
+        'Request aborted',
+      );
     });
 
     it('should reject when signal is aborted during wait', async () => {
       const controller = new AbortController();
-
-      const promise = bus.request<HookExecutionRequest, HookExecutionResponse>(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'TestEvent',
-          input: {},
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-        5000,
-        controller.signal,
-      );
-
-      // Abort after a tick
-      setTimeout(() => controller.abort(), 10);
+      const promise = requestHook(5000, controller.signal);
+      setTimeout(() => controller.abort(), 10); // abort after a tick
 
       await expect(promise).rejects.toThrow('Request aborted');
     });

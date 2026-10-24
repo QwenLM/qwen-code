@@ -42,7 +42,12 @@ function hasFlag(flag, alias) {
 
 function isInProcessFastPath() {
   const first = cliArgs[0];
-  if (first === 'serve' || first === 'mcp') {
+  if (
+    first === 'serve' ||
+    first === 'mcp' ||
+    first === 'managed-runtime-bootstrap' ||
+    first === 'managed-runtime-bootstrap-worker'
+  ) {
     return true;
   }
   if (first === undefined || first.startsWith('-')) {
@@ -236,7 +241,12 @@ function getManagedNpmInstallation() {
 const standaloneShim = process.env['QWEN_CODE_LAUNCHER_PATH'];
 delete process.env['QWEN_CODE_LAUNCHER_PATH'];
 
-const managedNpmInstallation = getManagedNpmInstallation();
+const managedRuntimeBootstrap =
+  cliArgs[0] === 'managed-runtime-bootstrap' ||
+  cliArgs[0] === 'managed-runtime-bootstrap-worker';
+const managedNpmInstallation = managedRuntimeBootstrap
+  ? undefined
+  : getManagedNpmInstallation();
 const validStandaloneShim =
   standaloneShim && existsSync(standaloneShim) ? standaloneShim : undefined;
 process.env['QWEN_CODE_CLI'] =
@@ -307,6 +317,28 @@ if (isInProcessFastPath()) {
 } else {
   const { spawnSync } = await import('node:child_process');
   const UPDATE_COMPLETE_EXIT_CODE = 44;
+  // A child that never started comes back from spawnSync as
+  // { status: null, signal: null, error }; say why instead of exiting silently.
+  const SPAWN_FAILURE_EXIT_CODE = 126;
+  const exitOnSpawnError = (command, error) => {
+    // Node's message already reads "<syscall> <path> <code>"; add only what it
+    // does not say.
+    const detail = [
+      ...[error.code, error.syscall].filter(
+        (part) => typeof part === 'string' && !error.message.includes(part),
+      ),
+      ...(error.errno === undefined ? [] : [`errno ${error.errno}`]),
+    ].join(' ');
+    process.stderr.write(
+      `Failed to start ${command}: ${error.message}${detail ? ` (${detail})` : ''}\n`,
+    );
+    process.exit(SPAWN_FAILURE_EXIT_CODE);
+  };
+  // cmd.exe metacharacters. Mirrors UNSAFE_CMD_CHARS in
+  // packages/cli/src/ui/standalone-update.ts — kept local because this
+  // plain-ESM entry ships in the standalone package and cannot import the
+  // TypeScript sources.
+  const UNSAFE_CMD_CHARS = /[&|<>^%!"`\n\r]/;
   const entryPath = resolve(process.argv[1]);
   delete process.env['QWEN_CODE_LAUNCHER_PID'];
   const launchEnv = { ...process.env };
@@ -369,18 +401,49 @@ if (isInProcessFastPath()) {
     // its own version instead of inheriting the old process's session version.
     delete relaunchEnv['QWEN_CODE_STARTUP_VERSION'];
     delete relaunchEnv['QWEN_CODE_MANAGED_NPM_PIN'];
+    if (
+      process.platform === 'win32' &&
+      launcher.endsWith('.cmd') &&
+      UNSAFE_CMD_CHARS.test(launcher)
+    ) {
+      // The cmd.exe relaunch below hands its command line over verbatim
+      // (windowsVerbatimArguments), which drops Node's escaping safety net:
+      // a launcher path with cmd metacharacters would be re-tokenized into
+      // extra commands. The update itself already landed, so skip the
+      // relaunch instead of spawning a malformed command line.
+      process.stderr.write(
+        'Update successful! The new version will be used on your next run.\n',
+      );
+      process.exit(0);
+      // Unreachable in production; keeps tests with a mocked exit honest.
+      return;
+    }
     const relaunchResult =
       process.platform === 'win32' && launcher.endsWith('.cmd')
         ? spawnSync(
             process.env['ComSpec'] ?? 'cmd.exe',
             ['/d', '/s', '/c', `""${launcher}""`],
-            { stdio: 'inherit', env: relaunchEnv },
+            // cmd.exe does not understand Node's MSVCRT argv escaping: it
+            // rewrites every embedded quote of the ""…"" idiom as \", and
+            // cmd /s rule 2 then strips the line down to a literal
+            // \"\"path\"\" program name (#12687). Hand the line over
+            // verbatim, as shellExecutionService already does for cmd.
+            {
+              stdio: 'inherit',
+              env: relaunchEnv,
+              windowsVerbatimArguments: true,
+            },
           )
         : spawnSync(launcher, [], {
             stdio: 'inherit',
             env: relaunchEnv,
           });
-    if (relaunchResult.signal) {
+    if (relaunchResult.error) {
+      process.stderr.write(
+        'Update successful! The new version will be used on your next run.\n',
+      );
+      exitOnSpawnError(launcher, relaunchResult.error);
+    } else if (relaunchResult.signal) {
       process.kill(process.pid, relaunchResult.signal);
     } else {
       process.exit(relaunchResult.status ?? 1);
@@ -431,7 +494,9 @@ if (isInProcessFastPath()) {
         },
       },
     );
-    if (result.signal) {
+    if (result.error) {
+      exitOnSpawnError(`${process.execPath} ${cliPath}`, result.error);
+    } else if (result.signal) {
       process.kill(process.pid, result.signal);
     } else if (result.status !== UPDATE_COMPLETE_EXIT_CODE) {
       process.exit(result.status ?? 1);

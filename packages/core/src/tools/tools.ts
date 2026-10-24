@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ToolOutputSize } from './tool-output-size.js';
 import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
@@ -29,6 +30,14 @@ export interface ToolInvocation<
 
   /** Historical names accepted only when evaluating persisted permissions. */
   readonly permissionAliases?: readonly string[];
+
+  /**
+   * Producer-carried MCP identity (server name + tool name on that server),
+   * set by MCP tool invocations. Permission matchers read the server
+   * boundary from here instead of re-deriving it from a flattened
+   * `mcp__<server>__<tool>` spelling, which cannot tell `foo` from `foo_`.
+   */
+  readonly mcpIdentity?: { serverName: string; serverToolName: string };
 
   /**
    * Gets a pre-execution description of the tool operation.
@@ -572,9 +581,19 @@ export interface ToolArtifact {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  /** Only refresh an artifact the session already has; never create one. */
+  updateOnly?: boolean;
 }
 
 export interface ToolResult {
+  /** Numeric size before a producer reduces its semantic result. */
+  rawOutputSize?: ToolOutputSize | null;
+  /**
+   * Set when the producer bounded its own render: the returned body is
+   * shortened. `rawOutputSize` may still be `null` (the pre-reduction size is
+   * unrecoverable), but the truncation fact itself is known here.
+   */
+  truncatedByProducer?: boolean;
   /**
    * Content meant to be included in LLM history.
    * This should represent the factual outcome of the tool execution.
@@ -620,6 +639,14 @@ export interface ToolResult {
    * Scheduler-side path activation consumes these in addition to input fields.
    */
   resultFilePaths?: string[];
+
+  /**
+   * The full collected set a result's count is computed over, before any
+   * display slice: glob's header certifies the collected count, so a
+   * containment check that reads only `resultFilePaths` would certify hits
+   * it never inspected.
+   */
+  collectedFilePaths?: string[];
 
   /**
    * Structured artifacts produced by this tool call. Daemon/session surfaces
@@ -821,6 +848,7 @@ export interface McpAppToolResult {
 /** A completed MCP tool call with an interactive MCP Apps resource. */
 export interface McpAppResultDisplay {
   type: 'mcp_app';
+  requiredFeature?: 'generated-ui';
   serverName: string;
   resourceUri: string;
   html: string;
@@ -897,6 +925,7 @@ export type ToolResultDisplay =
   | ShellResultDisplay
   | string
   | AdvisorReviewDisplay
+  | AdvisorAdviceDisplay
   | AskUserQuestionResultDisplay
   | FileDiff
   | TodoResultDisplay
@@ -911,6 +940,32 @@ export type ToolResultDisplay =
   | VisionBridgeNoticeDisplay
   | ShellProgressData
   | TerminalImageDisplay;
+
+export interface AdvisorAdviceDisplay {
+  type: 'advisor_advice';
+  model?: string;
+  text: string;
+}
+
+export type AdvisorDisplay = AdvisorReviewDisplay | AdvisorAdviceDisplay;
+
+export function isAdvisorDisplay(display: unknown): display is AdvisorDisplay {
+  return (
+    isAdvisorReviewDisplay(display) ||
+    (typeof display === 'object' &&
+      display !== null &&
+      'type' in display &&
+      display.type === 'advisor_advice' &&
+      'text' in display &&
+      typeof display.text === 'string')
+  );
+}
+
+export function formatAdvisorDisplay(display: AdvisorDisplay): string {
+  return display.type === 'advisor_advice'
+    ? display.text
+    : formatAdvisorReview(display);
+}
 
 export interface AdvisorReviewDisplay {
   type: 'advisor_review';
@@ -1187,7 +1242,8 @@ export interface AutoModeFallbackConfirmation {
     | 'consecutive_block'
     | 'consecutive_unavailable'
     | 'total_denial'
-    | 'external_write';
+    | 'external_write'
+    | 'external_directory';
   message: string;
 }
 
