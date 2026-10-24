@@ -82,6 +82,7 @@ export type LiveInfoItem = {
   kind: 'info';
   id: string;
   text: string;
+  historyIsSynthetic?: false;
 };
 
 /** Error notice row (ink HistoryItemError + ErrorMessage: `✕` + error color,
@@ -470,7 +471,14 @@ export function foldLiveEvent(
       // content before addItem — settle a still-streaming assistant block.
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
-      items.push({ kind: 'info', id: nid('info'), text: ev.text });
+      items.push({
+        kind: 'info',
+        id: nid('info'),
+        text: ev.text,
+        ...(ev.historyIsSynthetic !== undefined
+          ? { historyIsSynthetic: ev.historyIsSynthetic }
+          : {}),
+      });
       return items;
     }
     case 'error': {
