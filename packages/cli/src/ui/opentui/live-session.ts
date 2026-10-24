@@ -37,6 +37,7 @@ import type {
   Config,
   SteerInput,
   ToolCallConfirmationDetails,
+  ToolCallRequestInfo,
   ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -82,12 +83,21 @@ export interface OpenTuiSteeringSubmission extends OpenTuiInputSubmission {
   content: PartListUnion;
 }
 
+export interface PreparedLiveRequest {
+  content: PartListUnion;
+  modelOverride?: string;
+  inlineModelOverride: boolean;
+}
+
 /** Options the backend passes through to the live turn. */
 export interface LivePromptOptions {
   dualOutput?: DualOutputBridge | null;
   isCurrentTurn?: () => boolean;
   /** Per-turn model override (submit_prompt's modelOverride parity). */
   modelOverride?: string;
+  retry?: PreparedLiveRequest;
+  onAcceptedSteering?: (messages: readonly string[]) => void;
+  onPreparedRequest?: (request: PreparedLiveRequest | undefined) => void;
   /**
    * "Enter to steer" parity: called at each tool boundary (after tools ran,
    * before their results go back to the model). Returned texts are resolved
@@ -695,8 +705,12 @@ export async function* livePromptEvents(
   // Read per boundary rather than once: the vision bridge can pick a full-turn
   // model mid-turn, and the rest of the turn then stays on it (ink parity).
   const turnModel: TurnModelOverride = {
-    current: options?.modelOverride,
-    inline: options?.modelOverride !== undefined,
+    current: options?.retry
+      ? options.retry.modelOverride
+      : options?.modelOverride,
+    inline: options?.retry
+      ? options.retry.inlineModelOverride
+      : options?.modelOverride !== undefined,
   };
   const map = createEventMapper({
     // ink handleErrorEvent parity: auth-aware formatting. The Ctrl+Y retry
@@ -722,14 +736,18 @@ export async function* livePromptEvents(
   // the tool and submits the functionResponses to continue. Replicate that
   // loop here so tools actually run under OpenTUI (drain -> schedule ->
   // submit results -> drain again).
-  let nextPrompt: PartListUnion = prompt;
+  let nextPrompt: PartListUnion = options?.retry?.content ?? prompt;
   // Provenance marks user-typed text: the composer submit and the follow-on
   // turn built from the mid-turn queue both carry it. A slash command's
   // generated `submit_prompt` payload does not, and ink never expands that
   // one (processQuery returns it before its own isAtCommand check).
   const typedText =
     typeof prompt === 'string' ? prompt : collectText(normalizeParts(prompt));
-  if (options?.submittedPrompt !== undefined && isAtCommand(typedText)) {
+  if (
+    !options?.retry &&
+    options?.submittedPrompt !== undefined &&
+    isAtCommand(typedText)
+  ) {
     const expanded = await expandAtMentions(config, typedText, abort);
     for (const ev of expanded.events) yield ev;
     // A failed read reports itself on the card above; ink drops the
@@ -739,20 +757,22 @@ export async function* livePromptEvents(
   }
   // ink runs the bridge on every query it hands the model
   // (`prepareQueryForLlm`), so an image attached at the composer converts here.
-  const bridged = await applyPromptVisionBridge(
-    config,
-    nextPrompt,
-    abort,
-    turnModel,
-  );
-  for (const ev of bridged.events) yield ev;
-  if (bridged.parts === null) return;
-  nextPrompt = bridged.parts;
-  abort.throwIfAborted();
-  // U-27 (ink :3834-3850): the fresh hop checks the user-query parts once,
-  // before the send loop — tool-result continuations are never checked.
-  if (hasUnsupportedImageFormat(nextPrompt)) {
-    yield imageFormatWarningEvent();
+  if (!options?.retry) {
+    const bridged = await applyPromptVisionBridge(
+      config,
+      nextPrompt,
+      abort,
+      turnModel,
+    );
+    for (const ev of bridged.events) yield ev;
+    if (bridged.parts === null) return;
+    nextPrompt = bridged.parts;
+    abort.throwIfAborted();
+    // U-27 (ink :3834-3850): the fresh hop checks the user-query parts once,
+    // before the send loop — tool-result continuations are never checked.
+    if (hasUnsupportedImageFormat(nextPrompt)) {
+      yield imageFormatWarningEvent();
+    }
   }
   if (!current() || abort.aborted) return;
   dualOutput?.emitUserMessage(normalizeParts(nextPrompt));
@@ -769,22 +789,50 @@ export async function* livePromptEvents(
     }
     const steerInput = pendingSteer;
     pendingSteer = undefined;
+    const prepared: PreparedLiveRequest = {
+      content: nextPrompt,
+      modelOverride: turnModel.current,
+      inlineModelOverride: turnModel.inline,
+    };
+    let steerAccepted = false;
+    const carrier: SteerInput | undefined = steerInput && {
+      parts: steerInput.parts,
+      accept: () => {
+        steerAccepted = true;
+        steerInput.accept();
+      },
+      restore: () => {
+        steerInput.restore();
+        if (!steerAccepted && steerInput.parts.length > 0) {
+          prepared.content = normalizeParts(nextPrompt).slice(
+            0,
+            -steerInput.parts.length,
+          );
+        }
+      },
+    };
     const sendOptions = first
       ? {
-          type: SendMessageType.UserQuery,
-          ...(options?.humanInput ? { humanInput: options.humanInput } : {}),
+          type: options?.retry
+            ? SendMessageType.Retry
+            : SendMessageType.UserQuery,
+          ...(!options?.retry && options?.humanInput
+            ? { humanInput: options.humanInput }
+            : {}),
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
-          ...(options?.submittedPrompt
+          ...(!options?.retry && options?.submittedPrompt
             ? { submittedPrompt: options.submittedPrompt }
             : {}),
         }
       : {
           type: SendMessageType.ToolResult,
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
-          ...(steerInput ? { steerInput } : {}),
+          ...(carrier ? { steerInput: carrier } : {}),
         };
     first = false;
-    const pending: Array<{ callId: string; name: string; args?: unknown }> = [];
+    const pending: ToolCallRequestInfo[] = [];
+    let streamFailed = false;
+    options?.onPreparedRequest?.(prepared);
     dualOutput?.startAssistantMessage();
     try {
       const stream = client.sendMessageStream(
@@ -807,13 +855,16 @@ export async function* livePromptEvents(
             /* ignore */
           }
         }
-        if ((ev as { type?: string }).type === 'tool_call_request') {
-          pending.push(
-            (ev as { value: { callId: string; name: string; args?: unknown } })
-              .value,
-          );
+        if (ev.type === 'retry' || ev.type === 'model_fallback') {
+          pending.length = 0;
         }
-        for (const neutral of map(ev)) yield neutral;
+        if ((ev as { type?: string }).type === 'tool_call_request') {
+          pending.push((ev as { value: ToolCallRequestInfo }).value);
+        }
+        for (const neutral of map(ev)) {
+          if (neutral.type === 'error') streamFailed = true;
+          yield neutral;
+        }
       }
     } catch (error) {
       for (const event of acceptedSteerEvents.splice(0)) yield event;
@@ -821,10 +872,11 @@ export async function* livePromptEvents(
     } finally {
       // Covers a synchronous call failure or an unsettled early exit. A
       // carrier already accepted/restored by core makes this a no-op.
-      steerInput?.restore();
+      carrier?.restore();
       if (current()) dualOutput?.finalizeAssistantMessage();
     }
     for (const event of acceptedSteerEvents.splice(0)) yield event;
+    if (!streamFailed) options?.onPreparedRequest?.(undefined);
     if (pending.length === 0 || abort.aborted) return;
 
     // Live output bridge (ink outputUpdateHandler parity): scheduler output
@@ -1145,6 +1197,13 @@ export async function* livePromptEvents(
       }
       return;
     }
+    if (!turnModel.inline && !turnModel.current?.endsWith('\0')) {
+      for (const call of completed) {
+        if ('modelOverride' in call.response)
+          turnModel.current = call.response.modelOverride;
+      }
+    }
+
     if (!abort.aborted && current()) {
       for (const [index, call] of completed.entries()) {
         dualOutput?.emitToolResult(call.request, {
@@ -1193,6 +1252,9 @@ export async function* livePromptEvents(
             settled = true;
             if (options?.isCurrentTurn?.() === false) return;
             acceptedSteerEvents.push(...steered.events);
+            options?.onAcceptedSteering?.(
+              steered.recordings.map((recording) => recording.message),
+            );
             const recorder = config.getChatRecordingService?.();
             for (const recording of steered.recordings) {
               dualOutput?.emitUserMessage(recording.parts);
