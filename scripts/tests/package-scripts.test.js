@@ -1303,7 +1303,7 @@ describe('package scripts', () => {
           path.join(bin, 'npm'),
           [
             '#!/bin/sh',
-            'if [ "$1 $2" = "pkg get" ]; then printf "%s" "$STUB_WORKSPACES"; exit 0; fi',
+            'if [ "$1 $2" = "pkg get" ]; then printf "%s" "$STUB_WORKSPACES"; exit "$STUB_PKG_GET_RC"; fi',
             'echo "npm $* heap=$NODE_OPTIONS" >> "$STUB_CALLS"',
             // web-shell returns only once the main lane has started, so a
             // side lane that ran before the main lane would fail here.
@@ -1325,10 +1325,19 @@ describe('package scripts', () => {
           '@qwen-code/web-templates': {},
           '@qwen-code/sdk': 'vitest run',
         };
-        const run = (name, { workspaces = allWorkspaces, fail = '' } = {}) => {
+        const run = (
+          name,
+          {
+            workspaces = allWorkspaces,
+            pkgGet = JSON.stringify(workspaces),
+            pkgGetRc = 0,
+            fail = '',
+            tmp = dir,
+          } = {},
+        ) => {
           const calls = path.join(dir, `${name}.calls`);
           // With no main lane to start, lift the barrier up front.
-          if (!('@qwen-code/acp-bridge' in workspaces)) {
+          if (pkgGetRc !== 0 || !pkgGet.includes('"@qwen-code/acp-bridge"')) {
             writeFileSync(`${calls}.main`, '');
           }
           const result = spawnSync('bash', [lanes, '--retry=2'], {
@@ -1336,9 +1345,13 @@ describe('package scripts', () => {
             env: {
               ...process.env,
               PATH: `${bin}${path.delimiter}${process.env.PATH}`,
-              TMPDIR: dir,
+              TMPDIR: tmp,
+              // The script sets the heap cap itself where it wants one; the
+              // other commands run with no NODE_OPTIONS, not the caller's.
+              NODE_OPTIONS: '',
               STUB_CALLS: calls,
-              STUB_WORKSPACES: JSON.stringify(workspaces),
+              STUB_WORKSPACES: pkgGet,
+              STUB_PKG_GET_RC: String(pkgGetRc),
               STUB_FAIL: fail,
             },
           });
@@ -1372,6 +1385,10 @@ describe('package scripts', () => {
         expect(order(passing.calls, mainWorkspaces)).toBeLessThan(
           order(passing.calls, scriptsUnit),
         );
+        expect(passing.stdout).toContain(
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
+        );
+        expect(passing.stdout).toContain('output of npm run test:scripts:unit');
         const replay = passing.stdout.indexOf('Side lane output');
         expect(
           passing.stdout.indexOf('output of npm run test:scripts:unit'),
@@ -1420,6 +1437,37 @@ describe('package scripts', () => {
           '::error::Found no workspaces to test beside the side lane.',
         );
         expect(nothingElse.calls).toEqual([sideWebShell, standalone]);
+
+        // A failed listing says so instead of claiming there is nothing to
+        // test, and still fails the step after the side lane. A failing
+        // `npm pkg get --json` prints an error object, which parses as a
+        // listing with no workspaces in it.
+        const unlisted =
+          '::error::Could not list the workspaces that define test:ci; the error is above.';
+        for (const [name, options] of [
+          [
+            'pkg-get-fails',
+            {
+              pkgGet: JSON.stringify({ error: { code: 'EJSONPARSE' } }),
+              pkgGetRc: 1,
+            },
+          ],
+          ['pkg-get-garbled', { pkgGet: 'not json' }],
+        ]) {
+          const listingFails = run(name, options);
+          expect(listingFails.rc).toBe('1');
+          expect(listingFails.stdout).toContain(unlisted);
+          expect(listingFails.stdout).not.toContain('Found no workspaces');
+          expect(listingFails.calls).toEqual([sideWebShell, standalone]);
+        }
+
+        // Without a log file for the side lane, nothing runs.
+        const noTmp = run('no-tmpdir', { tmp: path.join(dir, 'missing') });
+        expect(noTmp.rc).toBe('1');
+        expect(noTmp.stdout).toContain(
+          `::error::Could not create the side lane's log file under ${path.join(dir, 'missing')}; running no suites.`,
+        );
+        expect(noTmp.calls).toEqual([]);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

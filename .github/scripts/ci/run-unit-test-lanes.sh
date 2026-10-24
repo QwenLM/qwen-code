@@ -12,7 +12,10 @@
 # The side lane logs to a file that is replayed once the main lane ends: the
 # two logs never interleave, and a vitest FAIL line still starts its own line
 # for main-failure-signature.mjs. If the side lane is still running then,
-# `tail --pid` keeps streaming its log until it exits.
+# `tail --pid` keeps streaming its log until it exits. The replay also puts
+# the side lane's failures after the main lane's: when both lanes fail,
+# main-failure-signature.mjs, which titles and searches by the first failures
+# in the log, names main-lane tests.
 #
 # Usage: run-unit-test-lanes.sh [vitest args...]
 # The args (ci.yml passes --retry) reach every Vitest run. Exits with the main
@@ -22,7 +25,10 @@ set -uo pipefail
 side_workspace='@qwen-code/web-shell'
 # The heap cap `npm run test:ci:workspaces` gives each workspace suite.
 workspace_node_options='--max-old-space-size=3072'
-side_log="$(mktemp "${TMPDIR:-/tmp}/side-lane-tests.XXXXXX")"
+if ! side_log="$(mktemp "${TMPDIR:-/tmp}/side-lane-tests.XXXXXX")"; then
+  echo "::error::Could not create the side lane's log file under ${TMPDIR:-/tmp}; running no suites."
+  exit 1
+fi
 
 (
   NODE_OPTIONS="$workspace_node_options" npm run test:ci --workspace="$side_workspace" -- "$@"
@@ -35,22 +41,26 @@ side_pid=$!
 
 # Every other workspace that defines test:ci, in npm's workspace order: the
 # set `npm run test:ci:workspaces` runs, minus the side lane's.
-mapfile -t main_workspaces < <(
-  npm pkg get scripts.test:ci --workspaces --json |
-    SIDE_WORKSPACE="$side_workspace" node -e "
-      const scripts = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
-      for (const [name, script] of Object.entries(scripts)) {
-        if (typeof script === 'string' && name !== process.env.SIDE_WORKSPACE) {
-          console.log('--workspace=' + name);
+if ! workspace_scripts="$(npm pkg get scripts.test:ci --workspaces --json)" ||
+  ! workspace_args="$(
+    printf '%s' "$workspace_scripts" |
+      SIDE_WORKSPACE="$side_workspace" node -e "
+        const scripts = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+        for (const [name, script] of Object.entries(scripts)) {
+          if (typeof script === 'string' && name !== process.env.SIDE_WORKSPACE) {
+            console.log('--workspace=' + name);
+          }
         }
-      }
-    "
-)
-if [ "${#main_workspaces[@]}" -eq 0 ]; then
+      "
+  )"; then
+  echo '::error::Could not list the workspaces that define test:ci; the error is above.'
+  rc=1
+elif [ -z "$workspace_args" ]; then
   # An empty list would run the root's own test:ci, every suite again.
   echo '::error::Found no workspaces to test beside the side lane.'
   rc=1
 else
+  mapfile -t main_workspaces <<<"$workspace_args"
   NODE_OPTIONS="$workspace_node_options" npm run test:ci "${main_workspaces[@]}" -- "$@"
   rc=$?
 fi
