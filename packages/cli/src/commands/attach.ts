@@ -5,6 +5,7 @@
  */
 
 import { createInterface } from 'node:readline/promises';
+import { resolve } from 'node:path';
 import type { CommandModule, Argv } from 'yargs';
 import {
   DaemonClient,
@@ -69,7 +70,7 @@ export function resolveAttachToken(
   if (!identityVerified(record)) {
     return {
       error:
-        'listener identity unverified; not sending an ambient bearer token',
+        'listener identity unverified; not sending an ambient bearer token. Pass --token to use an explicit token.',
     };
   }
   const token =
@@ -88,7 +89,7 @@ export function resolveAttachWorkspace(
   explicit: string | undefined,
 ): string | undefined {
   const requested = explicit?.trim();
-  if (requested) return requested;
+  if (requested) return resolve(requested);
   return record.workspaces.length === 1 ? record.workspaces[0] : undefined;
 }
 
@@ -110,6 +111,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
 
   const client = new DaemonClient({
     baseUrl: target.record.url,
+    // Empty string suppresses the SDK's ambient QWEN_SERVER_TOKEN fallback.
     token: resolved.token ?? '',
   });
   let session: DaemonSessionClient;
@@ -149,10 +151,9 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     atLineStart = true;
   };
   const renderEvent = (event: DaemonEvent): void => {
-    if (event.type === 'turn_complete' || event.type === 'turn_error') {
-      endLine();
-      notifyTurnSettled();
-    }
+    const settled =
+      event.type === 'turn_complete' || event.type === 'turn_error';
+    if (settled) endLine();
     for (const item of normalizeDaemonEvent(event, {
       clientId: session.clientId,
       suppressOwnUserEcho: true,
@@ -178,6 +179,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
         writeStderrLine(`qwen attach: ${sanitizeTerminalText(item.text)}`);
       }
     }
+    if (settled) notifyTurnSettled();
   };
 
   const snapshot = session.consumeReplaySnapshot();
@@ -196,8 +198,14 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
         if (next.done) break;
         renderEvent(next.value);
       }
+      if (!shuttingDown) {
+        endLine();
+        writeStderrLine('qwen attach: stream ended');
+        process.exitCode = 1;
+      }
     } catch (error) {
       if (!shuttingDown) {
+        endLine();
         writeStderrLine(
           `qwen attach: stream ended: ${formatAttachError(
             error instanceof Error ? error.message : String(error),
@@ -227,6 +235,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   rl.on('SIGINT', shutdown);
   rl.on('close', shutdown);
   process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
   rl.on('line', (line) => {
     atLineStart = true;
     const text = line.trim();
@@ -239,6 +248,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
       .prompt({ prompt: [{ type: 'text', text }] })
       .catch((error: unknown) => {
         if (!terminalClosed) {
+          endLine();
           writeStderrLine(
             `qwen attach: prompt failed: ${formatAttachError(
               error instanceof Error ? error.message : String(error),
@@ -263,6 +273,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     terminalClosed = true;
     subscriptionAbort.abort();
     process.removeListener('SIGINT', shutdown);
+    process.removeListener('SIGTERM', shutdown);
     rl.close();
     void iterator.return(undefined).catch(() => {});
     await session.detach().catch(() => {});

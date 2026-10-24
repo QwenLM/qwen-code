@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonDiscoveryEntry,
   DaemonDiscoveryRecord,
@@ -41,6 +41,10 @@ function entry(port: number): DaemonDiscoveryEntry {
 function bearer(port = 4170): DaemonDiscoveryRecord {
   return { ...entry(port).record, auth: 'bearer' };
 }
+
+beforeEach(() => {
+  vi.stubEnv('QWEN_SERVER_TOKEN', '');
+});
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -140,6 +144,10 @@ describe('qwen attach workspace resolution', () => {
     expect(resolveAttachWorkspace(entry(4170).record, undefined)).toBe(
       '/tmp/project-4170',
     );
+  });
+
+  it('resolves a relative workspace against the shell cwd', () => {
+    expect(resolveAttachWorkspace(entry(4170).record, '.')).toBe(process.cwd());
   });
 
   it('does not guess when several workspaces are registered', () => {
