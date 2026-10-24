@@ -3013,8 +3013,7 @@ describe('inbound media', () => {
   const VIDEO_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=video';
   const FILE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=file';
   const VOICE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=voice';
-  const VOICE_WAV_URL =
-    'https://multimedia.nt.qq.com.cn/download?fileid=voice-wav';
+  const VOICE_WAV_URL = 'https://qqbot.ugcimg.cn/download?fileid=voice-wav';
 
   const DOCX_BYTES = Buffer.from('PK\u0003\u0004docx bytes');
   const SILK_BYTES = Buffer.from('SILK voice bytes');
