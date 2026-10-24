@@ -1649,6 +1649,8 @@ export function EmbeddedApp() {
           prepareSubmit={async (submission) => {
             if (submission.source === 'mcp-app') return undefined;
             if (editingMessage) {
+              const { turnIndex } = editingMessage;
+              setEditingMessage(undefined);
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
@@ -1663,7 +1665,7 @@ export function EmbeddedApp() {
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
               const snapshot =
-                editingMessage.turnIndex === undefined
+                turnIndex === undefined
                   ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
                       (latest, entry) =>
                         !latest || entry.turnIndex > latest.turnIndex
@@ -1671,9 +1673,7 @@ export function EmbeddedApp() {
                           : latest,
                       undefined,
                     )
-                  : snapshots.find(
-                      (entry) => entry.turnIndex === editingMessage.turnIndex,
-                    );
+                  : snapshots.find((entry) => entry.turnIndex === turnIndex);
               if (!snapshot) {
                 throw new Error(t('composer.editExpired'));
               }
@@ -1691,7 +1691,6 @@ export function EmbeddedApp() {
               } catch (err) {
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
-              setEditingMessage(undefined);
               clearInsight();
               // The daemon delivers `session.rewound` on the session stream,
               // which lands in the transcript store after the rewind HTTP

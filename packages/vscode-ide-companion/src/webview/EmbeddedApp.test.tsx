@@ -1808,6 +1808,39 @@ describe('EmbeddedApp message edit rewind', () => {
     expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
   });
 
+  it('leaves edit mode after a refused edit so the next send is not stuck', async () => {
+    const props = await renderApp();
+    const prepareSubmit = await startEditing(props, 0);
+
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('The original message can no longer be edited.');
+    });
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledOnce();
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+
+    sdkMocks.getRewindSnapshots.mockClear();
+    const nextSubmit = callback<
+      (submission: PrepareSubmission) => Promise<unknown>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+    await act(async () => {
+      await expect(
+        nextSubmit({
+          sessionId: 'session-1',
+          prompt: 'unrelated',
+          inputAnnotations: [],
+        }),
+      ).resolves.toBeUndefined();
+    });
+    expect(sdkMocks.getRewindSnapshots).not.toHaveBeenCalled();
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+  });
+
   it('rewinds the session captured before the snapshot fetch, not the one navigated to', async () => {
     const props = await renderApp();
 
