@@ -781,8 +781,14 @@ export const statsCommand: SlashCommand = {
             );
             const cost = calculateCost({
               inputTokens: modelMetrics.tokens.prompt,
+              // `total - prompt` is the output under BOTH usage
+              // conventions; guard it so a record with no usable total
+              // keeps today's sum.
               outputTokens:
-                modelMetrics.tokens.candidates + modelMetrics.tokens.thoughts,
+                modelMetrics.tokens.total > modelMetrics.tokens.prompt
+                  ? modelMetrics.tokens.total - modelMetrics.tokens.prompt
+                  : modelMetrics.tokens.candidates +
+                    modelMetrics.tokens.thoughts,
               pricing: pricing?.[modelName],
             });
             if (cost != null) {

@@ -114,7 +114,12 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
     ({ key, metrics }) =>
       calculateCost({
         inputTokens: metrics.tokens.prompt,
-        outputTokens: metrics.tokens.candidates + metrics.tokens.thoughts,
+        // `total - prompt` is the output under BOTH usage conventions;
+        // guard it so a record with no usable total keeps today's sum.
+        outputTokens:
+          metrics.tokens.total > metrics.tokens.prompt
+            ? metrics.tokens.total - metrics.tokens.prompt
+            : metrics.tokens.candidates + metrics.tokens.thoughts,
         pricing: modelPricing?.[getModelName(key)],
       }) != null,
   );
@@ -264,7 +269,9 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
               const cost = calculateCost({
                 inputTokens: metrics.tokens.prompt,
                 outputTokens:
-                  metrics.tokens.candidates + metrics.tokens.thoughts,
+                  metrics.tokens.total > metrics.tokens.prompt
+                    ? metrics.tokens.total - metrics.tokens.prompt
+                    : metrics.tokens.candidates + metrics.tokens.thoughts,
                 pricing: modelPricing?.[getModelName(key)],
               });
               return cost != null ? `$${cost.toFixed(4)}` : 'N/A';
