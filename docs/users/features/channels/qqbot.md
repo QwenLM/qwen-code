@@ -76,12 +76,14 @@ export QQ_APP_SECRET=<your-app-secret>
 
 ### QQ-Specific Options
 
-| Option                | Default | Description                                                                       |
-| --------------------- | ------- | --------------------------------------------------------------------------------- |
-| `appID`               | —       | QQ Bot AppID from developer portal. If omitted, QR code login is used.            |
-| `appSecret`           | —       | QQ Bot AppSecret. Supports `$ENV_VAR` syntax. If omitted, QR code login is used.  |
-| `sandbox`             | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`) |
-| `purgeLegacySessions` | `false` | Delete legacy single-scope and user-scope session routes — see below.             |
+| Option                | Default | Description                                                                                                                                             |
+| --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appID`               | —       | QQ Bot AppID from developer portal. If omitted, QR code login is used.                                                                                  |
+| `appSecret`           | —       | QQ Bot AppSecret. Supports `$ENV_VAR` syntax. If omitted, QR code login is used.                                                                        |
+| `sandbox`             | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`)                                                                       |
+| `moderationTools`     | `false` | Expose the QQ group-management tools to the agent — see [Group Management Tools](#group-management-tools). Off by default; set `true` to opt in.        |
+| `purgeLegacySessions` | `false` | Delete legacy single-scope and user-scope session routes — see below.                                                                                   |
+| `fileTools`           | `false` | Expose the outbound media tools so the agent can send a local file, image, video, or voice message to the chat — see [Outbound Media](#outbound-media). |
 
 All standard channel options (see [Channel Overview](./overview#options)) are also supported:
 `privatePolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
@@ -122,6 +124,34 @@ The other shared scopes are not equivalents. `sessionScope: "chat_thread"` route
 **Upgrading from an older QQ channel.** The default scope changed from `"user"` to `"thread"`. (A channel configured with `groupAllPolicy: "keyword"` or `"all"` was previously forced to `"single"` — one global session. A channel that did not pin `sessionScope` now resolves to `"thread"` unless `multiSession` is on, which resolves to `"user"` — per-sender sessions are the only shape `multiSession` supports, so it wins over the plugin default; for a channel without `multiSession` the effective change is from that global session to a per-group one. A channel that pinned `sessionScope` explicitly is no longer overridden, so an explicit `"user"` now takes effect and fragments group full-message traffic per sender — change it to `"thread"` by hand.) Legacy session routes are not deleted automatically: while `purgeLegacySessions` is off, each start counts the routes the purge covers — the single-scope-era `<channel>:__single__` key and this channel's legacy user-scope `<channel>:<senderId>:<chatId>` keys — and leaves them, and their daemon-side sessions, untouched. A `chat_thread`-era `<channel>:<chatId>:<threadId>` route is not covered: it is neither counted nor purged. To remove the covered routes, set `purgeLegacySessions` to `true` on the channel. With it enabled, every such route is released and its daemon-side session discarded, so the old conversation mappings stop existing; the purge runs on each start while the option stays on. Nothing is deleted unless the rescue copy reaches disk: immediately before the first deletion the channel appends the doomed routes to `<channel>-sessions-purged.json` in the channel state directory (for example `~/.qwen/channels/my-qq-sessions-purged.json`; characters outside `A-Za-z0-9_-` in the channel name become `_`) and if that write fails it deletes nothing and leaves the routes in place. The file is written only when a deletion actually happens — never on a start that leaves everything alone. It is a JSON list of purge records, each with its `purgedAt` timestamp, `sessionScope`, and `routes`; each route carries its `kind`, `key`, `sessionId`, `target`, and — when the router's persisted session state still records them — `cwd`, `turns`, `startedAt`, `isolation`, and `workspaceCwd`. Records are appended rather than overwritten, so an earlier purge's record survives a later one (the oldest records are dropped once the list passes 20); a file that cannot be read, or does not hold a purge-record list, is reported in the log and renamed to a sibling `<path>.corrupt-<timestamp>` file before the new record is written, so the damaged copy is kept for hand recovery and the new record is never lost. That is routing metadata only — no conversation content — so it shows you what was dropped and lets you re-create the mapping by hand: a route whose record includes `cwd` and no `isolation` resolves to that same workspace when restored; when the record also carries `isolation: "worktree"`, `cwd` is the (usually already removed) per-session worktree, so restore against the record's `workspaceCwd` and keep `isolation` so the router re-attaches it through the managed load path. When the stored state for a route has no `cwd` (the entry is missing, or predates the field), the record simply omits `cwd` rather than guessing, so restoring such a route by hand also needs the channel's workspace path. Setting `sessionScope: "user"` after a purge does **not** bring the old conversations back by itself — those routes are already gone and are not restored automatically.
 
 See [Group Chats](./overview#group-chats) for full details on group policies and mention gating.
+
+## Group Management Tools
+
+With `moderationTools: true`, the channel exposes the QQ group-management API to the agent as **client MCP tools in that channel's sessions**. The tools are **off by default**: they are destructive and run with the bot's own token, so an existing deployment keeps them off until an operator opts in per channel. Once enabled, the agent calls them itself while answering — there is no slash command to type and no operator gate: the platform's own rules are the only limit.
+
+| Tool                | QQ endpoint                                                                             | Requirement                                                                                                                                                     |
+| ------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `qq_recall_message` | `DELETE /v2/groups/{id}/messages/{msg_id}` or `DELETE /v2/users/{id}/messages/{msg_id}` | Bot is a group admin to recall another member's message; within 2 minutes. A direct chat only recalls the bot's own messages, so `message_id` is required there |
+
+Every tool reports the platform's error code and what it means, so the agent can tell "the bot is not a group admin" from "the message is past the 2-minute window" from "this app is not allowed to call this endpoint".
+
+For a group action to reach a member's message by name, the channel remembers the last inbound messages per chat for the platform's 2-minute recall window; a message older than that cannot be recalled at all. That memory is per-process only — after a restart there is nothing to recall by member until new messages arrive.
+
+Each channel instance owns its tools: one bridge can serve several channels, and a tool is only offered to sessions of the channel that registered it, so two QQ channels in one process never act on each other's chats or credentials.
+
+## Outbound Media
+
+With `fileTools: true`, the channel exposes four outbound tools to the agent: `qq_send_file` sends a downloadable file card, `qq_send_image` sends a PNG or JPEG as an image message, `qq_send_video` sends an MP4 as a playable video, and `qq_send_voice` sends a SILK, MP3, WAV, or OGG recording as a voice bar. The model passes an absolute local path. The switch is off by default, because the tools hand a local file to QQ under the bot's own identity.
+
+Every tool uses the same boundary: the path must resolve inside the session's workspace or the system temporary directory — a symlink out of the workspace is resolved first and refused, a file with more than one hard link is refused, and where the platform exposes `/proc/self/fd` the opened descriptor is re-resolved so a directory swapped between the check and the open is caught — and the file must be a non-empty regular file. `qq_send_file` accepts any format up to 20 MiB, keeping the repository's outbound cap so the file stays in memory and the exposure stays bounded. The media tools cap at the platform's soft limits: an image at 20 MB, a video at 30 MB, and a voice message at 20 MB.
+
+The media tools check the bytes, not the file name. A file whose magic bytes do not match the tool's format list is refused before any upload, and the model is told to use `qq_send_file` instead, which sends it as a file card. The same happens above a soft limit: the platform would otherwise quietly downgrade an over-limit image, video, or voice upload to a file card, and the tool would report success for a different visible outcome. Accepted formats are `png`/`jpg` for images, `mp4` for videos, and `silk`/`mp3`/`wav`/`ogg` for voice messages.
+
+Every upload goes up through the platform's chunked path (`upload_prepare` → PUT each part → `upload_part_finish` → merge), which is the only path that fits a local file: the URL form needs a public origin the bot does not have, and the binary form stops at 5 MB. A transient `40093001` on a part is retried; `40093002` (the chat's daily file-sending limit) is reported as permanent. A rejected send is never replaced by a text message, because that would read as success while the user never received the media.
+
+The upload is followed by a `msg_type=7` send that reuses the text path's reply anchor and `msg_seq` counter, so media sent mid-turn stays in the same reply chain as that turn's text and cannot replay a `(msg_id, msg_seq)` pair the platform dedupes. The channel anchors a reply for 5 minutes in every chat type — the platform allows 60 minutes for a direct chat, but the channel's own anchor expires first, so a long turn can fall out of the reply window and the media is then sent as an active message. When a group admin has turned active messages off and that window has closed, the tool reports the refusal instead of dropping the media.
+
+Each channel instance owns its tools: one bridge can serve several channels, and the outbound tools are only offered to sessions of the channel that registered them.
 
 ## Markdown Support
 
@@ -164,7 +194,7 @@ Image input requires a model that accepts images. Declare the capability when th
 
 With a text-only model the agent receives an "unsupported image" note plus the saved path instead of the picture.
 
-Sending images, videos, files, or voice messages back to QQ is not supported.
+Sending media back to QQ is supported through the opt-in outbound tools — see [Outbound Media](#outbound-media).
 
 ## Token Management
 
