@@ -108,6 +108,31 @@ public final class ManagedSessionStoreModels {
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration) {
     }
 
+    public record OwnershipCommitProof(@Min(0) @Max(MAX_SAFE_COUNTER) long lastCommitSequence,
+            @NotBlank @Pattern(regexp = "[0-9a-f]{64}") String committedPrefixHash) {
+    }
+
+    public record QuiesceOwnershipRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long placementEpoch,
+            @NotBlank @Size(max = 144) String instanceId,
+            @NotBlank @Size(max = 144) String bootId) {
+    }
+
+    public record ReleaseOwnershipRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long journalRevision,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long placementEpoch,
+            @NotBlank @Size(max = 144) String instanceId,
+            @NotBlank @Size(max = 144) String bootId,
+            @NotBlank @Size(max = 512) String operationId,
+            @NotNull @jakarta.validation.Valid OwnershipCommitProof commitProof) {
+    }
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WriterGrant(long writerGeneration, long leaseUntil,
             long journalRevision, long committedSequence,
