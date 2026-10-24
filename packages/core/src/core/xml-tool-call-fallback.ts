@@ -28,6 +28,7 @@ export interface ExtractedToolCall {
 interface ToolCallBlock extends ExtractedToolCall {
   start: number;
   end: number;
+  parameterSpans: Array<[number, number]>;
 }
 
 /**
@@ -91,6 +92,33 @@ function stripDelimitingNewlines(value: string): string {
   return result;
 }
 
+function rangeContains(
+  ranges: ReadonlyArray<readonly [number, number]>,
+  index: number,
+): boolean {
+  return ranges.some(([start, end]) => index >= start && index < end);
+}
+
+/**
+ * Returns `text` between `from` and `to` with `ranges` removed. The ranges
+ * must be sorted by start; an overlap is trimmed, not double-counted.
+ */
+function textOutside(
+  text: string,
+  ranges: ReadonlyArray<readonly [number, number]>,
+  from = 0,
+  to = text.length,
+): string {
+  let result = '';
+  let cursor = from;
+  for (const [start, end] of ranges) {
+    if (end <= cursor) continue;
+    if (start > cursor) result += text.slice(cursor, start);
+    cursor = Math.max(cursor, end);
+  }
+  return result + text.slice(cursor, to);
+}
+
 /**
  * Returns true when `index` falls inside an unclosed fenced code block.
  * Tracks delimiter type and length so a fence is only closed by a run of
@@ -99,8 +127,7 @@ function stripDelimitingNewlines(value: string): string {
  * close). A closing fence must also be whitespace-only after the delimiter
  * run — CommonMark forbids an info string on a closing fence.
  *
- * Lines inside `parameterRanges` are skipped: they are parameter values,
- * not prose, so fence-like content there must not affect fence state.
+ * Parameter data is skipped; only prose can open or close its fences.
  */
 function positionInsideFence(
   text: string,
@@ -111,40 +138,42 @@ function positionInsideFence(
   let lineStart = 0;
   for (const line of text.slice(0, index).split('\n')) {
     const lineEnd = lineStart + line.length;
-    const insideParameter = parameterRanges.some(
-      ([start, end]) => lineStart >= start && lineStart < end,
-    );
+    const startsInsideParameter = rangeContains(parameterRanges, lineStart);
     lineStart = lineEnd + 1;
-    if (insideParameter) continue;
     const m = /^ {0,3}((`{3,})|~{3,})/.exec(line);
     if (!m) continue;
     const delim = m[2] ? '`' : '~';
     const len = m[1].length;
-    if (openFence === null) openFence = { delim, len };
-    else if (
+    const closes =
+      openFence !== null &&
       openFence.delim === delim &&
       len >= openFence.len &&
-      line.slice(m[0].length).trim() === ''
-    )
+      line.slice(m[0].length).trim() === '';
+    if (startsInsideParameter) continue;
+    if (openFence === null) {
+      openFence = { delim, len };
+    } else if (closes) {
       openFence = null;
+    }
   }
   return openFence !== null;
 }
 
-function computeExampleRanges(
+function exampleTagPositions(
   text: string,
   parameterRanges: Array<[number, number]>,
-): Array<[number, number]> {
+): Set<number> | null {
   // marked's inline lexer is super-linear on unterminated link/emphasis runs
   // and nothing bounds the model's output length, so it is only worth running
-  // when the text can actually produce an example range. The tag scan below
+  // when the text can actually produce an example range. The caller's tag scan
   // re-checks every candidate against `tagPositions`, so skipping the lexer
   // here can only yield "no ranges" — which is what an example-free text has.
-  if (!text.includes('<example') && !text.includes('</example')) return [];
+  if (!text.includes('<example') && !text.includes('</example'))
+    return new Set();
 
   // Over the cap the lexer is skipped and every regex-matched tag is taken at
   // face value, which is the regex-only behaviour this replaced.
-  let skipLexer = text.length > MAX_LEXER_SCAN_LENGTH;
+  if (text.length > MAX_LEXER_SCAN_LENGTH) return null;
   const tagPositions = new Set<number>();
   function collectTags(tokens: Token[], raw: string, baseOffset: number) {
     let cursor = 0;
@@ -170,33 +199,74 @@ function computeExampleRanges(
   }
   proseParts.push(text.slice(cursor));
   const prose = proseParts.join('');
-  if (!skipLexer) {
-    try {
-      collectTags(Lexer.lexInline(prose), prose, 0);
-    } catch {
-      // Preserve example filtering with the same fallback as oversized text.
-      skipLexer = true;
-    }
+  try {
+    collectTags(Lexer.lexInline(prose), prose, 0);
+  } catch {
+    // Preserve example filtering with the same fallback as oversized text.
+    return null;
   }
+  return tagPositions;
+}
 
+function computeExampleRanges(
+  text: string,
+  parameterRanges: Array<[number, number]>,
+  tagPositions: Set<number> | null,
+  quotedValueRanges: Array<[number, number]>,
+): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
+  const ambiguous = new Map<number, number>();
   const tags = /<\/?example(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
   let depth = 0;
   let start = 0;
+  let quotedIndex = 0;
+  // Earlier documentation masks affect later values' context, so merge their
+  // start events into this tag scan instead of classifying them all up front.
+  function maskValuesBefore(index: number) {
+    while (quotedIndex < quotedValueRanges.length) {
+      const span = quotedValueRanges[quotedIndex];
+      if (span[0] > index) break;
+      if (depth > 0 || positionInsideFence(text, span[0], parameterRanges)) {
+        if (
+          depth > 0 &&
+          /<\/?example(?=[\s/>])/.test(text.slice(span[0], span[1]))
+        ) {
+          // A value inside a documentation region carries an example tag:
+          // whether the tag is data or structure cannot be resolved. Each
+          // opener the value leaves unclosed would, as structure, consume one
+          // more closer, so the region stays documentation through that many
+          // extra closers — and no further, so a stray closer later in the
+          // turn cannot swallow the calls that follow the documentation.
+          const value = text.slice(span[0], span[1]);
+          const unclosed =
+            (value.match(
+              /<example(?=[\s>])(?:[^>"']|"[^"]*"|'[^']*')*(?<!\/)>/g,
+            )?.length ?? 0) -
+            (value.match(/<\/example(?=[\s/>])/g)?.length ?? 0);
+          ambiguous.set(
+            start,
+            (ambiguous.get(start) ?? 0) + Math.max(0, unclosed),
+          );
+        }
+        parameterRanges.push(span);
+      }
+      quotedIndex++;
+    }
+  }
   let match: RegExpExecArray | null;
   while ((match = tags.exec(text)) !== null) {
     const tagPosition = match.index;
+    maskValuesBefore(tagPosition);
+    const closes = match[0].startsWith('</');
     if (
-      (!skipLexer && !tagPositions.has(tagPosition)) ||
-      parameterRanges.some(
-        ([start, end]) => tagPosition >= start && tagPosition < end,
-      ) ||
-      positionInsideFence(text, tagPosition, parameterRanges)
+      rangeContains(parameterRanges, tagPosition) ||
+      (tagPositions !== null && !tagPositions.has(tagPosition))
     ) {
       continue;
     }
+    if (positionInsideFence(text, tagPosition, parameterRanges)) continue;
     if (/\/\s*>$/.test(match[0])) continue;
-    if (match[0].startsWith('</')) {
+    if (closes) {
       if (depth > 0 && --depth === 0) {
         ranges.push([start, tagPosition + match[0].length]);
       }
@@ -205,7 +275,33 @@ function computeExampleRanges(
       depth += 1;
     }
   }
+  maskValuesBefore(text.length);
   if (depth > 0) ranges.push([start, text.length]);
+  for (const [from, unclosed] of ambiguous) {
+    let end = -1;
+    let open = unclosed;
+    const scan = new RegExp(tags.source, 'g');
+    scan.lastIndex = from;
+    let tag: RegExpExecArray | null;
+    while ((tag = scan.exec(text)) !== null) {
+      if (
+        rangeContains(quotedValueRanges, tag.index) ||
+        rangeContains(parameterRanges, tag.index) ||
+        (tagPositions !== null && !tagPositions.has(tag.index)) ||
+        positionInsideFence(text, tag.index, parameterRanges) ||
+        /\/\s*>$/.test(tag[0])
+      ) {
+        continue;
+      }
+      if (!tag[0].startsWith('</')) {
+        open += 1;
+        continue;
+      }
+      end = tag.index + tag[0].length;
+      if (--open === 0) break;
+    }
+    ranges.push([from, end === -1 ? text.length : end]);
+  }
   return ranges;
 }
 
@@ -213,11 +309,8 @@ function computeExampleRanges(
  * Returns the offset just past the end of the open tag at the start of a
  * matched block, or -1 when the block holds no unquoted `>`.
  *
- * The invoke branch of TOOL_CALL_PATTERN admits `>` inside the quoted name, so
- * deriving the tag end with `indexOf('>')` can land in the middle of the open
- * tag. A rescan from there matches a complete call embedded in that name
- * attribute and dispatches it out of a block the guard has just rejected.
- * Tracking quote runs makes the tag end the first `>` outside a quoted run.
+ * Quote pairs determine the actual boundary. Compare it with the flat
+ * matcher's boundary before trusting a matched call's attributes.
  */
 function openTagEnd(block: string): number {
   let quote: string | null = null;
@@ -239,6 +332,45 @@ function openTagEnd(block: string): number {
 const PARAMETER_TAG_PATTERN =
   /<\/?parameter(?=[\s=>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
 
+// A parameter opener the strict grammar can validate, matched at a fixed
+// offset. PARAMETER_PATTERN is looser and also admits mixed quote characters.
+const PARAMETER_OPEN_TAG_PATTERN =
+  /<parameter(?:\s+name=(["'])[^"']+\1|=[^\s<>"']+)>/y;
+
+/**
+ * Returns the value of a complete parameter element the strict grammar
+ * validates, or null when the element is malformed or truncated. The flat
+ * grammar admits mixed quote characters in a name, where the value boundary
+ * cannot be trusted.
+ */
+function parameterValue(element: string): string | null {
+  PARAMETER_OPEN_TAG_PATTERN.lastIndex = 0;
+  if (
+    !PARAMETER_OPEN_TAG_PATTERN.test(element) ||
+    !element.endsWith('</parameter>')
+  ) {
+    return null;
+  }
+  return element.slice(openTagEnd(element), -'</parameter>'.length);
+}
+
+function hasBalancedQuotedCalls(value: string): boolean {
+  const tags =
+    /<invoke\s+name=["'][^"']+["']>|<function=[^\s<>]+>|<\/(invoke|function)>/g;
+  const stack: string[] = [];
+  let hasCall = false;
+  let tag: RegExpExecArray | null;
+  while ((tag = tags.exec(value)) !== null) {
+    if (tag[1]) {
+      if (stack.pop() !== tag[1]) return false;
+      hasCall = true;
+    } else {
+      stack.push(tag[0].startsWith('<invoke') ? 'invoke' : 'function');
+    }
+  }
+  return hasCall && stack.length === 0;
+}
+
 /**
  * Returns the spans of the parameter elements whose open tag is paired with a
  * later close tag, matched by depth.
@@ -255,7 +387,9 @@ const PARAMETER_TAG_PATTERN =
  * value merely mentioning the tag shape does not make the region behind it
  * unrescannable.
  */
-function closedParameterSpans(text: string): Array<[number, number]> {
+function closedParameterSpans(
+  text: string,
+): [Array<[number, number]>, number[]] {
   const spans: Array<[number, number]> = [];
   const openStarts: number[] = [];
   PARAMETER_TAG_PATTERN.lastIndex = 0;
@@ -270,13 +404,129 @@ function closedParameterSpans(text: string): Array<[number, number]> {
       openStarts.push(tagMatch.index);
     }
   }
-  return spans;
+  // Whatever is left on the stack is an element the stream never closed. Its
+  // interior is still value data, so the comment scan must treat it as opaque
+  // exactly like a closed span; without it a `<!--` in a truncated value opens
+  // a comment region that runs to end of turn and vetoes genuine siblings.
+  return [spans, openStarts];
+}
+
+/**
+ * Offsets of call openers the stream never closed, matched by depth.
+ *
+ * An unclosed parameter opener is only evidence of a truncated value when a
+ * call opener the stream never closed precedes it. A prose mention of the tag
+ * shape is unclosed too, and counting it would treat the whole remainder of
+ * the turn as value data.
+ */
+function unclosedCallOpenerOffsets(text: string): number[] {
+  const tags =
+    /<invoke\s+name=["'][^"']+["']>|<function=[^\s<>]+>|<\/(invoke|function)>/g;
+  const open: number[] = [];
+  let tag: RegExpExecArray | null;
+  while ((tag = tags.exec(text)) !== null) {
+    if (tag[0][1] === '/') open.pop();
+    else open.push(tag.index);
+  }
+  return open;
+}
+
+/**
+ * Documentation regions the fence and `<example>` guards cannot see: HTML
+ * comments and CommonMark indented code blocks. A call there is shown to the
+ * model, not emitted by it, so it must not dispatch. See #13492.
+ *
+ * Comments only open at the start of a line outside a fence, so a prose
+ * mention of the sequence stays prose and an opener a value owns is data —
+ * whether or not the stream ever closed that value. Indented code cannot
+ * interrupt a paragraph or a list item, so it starts only after a blank line
+ * and, inside a list item, only past that item's content column.
+ */
+function hiddenDocumentationRanges(
+  text: string,
+  valueSpans: ReadonlyArray<readonly [number, number]>,
+  parameterRanges: Array<[number, number]>,
+  unclosedParameterStarts: readonly number[],
+): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let lineStart = 0;
+  let commentStart = -1;
+  let inComment = false;
+  let previousBlank = true;
+  let inIndentedCode = false;
+  let listContentIndent = -1;
+  for (const line of text.split('\n')) {
+    const blank = line.trim() === '';
+    const indent = line.length - line.trimStart().length;
+    // No terminator search on the continuation lines: the opener scan below
+    // already walked every `-->` in the remainder and found none outside a
+    // value, so a terminator here is necessarily value data. An unterminated
+    // region runs to end of turn, pushed once after the loop.
+    if (!inComment) {
+      const listItem = /^( {0,3})(?:[-*+]|\d{1,9}[.)])(\s+)/.exec(line);
+      if (listItem) {
+        const markerEnd = listItem[0].length - listItem[2].length;
+        listContentIndent =
+          markerEnd + (listItem[2].length >= 5 ? 1 : listItem[2].length);
+      } else if (!blank && indent < listContentIndent) {
+        listContentIndent = -1;
+      }
+      const open = /^ {0,3}<!--/.exec(line);
+      const openerStart = open ? lineStart + open[0].length - 4 : -1;
+      if (
+        open &&
+        !rangeContains(valueSpans, openerStart) &&
+        !positionInsideFence(text, openerStart, parameterRanges)
+      ) {
+        // The scan starts at the opener itself so the abrupt-close forms
+        // `<!-->` and `<!--->` — complete empty comments, whose terminator
+        // overlaps the opener — close here instead of masking the whole
+        // remainder of the turn. A terminator inside a value is data, not the
+        // end of the comment.
+        let close = text.indexOf('-->', openerStart);
+        while (close !== -1 && rangeContains(valueSpans, close)) {
+          close = text.indexOf('-->', close + 3);
+        }
+        if (close !== -1) {
+          ranges.push([openerStart, close + 3]);
+        } else if (
+          // Unterminated, the region runs to end of turn. When the opener sits
+          // in a value the stream never closed, that value is data, and
+          // masking the remainder would veto genuine siblings in exactly the
+          // truncated streams this fallback exists for. A terminated comment
+          // stays masked whichever value owns it.
+          !unclosedParameterStarts.some((start) => start <= openerStart)
+        ) {
+          inComment = true;
+          commentStart = openerStart;
+        }
+      } else if (
+        /^(?: {4,}|\t)\S/.test(line) &&
+        (inIndentedCode || previousBlank) &&
+        // A list item's lazy continuation is indented below its content column
+        // + 4, which makes it a paragraph rather than an indented code block.
+        (listContentIndent < 0 ||
+          /^\t/.test(line) ||
+          indent >= listContentIndent + 4)
+      ) {
+        ranges.push([lineStart, lineStart + line.length]);
+        inIndentedCode = true;
+      } else if (!blank) {
+        inIndentedCode = false;
+      }
+    }
+    previousBlank = blank;
+    lineStart += line.length + 1;
+  }
+  if (inComment) ranges.push([commentStart, text.length]);
+  return ranges;
 }
 
 /**
  * Extracts XML-style tool calls from plain text content.
- * Tool-call blocks inside fences or explicit example wrappers are skipped:
- * they document the format rather than emitting a tool call. See #8003.
+ * Tool-call blocks inside fences, explicit example wrappers, HTML comments or
+ * indented code blocks are skipped: they document the format rather than
+ * emitting a tool call. See #8003.
  * Returns an array of extracted tool calls, or an empty array if none found.
  */
 function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
@@ -295,13 +545,51 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       rangeMatch.index + rangeMatch[0].length,
     ]);
   }
-
-  // Regions a closed parameter value owns. A call matched inside one is markup
-  // the value quotes rather than a call the model emitted, so it must not be
-  // dispatched: documentation would otherwise execute, and the block quoting
-  // it stays behind as prose. Skipping the match whole also keeps the
-  // rejected-block rescan below out of the value it belongs to. See #13492.
-  const valueSpans = closedParameterSpans(text);
+  // Regions a closed parameter value owns, outermost only. A call matched
+  // inside one is markup the value quotes rather than a call the model
+  // emitted, so it must not be dispatched; the flat match of a block quoting
+  // such a value also ends inside one, so the value is what tells the scan
+  // where that block really ends. See #13492.
+  const [closedSpans, unclosedParameterStarts] = closedParameterSpans(text);
+  const valueSpans: Array<[number, number]> = [];
+  let valueEnd = 0;
+  for (const span of closedSpans.sort(
+    ([startA], [startB]) => startA - startB,
+  )) {
+    if (span[0] < valueEnd) continue;
+    valueEnd = span[1];
+    valueSpans.push(span);
+  }
+  // A value the strict grammar can delimit owns its complete extent, so the
+  // block's arguments are read from that span instead of the flat match.
+  const ownedValueRanges: Array<[number, number]> = [];
+  const quotedValueRanges: Array<[number, number]> = [];
+  for (const [start, end] of valueSpans) {
+    const value = parameterValue(text.slice(start, end));
+    if (value === null) continue;
+    ownedValueRanges.push([start, end]);
+    if (hasBalancedQuotedCalls(value)) quotedValueRanges.push([start, end]);
+  }
+  const unclosedCallStarts = unclosedCallOpenerOffsets(text);
+  const hiddenDocs = hiddenDocumentationRanges(
+    text,
+    valueSpans,
+    parameterRanges,
+    // Containment, not precedence: an unclosed parameter opener only marks
+    // the region behind it as value data when a call opener the stream never
+    // closed precedes it. A prose mention of the tag shape is unclosed too,
+    // and letting it stand disables the comment mask for the whole remainder.
+    unclosedParameterStarts.filter((start) =>
+      unclosedCallStarts.some((callStart) => callStart < start),
+    ),
+  );
+  const tagPositions = exampleTagPositions(text, parameterRanges);
+  const exampleRanges = computeExampleRanges(
+    text,
+    parameterRanges,
+    tagPositions,
+    quotedValueRanges,
+  );
 
   TOOL_CALL_PATTERN.lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -313,16 +601,114 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       continue;
     }
     const toolName = match[1] ?? match[3];
-    const paramsBlock = match[2] ?? match[4];
-    // A rejected block may have swallowed a complete later block, so rescan
-    // from just after this block's open tag instead of its borrowed close.
-    // When the tag end is not derivable, skip the whole block: rescanning
-    // inside a rejected block is what dispatches markup it never accepted.
-    const tagEnd = openTagEnd(match[0]);
-    const resumeAt =
-      tagEnd === -1 ? match.index + match[0].length : match.index + tagEnd;
+    const closeTag = match[1] !== undefined ? '</invoke>' : '</function>';
+    // `match[0]` is exactly openTag + body + closeTag, so the body length is
+    // what separates this block's open tag from its parameters. Deriving the
+    // split location by scanning instead returns an offset inside the body
+    // whenever the name attribute opens with one quote character and closes
+    // with the other — the name group's delimiters are independent classes —
+    // which silently drops every parameter before that offset.
+    let closeStart = match.index + match[0].length - closeTag.length;
+    const lazyCloseStart = closeStart;
+    const paramsStart = lazyCloseStart - (match[2] ?? match[4]).length;
+    const openTagEndOffset = openTagEnd(match[0]);
+    if (openTagEndOffset !== paramsStart - matchStart) {
+      // Only this block's boundary is untrustworthy: a quote run in the name
+      // leaves no unquoted `>`, or quote pairs put the flat boundary inside an
+      // attribute. Reject the block without costing the turn, and resume at
+      // the flat match end: any offset inside the block comes from the same
+      // quote-pairing walk just distrusted and can re-enter its body.
+      TOOL_CALL_PATTERN.lastIndex = match.index + match[0].length;
+      continue;
+    }
+    // A value the block quotes a call in owns the flat close that landed
+    // inside it; the block's own closer is the first one past that value. The
+    // spans are sorted and disjoint and `closeStart` only moves forward.
+    for (const [start, end] of quotedValueRanges) {
+      if (end <= closeStart) continue;
+      if (start > closeStart) break;
+      closeStart = text.indexOf(closeTag, end);
+      if (closeStart === -1) break;
+    }
+    if (closeStart === -1) {
+      TOOL_CALL_PATTERN.lastIndex = paramsStart;
+      continue;
+    }
+    const paramsBlock = text.slice(paramsStart, closeStart);
+    const blockEnd = closeStart + closeTag.length;
+    TOOL_CALL_PATTERN.lastIndex = blockEnd;
+
+    const args: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
+    let outsideParameters = '';
+    let cursor = 0;
+    // Text-coordinate spans of the parameter elements this block consumed.
+    const parameterSpans: Array<[number, number]> = [];
+    // Only the values this block's own scan consumed may be excised from
+    // `unquotedParameters`: excising a value that merely lies inside the block
+    // hides a call opener the flat scan dispatched verbatim inside an argument.
+    const consumedValueSpans: Array<[number, number]> = [];
+    let duplicateParameter = false;
     PARAMETER_PATTERN.lastIndex = 0;
-    const outsideParameters = paramsBlock.replace(PARAMETER_PATTERN, '');
+    let paramMatch: RegExpExecArray | null;
+    while ((paramMatch = PARAMETER_PATTERN.exec(paramsBlock)) !== null) {
+      const parameterStart = paramsStart + paramMatch.index;
+      const owned = ownedValueRanges.find(
+        ([start, end]) => start === parameterStart && end <= closeStart,
+      );
+      let value = paramMatch[3];
+      let parameterEnd = paramMatch.index + paramMatch[0].length;
+      if (owned) {
+        consumedValueSpans.push(owned);
+        parameterEnd = owned[1] - paramsStart;
+        value = paramsBlock.slice(
+          paramMatch.index + openTagEnd(paramMatch[0]),
+          parameterEnd - '</parameter>'.length,
+        );
+        PARAMETER_PATTERN.lastIndex = parameterEnd;
+      }
+      outsideParameters += paramsBlock.slice(cursor, paramMatch.index);
+      cursor = parameterEnd;
+      parameterSpans.push([parameterStart, paramsStart + parameterEnd]);
+      const paramName = paramMatch[1] ?? paramMatch[2];
+      // A second element with the same name would silently overwrite the
+      // first, and the advance can pull a stray element behind a quoted value
+      // into the block. Duplicate names are ambiguous, so reject the block.
+      if (paramName in args) {
+        duplicateParameter = true;
+      } else {
+        args[paramName] = parseParameterValue(
+          decodeXmlEntities(stripDelimitingNewlines(value)),
+        );
+      }
+    }
+    outsideParameters += paramsBlock.slice(cursor);
+    if (duplicateParameter) {
+      TOOL_CALL_PATTERN.lastIndex = paramsStart;
+      continue;
+    }
+    const unquotedParameters = textOutside(
+      text,
+      consumedValueSpans,
+      paramsStart,
+      closeStart,
+    );
+    // An advance may only step over regions this block owns: the search for a
+    // later closer is unbounded, so without this it also binds the block to a
+    // closer merely mentioned in the prose that follows, which silently drops
+    // every parameter behind it and reinserts the block's own markup into the
+    // visible turn. What the advance swallowed must therefore be nothing but
+    // the block's own parameter elements and the values inside them.
+    if (
+      closeStart > lazyCloseStart &&
+      textOutside(text, parameterSpans, lazyCloseStart, closeStart).trim() !==
+        ''
+    ) {
+      TOOL_CALL_PATTERN.lastIndex = paramsStart;
+      continue;
+    }
     // A missing close must not borrow a later block's parameters or recover
     // only the arguments preceding a prematurely matched function close, so
     // reject a call opener the parameters did not consume. A closer is only
@@ -331,26 +717,12 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     // this syntax literally — and counting it as unclosed rejected the intact
     // call, which then never ran and left its raw markup visible.
     if (
-      /<(?:function|invoke)(?:[\s=>]|$)/.test(paramsBlock) ||
+      /<(?:function|invoke)(?:[\s=>]|$)/.test(unquotedParameters) ||
       /<\/?(?:function|invoke|parameter)(?:[\s=>]|$)/.test(outsideParameters) ||
       /^ {0,3}(?:`{3,}|~{3,})/m.test(outsideParameters)
     ) {
-      TOOL_CALL_PATTERN.lastIndex = resumeAt;
+      TOOL_CALL_PATTERN.lastIndex = paramsStart;
       continue;
-    }
-
-    const args: Record<string, unknown> = Object.create(null) as Record<
-      string,
-      unknown
-    >;
-    PARAMETER_PATTERN.lastIndex = 0;
-    let paramMatch: RegExpExecArray | null;
-    while ((paramMatch = PARAMETER_PATTERN.exec(paramsBlock)) !== null) {
-      const paramName = paramMatch[1] ?? paramMatch[2];
-      const paramValue = decodeXmlEntities(
-        stripDelimitingNewlines(paramMatch[3]),
-      );
-      args[paramName] = parseParameterValue(paramValue);
     }
 
     if (toolName && Object.keys(args).length > 0) {
@@ -358,22 +730,78 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
         name: toolName,
         args,
         start: match.index,
-        end: match.index + match[0].length,
+        end: blockEnd,
+        parameterSpans,
       });
     }
   }
 
-  const exampleRanges = computeExampleRanges(text, parameterRanges);
-  return blocks.filter(
-    ({ start, end }) =>
+  const eligibleBlocks = blocks.filter((block) => isEligibleBlock(block));
+  let extendedMasks = false;
+  for (const block of eligibleBlocks) {
+    for (const [start, end] of block.parameterSpans) {
+      if (!parameterRanges.some(([from, to]) => start >= from && end <= to)) {
+        parameterRanges.push([start, end]);
+        extendedMasks = true;
+      }
+    }
+  }
+  if (!extendedMasks) return eligibleBlocks;
+  // Documentation spans are appended out of text order and overlap the flat
+  // matches they extend, so restore the ordered, disjoint sequence the mask
+  // below needs: example tag offsets are read back against the unmasked text.
+  parameterRanges.sort(([startA], [startB]) => startA - startB);
+  let rangeCount = 0;
+  for (let index = 0; index < parameterRanges.length; index++) {
+    const current = parameterRanges[index];
+    const previous = parameterRanges[rangeCount - 1];
+    if (previous && current[0] <= previous[1]) {
+      previous[1] = Math.max(previous[1], current[1]);
+    } else {
+      parameterRanges[rangeCount++] = current;
+    }
+  }
+  parameterRanges.length = rangeCount;
+  const refreshedExamples = computeExampleRanges(
+    text,
+    parameterRanges,
+    exampleTagPositions(text, parameterRanges),
+    quotedValueRanges,
+  );
+  // Reconsider every block, not just the ones the un-extended masks kept: a
+  // live block's value tail is data, so it can move a later sibling out of a
+  // fence the flat view put it in.
+  return blocks.filter((block) => isEligibleBlock(block, refreshedExamples));
+
+  function isEligibleBlock(
+    { start, end, parameterSpans }: ToolCallBlock,
+    examples: Array<[number, number]> = exampleRanges,
+  ): boolean {
+    return (
+      // Both ends, like the fence and example guards below: a comment opener
+      // inside the block's own body masks its tail, so probing only `start`
+      // dispatches a call the module just classified as documentation.
+      !hiddenDocs.some(
+        ([from, to]) =>
+          (start >= from && start < to) || (end - 1 >= from && end - 1 < to),
+      ) &&
       !positionInsideFence(text, start, parameterRanges) &&
-      !positionInsideFence(text, end - 1, parameterRanges) &&
-      !exampleRanges.some(
+      !positionInsideFence(
+        text,
+        end - 1,
+        parameterRanges.concat(parameterSpans),
+      ) &&
+      !examples.some(
         ([exampleStart, exampleEnd]) =>
           (start >= exampleStart && start < exampleEnd) ||
-          (end - 1 >= exampleStart && end - 1 < exampleEnd),
-      ),
-  );
+          (end - 1 >= exampleStart &&
+            end - 1 < exampleEnd &&
+            !parameterSpans.some(
+              ([from, to]) => exampleStart >= from && exampleStart < to,
+            )),
+      )
+    );
+  }
 }
 
 export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
@@ -401,29 +829,29 @@ export function tryRecoverXmlToolCalls(text: string): {
     return { recovered: false, functionCallParts: [], remainingText: text };
   }
 
-  // Intent guard: only recover when XML blocks dominate the content.
-  // Substantial surrounding prose suggests the model is documenting or
-  // echoing the format, not emitting a tool call. Measure against all
-  // tool-call blocks (including parameterless ones the extraction skips).
+  const removedRanges: Array<[number, number]> = extracted.map(
+    ({ start, end }) => [start, end],
+  );
+  const withoutRecoveredCalls = textOutside(text, removedRanges);
+  // The measure counts something as prose only when no block claimed it, on the
+  // complete boundaries argument extraction uses: a rejected block leaves an
+  // opener behind that the lazy pattern can only delete as a pair, so charging
+  // that markup to prose refused a turn whose only call was recovered. Text
+  // that merely looks like a tag stays prose, as it does on the base. See
+  // #13492.
+  const proseRanges: Array<[number, number]> = [...removedRanges];
   TOOL_CALL_PATTERN.lastIndex = 0;
-  const proseOnly = text
-    .replace(TOOL_CALL_PATTERN, '')
+  let claimed: RegExpExecArray | null;
+  while ((claimed = TOOL_CALL_PATTERN.exec(text)) !== null) {
+    proseRanges.push([claimed.index, claimed.index + claimed[0].length]);
+  }
+  proseRanges.sort(([startA], [startB]) => startA - startB);
+  const proseOnly = textOutside(text, proseRanges)
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   if (text.length > 0 && proseOnly.length / text.length > 0.8) {
     return { recovered: false, functionCallParts: [], remainingText: text };
   }
-
-  const removedRanges = extracted.map(
-    ({ start, end }) => [start, end] as const,
-  );
-  let withoutRecoveredCalls = '';
-  let cursor = 0;
-  for (const [start, end] of removedRanges) {
-    withoutRecoveredCalls += text.slice(cursor, start);
-    cursor = end;
-  }
-  withoutRecoveredCalls += text.slice(cursor);
   const remainingText = withoutRecoveredCalls
     .replace(
       /<tool_call>\s*<\/tool_call>|<function_calls>\s*<\/function_calls>/g,
