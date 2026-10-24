@@ -215,12 +215,25 @@ describe('SDK Java self-hosted workflow guards', () => {
     ['mysql-integration', 'helper-ok', 0],
     ['mysql-integration', 'fallback', 0],
     ['mysql-integration', 'fallback-ok', 0],
+    ['mysql-integration', 'helper', 1],
+    ['mysql-integration', 'fallback', 1],
+    // The probe's exists branch and its documented unknown fallback.
+    ['test', 'helper', 0, 1],
+    ['mysql-integration', 'helper', 0, 1],
+    ['test', 'helper', 0, 'unknown'],
   ])(
     'skips the %s cache write-back when its lock is not acquired (%s, status %s)',
-    (name, mode, status) => {
+    (name, mode, status, seed = 0) => {
       const locked = parse(workflow).jobs[name].steps.find((s) =>
         s.run?.includes('sdk-java-tests.lock'),
       );
+      // The summary's seed field is fed by this probe, which sits above the
+      // executed slice. Run the lane's own line so a deleted or renamed
+      // probe cannot keep the suite green on the fallback alone.
+      const seedProbe = locked.run
+        .split('\n')
+        .find((line) => line.includes('SDK_JAVA_M2_SEED_EXISTED='));
+      expect(seedProbe, 'seed probe present').toBeTruthy();
       const lockStart = locked.run.indexOf('lock_status=0');
       const lockEnd = locked.run.indexOf('mkdir -p "${HOME}/.m2/repository"');
       expect(lockStart).toBeGreaterThan(-1);
@@ -240,6 +253,10 @@ describe('SDK Java self-hosted workflow guards', () => {
         };
         mkdirSync(workspace, { recursive: true });
         mkdirSync(join(home, '.cache', 'qwen-code-ci'), { recursive: true });
+        if (seed === 1) {
+          mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+        }
+        delete env.SDK_JAVA_M2_SEED_EXISTED;
         if (mode.startsWith('helper')) {
           // The stub mirrors the real helper's fatal timeout line plus a
           // diagnostic the rewrite must pass through. The success case proves
@@ -277,7 +294,8 @@ describe('SDK Java self-hosted workflow guards', () => {
             '-o',
             'pipefail',
             '-c',
-            `suite_status=${status}
+            `${seed === 'unknown' ? '' : seedProbe}
+suite_status=${status}
 gate_status=${status}
 ${locked.run.slice(lockStart, lockEnd)}
 echo REACHED_END`,
@@ -312,8 +330,8 @@ echo REACHED_END`,
           }
           expect(readFileSync(summary, 'utf8')).toContain(
             mode.startsWith('helper')
-              ? 'sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted after 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued); host cache present at seed: unknown'
-              : 'sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted in the bare-flock fallback; host cache present at seed: unknown',
+              ? `sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted after 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued); host cache present at seed: ${seed}`
+              : `sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted in the bare-flock fallback; host cache present at seed: ${seed}`,
           );
           // The guard must stop before the copy; a warning alone would still
           // run the write-back and hold the lock.
