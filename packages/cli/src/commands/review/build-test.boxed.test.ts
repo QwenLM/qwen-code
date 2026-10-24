@@ -97,8 +97,9 @@ describe('run (boxed): the declared heap reaches the container', () => {
     ).toBe(false);
   });
 
-  it("asks npm what the container sees: the tree's .npmrc, no user or global file", () => {
+  it("asks npm what the container sees: the tree's .npmrc, no user or global file, no host variable", () => {
     vi.stubEnv('npm_config_node_options', '--max-old-space-size=700');
+    vi.stubEnv('QWEN_BT_SECRET', 'host-secret');
     try {
       run('npm run build', root, 30_000, 'build');
       const [, args, opts] = callsOf('npm')[0]! as [
@@ -110,11 +111,15 @@ describe('run (boxed): the declared heap reaches the container', () => {
       expect(args).toContain('--userconfig');
       expect(args).toContain('--globalconfig');
       expect(opts.cwd).toBe(root);
+      // What npm needs to start, and nothing a `${VAR}` could name.
       expect(
-        Object.keys(opts.env).some((k) =>
-          k.toLowerCase().startsWith('npm_config_'),
+        Object.keys(opts.env).every((k) =>
+          ['path', 'pathext', 'systemroot', 'comspec'].includes(
+            k.toLowerCase(),
+          ),
         ),
-      ).toBe(false);
+      ).toBe(true);
+      expect(Object.keys(opts.env).length).toBeGreaterThan(0);
     } finally {
       vi.unstubAllEnvs();
     }

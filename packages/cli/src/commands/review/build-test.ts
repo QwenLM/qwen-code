@@ -395,14 +395,29 @@ export function buildRunEnv(
 
 const npmNodeOptionsCache = new Map<string, string | undefined>();
 
+/** What npm needs to start: the host variables an isolated query keeps. */
+const NPM_STARTUP_ENV = new Set(['path', 'pathext', 'systemroot', 'comspec']);
+
 /**
  * The `node-options` npm hands a lifecycle script in place of its
  * `NODE_OPTIONS`, or undefined when npm has none. Any layer can set it — the
  * tree's `.npmrc`, the user's or the global one, `npm_config_node_options` —
- * so it is asked of npm itself, in the tree the command runs in. `isolated`
- * asks what a container sees: the tree's own `.npmrc` only, as its HOME is
- * empty and `containerEnv` passes no npm configuration. A query that fails
- * reads as none. Once per tree: nothing a review runs changes it.
+ * so it is asked of npm itself, in the tree the command runs in.
+ *
+ * npm expands a `${VAR}` in it from its own environment and leaves one it has
+ * no value for as written; the value goes back through
+ * `npm_config_node_options`, and the npm the command runs expands what is
+ * left from the command's environment. So the query is not given a variable
+ * the command sees differently: `PWD`, which the command's shell sets to the
+ * tree, and `NODE_OPTIONS`, which `buildRunEnv` raises — and whose preloads
+ * would run in this npm and print into its answer. `isolated` asks what a
+ * container sees: the tree's own `.npmrc` only, as its HOME is empty and
+ * `containerEnv` passes no npm configuration. That query keeps no host
+ * variable but what npm needs to start, so a `${VAR}` naming a host secret
+ * stays as written, for the container to expand from its own allowlist.
+ *
+ * A query that fails, or answers more than one line, reads as none. Once per
+ * tree: nothing a review runs changes it.
  */
 export function npmNodeOptions(
   cwd: string,
@@ -411,13 +426,13 @@ export function npmNodeOptions(
 ): string | undefined {
   const key = `${isolated}\0${cwd}`;
   if (npmNodeOptionsCache.has(key)) return npmNodeOptionsCache.get(key);
-  const env = isolated
-    ? Object.fromEntries(
-        Object.entries(base).filter(
-          ([k]) => !k.toLowerCase().startsWith('npm_config_'),
-        ),
-      )
-    : base;
+  const env = Object.fromEntries(
+    Object.entries(isolated ? base : buildRunEnv(base)).filter(([k]) =>
+      isolated
+        ? NPM_STARTUP_ENV.has(k.toLowerCase())
+        : !['pwd', 'node_options'].includes(k.toLowerCase()),
+    ),
+  );
   const r = spawnSync(
     'npm',
     [
@@ -441,7 +456,10 @@ export function npmNodeOptions(
   );
   const value = r.status === 0 ? (r.stdout ?? '').trim() : '';
   const options =
-    value === '' || value === 'null' || value === 'undefined'
+    value === '' ||
+    value === 'null' ||
+    value === 'undefined' ||
+    /[\r\n]/.test(value)
       ? undefined
       : value;
   npmNodeOptionsCache.set(key, options);

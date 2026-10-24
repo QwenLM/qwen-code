@@ -258,6 +258,72 @@ describe.skipIf(process.platform === 'win32')(
       expect(npmNodeOptions(root, env, true)).toBeUndefined();
     });
 
+    it('leaves a variable the command sees differently for its own npm to expand', () => {
+      writeFileSync(
+        join(root, '.npmrc'),
+        'node-options=--require=${PWD}/preload.cjs --conditions=${QWEN_BT_SECRET} --title=ci-${CI} --max-old-space-size=512\n',
+      );
+      const env = {
+        ...process.env,
+        PWD: tmpdir(),
+        QWEN_BT_SECRET: 'host-secret',
+        CI: 'true',
+      };
+      // The command's shell sets its own PWD; `buildRunEnv` sets its CI.
+      expect(npmNodeOptions(root, env)).toBe(
+        '--require=${PWD}/preload.cjs --conditions=host-secret --title=ci-1 --max-old-space-size=512',
+      );
+      // A container sees none of the host's variables.
+      expect(npmNodeOptions(root, env, true)).toBe(
+        '--require=${PWD}/preload.cjs --conditions=${QWEN_BT_SECRET} --title=ci-${CI} --max-old-space-size=512',
+      );
+    });
+
+    it('reads an answer of more than one line as none', () => {
+      expect(
+        npmNodeOptions(root, {
+          ...process.env,
+          npm_config_node_options: 'preload ready\n--max-old-space-size=512',
+        }),
+      ).toBeUndefined();
+    });
+
+    it("resolves the .npmrc's ${PWD} in the tree, not this process's PWD", () => {
+      writeFileSync(
+        join(root, '.npmrc'),
+        'node-options=--require=${PWD}/preload.cjs --max-old-space-size=512\n',
+      );
+      vi.stubEnv('PWD', tmpdir());
+      vi.stubEnv('NODE_OPTIONS', '');
+      const r = run('npm run -s probe', root, 60_000, 'build');
+      expect(r.exitCode).toBe(0);
+      expect(r.output).toContain('preloaded heap-ok');
+    });
+
+    it('keeps what an ambient preload prints out of the answer', () => {
+      writeFileSync(
+        join(root, 'logging.cjs'),
+        "process.env.PRELOADED = 'preloaded'; console.log('preload ready');",
+      );
+      vi.stubEnv('NODE_OPTIONS', `--require=${join(root, 'logging.cjs')}`);
+      expect(npmNodeOptions(root)).toBeUndefined();
+      const r = run('npm run -s probe', root, 60_000, 'build');
+      expect(r.exitCode).toBe(0);
+      expect(r.output).toContain('preloaded heap-ok');
+    });
+
+    it('still reads the .npmrc under an ambient preload that prints', () => {
+      writeFileSync(join(root, 'logging.cjs'), "console.log('preload ready');");
+      writeFileSync(
+        join(root, '.npmrc'),
+        `node-options=--require=${join(root, 'preload.cjs')} --max-old-space-size=512\n`,
+      );
+      vi.stubEnv('NODE_OPTIONS', `--require=${join(root, 'logging.cjs')}`);
+      const r = run('npm run -s probe', root, 60_000, 'build');
+      expect(r.exitCode).toBe(0);
+      expect(r.output).toContain('preloaded heap-ok');
+    });
+
     it('hands a lifecycle script the declared heap and the .npmrc preload, whatever the parent heap', () => {
       writeFileSync(
         join(root, '.npmrc'),

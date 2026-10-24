@@ -609,9 +609,10 @@ export function containerCommand(
   // (`buildRunEnv`). Nothing larger can be inherited here: `containerEnv`
   // passes no `NODE_OPTIONS`. npm's own `node-options` — the mounted tree's
   // `.npmrc` can set it, and npm replaces `NODE_OPTIONS` with it — is raised
-  // only where it sets less, keeping its other options. Pushed here, not added
-  // to `containerEnv`, which subagent workers share; and before the image, or
-  // the runtime hands them to `sh -lc` as arguments.
+  // only where it sets less, keeping its other options — and any `${VAR}` in
+  // it, for the container's npm to expand (`npmNodeOptions`). Pushed here, not
+  // added to `containerEnv`, which subagent workers share; and before the
+  // image, or the runtime hands them to `sh -lc` as arguments.
   if (opts.kind !== 'test' && opts.heapMb !== undefined) {
     args.push('--env', `NODE_OPTIONS=--max-old-space-size=${opts.heapMb}`);
     const npm =
