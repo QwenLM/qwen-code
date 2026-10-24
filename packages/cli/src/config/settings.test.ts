@@ -1133,6 +1133,93 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.general?.enableAutoUpdate).toBe(false);
     });
 
+    it('resolves legacy enableAutoUpdate false into updateMode off without rewriting the file (#14274)', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              general: { enableAutoUpdate: false },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.general?.updateMode).toBe('off');
+      // The derived value also reaches the per-scope view exposed to the
+      // settings dialog and daemon, while the on-disk key is left alone.
+      expect(settings.user.settings.general?.updateMode).toBe('off');
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('resolves legacy enableAutoUpdate true into updateMode auto (#14274)', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              general: { enableAutoUpdate: true },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.general?.updateMode).toBe('auto');
+      expect(settings.user.settings.general?.updateMode).toBe('auto');
+    });
+
+    it('keeps an explicit updateMode untouched even when the legacy key disagrees (#14274)', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              general: { updateMode: 'notify', enableAutoUpdate: false },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.general?.updateMode).toBe('notify');
+      expect(settings.user.settings.general?.updateMode).toBe('notify');
+    });
+
+    it('does not inject a derived updateMode when neither key is set (#14274)', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              general: {},
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.general?.updateMode).toBeUndefined();
+      expect(settings.user.settings.general?.updateMode).toBeUndefined();
+    });
+
     it('should bump version to 3 even when V2 settings already have V3-compatible content', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,

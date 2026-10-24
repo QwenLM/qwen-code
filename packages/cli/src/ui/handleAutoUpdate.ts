@@ -13,6 +13,7 @@ import {
   PackageManager,
   resolveUpdateCommand,
 } from '../utils/installationInfo.js';
+import { resolveUpdateMode } from '../utils/update-mode.js';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
 import type { HistoryItemWithoutId } from './types.js';
 import { MessageType } from './types.js';
@@ -41,10 +42,11 @@ export async function handleAutoUpdate(
     return;
   }
 
-  // enableAutoUpdate is checked in llm.tsx before calling this function,
-  // so if we get here, auto-update is enabled (or undefined, which defaults to enabled).
+  // The install decision re-resolves the update mode from settings so an
+  // explicit 'notify' never reaches the spawn paths, regardless of how the
+  // caller gated the check (#14274).
   const isAutoUpdateEnabled =
-    settings.merged.general?.enableAutoUpdate !== false;
+    resolveUpdateMode(settings.merged.general) === 'auto';
 
   const installationInfo = getInstallationInfo(
     projectRoot,

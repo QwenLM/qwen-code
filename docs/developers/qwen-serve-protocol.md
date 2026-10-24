@@ -780,8 +780,9 @@ instructions.
 
 Automatic updates require a real CLI lifecycle with POSIX `process.execve`, a
 standalone or managed global npm installation, and operator settings that permit
-`general.enableAutoUpdate`. Embedded servers, Windows, unsupported Node runtimes,
-and development mode report `unavailable`. Only global/system settings apply;
+updates — `general.updateMode` set to anything other than `"off"` (a legacy
+`general.enableAutoUpdate: false` resolves to `"off"`). Embedded servers,
+Windows, unsupported Node runtimes, and development mode report `unavailable`. Only global/system settings apply;
 workspace settings cannot enable installation. The connection must use the
 primary listener and its daemon runtime token, or the explicitly trusted
 loopback deployment without a token. Paired browsers and Local Control connections

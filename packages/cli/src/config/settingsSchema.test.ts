@@ -722,7 +722,12 @@ describe('SettingsSchema', () => {
       );
       expect(
         getSettingsSchema().general.properties.enableAutoUpdate.showInDialog,
-      ).toBe(true);
+      ).toBe(false);
+      expect(getSettingsSchema().general.properties.updateMode).toMatchObject({
+        type: 'enum',
+        default: 'auto',
+        showInDialog: true,
+      });
       expect(
         getSettingsSchema().ui.properties.hideWindowTitle.showInDialog,
       ).toBe(false);

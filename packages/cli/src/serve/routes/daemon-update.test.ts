@@ -229,6 +229,29 @@ describe('daemon update routes', () => {
     },
   );
 
+  it('keeps checking in notify mode because the daemon never installs (#14274)', async () => {
+    mocks.settings.mockReturnValue({
+      merged: { general: { updateMode: 'notify' } },
+    });
+    const app = await makeApp();
+    const response = await request(app).get('/daemon/update').expect(200);
+    expect(response.body.state).toBe('available');
+    expect(mocks.check).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not check in explicit off mode (#14274)', async () => {
+    mocks.settings.mockReturnValue({
+      merged: { general: { updateMode: 'off' } },
+    });
+    const app = await makeApp();
+    expect((await request(app).get('/daemon/update')).body).toEqual({
+      state: 'unavailable',
+      currentVersion: '1.0.0',
+      canInstall: false,
+    });
+    expect(mocks.check).not.toHaveBeenCalled();
+  });
+
   it('stages one download without activation and retains readiness across app replacement', async () => {
     const pending = deferred<{
       activate: typeof mocks.activate;
