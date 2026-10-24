@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.HostedHarnessStreamIdleException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
@@ -33,6 +34,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -584,6 +586,45 @@ class HarnessCoordinatorTest {
                 eq("turn"), anyString(), anyLong(), eq(false));
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"503,harness_pool_unavailable", "409,harness_owner_still_live",
+            "409,harness_placement_changed", "409,harness_placement_quiescing", "409,harness_placement_released"})
+    void poolCapacityAndOwnershipWaitsOutliveBothAdmissionBudgets(int status, String code) {
+        for (boolean submitted : List.of(false, true)) {
+            var failure = new ManagedAgentException(HttpStatus.valueOf(status), code, "Waiting for a Harness owner");
+            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), anyLong(), eq(true));
+            verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+            verify(store, never()).markTurnFailureRecovery(anyString(), anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    @Test
+    void hostedDrainCutoffOutlivesBothAdmissionBudgets() {
+        for (boolean submitted : List.of(false, true)) {
+            var failure = mock(DaemonHttpException.class);
+            when(failure.getStatusCode()).thenReturn(409);
+            when(failure.getErrorCode()).thenReturn("hosted_harness_quiescing");
+            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), anyLong(), eq(true));
+            verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+            verify(store, never()).markTurnFailureRecovery(anyString(), anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"503,other_unavailable", "403,writer_credential_invalid", "409,harness_session_scope_ambiguous",
+            "409,harness_placement_not_admitted", "409,harness_placement_epoch_exhausted", "400,harness_pool_unavailable"})
+    void poolConfigurationAndUnclassifiedFailuresStillMeetTheAdmissionBudget(int status, String code) {
+        var failure = new ManagedAgentException(HttpStatus.valueOf(status), code, "Cannot admit this Harness owner");
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, false, 100, unboundSessionRecord());
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_unavailable"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(), anyString(), anyString(), anyLong(), anyBoolean());
     }
 
     // A permanent transport failure meets the pre-admission budget even on

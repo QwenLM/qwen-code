@@ -694,6 +694,15 @@ describe('SessionOverviewPanel', () => {
         states[index]?.querySelector('svg')?.outerHTML,
       );
     }
+    const runningCue = rows()[2]!.querySelector(
+      '[data-web-shell-session-status-cue="running"]',
+    )?.firstElementChild;
+    const statusSpinner = states[2]?.querySelector(
+      '[data-web-shell-session-loading]',
+    );
+    expect(runningCue).toBeInstanceOf(HTMLSpanElement);
+    expect(statusSpinner).toBeInstanceOf(HTMLSpanElement);
+    expect(runningCue?.className).toBe(statusSpinner?.className);
     // An idle row renders no attention cue at all.
     expect(
       rows()[3]!.querySelector('[data-web-shell-session-status-cue]'),
