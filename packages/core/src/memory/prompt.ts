@@ -8,6 +8,8 @@ import { wrapSystemReminder } from '../core/environmentContext.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 import {
+  INDEX_ALSO_OPEN,
+  INDEX_HOOK_SEPARATOR,
   INDEX_TRUNCATION_NOTICE,
   MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
   MAX_INDEX_CHARS,
@@ -165,6 +167,25 @@ const MAX_NAMED_DROPPED_ENTRIES = 3;
 const MAX_DROPPED_ENTRY_NAME_CHARS = 60;
 
 const INDEX_ENTRY_TITLE = /^\s*-\s*\[([^\]]+)\]/;
+function descriptionFreeIndexEntry(line: string): string {
+  if (!INDEX_ENTRY_TITLE.test(line)) {
+    return line;
+  }
+  const targetStart = line.indexOf('](');
+  const targetEnd = targetStart < 0 ? -1 : line.indexOf(')', targetStart + 2);
+  if (targetEnd < 0 || !line.startsWith(INDEX_HOOK_SEPARATOR, targetEnd + 1)) {
+    return line;
+  }
+  const link = line.slice(0, targetEnd + 1);
+  // Grouped links follow the description and must not count as shortenable.
+  const alsoStart = line.lastIndexOf(INDEX_ALSO_OPEN);
+  const suffix =
+    alsoStart >= link.length + INDEX_HOOK_SEPARATOR.length &&
+    line.trimEnd().endsWith(')')
+      ? line.slice(alsoStart)
+      : '';
+  return `${link}${suffix}`;
+}
 
 function droppedEntryName(line: string): string {
   const title = INDEX_ENTRY_TITLE.exec(line)?.[1]?.trim();
@@ -225,6 +246,10 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     .map((line) => line.slice(0, MAX_INDEX_LINE_CHARS))
     .join('\n').length;
   const noticeOverhead = hasWriterNotice ? INDEX_TRUNCATION_NOTICE.length : 0;
+  const canFitWithoutDescriptions =
+    candidates.map(descriptionFreeIndexEntry).join('\n').length +
+      noticeOverhead <=
+    MAX_INDEX_CHARS;
   // Blame long candidates only when the ordinary-entry bound clears overflow.
   const overlongEntriesCauseOverflow =
     candidateCharCount + noticeOverhead > MAX_INDEX_CHARS &&
@@ -244,10 +269,16 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const lever = overlongEntriesCauseOverflow
     ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
     : wasLineTruncated && candidateCharCount > MAX_INDEX_CHARS
-      ? ` Shortening entries cannot reduce the line count — prune or merge entries. The first ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} entries also exceed the character budget; shorten descriptions where possible, or prune or merge more entries.`
+      ? ` Shortening entries cannot reduce the line count — prune or merge entries. The first ${candidates.length} entries also exceed the character budget; ${
+          canFitWithoutDescriptions
+            ? `shorten descriptions enough to fit ${MAX_INDEX_CHARS} UTF-16 code units, or prune or merge more entries.`
+            : 'prune or merge more entries.'
+        }`
       : wasLineTruncated
         ? ' Shortening entries cannot reduce the line count — prune or merge entries.'
-        : ' Prune or merge entries, or shorten index descriptions, to fit the character budget.';
+        : canFitWithoutDescriptions
+          ? ` Prune or merge entries, or shorten index descriptions to bring the total within ${MAX_INDEX_CHARS} UTF-16 code units.`
+          : ' Prune or merge entries to fit the character budget.';
 
   return `${content}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedEntries(
     dropped,

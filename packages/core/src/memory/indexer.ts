@@ -32,6 +32,8 @@ import {
 import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
 import {
+  INDEX_ALSO_OPEN,
+  INDEX_HOOK_SEPARATOR,
   INDEX_TRUNCATION_NOTICE,
   MAX_INDEX_LINE_CHARS,
   MAX_INDEX_LINES,
@@ -44,8 +46,6 @@ const MAX_INDEX_FIELD_CHARS = 120;
 // the bytes it costs, so the entry is then emitted without one — but a hook
 // that fits whole in the leftover room is kept however small that room is.
 const MIN_INDEX_HOOK_CHARS = 24;
-const INDEX_HOOK_SEPARATOR = ' — ';
-const INDEX_ALSO_OPEN = ' (also: ';
 
 /**
  * Shorten an already-sanitized field to `limit`, preferring a word boundary.
