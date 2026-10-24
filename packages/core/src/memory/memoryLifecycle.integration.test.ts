@@ -222,6 +222,18 @@ describe('managed auto-memory lifecycle integration', () => {
   }
 
   afterEach(async () => {
+    // A failed or timed-out attempt can leave an extraction running, and a
+    // finishing extraction starts its queued successor from a finally block,
+    // after drain() has snapshotted the in-flight set. Wait until no extract
+    // work is left, or teardown deletes a live extraction's tree and the
+    // writes surface as ENOENT — even when a retry passed.
+    while (
+      mgr
+        .listTasksByType('extract', projectRoot)
+        .some((task) => task.status === 'running' || task.status === 'pending')
+    ) {
+      await mgr.drain();
+    }
     mgr.resetExtractStateForTests();
     if (originalMemoryBase === undefined) {
       delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
