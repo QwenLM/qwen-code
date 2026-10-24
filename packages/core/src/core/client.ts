@@ -274,6 +274,11 @@ export interface SendMessageOptions {
   humanInput?: HumanPromptInput;
   onWorkflowIntentApplied?: (trigger: WorkflowIntentTrigger) => void;
   /**
+   * Called once when UserPromptSubmit lets the prompt through, before any
+   * model request; a blocked or failed admission never calls it.
+   */
+  onPromptAdmitted?: () => void;
+  /**
    * {@link LlmClient.admitUserPrompt}'s verdict on this prompt, applied in
    * place of running UserPromptSubmit again. It is spent by the UserQuery with
    * the prompt id it was issued for; any other use throws.
@@ -3685,11 +3690,16 @@ export class LlmClient {
         ? { text: options.humanInput.text }
         : undefined;
     const onWorkflowIntentApplied = options?.onWorkflowIntentApplied;
-    if (options && (options.humanInput || onWorkflowIntentApplied)) {
+    const onPromptAdmitted = options?.onPromptAdmitted;
+    if (
+      options &&
+      (options.humanInput || onWorkflowIntentApplied || onPromptAdmitted)
+    ) {
       options = {
         ...options,
         humanInput: undefined,
         onWorkflowIntentApplied: undefined,
+        onPromptAdmitted: undefined,
       };
     }
     const startsInteraction =
@@ -4215,6 +4225,7 @@ export class LlmClient {
       settleSteerInput(attachedSteerInput);
       throw error;
     }
+    onPromptAdmitted?.();
 
     try {
       goalRuntime = await loadGoalRuntime(

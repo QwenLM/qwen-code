@@ -16,8 +16,20 @@ import type {
   ModCommand,
   ModLog,
   ModSessionFacts,
+  ModTurnComplete,
+  ModTurnStart,
 } from '@qwen-code/qwen-code-core/mods/types.js';
-import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import {
+  EVENT_API_RESPONSE,
+  uiTelemetryService,
+  type UiEvent,
+} from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import { setGenAiUsageProvenance } from '@qwen-code/qwen-code-core/telemetry/gen-ai-usage.js';
+import {
+  LlmEventType,
+  type ServerLlmStreamEvent,
+} from '@qwen-code/qwen-code-core/core/turn.js';
+import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import {
   getRuntimeContentGenerator,
   runWithRuntimeContentGenerator,
@@ -91,6 +103,13 @@ describe('Mod session ownership', () => {
       runCommand: vi.fn().mockResolvedValue('answer'),
       end: vi.fn().mockResolvedValue(undefined),
       dispose: vi.fn().mockResolvedValue(undefined),
+      turnHooks: { start: false, complete: [] as string[] },
+      startTurn:
+        vi.fn<(input: ModTurnStart, signal: AbortSignal) => Promise<void>>(),
+      completeTurn:
+        vi.fn<
+          (input: ModTurnComplete, signal: AbortSignal) => Promise<string>
+        >(),
     };
     mocks.load.mockResolvedValue({
       root: '/mod',
@@ -608,6 +627,405 @@ describe('Mod session ownership', () => {
     expect(facts().usage.context.percent).toBe(100);
   });
 
+  const content = (value: string): ServerLlmStreamEvent => ({
+    type: LlmEventType.Content,
+    value,
+  });
+  const finished = (
+    usageMetadata?: GenerateContentResponseUsageMetadata,
+  ): ServerLlmStreamEvent => ({
+    type: LlmEventType.Finished,
+    value: { reason: undefined, usageMetadata },
+  });
+  const apiResponse = (changes: Record<string, unknown> = {}) =>
+    ({
+      'event.name': EVENT_API_RESPONSE,
+      'event.timestamp': '2026-10-24T00:00:00.000Z',
+      response_id: 'response',
+      model: 'qwen-max',
+      duration_ms: 1,
+      input_token_count: 0,
+      output_token_count: 0,
+      cached_content_token_count: 0,
+      thoughts_token_count: 0,
+      total_token_count: 0,
+      prompt_id: 'prompt-1',
+      ...changes,
+    }) as unknown as UiEvent;
+  const turnSignal = new AbortController().signal;
+  // A host that cancels the turn it is asked to.
+  const abortHost = () => true;
+  const loadTurns = async (
+    complete = ['hello-mod'],
+    overrides: Record<string, unknown> = {},
+  ) => {
+    const loaded = setup({ getModel: () => 'qwen-max', ...overrides });
+    loaded.runtime.turnHooks = { start: true, complete };
+    loaded.runtime.startTurn.mockResolvedValue(undefined);
+    loaded.runtime.completeTurn.mockImplementation(
+      async (input) => input.answer,
+    );
+    await loaded.session.initialize(new AbortController().signal);
+    const abortTurn = mocks.create.mock.calls[0][8] as (turnId: string) => void;
+    const ended = () =>
+      loaded.runtime.completeTurn.mock.calls.at(-1)?.[0] as ModTurnComplete;
+    return { ...loaded, abortTurn, ended };
+  };
+
+  it('starts no turn when no hook hears the turn events', async () => {
+    const { session, runtime } = setup();
+    await session.initialize(new AbortController().signal);
+    expect(session.startTurn('hi', turnSignal, abortHost)).toBeUndefined();
+    runtime.turnHooks = { start: false, complete: ['hello-mod'] };
+    expect(session.startTurn('hi', turnSignal, abortHost)).toBeDefined();
+    expect(runtime.startTurn).not.toHaveBeenCalled();
+  });
+
+  it('runs turn.start beside the turn and its end after the turn tools', async () => {
+    const { session, runtime, ended } = await loadTurns();
+    runtime.hasToolHooks = true;
+    let release: () => void = () => {};
+    runtime.startTurn.mockImplementation(
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    const order: string[] = [];
+    runtime.runTool.mockImplementation(async () => {
+      order.push('tool');
+      return { result: {} };
+    });
+    runtime.completeTurn.mockImplementation(async (input) => {
+      order.push('complete');
+      return input.answer;
+    });
+    const turn = session.startTurn('Fix it', turnSignal, abortHost)!;
+    // The model request does not wait for the hooks.
+    expect(runtime.startTurn).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(runtime.startTurn).toHaveBeenCalledWith(
+        { text: 'Fix it', turnId: turn.id },
+        expect.any(AbortSignal),
+      ),
+    );
+    const tool = session.toolCall(() => {})!(
+      { tool: 'read_file' },
+      vi.fn(),
+      new AbortController().signal,
+    );
+    turn.saw(content('Do'));
+    turn.saw(content('ne. '));
+    turn.saw(finished());
+    const done = turn.complete();
+    expect(order).toEqual([]);
+    release();
+    await Promise.all([tool, done]);
+    expect(order).toEqual(['tool', 'complete']);
+    expect(ended()).toEqual({
+      answer: 'Done.',
+      durationMs: expect.any(Number),
+      isAborted: false,
+      turnId: turn.id,
+      reason: 'answer',
+    });
+    // The end is reported once, and later events change nothing.
+    turn.saw(content('later'));
+    expect(turn.complete('error')).toBe(done);
+    expect(runtime.completeTurn).toHaveBeenCalledOnce();
+  });
+
+  it('answers with the last response the turn streamed', async () => {
+    const { session, ended } = await loadTurns();
+    const retried = session.startTurn('', turnSignal, abortHost)!;
+    retried.saw(content('Checking.'));
+    retried.saw(finished());
+    retried.saw(content('Half'));
+    // A fresh attempt replaces what the failed one streamed.
+    retried.saw({ type: LlmEventType.Retry });
+    retried.saw(content('Done.'));
+    retried.saw(finished());
+    await retried.complete();
+    expect(ended().answer).toBe('Done.');
+
+    const fellBack = session.startTurn('', turnSignal, abortHost)!;
+    fellBack.saw(content('Overloaded'));
+    fellBack.saw({
+      type: LlmEventType.ModelFallback,
+      fromModel: 'qwen-max',
+      toModel: 'qwen-plus',
+      fallbackIndex: 1,
+    });
+    fellBack.saw(content('Done on the fallback.'));
+    await fellBack.complete('aborted');
+    expect(ended().answer).toBe('Done on the fallback.');
+
+    const continued = session.startTurn('', turnSignal, abortHost)!;
+    continued.saw(content('Part one, '));
+    continued.saw({ type: LlmEventType.Retry, isContinuation: true });
+    continued.saw(content('part two.'));
+    await continued.complete('aborted');
+    expect(ended()).toMatchObject({
+      answer: 'Part one, part two.',
+      isAborted: true,
+      reason: 'aborted',
+    });
+
+    // Cancelled while its tools ran: the last finished response stands.
+    const cancelled = session.startTurn('', turnSignal, abortHost)!;
+    cancelled.saw({
+      type: LlmEventType.Thought,
+      value: { subject: 'x', description: 'thinking' },
+    });
+    cancelled.saw(content('Reading the file.'));
+    cancelled.saw(finished());
+    await cancelled.complete('aborted');
+    expect(ended().answer).toBe('Reading the file.');
+  });
+
+  it('tells an error from an answer and an abort', async () => {
+    const { session, ended } = await loadTurns();
+    for (const event of [
+      { type: LlmEventType.Error, value: { error: { message: 'boom' } } },
+      { type: LlmEventType.LoopDetected },
+      { type: LlmEventType.MaxSessionTurns },
+    ] as ServerLlmStreamEvent[]) {
+      const turn = session.startTurn('', turnSignal, abortHost)!;
+      turn.saw(event);
+      await turn.complete();
+      expect(ended()).toMatchObject({ reason: 'error', isAborted: false });
+    }
+    const thrown = session.startTurn('', turnSignal, abortHost)!;
+    await thrown.complete('error');
+    expect(ended().reason).toBe('error');
+    const failedThenCancelled = session.startTurn('', turnSignal, abortHost)!;
+    failedThenCancelled.saw({
+      type: LlmEventType.LoopDetected,
+    } as ServerLlmStreamEvent);
+    await failedThenCancelled.complete('aborted');
+    expect(ended().reason).toBe('aborted');
+  });
+
+  it('sums the API counts of the turn responses and names the last model', async () => {
+    const { session, ended } = await loadTurns(['hello-mod'], {
+      getContentGeneratorConfig: () => ({ authType: 'gemini-api-key' }),
+    });
+    uiTelemetryService.addEvent(apiResponse({ model: 'before' }), 'session-1');
+    const turn = session.startTurn('', turnSignal, abortHost)!;
+    turn.saw(
+      finished({
+        promptTokenCount: 100,
+        cachedContentTokenCount: 60,
+        candidatesTokenCount: 10,
+        thoughtsTokenCount: 5,
+      }),
+    );
+    uiTelemetryService.addEvent(
+      apiResponse({ model: 'qwen-plus' }),
+      'session-1',
+    );
+    uiTelemetryService.addEvent(
+      apiResponse({ model: 'reviewer-model', subagent_name: 'reviewer' }),
+      'session-1',
+    );
+    uiTelemetryService.addEvent(
+      apiResponse({
+        model: 'suggestion-model',
+        prompt_id: 'prompt_suggestion',
+      }),
+      'session-1',
+    );
+    // An Anthropic response reports its cache writes apart.
+    const written = {
+      promptTokenCount: 50,
+      cachedContentTokenCount: 20,
+      candidatesTokenCount: 3,
+    };
+    setGenAiUsageProvenance(written, { cacheCreationInputTokens: 25 });
+    turn.saw(finished(written));
+    turn.saw(finished(undefined));
+    await turn.complete();
+    expect(ended().usage).toEqual({
+      input_tokens: 45,
+      output_tokens: 18,
+      cache_read_input_tokens: 80,
+      cache_creation_input_tokens: 25,
+      model: 'qwen-plus',
+    });
+
+    const quiet = session.startTurn('', turnSignal, abortHost)!;
+    await quiet.complete('aborted');
+    expect(ended()).not.toHaveProperty('usage');
+  });
+
+  it.each(['openai', 'openai-responses', 'qwen-oauth'])(
+    'counts reasoning once where the provider includes it in the output (%s)',
+    async (authType) => {
+      const { session, ended } = await loadTurns(['hello-mod'], {
+        getContentGeneratorConfig: () => ({ authType }),
+      });
+      const turn = session.startTurn('', turnSignal, abortHost)!;
+      turn.saw(
+        finished({
+          promptTokenCount: 10,
+          candidatesTokenCount: 8,
+          thoughtsTokenCount: 6,
+        }),
+      );
+      await turn.complete();
+      expect(ended().usage).toMatchObject({
+        input_tokens: 10,
+        output_tokens: 8,
+        model: 'qwen-max',
+      });
+    },
+  );
+
+  it('ends a running turn.start with its turn, but not turn.complete', async () => {
+    const { session, runtime } = await loadTurns();
+    const host = new AbortController();
+    const turn = session.startTurn('Fix it', host.signal, abortHost)!;
+    await vi.waitFor(() => expect(runtime.startTurn).toHaveBeenCalledOnce());
+    const started = runtime.startTurn.mock.calls[0][1];
+    expect(started.aborted).toBe(false);
+    host.abort();
+    expect(started.aborted).toBe(true);
+    await turn.complete('aborted');
+    expect(runtime.completeTurn.mock.calls[0][1].aborted).toBe(false);
+  });
+
+  it('keeps the head and tail of a prompt or answer too long for a Mod payload', async () => {
+    const { session, runtime, adapter, ended } = await loadTurns(['long-mod']);
+    const long = 'a'.repeat(200_000) + 'z'.repeat(200_000);
+    const turn = session.startTurn(long, turnSignal, abortHost)!;
+    turn.saw(content(long));
+    turn.saw(finished());
+    await turn.complete();
+    const started = runtime.startTurn.mock.calls[0][0];
+    expect(started).toEqual({
+      text: expect.stringMatching(
+        /^a+\n\[\.\.\. truncated for Mods \.\.\.\]\nz+$/,
+      ),
+      turnId: turn.id,
+      isTextTruncated: true,
+    });
+    expect(Buffer.byteLength(JSON.stringify(started.text))).toBeLessThanOrEqual(
+      131_072,
+    );
+    expect(ended()).toMatchObject({
+      answer: started.text,
+      isAnswerTruncated: true,
+    });
+    // The hooks returned the answer they heard, so no note goes beneath it.
+    expect(
+      adapter.emitSystemMessage.mock.calls.filter(
+        ([, data]) => data.plugin === 'long-mod',
+      ),
+    ).toEqual([]);
+  });
+
+  it('shows a different turn.complete text beneath the answer', async () => {
+    const { session, runtime, adapter } = await loadTurns([
+      'hello-mod',
+      'other-mod',
+    ]);
+    for (const text of [
+      'Done.',
+      '  ',
+      'TL;DR',
+      'x'.repeat(5000),
+      `${'x'.repeat(4095)}\u{1F600}tail`,
+    ]) {
+      runtime.completeTurn.mockResolvedValueOnce(text);
+      const turn = session.startTurn('', turnSignal, abortHost)!;
+      turn.saw(content('Done.'));
+      turn.saw(finished());
+      await turn.complete();
+    }
+    expect(
+      adapter.emitSystemMessage.mock.calls.filter(
+        ([, data]) => data.plugin === 'hello-mod+other-mod',
+      ),
+    ).toEqual([
+      ['ui_log', { plugin: 'hello-mod+other-mod', text: 'TL;DR' }],
+      [
+        'ui_log',
+        { plugin: 'hello-mod+other-mod', text: `${'x'.repeat(4096)}…` },
+      ],
+      [
+        'ui_log',
+        {
+          plugin: 'hello-mod+other-mod',
+          text: `${'x'.repeat(4095)}\u{1F600}…`,
+        },
+      ],
+    ]);
+  });
+
+  it('writes a text-mode note beneath the answer', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const { session, runtime } = await loadTurns(['hello-mod'], {
+      getOutputFormat: () => OutputFormat.TEXT,
+    });
+    runtime.completeTurn.mockResolvedValueOnce('TL;DR\u001b[31m');
+    await session.startTurn('', turnSignal, abortHost)!.complete();
+    const notes = () =>
+      stderr.mock.calls.filter(([text]) => String(text).includes('TL;DR'));
+    // The answer is written when the run ends; the note waits for it.
+    expect(notes()).toEqual([]);
+    await session.close();
+    expect(notes()).toEqual([]);
+    await session.flushOutput();
+    expect(notes()).toEqual([['[Mod hello-mod] TL;DR\n']]);
+    stderr.mockRestore();
+  });
+
+  it('ends only the running turn from $.turn.abort', async () => {
+    const { session, abortTurn, ended } = await loadTurns();
+    expect(() => abortTurn('turn-0')).toThrow(
+      '$.turn.abort: no turn is running (asked for turn-0)',
+    );
+    const abort = vi.fn(() => true);
+    const turn = session.startTurn('', turnSignal, abort)!;
+    expect(() => abortTurn('turn-0')).toThrow(
+      `$.turn.abort: turn-0 is not the running turn (${turn.id})`,
+    );
+    abortTurn(turn.id);
+    expect(abort).toHaveBeenCalledOnce();
+    expect(() => abortTurn(turn.id)).toThrow(
+      `$.turn.abort: ${turn.id} is already ending`,
+    );
+    // The host ends the turn without knowing who asked: still an abort.
+    await turn.complete();
+    expect(ended()).toMatchObject({ reason: 'aborted', isAborted: true });
+    expect(() => abortTurn(turn.id)).toThrow('no turn is running');
+    expect(abort).toHaveBeenCalledOnce();
+  });
+
+  it('rejects $.turn.abort when the host finds nothing to cancel', async () => {
+    const { session, abortTurn, ended } = await loadTurns();
+    // The stream already went idle, but the turn has not completed yet.
+    const turn = session.startTurn('', turnSignal, () => false)!;
+    turn.saw({ type: LlmEventType.Content, value: 'Done.' });
+    expect(() => abortTurn(turn.id)).toThrow(
+      `$.turn.abort: ${turn.id} is already ending`,
+    );
+    await turn.complete();
+    expect(ended()).toMatchObject({ reason: 'answer', isAborted: false });
+  });
+
+  it('keeps the queue running after a failed turn hook and drops a turn of an ended session', async () => {
+    const { session, runtime, config } = await loadTurns();
+    runtime.startTurn.mockRejectedValueOnce(new Error('hook failed'));
+    const failed = session.startTurn('', turnSignal, abortHost)!;
+    await failed.complete('error');
+    expect(runtime.completeTurn).toHaveBeenCalledOnce();
+
+    const old = session.startTurn('', turnSignal, abortHost)!;
+    config.getSessionId.mockReturnValue('session-2');
+    await session.syncSession('clear');
+    await old.complete();
+    expect(runtime.startTurn).toHaveBeenCalledTimes(2);
+    expect(runtime.completeTurn).toHaveBeenCalledOnce();
+  });
+
   it('stops listening to telemetry once closed', async () => {
     const before = uiTelemetryService.listenerCount('update');
     const { session } = setup();
@@ -666,6 +1084,12 @@ describe('Mod session ownership', () => {
       'hello-mod',
       'session-1',
     );
+    log.mockClear();
+    emit(
+      { to: 'transcript', text: `${'x'.repeat(1999)}\u{1F600}tail` },
+      'hello-mod',
+    );
+    expect(log.mock.calls[0][0].text).toBe(`${'x'.repeat(1999)}\u{1F600}`);
     log.mockClear();
     emit(
       {

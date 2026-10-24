@@ -105,7 +105,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
-import { ModSession } from './services/mod-session.js';
+import { ModSession, type ModTurn } from './services/mod-session.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -129,6 +129,14 @@ export class TurnInterruptedError extends Error {
   constructor() {
     super('Operation cancelled.');
     this.name = 'TurnInterruptedError';
+  }
+}
+
+/** `$.turn.abort` ends the turn as an interrupt does, in every mode. */
+class ModTurnAbortedError extends TurnInterruptedError {
+  constructor() {
+    super();
+    this.message = 'A Mod ended the turn.';
   }
 }
 
@@ -565,12 +573,21 @@ export async function runNonInteractive(
     const modSession =
       options.modSession ?? ModSession.create(config, settings, adapter);
     const ownsModSession = options.modSession === undefined;
+    // The prompt's turn, from its admission to its answer or its exit.
+    let modTurn: ModTurn | undefined;
     const unsubscribeRecordingFailure = ownsAdapter
       ? subscribeToHeadlessChatRecordingFailures(config, adapter)
       : undefined;
     let chatRecordingSettlement: Promise<void> | undefined;
     const settleBeforeTerminalOutput = (): Promise<void> => {
       chatRecordingSettlement ??= (async () => {
+        // An exit that did not reach the answer ended the turn on its way. A
+        // tripped run budget aborts the same controller, but is an error.
+        await modTurn?.complete(
+          abortController.signal.aborted && !budgetEnforcer.getExceeded()
+            ? 'aborted'
+            : 'error',
+        );
         if (ownsModSession) await modSession?.close();
         modSession?.flushLogs();
         await settleChatRecording(config, { finalize: ownsAdapter });
@@ -886,11 +903,13 @@ export async function runNonInteractive(
         // (vs. a useless literal "unreachable").
         throw new Error(exceeded.message);
       }
+      const reason: unknown = abortController.signal.reason;
       if (
-        options.recoverableCancellation === true &&
-        abortController.signal.reason instanceof TurnInterruptedError
+        reason instanceof TurnInterruptedError &&
+        (options.recoverableCancellation === true ||
+          reason instanceof ModTurnAbortedError)
       ) {
-        throw abortController.signal.reason;
+        throw reason;
       }
       await handleCancellationError(config);
       throw new Error('Operation cancelled.');
@@ -1709,6 +1728,7 @@ export async function runNonInteractive(
       // no-op), so unconditional invocation is safe even when the drain
       // path already finalized monitors before reaching here.
       const emitStructuredSuccess = async (): Promise<0> => {
+        await modTurn?.complete();
         const owner = captureActiveInteractionOwner();
         if (
           owner &&
@@ -2517,6 +2537,8 @@ export async function runNonInteractive(
         endsOnTerminateTurn: () => boolean;
         onRoundStart: (round: number) => void;
         onAbort?: () => void;
+        // Hears each model event once the adapter has it.
+        onEvent?: (event: ServerLlmStreamEvent) => void;
         tracksPreview: boolean;
       };
       const runOnSharedLoop = (
@@ -2648,6 +2670,7 @@ export async function runNonInteractive(
                   : undefined,
               );
               adapter.processEvent(event);
+              scope.onEvent?.(event);
               if (
                 event.type === LlmEventType.HookSystemMessage &&
                 outputFormat === OutputFormat.TEXT
@@ -2855,6 +2878,26 @@ export async function runNonInteractive(
         const roundOptions: SendMessageOptions = {
           type: sendType,
           modelOverride,
+          // The prompt, or the interrupted turn it continues, is a turn the
+          // Mods hear once UserPromptSubmit admits it.
+          ...(modSession &&
+            isFirstTurn &&
+            (sendType === SendMessageType.UserQuery ||
+              options.continueInterrupted) && {
+              onPromptAdmitted: () => {
+                modTurn = modSession.startTurn(
+                  options.continueInterrupted
+                    ? ''
+                    : (options.humanInput?.text ?? input),
+                  abortController.signal,
+                  () => {
+                    if (abortController.signal.aborted) return false;
+                    abortController.abort(new ModTurnAbortedError());
+                    return true;
+                  },
+                );
+              },
+            }),
           ...(isFirstTurn &&
             sendType === SendMessageType.UserQuery &&
             !goalTurn &&
@@ -2933,6 +2976,7 @@ export async function runNonInteractive(
                 isFirstTurn = false;
                 isFirstGoalSegment = false;
               },
+              onEvent: (event) => modTurn?.saw(event),
               tracksPreview: true,
             },
           );
@@ -2948,7 +2992,9 @@ export async function runNonInteractive(
             case 'loop_detected':
               return emitLoopDetectedResult();
             case 'cancelled':
-              return routeAbort();
+              // Awaited, so a recoverable interrupt reaches the catch below and
+              // ends with its result, as on the current loop.
+              return await routeAbort();
             case 'max_session_turns':
               // The client counts turns across the whole session (#15325).
               await failClosedActiveGoalTurn(
@@ -2964,6 +3010,7 @@ export async function runNonInteractive(
             case 'tool_ended_turn': {
               shouldFinalizeTurn = true;
               if (!activeGoalTurn) break;
+              await modTurn?.complete();
               llmClient.addHistory({ role: 'user', parts: result.parts ?? [] });
               await config.getChatRecordingService?.()?.flush();
               await finishGoalTurn(activeGoalTurn);
@@ -3027,6 +3074,7 @@ export async function runNonInteractive(
             // Process fallback metadata only after the abandoned attempt has
             // been reset, so batch adapters do not roll the system event back.
             adapter.processEvent(event);
+            modTurn?.saw(event);
             if (
               event.type === LlmEventType.HookSystemMessage &&
               outputFormat === OutputFormat.TEXT
@@ -3132,6 +3180,7 @@ export async function runNonInteractive(
               return emitLoopDetectedResult();
             }
             if (terminateTurn && activeGoalTurn) {
+              await modTurn?.complete();
               llmClient.addHistory({
                 role: 'user',
                 parts: toolResponseParts,
@@ -3167,6 +3216,7 @@ export async function runNonInteractive(
           }
         }
         if (shouldFinalizeTurn) {
+          await modTurn?.complete();
           if (activeGoalTurn) {
             const completedGoalTurn = activeGoalTurn;
             await config.getChatRecordingService?.()?.flush();
@@ -3823,8 +3873,9 @@ export async function runNonInteractive(
       // generic `handleError` exit code 1 from a raw "AbortError".
       const recoverableCancellation =
         !budgetExceeded &&
-        options.recoverableCancellation === true &&
-        abortController.signal.reason instanceof TurnInterruptedError;
+        abortController.signal.reason instanceof TurnInterruptedError &&
+        (options.recoverableCancellation === true ||
+          abortController.signal.reason instanceof ModTurnAbortedError);
 
       // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = budgetExceeded

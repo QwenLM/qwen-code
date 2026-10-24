@@ -13678,6 +13678,153 @@ describe('useLlmStream', () => {
       });
     });
 
+    describe('Mod turns', () => {
+      const installModTurn = () => {
+        const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
+        const startTurn = vi.fn(
+          (_text: string, _signal: AbortSignal, _abort: () => boolean) => turn,
+        );
+        vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+          ready: Promise.resolve(),
+          startTurn,
+        } as unknown as ReturnType<
+          typeof interactiveMods.getInteractiveModSession
+        >);
+        return { turn, startTurn };
+      };
+      // Admits the prompt as core does once UserPromptSubmit lets it through.
+      const admitted = (events: () => AsyncGenerator<unknown>) =>
+        mockSendMessageStream.mockImplementation((...args: unknown[]) => {
+          (args[3] as { onPromptAdmitted?: () => void })?.onPromptAdmitted?.();
+          return events();
+        });
+
+      it('hears a submitted prompt from its admission until the stream goes idle', async () => {
+        const { turn, startTurn } = installModTurn();
+        admitted(async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Done.' };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        });
+        const { result } = renderTestHook();
+
+        await act(async () => {
+          await result.current.submitQuery(
+            'Fix it',
+            SendMessageType.UserQuery,
+            undefined,
+            { submittedPrompt: 'Fix it' },
+          );
+        });
+
+        await waitFor(() => expect(turn.complete).toHaveBeenCalledOnce());
+        expect(turn.complete).toHaveBeenCalledWith(undefined);
+        expect(startTurn).toHaveBeenCalledExactlyOnceWith(
+          'Fix it',
+          expect.any(AbortSignal),
+          expect.any(Function),
+        );
+        expect(turn.saw.mock.calls.map(([event]) => event.type)).toEqual([
+          ServerLlmEventType.Content,
+          ServerLlmEventType.Finished,
+        ]);
+      });
+
+      it.each([
+        ['$.turn.abort', true],
+        ['Esc', false],
+      ])(
+        'ends the turn as aborted for %s, with a notice only for a person',
+        async (_, byMod) => {
+          const { turn, startTurn } = installModTurn();
+          admitted(async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'Part 1' };
+            await new Promise(() => {});
+          });
+          const onCancelSubmit = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            onCancelSubmit,
+          );
+          await act(async () => {
+            void result.current.submitQuery('Fix it');
+          });
+          await waitFor(() => expect(startTurn).toHaveBeenCalledOnce());
+          await waitFor(() =>
+            expect(result.current.streamingState).toBe(
+              StreamingState.Responding,
+            ),
+          );
+
+          act(() => {
+            if (byMod) expect(startTurn.mock.calls[0][2]()).toBe(true);
+            else result.current.cancelOngoingRequest();
+          });
+          // Either way the turn's own signal ends its turn.start hooks.
+          expect(startTurn.mock.calls[0][1].aborted).toBe(true);
+          // A cancelled turn has nothing left for a Mod to end.
+          act(() => expect(startTurn.mock.calls[0][2]()).toBe(false));
+
+          await waitFor(() =>
+            expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted'),
+          );
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          const notice = expect.objectContaining({
+            text: 'Request cancelled.',
+          });
+          if (byMod) {
+            expect(mockAddItem).not.toHaveBeenCalledWith(
+              notice,
+              expect.any(Number),
+            );
+            expect(onCancelSubmit).not.toHaveBeenCalled();
+          } else {
+            expect(mockAddItem).toHaveBeenCalledWith(
+              notice,
+              expect.any(Number),
+            );
+            expect(onCancelSubmit).toHaveBeenCalledOnce();
+          }
+        },
+      );
+
+      it('ends the turn as an error when its stream throws', async () => {
+        const { turn } = installModTurn();
+        admitted(async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Part' };
+          throw new Error('socket closed');
+        });
+        const { result } = renderTestHook();
+        await act(async () => {
+          await result.current.submitQuery('Fix it');
+        });
+        await waitFor(() =>
+          expect(turn.complete).toHaveBeenCalledExactlyOnceWith('error'),
+        );
+      });
+
+      it('offers no admission hook without Mods', async () => {
+        vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
+          undefined,
+        );
+        admitted(async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'ok' };
+        });
+        const { result } = renderTestHook();
+        await act(async () => {
+          await result.current.submitQuery('plain');
+        });
+        expect(
+          (mockSendMessageStream.mock.calls[0][3] as Record<string, unknown>)
+            .onPromptAdmitted,
+        ).toBeUndefined();
+      });
+    });
+
     it('should cancel an in-progress stream when cancelOngoingRequest is called', async () => {
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Part 1' };
