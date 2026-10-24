@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
 // Keep this literal in sync with core's QWEN_DIR. This lite module must not
 // import @qwen-code/qwen-code-core because it runs before serve listener ready.
 export const SETTINGS_DIRECTORY_NAME = '.qwen';
+
+// Files Qwen Code writes into its global dir on first run; see
+// Storage.getGlobalQwenDir() in packages/core.
+const GLOBAL_DIR_MARKERS = ['installation_id', 'output-language.md'];
 
 /**
  * Whether a `QWEN_HOME` value expands against the home directory: `~`, or a
@@ -161,11 +166,35 @@ export function getGlobalQwenDirLite(
   if (envDir) {
     return resolveConfigPathLite(envDir);
   }
+  return getDefaultQwenDirLite(readEnvironmentVariable(env, 'XDG_CONFIG_HOME'));
+}
+
+/**
+ * The global Qwen directory when `QWEN_HOME` is unset, by the rule core's
+ * `Storage.getGlobalQwenDir()` applies, given the environment's
+ * `XDG_CONFIG_HOME`.
+ */
+export function getDefaultQwenDirLite(
+  xdgConfigHome: string | undefined,
+): string {
   const homeDir = os.homedir();
   if (!homeDir) {
     return path.join(os.tmpdir(), SETTINGS_DIRECTORY_NAME);
   }
-  return path.join(homeDir, SETTINGS_DIRECTORY_NAME);
+  const legacyDir = path.join(homeDir, SETTINGS_DIRECTORY_NAME);
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    return legacyDir;
+  }
+  const xdgDir = path.join(
+    xdgConfigHome && path.isAbsolute(xdgConfigHome)
+      ? xdgConfigHome
+      : path.join(homeDir, '.config'),
+    'qwen',
+  );
+  return !fs.existsSync(legacyDir) ||
+    GLOBAL_DIR_MARKERS.some((file) => fs.existsSync(path.join(xdgDir, file)))
+    ? xdgDir
+    : legacyDir;
 }
 
 export function getSystemSettingsPath(

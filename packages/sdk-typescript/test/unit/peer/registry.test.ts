@@ -232,12 +232,41 @@ describe('resolveQwenHome', () => {
     else process.env['QWEN_HOME'] = saved;
   });
 
-  it('prefers an explicit home, then QWEN_HOME, then ~/.qwen', () => {
+  it('prefers an explicit home, then QWEN_HOME', () => {
     process.env['QWEN_HOME'] = '/from/env';
     expect(resolveQwenHome('/explicit')).toBe(path.resolve('/explicit'));
     expect(resolveQwenHome()).toBe(path.resolve('/from/env'));
-    delete process.env['QWEN_HOME'];
-    expect(resolveQwenHome()).toBe(path.join(os.homedir(), '.qwen'));
+  });
+
+  describe('without QWEN_HOME', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const savedXdg = process.env['XDG_CONFIG_HOME'];
+    let configHome: string;
+
+    beforeEach(() => {
+      configHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sdk-xdg-'));
+      fs.mkdirSync(path.join(configHome, 'qwen'));
+      fs.writeFileSync(path.join(configHome, 'qwen', 'installation_id'), 'id');
+      delete process.env['QWEN_HOME'];
+      process.env['XDG_CONFIG_HOME'] = configHome;
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', platform);
+      if (savedXdg === undefined) delete process.env['XDG_CONFIG_HOME'];
+      else process.env['XDG_CONFIG_HOME'] = savedXdg;
+      fs.rmSync(configHome, { recursive: true, force: true });
+    });
+
+    it('uses the XDG config directory on Linux once it holds Qwen Code files, like the CLI', () => {
+      expect(resolveQwenHome()).toBe(path.join(configHome, 'qwen'));
+    });
+
+    it.each(['darwin', 'win32'])('keeps ~/.qwen on %s', (value) => {
+      Object.defineProperty(process, 'platform', { value });
+      expect(resolveQwenHome()).toBe(path.join(os.homedir(), '.qwen'));
+    });
   });
 
   it('expands a leading ~ and resolves a relative path against the working directory', () => {

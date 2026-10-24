@@ -324,8 +324,10 @@ describe('Settings Loading and Merging', () => {
           SETTINGS_DIRECTORY_NAME,
           'settings.json',
         );
-        (mockFsExistsSync as Mock).mockImplementation(
-          (p: fs.PathLike) => p.toString() === homeSettingsPath,
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [homeSettingsPath, pathActual.dirname(homeSettingsPath)].includes(
+            p.toString(),
+          ),
         );
         (fs.readFileSync as Mock).mockImplementation(() =>
           JSON.stringify({ ui: { theme: 'Default' } }),
@@ -353,8 +355,10 @@ describe('Settings Loading and Merging', () => {
           SETTINGS_DIRECTORY_NAME,
           'settings.json',
         );
-        (mockFsExistsSync as Mock).mockImplementation(
-          (p: fs.PathLike) => p.toString() === homeSettingsPath,
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [homeSettingsPath, pathActual.dirname(homeSettingsPath)].includes(
+            p.toString(),
+          ),
         );
         (fs.readFileSync as Mock).mockImplementation(() =>
           JSON.stringify({
@@ -3172,10 +3176,7 @@ describe('Settings Loading and Merging', () => {
     });
 
     it('should resolve ${VAR} from ~/.env when QWEN_HOME is not set (#4466)', () => {
-      const homeEnvPath = path.join(
-        path.dirname(path.dirname(USER_SETTINGS_PATH)),
-        '.env',
-      );
+      const homeEnvPath = path.join('/mock/home/user', '.env');
       const userSettingsContent = {
         mcpServers: {
           myServer: {
@@ -6588,7 +6589,9 @@ describe('Settings Loading and Merging', () => {
         const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
 
         (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
-          [userQwenEnvPath].includes(p.toString()),
+          [userQwenEnvPath, path.dirname(userQwenEnvPath)].includes(
+            p.toString(),
+          ),
         );
         (fs.readFileSync as Mock).mockImplementation(
           (p: fs.PathOrFileDescriptor) => {
@@ -6709,7 +6712,11 @@ describe('Settings Loading and Merging', () => {
           source: 'file',
         });
         (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
-          [userQwenEnvPath, customSettingsPath].includes(p.toString()),
+          [
+            userQwenEnvPath,
+            path.dirname(userQwenEnvPath),
+            customSettingsPath,
+          ].includes(p.toString()),
         );
         (fs.readFileSync as Mock).mockImplementation(
           (p: fs.PathOrFileDescriptor) => {
@@ -6747,7 +6754,9 @@ describe('Settings Loading and Merging', () => {
         (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
           const s = p.toString();
           // Legacy settings exist, active QWEN_HOME settings do not.
-          if (s === legacySettings) return true;
+          if (s === legacySettings || s === path.dirname(legacySettings)) {
+            return true;
+          }
           if (s === customSettingsPath) return false;
           return false;
         });

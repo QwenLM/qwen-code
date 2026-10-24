@@ -89,11 +89,15 @@ describe('FileTokenStorage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // node:fs is mocked without existsSync, which the default global dir
+    // consults on Linux.
+    vi.stubEnv('QWEN_HOME', qwenDir);
     storage = new FileTokenStorage('test-storage');
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe('getCredentials', () => {

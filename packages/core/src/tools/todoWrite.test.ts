@@ -1098,8 +1098,10 @@ describe('TodoWriteTool – runtime output directory', () => {
     expect(await writePath()).toContain(path.join(envRuntimeDir, 'todos'));
   });
 
-  it('should use default ~/.qwen path when no custom dir is configured', async () => {
-    expect(await writePath()).toContain(path.join('.qwen', 'todos'));
+  it('should use the global Qwen dir when no custom dir is configured', async () => {
+    expect(await writePath()).toContain(
+      path.join(Storage.getGlobalQwenDir(), 'todos'),
+    );
   });
 
   it('should check file existence in custom runtime dir for getDescription', () => {

@@ -22,6 +22,7 @@ import path from 'node:path';
 import type { Content } from '@google/genai';
 import type { TrustedUserAnswerSnapshot } from './trusted-user-answers.js';
 import { ApprovalMode, type Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import {
   getAllMemoryFilenames,
   LOCAL_CONTEXT_FILENAME,
@@ -202,8 +203,9 @@ let qwenHomePrefixesCacheKey: string | undefined;
 let qwenHomePrefixesCache: string[] | undefined;
 
 function getNormalizedQwenHomePrefixes(): string[] {
-  const qwenHome = process.env['QWEN_HOME'];
-  if (!qwenHome) return [];
+  // Without QWEN_HOME the global dir can still sit outside a `.qwen` directory
+  // (the XDG config directory on Linux), which the patterns above miss.
+  const qwenHome = process.env['QWEN_HOME'] || Storage.getGlobalQwenDir();
   if (
     qwenHomePrefixesCacheKey === qwenHome &&
     qwenHomePrefixesCache !== undefined

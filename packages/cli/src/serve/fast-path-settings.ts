@@ -98,7 +98,7 @@ export function preResolveServeFastPathHomeEnvOverrides(): void {
   const initialQwenDir = getGlobalQwenDirLite();
   readHomeEnvIntoFastPath(path.join(initialQwenDir, '.env'));
   if (!initialQwenHome) {
-    readHomeEnvIntoFastPath(path.join(path.dirname(initialQwenDir), '.env'));
+    readHomeEnvIntoFastPath(path.join(os.homedir() || os.tmpdir(), '.env'));
   }
 
   const discoveredQwenHome = process.env['QWEN_HOME'];
@@ -135,7 +135,7 @@ function getHomeEnvFallbackVarsFastPath(): Record<string, string> {
   const globalQwenDir = getGlobalQwenDirLite();
   const candidates = [path.join(globalQwenDir, '.env')];
   if (!process.env['QWEN_HOME']) {
-    candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
+    candidates.push(path.join(os.homedir() || os.tmpdir(), '.env'));
   }
 
   const result: Record<string, string> = {};

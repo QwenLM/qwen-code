@@ -48,12 +48,15 @@ describe('InstallationManager', () => {
       path.join(os.tmpdir(), 'gemini-cli-test-home-'),
     );
     (os.homedir as Mock).mockReturnValue(tempHomeDir);
+    // On Linux a fresh home defaults to the XDG config dir; pin ~/.qwen.
+    vi.stubEnv('QWEN_HOME', path.join(tempHomeDir, '.qwen'));
     installationManager = new InstallationManager();
   });
 
   afterEach(() => {
     fs.rmSync(tempHomeDir, { recursive: true, force: true });
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe('getInstallationId', () => {

@@ -527,6 +527,54 @@ describe('scripts/cli-entry.js production entry', () => {
       }
     });
 
+    describe('without QWEN_HOME', () => {
+      const inheritedHome = process.env.QWEN_HOME;
+      const inheritedXdg = process.env.XDG_CONFIG_HOME;
+
+      beforeEach(() => {
+        delete process.env.QWEN_HOME;
+        delete process.env.XDG_CONFIG_HOME;
+      });
+
+      afterEach(() => {
+        existsSyncMock.mockImplementation(() => false);
+        if (inheritedHome === undefined) delete process.env.QWEN_HOME;
+        else process.env.QWEN_HOME = inheritedHome;
+        if (inheritedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = inheritedXdg;
+      });
+
+      it('roots managed npm updates in ~/.config/qwen for a new install', async () => {
+        await import('../cli-entry.js?xdg-new-install');
+        expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+          '/home/test-user/.config/qwen/updates/npm',
+        );
+      });
+
+      it('keeps managed npm updates in an existing ~/.qwen', async () => {
+        existsSyncMock.mockImplementation(
+          (file) => normalizePath(file) === '/home/test-user/.qwen',
+        );
+        await import('../cli-entry.js?xdg-legacy-home');
+        expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+          '/home/test-user/.qwen/updates/npm',
+        );
+      });
+
+      it('stays in ~/.config/qwen once it holds Qwen Code files, even next to ~/.qwen', async () => {
+        existsSyncMock.mockImplementation((file) =>
+          [
+            '/home/test-user/.qwen',
+            '/home/test-user/.config/qwen/installation_id',
+          ].includes(normalizePath(file)),
+        );
+        await import('../cli-entry.js?xdg-marked-home');
+        expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+          '/home/test-user/.config/qwen/updates/npm',
+        );
+      });
+    });
+
     it('runs the CLI in this process with gc exposed', async () => {
       await import('../cli-entry.js?in-process');
 

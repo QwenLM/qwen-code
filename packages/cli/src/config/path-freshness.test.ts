@@ -6,9 +6,9 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as path from 'node:path';
-import { homedir } from 'node:os';
 import { getUserSettingsDir, getUserSettingsPath } from './settings.js';
 import { getTrustedFoldersPath } from './trustedFolders.js';
+import { getGlobalQwenDirLite } from './storage-paths-lite.js';
 
 // Regression guard: `QWEN_HOME` is resolved by `preResolveHomeEnvOverrides()`
 // AFTER any module that imports a settings/trustedFolders path has loaded.
@@ -37,7 +37,9 @@ describe('settings/trustedFolders path getters are lazy', () => {
 
   it('getUserSettingsPath() reflects QWEN_HOME set after module load', () => {
     const defaultPath = getUserSettingsPath();
-    expect(defaultPath).toBe(path.join(homedir(), '.qwen', 'settings.json'));
+    expect(defaultPath).toBe(
+      path.join(getGlobalQwenDirLite(), 'settings.json'),
+    );
 
     process.env['QWEN_HOME'] = '/tmp/qwen-lazy-test';
     expect(getUserSettingsPath()).toBe(
@@ -46,7 +48,7 @@ describe('settings/trustedFolders path getters are lazy', () => {
   });
 
   it('getUserSettingsDir() reflects QWEN_HOME set after module load', () => {
-    expect(getUserSettingsDir()).toBe(path.join(homedir(), '.qwen'));
+    expect(getUserSettingsDir()).toBe(getGlobalQwenDirLite());
 
     process.env['QWEN_HOME'] = '/tmp/qwen-lazy-test';
     expect(getUserSettingsDir()).toBe(path.normalize('/tmp/qwen-lazy-test'));
@@ -54,7 +56,7 @@ describe('settings/trustedFolders path getters are lazy', () => {
 
   it('getTrustedFoldersPath() reflects QWEN_HOME set after module load', () => {
     expect(getTrustedFoldersPath()).toBe(
-      path.join(homedir(), '.qwen', 'trustedFolders.json'),
+      path.join(getGlobalQwenDirLite(), 'trustedFolders.json'),
     );
 
     process.env['QWEN_HOME'] = '/tmp/qwen-lazy-test';

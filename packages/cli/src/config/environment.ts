@@ -215,14 +215,11 @@ export function preResolveHomeEnvOverrides(): void {
     return;
   }
 
-  // Storage.getGlobalQwenDir() shares the same homedir resolution as the
-  // rest of the storage layer; when QWEN_HOME is unset it equals
-  // `<homedir>/.qwen`, so path.dirname() recovers `<homedir>`.
   const initialQwenHome = process.env['QWEN_HOME'];
   const initialQwenDir = Storage.getGlobalQwenDir();
   const candidates: string[] = [path.join(initialQwenDir, '.env')];
   if (!initialQwenHome) {
-    candidates.push(path.join(path.dirname(initialQwenDir), '.env'));
+    candidates.push(path.join(os.homedir() || os.tmpdir(), '.env'));
   }
 
   for (const candidate of candidates) {
@@ -337,7 +334,7 @@ export function getHomeEnvFallbackVars(
   // because loadEnvironment() populates process.env independently — the two
   // scopes are intentionally different.
   if (!process.env['QWEN_HOME']) {
-    candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
+    candidates.push(path.join(os.homedir() || os.tmpdir(), '.env'));
   }
 
   const result: Record<string, string> = {};

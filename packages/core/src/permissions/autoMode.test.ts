@@ -29,6 +29,7 @@ import {
 } from './autoMode.js';
 import { clearSessionCommits } from './destructive-commands.js';
 import { ApprovalMode } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from './types.js';
@@ -273,6 +274,25 @@ describe('isAutoModeProtectedWritePath', () => {
         '/tmp/custom-qwen-home/rules/backend.md',
         '/tmp/custom-qwen-home/.mcp.json',
       ]);
+    });
+  });
+
+  it('matches self-modification surfaces in a default global dir outside .qwen', () => {
+    restoringQwenHome(() => {
+      delete process.env['QWEN_HOME'];
+      const globalDir = vi
+        .spyOn(Storage, 'getGlobalQwenDir')
+        .mockReturnValue('/home/user/.config/qwen');
+      try {
+        expectProtected([
+          '/home/user/.config/qwen/settings.json',
+          '/home/user/.config/qwen/hooks/pre-tool-use.json',
+          '/home/user/.config/qwen/skills/review/SKILL.md',
+        ]);
+        expectProtected(['/home/user/.config/qwen/tmp/notes.md'], false);
+      } finally {
+        globalDir.mockRestore();
+      }
     });
   });
 
