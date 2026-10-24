@@ -655,6 +655,42 @@ fi
       expect(result.calls).toContain('issue create');
     });
 
+    it('reopens a closed aggregate sitting in a mixed closed population', () => {
+      // The one population the body filter can flip: a closed per-signature
+      // issue beside the closed aggregate. A jq that errs instead of
+      // filtering produces no match at all and the writer files a duplicate
+      // aggregate — silently, because the fallback swallows it.
+      const result = run([], {
+        closedIssues: [
+          {
+            ...botIssue(7, ' — Foo.test'),
+            body: '<!-- qwen-main-ci-failure-test:aaa111bbb222 -->',
+          },
+          { ...botIssue(42), body: '<!-- main-ci-failure-aggregate:1234 -->' },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue reopen 42');
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toContain('issue create');
+      expect(result.calls).not.toContain('issue reopen 7');
+    });
+
+    it('reopens a closed aggregate whose body carries both marker classes', () => {
+      // An adopted-and-migrated aggregate keeps its old per-test markers
+      // beside the workflow marker; the workflow marker is what keeps it
+      // reopenable, so a resolved aggregate is never replaced by a fresh one.
+      const both =
+        '<!-- qwen-main-ci-failure-test:aaa111bbb222 -->\n<!-- main-ci-failure-aggregate:1234 -->';
+      const result = run([], {
+        closedIssues: [{ ...botIssue(42, ' — Foo.test'), body: both }],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue reopen 42');
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toContain('issue create');
+    });
+
     it('refuses to write when the open-issue listing cannot be parsed', () => {
       // jq exiting non-zero must not read as an empty family: the signature
       // route would certify a false miss and file a duplicate issue.
@@ -950,6 +986,9 @@ fi
         expect(result.body).toContain('Run 123 failed at commit abcdef123456');
         expect(result.body).toContain(`<!-- ${markerA} -->`);
         expect(result.body).toContain(`<!-- ${markerB} -->`);
+        // The workflow scope rides in every filing: test markers alone carry
+        // no workflow component, and the retitled body scan keys on it.
+        expect(result.body).toContain('<!-- main-ci-failure-scope:1234 -->');
         expect(result.body).not.toContain('main-ci-failure-aggregate');
         expect(result.calls).not.toMatch(/ready-for-agent|autofix|assignee/);
       });
@@ -977,6 +1016,11 @@ fi
         expect(result.calls).not.toContain('--title');
         expect(result.migratedBody).toContain(`<!-- ${markerA} -->`);
         expect(result.migratedBody).toContain(`<!-- ${markerB} -->`);
+        // Accretion also back-fills the workflow scope, so a human retitle
+        // later still finds the issue through the scoped body scan.
+        expect(result.migratedBody).toContain(
+          '<!-- main-ci-failure-scope:1234 -->',
+        );
         expect(result.commentBody).toContain(
           'Run 123 failed at commit abcdef123456',
         );
@@ -984,7 +1028,7 @@ fi
       });
 
       it('does not edit the body when every marker is already recorded', () => {
-        const tracked = `<!-- ${markerA} -->\n<!-- ${markerB} -->\n`;
+        const tracked = `<!-- ${markerA} -->\n<!-- ${markerB} -->\n<!-- main-ci-failure-scope:1234 -->\n`;
         const result = run([botIssue(7, ' — Foo.test')], {
           signatureTitle,
           testMarkers: `${markerA}\n${markerB}`,
@@ -1060,7 +1104,7 @@ fi
           number: 9,
           title: 'Investigating the peer-messaging flake',
           user: { login: 'qwen-code-dev-bot' },
-          body: `<!-- ${markerA} -->\n<!-- ${markerB} -->\n`,
+          body: `<!-- ${markerA} -->\n<!-- ${markerB} -->\n<!-- main-ci-failure-scope:1234 -->\n`,
         };
         const result = run(
           [
@@ -1097,6 +1141,26 @@ fi
         );
         expect(result.calls).toContain('issue comment 42');
         expect(result.calls).not.toContain('issue create');
+      });
+
+      it('never adopts a marker match filed under another workflow', () => {
+        // Test markers carry no workflow component: the same test id failing
+        // in two watched workflows must not converge onto one issue — the
+        // writer's concurrency group serializes only within this workflow.
+        const foreign = {
+          number: 9,
+          title: 'Investigating the same test elsewhere',
+          user: { login: 'qwen-code-dev-bot' },
+          body: `<!-- ${markerA} -->\n<!-- main-ci-failure-scope:9999 -->\n`,
+        };
+        const result = run([], {
+          signatureTitle,
+          testMarkers: markerA,
+          markerIssues: [foreign],
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue create');
+        expect(result.calls).not.toContain('issue comment 9');
       });
     });
   });
