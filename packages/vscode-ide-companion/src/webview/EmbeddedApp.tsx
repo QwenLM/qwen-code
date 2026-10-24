@@ -16,6 +16,7 @@ import {
 } from '@qwen-code/web-shell';
 import {
   DaemonClient,
+  DaemonHttpError,
   findDaemonRewindUserBlock,
   isDaemonRewindUserBlock,
   type DaemonSessionSummary,
@@ -384,6 +385,7 @@ export function EmbeddedApp() {
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const historyButtonRef = useRef<HTMLButtonElement>(null);
+  const appRootRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
   const composerRef = useRef<WebShellComposerApi | null>(null);
   const currentModelIdRef = useRef<string | undefined>(undefined);
@@ -702,6 +704,33 @@ export function EmbeddedApp() {
     return () =>
       document.removeEventListener('contextmenu', trackContextMenu, true);
   }, [vscode]);
+
+  // VS Code 1.143's webview guest script refocuses the webview's last
+  // focused element right before running a clipboard execCommand (Ctrl+C,
+  // context-menu Copy). The last focused element here is the composer's
+  // contenteditable, and focusing an editable collapses the document text
+  // selection, so the copy runs on an empty selection and lands nothing in
+  // the clipboard. Keep the app root (a non-editable element) focused while
+  // the pointer presses into a non-interactive area: focusing a
+  // non-editable div preserves the selection, and an activeElement that is
+  // not <body> makes the guest script skip the refocus.
+  useEffect(() => {
+    const keepSelectionFocus = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      if (
+        target.closest(
+          'button, a, input, textarea, select, [contenteditable="true"], [role="button"]',
+        )
+      ) {
+        return;
+      }
+      appRootRef.current?.focus({ preventScroll: true });
+    };
+    document.addEventListener('pointerdown', keepSelectionFocus, true);
+    return () =>
+      document.removeEventListener('pointerdown', keepSelectionFocus, true);
+  }, []);
 
   useEffect(() => {
     const handleCopyCommand = (event: MessageEvent) => {
@@ -1051,7 +1080,14 @@ export function EmbeddedApp() {
 
   return (
     <div
-      style={{ ...ROOT_STYLE, position: 'relative', flexDirection: 'column' }}
+      ref={appRootRef}
+      tabIndex={-1}
+      style={{
+        ...ROOT_STYLE,
+        position: 'relative',
+        flexDirection: 'column',
+        outline: 'none',
+      }}
       data-vscode-context='{"webviewSection":"chat-messages"}'
     >
       <style>{VSCODE_EMBEDDED_CSS}</style>
@@ -1623,6 +1659,7 @@ export function EmbeddedApp() {
             if (submission.source === 'mcp-app') return undefined;
             if (editingMessage) {
               const { blockId } = editingMessage;
+              setEditingMessage(undefined);
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
@@ -1633,6 +1670,21 @@ export function EmbeddedApp() {
                 blockId === undefined
                   ? userBlocks.at(-1)
                   : userBlocks.find((block) => block.id === blockId);
+              // The clear above is unconditional so no refusal can wedge the
+              // next send, but a transient daemon failure has to re-arm the
+              // edit: the message says "Please try again", and a retry that
+              // skipped the rewind would append the edited text as a new turn
+              // instead of replacing the original. Only permanent 4xx refusals
+              // stay cleared, so a rewind that can never succeed cannot wedge
+              // the composer again. Never `cancelMessageEditing` here — it
+              // wipes the composer text the retry needs.
+              const rearmOnTransientFailure = (error: unknown) => {
+                if (runtimeRef.current?.sessionId !== sessionId) return;
+                if (error instanceof DaemonHttpError && error.status < 500) {
+                  return;
+                }
+                setEditingMessage({ blockId });
+              };
               let snapshots: Awaited<
                 ReturnType<typeof daemonClient.getRewindSnapshots>
               >['snapshots'];
@@ -1640,6 +1692,7 @@ export function EmbeddedApp() {
                 ({ snapshots } =
                   await daemonClient.getRewindSnapshots(sessionId));
               } catch (err) {
+                rearmOnTransientFailure(err);
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
               const matches =
@@ -1666,9 +1719,9 @@ export function EmbeddedApp() {
                   rewindFiles: false,
                 });
               } catch (err) {
+                rearmOnTransientFailure(err);
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
-              setEditingMessage(undefined);
               clearInsight();
               // The daemon delivers `session.rewound` on the session stream,
               // which lands in the transcript store after the rewind HTTP

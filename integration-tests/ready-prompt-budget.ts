@@ -18,13 +18,26 @@
  * a genuinely broken boot failing fast. Any budget here must stay under the
  * suite's testTimeout (TB_TIMEOUT_MINUTES, default 5min).
  *
- * Only InteractiveSession.start was observed to stall; the TestRig readiness
- * waits keep their own budgets and are tracked separately.
+ * InteractiveSession.start and the skill-hooks invocation-parity suite's
+ * TestRig readiness wait use this budget; other TestRig readiness waits keep
+ * their own budgets and are tracked separately.
  *
  * Pure and read at call time so the decision is pinned state-by-state with a
  * plain object instead of real time (scripts/tests/ready-prompt-budget.test.ts).
  */
+
+const TIERS = {
+  default: 30_000,
+  selfHosted: 90_000,
+  selfHostedDocker: 180_000,
+} as const;
+
+/** The widest branch, so a suite ceiling can be derived instead of copied. */
+export const MAX_READY_PROMPT_BUDGET_MS = Math.max(...Object.values(TIERS));
+
 export function readyPromptBudgetMs(env: NodeJS.ProcessEnv): number {
-  if (env['RUNNER_ENVIRONMENT'] !== 'self-hosted') return 30_000;
-  return env['QWEN_SANDBOX'] === 'docker' ? 180_000 : 90_000;
+  if (env['RUNNER_ENVIRONMENT'] !== 'self-hosted') return TIERS.default;
+  return env['QWEN_SANDBOX'] === 'docker'
+    ? TIERS.selfHostedDocker
+    : TIERS.selfHosted;
 }

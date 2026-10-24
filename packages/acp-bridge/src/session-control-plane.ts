@@ -13798,7 +13798,8 @@ export function createSessionControlPlane(
         } as T;
       }
       const startsWorkspaceChannel =
-        method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart;
+        method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart ||
+        method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan;
       const invoke = async (info: ChannelInfo) => {
         const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;
         const response = await withTimeout(
