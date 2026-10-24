@@ -3882,7 +3882,7 @@ it('passes REQUESTED_TIMEOUT_MS to the requested() wait', async () => {
   try {
     const requestId = await requested();
     expect(waitFor.mock.calls.at(-1)?.[1]).toEqual({
-      timeout: REQUESTED_TIMEOUT_MS,
+      timeout: requestedWaitBudgetMs(SLOW_HOST, BUDGET_RUNNER_NAME),
     });
     await resolveHostedAction(session, waiters, requestId, answer('deny'));
   } finally {
