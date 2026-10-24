@@ -64,6 +64,10 @@ import {
   getApiHistoryPromptId,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
+  userContentPushSnapshotKey,
+  userContentPushAcceptedKey,
+} from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import {
@@ -636,6 +640,7 @@ describe('Session', () => {
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     captureCacheSafeParams: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
+    acceptCompletedToolResults: ReturnType<typeof vi.fn>;
     resetManagedAutoMemoryAfterCompression: ReturnType<typeof vi.fn>;
   };
   let mockMemoryManager: {
@@ -906,6 +911,7 @@ describe('Session', () => {
       finishManagedAutoMemoryRecall: vi.fn(),
       captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
+      acceptCompletedToolResults: vi.fn(),
       resetManagedAutoMemoryAfterCompression: vi.fn(),
     };
     mockMemoryManager = {
@@ -1476,6 +1482,19 @@ describe('Session', () => {
       });
       return { raw, callTool, tool, registry };
     }
+
+    it('does not retain experience records for MCP App calls', async () => {
+      const { raw } = installAppTool();
+      const realClient = new core.LlmClient(mockConfig);
+      mockLlmClient.recordCompletedToolCall.mockImplementation(
+        realClient.recordCompletedToolCall.bind(realClient),
+      );
+
+      expect(await session.callMcpAppTool('app-only', request)).toEqual(raw);
+      expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+      expect(realClient['recordedExperienceCallIds'].size).toBe(0);
+      expect(realClient['toolCallCount']).toBe(0);
+    });
 
     it('requests permission and returns raw data only to the App', async () => {
       const { raw, callTool, tool } = installAppTool();
@@ -4653,11 +4672,128 @@ describe('Session', () => {
       expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
         'read_file',
         { path: '/tmp/test.txt' },
+        expect.objectContaining({
+          executionStatus: 'success',
+          error: undefined,
+        }),
       );
       expect(
         mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
       ).toHaveBeenCalledOnce();
     });
+
+    it.each([
+      'accepted',
+      'concurrent-only',
+      'failed-after-push',
+      'iterator-failed',
+      'iterator-failed-after-chunk',
+      'rolled-back',
+      'rolled-back-then-concurrent-push',
+      'session-changed',
+      'inline-repaired',
+    ] as const)(
+      'forwards only request-owned accepted ACP results (%s)',
+      async (mode) => {
+        let pushCount = 0;
+        let forwarded: Part[] | undefined;
+        let acceptedBeforeSourceComplete: number | undefined;
+        Object.assign(mockChat, { getUserContentPushCount: () => pushCount });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'contents',
+              returnDisplay: 'contents',
+            }),
+          }),
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(async (_model, request) => {
+            const message = (request as { message: Part[] }).message;
+            if (!message[0]?.functionResponse) {
+              return createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'acceptance-call',
+                        name: 'read_file',
+                        args: { path: '/tmp/test.txt' },
+                      },
+                    ],
+                  },
+                },
+              ]);
+            }
+            forwarded = message;
+            const rolledBack = mode.startsWith('rolled-back');
+            if (mode !== 'concurrent-only') {
+              Object.defineProperty(message, userContentPushSnapshotKey, {
+                value: pushCount,
+              });
+              Object.defineProperty(message, userContentPushAcceptedKey, {
+                value: rolledBack
+                  ? undefined
+                  : mode === 'inline-repaired'
+                    ? []
+                    : message,
+              });
+            }
+            if (!rolledBack) pushCount += 1;
+            if (mode === 'session-changed') {
+              vi.spyOn(mockConfig, 'getSessionId').mockReturnValue(
+                'new-session',
+              );
+            }
+            if (mode === 'failed-after-push')
+              throw new Error('fixture provider failed');
+            return (async function* () {
+              if (mode === 'iterator-failed')
+                throw new Error('fixture provider failed');
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: { text: 'Done' },
+              };
+              if (mode === 'iterator-failed-after-chunk')
+                throw new Error('fixture provider failed');
+              yield { type: core.StreamEventType.CHUNK, value: { text: '.' } };
+              acceptedBeforeSourceComplete =
+                mockLlmClient.acceptCompletedToolResults.mock.calls.length;
+              if (mode === 'rolled-back-then-concurrent-push') pushCount += 1;
+            })();
+          });
+        const result = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'ACP acceptance fixture' }],
+        });
+        if (mode.includes('failed'))
+          await expect(result).rejects.toThrow('fixture provider failed');
+        else await result;
+        expect(forwarded?.[0]?.functionResponse?.id).toBe('acceptance-call');
+        const accepted =
+          mode !== 'concurrent-only' &&
+          !mode.startsWith('rolled-back') &&
+          mode !== 'session-changed';
+        expect(mockLlmClient.acceptCompletedToolResults).toHaveBeenCalledTimes(
+          accepted ? 1 : 0,
+        );
+        if (accepted) {
+          expect(
+            mockLlmClient.acceptCompletedToolResults.mock.calls[0][0],
+          ).toEqual(mode === 'inline-repaired' ? [] : forwarded);
+        }
+        if (!mode.includes('failed')) {
+          expect(acceptedBeforeSourceComplete).toBe(accepted ? 1 : 0);
+        }
+      },
+    );
 
     it('does not run managed memory for retries or failed turns', async () => {
       mockChat.sendMessageStream = vi
@@ -21157,6 +21293,15 @@ describe('Session', () => {
           expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
             target.name,
             { title: 'Cache-safe tools' },
+            expect.objectContaining({
+              callId: 'bridge-call',
+              executionStatus:
+                outcome === 'build error'
+                  ? 'not_started'
+                  : outcome === 'success'
+                    ? 'success'
+                    : 'error',
+            }),
           );
         },
       );
@@ -42548,6 +42693,15 @@ describe('Session', () => {
             }),
             expect.anything(),
           );
+          expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+            'read_file',
+            expect.anything(),
+            expect.objectContaining({
+              executionStatus: 'success',
+              errorType: core.ToolErrorType.EXECUTION_DENIED,
+              resultDisplay: 'success',
+            }),
+          );
           // The stop must produce an observable error result
           expect(
             mockChatRecordingService.recordToolResult,
@@ -46503,6 +46657,40 @@ describe('Session', () => {
           .mockReturnValue(core.ToolMode.CodeModeOnly);
       });
 
+      it.each([
+        ['read_file', '/repo/example.txt', false],
+        ['write_file', '/repo/example.txt', false],
+        ['write_file', '/repo/.qwen/skills/example/SKILL.md', true],
+      ] as const)(
+        'retains only parent experience and skill-write protection for nested %s at %s',
+        async (name, filePath, skillWrite) => {
+          const realClient = new core.LlmClient(mockConfig);
+          mockLlmClient.recordCompletedToolCall.mockImplementation(
+            realClient.recordCompletedToolCall.bind(realClient),
+          );
+          const nested = nestedTool(name, core.Kind.Read, async () =>
+            output('nested result'),
+          );
+          const result = await runCode([nested], (runtime, signal) =>
+            runtime.dispatch(name, { file_path: filePath }, signal),
+          );
+
+          expect([...realClient['pendingExperienceOutcomes'].keys()]).toEqual([
+            'exec-parent',
+          ]);
+          expect([...realClient['recordedExperienceCallIds']]).toEqual(
+            skillWrite
+              ? ['exec-parent:code:1', 'exec-parent']
+              : ['exec-parent'],
+          );
+          expect(realClient['skillsModifiedInSession']).toBe(skillWrite);
+          realClient.acceptCompletedToolResults(result.parts);
+          realClient.acceptCompletedToolResults(result.parts);
+          expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+          expect(realClient['toolCallCount']).toBe(1);
+        },
+      );
+
       it('overlaps safe calls and keeps reversed results and persistence with their call IDs', async () => {
         const started = [deferred(), deferred()];
         const release = [deferred(), deferred()];
@@ -47701,6 +47889,17 @@ describe('Session', () => {
 
       expect(build).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
+      expect(
+        mockLlmClient.recordCompletedToolCall,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'enablement_tool',
+        {},
+        expect.objectContaining({
+          callId: 'enablement_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+        }),
+      );
       expect(result.parts[0].functionResponse?.response).toEqual({
         error: 'Tool call was cancelled before execution.',
       });
@@ -47889,6 +48088,17 @@ describe('Session', () => {
       expect(result.parts[0].functionResponse?.response).toEqual({
         error: 'The tool had already completed; its output was discarded.',
       });
+      expect(
+        mockLlmClient.recordCompletedToolCall,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'cancel_tool',
+        {},
+        expect.objectContaining({
+          callId: 'execution_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'cancelled',
+        }),
+      );
       expect(endExecutionSpanSpy).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
@@ -48367,6 +48577,17 @@ describe('Session', () => {
           error_type: core.ToolErrorType.UNHANDLED_EXCEPTION,
         }),
       );
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        'postprocess_tool',
+        {},
+        expect.objectContaining({
+          status: 'error',
+          error: expect.any(Error),
+          executionStatus: 'success',
+          errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+          resultDisplay: 'completed',
+        }),
+      );
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
         result.parts,
         expect.objectContaining({
@@ -48823,10 +49044,16 @@ describe('Session', () => {
       },
     );
 
-    it('prefers cancellation when PostToolUse stops after execution settles', async () => {
+    it('protects a skill write when PostToolUse cancels after execution settles', async () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
         .mockImplementation(() => {});
+      const endToolSpanSpy = vi.spyOn(core, 'endToolSpan');
+      const realClient = new core.LlmClient(mockConfig);
+      mockLlmClient.recordCompletedToolCall.mockImplementation(
+        realClient.recordCompletedToolCall.bind(realClient),
+      );
+      const args = { file_path: '/repo/.qwen/skills/example/SKILL.md' };
       const abortController = new AbortController();
       const messageBus = {
         request: vi
@@ -48863,7 +49090,7 @@ describe('Session', () => {
         persistedOutputFiles: ['/private/post-cancel-output.txt'],
       });
       mockToolRegistry.getTool.mockReturnValue(
-        mockAllowedTool('post_hook_tool', execute),
+        mockAllowedTool('write_file', execute),
       );
 
       const result = await (
@@ -48871,12 +49098,34 @@ describe('Session', () => {
       ).runToolCalls(abortController.signal, 'prompt-post-hook-cancel', [
         {
           id: 'post_hook_cancel_call',
-          name: 'post_hook_tool',
-          args: {},
+          name: 'write_file',
+          args,
         },
       ]);
 
       expect(execute).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.recordCompletedToolCall,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'write_file',
+        args,
+        expect.objectContaining({
+          callId: 'post_hook_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'success',
+        }),
+      );
+      expect(realClient['skillsModifiedInSession']).toBe(true);
+      expect(
+        realClient['recordedExperienceCallIds'].has('post_hook_cancel_call'),
+      ).toBe(true);
+      expect(realClient['toolCallCount']).toBe(0);
+      expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+      expect(realClient['recentCompletedToolNames']).toEqual([]);
+      expect(endToolSpanSpy).toHaveBeenCalledWith(expect.anything(), {
+        success: false,
+        cancelled: true,
+      });
       expect(result.parts[0].functionResponse?.response).toEqual({
         error: 'The tool had already completed; its output was discarded.',
       });

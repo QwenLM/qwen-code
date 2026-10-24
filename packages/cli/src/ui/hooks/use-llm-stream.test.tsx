@@ -100,6 +100,7 @@ const MockedLlmClientClass = vi.hoisted(() =>
     this.getChat = vi.fn().mockReturnValue({ addHistory: this.addHistory });
     this.consumePendingMemoryTaskPromises = vi.fn().mockReturnValue([]);
     this.recordCompletedToolCall = vi.fn();
+    this.acceptCompletedToolResults = vi.fn();
     // Default to the fast-path accessor returning an empty Set so the
     // dedup dispatcher in `handleCompletedTools` takes the
     // `getHistoryFunctionResponseIds` branch by default (matching
@@ -9531,7 +9532,7 @@ describe('useLlmStream', () => {
     expect(mockScheduleToolCalls).not.toHaveBeenCalled();
   });
 
-  it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
+  it('suppresses duplicate provider tool-call ids before TUI scheduling with Mod attempts', async () => {
     const recordToolResult = vi.fn();
     (
       mockConfig as Config & {
@@ -9651,6 +9652,7 @@ describe('useLlmStream', () => {
         prompt_id: 'prompt-tui-dup',
       },
       status: 'success',
+      nativeAttemptsObserved: true,
       responseSubmittedToLlm: false,
       response: {
         callId: 'tool-dup',
@@ -10130,6 +10132,7 @@ describe('useLlmStream', () => {
       responseSubmittedToLlm: false,
       response: {
         callId: 'call_race_A',
+        executionStatus: 'success',
         responseParts: [
           {
             functionResponse: {
@@ -10155,6 +10158,21 @@ describe('useLlmStream', () => {
     } as unknown as TrackedCompletedToolCall;
 
     const client = new MockedLlmClientClass(mockConfig);
+    const { LlmClient: RealLlmClient } = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core/core/client.js')
+    >('@qwen-code/qwen-code-core/core/client.js');
+    const realClient = new RealLlmClient({
+      getToolRegistry: () => ({ getTool: () => undefined }),
+    } as unknown as Config);
+    client.recordCompletedToolCall = vi.fn(
+      realClient.recordCompletedToolCall.bind(realClient),
+    );
+    client.acceptCompletedToolResults = vi.fn(
+      realClient.acceptCompletedToolResults.bind(realClient),
+    );
+    client.addHistory.mockImplementation((content: { parts: Part[] }) => {
+      realClient.acceptCompletedToolResults(content.parts);
+    });
     // Simulate the chat-internal repair pass having already planted a
     // synthetic functionResponse for the same callId on the previous
     // (Retry) push. The dedup dispatcher consults
@@ -10240,149 +10258,199 @@ describe('useLlmStream', () => {
       expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['call_race_A']);
     });
 
-    // The deduped tool DID run locally — `recordCompletedToolCall` must
-    // still fire so toolCallCount / skillsModifiedInSession reflect it,
-    // even though the wire-side submission is dropped. Regression guard:
-    // an earlier version filtered deduped tools out of `llmTools`
-    // without recording, skipping the metric increment.
-    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {
-      path: '/tmp/x.txt',
-    });
+    // Dropped results have no model consumer and must not retain experience
+    // records, ordinary reservations or recall hints.
+    expect(realClient['toolCallCount']).toBe(0);
+    expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+    expect(realClient['recordedExperienceCallIds'].size).toBe(0);
+    expect(realClient['recentCompletedToolNames']).toEqual([]);
+    expect(client.addHistory).not.toHaveBeenCalled();
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'read_file',
+      { path: '/tmp/x.txt' },
+      {
+        ...lateRealResult.response,
+        status: lateRealResult.status,
+        modelFacing: false,
+      },
+    );
 
     // No follow-up submission: the synthetic in history already closes
     // the tool_use ↔ tool_result pair.
     expect(mockSendMessageStream).not.toHaveBeenCalled();
-  });
-
-  it('skips recordCompletedToolCall for deduped CANCELLED tools (telemetry parity)', async () => {
-    // A deduped tool with status='cancelled' never actually produced
-    // model-visible output — counting it via `recordCompletedToolCall`
-    // (which increments toolCallCount and can flip
-    // skillsModifiedInSession on a skill-write path) would inflate the
-    // metric for a call that never ran end-to-end. Dedup must skip
-    // BOTH client-initiated (already skipped) AND cancelled tools,
-    // while still calling `markToolsAsSubmitted` so the scheduler
-    // unblocks.
-    const cancelledDedupedTool = {
-      request: {
-        callId: 'call_dedup_cancelled',
-        name: 'write_file',
-        args: { path: '/tmp/cancelled.txt', content: 'x' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-dedup-cancel',
-      },
-      status: 'cancelled',
-      responseSubmittedToLlm: false,
-      response: {
-        callId: 'call_dedup_cancelled',
-        responseParts: [
-          {
-            functionResponse: {
-              id: 'call_dedup_cancelled',
-              name: 'write_file',
-              response: { error: 'cancelled' },
-            },
-          },
-        ],
-        resultDisplay: undefined,
-        error: undefined,
-        errorType: undefined,
-      },
-      tool: {
-        name: 'write_file',
-        displayName: 'WriteFile',
-        description: 'Write a file',
-        build: vi.fn(),
-      } as any,
-      invocation: {
-        getDescription: () => 'cancelled write',
-      } as unknown as AnyToolInvocation,
-    } as unknown as TrackedCancelledToolCall;
-
-    const client = new MockedLlmClientClass(mockConfig);
-    // Pre-paired in history: dedup will fire for this callId. Wire
-    // the fast-path accessor so the dispatcher takes the
-    // `getHistoryFunctionResponseIds` branch (matches production
-    // path; see the default mock comment in MockedLlmClientClass).
-    client.getHistoryFunctionResponseIds = vi
-      .fn()
-      .mockReturnValue(new Set(['call_dedup_cancelled']));
-    client.getHistory = vi.fn().mockReturnValue([
-      { role: 'user', parts: [{ text: 'cancelled write' }] },
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: 'call_dedup_cancelled',
-              name: 'write_file',
-              args: { path: '/tmp/cancelled.txt', content: 'x' },
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call_dedup_cancelled',
-              name: 'write_file',
-              response: { error: 'synthetic' },
-            },
-          },
-        ],
-      },
-    ]);
-
-    let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
-      | null = null;
-    mockUseReactToolScheduler.mockImplementation((onComplete) => {
-      capturedOnComplete = onComplete;
-      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-    });
-
-    renderHook(() =>
-      useLlmStream(
-        client,
-        [],
-        mockAddItem,
-        mockConfig,
-        true,
-        mockLoadedSettings,
-        mockOnDebugMessage,
-        mockHandleSlashCommand,
-        false,
-        () => 'vscode' as EditorType,
-        () => {},
-        () => Promise.resolve(),
-        false,
-        () => {},
-        () => {},
-        () => {},
-        () => {},
-        80,
-        24,
-      ),
+    realClient.acceptCompletedToolResults(
+      lateRealResult.response.responseParts,
     );
-
-    await act(async () => {
-      if (capturedOnComplete) {
-        await capturedOnComplete([cancelledDedupedTool]);
-      }
-    });
-
-    // Scheduler still gets unblocked.
-    await waitFor(() => {
-      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
-        'call_dedup_cancelled',
-      ]);
-    });
-
-    // Telemetry NOT incremented — the cancelled filter held.
-    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+    expect(realClient['toolCallCount']).toBe(0);
   });
+
+  it.each([
+    ['success', 'success', false],
+    ['success', 'success', true],
+    ['success', 'not_started', true],
+    ['cancelled', 'success', true],
+    ['cancelled', 'error', true],
+    ['cancelled', 'cancelled', true],
+    ['cancelled', 'not_started', true],
+  ] as const)(
+    'handles deduped %s writes with %s execution (skill: %s) without counting experience',
+    async (status, executionStatus, skillWrite) => {
+      const dedupedWrite = {
+        request: {
+          callId: 'call_dedup_cancelled',
+          name: 'write_file',
+          args: {
+            path: skillWrite
+              ? '/test/dir/.qwen/skills/example/SKILL.md'
+              : '/test/dir/example.txt',
+            content: 'x',
+          },
+          isClientInitiated: false,
+          prompt_id: 'prompt-dedup-cancel',
+        },
+        status,
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call_dedup_cancelled',
+          executionStatus,
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call_dedup_cancelled',
+                name: 'write_file',
+                response: { error: 'cancelled' },
+              },
+            },
+          ],
+          resultDisplay: undefined,
+          error: undefined,
+          errorType: undefined,
+        },
+        tool: {
+          name: 'write_file',
+          displayName: 'WriteFile',
+          description: 'Write a file',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => 'cancelled write',
+        } as unknown as AnyToolInvocation,
+      } as unknown as TrackedToolCall;
+
+      const client = new MockedLlmClientClass(mockConfig);
+      const { LlmClient: RealLlmClient } = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/core/client.js')
+      >('@qwen-code/qwen-code-core/core/client.js');
+      const realClient = new RealLlmClient(mockConfig);
+      client.recordCompletedToolCall = vi.fn(
+        realClient.recordCompletedToolCall.bind(realClient),
+      );
+      // Pre-paired in history: dedup will fire for this callId. Wire
+      // the fast-path accessor so the dispatcher takes the
+      // `getHistoryFunctionResponseIds` branch (matches production
+      // path; see the default mock comment in MockedLlmClientClass).
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['call_dedup_cancelled']));
+      client.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'cancelled write' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_dedup_cancelled',
+                name: 'write_file',
+                args: dedupedWrite.request.args,
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_dedup_cancelled',
+                name: 'write_file',
+                response: { error: 'synthetic' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+
+      renderHook(() =>
+        useLlmStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        if (capturedOnComplete) {
+          await capturedOnComplete([dedupedWrite]);
+        }
+      });
+
+      // Scheduler still gets unblocked.
+      await waitFor(() => {
+        expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+          'call_dedup_cancelled',
+        ]);
+      });
+
+      expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+        'write_file',
+        dedupedWrite.request.args,
+        { ...dedupedWrite.response, status, modelFacing: false },
+      );
+      expect(realClient['skillsModifiedInSession']).toBe(
+        skillWrite && executionStatus !== 'not_started',
+      );
+      expect(
+        realClient['recordedExperienceCallIds'].has('call_dedup_cancelled'),
+      ).toBe(skillWrite && executionStatus !== 'not_started');
+      expect(realClient['toolCallCount']).toBe(0);
+      expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+      expect(realClient['recentCompletedToolNames']).toEqual([]);
+      expect(client.addHistory).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      realClient['skillsModifiedInSession'] = false;
+      await act(async () => {
+        await capturedOnComplete?.([dedupedWrite]);
+      });
+      expect(realClient['skillsModifiedInSession']).toBe(false);
+      expect(realClient['toolCallCount']).toBe(0);
+      expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+    },
+  );
 
   it('runs Race A dedup BEFORE the active-stream early-return (regression guard)', async () => {
     // The dedup block in handleCompletedTools is intentionally placed
@@ -10787,219 +10855,275 @@ describe('useLlmStream', () => {
     ]);
   });
 
-  it('handles a mixed batch (one deduped + one non-deduped) without double-counting telemetry', async () => {
-    // The dedup filter on `llmTools` (`!historyCallIdsWithResponse.has(callId)`)
-    // is the only thing preventing double `recordCompletedToolCall`
-    // for tools whose late real result lands AFTER the orphan-tool_use
-    // repair already planted a synthetic. Existing dedup tests supply
-    // ONLY deduped tools, so a regression that removed that filter
-    // would silently inflate `toolCallCount` (and flip
-    // `skillsModifiedInSession` for the SAME skill-write callId twice)
-    // without breaking any current test.
-    //
-    // Mixed-batch repro: scheduler completes two tools in the same
-    // batch — one whose callId already has a fr in history (deduped),
-    // one whose callId is fresh (must reach sendMessageStream). Pin:
-    //   (a) markToolsAsSubmitted called with BOTH callIds,
-    //   (b) recordCompletedToolCall fires once per non-deduped tool,
-    //       NOT twice for the deduped one,
-    //   (c) sendMessageStream IS called (the non-deduped tool's real
-    //       result must reach the wire).
-    const dedupedTool = {
-      request: {
-        callId: 'call_mixed_deduped',
-        name: 'read_file',
-        args: { path: '/tmp/d.txt' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-mixed',
-      },
-      status: 'success',
-      responseSubmittedToLlm: false,
-      response: {
-        callId: 'call_mixed_deduped',
-        responseParts: [
-          {
-            functionResponse: {
-              id: 'call_mixed_deduped',
-              name: 'read_file',
-              response: { output: 'late real for deduped' },
+  it.each(['success', 'cancelled'] as const)(
+    'handles a mixed batch (one deduped + one %s) without double-counting telemetry',
+    async (status) => {
+      // A late real result must not reach history after repair planted a
+      // synthetic response. Only a non-cancelled fresh result counts as
+      // experience.
+      //
+      // Mixed-batch repro: scheduler completes two tools in the same
+      // batch — one whose callId already has a fr in history (deduped),
+      // one whose callId is fresh (must reach model input or history). Pin:
+      //   (a) markToolsAsSubmitted called with BOTH callIds,
+      //   (b) recordCompletedToolCall fires once per non-deduped tool,
+      //       NOT twice for the deduped one,
+      //   (c) success arm: sendMessageStream receives the fresh result;
+      //       cancelled arm: addHistory receives it, with nothing on the wire.
+      const dedupedTool = {
+        request: {
+          callId: 'call_mixed_deduped',
+          name: 'read_file',
+          args: { path: '/tmp/d.txt' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-mixed',
+        },
+        status: 'error',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call_mixed_deduped',
+          executionStatus: 'error',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call_mixed_deduped',
+                name: 'read_file',
+                response: { error: 'late failure' },
+              },
             },
-          },
-        ],
-        resultDisplay: undefined,
-        error: undefined,
-        errorType: undefined,
-      },
-      tool: {
-        name: 'read_file',
-        displayName: 'ReadFile',
-        description: 'Read a file',
-        build: vi.fn(),
-      } as any,
-      invocation: {
-        getDescription: () => 'read /tmp/d.txt',
-      } as unknown as AnyToolInvocation,
-    } as unknown as TrackedCompletedToolCall;
+          ],
+          resultDisplay: undefined,
+          error: new Error('late failure'),
+          errorType: undefined,
+        },
+        tool: {
+          name: 'read_file',
+          displayName: 'ReadFile',
+          description: 'Read a file',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => 'read /tmp/d.txt',
+        } as unknown as AnyToolInvocation,
+      } as unknown as TrackedCompletedToolCall;
 
-    const freshTool = {
-      request: {
-        callId: 'call_mixed_fresh',
-        name: 'read_file',
-        args: { path: '/tmp/f.txt' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-mixed',
-      },
-      status: 'success',
-      responseSubmittedToLlm: false,
-      response: {
-        callId: 'call_mixed_fresh',
-        responseParts: [
-          {
-            functionResponse: {
-              id: 'call_mixed_fresh',
-              name: 'read_file',
-              response: { output: 'real for fresh' },
+      const freshTool = {
+        request: {
+          callId: 'call_mixed_fresh',
+          name: 'read_file',
+          args: { path: '/tmp/f.txt' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-mixed',
+        },
+        status,
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call_mixed_fresh',
+          executionStatus: 'success',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call_mixed_fresh',
+                name: 'read_file',
+                response: { output: 'real for fresh' },
+              },
             },
-          },
-        ],
-        resultDisplay: undefined,
-        error: undefined,
-        errorType: undefined,
-      },
-      tool: {
-        name: 'read_file',
-        displayName: 'ReadFile',
-        description: 'Read a file',
-        build: vi.fn(),
-      } as any,
-      invocation: {
-        getDescription: () => 'read /tmp/f.txt',
-      } as unknown as AnyToolInvocation,
-    } as unknown as TrackedCompletedToolCall;
+          ],
+          resultDisplay: 'real for fresh',
+          error:
+            status === 'cancelled'
+              ? new Error('cancelled after execution')
+              : undefined,
+          errorType: undefined,
+        },
+        tool: {
+          name: 'read_file',
+          displayName: 'ReadFile',
+          description: 'Read a file',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => 'read /tmp/f.txt',
+        } as unknown as AnyToolInvocation,
+      } as unknown as TrackedCompletedToolCall;
 
-    const client = new MockedLlmClientClass(mockConfig);
-    // Wire BOTH the fast-path accessor (`getHistoryFunctionResponseIds`)
-    // and the legacy `getHistory()` fallback. Wiring the fast path
-    // is the actual point of this test: production code prefers
-    // `getHistoryFunctionResponseIds` to skip the multi-millisecond
-    // `structuredClone` cost on long sessions, and an earlier
-    // version of this test only mocked `getHistory()` so the slow
-    // path was always the one exercised. We assert below that the
-    // fast path was the only one called — a regression that drops
-    // the fast-path branch from the dispatcher would silently
-    // re-route every batch onto the slow clone path with no test
-    // failure.
-    client.getHistoryFunctionResponseIds = vi
-      .fn()
-      .mockReturnValue(new Set(['call_mixed_deduped']));
-    client.getHistory = vi.fn().mockReturnValue([
-      { role: 'user', parts: [{ text: 'kick off' }] },
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: 'call_mixed_deduped',
-              name: 'read_file',
-              args: { path: '/tmp/d.txt' },
-            },
-          },
-          {
-            functionCall: {
-              id: 'call_mixed_fresh',
-              name: 'read_file',
-              args: { path: '/tmp/f.txt' },
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call_mixed_deduped',
-              name: 'read_file',
-              response: { error: 'Tool execution result was not recorded' },
-            },
-          },
-        ],
-      },
-    ]);
-
-    let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
-      | null = null;
-    mockUseReactToolScheduler.mockImplementation((onComplete) => {
-      capturedOnComplete = onComplete;
-      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-    });
-
-    renderHook(() =>
-      useLlmStream(
-        client,
-        [],
-        mockAddItem,
-        mockConfig,
-        true,
-        mockLoadedSettings,
-        mockOnDebugMessage,
-        mockHandleSlashCommand,
-        false,
-        () => 'vscode' as EditorType,
-        () => {},
-        () => Promise.resolve(),
-        false,
-        () => {},
-        () => {},
-        () => {},
-        () => {},
-        80,
-        24,
-      ),
-    );
-
-    await act(async () => {
-      if (capturedOnComplete) {
-        await capturedOnComplete([dedupedTool, freshTool]);
-      }
-    });
-
-    await waitFor(() => {
-      // (a) Both callIds were marked submitted somewhere across the
-      // dedup pass (deduped) and the post-isResponding flow (fresh).
-      const allMarked = mockMarkToolsAsSubmitted.mock.calls.flatMap(
-        (call) => call[0] as string[],
+      const client = new MockedLlmClientClass(mockConfig);
+      const { LlmClient: RealLlmClient } = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/core/client.js')
+      >('@qwen-code/qwen-code-core/core/client.js');
+      const realClient = new RealLlmClient({
+        getToolRegistry: () => ({ getTool: () => undefined }),
+      } as unknown as Config);
+      client.recordCompletedToolCall = vi.fn(
+        realClient.recordCompletedToolCall.bind(realClient),
       );
-      expect(allMarked).toContain('call_mixed_deduped');
-      expect(allMarked).toContain('call_mixed_fresh');
-    });
+      client.addHistory.mockImplementation((content: { parts: Part[] }) => {
+        realClient.acceptCompletedToolResults(content.parts);
+      });
+      client.acceptCompletedToolResults = vi.fn(
+        realClient.acceptCompletedToolResults.bind(realClient),
+      );
+      realClient['failedExperienceToolNames'].add('read_file');
+      if (status === 'success') {
+        mockSendMessageStream.mockImplementationOnce((parts: Part[]) => {
+          realClient.acceptCompletedToolResults(parts);
+          return (async function* () {})();
+        });
+      }
+      // Wire BOTH the fast-path accessor (`getHistoryFunctionResponseIds`)
+      // and the legacy `getHistory()` fallback. Wiring the fast path
+      // is the actual point of this test: production code prefers
+      // `getHistoryFunctionResponseIds` to skip the multi-millisecond
+      // `structuredClone` cost on long sessions, and an earlier
+      // version of this test only mocked `getHistory()` so the slow
+      // path was always the one exercised. We assert below that the
+      // fast path was the only one called — a regression that drops
+      // the fast-path branch from the dispatcher would silently
+      // re-route every batch onto the slow clone path with no test
+      // failure.
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['call_mixed_deduped']));
+      client.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_mixed_deduped',
+                name: 'read_file',
+                args: { path: '/tmp/d.txt' },
+              },
+            },
+            {
+              functionCall: {
+                id: 'call_mixed_fresh',
+                name: 'read_file',
+                args: { path: '/tmp/f.txt' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_mixed_deduped',
+                name: 'read_file',
+                response: { error: 'Tool execution result was not recorded' },
+              },
+            },
+          ],
+        },
+      ]);
 
-    // (b) recordCompletedToolCall fires EXACTLY once per tool (deduped
-    // gets one call from the dedup-loop; fresh gets one from the
-    // llmTools loop). The filter is what prevents the double
-    // record on the deduped callId.
-    const recordedCallIds = (
-      client.recordCompletedToolCall as unknown as ReturnType<typeof vi.fn>
-    ).mock.calls.map((call) => (call[1] as { path: string }).path);
-    expect(recordedCallIds.filter((p) => p === '/tmp/d.txt').length).toBe(1);
-    expect(recordedCallIds.filter((p) => p === '/tmp/f.txt').length).toBe(1);
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
 
-    // (c) The fresh tool's real result reaches sendMessageStream —
-    // dedup didn't accidentally suppress it.
-    expect(mockSendMessageStream).toHaveBeenCalled();
+      renderHook(() =>
+        useLlmStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
 
-    // (d) Fast-path was taken: `getHistoryFunctionResponseIds` was
-    // called for the dedup pass, and the cloning `getHistory()`
-    // fallback was NOT used by the dedup. (Other call sites in the
-    // hook may still call getHistory for their own purposes; we
-    // pin only that the dedup itself did not re-clone.) A future
-    // refactor that drops the fast-path branch from the dispatcher
-    // would re-route the dedup pass onto the structuredClone path
-    // and break this assertion — exactly the regression the
-    // accessor was added to prevent.
-    expect(client.getHistoryFunctionResponseIds).toHaveBeenCalled();
-    expect(client.getHistory).not.toHaveBeenCalled();
+      await act(async () => {
+        if (capturedOnComplete) {
+          await capturedOnComplete([dedupedTool, freshTool]);
+        }
+      });
+
+      await waitFor(() => {
+        // (a) Both callIds were marked submitted somewhere across the
+        // dedup pass (deduped) and the post-isResponding flow (fresh).
+        const allMarked = mockMarkToolsAsSubmitted.mock.calls.flatMap(
+          (call) => call[0] as string[],
+        );
+        expect(allMarked).toContain('call_mixed_deduped');
+        expect(allMarked).toContain('call_mixed_fresh');
+      });
+
+      // (b) recordCompletedToolCall fires EXACTLY once per tool (deduped
+      // gets one call from the dedup-loop; fresh gets one from the
+      // llmTools loop). The filter is what prevents the double
+      // record on the deduped callId.
+      const recordedCallIds = (
+        client.recordCompletedToolCall as unknown as ReturnType<typeof vi.fn>
+      ).mock.calls.map((call) => (call[1] as { path: string }).path);
+      expect(recordedCallIds.filter((p) => p === '/tmp/d.txt').length).toBe(1);
+      expect(recordedCallIds.filter((p) => p === '/tmp/f.txt').length).toBe(1);
+      expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+        'read_file',
+        { path: '/tmp/f.txt' },
+        { ...freshTool.response, status: freshTool.status },
+      );
+      expect(realClient['toolCallCount']).toBe(status === 'success' ? 1 : 0);
+      expect(
+        realClient['pendingExperienceOutcomes'].has('call_mixed_deduped'),
+      ).toBe(false);
+      expect(
+        realClient['recordedExperienceCallIds'].has('call_mixed_deduped'),
+      ).toBe(false);
+      expect(realClient['failedExperienceToolNames'].has('read_file')).toBe(
+        status === 'cancelled',
+      );
+      expect(realClient['experienceSignals'].retryArc).toBe(
+        status === 'success',
+      );
+      if (status === 'success') {
+        expect(mockSendMessageStream.mock.calls[0][0]).toEqual(
+          freshTool.response.responseParts,
+        );
+      } else {
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: freshTool.response.responseParts,
+        });
+        expect(mockSendMessageStream).not.toHaveBeenCalled();
+      }
+
+      // (d) Fast-path was taken: `getHistoryFunctionResponseIds` was
+      // called for the dedup pass, and the cloning `getHistory()`
+      // fallback was NOT used by the dedup. (Other call sites in the
+      // hook may still call getHistory for their own purposes; we
+      // pin only that the dedup itself did not re-clone.) A future
+      // refactor that drops the fast-path branch from the dispatcher
+      // would re-route the dedup pass onto the structuredClone path
+      // and break this assertion — exactly the regression the
+      // accessor was added to prevent.
+      expect(client.getHistoryFunctionResponseIds).toHaveBeenCalled();
+      expect(client.getHistory).not.toHaveBeenCalled();
+    },
+  );
+
+  it('serves its own stream after the mixed-batch cancelled arm', () => {
+    const stream = (async function* () {})();
+    mockSendMessageStream.mockReturnValue(stream);
+    expect(mockSendMessageStream([])).toBe(stream);
   });
 
   it('should not flicker streaming state to Idle between tool completion and submission', async () => {
@@ -19968,8 +20092,10 @@ describe('useLlmStream', () => {
             type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'btw-cancelled-tool',
-              name: 'testTool',
-              args: {},
+              name: 'write_file',
+              args: {
+                file_path: '/test/dir/.qwen/skills/example/SKILL.md',
+              },
               isClientInitiated: false,
               prompt_id: promptId,
             },
@@ -20047,19 +20173,32 @@ describe('useLlmStream', () => {
       const makeCancelledToolCall = (
         callId: string,
         promptId: string | undefined,
+        name: string,
       ) =>
         ({
           request: {
             callId,
-            name: 'testTool',
-            args: {},
+            name,
+            args:
+              name === 'write_file'
+                ? { file_path: '/test/dir/.qwen/skills/example/SKILL.md' }
+                : {},
             isClientInitiated: false,
             prompt_id: promptId,
           },
           status: 'cancelled',
           response: {
             callId,
-            responseParts: [{ text: 'cancelled' }],
+            executionStatus: 'cancelled',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: callId,
+                  name,
+                  response: { error: 'cancelled' },
+                },
+              },
+            ],
             errorType: undefined,
           },
           responseSubmittedToLlm: false,
@@ -20069,7 +20208,7 @@ describe('useLlmStream', () => {
           } as unknown as AnyToolInvocation,
         }) as TrackedCancelledToolCall;
       const mainCompletedToolCall = {
-        ...makeCancelledToolCall('main-tool', 'main-prompt'),
+        ...makeCancelledToolCall('main-tool', 'main-prompt', 'testTool'),
         status: 'success',
         response: {
           callId: 'main-tool',
@@ -20088,7 +20227,16 @@ describe('useLlmStream', () => {
       const btwCancelledToolCall = makeCancelledToolCall(
         'btw-cancelled-tool',
         btwPromptId,
+        'write_file',
       );
+      const { LlmClient: RealLlmClient } = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/core/client.js')
+      >('@qwen-code/qwen-code-core/core/client.js');
+      const realClient = new RealLlmClient(mockConfig);
+      client.recordCompletedToolCall = vi.fn(
+        realClient.recordCompletedToolCall.bind(realClient),
+      );
+      realClient['failedExperienceToolNames'].add('write_file');
 
       await act(async () => {
         await capturedOnComplete?.([
@@ -20171,6 +20319,24 @@ describe('useLlmStream', () => {
           functionResponse: expect.objectContaining({ id: 'main-tool' }),
         }),
       ]);
+      expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+        'write_file',
+        btwCancelledToolCall.request.args,
+        { ...btwCancelledToolCall.response, status: 'cancelled' },
+      );
+      expect(realClient['skillsModifiedInSession']).toBe(true);
+      expect(
+        realClient['recordedExperienceCallIds'].has('btw-cancelled-tool'),
+      ).toBe(true);
+      expect(realClient['toolCallCount']).toBe(0);
+      expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+      expect(realClient['recentCompletedToolNames']).not.toContain(
+        'write_file',
+      );
+      expect(realClient['experienceSignals'].retryArc).toBe(false);
+      expect(realClient['failedExperienceToolNames'].has('write_file')).toBe(
+        true,
+      );
       await act(async () => {
         await result.current.submitQuery(
           'After drain',

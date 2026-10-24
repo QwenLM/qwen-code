@@ -256,6 +256,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                   ? 'cancelled'
                   : 'success',
               response: {
+                callId: c.callId,
                 responseParts: [
                   {
                     functionResponse: {
@@ -338,6 +339,7 @@ function createFakeConfig(
   const client = {
     sendMessageStream,
     isInitialized,
+    recordCompletedToolCall: vi.fn(),
     // R5-4/R6-5: an abort at the sampling boundary still writes the
     // completed batch's function responses to history before returning.
     addHistory: vi.fn(async () => {}),
@@ -457,6 +459,17 @@ describe('livePromptEvents', () => {
     const [parts, metadata] = recordToolResult.mock.calls[0];
     expect(metadata.responseParts).toBeUndefined();
     expect(metadata.executionStatus).toBe('not_started');
+    expect(
+      config.getGeminiClient().recordCompletedToolCall,
+    ).toHaveBeenCalledWith(
+      request.name,
+      request.args,
+      expect.objectContaining({
+        callId: request.callId,
+        executionStatus: 'not_started',
+        status: 'success',
+      }),
+    );
     expect(JSON.stringify(parts)).not.toContain(output);
     expect(JSON.stringify(parts).length).toBeLessThan(1500);
     expect(stream.mock.calls[1][0]).toEqual(parts);

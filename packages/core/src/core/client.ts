@@ -27,6 +27,7 @@ import type {
   GenerateContentResponse,
   Part,
   PartListUnion,
+  PartUnion,
   Tool,
 } from '@google/genai';
 import { buildAdvisorReminder } from './advisor-policy.js';
@@ -81,6 +82,7 @@ import {
   type ChatCompressionObserverOptions,
   type RepairOrphanedToolUseOptions,
   userContentPushSnapshotKey,
+  userContentPushAcceptedKey,
 } from './llm-chat.js';
 import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
@@ -118,6 +120,14 @@ import {
   getToolExplorationKind,
   ToolExplorationBudget,
 } from '../services/tool-exploration-budget.js';
+import {
+  accumulateRetryBatch,
+  classifyToolExperience,
+  didToolCallProduceWork,
+  isSubstantiveToolCall,
+  type CompletedToolOutcome,
+  type ExperienceSignals,
+} from '../memory/experience-signals.js';
 import {
   renderAutoMemoryFocusedSubtree,
   toAutoMemoryRef,
@@ -538,6 +548,21 @@ export class LlmClient {
   private readonly stopHookChains = new Map<string, StopHookChain>();
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
+  private experienceSignals: ExperienceSignals = {
+    retryArc: false,
+    userSteer: false,
+    hasSubstantiveWork: false,
+  };
+  private failedExperienceToolNames = new Set<string>();
+  private recordedExperienceCallIds = new Set<string>();
+  private pendingExperienceOutcomes = new Map<
+    string,
+    {
+      toolName: string;
+      outcome: 'success' | 'failure' | null;
+      substantive: boolean;
+    }
+  >();
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
@@ -682,6 +707,10 @@ export class LlmClient {
       return;
     }
     this.interactionStartTypes.clear();
+    this.resetSkillReviewWindow();
+    this.pendingExperienceOutcomes.clear();
+    this.recordedExperienceCallIds.clear();
+    this.skillsModifiedInSession = false;
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
@@ -801,6 +830,7 @@ export class LlmClient {
 
   async addHistory(content: Content) {
     this.getChat().addHistory(content);
+    this.acceptCompletedToolResults(content.parts ?? []);
   }
 
   /**
@@ -1964,6 +1994,10 @@ export class LlmClient {
     }
 
     this.initializedSessionId = undefined;
+    this.resetSkillReviewWindow();
+    this.pendingExperienceOutcomes.clear();
+    this.recordedExperienceCallIds.clear();
+    this.skillsModifiedInSession = false;
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
@@ -2880,6 +2914,7 @@ export class LlmClient {
             history,
             this.config.getChatRecordingService(),
             uiTelemetryService,
+            this.recordedExperienceCallIds,
           ),
       );
       chat.enableManualPlanExitNotices();
@@ -3158,11 +3193,11 @@ export class LlmClient {
       return;
     }
 
-    // autoSkill counts tool calls and can trigger on both UserQuery and
-    // ToolResult turns so the threshold can fire mid-session.
+    // Retry can finish a window accepted before the previous provider failed.
     if (
       messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.ToolResult
+      messageType === SendMessageType.ToolResult ||
+      messageType === SendMessageType.Retry
     ) {
       const projectRoot = this.config.getProjectRoot();
       const sessionId = this.config.getSessionId();
@@ -3177,15 +3212,15 @@ export class LlmClient {
           history,
           config: this.config,
           toolCallCount: this.toolCallCount,
+          experienceSignals: { ...this.experienceSignals },
           skillsModified: this.skillsModifiedInSession,
           enabled: autoSkillEnabled,
           threshold: AUTO_SKILL_THRESHOLD,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
-          // Reset tool-call counter when a review is dispatched so the next
-          // review only fires after a full new threshold worth of tool calls.
-          this.toolCallCount = 0;
+          // Each dispatch consumes its window; later work needs fresh evidence.
+          this.resetSkillReviewWindow();
           if (skillReviewResult.promise) {
             this.pendingMemoryTaskPromises.push(
               skillReviewResult.promise
@@ -3202,16 +3237,8 @@ export class LlmClient {
                 }),
             );
           }
-        } else if (
-          skillReviewResult.status === 'skipped' &&
-          skillReviewResult.skippedReason === 'already_running' &&
-          this.toolCallCount >= AUTO_SKILL_THRESHOLD
-        ) {
-          // A review is already in-flight; reset the counter so that when the
-          // current review completes the next call doesn't immediately trigger
-          // another review without accumulating a fresh threshold of tool calls.
-          this.toolCallCount = 0;
         }
+        // In-flight reviews snapshot older history; keep newly accumulated work.
         // Always reset the skills-modified flag after the scheduleSkillReview
         // check, regardless of whether a review was dispatched. This prevents
         // a deadlock where skillsModifiedInSession stays true forever: when
@@ -3319,22 +3346,78 @@ export class LlmClient {
     return promises;
   }
 
+  private resetSkillReviewWindow(): void {
+    // Pending results and dedup IDs outlive the consumed review window.
+    this.toolCallCount = 0;
+    this.experienceSignals = {
+      retryArc: false,
+      userSteer: false,
+      hasSubstantiveWork: false,
+    };
+    this.failedExperienceToolNames.clear();
+  }
+
+  acceptCompletedToolResults(parts: readonly PartUnion[]): void {
+    const accepted = [];
+    for (const part of parts) {
+      const id =
+        typeof part === 'string' ? undefined : part.functionResponse?.id;
+      if (!id) continue;
+      const entry = this.pendingExperienceOutcomes.get(id);
+      if (!entry) continue;
+      this.pendingExperienceOutcomes.delete(id);
+      this.toolCallCount += 1;
+      this.experienceSignals.hasSubstantiveWork ||= entry.substantive;
+      accepted.push(entry);
+    }
+    this.experienceSignals.retryArc =
+      accumulateRetryBatch(this.failedExperienceToolNames, accepted) ||
+      this.experienceSignals.retryArc;
+  }
+
   recordCompletedToolCall(
     toolName: string,
-    args?: Record<string, unknown>,
+    args: Record<string, unknown> | undefined,
+    response: CompletedToolOutcome,
   ): void {
-    this.rememberCompletedToolName(toolName);
-
-    if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
-      const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
-      if (
-        typeof filePath === 'string' &&
-        isProjectSkillPath(filePath, this.config.getProjectRoot())
-      ) {
-        this.skillsModifiedInSession = true;
+    if (this.recordedExperienceCallIds.has(response.callId)) return;
+    if (
+      response.executionStatus === 'success' ||
+      response.executionStatus === 'error' ||
+      response.executionStatus === 'cancelled'
+    ) {
+      if (response.modelFacing !== false) {
+        this.recordedExperienceCallIds.add(response.callId);
+      }
+      // Cancellation cannot undo a skill write that already reached disk.
+      if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
+        const filePath =
+          args['file_path'] ?? args['path'] ?? args['target_file'];
+        if (
+          typeof filePath === 'string' &&
+          isProjectSkillPath(filePath, this.config.getProjectRoot())
+        ) {
+          this.skillsModifiedInSession = true;
+          this.recordedExperienceCallIds.add(response.callId);
+        }
       }
     }
-    this.toolCallCount += 1;
+    if (
+      response.modelFacing === false ||
+      response.status === 'cancelled' ||
+      response.executionStatus === 'cancelled'
+    )
+      return;
+    this.rememberCompletedToolName(toolName);
+    if (!didToolCallProduceWork(response)) return;
+    this.pendingExperienceOutcomes.set(response.callId, {
+      toolName,
+      outcome: classifyToolExperience(toolName, response),
+      substantive: isSubstantiveToolCall(
+        toolName,
+        this.config.getToolRegistry().getTool(toolName)?.kind,
+      ),
+    });
   }
 
   private rememberCompletedToolName(toolName: string): void {
@@ -3932,7 +4015,7 @@ export class LlmClient {
     // that exits before the publish never pushed, so it settles by
     // unconditional restore. `pushInitiated` tracks whether the send ever
     // reached `turn.run`; exits before it settle the same way.
-    let attachedSnapshotSource: readonly unknown[] | undefined;
+    let attachedSnapshotSource: readonly PartUnion[] | undefined;
     const attachedPushSnapshot = (): number | undefined => {
       const published = attachedSnapshotSource
         ? (attachedSnapshotSource as unknown as Record<PropertyKey, unknown>)[
@@ -3942,6 +4025,29 @@ export class LlmClient {
       return typeof published === 'number' ? published : undefined;
     };
     let pushInitiated = false;
+    let experienceInputRecorded = false;
+    const experienceSessionId = this.config.getSessionId();
+    const recordAcceptedExperienceInput = () => {
+      const acceptedParts = attachedSnapshotSource
+        ? (attachedSnapshotSource as unknown as Record<PropertyKey, unknown>)[
+            userContentPushAcceptedKey
+          ]
+        : undefined;
+      if (
+        !experienceInputRecorded &&
+        this.config.getSessionId() === experienceSessionId &&
+        Array.isArray(acceptedParts)
+      ) {
+        experienceInputRecorded = true;
+        if (
+          messageType === SendMessageType.Steer ||
+          (attachedSteerInput?.parts.length ?? 0) > 0
+        ) {
+          this.experienceSignals.userSteer = true;
+        }
+        this.acceptCompletedToolResults(acceptedParts);
+      }
+    };
 
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
@@ -5129,6 +5235,7 @@ export class LlmClient {
       const loopGuardFedCallIds = new Set<string>();
       try {
         for await (const event of resultStream) {
+          recordAcceptedExperienceInput();
           const acceptsModelInput =
             event.type === LlmEventType.Content ||
             event.type === LlmEventType.Thought ||
@@ -5418,6 +5525,7 @@ export class LlmClient {
       agentOutput.commitResponse(
         hasToolCalls || turn.pendingToolCalls.length > 0,
       );
+      recordAcceptedExperienceInput();
       for (const goalEvent of signal.aborted
         ? await finalizeInterruptedGoalTurn()
         : takePendingGoalEvents()) {
@@ -5925,6 +6033,7 @@ export class LlmClient {
         );
       }
       closeGoalStateEvents();
+      recordAcceptedExperienceInput();
       if (pushInitiated) {
         // Snapshot published by the chat ⇒ compare against it; no snapshot
         // ⇒ the send exited before its push site (no await between the

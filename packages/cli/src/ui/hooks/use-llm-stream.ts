@@ -5064,32 +5064,15 @@ export const useLlmStream = (
             `whose callId already has a functionResponse in history: ` +
             `${dedupedCallIds.join(', ')}`,
         );
-        // Even though the wire-side submission is dropped, the tool DID
-        // run locally — `toolCallCount` and `skillsModifiedInSession`
-        // must reflect that. Without this, deduped skill-write tools
-        // (e.g. write_file under a project SKILLS path) would silently
-        // skip the `skillsModifiedInSession` flip that gates the
-        // skills-reload prompt at end-of-turn. Mirrors the
-        // `recordCompletedToolCall` loop below over `llmTools` —
-        // filter to the same shape (non-client-initiated) so client
-        // tools (which the original loop also skipped) stay skipped.
-        //
-        // Cancelled tools are also skipped: `dedupedTools` includes
-        // anything in a terminal state (success | error | cancelled),
-        // but cancelled means the tool never actually ran end-to-end —
-        // the `allToolsCancelled` branch below would have surfaced
-        // them via `addHistory + reportCancelled` rather than the
-        // completed-call metric, and the metric should match. Without
-        // this filter, a deduped + cancelled tool would inflate
-        // `toolCallCount` for a call that never produced a result
-        // (and could also flip `skillsModifiedInSession` for a
-        // never-executed skill-write).
+        // Dropped results have no model consumer. Keep local skill-write
+        // protection and its replay reservation without retaining experience
+        // records or recall hints. Client-owned calls remain excluded.
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (tc.status === 'cancelled' || tc.nativeAttemptsObserved) continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
+            { ...tc.response, status: tc.status, modelFacing: false },
           );
         }
         markToolsAsSubmitted(dedupedCallIds);
@@ -5243,15 +5226,11 @@ export const useLlmStream = (
             toolCall.request.prompt_id,
           );
         }
-        if (
-          toolCall.status !== 'cancelled' &&
-          !toolCall.nativeAttemptsObserved
-        ) {
-          llmClient?.recordCompletedToolCall(
-            toolCall.request.name,
-            toolCall.request.args as Record<string, unknown>,
-          );
-        }
+        llmClient?.recordCompletedToolCall(
+          toolCall.request.name,
+          toolCall.request.args as Record<string, unknown>,
+          { ...toolCall.response, status: toolCall.status },
+        );
         dualOutput?.emitToolResult(toolCall.request, toolCall.response);
       }
       if (secondaryTools.length > 0) {
@@ -5538,10 +5517,10 @@ export const useLlmStream = (
       }
 
       for (const toolCall of llmTools) {
-        if (toolCall.nativeAttemptsObserved) continue;
         llmClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
+          { ...toolCall.response, status: toolCall.status },
         );
       }
 

@@ -32,6 +32,8 @@ import {
   redactApprovedPlansInHistory,
   redactStructuredOutputArgsForRecording,
   StreamEventType,
+  userContentPushSnapshotKey,
+  userContentPushAcceptedKey,
   type StreamEvent,
 } from './llm-chat.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
@@ -1735,6 +1737,56 @@ describe('LlmChat', async () => {
         ).toHaveBeenCalledTimes(2);
       });
     });
+
+    it.each(['accepted', 'rolled-back', 'failed-after-push'] as const)(
+      'publishes an owned history-push receipt (%s)',
+      async (mode) => {
+        const message: Part[] = [{ text: 'own input' }];
+        const receipt = message as unknown as Record<PropertyKey, unknown>;
+        // Reusing an array must not carry a previous send's acceptance.
+        receipt[userContentPushAcceptedKey] = [{ text: 'previous input' }];
+        if (mode === 'rolled-back') {
+          vi.spyOn(
+            chat as unknown as { getRequestHistory: () => Content[] },
+            'getRequestHistory',
+          ).mockImplementationOnce(() => {
+            throw new Error('history setup failed');
+          });
+        }
+        mockStream(
+          mode === 'failed-after-push'
+            ? streamThenThrow(
+                [textChunk('partial')],
+                new Error('stream aborted'),
+              )
+            : textStream('done'),
+        );
+        const sendResult = chat.sendMessageStream(
+          'test-model',
+          { message },
+          'owned-push',
+        );
+        if (mode === 'rolled-back') {
+          await expect(sendResult).rejects.toThrow('history setup failed');
+        } else {
+          const stream = await sendResult;
+          expect(receipt[userContentPushAcceptedKey]).toEqual([
+            { text: 'own input' },
+          ]);
+          if (mode === 'failed-after-push')
+            await expect(drain(stream)).rejects.toThrow('stream aborted');
+          else await drain(stream);
+        }
+        expect(receipt[userContentPushSnapshotKey]).toBe(0);
+        const accepted = mode !== 'rolled-back';
+        const acceptedParts = accepted ? [{ text: 'own input' }] : undefined;
+        expect(receipt[userContentPushAcceptedKey]).toEqual(acceptedParts);
+        expect(chat.getUserContentPushCount()).toBe(accepted ? 1 : 0);
+        streamMock().mockImplementation(async () => textStream('next'));
+        await sendDrain('unrelated input', 'unrelated-push');
+        expect(receipt[userContentPushAcceptedKey]).toEqual(acceptedParts);
+      },
+    );
 
     it('increments the user-content push counter once per surviving send', async () => {
       mockStream(textStream('done'));

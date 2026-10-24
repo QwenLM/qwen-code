@@ -3716,84 +3716,105 @@ describe('runNonInteractive', () => {
     expect(finalize).not.toHaveBeenCalled();
   });
 
-  it('should handle a single tool call and respond', async () => {
-    setupMetricsMock();
-    const toolCallEvent: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        name: 'testTool',
-        args: { arg1: 'value1' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-2',
-      },
-    };
-    const toolResponse: Part[] = [{ text: 'Tool response' }];
-    mockCoreExecuteToolCall.mockResolvedValue({
-      responseParts: toolResponse,
-      executionStatus: 'success',
-    });
+  it.each(['success', 'cancelled'] as const)(
+    'forwards a %s tool completion and responds',
+    async (status) => {
+      setupMetricsMock();
+      const toolCallEvent: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-1',
+          name: 'testTool',
+          args: { arg1: 'value1' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-2',
+        },
+      };
+      const toolResponse: Part[] = [{ text: 'Tool response' }];
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          const response = {
+            callId: 'tool-1',
+            responseParts: toolResponse,
+            executionStatus: 'success' as const,
+            resultDisplay: 'Tool response',
+            error:
+              status === 'cancelled'
+                ? new Error('cancelled after execution')
+                : undefined,
+          };
+          await options.onAllToolCallsComplete([{ request, response, status }]);
+          return response;
+        },
+      );
 
-    const firstCallEvents: ServerLlmStreamEvent[] = [toolCallEvent];
-    const secondCallEvents: ServerLlmStreamEvent[] = [
-      { type: LlmEventType.Content, value: 'Final answer' },
-      {
-        type: LlmEventType.Finished,
-        value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
-      },
-    ];
+      const firstCallEvents: ServerLlmStreamEvent[] = [toolCallEvent];
+      const secondCallEvents: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'Final answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
+        },
+      ];
 
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
-      .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
+        .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use a tool',
-      'prompt-id-2',
-      { humanInput: { text: 'ultracode use a tool' } },
-    );
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use a tool',
+        'prompt-id-2',
+        { humanInput: { text: 'ultracode use a tool' } },
+      );
 
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
-      mockConfig,
-      expect.objectContaining({ name: 'testTool' }),
-      expect.any(AbortSignal),
-      expect.objectContaining({
-        outputUpdateHandler: expect.any(Function),
-      }),
-    );
-    // Verify first call has type: UserQuery
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      1,
-      [{ text: 'Use a tool' }],
-      expect.any(AbortSignal),
-      'prompt-id-2',
-      {
-        type: SendMessageType.UserQuery,
-        modelOverride: undefined,
-        submittedPrompt: 'Use a tool',
-        humanInput: { text: 'ultracode use a tool' },
-      },
-    );
-    // Verify second call (after tool execution) has type: ToolResult
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      2,
-      [{ text: 'Tool response' }],
-      expect.any(AbortSignal),
-      'prompt-id-2',
-      { type: SendMessageType.ToolResult },
-    );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
-    // Verify recordCompletedToolCall is called with the tool name and args.
-    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
-      'testTool',
-      { arg1: 'value1' },
-    );
-    // Verify consumePendingMemoryTaskPromises is called at the end of the session.
-    expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
-  });
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ name: 'testTool' }),
+        expect.any(AbortSignal),
+        expect.objectContaining({
+          outputUpdateHandler: expect.any(Function),
+        }),
+      );
+      // Verify first call has type: UserQuery
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        1,
+        [{ text: 'Use a tool' }],
+        expect.any(AbortSignal),
+        'prompt-id-2',
+        {
+          type: SendMessageType.UserQuery,
+          modelOverride: undefined,
+          submittedPrompt: 'Use a tool',
+          humanInput: { text: 'ultracode use a tool' },
+        },
+      );
+      // Verify second call (after tool execution) has type: ToolResult
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        [{ text: 'Tool response' }],
+        expect.any(AbortSignal),
+        'prompt-id-2',
+        { type: SendMessageType.ToolResult },
+      );
+      expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+      // Verify recordCompletedToolCall is called with the tool name and args.
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        'testTool',
+        { arg1: 'value1' },
+        expect.objectContaining({
+          callId: 'tool-1',
+          executionStatus: 'success',
+          resultDisplay: 'Tool response',
+          status,
+        }),
+      );
+      // Verify consumePendingMemoryTaskPromises is called at the end of the session.
+      expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
+    },
+  );
 
   it('uses a tool-selected full-turn model for the next request', async () => {
     setupMetricsMock();
@@ -4536,6 +4557,8 @@ describe('runNonInteractive', () => {
           if (started === total) openGate();
           await gate;
           const response = {
+            callId: request.callId,
+            executionStatus: 'success' as const,
             responseParts: [
               {
                 functionResponse: {
@@ -4602,10 +4625,12 @@ describe('runNonInteractive', () => {
       expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
         targetName,
         { path: 'bridge-1' },
+        expect.objectContaining({ callId: 'bridge-1' }),
       );
       expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
         targetName,
         { path: 'bridge-2' },
+        expect.objectContaining({ callId: 'bridge-2' }),
       );
     });
 
