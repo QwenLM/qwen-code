@@ -7,6 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 
 import { SkillManager, Storage, type Config } from '@qwen-code/qwen-code-core';
+import { sanitizeChildEnv } from '@qwen-code/qwen-code-core/utils/sanitize-child-env.js';
 import { fromBuffer, type Entry, type ZipFile } from 'yauzl';
 
 export type WorkspaceSkillScope = 'workspace' | 'global';
@@ -408,7 +409,7 @@ async function downloadGitHubDirectoryWithGit(
       {
         timeout: 60_000,
         maxBuffer: 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        env: { ...sanitizeChildEnv(), GIT_TERMINAL_PROMPT: '0' },
       },
     );
     if (directory) {
@@ -418,7 +419,7 @@ async function downloadGitHubDirectoryWithGit(
         {
           timeout: 30_000,
           maxBuffer: 1024 * 1024,
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+          env: { ...sanitizeChildEnv(), GIT_TERMINAL_PROMPT: '0' },
         },
       );
     } else {
@@ -428,7 +429,7 @@ async function downloadGitHubDirectoryWithGit(
         {
           timeout: 30_000,
           maxBuffer: 1024 * 1024,
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+          env: { ...sanitizeChildEnv(), GIT_TERMINAL_PROMPT: '0' },
         },
       );
     }

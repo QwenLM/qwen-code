@@ -20,6 +20,7 @@ async function temporary() {
 }
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   execFileMock.mockReset();
   await Promise.all(
     roots
@@ -518,6 +519,8 @@ describe('workspace Skill install recovery', () => {
       vi.fn(async () => new Response('denied', { status: 401 })),
     );
     const token = 'ghp_TEST_TOKEN';
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'qwen-server-bearer');
+    vi.stubEnv('https_proxy', 'http://proxy.invalid:8080');
     await installWorkspaceSkill(
       workspace,
       {
@@ -539,9 +542,14 @@ describe('workspace Skill install recovery', () => {
     expect(execFileMock).toHaveBeenCalledTimes(2);
     for (const [, argv, options] of execFileMock.mock.calls) {
       expect(JSON.stringify([argv, options])).not.toContain(token);
-      expect(options).toMatchObject({
-        env: { GIT_TERMINAL_PROMPT: '0' },
+      const env = (options as { env: NodeJS.ProcessEnv }).env;
+      expect(env).toMatchObject({
+        GIT_TERMINAL_PROMPT: '0',
+        https_proxy: 'http://proxy.invalid:8080',
       });
+      expect(env['PATH']).toBe(process.env['PATH']);
+      expect(env['HOME']).toBe(process.env['HOME']);
+      expect(env['QWEN_SERVER_TOKEN']).toBeUndefined();
     }
   });
 });
