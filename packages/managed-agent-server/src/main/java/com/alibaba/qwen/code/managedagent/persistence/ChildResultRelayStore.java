@@ -486,8 +486,8 @@ public class ChildResultRelayStore {
             if (!turnId.equals(record.path("daemonPromptId").asText())) {
                 continue;
             }
-            // Text runs a thought separates join with a newline, the way the
-            // API Turn's output_text parts do (terminalResultText).
+            // Text runs a thought separates join with a newline, the same
+            // rule terminalResultText applies to an API Turn's parts.
             StringBuilder text = new StringBuilder();
             boolean separated = false;
             for (JsonNode part : record.path("message").path("parts")) {
