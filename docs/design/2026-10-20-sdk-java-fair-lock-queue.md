@@ -26,24 +26,29 @@ hold at a time — no constant budget bounds the queue.
 - Goal: make the wait deterministic. A waiter's worst-case wait is the work
   ahead of it in line, not how often it has re-entered the queue.
 - Goal: preserve the current semantics elsewhere. The lock still releases
-  automatically at the step boundary. The helper's default (fatal) mode keeps
-  the pinned infrastructure-signature error text (`lock not acquired within`)
-  as its contract; both steps in this workflow rewrite that line to a
-  non-fatal warning as the helper emits it, so no path here fails on the lock
-  or leaves that signature on a green step.
-- Goal: keep the raised test-lane wait budget at 9600 s. The raise was sized
-  while the suite held the lock; the suite is now off the lock and the
-  remaining holds are the bounded write-back copies, so 9600 s stays ample
-  headroom for chained write-backs and above the 8685 s hold measured before
-  #15128. No constant budget bounds the queue (qwen-code#15243).
+  automatically at the step boundary; the pinned infrastructure-signature
+  error text (`lock not acquired within`) stays so the rerun classifier in
+  `qwen-autofix.yml` is untouched.
+- Goal: keep a failed suite or gate red while still publishing the cache
+  delta its downloads produced, and record a failed seed copy, a skipped
+  write-back or a failed/timed-out write-back in the step summary instead
+  of only in the job log. A failed copy is never allowed to turn a green
+  lane red.
+- Goal: keep the test-lane wait at the 9600 s bound while this PR moves its
+  suite off the lock. Before the split the test lane's own suite was the
+  longest hold (925 s suite-alone since #14801, and 1031-1205 s as a whole
+  step at this head; the ceiling uses 1205 s); with the suite unlocked the
+  only hold is the bounded write-back copy, so 9600 s is a conservative
+  queue bound rather than a measured need. Shortening it is a separate
+  queue-depth trade-off; no constant budget bounds the queue
+  (qwen-code#15243).
 - Non-goal: reducing total occupancy. Sharding the lock by suite, capping
   registrations per host, or adding hosts are orthogonal and can follow;
-  fairness makes their remaining work measurable instead of urgent. The
-  hold-scope change below does run sdk-java suites concurrently on one host;
-  that host-resource contention is an accepted residual (see Hold scope), not
-  a claim that concurrent suites are free.
-- Non-goal: changing the MariaDB write-back's 5400 s budget or its
-  310-minute ceiling; its hold is the short copy.
+  fairness makes their remaining work measurable instead of urgent.
+- Non-goal: changing either lane's wait budget or job ceiling in this PR.
+  The MariaDB write-back keeps 5400 s and its 310-minute ceiling because its
+  hold is the short copy; shortening the test lane's now-conservative
+  9600 s/200-minute bound is a queue-depth follow-up.
 
 ## Design
 
@@ -77,14 +82,12 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   acquisition order, not release semantics.
 - On timeout the helper prints
   `::error::sdk-java host lock not acquired within N minutes as queue ticket S (CLASS); head of queue is H`
-  and returns 1. Both steps in this workflow rewrite that line in place —
-  the `::error::...not acquired within` prefix becomes
-  `::warning::sdk-java host lock wait exhausted after` — so the ticket,
-  class and queue head survive without the classifier signature. `CLASS` is
-  `fast` or `normal`, as the ticket stood when it gave up; `H` is the head
-  of the queue at that moment, or `(no other ticket queued)` when this
-  ticket was the last one. The `lock not acquired within` substring remains
-  the helper's contract, which the rerun classifiers match.
+  and returns 1. `CLASS` is `fast` or `normal`, as the ticket stood when it
+  gave up; `H` is the head of the queue at that moment, or
+  `(no other ticket queued)` when this ticket was the last one. The
+  `lock not acquired within` substring is the contract the rerun classifiers
+  match; the sdk-java call sites rewrite it case-insensitively on the
+  tolerated path below.
 - Wait observability: a non-blocking probe runs first, and only a waiter
   that actually has to wait prints its ticket number and the remaining
   budget — before it blocks, and at most once a minute after. A blocked head
@@ -108,54 +111,69 @@ failed at 19:15 without starting Maven — the hold, not the queue order, was
 the bound.
 
 Both Maven runs already resolve from a job-local repository, so they touch no
-host-shared state: Maven 3.9's resolver installs and downloads by replacing
-the directory entry. As defense-in-depth the seed still gives the resolver
-tracking files (`_remote.repositories`, `*.lastUpdated`,
-`resolver-status.properties`) private inodes instead of leaving them
-hardlinked to the host cache, so a resolver that does write in place cannot
-alter the host cache unlocked. Real Maven 3.9.0 replaces those files rather
-than writing through the link; the walk is kept at a measured ~52 s per job
-on a 3.5 GB warm cache (8,784 tracking files), against a 1.0 s seed. Only the
-cache write-back mutates `~/.m2`, so only the write-back takes the lock. The
-seed (`cp -aln`) is read-only and best-effort and runs before the acquisition;
-the Maven runs run unlocked; the write-back holds one acquisition, and its
-`mkdir` and bounded `find`/`cp` children drop fd 9 so a survivor cannot
-retain the lock. A hold now measures the copy instead of the suite. The test
-lane keeps the raised 9600 s wait as headroom for chained write-backs; the
-MariaDB write-back keeps 5400 s.
+host-shared state. Only the cache write-back mutates `~/.m2`, so only the
+write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
+and runs before the acquisition; it copies the host repository's contents
+(`/.`) so a reused job-local destination is not nested, then drops the two
+in-house fixed-release coordinates from the job-local copy, so the unlocked
+`mvn install` writes fresh inodes instead of rewriting the host cache through
+a hardlink. Maven's tracking markers (`resolver-status.properties`,
+`*.lastUpdated`, `_remote.repositories`) are truncated and rewritten in
+place, so the seed drops those hardlinks too and Maven recreates them
+job-locally. The Maven runs run unlocked; the write-back holds one
+acquisition, and its `mkdir` and bounded `find`/`cp` children drop fd 9 so a
+survivor cannot retain the lock. A hold now measures the copy instead of the
+suite, and the fast tier's budget is again far above one hold.
 
-The test job had the same shape and the same failure: the Java 21 leg held
-the lock across the sdk-java suite and the managed-agent H2 suite (925 s), and
-the Java 11/17 legs across the sdk-java suite. On 2026-10-22 run
-39794057849's fast job stayed head of the queue for the full 5400 s as ticket
-257, and failed before Maven on both attempts, on two different hosts. That job now seeds a job-local repository,
-runs all three Maven commands unlocked, and takes the lock only for its
-write-back, so no hold spans a suite anywhere in this workflow.
+The test job follows the same rule. Its suite was the other long hold: on
+2026-10-22, run 39771949573's fast-tier job failed at its 5400-second budget
+twice, on `ecs-qwen-hk4-21` (attempt 1) and `ecs-qwen-hk3-11` (attempt 2).
+The full-tier Java 21 leg of run 39754414693 ran 89 minutes on
+`ecs-qwen-hk3-30` — a different host, so the per-host lock is not what
+coupled them — and was itself a starvation victim: its attempt 1 failed at
+exactly 5400 seconds, and its 89-minute attempt 2 was ~81 minutes of its own
+lock wait plus ~6 minutes of Maven. The timeline-supported holder candidate
+is the pre-#15128 MariaDB `verify` hold (#15128 merged 2026-10-22T13:44:46Z,
+after attempt 1 and 17 minutes into attempt 2's wait). Whoever holds it, a
+suite hold measures in tens of minutes to hours while the write-back is
+bounded at 300 seconds, and that hold class is what the split retires. Its
+Maven runs now resolve from the job-local repository seeded from `~/.m2`,
+and only its write-back takes the lock.
 
-This is strictly more suite concurrency than the sharded-lock alternative
-rejected below, on a pool whose only recorded evidence is that it OOMed a
-build. No per-host memory headroom measurement is available for concurrent
-sdk-java suites, so host-resource contention is an accepted residual of this
-change, owned by the SDK Java CI maintainers: if a Java leg flakes while
-sibling suites run on the same host, re-scope the lock for that lane rather
-than attributing the flake to the suite.
+With the test job's suites unlocked, `sdk-java-tests.lock` no longer
+serializes any suite on any host: the only section left under it is the
+bounded write-back, and per-host suite concurrency is bounded solely by the
+number of runner registrations. #14566's "bounding hold length" therefore no
+longer covers that variable — uncapped concurrent JVM suites per host is now
+the mechanism's real bound.
 
-The write-back acquisition is also best-effort at both sites: a lock that
-cannot be acquired within its budget warns and skips the copy instead of
-failing a step whose suite already passed. On that path the workflow rewrites
-the helper's fatal line to a distinct `sdk-java host lock wait exhausted`
-warning with the same ticket/class/queue-head attribution and appends a
-step-summary line that reports host-cache presence and the seed copy's exit
-status separately, instead of leaving the pinned `lock not acquired within`
-error, so a succeeding step cannot leave the infrastructure signature on a
-job where a later genuine failure would be misclassified. The write-back's own
-failure arms — the 300 s backstop and any mkdir or copy error — append the
-same host-attributed record with the failure status, so a permanently
-unwritable or cross-filesystem host cache accumulates evidence instead of
-repeating an identical warning in every job log. The helper's default mode
-and the docker-lock callers keep the substring. The MariaDB write-back's
-5400 s budget and the fd 9
-closures are unchanged.
+A write-back that cannot acquire the lock within its budget warns and skips
+the copy instead of failing the step. The Maven gate result above is already
+final at that point, and the call sites rewrite the helper's timeout text
+case-insensitively before it reaches the log, so nothing on that tolerated
+path carries a rerun-classifier signature onto a succeeding step. The same
+policy covers a host fault the helper cannot recover from: a missing `flock`
+or an unusable cache or queue directory warns and skips before the helper
+spins out its budget. In the bare-lock fallback, only `flock`'s timeout
+status is tolerated; any other status is an unknown setup failure and stays
+fatal. Both jobs capture their Maven result instead of letting errexit skip
+the lock, so a failed suite or gate still publishes the delta its downloads
+produced and still exits red; a skipped write-back exits with that same
+result rather than masking it. Every cache-skip and write-back failure arm
+appends a host-attributed step-summary line with the seed's own exit status
+and host-cache presence, so a permanently unwritable or cross-filesystem
+host cache accumulates evidence instead of repeating an identical warning
+in every job log.
+
+The 9600 s test-lane and 5400 s write-back budgets are unchanged by this PR.
+They bound the queue, not the hold; the test lane's 9600 s is carried from
+the pre-split topology where its suite could queue behind several holds, and
+with the suite unlocked it is a conservative bound (about 32 queued 300 s
+copies) rather than a measured need. The 1200 s promotion window stays well
+inside both. What changed is that the wait now guards an optional bounded
+copy, so an expired budget skips the copy instead of failing the step.
+Shortening the test lane's budget to 1800 s (six queued copies) is a
+queue-depth trade-off left to a follow-up.
 
 ### Fast-tier priority
 
@@ -195,36 +213,39 @@ physical lock:
   cannot starve the full tier. Promotion protects waiting full-tier tickets,
   not parked ones: a parked head never loops back to the promotion check, and
   it does not need to, because it is already next.
-- The promotion window bounds the overtake, not a hold. A fast ticket that
-  arrived before the promotion and already parked in `flock` keeps its
-  earlier kernel position, so the promoted ticket waits one more hold behind
-  it; the cost is bounded by tickets already parked, not starvation. Under a
-  single hold longer than the window every waiting normal ticket crosses the
-  threshold together, the queue is plain sequence order, and a fast ticket
-  arriving afterwards has nothing left to overtake.
+- The promotion window bounds the overtake, not a hold. Promotion is
+  per-waiter: each normal ticket renames itself when its own wait crosses
+  the window. A fast ticket that arrived before the promotion and already
+  parked in `flock` keeps its earlier kernel position, so the promoted
+  ticket waits one more hold behind it; the cost is bounded by tickets
+  already parked, not starvation. Only under a single hold longer than the
+  window does every waiting normal ticket cross the threshold together;
+  otherwise they promote one at a time, and a fast ticket arriving before a
+  younger normal ticket has aged past the window can still overtake it. The
+  queue is plain sequence order only once every waiting normal ticket has
+  individually crossed the window.
 
 The release semantics and the `lock not acquired within` substring the
 rerun classifiers match are unchanged; the timeout line now also names the
 ticket's class.
 
-Priority does not bound a single hold. The same 2026-10-21 job then waited
-its last 52 minutes as head behind one hold and timed out. Before the
-MariaDB lane's suite moved off the lock, its holds of 7426 s and 8685 s were
-measured here, and a chain of holds could outlast a budget too: on
-2026-10-22 run 39754359013's Java 11 and Java 21 lanes each burned the full
-5400 s while the MariaDB lane still held the lock for its verify
-(qwen-code#15243) — pre-#15128 history, like those longer holds. The
-hold-scope change above now bounds every hold this workflow takes to one
-write-back copy, so no hold spans a suite. The test lane's 9600 s acquisition
-budget is headroom for chained write-backs and its ceiling is 200 minutes
-(the wait plus the 925 s suite, the 300 s write-back backstop and ~11 minutes
-of setup). The MariaDB write-back keeps 5400 s and its 310-minute ceiling:
-its own hold is the short copy, and its wait sits after the ~3-hour verify,
-so a larger budget would not fit a legal job ceiling. Naming the holder (a
-long ticketed hold, or a process that never took a ticket) is the diagnostic
-in qwen-code#15031; a hold that still outlasts the budget now comes from a
-stale or non-ticketed process, and the best-effort acquisition keeps it from
-reddening the suite.
+Priority does not bound a single hold; the hold-scope change above does.
+The same 2026-10-21 job then waited its last 52 minutes as head behind one
+hold and timed out. Before the MariaDB lane's suite moved off the lock, its
+holds of 7426 s and 8685 s were measured here, and a chain of holds could
+outlast a budget too: on 2026-10-22 run 39754359013's Java 11 and Java 21
+lanes each burned the full 5400 s while the MariaDB lane still held the lock
+for its verify (qwen-code#15243) — pre-#15128 history, like those longer
+holds. At this commit the longest hold this workflow takes is the bounded
+300 s write-back; the test lane's 9600 s acquisition budget is carried as a
+conservative bound from the pre-split topology, and its 200-minute ceiling
+covers that wait, the worst measured whole-step suite at this head (1205 s;
+the 925 s suite-alone figure from #14801 is a lower bound), the write-back
+and ~11 minutes of setup. The MariaDB write-back keeps 5400 s and its
+310-minute ceiling: its own hold is the short copy, and its wait sits after
+the ~3-hour verify, so a larger budget would not fit a legal job ceiling. Naming the holder (a long
+ticketed hold, or a process that never took a ticket) is the diagnostic in
+qwen-code#15031, and bounding hold length stays with #14566.
 
 The head keepalive matters more with two classes. Without it, a head blocked
 past 1800 s loses its ticket to another waiter's reaper, and the next ticket
@@ -236,10 +257,10 @@ order this section exists to prevent.
 ### Why fairness over the alternatives
 
 - Shard the lock by suite: reduces queue frequency but each shard is still a
-  bare flock. The earlier rejection rested on an untested assumption that
-  concurrent suites share the host safely; the hold-scope change now runs the
-  suites unlocked, so the remaining concern is the host-contention residual
-  recorded under Hold scope, not a reason to keep suite-spanning holds.
+  bare flock. This change removes suite serialization entirely, so the
+  untested assumption behind this bullet — that concurrent suites share the
+  host safely on a pool that just OOMed a build — is now load-bearing for
+  every suite on the pool.
 - Cap registrations per host: needs pool topology changes outside the repo
   and leaves the same lost-place race per host.
 - Second host: at least three hosts starved simultaneously; host count is
@@ -278,11 +299,22 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper, the
-  test lane's `sdk_java_lock_acquire 9600` budget, the write-back's 5400 s
-  budget, both job ceilings, every Maven run above its acquisition, both
-  write-backs' fd 9 closes, and the best-effort guard that keeps a missed
-  acquisition from failing the step. The `.size-baseline` records the
-  workflow's new size.
+  test lane's 9600 s budget and 200-minute ceiling, the MariaDB write-back's
+  5400 s budget and 310-minute ceiling, the identical prelude and write-back
+  tail at both sites (modulo the intentional budget difference), both jobs'
+  Maven runs above their acquisition, their write-back children's fd 9
+  close, the two in-house coordinates' and the tracking markers' absence
+  from every seeded job-local repository, and the seed-drop/prune sets
+  agreeing at every site. The fault arms cover a missing `flock`, a broken
+  `mkdir`, a stray queue file, a lock path that is a directory, a timed-out
+  `flock`, and an unexpected `flock` status. The suite also pins the seed's
+  contents-copy spelling, a failed seed's recorded status and summary line,
+  the write-back running after a failed suite while the step stays red, the
+  H2 suite skipped after a failed install, a write-back that cannot create
+  the host cache staying green with a summary line, a timed-out write-back's
+  124 status, resolver temporaries excluded from the write-back, and a
+  failed suite staying red when the lock is skipped. The `.size-baseline`
+  entry is re-measured to the workflow's size after the last edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -291,18 +323,24 @@ order this section exists to prevent.
 - The test site in `sdk-java.yml` acquires through the helper at 9600 s
   with a 200-minute ceiling; the MariaDB write-back site keeps 5400 s under
   its 310-minute ceiling. The test job passes its tier and the MariaDB site
-  defaults to normal.
-- Every Maven run resolves from a job-local repository above its acquisition,
-  and a failed acquisition skips the write-back without failing the step.
+  defaults to normal. Both sites run their Maven suites from a job-local
+  repository before the acquisition. Every job that seeds a job-local
+  repository drops the two in-house fixed-release coordinates from the copy
+  before running Maven.
+- A failed suite or gate still runs the write-back after the acquisition
+  and exits red; a failed seed or write-back records its status in the
+  step summary without failing an otherwise green lane.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
-- The helper still emits `lock not acquired within`, so
-  `qwen-autofix.yml`'s `INFRA_FAILURE_SIGNATURES` keeps matching for the
-  docker-lock callers and any future fatal sdk-java caller; both steps here
-  rewrite that line to `sdk-java host lock wait exhausted` before it reaches
-  the annotation channel, so a succeeding step cannot carry the
-  infrastructure signature.
+- The helper's timeout line still contains the substring
+  `lock not acquired within`, so `qwen-autofix.yml`'s
+  `INFRA_FAILURE_SIGNATURES` keeps matching a failed acquisition elsewhere.
+  Both call sites downgrade a failed acquisition or a setup fault to a
+  warning, skip the write-back, and rewrite the helper's timeout text
+  case-insensitively on the way to the log, so an acquisition this workflow
+  now tolerates leaves no classifier signature on a succeeding step. Only an
+  unexpected bare-`flock` status remains fatal.
 
 ## Open questions
 

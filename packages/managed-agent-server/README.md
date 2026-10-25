@@ -643,15 +643,16 @@ land. Design:
 
 All settings below use the `qwen.managed-agent.automation` prefix:
 
-| Setting              | Default | Meaning                                                                                                                                                                                            |
-| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                        |
-| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                 |
-| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                           |
-| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                |
-| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                             |
-| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged. |
-| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                 |
+| Setting              | Default | Meaning                                                                                                                                                                                                              |
+| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                                          |
+| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                                   |
+| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                                             |
+| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                                  |
+| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                                               |
+| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged.                   |
+| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                                   |
+| `scanner-threads`    | `4`     | Definition rows one tick works at once on its bounded pool; the tick joins them before returning. A row leases from its claim time, never from the tick's start, so a long tick hands out no already-expired leases. |
 
 ## Full WebShell dual-path development entry
 
@@ -1062,6 +1063,44 @@ export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
+For the external scratch provisioner, set these instead of the node executable,
+worker entry and state directory (the Broker token and credential key pair are
+still required). External scratch also requires an explicit Workspace ID: the
+worker-side cwd cannot be hashed on the Broker host, so no ID can be derived
+for this kind.
+
+```bash
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN="$QWEN_EXTERNAL_BROKER_TOKEN"
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID='external-dev-v1'
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY="$QWEN_EXTERNAL_CREDENTIAL_KEY_BASE64"
+export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST="$QWEN_EXTERNAL_CAPABILITY_DIGEST"
+export QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER='external-scratch'
+export QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY='false'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL='https://provider.example/'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_TOKEN="$QWEN_EXTERNAL_PROVIDER_TOKEN"
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID='external'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT='30s'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT='2m'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID="$QWEN_EXTERNAL_WORKSPACE_ID"
+export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/workspace'
+```
+
+Keep Workspace files and Shell disabled. Fill the `$QWEN_EXTERNAL_*` variables
+with your own values from a secret store and pick a stable Workspace ID; they
+are placeholders for operator-supplied values, not usable defaults. Set the
+capability digest (`sha256:` plus 64 lowercase hexadecimal characters) even
+with Harness disabled; the embedded Broker requires it. The provider URL must
+be HTTP(S) without credentials, query or fragment, and the cwd is the
+worker-side path. The provider implements authenticated `provision`
+and `observe` routes and must persist its mapping from the Broker's logical
+handle to one immutable physical resource across restarts. There is no release
+route, so a closed Session's worker is not stopped and its provider TTL must be
+budgeted. This increment has no tool consumer yet: Session Turns warm the worker
+but the model receives no tools until the Workspace extension lands. See the
+[Broker guide](docs/runtime-broker.md#external-scratch-runtime-opt-in) and the
+[bilingual design](../../docs/design/2026-10-23-external-runtime-provider.md).
+
 Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
 `QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
@@ -1148,10 +1187,13 @@ warns. Cadences bound through `@Scheduled` placeholders —
 and the startup warning cannot see them, so always write the suffix
 there.
 
-When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
+For the local-process and Kubernetes provisioners, when
+`QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical
 workspace path. An explicitly configured ID must match that value or startup
-fails before traffic is accepted.
+fails before traffic is accepted. The derivation does not apply to
+`external-scratch`, which requires an explicit ID because its worker-side cwd
+cannot be hashed on the Broker host.
 
 The Hosted file profile connects through the private Broker endpoint, which
 defaults to `http://127.0.0.1:4182`. When enabled, the embedded
