@@ -341,7 +341,7 @@ describe.skipIf(process.platform === 'win32')(
       // nested directory must stay separate or its config stops loading.
       expect(groups).toHaveLength(2);
       expect(groups.flat().sort()).toEqual(
-        ['./below-file.ts', './close-file.ts', './root-file.ts'].sort(),
+        ['./deep/below-file.ts', './close-file.ts', './root-file.ts'].sort(),
       );
       expect(
         groups.some(
@@ -380,7 +380,11 @@ describe.skipIf(process.platform === 'win32')(
         '--ignore-unknown',
       ]);
       expect(prettierCalls[0].slice(3).sort()).toEqual(
-        [`./${special}`, './config space.yml', './action.yml'].sort(),
+        [
+          `./${special}`,
+          './config space.yml',
+          './.github/actions/local/action.yml',
+        ].sort(),
       );
       expect(result.calls.find(({ name }) => name === 'yamllint').args).toEqual(
         [
@@ -548,6 +552,27 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.stdout).toContain('Checking nested');
       expect(result.stdout + result.stderr).toContain('root-file.js');
       expect(result.stdout + result.stderr).toContain('nested-file.js');
+    });
+
+    it('resolves a real Prettier target that sits below its config group', () => {
+      // The group directory is the nearest config-bearing ancestor, not
+      // dirname(file), so a target named by basename alone does not exist from
+      // that cwd and Prettier would check nothing.
+      put('package.json', '{"type":"module"}\n');
+      baseSha = commit();
+      put('below/deeper/bad.js', 'const  x=1;\n');
+      commit();
+      const result = spawnSync(process.execPath, [lintScript, '--prettier'], {
+        cwd: repo,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          LINT_BASE_SHA: baseSha,
+          PATH: `${fileURLToPath(new URL('../../node_modules/.bin', import.meta.url))}:${process.env.PATH}`,
+        },
+      });
+      expect(result.status, result.stdout + result.stderr).toBe(1);
+      expect(result.stdout + result.stderr).toContain('below/deeper/bad.js');
     });
 
     it.each(['eslint', 'prettier'])(

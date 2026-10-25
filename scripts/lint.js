@@ -16,7 +16,7 @@ import {
   rmSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { getLintScope } from './lint-scope.js';
 
 const ACTIONLINT_VERSION = '1.7.12';
@@ -417,8 +417,9 @@ function runChangedFiles(command, options, files) {
   console.log(`\nRunning ${command} on ${files.length} selected files...`);
   // Explicit targets do not make the experimental Prettier CLI discover
   // nested config/ignore files. Start in the nearest directory that carries
-  // one (see prettierGroupFor) and keep basename targets, so the config and
-  // ignore files that apply to the file are the ones Prettier loads.
+  // one (see prettierGroupFor) and name each target relative to that
+  // directory, so the file Prettier resolves is the file that was selected —
+  // a bare basename would miss every file that sits below its group directory.
   const root = process.cwd();
   const configCache = new Map();
   const groups =
@@ -428,14 +429,14 @@ function runChangedFiles(command, options, files) {
         )
       : { '.': files };
   // Accumulate failures instead of exiting on the first non-zero status:
-  // Prettier runs per directory with basename targets, so its own output never
-  // names the directory, and aborting would leave the remaining directories
-  // unchecked and unreported in the same run.
+  // Prettier runs per directory with directory-relative targets, so its own
+  // output never names the directory, and aborting would leave the remaining
+  // directories unchecked and unreported in the same run.
   let failed = false;
   for (const [directory, selected] of Object.entries(groups)) {
     const targets =
       command === 'prettier'
-        ? selected.map((file) => basename(file))
+        ? selected.map((file) => posix.relative(directory, file))
         : selected;
     if (command === 'prettier') console.log(`\nChecking ${directory}`);
     // 50 keeps argv far below the OS limit while leaving room for long paths.
