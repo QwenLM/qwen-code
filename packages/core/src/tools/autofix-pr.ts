@@ -221,8 +221,18 @@ export function validateAutofixPrParams(
 export function autofixPrArgs(params: AutofixPrParams): string[] {
   const args: string[] = [params.command];
   if (params.pr !== undefined) args.push(String(params.pr));
-  if (params.run_id !== undefined) args.push(params.run_id);
-  if (params.plan !== undefined) args.push(params.plan);
+  // The positionals are validated before this (`run_id` is digits, `plan`
+  // an absolute path to the plan file); refused here as well, so that no
+  // caller can hand the helper a value it would read as an option.
+  for (const positional of [params.run_id, params.plan]) {
+    if (positional === undefined) continue;
+    if (positional.startsWith('-')) {
+      throw new TypeError(
+        `autofix-pr: ${JSON.stringify(positional)} would read as an option`,
+      );
+    }
+    args.push(positional);
+  }
   const value = (name: string, v: string | number | undefined) => {
     if (v !== undefined) args.push(`--${name}=${v}`);
   };

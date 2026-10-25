@@ -242,6 +242,17 @@ describe('autofixPrArgs', () => {
   ])('builds %j', (params, args) => {
     expect(autofixPrArgs(params)).toEqual(args);
   });
+
+  it('never passes a positional the helper would read as an option, validated or not', () => {
+    for (const params of [
+      { command: 'rerun', pr: 5, run_id: '--force' },
+      { command: 'reply', pr: 5, plan: '--force' },
+      { command: 'cleanup', pr: 5, plan: '-f' },
+    ] as AutofixPrParams[]) {
+      expect(validateAutofixPrParams(params)).not.toBeNull();
+      expect(() => autofixPrArgs(params)).toThrow(/would read as an option/);
+    }
+  });
 });
 
 describe('permission rules', () => {
