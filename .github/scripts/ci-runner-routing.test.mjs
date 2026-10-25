@@ -1005,12 +1005,29 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
         assoc,
       );
     }
-    assert.deepEqual(route('pull_request', true, 'OWNER', true), HOSTED_LABELS);
-    assert.ok(
-      !job.steps.some((s) =>
-        String(s.uses || '').startsWith('actions/checkout'),
-      ),
-      'changes gate must stay checkout-free; adding one re-adds the pool-hygiene requirement',
+    for (const eventName of ['pull_request', 'workflow_dispatch']) {
+      assert.deepEqual(
+        route(eventName, true, 'OWNER', true),
+        HOSTED_LABELS,
+        eventName,
+      );
+    }
+    // Byte-identity with the lanes it guards is this change's own acceptance
+    // criterion: the gate is their door, so drift here is what re-starves
+    // them behind a hosted queue.
+    for (const lane of ['parity', 'noflicker']) {
+      assert.equal(
+        runsOn,
+        String(doc.jobs[lane]['runs-on']),
+        `the gate must be routed by the same expression as ${lane}`,
+      );
+    }
+    // Any added step would run on the reused pool workspace with no hygiene
+    // step before it, so the whole step list is pinned, not just checkouts.
+    assert.deepEqual(
+      job.steps.map((s) => s.uses),
+      ['actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'],
+      'changes gate must stay checkout-free and shell-free; adding a step re-adds the pool-hygiene requirement',
     );
   });
 });
