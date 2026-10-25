@@ -35,10 +35,10 @@ Non-goals:
 
 A turn begins when the main loop sends a prompt. It ends when the model answers without calling more tools, when it is cancelled, or when it fails. Tool results and Stop hook continuations belong to the turn they continue.
 
-Turn events cover the prompts a person submits, the same turns `$.session.turns()` counts:
+Turn events cover the prompts a person submits:
 
 - a typed or piped prompt, or one a command submits;
-- a retry of the last prompt with Ctrl+Y, and the headless continuation of an interrupted turn. These have no typed prompt.
+- a retry of the last prompt with Ctrl+Y, and the headless continuation of an interrupted turn. These have no typed prompt, and `$.session.turns()` does not count them, since the transcript records no new user turn for them.
 
 ### 2. `turn.start`
 
@@ -52,7 +52,7 @@ The model request does not wait for the hooks. The turn's `tool.call` dispatches
 
 ### 3. `turn.complete`
 
-`turn.complete` fires once when the turn has ended. Its input is:
+`turn.complete` fires once when the turn has ended. A turn still running when the session closes, for example on `/quit`, ends as `aborted` before `session.end`, within the same budget. Its input is:
 
 - `answer`: the visible text of the turn's last model response, trimmed, or `""` if there is none. After a cancel during streaming it is the text received so far.
 - `durationMs`: how long the turn took.
@@ -114,8 +114,9 @@ These go into the user guide:
   - pinned inputs;
   - `{ text }` results, and results of the wrong shape;
   - a prompt and an answer at the size the session cuts them to;
-  - `$.turn.abort` asking the host, its rejections, and another plugin denying or rewriting it.
-- A client test that `onPromptAdmitted` runs after admission and before the request, and never for a blocked prompt.
+  - `$.turn.abort` asking the host, its rejections, and another plugin denying or rewriting it;
+  - a `$.turn.abort` the host never answers, which the dispatch's end settles.
+- A client test that `onPromptAdmitted` runs after admission and before the request, once for a send that continues itself, and never for a blocked prompt.
 - Mod session tests:
   - `turn.start` runs beside the turn, and its end after the turn's tools;
   - cancelling the turn ends its `turn.start` hooks, not its `turn.complete` hooks;
@@ -123,13 +124,14 @@ These go into the user guide:
   - the reasons;
   - the usage sums, with reasoning counted once for each provider;
   - a prompt and an answer too long for a Mod payload;
-  - the note, cut without splitting a character;
+  - the note, cut without splitting a character, kept to 4,096 characters in a terminal, and written beneath the answer in text mode;
   - the rules of `$.turn.abort`;
   - a failed hook;
-  - a turn whose session has ended.
+  - a turn whose session has ended;
+  - a turn still running when the session closes, and an end the close overtook.
 - Host tests:
-  - headless, on the current and the shared agent loop: an answer, a blocked prompt, a Mod abort in JSON and text and from a `tool.call` hook, a Goal turn that a tool ends before a continuation, and a failed request;
-  - Ink: a turn from admission to idle, a Mod abort compared with Esc, and no hook without Mods;
+  - headless, on the current and the shared agent loop: an answer, a structured-output answer, a blocked prompt, the continuation of an interrupted turn, a Mod abort in JSON and text and from a `tool.call` hook, a Goal turn that a tool ends before a continuation, and a failed request;
+  - Ink: a turn from admission to idle, a Mod abort compared with Esc, a cancel without an Esc, a turn whose tools were cancelled or could not go on, a failed continuation, a slash command that waits for the Mods to start, and no hook without Mods;
   - OpenTUI: admission and a single end, interrupt and error, a Mod abort that lets the queue run, an Esc before or after a Mod abort, a retry with no typed prompt, and no hooks without Mods.
 - The built CLI against a fixture server, in headless JSON and text and in the Ink and OpenTUI terminals:
   - the `turn.start` text;

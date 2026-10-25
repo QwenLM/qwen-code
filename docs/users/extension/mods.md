@@ -575,7 +575,8 @@ end around the line `[... truncated for Mods ...]`, and `e.isTextTruncated` is
 `true`. A long answer is cut the same way, with `e.isAnswerTruncated`. Claude
 Code passes both whole.
 
-`turn.complete` fires once the turn has ended and receives:
+`turn.complete` fires once the turn has ended. A turn still running when the
+session closes ends as `aborted` before `session.end`. The hook receives:
 
 | Field               | Value                                                                                                                                  |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
