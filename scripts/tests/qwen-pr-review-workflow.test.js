@@ -7423,3 +7423,80 @@ describe('review supersede salvage (#10110)', () => {
     },
   );
 });
+
+describe('review model canary routing', () => {
+  const run = runReviewStep();
+
+  it('wires the three model variables instead of pinning OPENAI_MODEL', () => {
+    const step = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    );
+    expect(step.env.REVIEW_MODEL_DEFAULT).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL }}',
+    );
+    expect(step.env.REVIEW_MODEL_CANARY).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}',
+    );
+    expect(step.env.REVIEW_MODEL_CANARY_PERCENT).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}',
+    );
+    // The env no longer carries the model itself: a literal there would make
+    // every split a workflow edit, which is the thing a rollout must not need.
+    expect(step.env.OPENAI_MODEL).toBeUndefined();
+
+    // Selection runs before --model is built, and the run announces its
+    // cohort: the model is recorded nowhere else a later comparison could
+    // read it, so without the notice a rollout leaves no trace of which model
+    // served a given review.
+    const select = run.indexOf('OPENAI_MODEL="$(review_model_for_bucket');
+    expect(select).toBeGreaterThan(-1);
+    expect(select).toBeLessThan(run.indexOf('MODEL_ARGS=()'));
+    expect(run.indexOf('::notice title=Review model::')).toBeGreaterThan(
+      select,
+    );
+  });
+
+  it('buckets by PR number and stays inside the configured percent', () => {
+    const fn = run.match(/review_model_for_bucket\(\) \{[\s\S]*?\n\}/)?.[0];
+    expect(fn).toBeTruthy();
+    const pick = (defaultModel, canaryModel, percent, pr) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${fn}\nreview_model_for_bucket '${defaultModel}' '${canaryModel}' '${percent}' '${pr}'`,
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+
+    // Off unless a percent is set: merging this changes nothing, which is
+    // what makes the rollout a variable change and its revert one too.
+    for (const percent of ['', '0', 'abc']) {
+      expect(pick('main', 'canary', percent, '12345')).toBe('main');
+    }
+    // No canary model, no split, however high the percent goes.
+    expect(pick('main', '', '100', '12345')).toBe('main');
+    expect(pick('main', 'canary', '100', '12345')).toBe('canary');
+
+    // Whole buckets only: PR 12309 (bucket 9) is inside 10%, PR 12310
+    // (bucket 10) is not.
+    expect(pick('main', 'canary', '10', '12309')).toBe('canary');
+    expect(pick('main', 'canary', '10', '12310')).toBe('main');
+    // Sticky per PR — the same number answers the same way on every call,
+    // which is what keeps one PR's review rounds on one model.
+    expect(pick('main', 'canary', '10', '12309')).toBe(
+      pick('main', 'canary', '10', '12309'),
+    );
+
+    // Repository-variable typos take the clamp instead of failing the
+    // review: a leading zero is not octal, >100 clamps to 100, and a 4-digit
+    // value is out of range either way.
+    expect(pick('main', 'canary', '08', '12307')).toBe('canary');
+    expect(pick('main', 'canary', '250', '12399')).toBe('canary');
+    expect(pick('main', 'canary', '1000', '12399')).toBe('canary');
+
+    // A PR number that cannot be read keeps the default rather than guessing.
+    expect(pick('main', 'canary', '100', '')).toBe('main');
+    expect(pick('main', 'canary', '100', 'x123')).toBe('main');
+  });
+});

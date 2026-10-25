@@ -1010,7 +1010,14 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          # Review model, plus the canary split that sends a PR-number slice
+          # of reviews to a second model. All three arrive as variables so a
+          # rollout is a repository-variable change, never a workflow edit:
+          # an empty canary or percent keeps today's single model, and
+          # review_model_for_bucket below turns them into OPENAI_MODEL.
+          REVIEW_MODEL_DEFAULT: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          REVIEW_MODEL_CANARY: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}'
+          REVIEW_MODEL_CANARY_PERCENT: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}'
           QWEN_PR_REVIEW_EFFORT: '${{ vars.QWEN_PR_REVIEW_EFFORT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
@@ -1620,6 +1627,56 @@ jobs:
           elif [ "$REVIEW_MODE" = "comment" ]; then
             PROMPT="${PROMPT} --comment"
           fi
+
+          # Canary routing for the review model. A PR's NUMBER picks its
+          # bucket for the PR's whole life, so every re-review of the same PR
+          # — and every finding one round is judged against the next — stays
+          # on one model; a per-run bucket would flip models mid-PR and make
+          # two rounds of reviews incomparable. Percent empty, non-numeric or
+          # zero means off, and an unresolvable PR number keeps the default:
+          # the canary must never be the reason a review breaks. Out-of-range
+          # percents take the same clamps as SALVAGE_ELAPSED_PERCENT (strip
+          # leading zeros, bound the digit count, clamp to 100) because they
+          # ride repository variables, where a typo is one keystroke away.
+          # KEEP THE SHAPE: scripts/tests/qwen-pr-review-workflow.test.js
+          # extracts this function and executes the real bash.
+          review_model_for_bucket() {
+            local default_model="$1" canary_model="$2" percent="$3" pr="$4"
+            case "$percent" in
+              ''|*[!0-9]*) percent=0 ;;
+            esac
+            percent="${percent#"${percent%%[!0]*}"}"
+            percent="${percent:-0}"
+            if [ "${#percent}" -gt 3 ]; then
+              percent=100
+            fi
+            percent=$((10#$percent))
+            if [ "$percent" -gt 100 ]; then
+              percent=100
+            fi
+            case "$pr" in
+              ''|*[!0-9]*)
+                echo "$default_model"
+                return 0
+                ;;
+            esac
+            if [ -n "$canary_model" ] && [ "$percent" -gt 0 ] &&
+              [ $((10#$pr % 100)) -lt "$percent" ]; then
+              echo "$canary_model"
+            else
+              echo "$default_model"
+            fi
+          }
+
+          OPENAI_MODEL="$(review_model_for_bucket \
+            "${REVIEW_MODEL_DEFAULT:-}" "${REVIEW_MODEL_CANARY:-}" \
+            "${REVIEW_MODEL_CANARY_PERCENT:-}" "${PR_NUMBER:-}")"
+          export OPENAI_MODEL
+          # The run's own record of which cohort served this review: the
+          # model is not carried anywhere else a later comparison could read
+          # it (the cost ledger has tokens, not a model), so a rollout that
+          # cannot be told apart afterwards is unmeasurable.
+          echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${REVIEW_MODEL_CANARY_PERCENT:-0}%)"
 
           MODEL_ARGS=()
           if [ -n "${OPENAI_MODEL:-}" ]; then
