@@ -46,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -2426,7 +2427,10 @@ class AutomationScannerTest {
                     rows.getThreadPoolExecutor());
             clock.set(T0 + MINUTE + 1_000);
             assertThat(pooled.tick(clock.get())).isEqualTo(3);
-            assertThat(rows.getActiveCount()).isEqualTo(0);
+            // The join is what drains the backlog: every submitted task has
+            // finished by the time the tick answers.
+            assertThat(rows.getThreadPoolExecutor().getCompletedTaskCount())
+                    .isEqualTo(3);
         } finally {
             rows.destroy();
         }
@@ -2544,6 +2548,126 @@ class AutomationScannerTest {
         ThreadPoolTaskScheduler scheduler = (ThreadPoolTaskScheduler)
                 applicationContext.getBean("managedAutomationScheduler");
         assertThat(scheduler.getPoolSize()).isEqualTo(1);
+    }
+
+    @Test
+    void aRowBothQueriesReturnIsSubmittedOnce() {
+        // A row whose answer was lost comes back from the firing query, and
+        // the next due slot brings the same row back from the armed query.
+        // Deduping on (tenant, schedule) is the only thing keeping it one
+        // task: without it the second task races the first row's claim.
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        fake.failNextFire = new IllegalStateException("answer lost");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isZero();
+        // Past the lost answer's retry backoff, the same row answers both
+        // queries: the firing one for the stuck occurrence, the armed one
+        // for the slot that came due meanwhile.
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(ledger.findFiringSchedules(clock.get(), 100))
+                .extracting(ScheduleRow::scheduleId)
+                .contains(automation.id());
+        assertThat(ledger.findArmed(clock.get(), 100))
+                .extracting(ScheduleRow::scheduleId)
+                .contains(automation.id());
+        AtomicInteger claims = new AtomicInteger();
+        AutomationLedgerStore counting = new AutomationLedgerStore(jdbc) {
+            @Override
+            public long claim(String tenantId, String scheduleId, String owner,
+                    long leaseUntil, long now) {
+                if (scheduleId.equals(automation.id())) {
+                    claims.incrementAndGet();
+                }
+                return super.claim(tenantId, scheduleId, owner, leaseUntil,
+                        now);
+            }
+        };
+        ThreadPoolTaskExecutor rows = rowPool(2);
+        try {
+            AutomationScanner pooled = new AutomationScanner(counting,
+                    connector, settings, clock::get, "scanner-dedupe",
+                    rows.getThreadPoolExecutor());
+            pooled.tick(clock.get());
+        } finally {
+            rows.destroy();
+        }
+        assertThat(claims.get()).isEqualTo(1);
+    }
+
+    @Test
+    void anInterruptedJoinReportsTheInterruptAndLeavesTheRowItsClaim() {
+        // Context close interrupts the joining thread. The tick stops
+        // joining, re-asserts the interrupt and reports it as the tick's
+        // failure; the row task already running keeps its own durable claim
+        // instead of being shut down under it.
+        PublicAutomation automation = define("* * * * *", "allow", "none",
+                null, true);
+        CountDownLatch claimEntered = new CountDownLatch(1);
+        CountDownLatch releaseClaim = new CountDownLatch(1);
+        CountDownLatch rowReleased = new CountDownLatch(1);
+        AtomicLong fence = new AtomicLong(-1);
+        AutomationLedgerStore slowClaim = new AutomationLedgerStore(jdbc) {
+            @Override
+            public long claim(String tenantId, String scheduleId, String owner,
+                    long leaseUntil, long now) {
+                claimEntered.countDown();
+                awaitLatch(releaseClaim);
+                long claimed = super.claim(tenantId, scheduleId, owner,
+                        leaseUntil, now);
+                fence.set(claimed);
+                return claimed;
+            }
+
+            @Override
+            public void release(String tenantId, String scheduleId,
+                    String owner, long released, long now) {
+                try {
+                    super.release(tenantId, scheduleId, owner, released, now);
+                } finally {
+                    rowReleased.countDown();
+                }
+            }
+        };
+        ThreadPoolTaskExecutor rows = rowPool(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicBoolean interrupted = new AtomicBoolean();
+        try {
+            AutomationScanner blocked = new AutomationScanner(slowClaim,
+                    connector, settings, clock::get, "scanner-interrupted",
+                    rows.getThreadPoolExecutor());
+            clock.set(T0 + MINUTE + 1_000);
+            Thread joining = new Thread(() -> {
+                try {
+                    blocked.tick(clock.get());
+                } catch (RuntimeException error) {
+                    failure.set(error);
+                    interrupted.set(Thread.currentThread().isInterrupted());
+                }
+            }, "automation-join-under-test");
+            joining.start();
+            awaitLatch(claimEntered);
+            joining.interrupt();
+            try {
+                joining.join(TimeUnit.SECONDS.toMillis(10));
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(error);
+            }
+            assertThat(joining.isAlive()).isFalse();
+            assertThat(failure.get()).isInstanceOf(IllegalStateException.class)
+                    .hasCauseInstanceOf(InterruptedException.class);
+            assertThat(interrupted).isTrue();
+            releaseClaim.countDown();
+            awaitLatch(rowReleased);
+            assertThat(fence.get()).isGreaterThanOrEqualTo(0);
+            assertThat(occurrence(automation.id(),
+                    "schedule:2026-06-01T10:01:00Z").outcome())
+                    .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        } finally {
+            releaseClaim.countDown();
+            rows.destroy();
+        }
     }
 
     /** A fake connector whose fires run a test hook before answering. */
