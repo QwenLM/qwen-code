@@ -35,6 +35,9 @@ describe('resolveManagedRuntimeBrokerBaseUrl', () => {
   it.each(cases)(
     'reads $url as $verdict',
     ({ url, verdict, hostname, port }) => {
+      // The fixture holds this reader's verdicts only; an unknown one would
+      // leave toThrow() checking just that something threw.
+      expect(['accepted', ...Object.keys(REFUSALS)]).toContain(verdict);
       if (verdict !== 'accepted') {
         expect(() => resolveManagedRuntimeBrokerBaseUrl(url)).toThrow(
           REFUSALS[verdict],

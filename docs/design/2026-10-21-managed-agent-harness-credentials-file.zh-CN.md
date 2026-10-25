@@ -41,6 +41,7 @@ systemd 和 shell 的 `source` 都会为 Harness 读取这个文件，因此控�
 - 同时设置了该文件和非空的 `harness.token` 或 `harness.capability-digest`：启动失败，要求只保留一个来源。
 - 文件设置了 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`，同时也设置了 `runtime-broker.token`：启动失败，要求只保留一个来源。
 - 文件只设置了 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 中的一个：启动失败，因为 Harness 要求两者同时提供或同时缺省。
+- 文件把任一 Broker 键设为空值：启动失败，并给出键名，因为 Harness 把空值视为已设置，随后因缺少另一半而拒绝启动。
 - 文件无法读取：启动失败，并给出路径和异常类型。
 - 某行使用了被拒绝的写法：启动失败，并给出路径和行号。
 - 必需的键缺失或为空：启动失败，并给出键名和路径。

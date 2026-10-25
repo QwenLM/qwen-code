@@ -217,6 +217,20 @@ class HarnessCredentialsFileTest {
             assertThat(properties.getHarness().getToken()).isEmpty();
             assertThat(properties.harnessCredentialsApplied()).isFalse();
         }
+        // The Harness takes an empty value as set, and then refuses to start
+        // without the other half, so the file cannot pass as setting neither.
+        for (String empty : new String[] {
+                "QWEN_MANAGED_RUNTIME_BROKER_URL=", "QWEN_MANAGED_RUNTIME_BROKER_TOKEN=''"}) {
+            String key = empty.substring(0, empty.indexOf('='));
+            Path file = Files.writeString(directory.resolve("empty.env"), credentials + empty + "\n");
+            ManagedAgentProperties properties = withFile(file);
+            assertThatThrownBy(properties::validateWorkspaceFiles).as(empty)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("Hosted Harness credentials file " + file + " sets " + key
+                            + " to an empty value, which the Hosted Harness refuses; set it or remove the line");
+            assertThat(properties.harnessBrokerUrl()).isEmpty();
+            assertThat(properties.harnessCredentialsApplied()).isFalse();
+        }
 
         ManagedAgentProperties twice = withFile(shared);
         twice.getRuntimeBroker().setToken("direct-token");

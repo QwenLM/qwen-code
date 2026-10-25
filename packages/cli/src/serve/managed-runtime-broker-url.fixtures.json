@@ -220,6 +220,36 @@
     { "url": "127.0.0.1:4182", "verdict": "invalid" },
     { "url": "localhost:4182", "verdict": "not-origin" },
     { "url": "ftp://127.0.0.1:4182", "verdict": "not-origin" },
-    { "url": "http://", "verdict": "invalid" }
+    { "url": "http://", "verdict": "invalid" },
+    {
+      "url": "http://xn--localhost-:4182",
+      "verdict": "plain-outside-loopback"
+    },
+    {
+      "url": "http://xn--bcher-kva.example:4182",
+      "verdict": "plain-outside-loopback"
+    },
+    {
+      "url": "http://xn--bcher-kva.example:4182/broker",
+      "verdict": "not-origin"
+    },
+    {
+      "url": "https://xn--bcher-kva.example:8443",
+      "verdict": "accepted",
+      "hostname": "xn--bcher-kva.example",
+      "port": 8443
+    },
+    { "url": "http://xn--a:4182", "verdict": "invalid" },
+    { "url": "http://xn--a:4182/broker", "verdict": "invalid" },
+    { "url": "https://xn--a:8443", "verdict": "invalid" },
+    { "url": "http://xn--bcher-kva.1:4182", "verdict": "invalid" },
+    { "url": "https://xn--bcher-kva.1:8443", "verdict": "invalid" },
+    {
+      "url": "https://xn--bcher-kva.example:8443/broker",
+      "verdict": "not-origin"
+    },
+    { "url": "ftp://", "verdict": "invalid" },
+    { "url": "ws://", "verdict": "invalid" },
+    { "url": "file://", "verdict": "not-origin" }
   ]
 }

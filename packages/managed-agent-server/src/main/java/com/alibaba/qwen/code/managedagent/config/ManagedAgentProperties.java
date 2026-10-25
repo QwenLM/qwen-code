@@ -207,6 +207,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
         Map<String, String> values = readHarnessEnvironmentFile(file);
         String token = credential(values, "QWEN_SERVER_TOKEN", file);
         String digest = credential(values, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", file);
+        // The Harness takes an empty value as set, and then refuses to start
+        // without the other half of the pair.
+        for (String key : List.of(BROKER_URL_KEY, "QWEN_MANAGED_RUNTIME_BROKER_TOKEN")) {
+            if ("".equals(values.get(key))) {
+                throw new IllegalStateException("Hosted Harness credentials file " + file + " sets " + key
+                        + " to an empty value, which the Hosted Harness refuses; set it or remove the line");
+            }
+        }
         // Optional: a text-only deployment has no Broker to share a token with.
         String brokerToken = values.get("QWEN_MANAGED_RUNTIME_BROKER_TOKEN");
         boolean sharesBrokerToken = StringUtils.isNotBlank(brokerToken);

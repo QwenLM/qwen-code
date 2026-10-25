@@ -328,7 +328,7 @@ direct `QWEN_MANAGED_AGENT_HARNESS_TOKEN` or
 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` beside a file Broker token. The file
 sets the Harness's `QWEN_MANAGED_RUNTIME_BROKER_URL` and
 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` together or neither; a file with only one
-of them refuses startup. Write each of these keys as `KEY=value` on one line,
+of them, or with either one empty, refuses startup. Write each of these keys as `KEY=value` on one line,
 with no whitespace around the `=` and only letters, digits and `._:/+=-` in the
 value (the Broker URL may also use `[` and `]` to bracket an IPv6 literal, as
 in `http://[::1]:4182`), and start comments with `#`. The server

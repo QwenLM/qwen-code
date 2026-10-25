@@ -13,9 +13,12 @@ import java.util.regex.Pattern;
  * is here, and only for the characters the credentials file admits, which
  * leave out percent-encoding, user information, a query, a fragment, a
  * backslash, whitespace and non-ASCII text. Each step follows the URL
- * Standard (https://url.spec.whatwg.org/), and
- * managed-runtime-broker-url.fixtures.json holds both readers to the same
- * verdicts.
+ * Standard (https://url.spec.whatwg.org/), with two exceptions that never
+ * turn a refusal into an acceptance: a scheme other than http or https is
+ * refused before the rest is parsed, and a host with an xn-- label is not run
+ * through IDNA. Either may name a different reason for a URL the Harness
+ * finds invalid. managed-runtime-broker-url.fixtures.json holds both readers
+ * to the same verdicts.
  */
 final class HarnessBrokerUrl {
     enum Verdict {
@@ -23,8 +26,8 @@ final class HarnessBrokerUrl {
         INVALID,
         NOT_ORIGIN,
         PLAIN_OUTSIDE_LOOPBACK,
-        // Text outside the file's characters, or a label the parser would
-        // run through IDNA, which is not here.
+        // Text outside the file's characters, or an https host with a label
+        // the parser would run through IDNA, which is not here.
         UNCLASSIFIED
     }
 
@@ -114,9 +117,20 @@ final class HarnessBrokerUrl {
                 return INVALID;
             }
             // Without an xn-- label, IDNA only lowercases an ASCII domain.
+            // With one, it keeps the label or refuses the URL, so the host is
+            // never loopback or an IPv4 address, and only whether the Harness
+            // accepts an https URL is left to IDNA.
             for (String label : domain.split("\\.", -1)) {
                 if (label.startsWith("xn--")) {
-                    return new Result(Verdict.UNCLASSIFIED);
+                    if (endsInANumber(domain)) {
+                        return INVALID;
+                    }
+                    if (!isRootPath(path)) {
+                        return new Result(Verdict.NOT_ORIGIN);
+                    }
+                    return new Result(protocol.equals("http")
+                            ? Verdict.PLAIN_OUTSIDE_LOOPBACK
+                            : Verdict.UNCLASSIFIED);
                 }
             }
             if (endsInANumber(domain)) {

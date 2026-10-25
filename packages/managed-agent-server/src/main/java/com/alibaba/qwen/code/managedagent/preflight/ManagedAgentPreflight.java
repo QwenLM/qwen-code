@@ -666,7 +666,10 @@ public final class ManagedAgentPreflight {
     // may reach it through a proxy.
     static Check harnessBrokerUrlCheck(String url,
             ManagedAgentProperties.RuntimeBroker broker, String file) {
-        String address = broker.getHost() + ":" + broker.getPort();
+        String host = broker.getHost();
+        // An IPv6 literal needs brackets before the port.
+        String address = (host.contains(":") && !host.startsWith("[")
+                ? "[" + host + "]" : host) + ":" + broker.getPort();
         if (StringUtils.isBlank(url)) {
             return new Check("broker-url", Status.WARN,
                     file + " gives the Hosted Harness no Broker URL",

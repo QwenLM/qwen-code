@@ -660,6 +660,14 @@ class ManagedAgentPreflightTest {
         assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
                 + " http://[::1]:4182, unless a proxy forwards"
                 + " http://127.0.0.1:4182 there", family.fix());
+        assertEquals("the Hosted Harness dials http://127.0.0.1:4182, not the"
+                + " Broker's listener at [::1]:4182; a proxy may forward it,"
+                + " which preflight cannot verify", family.detail());
+        broker.setHost("2001:db8::1");
+        broker.setAllowNonLoopback(true);
+        assertEquals("check that a proxy forwards https://198.51.100.5:8443"
+                + " to [2001:db8::1]:4182",
+                urlCheck("https://198.51.100.5:8443", broker).fix());
     }
 
     @Test
@@ -683,8 +691,12 @@ class ManagedAgentPreflightTest {
             assertEquals("the Hosted Harness refuses " + url
                     + ", which is not a valid URL", check.detail());
         }
+        // Only whether the Harness accepts an https host with an xn-- label
+        // depends on IDNA; plain http to one is refused either way.
         assertEquals(ManagedAgentPreflight.Status.WARN,
                 urlCheck("https://xn--bcher-kva.example:4182", broker).status());
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                urlCheck("http://xn--bcher-kva.example:4182", broker).status());
         broker.setHost("::1");
         assertEquals(ManagedAgentPreflight.Status.FAIL,
                 urlCheck("http://::1:4182", broker).status());

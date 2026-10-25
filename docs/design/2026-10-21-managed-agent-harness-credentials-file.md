@@ -41,6 +41,7 @@ Both systemd and a shell `source` read this file for the Harness, so the control
 - The file is set together with a non-blank `harness.token` or `harness.capability-digest`: startup fails and asks for one source.
 - The file sets `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` while `runtime-broker.token` is also set: startup fails and asks for one source.
 - The file sets only one of `QWEN_MANAGED_RUNTIME_BROKER_URL` and `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`: startup fails, because the Harness takes them together or not at all.
+- The file sets either Broker key to an empty value: startup fails, naming the key, because the Harness takes an empty value as set and then refuses to start without the other half.
 - The file cannot be read: startup fails, naming the path and the exception type.
 - A line uses a refused construct: startup fails, naming the path and the line.
 - A required key is missing or blank: startup fails, naming the key and the path.
