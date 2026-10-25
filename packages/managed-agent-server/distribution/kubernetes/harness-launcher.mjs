@@ -33,12 +33,14 @@ try {
     )
   )
     throw new Error('A verified capability digest is required.');
-  // Name the variable, never its value: the name changed, and an older
+  // Name the variable, never its value: the name changed, and the v0.26.1
   // manifest still sets QWEN_HOSTED_HARNESS_BROKER_URL.
   const brokerUrlText = process.env.QWEN_MANAGED_RUNTIME_BROKER_URL;
   if (!brokerUrlText)
     throw new Error(
-      'The pool requires a Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+      process.env.QWEN_HOSTED_HARNESS_BROKER_URL
+        ? 'The pool requires a Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL; rename QWEN_HOSTED_HARNESS_BROKER_URL in the Deployment.'
+        : 'The pool requires a Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
     );
   let brokerUrl;
   try {
@@ -57,6 +59,12 @@ try {
   )
     throw new Error(
       'The pool requires an HTTPS Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+    );
+  // qwen serve takes an origin only, and would stop at boot without naming
+  // the variable.
+  if (brokerUrl.pathname !== '/' && brokerUrl.pathname !== '')
+    throw new Error(
+      'The pool requires an origin-only Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
     );
   await Promise.all(
     ['home', 'state', 'workspace'].map((name) =>

@@ -100,7 +100,6 @@ it('hands qwen serve only Broker variables that serve removes from its environme
   for (const key of brokerKeys) expect(removed).toContain(key);
 });
 
-// A manifest that still sets the old name leaves the launcher without one.
 it('names a missing Broker URL', async () => {
   delete state.process.env.QWEN_MANAGED_RUNTIME_BROKER_URL;
   await launch();
@@ -109,6 +108,19 @@ it('names a missing Broker URL', async () => {
   expect(state.spawned).toHaveLength(0);
   expect(state.errors).toEqual([
     'The pool requires a Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+  ]);
+});
+
+// The v0.26.1 manifest sets the old name, which nothing reads any more.
+it('names the rename for a manifest that sets the old Broker URL name', async () => {
+  delete state.process.env.QWEN_MANAGED_RUNTIME_BROKER_URL;
+  state.process.env.QWEN_HOSTED_HARNESS_BROKER_URL = brokerUrl;
+  await launch();
+
+  expect(state.process.exitCode).toBe(1);
+  expect(state.spawned).toHaveLength(0);
+  expect(state.errors).toEqual([
+    'The pool requires a Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL; rename QWEN_HOSTED_HARNESS_BROKER_URL in the Deployment.',
   ]);
 });
 
@@ -136,6 +148,17 @@ it('refuses a plaintext Broker URL', async () => {
   ]);
 });
 
+it('refuses a Broker URL with a path, which qwen serve refuses at boot', async () => {
+  state.process.env.QWEN_MANAGED_RUNTIME_BROKER_URL = `${brokerUrl}/broker`;
+  await launch();
+
+  expect(state.process.exitCode).toBe(1);
+  expect(state.spawned).toHaveLength(0);
+  expect(state.errors).toEqual([
+    'The pool requires an origin-only Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+  ]);
+});
+
 it('sets every variable the launcher reads in the Harness container', () => {
   const read = new Set(
     [
@@ -150,5 +173,13 @@ it('sets every variable the launcher reads in the Harness container', () => {
   );
   const set = harness.env.map((variable) => variable.name);
   expect(read).toContain('QWEN_MANAGED_RUNTIME_BROKER_URL');
-  for (const name of read) expect(set).toContain(name);
+  // Read only to name the rename for an older manifest.
+  const retired = ['QWEN_HOSTED_HARNESS_BROKER_URL'];
+  for (const name of retired) {
+    expect(read).toContain(name);
+    expect(set).not.toContain(name);
+  }
+  for (const name of read) {
+    if (!retired.includes(name)) expect(set).toContain(name);
+  }
 });
