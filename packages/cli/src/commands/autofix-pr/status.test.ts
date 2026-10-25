@@ -163,6 +163,10 @@ describe('runStatus', () => {
       }),
     ]);
     expect(runStatus({ pr: 12 }).watches.map(({ pr }) => pr)).toEqual([12]);
+    // A quick ownership check skips the one git scan.
+    expect(runStatus({ pr: 7, work: false }).watches[0]!.worktreeWork).toBe(
+      null,
+    );
   });
 
   it("says whether a gate checked within two of the watch's intervals", () => {

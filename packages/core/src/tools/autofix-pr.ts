@@ -13,6 +13,7 @@
  */
 
 import { accessSync, constants, statSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
@@ -27,6 +28,7 @@ import {
   type ShellOutputEvent,
 } from '../services/shellExecutionService.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { execCommand } from '../utils/shell-utils.js';
 import { getJsInterpreterCommand } from '../utils/runtime-info.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import { sessionIdContext } from '../utils/sessionIdContext.js';
@@ -49,6 +51,7 @@ import {
   grantUnattendedFixes,
   recordConfirmedWatch,
   revokeUnattendedFixes,
+  unattendedFixGranted,
   type ConfirmedWatch,
 } from './autofix-pr-grants.js';
 
@@ -523,7 +526,12 @@ async function listedWatches(
   pr: number,
   signal: AbortSignal,
 ): Promise<WatchStatusLike[] | { refused: string }> {
-  const run = await runAutofixPrHelper(config, ['status', String(pr)], signal);
+  // Ownership only: `--no-work` skips the git scan of the worktree.
+  const run = await runAutofixPrHelper(
+    config,
+    ['status', String(pr), '--no-work'],
+    signal,
+  );
   if (run.failure || run.exitCode !== 0) {
     return {
       refused: `\`autofix-pr status ${pr}\` failed: ${run.failure ?? (run.stderr.trim() || `exit ${run.exitCode}`)}`,
@@ -544,6 +552,7 @@ async function listedWatches(
  */
 async function stillPrepared(
   config: Config,
+  command: AutofixPrCommand,
   pr: number,
   signal: AbortSignal,
 ): Promise<boolean> {
@@ -552,12 +561,62 @@ async function stillPrepared(
   const watches = await listedWatches(config, pr, signal);
   if (!Array.isArray(watches)) return false;
   const watch = watches.find((w) => w.pr === pr);
+  if (
+    watch === undefined ||
+    !listsPrepared(prepared, watch) ||
+    watch.thisSession !== true ||
+    watch.ended !== null
+  ) {
+    return false;
+  }
+  // These run git hooks in the worktree. When the clone takes them from its
+  // tree, the PR's code runs, which a watch whose fixes ask must ask for.
   return (
-    watch !== undefined &&
-    listsPrepared(prepared, watch) &&
-    watch.thisSession === true &&
-    watch.ended === null
+    !HOOK_COMMANDS.has(command) ||
+    unattendedFixGranted(config.getSessionId(), prepared.worktree) ||
+    !(await hooksFromWorktree(prepared.worktree, signal))
   );
+}
+
+/** The helpers that run git commands with hooks in the worktree. */
+const HOOK_COMMANDS = new Set<AutofixPrCommand>(['sync', 'push']);
+
+/**
+ * Whether git takes the worktree's hooks from inside it: a relative
+ * `core.hooksPath` (husky's `.husky`, a `.githooks`) resolves against the
+ * working tree, so the PR's own tree supplies them. Unknown counts as yes.
+ */
+async function hooksFromWorktree(
+  worktree: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  try {
+    const { stdout, code } = await execCommand(
+      'git',
+      ['-C', worktree, 'config', '--get', 'core.hooksPath'],
+      {
+        preserveOutputOnError: true,
+        signal,
+        timeout: 10_000,
+        windowsHide: true,
+      },
+    );
+    // Unset: the clone's own hooks directory, outside every worktree.
+    if (code === 1 && stdout.trim() === '') return false;
+    if (code !== 0) return true;
+    const value = stdout.trim();
+    const expanded =
+      value === '~' || value.startsWith('~/')
+        ? path.join(os.homedir(), value.slice(1))
+        : value;
+    const inside = path.relative(
+      worktree,
+      canonicalWorktreePath(path.resolve(worktree, expanded)),
+    );
+    return !inside.startsWith('..') && !path.isAbsolute(inside);
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -621,6 +680,7 @@ interface PreparedLike {
   worktreePath?: unknown;
   preparedAt?: unknown;
   authorCanPush?: unknown;
+  tookOver?: unknown;
 }
 
 function lastJsonLine(out: string): unknown {
@@ -643,6 +703,8 @@ class AutofixPrInvocation extends BaseToolInvocation<
   private watchConfirmed = false;
   /** Found when the permission was: the shell route's rules deny it. */
   private shellDenial: string | null = null;
+  /** Found when the permission was: an ask rule of the shell route names it. */
+  private shellAsks = false;
 
   constructor(
     private readonly config: Config,
@@ -679,6 +741,9 @@ class AutofixPrInvocation extends BaseToolInvocation<
       // A program answers there; one that wants this runs in YOLO mode.
       return 'a stream-json host answers for no user';
     }
+    if (this.config.getInputFile?.()) {
+      return 'a program answers this session through --input-file';
+    }
     if (!this.config.isTrustedFolder()) return 'this folder is not trusted';
     if (this.config.isSessionAgentSession?.() === true) {
       return 'a session-agents session always asks';
@@ -698,25 +763,38 @@ class AutofixPrInvocation extends BaseToolInvocation<
    * naming `qwen autofix-pr` — denies this call too: it runs the same
    * program, with the repository's git hooks.
    */
-  private async deniedAsShell(): Promise<string | null> {
+  private async asShell(): Promise<{ denial: string | null; asks: boolean }> {
     const pm = this.config.getPermissionManager?.();
-    if (!pm) return null;
+    if (!pm) return { denial: null, asks: false };
     const command = `qwen ${this.getDescription()}`;
     const ctx = buildPermissionCheckContext(
       ToolNames.SHELL,
       { command },
       this.config.getTargetDir(),
     );
-    const { finalPermission } = await evaluatePermissionRules(pm, 'ask', ctx);
-    return finalPermission === 'deny'
-      ? `a permission rule denies \`${command}\` as a shell command, so the tool does not run it either`
-      : null;
+    const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
+      pm,
+      'ask',
+      ctx,
+    );
+    return {
+      denial:
+        finalPermission === 'deny'
+          ? `a permission rule denies \`${command}\` as a shell command, so the tool does not run it either`
+          : null,
+      // An ask rule for it there asks here too: no skill rule overrides it.
+      asks: pmForcedAsk,
+    };
   }
 
   override async getDefaultPermission(
     signal?: AbortSignal,
   ): Promise<PermissionDecision> {
-    this.shellDenial = this.isUnattended ? null : await this.deniedAsShell();
+    if (!this.isUnattended) {
+      const shell = await this.asShell();
+      this.shellDenial = shell.denial;
+      this.shellAsks = shell.asks;
+    }
     // Nothing to ask: execute() gives the refusal.
     if (this.shellDenial) return 'allow';
     if (this.params.command === 'status') return 'allow';
@@ -724,12 +802,18 @@ class AutofixPrInvocation extends BaseToolInvocation<
     if (this.isUnattended && (this.yolo() || this.unattendedBlocker())) {
       return 'allow';
     }
+    const mode = this.config.getApprovalMode();
     if (
       WATCH_COMMANDS.has(this.params.command) &&
-      this.params.take_over !== true
+      this.params.take_over !== true &&
+      !this.shellAsks &&
+      // YOLO asks nothing, and plan mode runs no helper: nothing to find.
+      mode !== ApprovalMode.YOLO &&
+      mode !== ApprovalMode.PLAN
     ) {
       this.watchConfirmed = await stillPrepared(
         this.config,
+        this.params.command,
         this.params.pr!,
         signal ?? new AbortController().signal,
       );
@@ -844,7 +928,7 @@ class AutofixPrInvocation extends BaseToolInvocation<
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
     if (this.isUnattended) return this.grant(signal);
-    const denial = this.shellDenial ?? (await this.deniedAsShell());
+    const denial = this.shellDenial ?? (await this.asShell()).denial;
     if (denial) {
       return {
         llmContent: denial,
@@ -866,10 +950,6 @@ class AutofixPrInvocation extends BaseToolInvocation<
       };
     }
     const sessionId = this.config.getSessionId();
-    if (this.params.command === 'prepare') {
-      // A start or a resume asks again, whatever this one answers.
-      revokeUnattendedFixes(sessionId, this.params.pr!);
-    }
     const misplaced = this.misplacedPlan();
     if (misplaced) {
       return {
@@ -940,7 +1020,9 @@ class AutofixPrInvocation extends BaseToolInvocation<
 
   /**
    * Records the watch `prepare` just reported, its author's right to push
-   * as GitHub gave it moments ago.
+   * as GitHub gave it moments ago. A grant for the PR survives only a
+   * prepare that reports the watch it was made for: one recreated, taken
+   * from another session, or of another repository asks again.
    */
   private recordPrepared(sessionId: string, out: string): void {
     const pr = this.params.pr!;
@@ -949,12 +1031,24 @@ class AutofixPrInvocation extends BaseToolInvocation<
       forgetConfirmedWatch(sessionId, pr);
       return;
     }
+    const before = preparedWatch(this.config, pr);
+    const preparedAt =
+      typeof reported.preparedAt === 'string' ? reported.preparedAt : null;
+    if (
+      !before ||
+      reported.tookOver === true ||
+      before.preparedAt !== preparedAt ||
+      before.repo.toLowerCase() !== this.params.repo!.toLowerCase() ||
+      before.worktree !== canonicalWorktreePath(reported.worktreePath) ||
+      before.authorCanPush !== (reported.authorCanPush === true)
+    ) {
+      revokeUnattendedFixes(sessionId, pr);
+    }
     recordConfirmedWatch(sessionId, {
       pr,
       repo: this.params.repo!,
       targetDir: this.config.getTargetDir(),
-      preparedAt:
-        typeof reported.preparedAt === 'string' ? reported.preparedAt : null,
+      preparedAt,
       worktree: canonicalWorktreePath(reported.worktreePath),
       authorCanPush: reported.authorCanPush === true,
     });

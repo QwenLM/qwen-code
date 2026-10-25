@@ -2631,6 +2631,25 @@ describe('AgentTool', () => {
       );
 
       itInRepo(
+        "gives an agent the granted fix agent starts the session's own mode",
+        async (repo) => {
+          const wt = addWorktree(repo);
+          vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+          grant(wt, true);
+          await run(fix(wt));
+          const granted = childConfig();
+          expect(granted.getApprovalMode()).toBe(YOLO);
+          // Its own agent, of whatever executor: the session's mode, not YOLO.
+          await runWithAgentContext('fix-agent', () =>
+            invoke(fg(), new AgentTool(granted)).execute(
+              new AbortController().signal,
+            ),
+          );
+          expect(childConfig(1).getApprovalMode()).toBe(AUTO_EDIT);
+        },
+      );
+
+      itInRepo(
         "grants nothing to a project's own general-purpose agent",
         async (repo) => {
           const wt = addWorktree(repo);

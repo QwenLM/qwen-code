@@ -126,6 +126,26 @@ export async function hasUnattendedFixGrant(
   return allowed;
 }
 
+/** Whether the session granted the worktree's fixes, unchecked. */
+export function unattendedFixGranted(
+  sessionId: string,
+  worktree: string,
+): boolean {
+  return grants.get(sessionId)?.has(canonicalWorktreePath(worktree)) === true;
+}
+
+// The Configs of agents a grant runs in YOLO mode: an agent one of them
+// starts takes the session's own mode, not theirs.
+const grantedConfigs = new WeakSet<object>();
+
+export function markUnattendedFixConfig(config: object): void {
+  grantedConfigs.add(config);
+}
+
+export function isUnattendedFixConfig(config: object): boolean {
+  return grantedConfigs.has(config);
+}
+
 /** Drops everything a session confirmed and granted. */
 export function forgetAutofixPrSession(sessionId: string): void {
   confirmed.delete(sessionId);

@@ -111,7 +111,11 @@ function modifiedAt(path: string): string | null {
   }
 }
 
-export function runStatus(args: { pr?: number }): StatusOutcome {
+export function runStatus(args: {
+  pr?: number;
+  /** false skips `worktreeWork` (null), the one part that runs git. */
+  work?: boolean;
+}): StatusOutcome {
   if (args.pr !== undefined) assertPositiveInteger(args.pr, 'PR number');
   const root = repoRoot();
   const tmp = join(root, '.qwen', 'tmp');
@@ -172,10 +176,10 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         // The recorded path goes stale when the clone moves; this one does not.
         worktreePath: paths.worktreePath,
         worktreeExists: existsSync(paths.worktreePath),
-        worktreeWork: unsavedWork(paths, [
-          state.lastKnownHeadSha,
-          ...state.pushedShas,
-        ]),
+        worktreeWork:
+          args.work === false
+            ? null
+            : unsavedWork(paths, [state.lastKnownHeadSha, ...state.pushedShas]),
       });
     } catch (err) {
       const message = (err as Error).message;
@@ -196,15 +200,23 @@ export const statusCommand: CommandModule = {
   describe:
     "List this clone's watches from their files: head, pushes, owning session, last check and round, and what needs a human",
   builder: (yargs) =>
-    yargs.positional('pr', {
-      type: 'number',
-      describe: 'Only this PR',
-    }),
+    yargs
+      .positional('pr', {
+        type: 'number',
+        describe: 'Only this PR',
+      })
+      .option('work', {
+        type: 'boolean',
+        default: true,
+        describe:
+          'Say what each worktree holds that the PR does not (--no-work skips that git scan, for a quick ownership check)',
+      }),
   handler: (argv) => {
     writeStdoutLine(
       JSON.stringify(
         runStatus({
           pr: argv['pr'] === undefined ? undefined : Number(argv['pr']),
+          work: argv['work'] !== false,
         }),
       ),
     );

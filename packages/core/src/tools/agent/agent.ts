@@ -110,7 +110,11 @@ import {
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { approvalModeToPermissionMode } from '../../hooks/permission-mode.js';
-import { hasUnattendedFixGrant } from '../autofix-pr-grants.js';
+import {
+  hasUnattendedFixGrant,
+  isUnattendedFixConfig,
+  markUnattendedFixConfig,
+} from '../autofix-pr-grants.js';
 import type { StopHookOutput } from '../../hooks/types.js';
 import {
   appendStopHookBlockingCapWarning,
@@ -3455,9 +3459,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       // Resolve the subagent's permission mode before creating it
       const isCodex = subagentConfig.executor?.kind === 'codex';
-      const parentApprovalMode = isCodex
-        ? this.config.getSessionApprovalMode()
-        : this.config.getApprovalMode();
+      // An agent a granted fix agent starts takes the session's own mode:
+      // the grant is that agent's, not one for whatever it launches.
+      const parentApprovalMode =
+        isCodex || isUnattendedFixConfig(this.config)
+          ? this.config.getSessionApprovalMode()
+          : this.config.getApprovalMode();
       // The fix agent of a watch whose user let its commands run without
       // asking (`autofix_pr` `unattended`), its watch checked again now: a
       // general-purpose agent the session itself starts in that worktree,
@@ -3566,6 +3573,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         { externalExecutor: subagentConfig.executor !== undefined },
       );
       restoreParentPM = cleanup;
+      if (unattendedFixes) markUnattendedFixConfig(agentConfig);
 
       // Date.now() alone collides when two parallel background agents of the
       // same type land in the same ms; the registry is keyed by agentId.

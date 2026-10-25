@@ -909,7 +909,8 @@ into, and a fresh lock is never touched.
 ### 6.10 `status [<pr>]`
 
 Lists the watches of the clone, read from their files under the main
-worktree's `.qwen/tmp`: no lock is taken and GitHub is not asked, so it
+worktree's `.qwen/tmp` (`--no-work` leaves `worktreeWork` null, skipping
+its git scan): no lock is taken and GitHub is not asked, so it
 answers while a helper runs and whichever session owns a watch. Output:
 `{ "now": "<time>", "watches": [...] }`, and `unreadable` with the PR and
 the reason for a state file that could not be read. Each watch carries:
@@ -1048,7 +1049,15 @@ command does — in auto mode the classifier decides. Rules match on
   author can push. A helper call is `confirmed` when that record exists for
   this clone and `status`, asked when the permission is, still lists the
   watch as that one — same repository, `preparedAt` and worktree — of this
-  session and not ended. The state file the helper reads sits in reach of
+  session and not ended. `status` runs there with `--no-work`, which skips
+  its git scan of the worktree, and not at all in YOLO mode, which asks
+  nothing, or in plan mode, which runs no helper. A `push` or `sync` is
+  `confirmed` only when the clone's `core.hooksPath` keeps git's hooks
+  outside the worktree, or the watch's fixes run unattended (Section 6.13):
+  a relative one (husky's `.husky`) resolves inside the worktree, where the
+  PR's own tree supplies them. An ask rule for the shell command
+  (`Bash(qwen autofix-pr push *)`) keeps the call `unconfirmed` too. The
+  state file the helper reads sits in reach of
   the code a round runs, so it can only make a call `unconfirmed`; none of
   the record is read back from it. Any other helper call is
   `watch:unconfirmed`. A round starts with `status` through the tool: a
@@ -1108,8 +1117,9 @@ dialog of its own and records it for this session.
   turn, so the skill offers it only to a user who just chose it; the watch
   is then left prepared without its task, and the start or resume is run
   again. Without anyone to answer — a headless run, a background agent — it
-  is refused, and so is the answer of a stream-json host, a program that
-  would run in YOLO mode if it wanted this. In YOLO mode nothing is needed,
+  is refused, and so is the answer of a stream-json host or of a program
+  driving the session through `--input-file`, which would run in YOLO mode
+  if it wanted this. In YOLO mode nothing is needed,
   and it records nothing. A refusal known before the dialog (the folder,
   the host, the watch below) is given without one.
 - It grants only a watch this session prepared through the tool
@@ -1130,12 +1140,15 @@ dialog of its own and records it for this session.
   executor that no deny rule of this session reaches — when the session
   itself, not a subagent of it, launches it with `working_dir` at the
   granted worktree. Before the launch it checks again: the folder still trusted, the
-  watch still as above. Then the agent runs in YOLO mode (a subagent starts
-  no agents of its own). Plan mode stays plan mode; an agent of another executor
+  watch still as above. Then the agent runs in YOLO mode; an agent it starts
+  in turn takes the session's own mode, not YOLO, whatever its executor.
+  Plan mode stays plan mode; an agent of another executor
   (Codex), a teammate and a workflow agent are not affected.
-- The grant ends with `cleanup` of the PR through the tool, with the next
-  `prepare` of the PR (a start or a resume asks again), with a check at
-  launch that fails, and with the session: `/clear`, `/new` and `/resume`
+- The grant ends with `cleanup` of the PR through the tool, with a
+  `prepare` that reports another watch of the PR (recreated, of another
+  repository, or taken from another session; a start or resume over the
+  same watch, a refused one included, leaves it), with a check at launch
+  that fails, and with the session: `/clear`, `/new` and `/resume`
   drop what the session confirmed and granted, the session left and the one
   entered alike, and so does closing it, which a daemon does before it loads
   the session again. Plan mode grants nothing.

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,10 +36,11 @@ import { ToolConfirmationOutcome } from './tools.js';
 const FAKE_CLI = `
 const [, , sub, command, ...rest] = process.argv;
 const mode = process.env.FAKE_AUTOFIX_MODE;
+if (process.env.FAKE_LOG) require('node:fs').appendFileSync(process.env.FAKE_LOG, [command, ...rest].join(' ') + '\\n');
 if (sub !== 'autofix-pr') { process.stderr.write('not autofix-pr'); process.exit(2); }
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
-else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, authorCanPush: process.env.FAKE_CAN_PUSH === '1' }) + '\\n');
+else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1' }) + '\\n');
 else if (command === 'status') process.stdout.write(process.env.FAKE_STATUS + '\\n');
 else process.stdout.write(JSON.stringify({ command, rest, session: process.env.QWEN_CODE_SESSION_ID, cwd: process.cwd() }) + '\\n');
 `;
@@ -98,7 +100,7 @@ beforeEach(() => {
   dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-pr-')));
   worktree = path.join(dir, '.qwen', 'tmp', 'autofix-pr-12');
   fs.mkdirSync(worktree, { recursive: true });
-  const cli = path.join(dir, 'fake-cli.mjs');
+  const cli = path.join(dir, 'fake-cli.cjs');
   fs.writeFileSync(cli, FAKE_CLI);
   vi.stubEnv('QWEN_CODE_CLI', cli);
   resetAutofixPrLaunchForTests();
@@ -254,6 +256,13 @@ describe('permission rules', () => {
       await presented(params, config),
     );
   const confirmedPush = 'AutofixPr(command:push,watch:confirmed)';
+  const confirmAndRunHere = async () => {
+    const inv = invocation({ command: 'unattended', pr: 12 });
+    await (
+      await inv.getConfirmationDetails(signal())
+    ).onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    expect((await inv.execute(signal())).error).toBeUndefined();
+  };
 
   it('let a rule name the helpers of a watch this session prepared, and a take-over only as its own', async () => {
     const push: AutofixPrParams = { command: 'push', pr: 12 };
@@ -348,6 +357,74 @@ describe('permission rules', () => {
     const elsewhere = makeConfig({ getTargetDir: () => os.tmpdir() });
     expect(
       (await presented({ command: 'push', pr: 12 }, elsewhere))['watch'],
+    ).toBe('unconfirmed');
+  });
+
+  it('checks ownership without the git scan, and not at all in YOLO or plan mode', async () => {
+    await prepare();
+    const log = path.join(dir, 'calls.log');
+    vi.stubEnv('FAKE_LOG', log);
+    await presented({ command: 'push', pr: 12 });
+    expect(fs.readFileSync(log, 'utf8')).toContain('status 12 --no-work');
+    fs.rmSync(log);
+    for (const mode of [ApprovalMode.YOLO, ApprovalMode.PLAN]) {
+      await presented(
+        { command: 'push', pr: 12 },
+        makeConfig({ getApprovalMode: () => mode }),
+      );
+    }
+    expect(fs.existsSync(log)).toBe(false);
+  });
+
+  it("asks for a push or sync that would run the PR's own git hooks, unless its fixes run unattended", async () => {
+    const repo = path.join(dir, 'clone');
+    fs.mkdirSync(repo);
+    execFileSync('git', ['init', '-q', repo]);
+    execFileSync('git', ['-C', repo, 'config', 'core.hooksPath', '.githooks']);
+    vi.stubEnv('FAKE_WORKTREE', repo);
+    vi.stubEnv('FAKE_STATUS', status({ worktreePath: repo }));
+    await prepare();
+    for (const command of ['push', 'sync'] as const) {
+      expect((await presented({ command, pr: 12 }))['watch']).toBe(
+        'unconfirmed',
+      );
+    }
+    const plan = '/x/.qwen/tmp/autofix-pr-12-plan.json';
+    expect((await presented({ command: 'reply', pr: 12, plan }))['watch']).toBe(
+      'confirmed',
+    );
+    await confirmAndRunHere();
+    expect((await presented({ command: 'push', pr: 12 }))['watch']).toBe(
+      'confirmed',
+    );
+    // Hooks of the clone's own, outside the worktree, run as before.
+    execFileSync('git', [
+      '-C',
+      repo,
+      'config',
+      'core.hooksPath',
+      path.join(os.tmpdir(), 'hooks'),
+    ]);
+    resetUnattendedFixGrantsForTests();
+    await prepare();
+    expect((await presented({ command: 'push', pr: 12 }))['watch']).toBe(
+      'confirmed',
+    );
+  });
+
+  it('keeps asking where an ask rule names the shell command', async () => {
+    await prepare();
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => undefined,
+      getPermissionsAsk: () => ['Bash(qwen autofix-pr push *)'],
+      getPermissionsDeny: () => undefined,
+      getProjectRoot: () => dir,
+      getCwd: () => dir,
+    });
+    pm.initialize();
+    const config = makeConfig({ getPermissionManager: () => pm });
+    expect(
+      (await presented({ command: 'push', pr: 12 }, config))['watch'],
     ).toBe('unconfirmed');
   });
 
@@ -746,18 +823,38 @@ describe('unattended', () => {
     expect(canonicalWorktreePath(link)).toBe(worktree);
   });
 
-  it('ends with a later prepare of the PR, which asks again, and with its cleanup', async () => {
+  it('survives a prepare of the same watch, a refused one included, and ends with another watch or its cleanup', async () => {
     await prepare();
     await confirmAndRun();
+    // A start over a running watch, or a refused one, leaves it as it is.
     vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
     await invocation({ command: 'prepare', pr: 12, repo: 'o/r' }).execute(
       signal(),
     );
     vi.stubEnv('FAKE_AUTOFIX_MODE', '');
+    await prepare();
+    expect(await granted()).toBe(true);
+    // Recreated: another watch, which asks again.
+    vi.stubEnv('FAKE_PREPARED_AT', '2026-10-25T11:00:00.000Z');
+    vi.stubEnv(
+      'FAKE_STATUS',
+      status({ preparedAt: '2026-10-25T11:00:00.000Z' }),
+    );
+    await prepare();
+    // Revoked by the prepare itself, though status now lists the new watch.
     expect(await granted()).toBe(false);
     await confirmAndRun();
-    await prepare();
+    expect(await granted()).toBe(true);
+    // Taken from another session: asks again.
+    vi.stubEnv('FAKE_TOOK_OVER', '1');
+    await invocation({
+      command: 'prepare',
+      pr: 12,
+      repo: 'o/r',
+      take_over: true,
+    }).execute(signal());
     expect(await granted()).toBe(false);
+    vi.stubEnv('FAKE_TOOK_OVER', '');
     await confirmAndRun();
     await invocation({ command: 'cleanup', pr: 12 }).execute(signal());
     expect(await granted()).toBe(false);
@@ -822,6 +919,12 @@ describe('unattended', () => {
       makeConfig({ isSessionAgentSession: () => true }),
       ToolConfirmationOutcome.ProceedOnce,
       /always asks/,
+    ],
+    [
+      'a program answers through --input-file',
+      makeConfig({ getInputFile: () => '/tmp/in.jsonl' }),
+      ToolConfirmationOutcome.ProceedOnce,
+      /--input-file/,
     ],
     [
       'a stream-json host answered',
