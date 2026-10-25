@@ -1213,6 +1213,14 @@ describe('background fixes', () => {
     );
   });
 
+  it('refuses as no longer unattended an attempt the session ended while it opened', async () => {
+    await granted();
+    const opening = openBackgroundFix('session-a', worktree, signal());
+    forgetAutofixPrSession('session-a');
+    await expect(opening).rejects.toThrow(/runs without asking$/);
+    expect(log().at(-1)).toMatch(/^fix-end 12 --attempt=.* --abandon$/);
+  });
+
   it("refuses with the helper's reason, and with no grant or no task", async () => {
     await expect(
       openBackgroundFix('session-a', worktree, signal()),
