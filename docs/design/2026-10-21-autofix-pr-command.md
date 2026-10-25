@@ -212,7 +212,11 @@ worktree included:
    another repository's PR of the same number is a refusal. Repositories
    compare as on GitHub: owner and name without case, and the host without
    case or the default port, but with any other port, which may name another
-   instance.
+   instance. In a daemon session (`QWEN_CODE_SERVE=1`), a worktree outside
+   the session's working directory is a refusal before the state file is
+   read, on a resume or take-over as on a new watch: the daemon runs a fix
+   agent's commands only inside that directory, so a round there could not
+   test, commit or push. The refusal names the clone root to prepare from.
 8. Print a JSON report: worktree path, branch, head SHA, base/head refs, push
    target, viewer and PR author logins, draft and fork flags, and
    `localUnpushedCommits`, the number of commits on the user's own copy of the
