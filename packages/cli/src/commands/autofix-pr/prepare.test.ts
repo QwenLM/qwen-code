@@ -995,7 +995,10 @@ describe('runPrepare (real git)', () => {
     const state = readState(paths.statePath)!;
     expect(Date.parse(state.preparedAt!)).not.toBeNaN();
     // Reported as recorded: a later prepare of the PR is another watch.
-    expect(lastReport()).toMatchObject({ preparedAt: state.preparedAt });
+    expect(lastReport()).toMatchObject({
+      preparedAt: state.preparedAt,
+      host: 'github.com',
+    });
     const ended = { at: '2026-10-25T00:00:00.000Z', reason: 'kept' };
     writeState(paths.statePath, { ...state, ended });
     runPrepare({ pr: 7, repo: 'o/r' });

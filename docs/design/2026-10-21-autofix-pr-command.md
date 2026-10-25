@@ -1035,6 +1035,14 @@ the PR.
   outside the model, and only the user discards a worktree's work.
 - Only the main session has it: subagents, forks, teammates and workspace
   agents do not, and code mode's `exec` cannot call it.
+- Before any git command in the worktree, `push`, `sync`, `status` and
+  `cleanup` check its `.git` from the files: it must name this clone's own
+  admin entry for a worktree, which must point back at it. A round's code
+  can rewrite that file, and a git directory it built would hand every git
+  command there its config — a `core.fsmonitor` command runs on the next
+  `git status`.
+- A user's PreToolUse or PostToolUse hook for the shell tool does not see
+  these calls; one for `autofix_pr` does.
 - In plan mode it runs nothing but `status`: a rule lets a round's helpers
   past the dialog plan mode would block, and each of them writes.
 
@@ -1044,18 +1052,19 @@ command does — in auto mode the classifier decides. Rules match on
 
 - **`watch:confirmed`, a watch this session prepared.** When `prepare`
   succeeds through the tool, the session records, in memory, the watch it
-  reported: the PR, its repository, the directory it was prepared from, the
-  worktree, its `preparedAt`, and whether GitHub said just then that the
+  reported: the PR, its repository and host, the directory it was prepared
+  from, the worktree, its `preparedAt`, and whether GitHub said just then that the
   author can push. A helper call is `confirmed` when that record exists for
   this clone and `status`, asked when the permission is, still lists the
-  watch as that one — same repository, `preparedAt` and worktree — of this
+  watch as that one — same repository, host, `preparedAt` and worktree — of
+  this
   session and not ended. `status` runs there with `--no-work`, which skips
   its git scan of the worktree, and not at all in YOLO mode, which asks
   nothing, or in plan mode, which runs no helper. A `push` or `sync` is
   `confirmed` only when the clone's `core.hooksPath` keeps git's hooks
   outside the worktree, or the watch's fixes run unattended (Section 6.13):
   a relative one (husky's `.husky`) resolves inside the worktree, where the
-  PR's own tree supplies them. An ask rule for the shell command
+  PR's own tree supplies them, and the dialog of such a call says so. An ask rule for the shell command
   (`Bash(qwen autofix-pr push *)`) keeps the call `unconfirmed` too. The
   state file the helper reads sits in reach of
   the code a round runs, so it can only make a call `unconfirmed`; none of
@@ -1068,7 +1077,8 @@ command does — in auto mode the classifier decides. Rules match on
   a daemon restart brought back (Section 6.11), or a `/resume` back into the
   session — the round goes on with its helpers and its fix under the
   approval mode, as without the tool, and its report says that
-  `/autofix-pr resume <n>` confirms the watch again. The record ends with
+  `/autofix-pr resume <n>` confirms the watch again — a resume that takes
+  such a watch even though this session's task drives it. The record ends with
   `cleanup` of the PR through the tool and with the session.
 - **`watch:take-over`**, for `prepare --take-over` and `cleanup
 --take-over` (which `/autofix-pr stop <n>` runs, and so asks). `prepare`
@@ -1081,7 +1091,8 @@ command does — in auto mode the classifier decides. Rules match on
 - **A start, a new schedule, a take-over and an unconfirmed helper** offer
   no "always allow": a saved rule would let every later one through. The
   `prepare` dialog says that the watch's rounds then push and reply without
-  asking. Elsewhere the rule saved names `watch:confirmed`.
+  asking, and in auto mode it is the user's to answer, not the classifier's.
+  Elsewhere the rule saved names `watch:confirmed`.
 
 The skill's `allowedTools` grant the commands a round runs with
 `watch:confirmed` — `snapshot`, `ci-log`, `sync`, `push`, `reply`,
@@ -1144,6 +1155,9 @@ dialog of its own and records it for this session.
   in turn takes the session's own mode, not YOLO, whatever its executor.
   Plan mode stays plan mode; an agent of another executor
   (Codex), a teammate and a workflow agent are not affected.
+- `command: "attended"` takes the PR's grant back, asking nothing: the skill
+  calls it on a plain "Start", "Take over" or "Resume" answer and with
+  `--yes`, so an earlier choice does not outlast a later one.
 - The grant ends with `cleanup` of the PR through the tool, with a
   `prepare` that reports another watch of the PR (recreated, of another
   repository, or taken from another session; a start or resume over the

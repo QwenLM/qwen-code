@@ -22,6 +22,8 @@ export interface ConfirmedWatch {
   pr: number;
   /** `<owner>/<repo>`, as `prepare` was given it. */
   repo: string;
+  /** The host `prepare` resolved, or null when it did not say. */
+  host: string | null;
   /** The session's directory it was prepared from: one clone's watch. */
   targetDir: string;
   /** When `prepare` made the watch: a later one of the PR is another. */
@@ -142,8 +144,12 @@ export function markUnattendedFixConfig(config: object): void {
   grantedConfigs.add(config);
 }
 
+/** Also a Config derived from one of them, as a rebuilt registry binds to. */
 export function isUnattendedFixConfig(config: object): boolean {
-  return grantedConfigs.has(config);
+  for (let c: object | null = config; c; c = Object.getPrototypeOf(c)) {
+    if (grantedConfigs.has(c)) return true;
+  }
+  return false;
 }
 
 /** Drops everything a session confirmed and granted. */

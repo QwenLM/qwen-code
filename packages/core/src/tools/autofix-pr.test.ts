@@ -26,6 +26,8 @@ import {
   canonicalWorktreePath,
   confirmedWatch,
   hasUnattendedFixGrant,
+  isUnattendedFixConfig,
+  markUnattendedFixConfig,
   resetUnattendedFixGrantsForTests,
 } from './autofix-pr-grants.js';
 import { ToolConfirmationOutcome } from './tools.js';
@@ -40,7 +42,7 @@ if (process.env.FAKE_LOG) require('node:fs').appendFileSync(process.env.FAKE_LOG
 if (sub !== 'autofix-pr') { process.stderr.write('not autofix-pr'); process.exit(2); }
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
-else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1' }) + '\\n');
+else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, host: process.env.FAKE_HOST || undefined, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1' }) + '\\n');
 else if (command === 'status') process.stdout.write(process.env.FAKE_STATUS + '\\n');
 else process.stdout.write(JSON.stringify({ command, rest, session: process.env.QWEN_CODE_SESSION_ID, cwd: process.cwd() }) + '\\n');
 `;
@@ -304,6 +306,30 @@ describe('permission rules', () => {
     ).toBe(true);
   });
 
+  it('treat a watch the state file moved to another host as unconfirmed', async () => {
+    vi.stubEnv('FAKE_HOST', 'github.com');
+    await prepare();
+    const plan = '/x/.qwen/tmp/autofix-pr-12-plan.json';
+    expect((await presented({ command: 'reply', pr: 12, plan }))['watch']).toBe(
+      'confirmed',
+    );
+    vi.stubEnv('FAKE_STATUS', status({ host: 'ghe.corp' }));
+    expect((await presented({ command: 'reply', pr: 12, plan }))['watch']).toBe(
+      'unconfirmed',
+    );
+  });
+
+  it('asks the user for a start in auto mode, whatever the classifier says', async () => {
+    const start = (mode: ApprovalMode) =>
+      invocation(
+        { command: 'prepare', pr: 12, repo: 'o/r' },
+        makeConfig({ getApprovalMode: () => mode }),
+      ).requiresUserInteraction!();
+    expect(start(ApprovalMode.AUTO)).toBe(true);
+    expect(start(ApprovalMode.DEFAULT)).toBe(false);
+    expect(start(ApprovalMode.YOLO)).toBe(false);
+  });
+
   it('treat a prepared watch the state file now names otherwise as unconfirmed', async () => {
     await prepare();
     for (const watch of [
@@ -326,7 +352,7 @@ describe('permission rules', () => {
     }
   });
 
-  it('asks for every command but status, offering a rule only for a helper of a watch prepared here', async () => {
+  it('asks for a push, not for status, offering a rule only for a helper of a watch prepared here', async () => {
     const asked = async () => {
       const inv = invocation({ command: 'push', pr: 12, task: 't1' });
       const permission = await inv.getDefaultPermission(signal());
@@ -393,6 +419,14 @@ describe('permission rules', () => {
     expect((await presented({ command: 'reply', pr: 12, plan }))['watch']).toBe(
       'confirmed',
     );
+    // Its dialog says why it asks.
+    const push = invocation({ command: 'push', pr: 12 });
+    await push.getDefaultPermission(signal());
+    expect(
+      (
+        (await push.getConfirmationDetails(signal())) as { warnings?: string[] }
+      ).warnings?.join(' '),
+    ).toMatch(/runs git hooks the PR's own tree supplies/);
     await confirmAndRunHere();
     expect((await presented({ command: 'push', pr: 12 }))['watch']).toBe(
       'confirmed',
@@ -465,13 +499,13 @@ describe('permission rules', () => {
 
   it('asks for a new schedule each time', async () => {
     await prepare();
-    expect(
-      await invocation({
-        command: 'schedule',
-        pr: 12,
-        again: true,
-      }).getConfirmationDetails(signal()),
-    ).toMatchObject({ hideAlwaysAllow: true });
+    const schedule = invocation({ command: 'schedule', pr: 12, again: true });
+    await schedule.getDefaultPermission(signal());
+    const details = await schedule.getConfirmationDetails(signal());
+    expect(details).toMatchObject({ hideAlwaysAllow: true });
+    expect((details as { warnings?: string[] }).warnings?.join(' ')).toMatch(
+      /Records the scheduled task of the watch of PR #12, replacing any it has/,
+    );
   });
 
   it('says what a take-over does', async () => {
@@ -525,6 +559,15 @@ describe('permission rules', () => {
     );
     expect(yolo.requiresUserInteraction!()).toBe(false);
     expect(await yolo.getDefaultPermission()).toBe('allow');
+  });
+});
+
+describe('the Configs of granted agents', () => {
+  it('include one derived from them, as a rebuilt registry binds to', () => {
+    const granted = {};
+    markUnattendedFixConfig(granted);
+    expect(isUnattendedFixConfig(Object.create(granted))).toBe(true);
+    expect(isUnattendedFixConfig({})).toBe(false);
   });
 });
 
@@ -687,6 +730,7 @@ describe('running a helper', () => {
     expect(confirmedWatch('session-a', 12)).toEqual({
       pr: 12,
       repo: 'o/r',
+      host: null,
       targetDir: dir,
       preparedAt: PREPARED_AT,
       worktree,
@@ -955,6 +999,17 @@ describe('unattended', () => {
       signal(),
     );
     expect(result.error?.message).toMatch(/did not confirm/);
+  });
+
+  it('is taken back by attended, which asks nothing, in any mode', async () => {
+    await prepare();
+    await confirmAndRun();
+    const plan = makeConfig({ getApprovalMode: () => ApprovalMode.PLAN });
+    const attended = invocation({ command: 'attended', pr: 12 }, plan);
+    expect(await attended.getDefaultPermission(signal())).toBe('allow');
+    expect(attended.requiresUserInteraction!()).toBe(false);
+    expect((await attended.execute(signal())).error).toBeUndefined();
+    expect(await granted()).toBe(false);
   });
 
   it('records nothing in YOLO mode', async () => {

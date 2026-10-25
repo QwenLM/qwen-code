@@ -223,7 +223,14 @@ describe('bundled autofix-pr skill', () => {
       'call `autofix_pr` with `command: "unattended"` and `pr`: its dialog confirms the answer',
     );
     expect(body).toContain(
-      '`--yes` skips the question and so never makes this choice.',
+      'which skips the question and so never makes this choice, call `autofix_pr` with `command: "attended"` and `pr` instead',
+    );
+    expect(body).toContain(
+      'On plain "Resume": `autofix_pr` with `command: "attended"` and `pr`.',
+    );
+    // A durable task a daemon restart brought back is resumed, not skipped.
+    expect(body).toContain(
+      'unless `status` came through the `autofix_pr` tool with `preparedHere` false',
     );
     // A round of a watch no longer this session's (a task left after
     // /clear) ends at the status that never asks, not at a helper that

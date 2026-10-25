@@ -351,14 +351,16 @@ GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就
 - 结果是辅助命令输出的那一行 JSON。非零退出就是辅助命令的拒绝，连同它的消息一起返回。
 - 不提供 `snapshot --gate` 和 `cleanup --force`：闸门在模型之外运行，丢弃 worktree 里的工作只能由用户来做。
 - 只有主会话有这个工具：子 agent、fork、teammate 和 workspace agent 都没有，code mode 的 `exec` 也调用不了它。
+- 在 worktree 里运行任何 git 命令之前，`push`、`sync`、`status` 和 `cleanup` 都会直接读文件检查它的 `.git`：它必须指向本 clone 自己为某个 worktree 建的 admin 条目，而该条目也必须指回它。一轮运行的代码可以改写这个文件；它自己搭出来的 git 目录会把它的 config 交给那里的每一条 git 命令——`core.fsmonitor` 里的命令会在下一次 `git status` 时运行。
+- 用户为 shell 工具配置的 PreToolUse 或 PostToolUse hook 看不到这些调用；为 `autofix_pr` 配置的才看得到。
 - plan 模式下除 `status` 外它什么都不运行：规则会让一轮里的辅助命令绕过 plan 模式本会拦下的弹窗，而它们每个都会写东西。
 
 `status` 只读，不需要审批。其他每次调用都和 shell 命令一样要询问——auto 模式下由分类器决定。规则按 `command` 和 `watch` 匹配；`watch` 由工具推导，模型无法设置：
 
-- **`watch:confirmed`：本会话准备过的监视。** `prepare` 通过工具成功运行后，会话在内存里记下它报告的监视：PR、所属仓库、准备时所在的目录、worktree、它的 `preparedAt`，以及 GitHub 当时说作者能否推送。一次辅助命令调用要算 `confirmed`，需要这条记录属于当前 clone，并且在判定权限时询问的 `status` 仍把该监视列为同一个——仓库、`preparedAt` 和 worktree 都相同——归本会话、未结束。这里的 `status` 带 `--no-work` 运行，跳过对 worktree 的 git 扫描；YOLO 模式下（什么都不问）和 plan 模式下（不运行任何辅助命令）则根本不运行。`push` 或 `sync` 只有在 clone 的 `core.hooksPath` 让 git hook 留在 worktree 之外，或者该监视的修复已免询问（第 6.13 节）时，才算 `confirmed`：相对路径（husky 的 `.husky`）会在 worktree 里解析，hook 就来自 PR 自己的代码树。shell 命令的 ask 规则（`Bash(qwen autofix-pr push *)`）也会让调用保持 `unconfirmed`。辅助命令读取的状态文件在一轮运行的代码够得着的地方，所以它只能让一次调用变成 `unconfirmed`；记录里的任何内容都不会从它读回。其他辅助命令调用都是 `watch:unconfirmed`。一轮开始时先通过工具运行 `status`：监视已不归本会话（`/clear` 之后，或被接管）时还在运行的任务会在这里结束、什么都不问，而不是走到会询问的辅助命令。`status` 还会给每个监视标上 `preparedHere`；本会话的监视这一项为 false 时——daemon 重启后恢复的持久任务（第 6.11 节），或 `/resume` 回到了这个会话——这一轮照常进行，辅助命令和修复按审批模式运行，与没有这个工具时一样，报告里会说明 `/autofix-pr resume <n>` 可以重新确认这个监视。这条记录在通过工具对该 PR 运行 `cleanup` 时、以及会话结束时消失。
+- **`watch:confirmed`：本会话准备过的监视。** `prepare` 通过工具成功运行后，会话在内存里记下它报告的监视：PR、所属仓库和 host、准备时所在的目录、worktree、它的 `preparedAt`，以及 GitHub 当时说作者能否推送。一次辅助命令调用要算 `confirmed`，需要这条记录属于当前 clone，并且在判定权限时询问的 `status` 仍把该监视列为同一个——仓库、host、`preparedAt` 和 worktree 都相同——归本会话、未结束。这里的 `status` 带 `--no-work` 运行，跳过对 worktree 的 git 扫描；YOLO 模式下（什么都不问）和 plan 模式下（不运行任何辅助命令）则根本不运行。`push` 或 `sync` 只有在 clone 的 `core.hooksPath` 让 git hook 留在 worktree 之外，或者该监视的修复已免询问（第 6.13 节）时，才算 `confirmed`：相对路径（husky 的 `.husky`）会在 worktree 里解析，hook 就来自 PR 自己的代码树，这种调用的弹窗会说明这一点。shell 命令的 ask 规则（`Bash(qwen autofix-pr push *)`）也会让调用保持 `unconfirmed`。辅助命令读取的状态文件在一轮运行的代码够得着的地方，所以它只能让一次调用变成 `unconfirmed`；记录里的任何内容都不会从它读回。其他辅助命令调用都是 `watch:unconfirmed`。一轮开始时先通过工具运行 `status`：监视已不归本会话（`/clear` 之后，或被接管）时还在运行的任务会在这里结束、什么都不问，而不是走到会询问的辅助命令。`status` 还会给每个监视标上 `preparedHere`；本会话的监视这一项为 false 时——daemon 重启后恢复的持久任务（第 6.11 节），或 `/resume` 回到了这个会话——这一轮照常进行，辅助命令和修复按审批模式运行，与没有这个工具时一样，报告里会说明 `/autofix-pr resume <n>` 可以重新确认这个监视——即使本会话的任务驱动着这样的监视，resume 也会接手它。这条记录在通过工具对该 PR 运行 `cleanup` 时、以及会话结束时消失。
 - **`watch:take-over`**：用于 `prepare --take-over` 和 `cleanup --take-over`（`/autofix-pr stop <n>` 运行的就是后者，所以会询问）。`prepare` 和 `status` 的 `watch` 是 `none`。
 - **只点名 `command` 的规则覆盖该命令的每一次调用**，不论它的 `watch` 是什么：`deny: ["AutofixPr(command:push)"]` 会挡住所有推送。拒绝这次调用对应 shell 写法的规则——`Bash`，或 `Bash(qwen autofix-pr *)`——也一样，因为这个工具运行的是同一个程序，并且会执行仓库的 git hook。
-- **启动、重新排程、接管，以及未确认的辅助命令**不提供"总是允许"：保存下来的规则会放行以后的每一次。`prepare` 的弹窗会说明，此后这个监视的每一轮都会不经询问地推送和回复。其他情况下保存的规则会写明 `watch:confirmed`。
+- **启动、重新排程、接管，以及未确认的辅助命令**不提供"总是允许"：保存下来的规则会放行以后的每一次。`prepare` 的弹窗会说明，此后这个监视的每一轮都会不经询问地推送和回复；在 auto 模式下这个弹窗由用户回答，而不是分类器。其他情况下保存的规则会写明 `watch:confirmed`。
 
 skill 的 `allowedTools` 以 `watch:confirmed` 放行一轮里运行的命令——`snapshot`、`ci-log`、`sync`、`push`、`reply`、`rerun` 和 `cleanup`——再加上 `status`；不放行 `prepare`（它启动或恢复监视），也不放行 `schedule`（一轮里从不运行它，而它会替换监视的任务和选项）。这些规则放行的范围同样由辅助命令划定：每个辅助命令都会拒绝由另一个任务驱动的监视（第 6.1 节第 5 步；第 6.8 节），`push` 检查推送去向并计数，`reply` 只回复有可信作者新评论的 thread。工具运行的 CLI 在每个进程里只确定一次，所以之后环境变化（比如重新加载的 `.env`）不会改变它。
 
@@ -372,6 +374,7 @@ skill 的 `allowedTools` 以 `watch:confirmed` 放行一轮里运行的命令—
 - 它只授权本会话通过工具准备过、且 GitHub 当时说作者能推送的监视（第 6.12 节），并且只在 `status <pr>` 仍把它列为本会话的、未结束、属于那个仓库（名字比较不区分大小写）、使用那个 worktree、`preparedAt` 不变时有效——同一会话的另一个进程重新准备过的监视就是另一个监视。授权只给弹窗里点名的那个监视；在回答之前又被重新准备的，会被拒绝。`status` 读的是状态文件，所以它只能收回授权。别人的 PR 永远不会被监视（第 8 节），这类 PR 的 `--once` 一轮每条命令都会询问。不受信任的文件夹和 session-agents 会话会被拒绝：它们的子 agent 拿不到特权模式。
 - 授权保存在 CLI 进程里，以会话 id 和 worktree 的真实路径为键。不写任何文件。
 - 它只作用于一种 agent：内置的 `general-purpose` agent——不是项目或用户自己定义的同名 agent，那种可能运行另一个执行器，本会话的 deny 规则管不到它——并且要由会话本身（而不是它的子 agent）以 `working_dir` 指向已授权 worktree 启动。启动前会再检查一次：文件夹仍受信任，监视仍满足上面的条件。然后这个 agent 以 YOLO 模式运行；它再启动的 agent 用会话自己的模式而不是 YOLO，不论执行器是什么。plan 模式保持 plan 模式；其他执行器（Codex）的 agent、teammate 和 workflow agent 不受影响。
+- `command: "attended"` 收回该 PR 的授权，什么都不问：用户回答普通的"Start""Take over"或"Resume"时，以及带 `--yes` 时，skill 都会调用它，所以之前的选择不会延续过之后的选择。
 - 授权在以下情况结束：通过工具对该 PR 运行 `cleanup`；报告了该 PR 另一个监视的 `prepare`（重新创建的、另一个仓库的，或从另一个会话接管来的；在同一个监视上再次启动或恢复，包括被拒绝的那次，不会结束它）；启动时的检查没有通过；会话结束——`/clear`、`/new` 和 `/resume` 会丢掉会话确认过和授权过的内容，离开的会话和进入的会话都一样；关闭会话也会丢掉，daemon 在重新加载一个会话之前就是这样做的。plan 模式不授予任何东西。
 
 它并不约束这个 agent。agent 的运行方式和 YOLO 会话里的 agent 一样：带着用户的凭据，能访问 worktree 之外的文件，不受用户的 ask 规则约束；deny 规则仍然生效。弹窗会说明这一点；把别人的代码挡在外面的，是第 8 节的信任规则。任务已过期或被删除的监视，授权会一直保留到上面某种情况结束它。

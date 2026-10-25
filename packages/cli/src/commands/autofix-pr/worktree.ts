@@ -7,10 +7,66 @@
 // The checks every helper that writes from the autofix worktree makes first.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { GIT_TIMEOUT_MS, gitOpt, gitProbe } from '../review/lib/git.js';
 import { redirectedAncestor, sanitizedGitEnv } from '../review/lib/worktree.js';
 import type { AutofixPrPaths } from './state.js';
+
+function isBrokenLink(file: string): boolean {
+  try {
+    return lstatSync(file).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why the worktree's `.git` is not to be trusted, or null. It is a file a
+ * round's code can rewrite: pointed at a git directory that code built,
+ * every git command in the worktree would read that directory's config, and
+ * a `core.fsmonitor` command there runs on the next `git status`. So before
+ * any git command in the worktree, the file must name this clone's own
+ * admin entry for a worktree, and that entry must point back at it. Read
+ * from the files, not asked of git, which would read the config in
+ * question; `root` is the clone's main worktree, whose git is the user's.
+ */
+export function untrustedGitfile(
+  worktreePath: string,
+  root: string,
+): string | null {
+  const dotGit = join(worktreePath, '.git');
+  // None at all: git walks up to the clone itself, the user's own, and the
+  // caller's own check finds the directory is no worktree.
+  if (!existsSync(dotGit) && !isBrokenLink(dotGit)) return null;
+  let text: string;
+  try {
+    if (!lstatSync(dotGit).isFile()) {
+      return `${dotGit} is not the gitfile of a linked worktree`;
+    }
+    text = readFileSync(dotGit, 'utf8');
+  } catch {
+    return `${dotGit} cannot be read`;
+  }
+  const pointer = /^gitdir: *(.+?)\s*$/m.exec(text)?.[1];
+  if (!pointer) return `${dotGit} names no git directory`;
+  const common = gitOpt('-C', root, 'rev-parse', '--git-common-dir');
+  if (common === null) return `git cannot find the git directory of ${root}`;
+  try {
+    const entry = realpathSync(resolve(worktreePath, pointer));
+    const entries = realpathSync(join(resolve(root, common), 'worktrees'));
+    if (dirname(entry) !== entries) {
+      return `${dotGit} points to ${pointer}, not to this clone's own entry for a worktree`;
+    }
+    const back = readFileSync(join(entry, 'gitdir'), 'utf8').trim();
+    if (realpathSync(resolve(entry, back)) !== realpathSync(dotGit)) {
+      return `${dotGit} points to ${entry}, the entry of another worktree`;
+    }
+  } catch {
+    return `${dotGit} points to ${pointer}, which is not this clone's entry for it`;
+  }
+  return null;
+}
 
 /**
  * Throws unless the watch's worktree is a git worktree of its own, at its
@@ -40,6 +96,12 @@ export function requireWorktree(
   if (redirected !== null) {
     throw new Error(
       `${worktreePath} resolves through the symlink ${redirected}; it is not the watch's worktree.`,
+    );
+  }
+  const untrusted = untrustedGitfile(worktreePath, root);
+  if (untrusted !== null) {
+    throw new Error(
+      `${untrusted}: no git command runs in ${worktreePath} until the worktree is checked and removed.`,
     );
   }
   const top = gitOpt('-C', worktreePath, 'rev-parse', '--show-toplevel');

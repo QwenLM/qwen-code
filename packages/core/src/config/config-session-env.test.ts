@@ -224,6 +224,7 @@ describe('Config sessionEnvClaimed guard', () => {
     const watch = {
       pr: 7,
       repo: 'o/r',
+      host: null,
       targetDir: '/repo',
       preparedAt: null,
       worktree: '/w',
@@ -244,6 +245,7 @@ describe('Config sessionEnvClaimed guard', () => {
     grants.recordConfirmedWatch('daemon-session', {
       pr: 7,
       repo: 'o/r',
+      host: null,
       targetDir: '/repo',
       preparedAt: null,
       worktree: '/w',
