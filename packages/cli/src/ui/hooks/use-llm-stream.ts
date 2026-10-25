@@ -1465,9 +1465,12 @@ export const useLlmStream = (
       detachedToolContinuationAbortControllersRef.current.clear();
       return false;
     }
+    // A Mod can end its turn before React renders the turn's admission:
+    // the turn and the stream it opened already count.
     if (
       quiet
-        ? streamingState === StreamingState.Idle
+        ? streamingState === StreamingState.Idle &&
+          !(modTurnRef.current && activeModelStreamsRef.current > 0)
         : streamingState !== StreamingState.Responding
     ) {
       return false;

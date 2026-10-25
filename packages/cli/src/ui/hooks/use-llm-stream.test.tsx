@@ -14323,6 +14323,36 @@ describe('useLlmStream', () => {
         },
       );
 
+      // A retry, unlike a typed prompt, starts responding only as it sends.
+      it('lets a Mod end a retried turn before its admission renders', async () => {
+        const { turn, startTurn } = installModTurn();
+        let aborted: boolean | undefined;
+        mockSendMessageStream.mockImplementation((...args: unknown[]) => {
+          (args[3] as { onPromptAdmitted?: () => void }).onPromptAdmitted?.();
+          // A turn.start guard, answered before React commits the turn.
+          aborted = startTurn.mock.calls[0][2]();
+          return (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'Part' };
+            await new Promise(() => {});
+          })();
+        });
+        const { result } = renderTestHook();
+        await act(async () => {
+          void result.current.submitQuery('Fix it', SendMessageType.Retry);
+        });
+
+        await waitFor(() => expect(startTurn).toHaveBeenCalledOnce());
+        expect(aborted).toBe(true);
+        expect(startTurn.mock.calls[0][1].aborted).toBe(true);
+        expect(
+          (mockSendMessageStream.mock.calls[0][1] as AbortSignal).aborted,
+        ).toBe(true);
+        await waitFor(() =>
+          expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted'),
+        );
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
       it('ends the turn as an error when its stream throws', async () => {
         const { turn } = installModTurn();
         admitted(async function* () {
