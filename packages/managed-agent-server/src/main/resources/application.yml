@@ -37,6 +37,7 @@ qwen:
     definition-models: '${QWEN_MANAGED_AGENT_DEFINITION_MODELS:}'
     definition-tool-profiles: '${QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:hosted-workspace-files/1}'
     trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'
+    service-user: '${QWEN_MANAGED_AGENT_SERVICE_USER:}'
     auth:
       mode: '${QWEN_MANAGED_AGENT_AUTH_MODE:auto}'
       signing-key: '${QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY:}'
