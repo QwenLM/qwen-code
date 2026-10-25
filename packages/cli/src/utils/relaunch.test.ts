@@ -205,6 +205,111 @@ describe('relaunchAppInChildProcess', () => {
     });
   });
 
+  it('keeps Node supervising private Bun without forwarding Node memory or loader flags', async () => {
+    process.execArgv = ['--import', 'node-loader.js'];
+    process.argv = ['/usr/bin/node', '/installed/cli.js', '-i', 'hello'];
+    const execveSpy = vi.fn(() => undefined as never);
+    process.execve = execveSpy;
+    const child = createMockChildProcess(0, false);
+    mockedSpawn.mockReturnValue(child);
+    const onUpdateRelaunch = vi.fn().mockResolvedValue(44);
+    const promise = relaunchAppInChildProcess(
+      ['--max-old-space-size=4096'],
+      [],
+      {
+        interpreter: { command: '/installed/private/bun', runtime: 'bun' },
+        childEnv: { QWEN_CODE_NPM_RUNTIME_CONTEXT: 'private-context' },
+        replaceProcess: true,
+        onUpdateRelaunch,
+      },
+    );
+    await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+    expect(mockedSpawn).toHaveBeenCalledWith(
+      '/installed/private/bun',
+      ['--expose-gc', '/installed/cli.js', '-i', 'hello'],
+      expect.objectContaining({
+        stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+        env: expect.objectContaining({
+          QWEN_CODE_NO_RELAUNCH: 'true',
+          QWEN_CODE_NPM_RUNTIME_CONTEXT: 'private-context',
+          QWEN_CODE_RELAUNCH_SUPERVISED: '1',
+        }),
+      }),
+    );
+    expect(execveSpy).not.toHaveBeenCalled();
+    child.emit('message', { type: UPDATE_ON_EXIT_MESSAGE });
+    child.emit('close', 0);
+    await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+    expect(onUpdateRelaunch).toHaveBeenCalledExactlyOnceWith(false);
+    expect(processExitSpy).toHaveBeenCalledWith(44);
+  });
+
+  it.each([
+    { runtime: 'bun' as const, tty: true, marker: 'terminal' },
+    { runtime: 'bun' as const, tty: false, marker: '1' },
+    { runtime: 'node' as const, tty: true, marker: '1' },
+  ])(
+    'keeps SIGINT ownership in the child only for $runtime tty=$tty',
+    async ({ runtime, tty, marker }) => {
+      vi.mocked(isatty).mockReturnValue(tty);
+      const before = process.listeners('SIGINT');
+      onTestFinished(() => {
+        for (const listener of process.listeners('SIGINT')) {
+          if (!before.includes(listener))
+            process.removeListener('SIGINT', listener);
+        }
+      });
+      const child = createMockChildProcess();
+      mockedSpawn.mockReturnValue(child);
+      const promise = relaunchAppInChildProcess([], [], {
+        interpreter: { command: `/installed/${runtime}`, runtime },
+      });
+      expect(mockedSpawn.mock.calls[0]?.[2]?.env).toHaveProperty(
+        'QWEN_CODE_RELAUNCH_SUPERVISED',
+        marker,
+      );
+      const added = process
+        .listeners('SIGINT')
+        .filter((fn) => !before.includes(fn));
+      expect(added).toHaveLength(marker === 'terminal' ? 1 : 0);
+      for (const listener of added) listener('SIGINT');
+      expect(processExitSpy).not.toHaveBeenCalled();
+      expect(child.kill).not.toHaveBeenCalled();
+      child.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+      expect(process.listeners('SIGINT')).toEqual(before);
+    },
+  );
+
+  it.each(['spawn', 'error', 'afterSpawn'] as const)(
+    'removes the terminal supervisor signal handler on %s failure',
+    async (failure) => {
+      vi.mocked(isatty).mockReturnValue(true);
+      const before = process.listeners('SIGINT');
+      onTestFinished(() => {
+        for (const listener of process.listeners('SIGINT')) {
+          if (!before.includes(listener))
+            process.removeListener('SIGINT', listener);
+        }
+      });
+      const child = createMockChildProcess();
+      mockedSpawn.mockImplementation(() => {
+        if (failure === 'spawn') throw new Error('spawn failed');
+        return child;
+      });
+      const promise = relaunchAppInChildProcess([], [], {
+        interpreter: { command: '/installed/bun', runtime: 'bun' },
+        afterSpawn: () => {
+          if (failure === 'afterSpawn') throw new Error('afterSpawn failed');
+        },
+      });
+      if (failure === 'error') child.emit('error', new Error('spawn error'));
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+      expect(process.listeners('SIGINT')).toEqual(before);
+      if (failure === 'afterSpawn') expect(child.kill).toHaveBeenCalledOnce();
+    },
+  );
+
   it('replaces the current process when requested and supported', async () => {
     // Leaked into this process; a replaced image must not be marked.
     process.env['QWEN_CODE_RELAUNCH_SUPERVISED'] = '1';
@@ -847,6 +952,41 @@ describe.skipIf(!process.channel)('exitWhenSupervisorExits', () => {
     expect(unrefSpy).not.toHaveBeenCalled();
     expect(exitSpy).not.toHaveBeenCalled();
   });
+
+  it('cleans up the npm terminal child immediately when its IPC parent disappears', async () => {
+    process.env['QWEN_CODE_RELAUNCH_SUPERVISED'] = 'terminal';
+    vi.mocked(isatty).mockReturnValue(true);
+
+    exitWhenSupervisorExits();
+
+    expect(process.env['QWEN_CODE_RELAUNCH_SUPERVISED']).toBeUndefined();
+    expect(unrefSpy).toHaveBeenCalledOnce();
+    expect(listeners).toHaveLength(1);
+    expect(runExitCleanup).not.toHaveBeenCalled();
+    listeners[0]!();
+    expect(runExitCleanup).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    expect(exitSpy).toHaveBeenCalledWith(129);
+  });
+
+  it('retains the full pipe grace period even if a terminal marker is inherited', async () => {
+    process.env['QWEN_CODE_RELAUNCH_SUPERVISED'] = 'terminal';
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      exitWhenSupervisorExits();
+      expect(process.env['QWEN_CODE_RELAUNCH_SUPERVISED']).toBeUndefined();
+      expect(listeners).toHaveLength(1);
+      listeners[0]!();
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(runExitCleanup).not.toHaveBeenCalled();
+      expect(exitSpy).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(runExitCleanup).toHaveBeenCalledOnce();
+      expect(exitSpy).toHaveBeenCalledWith(129);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('a supervised child', () => {
@@ -947,28 +1087,32 @@ describe('a supervised child', () => {
     expect(output()).toContain('exit:129');
   }, 30_000);
 
-  it('ignores the marker without a channel from a supervisor', async () => {
-    const env = { ...process.env };
-    env['QWEN_CODE_NO_RELAUNCH'] = 'true';
-    env['QWEN_CODE_RELAUNCH_SUPERVISED'] = '1';
-    // Started directly, without an IPC channel, as a forged or leaked marker
-    // would be: it must run to its end instead of exiting as orphaned.
-    const code = await within(
-      new Promise<number | null>((resolve) => {
-        const child = execFile(
-          process.execPath,
-          ['--import', 'tsx', helper, 'idle'],
-          { env },
-          () => resolve(child.exitCode),
-        );
-        onTestFinished(() => {
-          if (child.exitCode === null) child.kill('SIGKILL');
-        });
-      }),
-      15_000,
-    );
-    expect(code).toBe(0);
-  }, 30_000);
+  it.each(['1', 'terminal'])(
+    'ignores marker %s without a channel from a supervisor',
+    async (marker) => {
+      const env = { ...process.env };
+      env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+      env['QWEN_CODE_RELAUNCH_SUPERVISED'] = marker;
+      // Started directly, without an IPC channel, as a forged or leaked marker
+      // would be: it must run to its end instead of exiting as orphaned.
+      const code = await within(
+        new Promise<number | null>((resolve) => {
+          const child = execFile(
+            process.execPath,
+            ['--import', 'tsx', helper, 'idle'],
+            { env },
+            () => resolve(child.exitCode),
+          );
+          onTestFinished(() => {
+            if (child.exitCode === null) child.kill('SIGKILL');
+          });
+        }),
+        15_000,
+      );
+      expect(code).toBe(0);
+    },
+    30_000,
+  );
 
   it('still exits on its own once its work is done', async () => {
     const { exited } = await start(['idle']);

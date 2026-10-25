@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.HostedPermissionRules;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -118,7 +119,6 @@ public class ManagedAgentService {
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
     private RuntimeWarmer runtimeWarmer;
-    private JavaDurableAdmission javaDurableAdmission;
     private org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices;
     private ManagedAgentProperties.Dispatch renameDispatch = new ManagedAgentProperties.Dispatch();
     private Clock renameClock = Clock.systemUTC();
@@ -132,14 +132,6 @@ public class ManagedAgentService {
     @Autowired(required = false)
     void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
         this.runtimeWarmer = runtimeWarmer;
-    }
-
-    // D7-3: present only when the deployment enables the java_durable
-    // admission profile (JavaDurableAdmissionConfiguration); null keeps
-    // every admission on its harness_confirmed response.
-    @Autowired(required = false)
-    void setJavaDurableAdmission(JavaDurableAdmission javaDurableAdmission) {
-        this.javaDurableAdmission = javaDurableAdmission;
     }
 
     @Autowired
@@ -294,11 +286,14 @@ public class ManagedAgentService {
                     "unsupported_feature", "Approval selection requires a Workspace Session");
         }
         boolean supported = Boolean.TRUE.equals(summary.capabilities().approvalModeChange());
-        return new WebShellSessionApproval(summary.approvalMode(),
-                summary.approvalRevision() == null ? 0 : summary.approvalRevision(),
-                supported ? List.of("default", "auto-edit", "yolo")
-                        : summary.approvalMode() == null ? List.of() : List.of(summary.approvalMode()), supported,
-                summary.planMode(), summary.planModeSupported(), supported && harness.supportsLiveApprovalSelection());
+        var selected = store.findApprovalSelections(tenantId, List.of(sessionId)).getOrDefault(sessionId,
+                new WebShellApprovalSelection(summary.approvalMode(), summary.approvalRevision() == null ? 0 : summary.approvalRevision(), summary.planMode()));
+        return new WebShellSessionApproval(selected.mode(), selected.revision(),
+                supported ? harness.supportsAutoApproval() || "auto".equals(selected.mode())
+                        ? List.of("default", "auto", "auto-edit", "yolo") : List.of("default", "auto-edit", "yolo")
+                        : selected.mode() == null ? List.of() : List.of(selected.mode()), supported,
+                selected.planMode(), summary.planModeSupported(), supported && harness.supportsLiveApprovalSelection(),
+                supported && harness.supportsPermissionRules(), selected.permissionRules());
     }
 
     public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
@@ -308,17 +303,32 @@ public class ManagedAgentService {
 
     public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String mode, long expectedRevision, Boolean planMode) {
+        return changeWebShellSessionApproval(tenantId, actorId, sessionId, key, mode, expectedRevision, planMode, null);
+    }
+
+    public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String mode, long expectedRevision, Boolean planMode, Map<?, ?> requestedRules) {
         requireModelActor(actorId);
+        Map<String, List<String>> rules;
+        try {
+            rules = HostedPermissionRules.copyOf(requestedRules);
+        } catch (IllegalArgumentException invalid) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_permission_rules", invalid.getMessage());
+        }
         validateIdempotencyKey(key);
         Map<String, Object> semantic = new LinkedHashMap<>(Map.of("sessionId", sessionId,
                 "mode", mode, "expectedRevision", expectedRevision));
         if (planMode != null) {
             semantic.put("planMode", planMode);
         }
+        if (rules != null) {
+            semantic.put("permissionRules", rules);
+        }
         String digest = digests.digest(semantic);
         return store.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode,
                 expectedRevision, harness.supportsApprovalSelection(), harness.supportsAgentDefinitionApprovalSelection(),
-                planMode, harness.supportsPlanMode(), harness.supportsLiveApprovalSelection());
+                planMode, harness.supportsPlanMode(), harness.supportsLiveApprovalSelection(), rules,
+                harness.supportsPermissionRules(), harness.supportsAutoApproval());
     }
 
     private static void requireModelActor(String actorId) {
@@ -598,20 +608,6 @@ public class ManagedAgentService {
     public CommandAdmission submitTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
-        return submitTurn(tenantId, actorId, idempotencyKey, sessionId,
-                blocks, null);
-    }
-
-    /**
-     * Admits a Turn input. An admission that asks for the java_durable
-     * profile (D7-3) is answered with the submit_input operation it saved,
-     * as the profile reports it; the request digest leaves the profile out,
-     * so a retry under the key replays the same command in either view.
-     */
-    public CommandAdmission submitTurn(String tenantId, String actorId,
-            String idempotencyKey, String sessionId,
-            List<InputBlock> blocks, String admissionProfile) {
-        boolean durable = requireAdmissionProfile(admissionProfile);
         validateIdempotencyKey(idempotencyKey);
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
@@ -636,7 +632,7 @@ public class ManagedAgentService {
         Admission replay = replayForCreator(tenantId, SUBMIT,
                 idempotencyKey, requestDigest, session, actorId);
         if (replay != null) {
-            CommandAdmission body = response(tenantId, replay, durable);
+            CommandAdmission body = response(tenantId, replay);
             dispatch(tenantId, replay, session.workspace() != null);
             return body;
         }
@@ -664,22 +660,13 @@ public class ManagedAgentService {
                 session, actorId);
         // Built before the dispatcher runs, so the body reports the
         // operation as its admission saved it.
-        CommandAdmission body = response(tenantId, admission, durable);
+        CommandAdmission body = response(tenantId, admission);
         dispatch(tenantId, admission, session.workspace() != null);
         return body;
     }
 
     public CommandAdmission cancelTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId, String turnId) {
-        return cancelTurn(tenantId, actorId, idempotencyKey, sessionId,
-                turnId, null);
-    }
-
-    /** Admits a Turn cancel; the profile works as for submitTurn. */
-    public CommandAdmission cancelTurn(String tenantId, String actorId,
-            String idempotencyKey, String sessionId, String turnId,
-            String admissionProfile) {
-        boolean durable = requireAdmissionProfile(admissionProfile);
         validateIdempotencyKey(idempotencyKey);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "turnId", turnId));
@@ -694,7 +681,7 @@ public class ManagedAgentService {
         Admission replay = replayForCreator(tenantId, CANCEL,
                 idempotencyKey, requestDigest, session, actorId);
         if (replay != null) {
-            CommandAdmission body = response(tenantId, replay, durable);
+            CommandAdmission body = response(tenantId, replay);
             dispatch(tenantId, replay, session.workspace() != null);
             return body;
         }
@@ -711,7 +698,7 @@ public class ManagedAgentService {
         }
         requireReplayedAdmission(tenantId, CANCEL, idempotencyKey, admission,
                 session, actorId);
-        CommandAdmission body = response(tenantId, admission, durable);
+        CommandAdmission body = response(tenantId, admission);
         if (admission.commandEffect()) {
             coordinator.cancel(tenantId, admission.sessionId(),
                     admission.turnId());
@@ -820,14 +807,6 @@ public class ManagedAgentService {
         SessionRecord current = requireVisibleSession(tenantId, sessionId);
         requireSubmitterRole(current, actorId);
         requireSubmitterFacts(current, actorId);
-        // A row written before the bound was unified can still hold a title
-        // past 256: echoing that stored title back is a no-op rewrite,
-        // tolerated in the row but never forwarded to the Harness — its own
-        // 256-unit client cap is the bound the policy protects.
-        if (title != null && title.length() > 256
-                && title.equals(current.title())) {
-            return new SessionMutationResult<>(publicSession(current), false);
-        }
         String effectiveTitle = validRenameTitle(title);
         requireHarness();
         if (!harness.supportsFencedTitles()) {
@@ -984,31 +963,14 @@ public class ManagedAgentService {
 
     public PublicList<PublicSession> listPublicSessions(String tenantId,
             String actorId, String cursor, int requestedLimit) {
-        int limit = limit(requestedLimit);
-        SessionCursor decoded = decodeCursor(cursor);
-        SessionPage page = store.listSessions(tenantId, actorId,
-                decoded == null ? null : decoded.createdAt(),
-                decoded == null ? null : decoded.sessionId(), limit);
-        return new PublicList<>("list", publicSessions(page.sessions()),
-                page.hasMore(), nextCursor(page));
+        return listPublicSessions(tenantId, actorId, cursor, requestedLimit, null, null);
     }
 
     public PublicList<PublicSession> listPublicSessions(String tenantId,
             String actorId, String cursor, int requestedLimit, String requestedArchiveState,
-            Boolean includeArchived, String requestedTitleQuery) {
+            String requestedTitleQuery) {
         String archiveState = archiveState(requestedArchiveState);
-        if (includeArchived != null) {
-            String alias = includeArchived ? "all" : "unarchived";
-            if (requestedArchiveState != null && !alias.equals(archiveState)) {
-                throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
-                        "invalid_archive_state", "Archive filters conflict.");
-            }
-            archiveState = alias;
-        }
         String titleQuery = titleQuery(requestedTitleQuery);
-        if ("all".equals(archiveState) && titleQuery.isEmpty()) {
-            return listPublicSessions(tenantId, actorId, cursor, requestedLimit);
-        }
         int limit = limit(requestedLimit);
         SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
         SessionPage page = filteredSessions(tenantId, actorId, decoded, limit, archiveState, titleQuery);
@@ -1298,7 +1260,6 @@ public class ManagedAgentService {
                         hasActions(session), close, keep, keep,
                         visible && supportsDelete(session, retention),
                         foregroundShell(session),
-                        javaDurableAdmission == null ? null : visible,
                         visible && "ACTIVE".equals(session.status()) && session.workspace() != null
                                 && store.workspaceFilesEnabled() && compression.available() && harness.supportsContextCompression(),
                         childAgentsCapability(session)),
@@ -1426,6 +1387,9 @@ public class ManagedAgentService {
                 || supportsApprovalSelection(session);
         approvalExecutable = approvalExecutable && (approvalSelection == null
                 || !approvalSelection.planMode() || harness.supportsPlanMode());
+        approvalExecutable = approvalExecutable && (approvalSelection == null
+                || (!"auto".equals(approvalSelection.mode()) || harness.supportsAutoApproval())
+                && (approvalSelection.permissionRules() == null || harness.supportsPermissionRules()));
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -1448,7 +1412,6 @@ public class ManagedAgentService {
                         mayChangeCwd && approvalExecutable, foregroundShell(session),
                         visible && modelSelectionSupported && mayChangeCwd,
                         visible && approvalSupported && mayChangeCwd && !Boolean.FALSE.equals(foregroundShell(session)),
-                        javaDurableAdmission == null ? null : visible,
                         visible && maySubmit && harness.supportsInputAttachments(),
                         visible && "ACTIVE".equals(session.status()) && renameSupported
                                 && (session.workspace() == null || maySubmit),
@@ -2002,9 +1965,7 @@ public class ManagedAgentService {
 
     // The recorder half of the replay admission: a command receipt names
     // the actor whose own retry the recorded outcome answers. An
-    // unattributed one — server-keyed — leaves the creator gate alone, and
-    // one recorded before the stamp keeps its role-gated replay; see
-    // CommandRecord.admitsReplayBy.
+    // unattributed or unstamped receipt leaves the creator gate in place.
     private boolean recordedByCaller(StoreModels.CommandRecord command,
             String actorId) {
         return command.admitsReplayBy(actorId);
@@ -2222,32 +2183,17 @@ public class ManagedAgentService {
         return requested;
     }
 
-    private static String nextCursor(SessionPage page) {
-        if (!page.hasMore() || page.sessions().isEmpty()) {
-            return null;
-        }
-        SessionRecord last = page.sessions().get(page.sessions().size() - 1);
-        String raw = last.createdAt() + ":" + last.sessionId();
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(
-                raw.getBytes(StandardCharsets.UTF_8));
-    }
-
     private static String nextSessionCursor(SessionPage page, String archiveState, String titleQuery) {
         if (!page.hasMore() || page.sessions().isEmpty()) {
             return null;
         }
         SessionRecord last = page.sessions().getLast();
-        String prefix = titleQuery.isEmpty() ? "v2:" + archiveState + ":"
-                : "v3:" + archiveState + ":" + DigestUtils.sha256Hex(titleQuery) + ":";
+        String prefix = "v3:" + archiveState + ":" + DigestUtils.sha256Hex(titleQuery) + ":";
         return encodeCursor(prefix + last.createdAt() + ":" + last.sessionId());
     }
 
     private static String encodeCursor(String raw) {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static SessionCursor decodeCursor(String cursor) {
-        return decodeCursor(cursor, "all", "");
     }
 
     private static SessionCursor decodeCursor(String cursor, String archiveState, String titleQuery) {
@@ -2257,21 +2203,11 @@ public class ManagedAgentService {
         try {
             String decoded = new String(Base64.getUrlDecoder().decode(cursor),
                     StandardCharsets.UTF_8);
-            if (!titleQuery.isEmpty()) {
-                String prefix = "v3:" + archiveState + ":" + DigestUtils.sha256Hex(titleQuery) + ":";
-                if (!decoded.startsWith(prefix)) {
-                    throw new IllegalArgumentException();
-                }
-                decoded = decoded.substring(prefix.length());
-            } else if (decoded.startsWith("v2:")) {
-                String prefix = "v2:" + archiveState + ":";
-                if (!decoded.startsWith(prefix)) {
-                    throw new IllegalArgumentException();
-                }
-                decoded = decoded.substring(prefix.length());
-            } else if (!"all".equals(archiveState)) {
+            String prefix = "v3:" + archiveState + ":" + DigestUtils.sha256Hex(titleQuery) + ":";
+            if (!decoded.startsWith(prefix)) {
                 throw new IllegalArgumentException();
             }
+            decoded = decoded.substring(prefix.length());
             int separator = decoded.indexOf(':');
             if (separator <= 0 || separator == decoded.length() - 1) {
                 throw new IllegalArgumentException();
@@ -2340,39 +2276,14 @@ public class ManagedAgentService {
                 admission.turnId(), "accepted", admission.replayed());
     }
 
-    /**
-     * D7-3: whether an admission asked for the java_durable profile. Asking
-     * for it on a deployment without the profile is refused before anything
-     * is read or written, rather than answered with harness_confirmed
-     * semantics the caller did not ask for.
-     */
-    private boolean requireAdmissionProfile(String admissionProfile) {
-        if (!JavaDurableAdmission.JAVA_DURABLE.equals(admissionProfile)) {
-            return false;
-        }
-        if (javaDurableAdmission == null) {
-            throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
-                    "unsupported_feature",
-                    "java_durable admission is not enabled on this deployment.");
-        }
-        return true;
-    }
-
-    /**
-     * The java_durable view names the command's operation with its latest
-     * stage and state; a command recorded before D7-1 saved operations
-     * keeps the legacy body.
-     */
-    private CommandAdmission response(String tenantId, Admission admission,
-            boolean durable) {
-        JavaDurableAdmission.Operation operation = durable
-                ? javaDurableAdmission.operation(tenantId, admission) : null;
-        if (operation == null) {
-            return response(admission);
-        }
+    private CommandAdmission response(String tenantId, Admission admission) {
+        var operation = store.findOperation(tenantId, admission.sessionId(),
+                Objects.requireNonNull(admission.operationId(), "Turn admission operation"))
+                .orElseThrow(() -> new IllegalStateException("Turn admission operation is missing"));
         return new CommandAdmission(admission.sessionId(), admission.turnId(),
                 "accepted", admission.replayed(), operation.operationId(),
-                operation.admissionStage(), operation.deliveryState());
+                operation.admissionStage().toLowerCase(Locale.ROOT),
+                operation.deliveryState().toLowerCase(Locale.ROOT));
     }
 
     private record SessionCursor(long createdAt, String sessionId) {

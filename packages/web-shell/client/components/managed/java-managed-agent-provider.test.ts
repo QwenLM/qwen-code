@@ -512,7 +512,7 @@ describe('createJavaManagedAgentProvider', () => {
     {
       approvalMode: 'yolo',
       approvalRevision: 0,
-      availableApprovalModes: ['yolo', 'auto'],
+      availableApprovalModes: ['yolo', 'unknown'],
       supported: true,
     },
   ])('refuses invalid approval options (%j)', async (selection) => {
@@ -524,6 +524,51 @@ describe('createJavaManagedAgentProvider', () => {
     await expect(
       provider.approvalChange!.queryOptions('s', { clientId: 'client' }),
     ).rejects.toThrow('Invalid Session approval options');
+  });
+
+  it('round-trips Auto and Session rules through the existing approval contract', async () => {
+    const permissionRules = {
+      allow: ['Read'],
+      ask: ['Bash(git push*)'],
+      deny: ['Bash(rm *)'],
+    };
+    const selection = {
+      approvalMode: 'auto',
+      approvalRevision: 2,
+      availableApprovalModes: ['auto', 'default'],
+      supported: true,
+      permissionRulesSupported: true,
+      permissionRules,
+    };
+    const receipt = {
+      sessionId: 's',
+      approvalMode: 'auto',
+      approvalRevision: 3,
+      replayed: false,
+      permissionRules,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(selection))
+      .mockResolvedValueOnce(jsonResponse(receipt));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.approvalChange!.queryOptions('s', { clientId: 'c' }),
+    ).toEqual(selection);
+    expect(
+      await provider.approvalChange!.submit(
+        's',
+        { approvalMode: 'auto', expectedRevision: 2, permissionRules },
+        { clientId: 'c', requestId: 'request', idempotencyKey: 'key' },
+      ),
+    ).toEqual(receipt);
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toMatchObject({
+      permissionRules,
+    });
   });
 
   it('uses only server model choices and preserves the frozen change key and revision', async () => {
@@ -1221,7 +1266,9 @@ describe('createJavaManagedAgentProvider', () => {
         ),
       });
       const summary = await provider.getSession('s', { clientId: 'client' });
-      if (['default', 'auto-edit', 'yolo'].includes(String(approvalMode)))
+      if (
+        ['default', 'auto-edit', 'auto', 'yolo'].includes(String(approvalMode))
+      )
         expect(summary.approvalMode).toBe(approvalMode);
       else expect(summary).not.toHaveProperty('approvalMode');
     },
@@ -1328,7 +1375,6 @@ describe('createJavaManagedAgentProvider', () => {
     );
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example?token=not-stored',
-      environmentId: 'python',
       fetch: fetchImpl,
     });
 
@@ -1480,18 +1526,36 @@ describe('createJavaManagedAgentProvider', () => {
           turnId: url.includes('/sessions/create') ? 'turn-1' : 'turn-2',
           status: 'accepted',
           replayed: false,
+          ...(!url.includes('/sessions/create')
+            ? {
+                operationId: 'op-1',
+                admissionStage: 'java_durable',
+                deliveryState: 'pending',
+              }
+            : {}),
         });
       });
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
-      environmentId: 'python',
       fetch: fetchImpl,
     });
     const options = { clientId: 'client-1', idempotencyKey: 'key-1' };
 
     await provider.createSession({ text: 'hello' }, options);
-    await provider.submitPrompt('session-1', { text: 'next' }, options);
-    await provider.cancel('session-1', 'turn-2', options);
+    await expect(
+      provider.submitPrompt('session-1', { text: 'next' }, options),
+    ).resolves.toEqual({
+      sessionId: 'session-1',
+      turnId: 'turn-2',
+      operationId: 'op-1',
+    });
+    await expect(
+      provider.cancel('session-1', 'turn-2', options),
+    ).resolves.toEqual({
+      sessionId: 'session-1',
+      turnId: 'turn-2',
+      operationId: 'op-1',
+    });
 
     expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
       'https://product.example/api/agent/web-shell/v1/sessions/create',
@@ -1507,10 +1571,35 @@ describe('createJavaManagedAgentProvider', () => {
         input: [{ type: 'input_text', text: 'hello' }],
       }),
     );
-    // The standalone Java contract 400s any non-blank environmentId; the
-    // option stays a storageKey scope input only.
     expect(createBody).not.toHaveProperty('environmentId');
+    for (const [, init] of fetchImpl.mock.calls)
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty(
+        'admissionProfile',
+      );
   });
+
+  it.each(['submit', 'cancel'] as const)(
+    'rejects a %s response without its durable operation',
+    async (command) => {
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: vi.fn<typeof fetch>().mockResolvedValue(
+          jsonResponse({
+            sessionId: 'session-1',
+            turnId: 'turn-1',
+            status: 'accepted',
+            replayed: false,
+          }),
+        ),
+      });
+      const options = { clientId: 'client-1', idempotencyKey: 'original-key' };
+      const result =
+        command === 'submit'
+          ? provider.submitPrompt('session-1', { text: 'Continue' }, options)
+          : provider.cancel('session-1', 'turn-1', options);
+      await expect(result).rejects.toThrow(/identity/);
+    },
+  );
 
   it('strips control characters from the derived create title', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () =>
@@ -1606,17 +1695,17 @@ describe('createJavaManagedAgentProvider', () => {
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(capped)).toBe(false);
   });
 
-  it('scopes the storageKey by environmentId when no productScope is given', () => {
+  it('scopes the storageKey by product identity', () => {
     const a = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
-      environmentId: 'env-a',
+      productScope: 'tenant:actor-a',
     });
     const b = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
-      environmentId: 'env-b',
+      productScope: 'tenant:actor-b',
     });
     expect(a.storageKey).not.toBe(b.storageKey);
-    expect(a.storageKey).toContain('env-a');
+    expect(a.storageKey).toContain('tenant:actor-a');
   });
 
   it('uses lastEventId only as the Java public sequence cursor', async () => {
@@ -1738,6 +1827,7 @@ describe('createJavaManagedAgentProvider', () => {
   it('projects a bounded transcript snapshot from canonical Java events', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({
+        items: [],
         events: [
           {
             sequence: 1,

@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ModRuntime } from './runtime.js';
-import type { ModLog, ModOptions } from './types.js';
+import type { ModLog, ModOptions, ModSessionFacts } from './types.js';
 import type { ModToolNext } from './tool-events.js';
 
 const signal = () => new AbortController().signal;
@@ -322,6 +322,375 @@ describe('ModRuntime with the real QuickJS worker', () => {
     expect(await runtime.runCommand('hello', '', signal())).toBe('');
   });
 
+  it('skips hooks for known Claude Code events it does not run and reports them once', async () => {
+    const runtime = await create(`export function register(on) {
+      on('prompt.edit', ($, e, next) => next(e));
+      on('prompt.edit', {key:'enter'}, ($, e, next) => next(e)).catch(() => ({}));
+      on('prompt.*', ($, e, next) => next(e));
+      on('!prompt.change', async ($, e, next) => {
+        if (e.command === 'hello') $.ui.log('negated:' + next.event);
+        return next(e);
+      });
+      on('classic.Stop', ($, e, next) => next(e));
+      on('ui.render', {component:'Spinner'}, ($, e, next) => next(e));
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name:'hello',description:'Hello'});
+        return next(e);
+      });
+      on('command.run', {command:'hello'}, () => ({text:'still works'}));
+    }`);
+    expect(logs).toEqual([
+      {
+        to: 'transcript',
+        text: 'Hooks for unsupported events will not run: classic.Stop, prompt.*, prompt.edit, ui.render',
+      },
+    ]);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('still works');
+    expect(logs.at(-1)).toEqual({
+      to: 'transcript',
+      text: 'negated:command.run',
+    });
+  });
+
+  it('fails initialization for skipped hooks when the plugin opts in', async () => {
+    await expect(
+      ModRuntime.createGroup(
+        [
+          {
+            id: 'strict',
+            name: 'strict',
+            options: {},
+            unsupportedEvents: 'reject',
+            source: {
+              root: '/fixture',
+              entry: '/fixture/mod.js',
+              source: `export function register(on) {
+                on('turn.start', ($, e, next) => next(e));
+                on('prompt.submit', ($, e, next) => next(e));
+                on('session.start', ($, e, next) => next(e));
+              }`,
+            },
+          },
+        ],
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+      ),
+    ).rejects.toThrow(
+      'Mod strict: Mod events not supported: prompt.submit, turn.start',
+    );
+    expect(logs).toEqual([]);
+  });
+
+  it('answers $.session.version through the API middleware chain', async () => {
+    const versionFixture = fixture(
+      'return {text: JSON.stringify(await $.session.version())};',
+    );
+    const runtime = await ModRuntime.createGroup(
+      [
+        `export function register(on) {
+          on('session.version', async ($, e, next) => {
+            const answer = await next(e);
+            if (next.origin.plugin !== 'mod-1') throw new Error('origin');
+            return {value: {...answer.value, version: answer.value.version + '+wrapped'}};
+          });
+        }`,
+        versionFixture,
+      ].map((source, index) => ({
+        id: `mod-${index}`,
+        name: `mod-${index}`,
+        source: { root: '/fixture', entry: '/fixture/mod.js', source },
+        options: {},
+      })),
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      null,
+      '1.2.3',
+    );
+    runtimes.push(runtime);
+    expect(JSON.parse(await runtime.runCommand('hello', '', signal()))).toEqual(
+      {
+        version: '1.2.3+wrapped',
+        qwen: {
+          claudeCode: '2.1.308',
+          events: [
+            'clock.now',
+            'clock.sleep',
+            'command.register',
+            'command.run',
+            'session.cwd',
+            'session.end',
+            'session.id',
+            'session.model',
+            'session.root',
+            'session.start',
+            'session.surface',
+            'session.surfaces',
+            'session.turns',
+            'session.usage',
+            'session.version',
+            'tool.call',
+            'tool.check',
+            'ui.log',
+          ],
+          methods: [
+            'clock.now',
+            'clock.sleep',
+            'command.register',
+            'session.cwd',
+            'session.id',
+            'session.model',
+            'session.root',
+            'session.surface',
+            'session.surfaces',
+            'session.turns',
+            'session.usage',
+            'session.version',
+            'ui.log',
+          ],
+        },
+      },
+    );
+    const denied = await createTerminal([
+      `export function register(on) {
+        on('session.version', () => ({deny: 'hidden'}));
+      }`,
+      fixture(
+        'try { await $.session.version(); return {text:"answered"}; } catch (error) { return {text:String(error)}; }',
+      ),
+    ]);
+    expect(await denied.runCommand('hello', '', signal())).toContain('hidden');
+  });
+
+  const facts = (changes: Partial<ModSessionFacts> = {}): ModSessionFacts => ({
+    id: 'session-1',
+    cwd: '/workspace',
+    root: '/workspace',
+    model: 'qwen-max',
+    turns: 2,
+    usage: {
+      startedAt: 1_000,
+      context: { tokens: 300, window: 1_000, percent: 30 },
+      rateLimits: [],
+    },
+    ...changes,
+  });
+  const createWithFacts = async (
+    sources: string[],
+    read: () => ModSessionFacts,
+  ) => {
+    const runtime = await ModRuntime.createGroup(
+      sources.map((source, index) => ({
+        id: `mod-${index}`,
+        name: `mod-${index}`,
+        source: {
+          root: `/plugins/mod-${index}`,
+          entry: `/plugins/mod-${index}/mod.js`,
+          source,
+        },
+        options: {},
+      })),
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      'terminal',
+      '1.2.3',
+      read,
+    );
+    runtimes.push(runtime);
+    return runtime;
+  };
+
+  it('answers session facts and the plugin identity from each dispatch snapshot', async () => {
+    let current = facts();
+    const read = vi.fn(() => current);
+    const runtime = await createWithFacts(
+      [
+        `export function register(on) {
+          on('session.start', async ($, e, next) => {
+            $.ui.log('start model:' + await $.session.model());
+            return next(e);
+          });
+        }`,
+        fixture(`return {text: JSON.stringify({
+          plugin: JSON.parse(JSON.stringify($.plugin)),
+          plain: [String($.plugin), (await Promise.resolve($.plugin)).name, Object.isFrozen($.plugin)],
+          id: await $.session.id(),
+          cwd: await $.session.cwd(),
+          root: await $.session.root(),
+          model: await $.session.model(),
+          turns: await $.session.turns(),
+          surfaces: await $.session.surfaces(),
+          surface: await $.session.surface(),
+          usage: await $.session.usage({breakdown: 'summary', columns: 80}),
+          invalid: await $.session.usage({breakdown: 'detail'}).then(() => 'answered', String),
+        })};`),
+      ],
+      read,
+    );
+    expect(logs.map((log) => log.text)).toContain('start model:qwen-max');
+    expect(JSON.parse(await runtime.runCommand('hello', '', signal()))).toEqual(
+      {
+        plugin: { name: 'mod-1', root: '/plugins/mod-1' },
+        plain: ['[object Object]', 'mod-1', true],
+        id: 'session-1',
+        cwd: '/workspace',
+        root: '/workspace',
+        model: 'qwen-max',
+        turns: 2,
+        surfaces: ['terminal'],
+        surface: 'terminal',
+        usage: current.usage,
+        invalid: expect.stringContaining(
+          'Invalid Mod session.usage arguments.',
+        ),
+      },
+    );
+    current = facts({ id: 'session-2', turns: 0 });
+    expect(
+      JSON.parse(await runtime.runCommand('hello', '', signal())),
+    ).toMatchObject({ id: 'session-2', turns: 0 });
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it('answers headless defaults when no snapshot is supplied', async () => {
+    const runtime = await create(
+      fixture(
+        'return {text: JSON.stringify([await $.session.surfaces(), await $.session.surface(), await $.session.cwd(), (await $.session.usage()).context])};',
+      ),
+    );
+    expect(JSON.parse(await runtime.runCommand('hello', '', signal()))).toEqual(
+      [[], null, '/workspace', { tokens: 0, window: 0 }],
+    );
+  });
+
+  it('lets another plugin answer, rewrite or deny the session and clock events', async () => {
+    const runtime = await createWithFacts(
+      [
+        `export function register(on) {
+          on('clock.now', () => ({value: 42}));
+          on('session.model', async ($, e, next) => {
+            const answer = await next(e);
+            return {value: answer.value + '+seen'};
+          });
+          on('session.turns', () => ({deny: 'private'}));
+          on('session.cwd', () => ({value: 7}));
+          on('clock.sleep', ($, e, next) => next({...e, ms: 0}));
+        }`,
+        fixture(`const started = Date.now();
+          await $.clock.sleep(5000);
+          return {text: JSON.stringify({
+            now: await $.clock.now(),
+            model: await $.session.model(),
+            turns: await $.session.turns().then(String, String),
+            cwd: await $.session.cwd(),
+            waited: Date.now() - started,
+          })};`),
+      ],
+      () => facts(),
+    );
+    const answer = JSON.parse(await runtime.runCommand('hello', '', signal()));
+    expect(answer).toMatchObject({
+      now: 42,
+      model: 'qwen-max+seen',
+      turns: expect.stringContaining('private'),
+      cwd: '/workspace',
+    });
+    expect(answer.waited).toBeLessThan(4000);
+  });
+
+  it('reads the clock and charges a sleep to the hook that waits', async () => {
+    const runtime = await create(
+      fixture(`
+        if (e.args === 'now') return {text: String(await $.clock.now())};
+        if (e.args === 'charge') {
+          const before = next.budget.remainingMs;
+          await $.clock.sleep(300);
+          return {text: String(before - next.budget.remainingMs)};
+        }
+        if (e.args === 'invalid')
+          return {text: await $.clock.sleep(-1).then(String, String) + '|' +
+            await $.clock.sleep(1, {timeout: 5}).then(String, String) + '|' +
+            await $.clock.sleep(1, {signal: next.signal}).then(() => 'next.signal', String)};
+        if (e.args === 'detach') {
+          void $.clock.sleep(5000).catch(() => {});
+          return {text: 'detached'};
+        }
+        const listeners = [];
+        const signal = {aborted: false, addEventListener: (type, fn) => listeners.push(fn), removeEventListener() {}};
+        const waiting = $.clock.sleep(5000, {signal});
+        signal.aborted = true;
+        for (const listener of listeners) listener();
+        return {text: await waiting.then(() => 'slept', () => 'aborted')};
+      `),
+    );
+    const before = Date.now();
+    const now = Number(await runtime.runCommand('hello', 'now', signal()));
+    expect(now).toBeGreaterThanOrEqual(before);
+    expect(now).toBeLessThanOrEqual(Date.now());
+    expect(
+      Number(await runtime.runCommand('hello', 'charge', signal())),
+    ).toBeGreaterThanOrEqual(250);
+    expect(await runtime.runCommand('hello', 'invalid', signal())).toMatch(
+      /non-negative number of milliseconds.*\|.*Invalid Mod sleep options.*\|next\.signal$/,
+    );
+    const started = performance.now();
+    expect(await runtime.runCommand('hello', 'detach', signal())).toBe(
+      'detached',
+    );
+    expect(await runtime.runCommand('hello', 'abort', signal())).toBe(
+      'aborted',
+    );
+    expect(performance.now() - started).toBeLessThan(3000);
+  });
+
+  it('times a hook out when its sleep outlasts the remaining budget', async () => {
+    const runtime = await create(`export function register(on) {
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name:'hello',description:'Hello'});
+        return next(e);
+      });
+      on('command.run', async () => { throw new Error('first'); })
+        .catch(async ($, e) => {
+          // A wait past the timer range would fire at once without the clamp.
+          await $.clock.sleep(e.args === 'huge' ? 2 ** 32 : 5000);
+          return {text: 'woke'};
+        });
+    }`);
+    for (const args of ['', 'huge']) {
+      const started = performance.now();
+      await expect(runtime.runCommand('hello', args, signal())).rejects.toThrow(
+        'No Mod hook answered /hello',
+      );
+      expect(performance.now() - started).toBeLessThan(4000);
+    }
+  });
+
+  it('ends the sleep of a failed hook while its catch recovers', async () => {
+    const runtime = await create(`export function register(on) {
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name:'hello',description:'Hello'});
+        return next(e);
+      });
+      on('command.run', async ($) => {
+        globalThis.detached = 'pending';
+        void $.clock.sleep(60000).then(
+          () => { globalThis.detached = 'slept'; },
+          () => { globalThis.detached = 'ended'; },
+        );
+        await $.clock.now();
+        throw new Error('first');
+      }).catch(async ($) => {
+        await $.clock.sleep(100);
+        return {text: globalThis.detached};
+      });
+    }`);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('ended');
+  });
+
   it.each([
     ['missing export', 'export const other = 1;', /export register/],
     [
@@ -333,6 +702,26 @@ describe('ModRuntime with the real QuickJS worker', () => {
       'unknown event',
       "export function register(on) { on('model.request', () => ({})); }",
       /event not supported/,
+    ],
+    [
+      'misspelled event',
+      "export function register(on) { on('tool.calls', () => ({})); }",
+      /event not supported: tool\.calls/,
+    ],
+    [
+      'unknown namespace',
+      "export function register(on) { on('models.*', () => ({})); }",
+      /event not supported: models\.\*/,
+    ],
+    [
+      'unknown classic event',
+      "export function register(on) { on('classic.BeforeRun', () => ({})); }",
+      /event not supported: classic\.BeforeRun/,
+    ],
+    [
+      'negated unknown event',
+      "export function register(on) { on('!tool.calls', () => ({})); }",
+      /event not supported: !tool\.calls/,
     ],
   ])(
     'rejects %s without leaving a usable failed runtime',

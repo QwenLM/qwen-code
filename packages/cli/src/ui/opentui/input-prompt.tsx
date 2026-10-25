@@ -67,6 +67,7 @@ import { randomUUID } from 'node:crypto';
 import { classifyPastedImagePaths } from '../utils/pasted-image-paths.js';
 import { editTextInExternalEditor } from '../utils/external-editor.js';
 import type { Key } from '../hooks/useKeypress.js';
+import { useDoublePress } from '../hooks/useDoublePress.js';
 import type { VimBuffer } from '../hooks/vim.js';
 import {
   useTextBuffer,
@@ -254,6 +255,8 @@ export interface InputPromptProps {
   /** Esc-while-streaming hook (aborts the live turn in the parent). */
   onInterrupt?: (onSettled?: OpenTuiCancelSettled) => void;
   onCancelCommand?: () => boolean;
+  onRetry?: () => void;
+  onRewind?: () => void;
   approvalMode?: ApprovalMode;
   placeholder?: string;
   topRightLabel?: string;
@@ -510,6 +513,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     : completionIndex;
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [escapeArmed, setEscapeArmed] = useState(false);
+  const [rewindArmed, setRewindArmed] = useState(false);
+  const rewindPress = useDoublePress(() => props.onRewind?.(), setRewindArmed);
   const draftRef = useRef<Draft>(newDraft());
   const claimedDraftRef = useRef<Draft | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -938,9 +943,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     const session = sessionRef.current;
     cancelPendingRef.current = true;
     onInterrupt((settlement) => {
-      if (session !== sessionRef.current || !draftRef.current.valid) return;
+      if (session !== sessionRef.current || !draftRef.current.valid)
+        return undefined;
       cancelPendingRef.current = false;
-      if (settlement.kind === 'reset') return;
+      if (settlement.kind === 'reset') return undefined;
       const { queued, prompt } = settlement;
       const popped = onPopQueue?.();
       const pending = [queued, popped].filter((entry) => entry != null);
@@ -957,7 +963,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         !claimedDraftRef.current
       ) {
         restoreSubmission(prompt);
+        return true;
       }
+      return undefined;
     });
   }, [onInterrupt, onPopQueue, restoreSubmission]);
 
@@ -1426,6 +1434,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       setTextVersion((v) => v + 1);
       return;
     }
+    if (matchesCommand(Command.RETRY_LAST, key)) {
+      key.preventDefault();
+      props.onRetry?.();
+      return;
+    }
     if (key.name === 'r' && key.ctrl) {
       key.preventDefault();
       if (!searchActiveRef.current || shellModeActive) {
@@ -1765,6 +1778,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           restoreSubmission(popped, '\n');
           return;
         }
+      }
+      if (!bufferRef.current.text && props.onRewind) {
+        rewindPress();
+        return;
       }
       const effect = escapeRef.current!.handleEscape(bufferRef.current.text);
       if (effect === 'arm') {
@@ -2328,6 +2345,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         </box>
       )}
       {escapeArmed && <text fg={C.dim}>{ESCAPE_ARM_HINT}</text>}
+      {rewindArmed && <text fg={C.dim}>{t('Press Esc again to rewind')}</text>}
     </box>
   );
 }

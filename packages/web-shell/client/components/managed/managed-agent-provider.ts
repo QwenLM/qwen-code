@@ -1,4 +1,6 @@
 import type { components } from './generated/managed-agent-api';
+import type { ManagedPermissionRules } from '@qwen-code/qwen-code-core/managed-runtime/managed-permission-rules.js';
+export type { ManagedPermissionRules } from '@qwen-code/qwen-code-core/managed-runtime/managed-permission-rules.js';
 import type {
   ManagedMcpManagementCommand,
   ManagedMcpManagementSnapshot,
@@ -29,7 +31,7 @@ export type ManagedAgentRuntimeState =
   | 'ready'
   | 'failed';
 
-export type ManagedApprovalMode = 'default' | 'auto-edit' | 'yolo';
+export type ManagedApprovalMode = 'default' | 'auto-edit' | 'auto' | 'yolo';
 export type ManagedInputBlock = components['schemas']['InputBlock'];
 export type ManagedSessionSkills =
   components['schemas']['WebShellSessionSkills'];
@@ -38,7 +40,29 @@ export type ManagedSessionMcp = components['schemas']['PublicMcpCatalog'];
 export function isManagedApprovalMode(
   value: unknown,
 ): value is ManagedApprovalMode {
-  return value === 'default' || value === 'auto-edit' || value === 'yolo';
+  return (
+    value === 'default' ||
+    value === 'auto-edit' ||
+    value === 'auto' ||
+    value === 'yolo'
+  );
+}
+
+export function isManagedInitialApprovalMode(
+  value: unknown,
+): value is Exclude<ManagedApprovalMode, 'auto'> {
+  return isManagedApprovalMode(value) && value !== 'auto';
+}
+
+export function managedPermissionRulesEqual(
+  left: ManagedPermissionRules | undefined,
+  right: ManagedPermissionRules | undefined,
+): boolean {
+  return (['allow', 'ask', 'deny'] as const).every((kind) => {
+    const a = left?.[kind] ?? [];
+    const b = right?.[kind] ?? [];
+    return a.length === b.length && a.every((rule, index) => rule === b[index]);
+  });
 }
 
 export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
@@ -66,6 +90,8 @@ export interface ManagedSessionApproval extends ManagedSessionOptions {
   supported: boolean;
   planMode?: boolean;
   liveSupported?: boolean;
+  permissionRulesSupported?: boolean;
+  permissionRules?: ManagedPermissionRules;
 }
 
 export interface ManagedApprovalChangeResult {
@@ -74,6 +100,7 @@ export interface ManagedApprovalChangeResult {
   approvalRevision: number;
   replayed: boolean;
   planMode?: boolean;
+  permissionRules?: ManagedPermissionRules;
 }
 
 export interface ManagedModelContext {
@@ -127,7 +154,6 @@ export interface ManagedAgentSessionSummary {
   lifecycleOperation?: components['schemas']['WebShellLifecycleOperation'];
   activeTurnId?: string;
   title: string;
-  workspaceCwd?: string;
   workspace?: {
     workspaceId: string;
     cwdRelative: string;
@@ -159,7 +185,6 @@ export interface ManagedAgentSessionSummary {
     contextCompression?: boolean;
     approvalModeChange?: boolean;
     inputAttachments?: boolean;
-    durableOperations?: boolean;
   };
   failure?: { code: string; message: string };
   recovery?: ManagedSessionRecovery;
@@ -277,7 +302,6 @@ export interface ManagedAgentPendingAction {
 }
 
 export interface ManagedAgentProvider {
-  readonly kind: 'daemon' | 'java';
   readonly lifecycle?: {
     submit(
       kind: ManagedLifecycleKind,
@@ -300,7 +324,6 @@ export interface ManagedAgentProvider {
   ): Promise<ManagedExportPage>;
   readonly storageKey: string;
   readonly canCancel: boolean;
-  readonly acceptsWorkspaceCwd: boolean;
   /** Present when the provider can filter the complete Session history by title. */
   readonly titleSearch?: boolean;
   readonly recovery?: {
@@ -314,7 +337,7 @@ export interface ManagedAgentProvider {
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedSessionRecovery>;
   };
-  queryCancelOperation?(
+  queryCancelOperation(
     sessionId: string,
     operationId: string,
     options: ManagedAgentRequestOptions,
@@ -433,6 +456,7 @@ export interface ManagedAgentProvider {
         approvalMode: ManagedApprovalMode;
         expectedRevision: number;
         planMode?: boolean;
+        permissionRules?: ManagedPermissionRules;
       },
       options: ManagedAgentCommandOptions & { requestId: string },
     ): Promise<ManagedApprovalChangeResult>;
@@ -527,7 +551,6 @@ export interface ManagedAgentProvider {
   };
   listSessions(
     options: ManagedAgentRequestOptions & {
-      workspaceCwd?: string;
       archiveState?: 'unarchived' | 'archived' | 'all';
       titleQuery?: string;
       limit?: number;
@@ -556,7 +579,6 @@ export interface ManagedAgentProvider {
   createSession(
     request: {
       text: string;
-      workspaceCwd?: string;
       input?: ManagedInputBlock[];
     },
     options: ManagedAgentCommandOptions,
@@ -565,17 +587,15 @@ export interface ManagedAgentProvider {
     sessionId: string,
     request: { text: string; input?: ManagedInputBlock[] },
     options: ManagedAgentCommandOptions,
-  ): Promise<ManagedAgentTurnAdmission>;
+  ): Promise<ManagedAgentTurnAdmission & { operationId: string }>;
   cancel(
     sessionId: string,
     turnId: string,
-    options: ManagedAgentCommandOptions & {
-      admissionProfile?: 'harness_confirmed' | 'java_durable';
-    },
-  ): Promise<void | {
+    options: ManagedAgentCommandOptions,
+  ): Promise<{
     sessionId: string;
     turnId: string;
-    operationId?: string;
+    operationId: string;
   }>;
   subscribeEvents(
     sessionId: string,

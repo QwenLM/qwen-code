@@ -149,6 +149,92 @@ describe('useConfirmUpdateRequests', () => {
   });
 });
 
+describe('owned confirmation lifetime', () => {
+  it('aborts only A and ignores its late answers while B remains usable', () => {
+    const { result } = renderHook(() => useConfirmUpdateRequests());
+    const controller = new AbortController();
+    const a = vi.fn();
+    const b = vi.fn();
+    act(() => {
+      result.current.addConfirmUpdateExtensionRequest({
+        prompt: 'A',
+        signal: controller.signal,
+        onConfirm: a,
+      });
+      result.current.addConfirmUpdateExtensionRequest({
+        prompt: 'B',
+        onConfirm: b,
+      });
+    });
+    const lateA = result.current.confirmUpdateExtensionRequests[0].onConfirm;
+    act(() => controller.abort());
+    expect(a.mock.calls).toEqual([[false]]);
+    expect(
+      result.current.confirmUpdateExtensionRequests.map((r) => r.prompt),
+    ).toEqual(['B']);
+    act(() => {
+      lateA(true);
+      lateA(false);
+    });
+    expect(a.mock.calls).toEqual([[false]]);
+    expect(b).not.toHaveBeenCalled();
+    act(() => result.current.confirmUpdateExtensionRequests[0].onConfirm(true));
+    expect(b.mock.calls).toEqual([[true]]);
+  });
+
+  it.each(['rerender', 'late yes'] as const)(
+    'rejects current loss through %s',
+    (mode) => {
+      let current = true;
+      const onConfirm = vi.fn();
+      const { result, rerender } = renderHook(() => useConfirmUpdateRequests());
+      act(() =>
+        result.current.addConfirmUpdateExtensionRequest({
+          prompt: 'A',
+          isCurrent: () => current,
+          onConfirm,
+        }),
+      );
+      const late = result.current.confirmUpdateExtensionRequests[0].onConfirm;
+      current = false;
+      if (mode === 'rerender') rerender();
+      act(() => late(true));
+      expect(onConfirm.mock.calls).toEqual([[false]]);
+      expect(result.current.confirmUpdateExtensionRequests).toHaveLength(0);
+    },
+  );
+
+  it('rejects pre-aborted requests and settles owned pending requests on unmount', () => {
+    const dead = new AbortController();
+    dead.abort();
+    const pending = new AbortController();
+    const denied = vi.fn();
+    const abandoned = vi.fn();
+    const { result, unmount } = renderHook(() => useConfirmUpdateRequests());
+    act(() => {
+      result.current.addConfirmUpdateExtensionRequest({
+        prompt: 'dead',
+        signal: dead.signal,
+        onConfirm: denied,
+      });
+      result.current.addConfirmUpdateExtensionRequest({
+        prompt: 'pending',
+        signal: pending.signal,
+        onConfirm: abandoned,
+      });
+    });
+    expect(denied.mock.calls).toEqual([[false]]);
+    expect(
+      result.current.confirmUpdateExtensionRequests.map((r) => r.prompt),
+    ).toEqual(['pending']);
+    const late = result.current.confirmUpdateExtensionRequests[0].onConfirm;
+    unmount();
+    pending.abort();
+    late(true);
+    expect(abandoned.mock.calls).toEqual([[false]]);
+  });
+});
+
 describe('useSettingInputRequests', () => {
   it('should add a setting input request', () => {
     const { result } = renderHook(() => useSettingInputRequests());
