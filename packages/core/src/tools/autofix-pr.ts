@@ -1163,21 +1163,25 @@ class AutofixPrInvocation extends BaseToolInvocation<
     // doing gets a little longer to settle before the round acts.
     await fix.waitSettled(FIX_STOP_WAIT_MS);
     const ended = fix.ended;
-    // Claimed whatever the helper answers: a marker it keeps goes stale, and
-    // the next round discards the attempt.
-    fix.claim();
     const run = await runAutofixPrHelper(
       this.config,
       autofixPrArgs(this.params),
       signal,
     );
+    // A refusal leaves the attempt to claim again (a helper busy with the
+    // lock), until the claim window ends it.
     if (run.failure || run.exitCode !== 0) {
       return refuse(helperRefusal('fix-end', run));
     }
+    fix.claim();
     const printed = lastJsonLine(run.stdout);
+    // The watch's options as this session's `schedule` printed them: the
+    // turn goes on with these, whatever the follow-up it read said.
+    const { task, reply, instructions } = fix.task;
     const out = JSON.stringify({
       ...(printed !== null && typeof printed === 'object' ? printed : {}),
       agent: ended,
+      watch: { task, reply, instructions },
     });
     return { llmContent: out, returnDisplay: out };
   }
@@ -1199,8 +1203,8 @@ class AutofixPrInvocation extends BaseToolInvocation<
     });
     if (!fix.ended) {
       if (fix.agentId === null) {
-        // Stopped as it launches.
-        fix.stop();
+        // Stopped as it launches, with no round to go on.
+        await fix.abandon();
         return refuse(
           `The fix agent of PR #${this.params.pr} is starting; run cleanup again once it runs.`,
         );
@@ -1215,7 +1219,12 @@ class AutofixPrInvocation extends BaseToolInvocation<
     // The marker goes before the watch: `cleanup` refuses a fresh one.
     const run = await runAutofixPrHelper(
       this.config,
-      ['fix-end', String(this.params.pr), `--attempt=${fix.attempt}`],
+      [
+        'fix-end',
+        String(this.params.pr),
+        `--attempt=${fix.attempt}`,
+        '--abandon',
+      ],
       signal,
     );
     if (run.failure || run.exitCode !== 0) {
@@ -1354,7 +1363,7 @@ class AutofixPrInvocation extends BaseToolInvocation<
       close: async (attempt) => {
         await runAutofixPrHelper(
           this.config,
-          ['fix-end', String(pr), `--attempt=${attempt}`],
+          ['fix-end', String(pr), `--attempt=${attempt}`, '--abandon'],
           new AbortController().signal,
         );
       },

@@ -1245,6 +1245,12 @@ describe('background fixes', () => {
       brief: 'brief.md',
       head: 'abc',
       agent: { status: 'completed', report: 'fixed "Test"' },
+      // The options this session scheduled, whatever the follow-up said.
+      watch: {
+        task: 'feedc0ffee12',
+        reply: false,
+        instructions: 'keep the API',
+      },
     });
     expect(log().at(-1)).toBe(
       `fix-end 12 --task=feedc0ffee12 --attempt=${fix.attempt}`,
@@ -1288,7 +1294,7 @@ describe('background fixes', () => {
     expect(result.error).toBeUndefined();
     expect(registry.cancel).toHaveBeenCalledWith('agent-1', { notify: false });
     expect(log().slice(-2)).toEqual([
-      `fix-end 12 --attempt=${fix.attempt}`,
+      `fix-end 12 --attempt=${fix.attempt} --abandon`,
       'cleanup 12',
     ]);
     expect(backgroundFixOf('session-a', 12)).toBeUndefined();
@@ -1302,7 +1308,7 @@ describe('background fixes', () => {
     expect((await pending).error).toBeUndefined();
     expect(fix.ended).toEqual({ status: 'cancelled', report: '' });
     expect(log().slice(-2)).toEqual([
-      `fix-end 12 --attempt=${fix.attempt}`,
+      `fix-end 12 --attempt=${fix.attempt} --abandon`,
       'cleanup 12',
     ]);
   });
@@ -1336,13 +1342,43 @@ describe('background fixes', () => {
     expect(backgroundFixOf('session-a', 12)).toBeUndefined();
   });
 
-  it("stops the agent when the fixes ask again, its attempt still the round's to claim", async () => {
+  it('stops the agent and drops its attempt when the fixes ask again', async () => {
     await granted();
     const fix = await launched();
     await run({ command: 'attended', pr: 12 });
     expect(cancel).toHaveBeenCalledWith('agent-1');
-    expect(fix.done).toBe(false);
-    expect(fix.followUp()).toContain(`--attempt ${fix.attempt}`);
+    // Its marker goes stale: the next round redoes it in the foreground.
+    expect(fix.done).toBe(true);
+    expect(fix.followUp()).toBeUndefined();
+    expect(backgroundFixOf('session-a', 12)).toBeUndefined();
+  });
+
+  it('leaves the attempt to claim again when the helper refuses', async () => {
+    await granted();
+    const fix = await launched();
+    fix.end({ status: 'completed', report: '' });
+    fix.bodySettled();
+    const claim = { command: 'fix-end', pr: 12, attempt: fix.attempt } as const;
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
+    expect((await run(claim)).error?.message).toMatch(/fix-end refused/);
+    expect(backgroundFixOf('session-a', 12)).toBe(fix);
+    vi.stubEnv('FAKE_AUTOFIX_MODE', '');
+    expect((await run(claim)).error).toBeUndefined();
+    expect(backgroundFixOf('session-a', 12)).toBeUndefined();
+  });
+
+  it('abandons an attempt a cleanup finds still launching', async () => {
+    await granted();
+    const fix = await openBackgroundFix('session-a', worktree, signal());
+    expect((await run({ command: 'cleanup', pr: 12 })).error?.message).toMatch(
+      /is starting; run cleanup again/,
+    );
+    expect(log().at(-1)).toBe(`fix-end 12 --attempt=${fix.attempt} --abandon`);
+    expect(fix.done).toBe(true);
+    // It launches anyway: stopped at once, with no round to go on.
+    fix.attach('agent-1', () => cancel('agent-1'));
+    expect(cancel).toHaveBeenCalledWith('agent-1');
+    expect(fix.followUp()).toBeUndefined();
   });
 
   it('says in status which watches run their fixes unattended', async () => {

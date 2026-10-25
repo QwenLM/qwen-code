@@ -24,6 +24,7 @@ import {
   backgroundFixAt,
   canonicalWorktreePath,
   grantUnattendedFixes,
+  openBackgroundFix,
   recordConfirmedWatch,
   recordWatchTask,
   resetUnattendedFixGrantsForTests,
@@ -2000,6 +2001,57 @@ describe('AgentTool', () => {
       }
     });
 
+    it('never pins a teammate beside a background fix of /autofix-pr', async () => {
+      const spies = await stubWorktreeProbes(async () => ({
+        branch: 'worktree-writer',
+        headCommit: 'abc123',
+      }));
+      const wt = path.resolve('/test/project', '.qwen/tmp/review-pr-1');
+      grantUnattendedFixes('test-session-id', {
+        pr: 1,
+        worktree: canonicalWorktreePath(wt),
+        check: async () => true,
+        open: async () => ({ task: 't' }),
+        close: async () => {},
+      });
+      recordConfirmedWatch('test-session-id', {
+        pr: 1,
+        repo: 'o/r',
+        host: null,
+        targetDir: '/test/project',
+        preparedAt: null,
+        worktree: canonicalWorktreePath(wt),
+        authorCanPush: true,
+      });
+      recordWatchTask('test-session-id', 1, {
+        task: 't',
+        reply: true,
+        instructions: '',
+      });
+      try {
+        await openBackgroundFix(
+          'test-session-id',
+          wt,
+          new AbortController().signal,
+        );
+        const spawnTeammate = activeTeam();
+        const result = await buildAndRun({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          name: 'reviewer',
+          working_dir: '.qwen/tmp/review-pr-1',
+        });
+        expect(spawnTeammate).not.toHaveBeenCalled();
+        expect(textOf(result)).toMatch(
+          /a background fix agent of \/autofix-pr is working/,
+        );
+      } finally {
+        resetUnattendedFixGrantsForTests();
+        for (const spy of spies) spy.mockRestore();
+      }
+    });
+
     it('aborts a named teammate after working_dir validation', async () => {
       const controller = new AbortController();
       const spies = await stubWorktreeProbes(async () => {
@@ -2769,8 +2821,13 @@ describe('AgentTool', () => {
             expect(
               mockSubagentManager.createAgentHeadless,
             ).toHaveBeenCalledOnce();
-            // The notification tells the round to go on, once the agent ended.
+            // The notification tells the round to go on, once the agent ended;
+            // the entry is never continued from then on.
             await live.settled;
+            expect(
+              config.getBackgroundTaskRegistry().get(entry.agentId)
+                ?.resumeBlockedReason,
+            ).toMatch(/never continued/);
             const followUp = entry.notificationFollowUp!()!;
             expect(followUp).toContain(
               `after-fix o/r#7 --task feedc0ffee12 --attempt ${live.attempt} --no-reply -- keep the API`,

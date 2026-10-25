@@ -130,7 +130,7 @@ export function assertNoFixInFlight(
     `a fix agent is working in PR #${prNumber}'s worktree (attempt ` +
       `${attempt.attempt}, started ${attempt.startedAt}); its round goes on ` +
       `when it ends. In the session that runs it, /autofix-pr stop ` +
-      `${prNumber} stops it; it ends by itself within 40 minutes.`,
+      `${prNumber} stops it; it ends by itself within 45 minutes.`,
   );
 }
 
@@ -253,6 +253,9 @@ export interface FixEndArgs {
   pr: number;
   attempt: string;
   task?: string;
+  /** The session ends an attempt no round claims (a launch that failed):
+   * the marker goes, and the round's snapshot stays for the round. */
+  abandon?: boolean;
 }
 
 export interface FixEndResult {
@@ -277,14 +280,16 @@ export function runFixEnd(args: FixEndArgs): FixEndResult {
           `it was abandoned, or a later round discarded it.`,
       );
     }
-    rmSync(paths.fixPath, { force: true });
     // The round's snapshot, claimed: no later attempt starts from it. Its
     // `--no-reply` and instructions are the session's to say, from what
-    // `schedule` printed it, not this file's.
+    // `schedule` printed it, not this file's. Moved before the marker goes,
+    // so a move that fails leaves the attempt to the next round's sync.
     const snapshot = fixSnapshotPath(paths, args.pr);
-    if (isRegularFile(paths.snapshotPath)) {
+    if (!args.abandon && isRegularFile(paths.snapshotPath)) {
+      rmSync(snapshot, { force: true, recursive: true });
       renameSync(paths.snapshotPath, snapshot);
     }
+    rmSync(paths.fixPath, { force: true });
     return {
       attempt: marker.attempt.attempt,
       head: marker.attempt.head,
@@ -338,7 +343,13 @@ export const fixEndCommand: CommandModule = {
         describe: 'PR number',
       })
       .option('attempt', ATTEMPT_OPTION)
-      .option('task', TASK_OPTION),
+      .option('task', TASK_OPTION)
+      .option('abandon', {
+        type: 'boolean',
+        default: false,
+        describe:
+          "End an attempt no round claims (run by the session): remove the marker, keep the round's snapshot",
+      }),
   handler: (argv) => {
     writeStdoutLine(
       JSON.stringify(
@@ -346,6 +357,7 @@ export const fixEndCommand: CommandModule = {
           pr: Number(argv['pr']),
           attempt: String(argv['attempt']),
           task: taskArg(argv),
+          abandon: Boolean(argv['abandon']),
         }),
       ),
     );

@@ -145,11 +145,12 @@ export function grantUnattendedFixes(
 
 /**
  * Ends the PR's grant. A fix agent it runs in the background is stopped —
- * its YOLO mode was fixed when it launched — and its attempt stays the
- * round's to claim, as an agent that was stopped.
+ * its YOLO mode was fixed when it launched — and its attempt dropped: its
+ * marker goes stale, and the next round redoes the fix in the foreground,
+ * as the user now has it.
  */
 export function revokeUnattendedFixes(sessionId: string, pr: number): void {
-  backgroundFixOf(sessionId, pr)?.stop();
+  backgroundFixOf(sessionId, pr)?.drop();
   const bySession = grants.get(sessionId);
   if (!bySession) return;
   for (const [worktree, grant] of bySession) {
@@ -316,24 +317,23 @@ export class BackgroundFix {
     }
   }
 
+  /** The attempt opened: its marker is refreshed, and the attempt time
+   * limit runs, from now. */
   startHeartbeat(): void {
     // From now: the helper that opened the attempt may have waited its turn.
     this.lastBeat = Date.now();
+    this.restartTimer(FIX_TIME_LIMIT_MS, () => this.stop());
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = setInterval(() => this.beat(), FIX_HEARTBEAT_MS);
     this.heartbeat.unref?.();
   }
 
-  /** The agent launched: the attempt time limit runs from now. A stop or a
-   * drop asked for while it launched stops it now. */
+  /** The agent launched. A stop or a drop asked for while it launched
+   * stops it now. */
   attach(agentId: string, cancel: () => void): void {
     this.agentId = agentId;
     this.cancelAgent = cancel;
-    if (this.done || this.stopRequested) {
-      cancel();
-      return;
-    }
-    this.restartTimer(FIX_TIME_LIMIT_MS, () => this.stop());
+    if (this.done || this.stopRequested) cancel();
   }
 
   /** Stops the agent; its attempt stays the round's to claim. */

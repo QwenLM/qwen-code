@@ -822,6 +822,21 @@ function backgroundFixEnd(
   };
 }
 
+/**
+ * A background fix agent that ended: never continued from now, whatever
+ * its saved record — which the agent could write — says. While it ran, its
+ * entry took inputs (a Monitor it started).
+ */
+function endBackgroundFix(
+  fix: BackgroundFix,
+  registry: ReturnType<Config['getBackgroundTaskRegistry']>,
+  agentId: string,
+): void {
+  const entry = registry.get(agentId);
+  if (entry) entry.resumeBlockedReason ??= BACKGROUND_FIX_CONTINUATION_BLOCKED;
+  fix.end(backgroundFixEnd(registry, agentId));
+}
+
 /** Its completion notification: the agent ended, and its round goes on. */
 function endBackgroundFixFollowUp(
   fix: BackgroundFix,
@@ -829,7 +844,7 @@ function endBackgroundFixFollowUp(
   agentId: string,
 ): () => string | undefined {
   return () => {
-    fix.end(backgroundFixEnd(registry, agentId));
+    endBackgroundFix(fix, registry, agentId);
     return fix.followUp();
   };
 }
@@ -4652,7 +4667,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           void currentTurnPromise
             .catch(() => {})
             .finally(() => {
-              fix.end(backgroundFixEnd(registry, fixAgentId));
+              endBackgroundFix(fix, registry, fixAgentId);
               fix.bodySettled();
             });
         }
@@ -5312,6 +5327,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           return this.buildSpawnBlockedResult(
             `Error: ${resolved.error}`,
             'Invalid teammate working_dir',
+          );
+        }
+        // Not beside a background fix agent of /autofix-pr, nor before its
+        // round went on.
+        if (backgroundFixAt(resolved.path)) {
+          return this.buildSpawnBlockedResult(
+            `Error: a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,
+            'Worktree in use by a background fix',
           );
         }
         cwd = resolved.path;

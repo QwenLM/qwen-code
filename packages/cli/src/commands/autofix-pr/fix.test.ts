@@ -191,6 +191,24 @@ describe('fix-start and fix-end', () => {
     expect(existsSync(paths.fixPath)).toBe(false);
   });
 
+  it("ends an abandoned attempt keeping its round's snapshot, for the fix the round runs instead", () => {
+    runFixStart({ pr: 7, attempt: ATTEMPT });
+    runFixEnd({ pr: 7, attempt: ATTEMPT, abandon: true });
+    expect(existsSync(paths.fixPath)).toBe(false);
+    expect(existsSync(paths.snapshotPath)).toBe(true);
+    expect(existsSync(fixSnapshotPath(paths, 7))).toBe(false);
+  });
+
+  it("moves the round's snapshot over whatever is in its place", () => {
+    runFixStart({ pr: 7, attempt: ATTEMPT });
+    mkdirSync(join(fixSnapshotPath(paths, 7), 'planted'), { recursive: true });
+    runFixEnd({ pr: 7, attempt: ATTEMPT });
+    expect(JSON.parse(readFileSync(fixSnapshotPath(paths, 7), 'utf8'))).toEqual(
+      { action: 'fix', headSha: HEAD },
+    );
+    expect(existsSync(paths.fixPath)).toBe(false);
+  });
+
   it("starts only from a round's recent snapshot to fix at the watch's head", () => {
     for (const snapshot of [
       { action: 'wait', headSha: HEAD },

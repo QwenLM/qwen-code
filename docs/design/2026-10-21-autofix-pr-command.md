@@ -1220,15 +1220,20 @@ watch's task, the head and when. The claim (`fix-end`) moves the round's
 snapshot to `autofix-pr-<n>-fix-snapshot.json`, which `reply` reads until
 a round prepares another, and a `sync` that removes an abandoned attempt
 removes its snapshot: no later attempt starts from it. A refusal refuses the launch, and a launch
-that fails after it ends the attempt. So every background agent at a
-worktree has an attempt tied to the round that prepared it, and while one
-lives no other agent launches there, in the foreground or the background.
+that fails after it ends the attempt (`fix-end --abandon`, which removes
+the marker and leaves the round's snapshot to the foreground fix the round
+then runs). The round falls back to that foreground fix only when the
+grant no longer holds or no round has a fix to start; any other refusal (a
+fix in flight, one left behind, a watch no longer the round's) ends the
+round. So every background agent at a worktree has an attempt tied to the
+round that prepared it, and while one lives no other agent or teammate
+launches there, in the foreground or the background.
 
 A background fix agent is never continued: once it ends, `send_message` to
 it, a revival of its transcript and a resume after a restart are refused,
-through the reason its saved record carries (its registry entry does not
-carry it while it runs, which would refuse the events of a Monitor it
-starts), and it never stays resident, so no later turn
+through the reason its saved record carries and, once it ends, its
+registry entry (not while it runs, which would refuse the events of a
+Monitor it starts), and it never stays resident, so no later turn
 gives the agent work outside an attempt — or in the session's own
 directory, where a revived agent would run. Its saved record keeps the
 approval mode it would have had without the grant.
@@ -1249,7 +1254,8 @@ attempt, and stops the agent when it does not, or when a refresh
 comes more than a minute late (the process was suspended, and another
 session may have taken the worktree meanwhile). A helper takes the marker as
 fresh when it was refreshed within the last 90 seconds and its attempt
-started neither ahead of the clock nor more than 45 minutes ago. While it
+started neither more than a minute ahead of the clock nor more than 45
+minutes ago. While it
 is fresh:
 
 - `sync` (with `--discard` too), the prepared `snapshot`, `ci-log`, `push`,
@@ -1264,9 +1270,11 @@ is fresh:
   whose `status` shows a fresh one ends without a message.
 
 The session stops the agent when it runs past the attempt time limit
-(Section 10, 30 minutes) and when the grant ends (Section 6.13: `attended`,
-a failed launch check); such an attempt stays the round's to claim, as an
-agent that was stopped. `/autofix-pr stop` in this session — `cleanup`
+(Section 10, 30 minutes from when the attempt opened); such an attempt stays
+the round's to claim, as an agent that was stopped. When the grant ends
+(Section 6.13: `attended`, a failed launch check) it stops the agent and
+drops the attempt: the next round redoes the fix in the foreground, asking
+as the user now wants. `/autofix-pr stop` in this session — `cleanup`
 through the tool — stops the agent without a notification, waits up to 15
 seconds for its body to settle (outside the helpers' queue), ends the
 attempt and then cleans up. The session drops the
@@ -1298,9 +1306,13 @@ claim: invoke the skill with
 skill again, whatever the conversation kept of the round, and runs
 `fix-end <n> --task <task> --attempt <id>`, which removes the marker of
 that attempt only and prints the snapshot the attempt took, its brief and
-the head it started from; the tool adds how the agent ended and its report,
-from memory. Then the turn goes on with Section 7's re-runs, push and
-reply, exactly as after a foreground agent. Nothing an agent that failed or
+the head it started from; the tool adds how the agent ended, its report and
+the watch's options, from memory, which the turn uses whatever the
+follow-up said. A refusal of the helper leaves the attempt to claim again.
+The brief lists, besides the agent's items, the round's own — the re-runs
+and the items needing a human that the round decided before the fix — so
+the turn answers them too. Then it goes on with Section 7's re-runs, push
+and reply, exactly as after a foreground agent. Nothing an agent that failed or
 was stopped made is pushed: the turn runs `sync --discard` and answers the
 brief's items as needing a human, as for a fix that did not verify, so
 they are recorded and not lost to a gate that reported them already. A claim
