@@ -2185,6 +2185,47 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
+    it('keeps the real cwd denied after a partially quoted glob or quoted brace (#12280-R2-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(sub/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      for (const command of [
+        "cd sub ; cd 'a'/* ; echo {} > settings.json",
+        "cd sub ; cd '{' ; echo {} > settings.json",
+      ]) {
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      }
+    });
+
+    it('keeps env, command and builtin cd prefixes subject to the same deny (#12280-R2-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      for (const prefix of [
+        'FOO=1',
+        'command',
+        'command -p',
+        'command --',
+        'builtin',
+        'builtin --',
+      ]) {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: `${prefix} cd .qwen ; echo {} > settings.json`,
+          }),
+        ).toBe('deny');
+      }
+    });
+
     it('denies the write a process substitution used to erase from the cd (#12280-R2-1)', async () => {
       pm = makePm({
         permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],

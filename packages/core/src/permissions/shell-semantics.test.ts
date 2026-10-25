@@ -1078,6 +1078,29 @@ describe('R2 review round: comment-continuation desync, merge flag union', () =>
     ['cd >(tee log) ; echo {} > settings.json', '/repo/settings.json'],
     ['cd <(echo x) ; echo {} > settings.json', '/repo/settings.json'],
     ['cd backup >(tee log) ; cd sub ; echo {} > f', '/repo/sub/f'],
+    ["cd 'a'/* ; echo {} > settings.json", '/repo/settings.json'],
+    ["cd '{' ; echo {} > settings.json", '/repo/settings.json'],
+    ['cd sub { } ; echo {} > settings.json', '/repo/settings.json'],
+    ["cd x '{' ; echo {} > settings.json", '/repo/settings.json'],
+    ["cd '~/x' ; echo {} > settings.json", '/repo/settings.json'],
+    ["cd 'a&' ; echo {} > settings.json", '/repo/settings.json'],
+    ["cd '(x)' ; echo {} > settings.json", '/repo/settings.json'],
+    ["cd 'sub)' ; echo {} > settings.json", '/repo/settings.json'],
+    ['cd sub\\& ; echo {} > settings.json', '/repo/settings.json'],
+    ["cd '>y' ; echo {} > settings.json", '/repo/settings.json'],
+    ["cd '2>log' ; echo {} > settings.json", '/repo/settings.json'],
+    ["cd '>>out' ; echo {} > settings.json", '/repo/settings.json'],
+    ["cd '<<<str' ; echo {} > settings.json", '/repo/settings.json'],
+    ["cd '<&2' ; echo {} > settings.json", '/repo/settings.json'],
+    ["cd > '' ; echo {} > settings.json", '/repo/settings.json'],
+    ['pushd -L /var/tmp ; echo {} > settings.json', '/repo/settings.json'],
+    ['CDPATH=/tmp cd sub ; echo {} > settings.json', '/repo/settings.json'],
+    ['HOME=/tmp cd ; echo {} > settings.json', '/repo/settings.json'],
+    ['cd() { pwd; } ; cd sub ; echo {} > settings.json', '/repo/settings.json'],
+    [
+      'cd() { pwd; } ; cd /tmp ; echo {} > settings.json',
+      '/repo/settings.json',
+    ],
   ])(
     'escalates a cd bash does not provably perform: `%s` (#12280-R2-1)',
     (command, expectedPath) => {
@@ -1092,10 +1115,40 @@ describe('R2 review round: comment-continuation desync, merge flag union', () =>
     'trusts a flag-only cd bash performs: `cd %s` (#12280-R3-4)',
     (flag) => {
       expect(across(`cd ${flag} ; echo {} > .qwen/settings.json`)).toEqual([
-        write(`${process.env['HOME']}/.qwen/settings.json`),
+        write(
+          `${process.env['HOME']!.replace(/\\/g, '/')}/.qwen/settings.json`,
+        ),
       ]);
     },
   );
+
+  it.each([
+    ['FOO=1 cd sub ; echo {} > settings.json', '/repo/sub/settings.json'],
+    ['command cd sub ; echo {} > settings.json', '/repo/sub/settings.json'],
+    ['command -p cd sub ; echo {} > settings.json', '/repo/sub/settings.json'],
+    ['command -- cd sub ; echo {} > settings.json', '/repo/sub/settings.json'],
+    ['builtin cd sub ; echo {} > settings.json', '/repo/sub/settings.json'],
+    ['builtin -- cd sub ; echo {} > settings.json', '/repo/sub/settings.json'],
+    ['pushd -- /var/tmp ; echo {} > settings.json', '/var/tmp/settings.json'],
+  ])(
+    'keeps a cd spelling bash really performs static: `%s`',
+    (command, expected) => {
+      expect(across(command)).toEqual([write(expected)]);
+    },
+  );
+
+  it('escalates a relative cd when the inherited CDPATH can redirect it', () => {
+    const previous = process.env['CDPATH'];
+    process.env['CDPATH'] = '/tmp';
+    try {
+      expect(across('cd sub ; echo {} > settings.json')).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env['CDPATH'];
+      else process.env['CDPATH'] = previous;
+    }
+  });
 
   it.each([
     // A quoted or escaped redirect spelling is a literal operand, not an
@@ -1159,7 +1212,24 @@ describe('R2 review round: comment-continuation desync, merge flag union', () =>
     expect(result[0]!.filePath).not.toContain('\n');
     // Pin the attribution itself, not just its certainty: the branch reads
     // process.env['HOME'], not os.homedir() (#12280 R3-11).
-    expect(result[0]!.filePath).toBe(`${process.env['HOME']}/settings.json`);
+    expect(result[0]!.filePath).toBe(
+      `${process.env['HOME']!.replace(/\\/g, '/')}/settings.json`,
+    );
     expect(result[0]!.cwdUnknown).toBeUndefined();
   });
+
+  it.each([
+    [
+      ['echo a \\', '# note \\', 'cd .qwen ; echo {} > settings.json'].join(
+        '\n',
+      ),
+      REPO_SETTINGS,
+    ],
+    [['cd sub \\', '# note \\', 'echo x > out'].join('\n'), '/repo/sub/out'],
+  ])(
+    'follows a command after a comment opened on a continuation line: `%s` (#12280-R2-2)',
+    (command, expected) => {
+      expect(across(command)).toEqual([write(expected)]);
+    },
+  );
 });

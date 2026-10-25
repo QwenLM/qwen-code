@@ -96,7 +96,13 @@ export interface ShellOperation {
  * operand, so `<<'EOF'` is still a heredoc and `2>'log'` still a redirect
  * (#12280 R3-1, R4-2).
  */
-interface ShellToken {
+interface TokenProvenance {
+  unquotedGlob: boolean;
+  quotedTilde: boolean;
+  unquotedSyntax: boolean;
+}
+
+interface ShellToken extends TokenProvenance {
   text: string;
   bare: boolean;
   barePrefix: number;
@@ -117,9 +123,20 @@ function tokenizeDetailed(command: string): ShellToken[] {
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
+  let unquotedGlob = false;
+  let quotedTilde = false;
+  let unquotedSyntax = false;
+
+  const record = (ch: string, quoted: boolean): void => {
+    if (current.length === 0 && ch === '~' && quoted) quotedTilde = true;
+    if (quoted) return;
+    if (/[*?[\]{}]/.test(ch)) unquotedGlob = true;
+    if (ch === '(' || ch === ')' || ch === '&') unquotedSyntax = true;
+  };
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
+    record(ch, inSingle || inDouble || escaped);
 
     if (escaped) {
       current += ch;
@@ -145,15 +162,26 @@ function tokenizeDetailed(command: string): ShellToken[] {
       continue;
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      pushToken(tokens, current, bare, prefixLen ?? current.length);
+      pushToken(tokens, current, bare, prefixLen ?? current.length, {
+        unquotedGlob,
+        quotedTilde,
+        unquotedSyntax,
+      });
       current = '';
       bare = true;
       prefixLen = null;
+      unquotedGlob = false;
+      quotedTilde = false;
+      unquotedSyntax = false;
       continue;
     }
     current += ch;
   }
-  pushToken(tokens, current, bare, prefixLen ?? current.length);
+  pushToken(tokens, current, bare, prefixLen ?? current.length, {
+    unquotedGlob,
+    quotedTilde,
+    unquotedSyntax,
+  });
   return tokens;
 }
 
@@ -162,12 +190,15 @@ function pushToken(
   token: string,
   bare: boolean,
   barePrefix: number,
+  provenance: TokenProvenance,
 ): void {
-  if (token === '{' || token === '}') return;
-  const normalized = trimShellSyntax(token);
-  // trimShellSyntax drops leading `(`s, so the prefix window shifts with them.
+  const normalized = trimShellSyntax(token, bare);
+  // trimShellSyntax drops leading `(`s only for a wholly bare token, so the
+  // prefix window shifts only under that same condition.
   let leadTrim = 0;
-  while (leadTrim < token.length && token[leadTrim] === '(') leadTrim++;
+  if (bare) {
+    while (leadTrim < token.length && token[leadTrim] === '(') leadTrim++;
+  }
   const adjPrefix = Math.max(
     0,
     Math.min(barePrefix - leadTrim, normalized.length),
@@ -176,11 +207,17 @@ function pushToken(
   // as an operand and `cd ''` errors without moving the cwd, so erasing it
   // would under-count the operands (#12280 R3-2).
   if (normalized || !bare) {
-    tokens.push({ text: normalized, bare, barePrefix: adjPrefix });
+    tokens.push({
+      text: normalized,
+      bare,
+      barePrefix: adjPrefix,
+      ...provenance,
+    });
   }
 }
 
-function trimShellSyntax(token: string): string {
+function trimShellSyntax(token: string, bare: boolean): string {
+  if (!bare) return token;
   let start = 0;
   let end = token.length;
 
@@ -196,9 +233,13 @@ function trimShellSyntax(token: string): string {
   return token.slice(start, end);
 }
 
+function isBareBrace(token: ShellToken): boolean {
+  return token.bare && (token.text === '{' || token.text === '}');
+}
+
 function tokenize(command: string): string[] {
   return tokenizeDetailed(command)
-    .filter((token) => token.text !== '')
+    .filter((token) => token.text !== '' && !isBareBrace(token))
     .map((token) => token.text);
 }
 
@@ -354,6 +395,13 @@ function dropCommentContinuationBackslashes(command: string): string {
       out += ch;
       escaped = false;
       wordStart = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle && command[i + 1] === '\n') {
+      // Keep the pair for span replay, but preserve word-startedness so a `#`
+      // opening the continuation line still starts a comment.
+      out += ch + command[i + 1]!;
+      i++;
       continue;
     }
     if (ch === '\\' && !inSingle) {
@@ -2262,7 +2310,9 @@ export function extractShellOperations(
 ): ShellOperation[] {
   if (!simpleCommand.trim()) return [];
 
-  const detailed = tokenizeDetailed(simpleCommand).filter((t) => t.text !== '');
+  const detailed = tokenizeDetailed(simpleCommand).filter(
+    (token) => token.text !== '' && !isBareBrace(token),
+  );
   const tokens = detailed.map((t) => t.text);
   if (tokens.length === 0) return [];
 
@@ -2422,14 +2472,22 @@ const REDIRECT_OPERATOR_PREFIX =
  * leftovers reads as an extra `cd` operand and de-resolves a `cd` bash
  * really performs (#12280 R7-2).
  */
-function stripRedirectsForOperandCount(tokens: ShellToken[]): ShellToken[] {
+function stripRedirectsForOperandCount(tokens: ShellToken[]): {
+  words: ShellToken[];
+  invalidRedirect: boolean;
+} {
   const words: ShellToken[] = [];
+  let invalidRedirect = false;
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]!;
     // Only an unquoted, unescaped operator spelling is a redirect: `cd '>'
     // sub` hands bash two operands, no redirect (#12280 R3-1).
     if (tok.bare && REDIRECT_OPERATOR_TOKEN.test(tok.text)) {
       // Separate-token operator: its target/delimiter is the next word.
+      const redirectTarget = tokens[i + 1];
+      if (redirectTarget === undefined || redirectTarget.text === '') {
+        invalidRedirect = true;
+      }
       i++;
       continue;
     }
@@ -2440,7 +2498,7 @@ function stripRedirectsForOperandCount(tokens: ShellToken[]): ShellToken[] {
     }
     words.push(tok);
   }
-  return words;
+  return { words, invalidRedirect };
 }
 
 function resolveCdTargetCwd(
@@ -2448,15 +2506,38 @@ function resolveCdTargetCwd(
   cwd: string,
   cwdUnknown: boolean,
   artifactSegment = false,
+  cdFunctionUnknown = false,
 ): CdResolution {
   const tokens = tokenizeDetailed(
     cutShellCommentsAndProcessSubstitutions(command),
   );
-  const words = stripRedirectsForOperandCount(tokens);
+  const { words, invalidRedirect } = stripRedirectsForOperandCount(tokens);
+
+  // A leading bare brace is grouping syntax. Braces after the command stay in
+  // the operand list so `cd sub { }` cannot be mistaken for a successful cd.
+  if (words[0] && isBareBrace(words[0]) && words[0].text === '{') {
+    words.shift();
+  }
+
+  let cdEnvironmentUnknown = false;
+  while (words[0] && isEnvAssignmentToken(words[0].text)) {
+    cdEnvironmentUnknown ||= /^(?:HOME|CDPATH)=/.test(words[0].text);
+    words.shift();
+  }
+  while (words[0] && ['command', 'builtin'].includes(words[0].text)) {
+    const wrapper = words.shift()!.text;
+    while (wrapper === 'command' && words[0]?.text === '-p') {
+      words.shift();
+    }
+    if (words[0]?.text === '--') words.shift();
+  }
 
   if (words[0]?.text === 'popd') return { kind: 'dynamic' };
   if (words[0]?.text !== 'cd' && words[0]?.text !== 'pushd') {
     return { kind: 'not-cd' };
+  }
+  if (invalidRedirect || cdEnvironmentUnknown || cdFunctionUnknown) {
+    return { kind: 'dynamic' };
   }
 
   if (words[0]!.text === 'pushd') {
@@ -2479,7 +2560,8 @@ function resolveCdTargetCwd(
     words[targetIndex]!.text !== '-' &&
     words[targetIndex]!.text !== '--'
   ) {
-    sawInvalidOption ||= !/^-[LPe]+$/.test(words[targetIndex]!.text);
+    sawInvalidOption ||=
+      words[0]!.text !== 'cd' || !/^-[LPe]+$/.test(words[targetIndex]!.text);
     targetIndex++;
   }
   if (words[targetIndex]?.text === '--') {
@@ -2509,13 +2591,22 @@ function resolveCdTargetCwd(
     // moving the cwd (#12280 R3-2).
     target.text === '' ||
     isDynamicShellPath(target.text, artifactSegment) ||
-    // A quoted or escaped redirect spelling reaches here as a literal target
-    // (`cd '>'`): bash tries to enter a directory by that name, which only
-    // exists if someone created it, so the cd is not provable (#12280 R3-1).
-    REDIRECT_OPERATOR_TOKEN.test(target.text) ||
-    // Unquoted glob characters expand at runtime; quoted ones are literal
-    // directory names bash really enters (#12280 R3-3).
-    (target.bare && /[*?[\]{}]/.test(target.text)) ||
+    // A glued or quoted redirect-looking operand is not a directory this
+    // analysis can prove bash enters.
+    REDIRECT_OPERATOR_PREFIX.test(target.text) ||
+    // Any unquoted glob character expands at runtime, even if another part of
+    // the word was quoted. Fully quoted glob characters stay literal.
+    target.unquotedGlob ||
+    // Unquoted shell punctuation is syntax, not a literal path. Quoted or
+    // escaped punctuation at a position trimShellSyntax used to erase is not
+    // a directory this analysis certifies either; interior `R&D` stays valid.
+    target.unquotedSyntax ||
+    target.text.startsWith('(') ||
+    /[)&]$/.test(target.text) ||
+    target.text === '{' ||
+    target.text === '}' ||
+    // A quoted tilde is a literal directory name, not home expansion.
+    target.quotedTilde ||
     // `~` and `~/…` expand via resolvePath below; the other tilde spellings
     // (`~-`, `~+`, `~user`) expand to a directory bash picks at runtime
     // (#12280 R3-3).
@@ -2526,6 +2617,10 @@ function resolveCdTargetCwd(
     // (`Not a directory`): the shell stays where it was (#12280 R1-6).
     target.text.startsWith('/dev/fd/')
   ) {
+    return { kind: 'dynamic' };
+  }
+
+  if (process.env['CDPATH'] && !isShellAbsolutePath(target.text)) {
     return { kind: 'dynamic' };
   }
 
@@ -2918,6 +3013,7 @@ function walkCompoundCommand(
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
+  let cdFunctionUnknown = false;
 
   for (const [index, { command: sub, terminator }] of subCommands.entries()) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
@@ -2927,11 +3023,14 @@ function walkCompoundCommand(
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
 
+    cdFunctionUnknown ||=
+      /\b(?:function\s+(?:cd|pushd)\b|(?:cd|pushd)\s*\(\s*\))/.test(sub);
     const cdTarget = resolveCdTargetCwd(
       sub,
       effectiveCwd,
       cwdUnknown,
       artifactSegment[index] ?? false,
+      cdFunctionUnknown,
     );
     if (cdTarget.kind === 'static') {
       // A `cd` still performs its redirections: `cd x > /tmp/log` truncates the
