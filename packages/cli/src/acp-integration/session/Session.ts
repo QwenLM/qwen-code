@@ -29,6 +29,15 @@ import {
   runModelRound,
   type AgentLoopStopReason,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import {
+  SendMessageType,
+  type UserPromptAdmission,
+} from '@qwen-code/qwen-code-core/core/client.js';
+import {
+  getStructuredErrorCause,
+  LlmEventType,
+  type StructuredError,
+} from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
@@ -144,11 +153,6 @@ import {
   PromptSuggestionEvent,
   getErrorStatus,
   UserPromptEvent,
-  getStructuredErrorCause,
-  LlmEventType,
-  SendMessageType,
-  type StructuredError,
-  type UserPromptAdmission,
   readManyFiles,
   getSpecificMimeType,
   clampInlineMediaPart,
@@ -7237,9 +7241,6 @@ export class Session implements SessionContext {
               !channelTurn &&
               !responseCapture.goalProposalTurn;
             let promptAdmission: UserPromptAdmission | undefined;
-            // The client runs the managed memory tasks when a UserQuery or
-            // ToolResult round ends the response without tool calls.
-            let memoryTasksRanInClient = false;
             if (sharedModelRound) {
               promptAdmission = await this.config
                 .getLlmClient()
@@ -7333,10 +7334,9 @@ export class Session implements SessionContext {
               }
             }
 
-            if (isFreshUserTurn && sharedModelRound) {
-              managedMemoryRecallStarted = true;
-            } else if (isFreshUserTurn) {
-              managedMemoryRecallStarted = true;
+            // On the shared round `LlmClient` starts the recall itself.
+            managedMemoryRecallStarted = isFreshUserTurn;
+            if (isFreshUserTurn && !sharedModelRound) {
               // Mirror LlmClient.sendMessageStream: commit a prepared
               // legacy->structured recall transition before the per-turn
               // reset, so ACP sessions leave legacy mode once migration
@@ -7912,6 +7912,12 @@ export class Session implements SessionContext {
                             case LlmEventType.LoopDetected:
                               loopStop = event.value;
                               break;
+                            case LlmEventType.UserPromptSubmitBlocked:
+                              // A tool-result round runs UserPromptSubmit too.
+                              await this.messageEmitter.emitAgentMessage(
+                                `✗ **UserPromptSubmit blocked**: ${event.value.reason || 'No reason provided'}`,
+                              );
+                              break;
                             case LlmEventType.Error:
                               streamError = event.value.error;
                               break;
@@ -7956,6 +7962,7 @@ export class Session implements SessionContext {
                     return { stopReason: 'cancelled' };
                   }
                   if (roundStop === 'user_prompt_blocked') {
+                    this.todoStopGuard.suspend();
                     return { stopReason: 'end_turn' };
                   }
                   if (
@@ -7980,14 +7987,6 @@ export class Session implements SessionContext {
                       });
                     }
                     return { stopReason: 'end_turn' };
-                  }
-                  if (
-                    roundType !== SendMessageType.Steer &&
-                    functionCalls.length === 0 &&
-                    !streamFailed &&
-                    !cutForInput()
-                  ) {
-                    memoryTasksRanInClient = true;
                   }
                 } else {
                   try {
@@ -8270,6 +8269,7 @@ export class Session implements SessionContext {
                       result,
                       responseCapture,
                       isFreshUserTurn,
+                      sharedModelRound,
                     );
                     return result;
                   }
@@ -8334,7 +8334,7 @@ export class Session implements SessionContext {
                 result,
                 responseCapture,
                 isFreshUserTurn,
-                memoryTasksRanInClient,
+                sharedModelRound,
               );
               return { stopReason: result.stopReason };
             } finally {
@@ -10358,19 +10358,27 @@ export class Session implements SessionContext {
     },
     responseCapture: AgentResponseCapture,
     isFreshUserTurn: boolean,
-    // `LlmClient` scheduled them after the turn's last model round.
-    memoryTasksScheduled = false,
+    // The turn's model rounds went through `LlmClient`, which leaves the
+    // memory tasks to the host that ends the turn.
+    sharedModelRound = false,
   ): void {
     if (result.stopReason !== 'cancelled') {
       responseCapture.agentOutput.writeToSpan(getActiveInteractionSpan());
     }
     if (
-      memoryTasksScheduled ||
       !isFreshUserTurn ||
       result.stopReason !== 'end_turn' ||
-      result.loopProtectionStopped ||
-      !this.config.getManagedAutoMemoryEnabled()
+      result.loopProtectionStopped
     ) {
+      return;
+    }
+    if (sharedModelRound) {
+      const llmClient = this.config.getLlmClient();
+      llmClient.captureCacheSafeParams();
+      llmClient.runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery);
+      return;
+    }
+    if (!this.config.getManagedAutoMemoryEnabled()) {
       return;
     }
     this.config.getLlmClient().captureCacheSafeParams();

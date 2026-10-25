@@ -143,6 +143,19 @@ const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
 const structuredErrorCauses = vi.hoisted(() => new WeakMap<object, unknown>());
 
+// Session imports getStructuredErrorCause from the turn module, not the barrel.
+vi.mock('@qwen-code/qwen-code-core/core/turn.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/core/turn.js')
+    >();
+  return {
+    ...actual,
+    getStructuredErrorCause: (error: core.StructuredError) =>
+      structuredErrorCauses.get(error) ?? actual.getStructuredErrorCause(error),
+  };
+});
+
 // Session imports logLoopProtection from the loggers module, not the barrel.
 vi.mock(
   '@qwen-code/qwen-code-core/telemetry/loggers.js',
@@ -181,8 +194,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
     refreshMemoryInstruction: refreshMemoryInstructionSpy,
     getActiveInteractionSpan: agentTelemetry.getActiveInteractionSpan,
-    getStructuredErrorCause: (error: core.StructuredError) =>
-      structuredErrorCauses.get(error) ?? actual.getStructuredErrorCause(error),
     addAgentInputMessageAttributes:
       agentTelemetry.addAgentInputMessageAttributes,
     AgentOutputMessageCapture: class {
@@ -637,6 +648,7 @@ describe('Session', () => {
     commitManagedAutoMemoryRecallDelivery: ReturnType<typeof vi.fn>;
     discardManagedAutoMemoryRecallDelivery: ReturnType<typeof vi.fn>;
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    runManagedAutoMemoryBackgroundTasks: ReturnType<typeof vi.fn>;
     captureCacheSafeParams: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
     resetManagedAutoMemoryAfterCompression: ReturnType<typeof vi.fn>;
@@ -907,6 +919,7 @@ describe('Session', () => {
       commitManagedAutoMemoryRecallDelivery: vi.fn(),
       discardManagedAutoMemoryRecallDelivery: vi.fn(),
       finishManagedAutoMemoryRecall: vi.fn(),
+      runManagedAutoMemoryBackgroundTasks: vi.fn(),
       captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
       resetManagedAutoMemoryAfterCompression: vi.fn(),
@@ -4478,7 +4491,10 @@ describe('Session', () => {
         promptAdmission: { blocked: false },
       });
       expect(agentText()).toContain('Hello');
-      // The client ran the memory tasks after the response.
+      // The session runs the client's memory tasks once its turn ends.
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
     });
 
@@ -4548,6 +4564,37 @@ describe('Session', () => {
         '✗ **UserPromptSubmit blocked**: not today',
       );
       expect(mockConfig.getFileHistoryService).not.toHaveBeenCalled();
+    });
+
+    it('reports a UserPromptSubmit block of a tool-result round and ends the turn', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      const send = useSharedRounds(
+        [
+          toolCall({
+            id: 'call-read',
+            name: 'read_file',
+            args: { file_path: '/tmp/a.txt' },
+          }),
+          finished(),
+        ],
+        [
+          {
+            type: core.LlmEventType.UserPromptSubmitBlocked,
+            value: { reason: 'secret in output', originalPrompt: '' },
+          },
+        ],
+      );
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(agentText()).toContain(
+        '✗ **UserPromptSubmit blocked**: secret in output',
+      );
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).not.toHaveBeenCalled();
     });
 
     it.each([
@@ -4638,6 +4685,12 @@ describe('Session', () => {
       expect(stopRequests(request)[1][0].input).toMatchObject({
         stop_hook_active: true,
       });
+      // The memory tasks wait for the turn the Stop hook continued.
+      const memoryTasks = mockLlmClient.runManagedAutoMemoryBackgroundTasks;
+      expect(memoryTasks).toHaveBeenCalledOnce();
+      expect(memoryTasks.mock.invocationCallOrder[0]).toBeGreaterThan(
+        continuation.mock.invocationCallOrder[0]!,
+      );
     });
 
     it('discards the tool cards of a round the loop guard stopped', async () => {
@@ -27784,9 +27837,10 @@ describe('Session', () => {
               expect(sends[1][3]).toMatchObject({
                 type: core.SendMessageType.Steer,
               });
-              // The client ran no memory tasks for the cut response or the
-              // Steer round, so the session schedules them.
-              expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+              // The session runs the client's memory tasks once the turn ends.
+              expect(
+                mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+              ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
             },
           );
 

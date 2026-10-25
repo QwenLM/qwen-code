@@ -289,7 +289,11 @@ export interface SendMessageOptions {
   userTurnRecordedByHost?: boolean;
   /** Also yield `ToolCallPreparation` for calls the model starts streaming. */
   toolCallPreparations?: boolean;
-  /** The host fires the Stop hook after the round, so this send does not. */
+  /**
+   * The host fires the Stop hook after the round, so this send does not. The
+   * host then decides when the turn ends, so it also runs the turn's memory
+   * tasks through `runManagedAutoMemoryBackgroundTasks`.
+   */
   stopHookRunByHost?: boolean;
   /**
    * The host keeps the interaction span open around its turn, so this send
@@ -297,9 +301,11 @@ export interface SendMessageOptions {
    */
   interactionSpanByHost?: boolean;
   /**
-   * The host runs its own tool-call guards and exploration budget, so this
-   * send checks no tool-call patterns and adds no exploration reminder; the
-   * content and thought heuristics still run.
+   * The host runs its own tool-call guards and exploration budget and builds
+   * the tool-result message with its todo reminder, so this send checks no
+   * tool-call patterns and adds neither reminder. The content and thought
+   * heuristics still run, and a tool-result send still carries their loop
+   * reminder and the memory recall.
    */
   toolLoopGuardsByHost?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
@@ -3187,9 +3193,11 @@ export class LlmClient {
     }
   }
 
-  private runManagedAutoMemoryBackgroundTasks(
-    messageType: SendMessageType,
-  ): void {
+  /**
+   * Schedules the memory work due when a response ends without tool calls.
+   * A host that runs the Stop hook itself calls this once its turn ends.
+   */
+  runManagedAutoMemoryBackgroundTasks(messageType: SendMessageType): void {
     // During shutdown, skip all background memory tasks so the process
     // can exit cleanly without spawning new work.
     if (this.shutdownRequested) {
@@ -4965,131 +4973,134 @@ export class LlmClient {
         }
       }
 
-      if (
-        messageType === SendMessageType.ToolResult &&
-        !options?.toolLoopGuardsByHost
-      ) {
-        // Record executed tool results for stateful read tools (task_list)
-        // so the loop guards can distinguish productive re-polling — the
-        // shared task board changed between identical calls — from a stuck
-        // loop (issue #9450). A detection here (the result-aware global
-        // duplicate count) halts the turn exactly like the event-loop
-        // guards below.
-        for (const part of requestToSend) {
-          if (
-            typeof part !== 'object' ||
-            part === null ||
-            !('functionResponse' in part)
-          ) {
-            continue;
-          }
-          const functionResponseId = (part as Part).functionResponse?.id;
-          if (!functionResponseId) continue;
-          if (
-            this.loopDetector.recordToolResultByCallId(
-              functionResponseId,
-              [part as Part],
-              { queueReminders: ownsExplorationBudget },
-            )
-          ) {
-            for (const goalEvent of await finalizeInterruptedGoalTurn(
-              undefined,
-              'loop detected',
-            )) {
-              yield goalEvent;
-            }
-            const loopType = this.loopDetector.getLastLoopType();
-            yield {
-              type: LlmEventType.LoopDetected,
-              ...(loopType && {
-                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
-              }),
-            };
-            await arenaAgentClient?.reportError('Loop detected');
-            this.lastApiCompletionTimestamp = Date.now();
-            endCurrentInteraction('error', 'loop detected', 'loop_detected');
-            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-            this.fireLoopDetectedStopFailure(loopType);
-            return turn;
-          }
-        }
-        // A top-level Agent tool result means a delegated execution just
-        // returned (#10953): real work advanced while the parent earned a
-        // single tool turn, so the turn budget cannot come due on its own.
-        // Force the reminder exactly where the progress information arrives.
-        // A bridged delegation returns under the tool_call envelope (the
-        // scheduler keeps the model-facing request name on the response
-        // part), so also correlate by call id with the functionCall recorded
-        // in history and unwrap the resolved target — the same correlation
-        // seedRecentCompletedToolNamesFromHistory uses. The force stays
-        // specific to calls that actually resolved to Agent: the goal tools
-        // are bridged too, and per-turn injection grows context linearly.
-        let bridgedResponseIds: Set<string> | undefined;
+      if (messageType === SendMessageType.ToolResult) {
         let carriesAgentToolResult = false;
-        for (const part of requestToSend) {
-          if (typeof part !== 'object' || part === null) {
-            continue;
-          }
-          const response = part.functionResponse;
-          if (!response) {
-            continue;
-          }
-          if (canonicalToolName(response.name ?? '') === ToolNames.AGENT) {
-            carriesAgentToolResult = true;
-            break;
-          }
-          if (response.name === ToolNames.TOOL_CALL && response.id) {
-            // The bridge prefixes mark calls that never started. A bridged
-            // Agent that ran before failing or being cancelled carries an
-            // unprefixed error: real work advanced, so force the reminder
-            // like the direct-Agent branch and the history seeding pass.
-            const errorText = (
-              response.response as Record<string, unknown> | undefined
-            )?.['error'];
+        // A host that runs its own tool-call guards also builds the
+        // tool-result message with its own todo reminder.
+        if (!options?.toolLoopGuardsByHost) {
+          // Record executed tool results for stateful read tools (task_list)
+          // so the loop guards can distinguish productive re-polling — the
+          // shared task board changed between identical calls — from a stuck
+          // loop (issue #9450). A detection here (the result-aware global
+          // duplicate count) halts the turn exactly like the event-loop
+          // guards below.
+          for (const part of requestToSend) {
             if (
-              typeof errorText === 'string' &&
-              (errorText.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX) ||
-                errorText.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX))
+              typeof part !== 'object' ||
+              part === null ||
+              !('functionResponse' in part)
             ) {
               continue;
             }
-            (bridgedResponseIds ??= new Set<string>()).add(response.id);
+            const functionResponseId = (part as Part).functionResponse?.id;
+            if (!functionResponseId) continue;
+            if (
+              this.loopDetector.recordToolResultByCallId(
+                functionResponseId,
+                [part as Part],
+                { queueReminders: ownsExplorationBudget },
+              )
+            ) {
+              for (const goalEvent of await finalizeInterruptedGoalTurn(
+                undefined,
+                'loop detected',
+              )) {
+                yield goalEvent;
+              }
+              const loopType = this.loopDetector.getLastLoopType();
+              yield {
+                type: LlmEventType.LoopDetected,
+                ...(loopType && {
+                  value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+                }),
+              };
+              await arenaAgentClient?.reportError('Loop detected');
+              this.lastApiCompletionTimestamp = Date.now();
+              endCurrentInteraction('error', 'loop detected', 'loop_detected');
+              this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+              this.fireLoopDetectedStopFailure(loopType);
+              return turn;
+            }
+          }
+          // A top-level Agent tool result means a delegated execution just
+          // returned (#10953): real work advanced while the parent earned a
+          // single tool turn, so the turn budget cannot come due on its own.
+          // Force the reminder exactly where the progress information arrives.
+          // A bridged delegation returns under the tool_call envelope (the
+          // scheduler keeps the model-facing request name on the response
+          // part), so also correlate by call id with the functionCall recorded
+          // in history and unwrap the resolved target — the same correlation
+          // seedRecentCompletedToolNamesFromHistory uses. The force stays
+          // specific to calls that actually resolved to Agent: the goal tools
+          // are bridged too, and per-turn injection grows context linearly.
+          let bridgedResponseIds: Set<string> | undefined;
+          for (const part of requestToSend) {
+            if (typeof part !== 'object' || part === null) {
+              continue;
+            }
+            const response = part.functionResponse;
+            if (!response) {
+              continue;
+            }
+            if (canonicalToolName(response.name ?? '') === ToolNames.AGENT) {
+              carriesAgentToolResult = true;
+              break;
+            }
+            if (response.name === ToolNames.TOOL_CALL && response.id) {
+              // The bridge prefixes mark calls that never started. A bridged
+              // Agent that ran before failing or being cancelled carries an
+              // unprefixed error: real work advanced, so force the reminder
+              // like the direct-Agent branch and the history seeding pass.
+              const errorText = (
+                response.response as Record<string, unknown> | undefined
+              )?.['error'];
+              if (
+                typeof errorText === 'string' &&
+                (errorText.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX) ||
+                  errorText.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX))
+              ) {
+                continue;
+              }
+              (bridgedResponseIds ??= new Set<string>()).add(response.id);
+            }
+          }
+          if (!carriesAgentToolResult && bridgedResponseIds) {
+            // Newest-first over raw history: the matching functionCall is the
+            // model message that just ran, so the scan exits at the first
+            // hit instead of cloning and walking the whole history per send.
+            carriesAgentToolResult =
+              this.getChat().findLastHistoryEntry((message) =>
+                (message.parts ?? []).some((historyPart) => {
+                  const call = historyPart.functionCall;
+                  if (
+                    call?.name !== ToolNames.TOOL_CALL ||
+                    !call.id ||
+                    !bridgedResponseIds.has(call.id)
+                  ) {
+                    return false;
+                  }
+                  const bridgedName = (
+                    call.args as Record<string, unknown> | undefined
+                  )?.['name'];
+                  if (typeof bridgedName !== 'string') {
+                    return false;
+                  }
+                  const targetName = canonicalToolName(bridgedName);
+                  return (
+                    (resolveRegisteredToolName(
+                      targetName,
+                      this.config.getToolRegistry().getAllToolNames(),
+                    ) ?? targetName) === ToolNames.AGENT
+                  );
+                }),
+              ) !== undefined;
           }
         }
-        if (!carriesAgentToolResult && bridgedResponseIds) {
-          // Newest-first over raw history: the matching functionCall is the
-          // model message that just ran, so the scan exits at the first
-          // hit instead of cloning and walking the whole history per send.
-          carriesAgentToolResult =
-            this.getChat().findLastHistoryEntry((message) =>
-              (message.parts ?? []).some((historyPart) => {
-                const call = historyPart.functionCall;
-                if (
-                  call?.name !== ToolNames.TOOL_CALL ||
-                  !call.id ||
-                  !bridgedResponseIds.has(call.id)
-                ) {
-                  return false;
-                }
-                const bridgedName = (
-                  call.args as Record<string, unknown> | undefined
-                )?.['name'];
-                if (typeof bridgedName !== 'string') {
-                  return false;
-                }
-                const targetName = canonicalToolName(bridgedName);
-                return (
-                  (resolveRegisteredToolName(
-                    targetName,
-                    this.config.getToolRegistry().getAllToolNames(),
-                  ) ?? targetName) === ToolNames.AGENT
-                );
-              }),
-            ) !== undefined;
-        }
-        const activeTodoReminder = carriesAgentToolResult
-          ? this.config.takeActiveTodoReminder(prompt_id, true)
-          : this.config.takeActiveTodoReminder(prompt_id);
+        const activeTodoReminder = options?.toolLoopGuardsByHost
+          ? undefined
+          : carriesAgentToolResult
+            ? this.config.takeActiveTodoReminder(prompt_id, true)
+            : this.config.takeActiveTodoReminder(prompt_id);
         const explorationReminder =
           this.loopDetector.isDisabledForSession() || !ownsToolLoopGuards
             ? undefined
@@ -5830,7 +5841,7 @@ export class LlmClient {
         this.captureCacheSafeParams();
 
         if (this.config.getSkipNextSpeakerCheck()) {
-          if (!isGoalRuntimeTurn) {
+          if (!isGoalRuntimeTurn && !options?.stopHookRunByHost) {
             this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
           }
           if (arenaAgentClient) {
@@ -5913,7 +5924,7 @@ export class LlmClient {
           return continueTurn;
         }
 
-        if (!isGoalRuntimeTurn) {
+        if (!isGoalRuntimeTurn && !options?.stopHookRunByHost) {
           this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
         }
 

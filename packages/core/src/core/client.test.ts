@@ -2688,6 +2688,42 @@ describe('Gemini Client (client.ts)', () => {
       expect(setTools).toHaveBeenCalledWith(tools);
     });
 
+    it('leaves the todo reminder to a host that runs its own tool-call guards', async () => {
+      // The prompt's first round makes its tool-result rounds the turn's own.
+      await runTurn(
+        SendMessageType.UserQuery,
+        [{ text: 'hello' }],
+        'prompt-tool-result',
+        { toolLoopGuardsByHost: true },
+      );
+      todoReminder('run tests');
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockClear();
+      vi.spyOn(client['loopDetector'], 'takeLoopReminder').mockReturnValue(
+        'LOOP_REMINDER',
+      );
+      vi.spyOn(client, 'consumeManagedAutoMemoryRecall').mockResolvedValue({
+        prompt: 'MEMORY_RECALL',
+      } as never);
+      vi.spyOn(client, 'commitManagedAutoMemoryRecallDelivery').mockReturnValue(
+        undefined,
+      );
+
+      await runTurn(
+        SendMessageType.ToolResult,
+        [fnResponse('read_file', { ok: true })],
+        'prompt-tool-result',
+        { toolLoopGuardsByHost: true },
+      );
+
+      expect(mockConfig.takeActiveTodoReminder).not.toHaveBeenCalled();
+      expect(client.consumeManagedAutoMemoryRecall).toHaveBeenCalledWith(
+        'tool_result',
+      );
+      expect(lastRequest()).toEqual(
+        expect.arrayContaining([{ text: 'LOOP_REMINDER' }, 'MEMORY_RECALL']),
+      );
+    });
+
     it('carries active todos after tool results and clears them for new work', async () => {
       const reminder = todoReminder('run tests');
 
@@ -11904,7 +11940,7 @@ Other open files:
         );
       });
 
-      it('leaves the Stop hook to a host that runs it after the round', async () => {
+      it('leaves the Stop hook and the memory tasks to a host that runs it after the round', async () => {
         const request = blockStopOnce();
         installMessageBus(request, 'Stop');
         notDoneChat();
@@ -11912,6 +11948,10 @@ Other open files:
           (async function* () {
             yield { type: LlmEventType.Content, value: 'not done' };
           })(),
+        );
+        const memoryTasks = vi.spyOn(
+          client,
+          'runManagedAutoMemoryBackgroundTasks',
         );
 
         await run([{ text: 'Hi' }], 'prompt-stop-hook-by-host', {
@@ -11924,6 +11964,7 @@ Other open files:
           expect.objectContaining({ eventName: 'Stop' }),
           expect.anything(),
         );
+        expect(memoryTasks).not.toHaveBeenCalled();
       });
 
       it('gives a blocking Stop hook continuation a fresh exploration phase', async () => {
