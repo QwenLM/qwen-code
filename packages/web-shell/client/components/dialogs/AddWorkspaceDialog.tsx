@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useI18n } from '../../i18n';
 import { getShadowAwareActiveElement } from '../../utils/dom';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { DialogShell } from './DialogShell';
 import { Button } from '../ui/button';
 import {
@@ -166,6 +167,7 @@ export function AddWorkspaceDialog({
   );
   const cloneJobIdRef = useRef<string | undefined>(undefined);
   const cloneRegisteredJobRef = useRef<string | undefined>(undefined);
+  const cloneCancelRequestedRef = useRef<string | undefined>(undefined);
   const cloneUnmountedRef = useRef(false);
   const autoGitTargetRef = useRef<string | undefined>(undefined);
   const [gitSuggestions, setGitSuggestions] = useState<
@@ -224,7 +226,22 @@ export function AddWorkspaceDialog({
   }, []);
 
   useEffect(() => {
-    if (!gitClone) setSource('directory');
+    if (gitClone) return;
+    // Withdrawing the capability mid-clone (a daemon reconnect or host
+    // switch) leaves the poll's controls dead, so the clone state must go
+    // with it; otherwise the dialog stays submitting and undismissible.
+    setSource('directory');
+    if (clonePollTimerRef.current !== undefined) {
+      clearTimeout(clonePollTimerRef.current);
+      clonePollTimerRef.current = undefined;
+    }
+    cloneJobIdRef.current = undefined;
+    cloneRegisteredJobRef.current = undefined;
+    cloneCancelRequestedRef.current = undefined;
+    setCloneJob(undefined);
+    setCloneUnknown(false);
+    setCancelling(false);
+    setSubmitting(false);
   }, [gitClone]);
 
   const closeList = useCallback(() => {
@@ -430,6 +447,15 @@ export function AddWorkspaceDialog({
           return;
         }
         if (job.status === 'succeeded' && job.cwd) {
+          // A cancel that lost the race with a finished clone must not
+          // register the repository the user asked to abort; fall through to
+          // the completed-clone form so Register stays an explicit action.
+          if (cloneCancelRequestedRef.current === jobId) {
+            cloneCancelRequestedRef.current = undefined;
+            setClonedCwd(job.cwd);
+            setSubmitting(false);
+            return;
+          }
           if (cloneRegisteredJobRef.current === jobId) return;
           cloneRegisteredJobRef.current = jobId;
           setClonedCwd(job.cwd);
@@ -448,16 +474,33 @@ export function AddWorkspaceDialog({
           }
           return;
         }
+        cloneCancelRequestedRef.current = undefined;
         if (job.status === 'failed') {
           setError(job.error?.message ?? t('sidebar.gitCloneFailed'));
         } else if (job.status === 'cancelled') {
           setError(t('sidebar.gitCloneCancelled'));
         }
         setSubmitting(false);
-      } catch {
+      } catch (err) {
         if (cloneUnmountedRef.current || cloneJobIdRef.current !== jobId)
           return;
-        setCloneUnknown(true);
+        // A pruned or forgotten job answers 404 forever: retrying cannot
+        // resolve it, so report that the job is gone instead of leaving the
+        // user in an endless "Check again" loop.
+        if (
+          err instanceof DaemonHttpError &&
+          err.status === 404 &&
+          (err.body as { code?: unknown } | undefined)?.code ===
+            'clone_job_not_found'
+        ) {
+          setError(t('sidebar.gitCloneJobGone'));
+          setCloneUnknown(false);
+          setCloneJob((job) =>
+            job?.jobId === jobId ? { ...job, status: 'failed' } : job,
+          );
+        } else {
+          setCloneUnknown(true);
+        }
         setSubmitting(false);
       }
     },
@@ -465,9 +508,10 @@ export function AddWorkspaceDialog({
   );
 
   const cancelClone = useCallback(async () => {
-    const jobId = cloneJob?.jobId;
+    const jobId = cloneJob?.jobId ?? cloneJobIdRef.current;
     if (!gitClone || !jobId) return;
     setCancelling(true);
+    cloneCancelRequestedRef.current = jobId;
     if (clonePollTimerRef.current !== undefined) {
       clearTimeout(clonePollTimerRef.current);
       clonePollTimerRef.current = undefined;
@@ -740,6 +784,7 @@ export function AddWorkspaceDialog({
         }
         setError(null);
         setCloneUnknown(false);
+        cloneCancelRequestedRef.current = undefined;
         setGitSuggestOpen(false);
         setGitSuggestHighlight(-1);
         setSubmitting(true);
@@ -855,12 +900,14 @@ export function AddWorkspaceDialog({
                 variant="outline"
                 className="flex-1 sm:flex-none"
                 onClick={
-                  cloneJob?.status === 'running'
+                  cloneJob?.status === 'running' && !cloneUnknown
                     ? () => void cancelClone()
                     : onClose
                 }
                 disabled={
-                  cloneJob?.status === 'running' ? cancelling : submitting
+                  cloneJob?.status === 'running' && !cloneUnknown
+                    ? cancelling
+                    : submitting
                 }
               >
                 {t('sidebar.addWorkspaceCancel')}

@@ -2133,7 +2133,7 @@ const EN: Messages = {
   'sidebar.gitCloneUrl': 'Repository URL',
   'sidebar.gitCloneUrlPlaceholder': 'https://github.com/org/repo.git',
   'sidebar.gitCloneUrlHint':
-    'Public URLs and addresses the daemon host can already authenticate work. Credentials are never collected here.',
+    'Public URLs, SSH-agent addresses, and URLs that carry their own token work. The daemon passes the token to Git and never writes it into the cloned repository; Git credentials configured on the host are not used.',
   'sidebar.gitCloneTarget': 'Clone into',
   'sidebar.gitCloneTargetPlaceholder': '/absolute/path/for/new/repo',
   'sidebar.gitCloneTargetHint':
@@ -2151,6 +2151,8 @@ const EN: Messages = {
   'sidebar.gitCloneInvalidTarget': 'Enter an absolute target path.',
   'sidebar.gitCloneUnknown':
     'Could not confirm the clone result. Check the workspace list before cloning again.',
+  'sidebar.gitCloneJobGone':
+    'This clone job is no longer available, so its result cannot be confirmed. Check the workspace list or whether the target exists before cloning again.',
   'sidebar.gitCloneRecheck': 'Check again',
   'sidebar.gitCloneBack': 'Back',
   'sidebar.gitCloneRegisterRetry': (vars) =>
@@ -6562,7 +6564,7 @@ const ZH: Messages = {
   'sidebar.gitCloneUrl': '仓库地址',
   'sidebar.gitCloneUrlPlaceholder': 'https://github.com/org/repo.git',
   'sidebar.gitCloneUrlHint':
-    '支持公开地址，以及守护进程主机已能完成鉴权的地址。这里不会收集凭据。',
+    '支持公开地址、SSH agent 地址，以及自带 token 的地址：守护进程把 token 交给 Git，不会写入克隆仓库的配置；宿主上已配置的 Git 凭据不会被使用。',
   'sidebar.gitCloneTarget': '克隆到',
   'sidebar.gitCloneTargetPlaceholder': '/绝对路径/新目录',
   'sidebar.gitCloneTargetHint':

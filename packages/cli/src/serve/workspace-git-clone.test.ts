@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   GitCloneRequestError,
   claimCloneTarget,
+  cloneEnvironment,
   createWorkspaceGitCloner,
   extractGitCredentials,
   normalizeGitCloneUrl,
@@ -165,6 +166,58 @@ describe('extractGitCredentials', () => {
       url: 'ssh://git@example.com/repo.git',
     });
   });
+
+  it('strips userinfo even when a percent escape is malformed', () => {
+    expect(
+      extractGitCredentials('https://user:100%@example.com/repo.git'),
+    ).toEqual({
+      url: 'https://example.com/repo.git',
+      credentials: { username: 'user', password: '100%' },
+    });
+  });
+});
+
+describe('cloneEnvironment', () => {
+  it('sweeps host config channels and pins the parsing locale', () => {
+    const injected: Record<string, string> = {
+      GIT_CONFIG_PARAMETERS: "'filter.evil.smudge=sh'",
+      GIT_CONFIG_COUNT: '1',
+      GIT_ASKPASS: '/tmp/askpass',
+      SSH_ASKPASS: '/tmp/askpass',
+      GIT_SSH_COMMAND: 'ssh -oProxyCommand=evil',
+      GIT_SSH: '/tmp/ssh',
+      GIT_PROXY_COMMAND: 'evil',
+      GIT_EXEC_PATH: '/tmp/exec',
+      GIT_TEMPLATE_DIR: '/tmp/templates',
+      GIT_DIR: '/tmp/repo/.git',
+      SSH_AUTH_SOCK: '/tmp/agent.sock',
+    };
+    const saved: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(injected)) {
+      saved[key] = process.env[key];
+      process.env[key] = value;
+    }
+    try {
+      const env = cloneEnvironment();
+      for (const key of Object.keys(injected)) {
+        if (key === 'SSH_AUTH_SOCK') continue;
+        expect(env[key]).toBeUndefined();
+      }
+      expect(env['SSH_AUTH_SOCK']).toBe('/tmp/agent.sock');
+      expect(env['LC_ALL']).toBe('C');
+      expect(env['LANG']).toBe('C');
+      expect(env['GIT_TERMINAL_PROMPT']).toBe('0');
+      expect(env['GIT_CONFIG_NOSYSTEM']).toBe('1');
+      expect(env['GIT_CONFIG_GLOBAL']).toBe(
+        process.platform === 'win32' ? 'NUL' : '/dev/null',
+      );
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 });
 
 describe('sanitizeGitCloneMessage', () => {
@@ -251,6 +304,18 @@ describe('claimCloneTarget', () => {
 });
 
 describe('createWorkspaceGitCloner', () => {
+  it('rejects credentials that decode to control characters', async () => {
+    const root = await tempRoot();
+    const cloner = createWorkspaceGitCloner({ runner: writingRunner() });
+    await expect(
+      cloner.start({
+        url: 'https://user:pa%0Ass@example.com/repo.git',
+        target: join(root, 'repo'),
+      }),
+    ).rejects.toMatchObject({ status: 400, code: 'invalid_url' });
+    expect(existsSync(join(root, 'repo'))).toBe(false);
+  });
+
   it('clones, reports progress, and returns the canonical cwd', async () => {
     const root = await tempRoot();
     const target = join(root, 'repo');

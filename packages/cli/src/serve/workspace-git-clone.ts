@@ -47,6 +47,16 @@ const ALLOWED_PROTOCOLS = new Set([
   'git+ssh:',
   'file:',
 ]);
+/** Environment channels that re-apply host Git config or host transports. */
+const CLONE_ENV_DENIED_KEYS = new Set([
+  'GIT_SSH',
+  'GIT_SSH_COMMAND',
+  'GIT_PROXY_COMMAND',
+  'GIT_ASKPASS',
+  'SSH_ASKPASS',
+  'GIT_EXEC_PATH',
+  'GIT_TEMPLATE_DIR',
+]);
 
 export type GitCloneJobStatus =
   | 'running'
@@ -250,6 +260,16 @@ export function extractGitCredentials(raw: string): {
   url: string;
   credentials?: GitCloneCredentials;
 } {
+  // A hand-pasted userinfo often keeps a literal `%` that is not an escape;
+  // git decodes such values literally, so a decode failure must not fall
+  // through to returning the credential-bearing URL.
+  const safeDecode = (value: string): string => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
   try {
     const parsed = new URL(raw);
     const isHttp = parsed.protocol === 'http:' || parsed.protocol === 'https:';
@@ -257,8 +277,8 @@ export function extractGitCredentials(raw: string): {
       return { url: raw };
     }
     const credentials = {
-      username: decodeURIComponent(parsed.username),
-      password: decodeURIComponent(parsed.password),
+      username: safeDecode(parsed.username),
+      password: safeDecode(parsed.password),
     };
     parsed.username = '';
     parsed.password = '';
@@ -300,14 +320,26 @@ function killProcessTree(pid: number | undefined): void {
  * Global/system config is disabled as well: a cloned repository's
  * `.gitattributes` must not be able to run filter commands configured on the
  * daemon host during the clone's own checkout.
+ *
+ * The environment-carried config channels outrank those config files, so they
+ * are swept too: `GIT_CONFIG_PARAMETERS` / `GIT_CONFIG_COUNT` re-apply host
+ * config, `GIT_ASKPASS` / `SSH_ASKPASS` would answer a client-chosen host with
+ * the host's own credentials, and `GIT_SSH*` / `GIT_PROXY_COMMAND` /
+ * `GIT_EXEC_PATH` / `GIT_TEMPLATE_DIR` would run host transports and
+ * templates for a browser-supplied URL. `SSH_AUTH_SOCK` is outside the swept
+ * namespaces, so SSH-agent authentication still works.
+ *
+ * `LC_ALL`/`LANG` are pinned because the progress and fatal lines this module
+ * parses are git's English strings; a localized git would report no percent
+ * and a `fatal:` prefix that does not match.
  */
-function cloneEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    GIT_TERMINAL_PROMPT: '0',
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
-  };
+export function cloneEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('GIT_CONFIG_') || CLONE_ENV_DENIED_KEYS.has(key)) {
+      delete env[key];
+    }
+  }
   for (const key of [
     'GIT_DIR',
     'GIT_WORK_TREE',
@@ -319,7 +351,14 @@ function cloneEnvironment(): NodeJS.ProcessEnv {
   ]) {
     delete env[key];
   }
-  return env;
+  return {
+    ...env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+    LC_ALL: 'C',
+    LANG: 'C',
+  };
 }
 
 export const spawnGitClone: GitCloneProcess = {
@@ -330,9 +369,11 @@ export const spawnGitClone: GitCloneProcess = {
       if (credentials) {
         // The URL itself is credential-free; the helper reads the secret from
         // the child's environment, so it never appears in /proc/<pid>/cmdline.
+        // `printf`, not `echo`: git runs a `!`-prefixed helper through /bin/sh,
+        // and dash's echo interprets backslash escapes in the token.
         args.unshift(
           '-c',
-          'credential.helper=!f() { echo username="$QWEN_GIT_USERNAME"; echo password="$QWEN_GIT_PASSWORD"; }; f',
+          'credential.helper=!f() { printf \'username=%s\\n\' "$QWEN_GIT_USERNAME"; printf \'password=%s\\n\' "$QWEN_GIT_PASSWORD"; }; f',
         );
         env['QWEN_GIT_USERNAME'] = credentials.username;
         env['QWEN_GIT_PASSWORD'] = credentials.password;
@@ -587,6 +628,20 @@ export function createWorkspaceGitCloner(
     }
     const normalizedUrl = normalizeGitCloneUrl(request.url);
     const { url, credentials } = extractGitCredentials(normalizedUrl);
+    // A decoded newline would split the helper's credential-protocol lines;
+    // reject here, after `extractGitCredentials` has parsed the URL, because
+    // its own catch turns every throw into the raw (credential-bearing) URL.
+    if (
+      credentials &&
+      (hasControlCharacters(credentials.username) ||
+        hasControlCharacters(credentials.password))
+    ) {
+      throw requestError(
+        400,
+        'invalid_url',
+        'Git URL credentials contain control characters',
+      );
+    }
     const target = expandCloneTarget(request.target);
     const claimed = await claimCloneTarget(
       target,

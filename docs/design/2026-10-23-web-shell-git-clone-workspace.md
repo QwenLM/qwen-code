@@ -52,7 +52,7 @@ workspace.
 - Branch, tag, or commit selection, shallow clones, submodule recursion, and
   Git LFS handling.
 - Collecting Git credentials in the browser. Private repositories rely on the
-  daemon host's credential helper or SSH agent.
+  daemon host's SSH agent, or on a token embedded in the pasted URL.
 - Resuming clone progress after the page closes. The daemon keeps cloning and
   leaves the directory in place; the user can register it afterwards.
 
@@ -102,8 +102,10 @@ persistence, and trust logic inside the clone job.
 
 ### Clone execution
 
-- Run `git clone --progress -- <url> <target>` through an argv array, never a
-  shell.
+- Run `git clone --progress -- <url> <target>` through an argv array: the URL
+  and target never reach a shell. The one exception is the inline
+  `credential.helper` injected for a URL with credentials, which git itself
+  runs through `/bin/sh`, so it prints with `printf` rather than `echo`.
 - Set `GIT_TERMINAL_PROMPT=0` so a missing credential fails instead of hanging.
 - Reject URLs that are not `http(s)://`, `ssh://`, `git://`, `git+ssh://`,
   scp-like (`user@host:path`), or `file://`; reject any URL starting with `-`
@@ -119,9 +121,16 @@ persistence, and trust logic inside the clone job.
   credential-free, and job state, progress messages, and error envelopes are
   redacted.
 - Disable global/system git config for the clone child (`GIT_CONFIG_NOSYSTEM=1`,
-  `GIT_CONFIG_GLOBAL` pointed at the platform null device), so a repository's
+  `GIT_CONFIG_GLOBAL` pointed at the platform null device) and sweep the
+  environment channels that outrank those files (`GIT_CONFIG_PARAMETERS`,
+  `GIT_CONFIG_COUNT`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH*`,
+  `GIT_PROXY_COMMAND`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`), so a repository's
   committed `.gitattributes` cannot select host-configured filter commands
-  during the clone's checkout.
+  during the clone's checkout, and a browser-chosen URL cannot borrow host
+  credentials or transport settings. The cost is that the host's
+  `credential.helper`, `url.*.insteadOf`, and `http.*` configuration does not
+  apply to the clone: SSH-agent authentication (through the inherited
+  `SSH_AUTH_SOCK`) and credentials embedded in the URL are what work.
 
 ### Capability
 
@@ -194,8 +203,9 @@ Clients that do not see the tag keep the current dialog.
 
 ## Acceptance criteria
 
-- A user can paste a public or host-authenticated clone URL, choose a target,
-  see progress, cancel it, and land in the cloned workspace.
+- A user can paste a public clone URL, an SSH-agent URL, or an HTTPS URL that
+  carries its own token, choose a target, see progress, cancel it, and land in
+  the cloned workspace.
 - A failed or cancelled clone leaves no target directory behind.
 - A cloned workspace is registered exactly like an existing directory; the
   clone path neither grants nor bypasses trust, and it appears in the workspace

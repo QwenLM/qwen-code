@@ -28,7 +28,7 @@ Web Shell 的「添加工作区」对话框目前只能注册守护进程主机�
 
 - 从另一个守护进程页面经代理在远程守护进程上 clone（现有的就地远程添加代理）。第一版只对当前连接的守护进程提供 Git 来源，与现有「非连接位置不展示无法验证的能力」保持一致。
 - 分支、tag、commit 选择，浅克隆，submodule 递归，Git LFS 特殊处理。
-- 在浏览器里收集 Git 凭据。私有仓库依赖守护进程主机上的 credential helper 或 SSH agent。
+- 在浏览器里收集 Git 凭据。私有仓库依赖守护进程主机上的 SSH agent，或者把 token 放进粘贴的 URL。
 - 页面关闭后恢复 clone 进度。守护进程会继续 clone 并把目录留在磁盘上，用户之后可以注册。
 
 ## 方案
@@ -68,13 +68,13 @@ Web Shell 的「添加工作区」对话框目前只能注册守护进程主机�
 
 ### Clone 执行
 
-- 通过参数数组执行 `git clone --progress -- <url> <target>`，不经过 shell。
+- 通过参数数组执行 `git clone --progress -- <url> <target>`：URL 与目标从不经过 shell。唯一的例外是 URL 带凭据时注入的内联 `credential.helper`，它由 git 自己经 `/bin/sh` 执行，因此用 `printf` 输出而不用 `echo`。
 - 设置 `GIT_TERMINAL_PROMPT=0`，缺少凭据时立即失败而不是挂起。
 - 拒绝非 `http(s)://`、`ssh://`、`git://`、`git+ssh://`、scp 形式（`user@host:path`）或 `file://` 的 URL；拒绝以 `-` 开头的 URL（选项注入）和 `ext::` remote-helper 传输。
 - Clone 上限 15 分钟并允许取消。取消会杀掉整个进程树，而不只是直接子进程。
 - 最多两个并发 clone、保留八个已结束任务、终态任务十分钟后回收，进度上报有界（百分比加一条脱敏短消息）。
 - 把 URL 的 userinfo 移出 git 的 argv：传给 git 的 URL 不含凭据，通过命令行 credential helper 从子进程环境读取密钥。因此 `.git/config` 里保存的 remote URL 也不含凭据，任务状态、进度消息和错误响应同样会脱敏。
-- 为 clone 子进程禁用全局/系统 git config（`GIT_CONFIG_NOSYSTEM=1`，`GIT_CONFIG_GLOBAL` 指向平台空设备），使仓库提交的 `.gitattributes` 无法在 clone 的 checkout 阶段选中宿主机配置的 filter 命令。
+- 为 clone 子进程禁用全局/系统 git config（`GIT_CONFIG_NOSYSTEM=1`，`GIT_CONFIG_GLOBAL` 指向平台空设备），并从子进程环境里清扫同类通道（`GIT_CONFIG_PARAMETERS`、`GIT_CONFIG_COUNT`、`GIT_ASKPASS`、`SSH_ASKPASS`、`GIT_SSH*`、`GIT_PROXY_COMMAND`、`GIT_EXEC_PATH`、`GIT_TEMPLATE_DIR`），使仓库提交的 `.gitattributes` 无法在 clone 的 checkout 阶段选中宿主机配置的 filter 命令，浏览器选定的地址也无法借用宿主凭据或传输配置。代价是宿主上配置的 `credential.helper`、`url.*.insteadOf`、`http.*` 对 clone 不生效：可用的是 SSH agent（继承 `SSH_AUTH_SOCK`）和 URL 自带凭据。
 
 ### 能力
 
@@ -124,7 +124,7 @@ Web Shell 的「添加工作区」对话框目前只能注册守护进程主机�
 
 ## 验收标准
 
-- 用户可以粘贴公开或主机已鉴权的 clone 地址、选择目标、看到进度、取消，并进入 clone 后的工作区。
+- 用户可以粘贴公开的、走 SSH agent 的或自带 token 的 clone 地址、选择目标、看到进度、取消，并进入 clone 后的工作区。
 - 失败或取消的 clone 不留下目标目录。
 - clone 出的工作区与注册已有目录完全一致：clone 路径既不授予也不绕过信任，并像其他动态注册的工作区一样出现在列表中。
 - 没有该能力的守护进程和旧客户端行为不变。
