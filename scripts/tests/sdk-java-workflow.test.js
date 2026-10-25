@@ -1433,6 +1433,9 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(selfHosted?.env?.MAVEN_ARGS).toContain(
         '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
       );
+      expect(block).toContain(
+        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+      );
     } else if (name !== 'mysql-integration') {
       expect(jobLocal).toBeNull();
     }
