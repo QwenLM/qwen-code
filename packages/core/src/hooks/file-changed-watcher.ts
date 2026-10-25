@@ -133,14 +133,22 @@ export class FileChangedWatcher {
           this.settleReady = resolve;
           watcher
             .on('all', (event, filePath) => {
-              if (
-                this.lifetime.signal.aborted ||
-                this.watcher !== watcher ||
-                (event !== 'add' && event !== 'change' && event !== 'unlink')
-              ) {
+              if (this.lifetime.signal.aborted || this.watcher !== watcher) {
                 return;
               }
               const resolved = path.resolve(filePath);
+              if (event === 'unlinkDir' && watchRoots.includes(resolved)) {
+                this.paths = [];
+                const parent = discoveryRoot(resolved);
+                if (parent && !watchRoots.includes(parent)) {
+                  watchRoots.push(parent);
+                  // Keep the watcher alive so pending file unlinks still drain.
+                  watcher.add(parent);
+                }
+                return;
+              }
+              if (event !== 'add' && event !== 'change' && event !== 'unlink')
+                return;
               if (
                 !staticSet.has(resolved) &&
                 !dynamic.some((root) => isWithin(root, resolved))

@@ -1417,6 +1417,8 @@ export interface ConfigParameters {
   /** Opt-in flag for the built-in `todo_write` tool. */
   todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
+  /** Experimental: run migrated surfaces on the shared agent loop. */
+  unifiedAgentLoopEnabled?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -3163,6 +3165,7 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
+  private readonly unifiedAgentLoopEnabled: boolean = false;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private artifactSnapshotsEnabled = false;
@@ -3617,6 +3620,7 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
+    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
@@ -10428,6 +10432,11 @@ export class Config {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
     return this.agentTeamEnabled;
+  }
+
+  isUnifiedAgentLoopEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
+    return this.unifiedAgentLoopEnabled;
   }
 
   /**

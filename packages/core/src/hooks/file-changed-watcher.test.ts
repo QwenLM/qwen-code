@@ -357,6 +357,68 @@ describe('FileChangedWatcher with real files', () => {
     );
   });
 
+  it.each(['dynamic', 'static'] as const)(
+    'recovers a %s target when its discovery anchor is deleted and recreated',
+    async (kind) => {
+      const anchor = path.join(root, 'anchor');
+      const directory = kind === 'static' ? anchor : path.join(anchor, 'out');
+      await fs.mkdir(directory, { recursive: true });
+      const file = path.join(directory, 'topic.md');
+      await fs.writeFile(file, 'initial');
+      const target = kind === 'static' ? file : directory;
+      const staticFiles = kind === 'static' ? [file] : [];
+      const notify = vi.fn().mockResolvedValue(undefined);
+      watcher = new FileChangedWatcher(notify);
+      await watcher.setPaths([target], staticFiles);
+      await fs.writeFile(file, 'before deletion');
+      await vi.waitFor(
+        () =>
+          expect(notify).toHaveBeenCalledWith(
+            file,
+            'change',
+            expect.any(AbortSignal),
+          ),
+        waitOptions,
+      );
+      await fs.rm(anchor, { recursive: true });
+      await vi.waitFor(
+        () =>
+          expect(notify).toHaveBeenCalledWith(
+            file,
+            'unlink',
+            expect.any(AbortSignal),
+          ),
+        waitOptions,
+      );
+      notify.mockClear();
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(file, 'recreated');
+      await vi.waitFor(
+        () =>
+          expect(notify).toHaveBeenCalledWith(
+            file,
+            'add',
+            expect.any(AbortSignal),
+          ),
+        waitOptions,
+      );
+      await watcher.setPaths([target], staticFiles);
+      await fs.writeFile(file, 'after identical refresh');
+      await vi.waitFor(
+        () =>
+          expect(notify).toHaveBeenCalledWith(
+            file,
+            'change',
+            expect.any(AbortSignal),
+          ),
+        waitOptions,
+      );
+      expect(notify.mock.calls.every(([changed]) => changed === file)).toBe(
+        true,
+      );
+    },
+  );
+
   it('continues delivering after a callback failure', async () => {
     const notify = vi
       .fn()

@@ -4704,6 +4704,11 @@
           "type": "boolean",
           "default": false
         },
+        "unifiedAgentLoop": {
+          "description": "Run headless sessions (`-p` and stream-json) on the shared agent loop (experimental). Other surfaces keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.",
+          "type": "boolean",
+          "default": false
+        },
         "agentCollaboration": {
           "description": "Enable persistent workspace Agents that you can @-mention in a chat session (experimental). Each mentioned Agent answers in the same session from its own native session. Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.",
           "type": "boolean",

@@ -314,6 +314,18 @@ const EN: Messages = {
     'Approval policy changed elsewhere. Review the current selection.',
   'managed.approvalChange.failed':
     'Approval change was refused. Review the available policies.',
+  'managed.permissionRules.title': 'Permission rules',
+  'managed.permissionRules.description':
+    'Rules belong to this conversation. Edit while idle. Deny takes priority, and explicit Ask always requires your approval, including in YOLO.',
+  'managed.permissionRules.syntax':
+    'One rule per line: Read, Bash(git status*), WebFetch(domain:example.com), or mcp__server__tool. Path rules are not supported. Up to 32 per list and 64 in total.',
+  'managed.permissionRules.allow': 'Allow',
+  'managed.permissionRules.ask': 'Ask every time',
+  'managed.permissionRules.deny': 'Deny',
+  'managed.permissionRules.invalid':
+    'Check the rule syntax, duplicates and limits: 512 UTF-8 bytes per rule, 8 KiB in total.',
+  'managed.permissionRules.clear': 'Clear rules',
+  'managed.permissionRules.save': 'Save rules',
   'managed.model.loading': 'Loading available models…',
   'managed.model.optionsError': 'Could not load available models.',
   'managed.model.reload': 'Reload models',
@@ -4717,6 +4729,18 @@ const ZH: Messages = {
   'managed.approvalChange.conflict':
     '审批策略已在其他页面修改，请检查当前选择。',
   'managed.approvalChange.failed': '审批策略切换被拒绝，请检查可用策略。',
+  'managed.permissionRules.title': '权限规则',
+  'managed.permissionRules.description':
+    '规则仅属于当前会话，空闲时可编辑。拒绝优先，显式询问始终需要人工确认，包括 YOLO 模式。',
+  'managed.permissionRules.syntax':
+    '每行一条：Read、Bash(git status*)、WebFetch(domain:example.com) 或 mcp__server__tool。暂不支持路径规则；每类最多 32 条，合计 64 条。',
+  'managed.permissionRules.allow': '允许',
+  'managed.permissionRules.ask': '每次询问',
+  'managed.permissionRules.deny': '拒绝',
+  'managed.permissionRules.invalid':
+    '请检查语法、重复项与容量：每条最多 512 UTF-8 字节，合计最多 8 KiB。',
+  'managed.permissionRules.clear': '清除规则',
+  'managed.permissionRules.save': '保存规则',
   'managed.model.loading': '正在加载可用模型…',
   'managed.model.optionsError': '加载可用模型失败。',
   'managed.model.reload': '重新加载模型',
