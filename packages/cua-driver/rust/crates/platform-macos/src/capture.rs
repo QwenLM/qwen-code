@@ -23,6 +23,9 @@
 //!
 //! Compatibility fallback: `screencapture -l <windowID> -x -o <file>` when
 //! the native path errors or returns empty bytes.
+//! Known off-Space windows first try a single-window SkyLight backing-store
+//! image. Current-Space and unknown windows use it only after the public chain
+//! fails. Both native backends share one worker and a three-second budget.
 //!
 //! ## Display capture
 //!
@@ -237,7 +240,7 @@ fn screenshot_window_bytes_shell(window_id: u32) -> anyhow::Result<Vec<u8>> {
     let capture = SecureCapturePath::new("window.png")?;
     let tmp_path = capture.file.to_string_lossy().into_owned();
 
-    let output = Command::new("screencapture")
+    let output = Command::new("/usr/sbin/screencapture")
         .args([
             "-l",
             &window_id.to_string(),
@@ -366,7 +369,7 @@ const WINDOW_PLAN_CACHE_CAPACITY: usize = 32;
 /// walk's own 20-second bound. The shell fallback retains its prior behavior.
 const WINDOW_CAPTURE_NATIVE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Permit at most one ScreenCaptureKit worker. If an Apple completion callback
+/// Permit at most one native window-capture worker. If an Apple completion callback
 /// never fires, the timed-out worker keeps this permit, and every later request
 /// goes straight to the compatibility fallback instead of leaking more
 /// blocked threads.
@@ -413,29 +416,34 @@ where
     T: Send + 'static,
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
 {
+    if timeout.is_zero() {
+        anyhow::bail!("native window capture budget exhausted");
+    }
     let permit = gate
         .try_acquire()
-        .ok_or_else(|| anyhow::anyhow!("ScreenCaptureKit capture already in flight"))?;
+        .ok_or_else(|| anyhow::anyhow!("native window capture already in flight"))?;
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::Builder::new()
-        .name("cua-sck-window-capture".into())
+        .name("cua-native-window-capture".into())
         .spawn(move || {
             let result = work();
             drop(permit);
             let _ = sender.send(result);
         })
-        .map_err(|error| anyhow::anyhow!("failed to start ScreenCaptureKit worker: {error}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!("failed to start native window capture worker: {error}")
+        })?;
 
     match receiver.recv_timeout(timeout) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => {
             anyhow::bail!(
-                "ScreenCaptureKit capture timed out after {} ms",
+                "native window capture timed out after {} ms",
                 timeout.as_millis()
             )
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            anyhow::bail!("ScreenCaptureKit worker ended without a result")
+            anyhow::bail!("native window capture worker ended without a result")
         }
     }
 }
@@ -849,12 +857,10 @@ fn screenshot_window_bytes_sck_inner(window_id: u32) -> anyhow::Result<Vec<u8>> 
 /// Bound the dependency's synchronous callback wrappers without permitting an
 /// unbounded number of detached workers. Ownership of the gate permit and all
 /// ScreenCaptureKit/CF objects stays on the worker until it really returns.
-fn screenshot_window_bytes_sck(window_id: u32) -> anyhow::Result<Vec<u8>> {
-    run_native_capture_worker(
-        native_capture_gate(),
-        WINDOW_CAPTURE_NATIVE_TIMEOUT,
-        move || screenshot_window_bytes_sck_inner(window_id),
-    )
+fn screenshot_window_bytes_sck(window_id: u32, timeout: Duration) -> anyhow::Result<Vec<u8>> {
+    run_native_capture_worker(native_capture_gate(), timeout, move || {
+        screenshot_window_bytes_sck_inner(window_id)
+    })
     .map_err(|error| {
         anyhow::anyhow!(
             "ScreenCaptureKit capture failed for window {window_id}: {error:#}; \
@@ -866,15 +872,150 @@ fn screenshot_window_bytes_sck(window_id: u32) -> anyhow::Result<Vec<u8>> {
 /// Capture a window by its `window_id` (CGWindowID).
 /// Returns raw PNG bytes or an error.
 ///
-/// Tries ScreenCaptureKit first; falls back to the `screencapture` CLI on
-/// native error or empty output.
+/// Off-Space windows try the backing store first; others prefer SCK and shell.
 pub fn screenshot_window_bytes(window_id: u32) -> anyhow::Result<Vec<u8>> {
-    capture_window_with_backends(window_id, screenshot_window_bytes_sck, |wid| {
-        if current_window_capture_identity(wid)?.requires_display_crop {
-            anyhow::bail!("shell capture cannot preserve attached window {wid} geometry");
+    let deadline = Instant::now() + WINDOW_CAPTURE_NATIVE_TIMEOUT;
+    let off_space = crate::windows::window_on_current_space_by_id(window_id) == Some(false);
+    capture_window_with_space_route(
+        window_id,
+        off_space,
+        |wid| {
+            capture_window_with_backends(
+                wid,
+                |wid| {
+                    screenshot_window_bytes_sck(
+                        wid,
+                        deadline.saturating_duration_since(Instant::now()),
+                    )
+                },
+                |wid| {
+                    if current_window_capture_identity(wid)?.requires_display_crop {
+                        anyhow::bail!(
+                            "shell capture cannot preserve attached window {wid} geometry"
+                        );
+                    }
+                    screenshot_window_bytes_shell(wid)
+                },
+            )
+        },
+        |wid| {
+            run_native_capture_worker(
+                native_capture_gate(),
+                deadline.saturating_duration_since(Instant::now()),
+                move || screenshot_window_bytes_skylight(wid),
+            )
+        },
+    )
+}
+
+fn capture_window_with_space_route<P, S>(
+    window_id: u32,
+    off_space: bool,
+    public: P,
+    skylight: S,
+) -> anyhow::Result<Vec<u8>>
+where
+    P: FnOnce(u32) -> anyhow::Result<Vec<u8>>,
+    S: FnOnce(u32) -> anyhow::Result<CaptureIdentityValidation>,
+{
+    if off_space {
+        let private_error = match skylight(window_id) {
+            Ok(CaptureIdentityValidation::Changed(_)) => {
+                anyhow::bail!("window {window_id} changed identity during backing-store capture")
+            }
+            Ok(CaptureIdentityValidation::Matched(bytes)) if !bytes.is_empty() => return Ok(bytes),
+            Ok(CaptureIdentityValidation::Matched(_)) => {
+                anyhow::anyhow!("SkyLight capture produced empty bytes")
+            }
+            Err(error) => error,
+        };
+        return public(window_id).map_err(|public_error| anyhow::anyhow!(
+            "window {window_id} is on another Space; SkyLight capture: {private_error:#}; {public_error:#}"
+        ));
+    }
+    match public(window_id) {
+        Ok(bytes) => Ok(bytes),
+        Err(public_error) => match skylight(window_id) {
+            Ok(CaptureIdentityValidation::Matched(bytes)) if !bytes.is_empty() => Ok(bytes),
+            Ok(CaptureIdentityValidation::Matched(_)) => Err(anyhow::anyhow!(
+                "{public_error:#}; SkyLight capture produced empty bytes"
+            )),
+            Ok(CaptureIdentityValidation::Changed(_)) => Err(anyhow::anyhow!(
+                "{public_error:#}; window {window_id} changed identity during backing-store capture"
+            )),
+            Err(private_error) => Err(anyhow::anyhow!(
+                "{public_error:#}; SkyLight capture: {private_error:#}"
+            )),
+        },
+    }
+}
+
+fn screenshot_window_bytes_skylight(window_id: u32) -> anyhow::Result<CaptureIdentityValidation> {
+    let identity = current_window_capture_identity(window_id)?;
+    if identity.requires_display_crop {
+        anyhow::bail!("backing-store capture cannot preserve attached window {window_id} geometry");
+    }
+    capture_then_validate_identity(
+        identity,
+        || {
+            let image = crate::input::skylight::hw_capture_window(window_id).ok_or_else(|| {
+                anyhow::anyhow!("SkyLight returned no image for window {window_id}")
+            })?;
+            core_cgimage_to_png(&image)
+        },
+        || current_window_capture_identity(window_id),
+    )
+}
+
+fn core_cgimage_to_png(image: &core_graphics::image::CGImage) -> anyhow::Result<Vec<u8>> {
+    use core_graphics::base::{kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast};
+    use core_graphics::color_space::CGColorSpace;
+    use core_graphics::context::CGContext;
+    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+
+    let w = checked_image_dim(image.width(), "CGImage width")?;
+    let h = checked_image_dim(image.height(), "CGImage height")?;
+    let mut context = CGContext::create_bitmap_context(
+        None,
+        w as usize,
+        h as usize,
+        8,
+        w as usize * 4,
+        &CGColorSpace::create_device_rgb(),
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big,
+    );
+    context.draw_image(
+        CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(f64::from(w), f64::from(h)),
+        ),
+        image,
+    );
+    let mut rgba = context.data().to_vec();
+    if rgba.len() != w as usize * h as usize * 4 {
+        anyhow::bail!("backing-store bitmap length {} != {w}*{h}*4", rgba.len());
+    }
+    if !unpremultiply_rgba(&mut rgba) {
+        anyhow::bail!("backing-store image is fully transparent (no window content)");
+    }
+    cua_driver_core::image_utils::encode_rgba_to_png(&rgba, w, h)
+}
+
+fn unpremultiply_rgba(rgba: &mut [u8]) -> bool {
+    let mut visible = false;
+    for pixel in rgba.chunks_exact_mut(4) {
+        let alpha = u16::from(pixel[3]);
+        if alpha == 0 {
+            continue;
         }
-        screenshot_window_bytes_shell(wid)
-    })
+        visible = true;
+        if alpha < 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+    visible
 }
 
 /// Capture a window by its `window_id` (CGWindowID).
@@ -892,7 +1033,7 @@ pub fn screenshot_display_bytes() -> anyhow::Result<Vec<u8>> {
     let capture = SecureCapturePath::new("display.png")?;
     let tmp_path = capture.file.to_string_lossy().into_owned();
 
-    let output = Command::new("screencapture")
+    let output = Command::new("/usr/sbin/screencapture")
         .args(["-x", &tmp_path])
         .output()?;
 
@@ -993,6 +1134,93 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use std::sync::Arc;
+
+    #[test]
+    fn space_route_prefers_the_appropriate_backend_and_never_falls_back_after_identity_change() {
+        let png = vec![1, 2, 3];
+        assert_eq!(
+            capture_window_with_space_route(
+                42,
+                true,
+                |_| panic!("off-Space backing store succeeded"),
+                |wid| {
+                    assert_eq!(wid, 42);
+                    Ok(CaptureIdentityValidation::Matched(png.clone()))
+                },
+            )
+            .unwrap(),
+            png
+        );
+        assert_eq!(
+            capture_window_with_space_route(
+                42,
+                false,
+                |_| Ok(png.clone()),
+                |_| panic!("current-Space public capture succeeded"),
+            )
+            .unwrap(),
+            png
+        );
+        assert_eq!(
+            capture_window_with_space_route(
+                42,
+                true,
+                |_| Ok(png.clone()),
+                |_| anyhow::bail!("symbol missing"),
+            )
+            .unwrap(),
+            png
+        );
+        let changed = WindowCaptureIdentity::new(99, 0, 0.0, 0.0, 800.0, 600.0);
+        let error = capture_window_with_space_route(
+            42,
+            true,
+            |_| panic!("must not recapture a replacement window"),
+            |_| Ok(CaptureIdentityValidation::Changed(changed)),
+        )
+        .err()
+        .expect("identity change refuses the whole request");
+        assert!(error.to_string().contains("changed identity"));
+    }
+
+    #[test]
+    fn backing_store_png_preserves_pixels_and_rejects_a_transparent_image() {
+        use core_graphics::base::{kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast};
+        use core_graphics::color_space::CGColorSpace;
+        use core_graphics::context::CGContext;
+
+        let mut context = CGContext::create_bitmap_context(
+            None,
+            2,
+            1,
+            8,
+            8,
+            &CGColorSpace::create_device_rgb(),
+            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big,
+        );
+        context
+            .data()
+            .copy_from_slice(&[255, 0, 0, 255, 64, 32, 0, 128]);
+        let image = context.create_image().unwrap();
+        let png = core_cgimage_to_png(&image).unwrap();
+        let pixels = image::load_from_memory(&png).unwrap().into_rgba8();
+        assert_eq!(pixels.dimensions(), (2, 1));
+        assert_eq!(pixels.as_raw(), &[255, 0, 0, 255, 128, 64, 0, 128]);
+        context.data().fill(0);
+        let error = core_cgimage_to_png(&context.create_image().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("fully transparent"));
+    }
+
+    #[test]
+    fn exhausted_native_budget_never_starts_a_worker() {
+        static GATE: NativeCaptureGate = NativeCaptureGate::new();
+        let error = run_native_capture_worker::<(), _>(&GATE, Duration::ZERO, || {
+            panic!("exhausted budget cannot dispatch native work")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("budget exhausted"));
+        assert!(GATE.try_acquire().is_some());
+    }
 
     #[test]
     fn native_window_capture_short_circuits_shell_fallback() {

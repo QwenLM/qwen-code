@@ -24,7 +24,9 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { ensureAutoMemoryScaffold } from './store.js';
+import { scanUserAutoMemoryTopicDocuments } from './scan.js';
 import * as trustedMemoryFilesystem from './trusted-memory-filesystem.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 vi.mock('./trusted-memory-filesystem.js', { spy: true });
 
@@ -127,40 +129,45 @@ describe('managed auto-memory indexer', () => {
     await expect(fs.readFile(index, 'utf-8')).resolves.toBe('GOOD INDEX\n');
   });
 
-  it('refuses to persist a partial index when a subdirectory cannot be read', async () => {
-    // chmod 000 blocks neither root nor Windows, where a directory chmod only
-    // toggles FILE_ATTRIBUTE_READONLY and so cannot make a directory
-    // unreadable — the rebuild would resolve and the rejects assertion red.
-    if (process.platform === 'win32' || process.getuid?.() === 0) {
-      return;
-    }
-    // A partially walked root must fail the rebuild loudly: the index is the
-    // persisted, authoritative artifact, so committing it from a scan that
-    // silently skipped a directory would drop those entries with no warning.
-    const memoryRoot = getAutoMemoryRoot(projectRoot);
-    const indexPath = getAutoMemoryIndexPath(projectRoot);
-    const doc = (name: string) =>
-      `---\ntype: project\nname: ${name}\ndescription: ${name}\n---\nbody`;
-    const visible = path.join(memoryRoot, 'project', 'visible.md');
-    const locked = path.join(memoryRoot, 'reference');
-    await fs.mkdir(path.dirname(visible), { recursive: true });
-    await fs.writeFile(visible, doc('Visible'), 'utf-8');
-    await fs.mkdir(locked, { recursive: true });
-    await fs.writeFile(path.join(locked, 'hidden.md'), doc('Hidden'), 'utf-8');
-
-    const complete = await rebuildManagedAutoMemoryIndex(projectRoot);
-    expect(complete).toContain('reference/hidden.md');
-
-    await fs.chmod(locked, 0o000);
-    try {
-      await expect(rebuildManagedAutoMemoryIndex(projectRoot)).rejects.toThrow(
-        'memory scan',
+  // chmod 000 blocks neither root with its DAC capabilities nor Windows,
+  // where a directory chmod only toggles FILE_ATTRIBUTE_READONLY and so
+  // cannot make a directory unreadable — the rebuild would resolve and the
+  // rejects assertion red.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'refuses to persist a partial index when a subdirectory cannot be read',
+    async () => {
+      // A partially walked root must fail the rebuild loudly: the index is the
+      // persisted, authoritative artifact, so committing it from a scan that
+      // silently skipped a directory would drop those entries with no warning.
+      const memoryRoot = getAutoMemoryRoot(projectRoot);
+      const indexPath = getAutoMemoryIndexPath(projectRoot);
+      const doc = (name: string) =>
+        `---\ntype: project\nname: ${name}\ndescription: ${name}\n---\nbody`;
+      const visible = path.join(memoryRoot, 'project', 'visible.md');
+      const locked = path.join(memoryRoot, 'reference');
+      await fs.mkdir(path.dirname(visible), { recursive: true });
+      await fs.writeFile(visible, doc('Visible'), 'utf-8');
+      await fs.mkdir(locked, { recursive: true });
+      await fs.writeFile(
+        path.join(locked, 'hidden.md'),
+        doc('Hidden'),
+        'utf-8',
       );
-      await expect(fs.readFile(indexPath, 'utf-8')).resolves.toBe(complete);
-    } finally {
-      await fs.chmod(locked, 0o700);
-    }
-  });
+
+      const complete = await rebuildManagedAutoMemoryIndex(projectRoot);
+      expect(complete).toContain('reference/hidden.md');
+
+      await fs.chmod(locked, 0o000);
+      try {
+        await expect(
+          rebuildManagedAutoMemoryIndex(projectRoot),
+        ).rejects.toThrow('memory scan');
+        await expect(fs.readFile(indexPath, 'utf-8')).resolves.toBe(complete);
+      } finally {
+        await fs.chmod(locked, 0o700);
+      }
+    },
+  );
 
   it('does not create a missing user root while rebuilding', async () => {
     const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
@@ -207,6 +214,106 @@ describe('managed auto-memory indexer', () => {
       }
       clearAutoMemoryRootCache();
     }
+  });
+
+  it.each([
+    { nativeCount: 1, importedCount: 201, long: false },
+    { nativeCount: 200, importedCount: 1, long: false },
+    { nativeCount: 166, importedCount: 20, long: true },
+  ])(
+    'preserves native user memory against import capacity ($nativeCount/$importedCount/$long)',
+    async ({ nativeCount, importedCount, long }) => {
+      const previous = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'runtime');
+      clearAutoMemoryRootCache();
+      try {
+        const root = getUserAutoMemoryRoot();
+        await fs.mkdir(root, { recursive: true });
+        const old = new Date('2026-01-01T00:00:00Z');
+        const document = (name: string, description = name) =>
+          `---\nname: ${name}\ndescription: ${description}\ntype: user\n---\nSynthetic preference ${name}.\n`;
+        for (let i = 0; i < nativeCount; i++) {
+          const file = path.join(root, `native-${i}.md`);
+          await fs.writeFile(
+            file,
+            document(`N${i}`, long ? 'D'.repeat(120) : `N${i}`),
+          );
+          await fs.utimes(file, old, old);
+        }
+        if (long) {
+          const file = path.join(
+            root,
+            ...Array.from(
+              { length: 4 },
+              (_, i) => `long${i}-${'x'.repeat(174)}`,
+            ),
+            'long.md',
+          );
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, document('NativeLong'));
+          await fs.utimes(file, old, old);
+        }
+        const before = await rebuildUserAutoMemoryIndex();
+        const originalEntries = before
+          .split('\n')
+          .filter((line) => line.startsWith('- '));
+        expect(originalEntries).toHaveLength(nativeCount + Number(long));
+        const imported = path.join(root, 'imported', 'synthetic');
+        await fs.mkdir(imported, { recursive: true });
+        for (let i = 0; i < importedCount; i++)
+          await fs.writeFile(
+            path.join(imported, `${i}.md`),
+            document(`Imported${i}`),
+          );
+        const published = await rebuildAutoMemoryIndexAtRoot(root, 'user');
+        const rebuilt = await rebuildUserAutoMemoryIndex();
+        for (const entry of originalEntries) {
+          expect(published).toContain(entry);
+          expect(rebuilt).toContain(entry);
+        }
+        const scanned = await scanUserAutoMemoryTopicDocuments();
+        expect(scanned.length).toBeLessThanOrEqual(200);
+        expect(
+          scanned.filter((doc) => !doc.relativePath.startsWith('imported/')),
+        ).toHaveLength(nativeCount + Number(long));
+      } finally {
+        if (previous === undefined)
+          delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+        else process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previous;
+        clearAutoMemoryRootCache();
+      }
+    },
+  );
+
+  it('keeps native project memory ahead of imported project memory in the index', () => {
+    const doc = (
+      relativePath: string,
+      title: string,
+      mtimeMs: number,
+    ): Parameters<typeof buildManagedAutoMemoryIndex>[0][number] => ({
+      scope: 'project',
+      type: 'project',
+      filePath: `/tmp/project/${relativePath}`,
+      relativePath,
+      filename: path.basename(relativePath),
+      title,
+      description: title,
+      category: 'uncategorized',
+      keywords: [],
+      usageScenarios: [],
+      body: title,
+      mtimeMs,
+    });
+    const docs = [
+      ...Array.from({ length: 210 }, (_, index) =>
+        doc(`imported/group/${index}.md`, `Imported${index}`, 2_000 + index),
+      ),
+      doc('native.md', 'Native project memory', 1),
+    ];
+
+    const index = buildManagedAutoMemoryIndex(docs);
+
+    expect(index).toContain('native.md');
   });
 
   it('formats a compact file-based MEMORY.md index view', () => {

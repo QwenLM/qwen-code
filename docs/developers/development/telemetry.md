@@ -71,7 +71,7 @@ These settings can be overridden by environment variables or CLI flags.
 | `enabled`                         | `QWEN_TELEMETRY_ENABLED`                             | `--telemetry` / `--no-telemetry`                         | Enable or disable telemetry                                                                                                            | `true`/`false`    | `false`                 |
 | `target`                          | `QWEN_TELEMETRY_TARGET`                              | `--telemetry-target <local\|gcp>` _(deprecated)_         | Informational destination label; does not control exporter routing — set `otlpEndpoint` or `outfile` to configure where data is sent   | `"gcp"`/`"local"` | `"local"`               |
 | `otlpEndpoint`                    | `QWEN_TELEMETRY_OTLP_ENDPOINT`                       | `--telemetry-otlp-endpoint <URL>`                        | OTLP collector endpoint                                                                                                                | URL string        | `http://localhost:4317` |
-| `otlpProtocol`                    | `QWEN_TELEMETRY_OTLP_PROTOCOL`                       | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP transport protocol                                                                                                                | `"grpc"`/`"http"` | `"grpc"`                |
+| `otlpProtocol`                    | `QWEN_TELEMETRY_OTLP_PROTOCOL`                       | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP exporter protocol: `grpc` = gRPC/protobuf; `http` = HTTP/JSON                                                                     | `"grpc"`/`"http"` | `"grpc"`                |
 | `otlpTracesEndpoint`              | `QWEN_TELEMETRY_OTLP_TRACES_ENDPOINT`                | -                                                        | Per-signal endpoint override for traces (HTTP only)                                                                                    | URL string        | -                       |
 | `otlpLogsEndpoint`                | `QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT`                  | -                                                        | Per-signal endpoint override for logs (HTTP only)                                                                                      | URL string        | -                       |
 | `otlpMetricsEndpoint`             | `QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT`               | -                                                        | Per-signal endpoint override for metrics (HTTP only)                                                                                   | URL string        | -                       |
@@ -144,6 +144,11 @@ This setting does not disable sensitive data in OTel logs or other telemetry
 sinks; non-internal API response telemetry can populate `response_text`, so
 OTel logs, UI telemetry, and chat recording may receive response text
 independently of this setting. QwenLogger does not include `response_text`.
+
+**HTTP OTLP encoding:** `otlpProtocol: "http"` sends OTLP/JSON with
+`Content-Type: application/json` for traces, logs, and metrics. Use a collector
+or receiver that supports OTLP/HTTP JSON. The `http` value does not select
+OTLP/HTTP protobuf encoding.
 
 **HTTP OTLP signal routing:** When using HTTP protocol (`otlpProtocol: "http"`),
 Qwen Code automatically appends signal-specific paths (`/v1/traces`, `/v1/logs`,
@@ -752,7 +757,7 @@ The following events are logged:
   - **Attributes**: `trigger` ("auto"/"manual"), `status` ("updated"/"noop"/"failed"/"cancelled"), `deduped_entries` (int), `touched_topics_count` (int), `touched_topics` (string), `duration_ms` (int)
 
 - `qwen-code.memory.recall`: Memory recall operation completed.
-  - **Attributes**: `query_length` (int), `docs_scanned` (int), `docs_selected` (int), `strategy` ("none"/"heuristic"/"model"), `duration_ms` (int)
+  - **Attributes**: `query_length` (int), `docs_scanned` (int), `docs_selected` (int), `strategy` ("none"/"heuristic"/"model"), `duration_ms` (int), `selector_skipped` (bool, optional — set for structured-mode recalls that made a skip decision, so not on the empty-query/empty-corpus short circuit; false when the selector runs, including when the #13003 knob is off)
 
 #### Prompt Suggestion & Speculation Events
 
@@ -771,7 +776,12 @@ The following events are logged:
   - **Attributes**: `prompt_id` (string), `finish_reason` (string), `result` (string)
 
 - `loop_detected`: Loop detected during agent execution. _(Note: emitted without `qwen-code.` prefix — pre-existing inconsistency.)_
-  - **Attributes**: `loop_type` (string), `prompt_id` (string)
+  - **Attributes**: `loop_type` (string), `prompt_id` (string), `loop_reason` (string, optional), `tool_call_count` (int, optional), `tool_call_limit` (int, optional)
+  - `loop_reason` names the cause when one loop type covers several: `explicit_cap`, `backstop` or `stuck_repetition` for `turn_tool_call_cap`, and `repeated_call` or `provider_duplicate_id` for `global_tool_call_duplicate`. `tool_call_count` and `tool_call_limit` are set for `turn_tool_call_cap` only. `tool_call_count` is the count the cap compared with the limit; daemon/ACP sessions check the cap per batch before running it, so their count includes the whole skipped batch.
+
+- `loop_protection`: A loop detector governed by `model.loopProtection` reached a reminder or stop point. _(Note: emitted without `qwen-code.` prefix, like `loop_detected`.)_
+  - **Attributes**: `prompt_id` (string), `loop_type` (string), `decision` (string: `reminded`, `stopped` or `observed`), `mode` (string: `stop`, `warn` or `off`), `loop_reason` (string, optional)
+  - `reminded` is logged when the reminder is sent to the model; `stopped` is logged once per turn and also as `loop_detected`; `observed` is logged once per pattern under `off`, and under `warn` when a stateful read tool reaches the stop point without the result evidence a reminder needs. Budget stops (an explicit cap, the backstop) and the duplicate provider tool-call id guard are not governed and log no `loop_protection` event.
 
 - `kitty_sequence_overflow`: Kitty graphics protocol sequence exceeded buffer size. _(Note: emitted without `qwen-code.` prefix — pre-existing inconsistency.)_
   - **Attributes**: `sequence_length` (int), `truncated_sequence` (string, first 20 chars)
@@ -873,10 +883,10 @@ A resumed Goal can contribute multiple stop observations, each containing its li
   - **Attributes**: `trigger`, `status`
 
 - `qwen-code.memory.recall.count` (Counter, Int): Auto-memory recall operations.
-  - **Attributes**: `strategy` ("none"/"heuristic"/"model")
+  - **Attributes**: `strategy` ("none"/"heuristic"/"model"), `selector_skipped` (bool, optional — attached only for structured-mode recalls while the #13003 skip-selector knob is on)
 
 - `qwen-code.memory.recall.duration` (Histogram, ms): Recall duration.
-  - **Attributes**: `strategy`
+  - **Attributes**: `strategy`, `selector_skipped` (bool, optional — same conditions as the counter)
 
 #### API Request Breakdown
 
@@ -956,10 +966,11 @@ spans continue to use `gen_ai.conversation.id` for the same owning session ID.
   - Agent input is one original user prompt, not the expanded model request. Agent output is one final user-visible text projection; structured JSON uses compact JSON text with `finish_reason=tool_call`. Both are omitted unless sensitive span attributes are enabled and the complete JSON fits the per-attribute limit.
 
 - `qwen-code.llm_request`: Wraps a single LLM API call.
-  - **GenAI attributes**: `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, optional ARMS extension `gen_ai.user.id`, `gen_ai.request.model`, `gen_ai.request.stream`, `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences`, optional `gen_ai.output.type`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`, `gen_ai.response.time_to_first_chunk`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`
+  - **GenAI attributes**: `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, optional ARMS extension `gen_ai.user.id`, `gen_ai.request.model`, `gen_ai.request.stream`, `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences`, `gen_ai.request.reasoning.level`, optional `gen_ai.output.type`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`, `gen_ai.response.time_to_first_chunk`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`
   - **Compatibility attributes**: `session.id`, `qwen-code.prompt_id`, `llm_request.context` ("subagent"/"interaction"/"standalone"), `duration_ms`, `ttft_ms`, `request_setup_ms`, `attempt`, `retry_total_delay_ms`, `sampling_ms`, `output_tokens_per_second`, `success`, `error`, `finish_reason`, `thoughts_token_count`, `subagent_name`, `error_type`, `error_status_code`
   - Standard response fields come from the provider response. Standard token fields are emitted only for provider-reported non-negative safe integers. If the provider reports only a total token count, input/output usage is omitted rather than estimated.
   - Standard request-parameter fields come from the first provider-final SDK request object after adapter defaults, overrides, unsupported-field removal, and output-window clamps. Qwen Code does not infer SDK or server defaults.
+  - `gen_ai.request.reasoning.level` preserves the exact non-empty `reasoning_effort` string from the first final OpenAI-compatible request, including provider-specific tiers and `none` when sent. It is omitted when absent or invalid, including when the adapter removes it; nested provider-specific reasoning fields are not mapped. This request parameter does not require sensitive-content capture.
   - Streaming requests emit `gen_ai.request.stream=true`. `gen_ai.response.time_to_first_chunk` measures seconds from the provider call to the first normalized response yielded by the provider adapter, which may differ from the first raw network frame. Non-streaming requests omit both standard streaming attributes because an absent `gen_ai.request.stream` means non-streaming in the semantic convention.
 
 - `qwen-code.tool`: Wraps the full tool lifecycle (approval wait + execution).

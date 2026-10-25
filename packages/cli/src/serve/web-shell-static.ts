@@ -5,6 +5,7 @@
  */
 
 import * as path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -104,6 +105,21 @@ export function requestedDaemonParam(originalUrl: string): string | null {
   ).get('daemon');
 }
 
+/**
+ * Repeated `?fanout=` values naming extra daemons the page connects to
+ * simultaneously (multi-daemon view, #13727). Read with the client's own
+ * parser for the same reasons as `requestedDaemonParam`; `getAll` keeps every
+ * repeated value, and each value is validated individually by
+ * `remoteDaemonConnectOrigins`.
+ */
+export function requestedFanoutParams(originalUrl: string): string[] {
+  const queryStart = originalUrl.indexOf('?');
+  const values = new URLSearchParams(
+    queryStart === -1 ? '' : originalUrl.slice(queryStart + 1),
+  ).getAll('fanout');
+  return [...new Set(values)];
+}
+
 export function remoteDaemonConnectOrigins(value: string | null): string[] {
   if (!value) return [];
   try {
@@ -157,11 +173,21 @@ function createSendIndex(
   webShellDir: string,
   frameAncestors: readonly string[] = [],
   desktopRelayEnabled = false,
+  managedApp = false,
 ): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
   return (req: Request, res: Response): void => {
     const csp = buildWebShellCsp(frameAncestors, [
-      ...remoteDaemonConnectOrigins(requestedDaemonParam(req.originalUrl)),
+      ...(!managedApp
+        ? [
+            ...remoteDaemonConnectOrigins(
+              requestedDaemonParam(req.originalUrl),
+            ),
+            ...requestedFanoutParams(req.originalUrl).flatMap(
+              remoteDaemonConnectOrigins,
+            ),
+          ]
+        : []),
       ...(desktopRelayEnabled ? ['http://127.0.0.1:47821'] : []),
     ]);
     res
@@ -185,6 +211,27 @@ function createSendIndex(
     // frame-ancestors (set above) governs framing.
     if (frameAncestors.length === 0) {
       res.set('X-Frame-Options', 'DENY');
+    }
+    if (managedApp) {
+      void readFile(indexPath, 'utf8')
+        .then((html) => {
+          res
+            .type('html')
+            .send(
+              html.replace(
+                /<\/head>/iu,
+                '<meta name="qwen-managed-app" content="true"></head>',
+              ),
+            );
+        })
+        .catch(() => {
+          if (!res.headersSent) {
+            res.status(500).type('text/plain').send('Failed to load Web Shell');
+          } else {
+            res.end();
+          }
+        });
+      return;
     }
     // `dotfiles: 'allow'` is required because the resolved path may pass
     // through a dotfile directory (e.g. ~/.nvm/.../web-shell/index.html).
@@ -243,11 +290,13 @@ export function mountWebShellAssets(
   webShellDir: string,
   frameAncestors: readonly string[] = [],
   desktopRelayEnabled = false,
+  managedApp = false,
 ): void {
   const sendIndex = createSendIndex(
     webShellDir,
     frameAncestors,
     desktopRelayEnabled,
+    managedApp,
   );
   app.use(
     '/assets',
@@ -356,11 +405,13 @@ export function mountWebShellSpaFallback(
   webShellDir: string,
   frameAncestors: readonly string[] = [],
   desktopRelayEnabled = false,
+  managedApp = false,
 ): void {
   const sendIndex = createSendIndex(
     webShellDir,
     frameAncestors,
     desktopRelayEnabled,
+    managedApp,
   );
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();

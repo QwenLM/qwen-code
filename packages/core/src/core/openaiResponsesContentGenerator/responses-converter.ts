@@ -30,6 +30,8 @@ import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import { REATTACH_BOUNDARY_METADATA } from '../../services/image-payload-references.js';
+import type { ResponsesCacheBoundary } from './prompt-caching.js';
 import {
   getResponsesMessage,
   type ResponsesMessageMetadata,
@@ -532,8 +534,13 @@ function mapFinishReason(reason: string): FinishReason {
 export function convertGeminiContentsToResponsesInput(
   request: GenerateContentParameters,
   freeformExec = false,
-): { instructions: string | undefined; input: ResponsesApiInputItem[] } {
+): {
+  instructions: string | undefined;
+  input: ResponsesApiInputItem[];
+  cacheBoundary?: ResponsesCacheBoundary;
+} {
   let instructions: string | undefined;
+  let cacheBoundary: ResponsesCacheBoundary | undefined;
   const items: ResponsesApiInputItem[] = [];
   let callIdCounter = 0;
   const customCallIds = new Set<string>();
@@ -614,6 +621,19 @@ export function convertGeminiContentsToResponsesInput(
         if (pendingMessage) flushPendingMessage();
         pendingContentParts.push({ type: 'input_text', text: part });
         continue;
+      }
+
+      if (
+        role === 'user' &&
+        part.partMetadata?.[REATTACH_BOUNDARY_METADATA] === true &&
+        !cacheBoundary
+      ) {
+        cacheBoundary = pendingContentParts.length
+          ? {
+              itemIndex: items.length,
+              contentIndex: pendingContentParts.length - 1,
+            }
+          : { itemIndex: items.length - 1 };
       }
 
       if ('thought' in part && part.thought) {
@@ -713,8 +733,7 @@ export function convertGeminiContentsToResponsesInput(
           output = JSON.stringify(fr.response ?? {});
         }
         // A tool can return media (e.g. read_file on an image) in
-        // functionResponse.parts alongside its textual output. The
-        // function_call_output.output field is string-only, so surface the
+        // functionResponse.parts alongside its textual output. Surface the
         // media the way the sibling Chat converter does
         // (createToolMessage/splitToolMedia) instead of dropping it: append
         // any text entries (e.g. compaction-slimmer placeholders) to the
@@ -814,7 +833,7 @@ export function convertGeminiContentsToResponsesInput(
     }
   }
 
-  return { instructions, input: items };
+  return { instructions, input: items, cacheBoundary };
 }
 
 /**
@@ -921,16 +940,21 @@ export function convertGeminiToolsToResponsesTools(
  * helper patches such schemas (including nested object schemas) to include
  * `properties: {}` so Azure accepts them. Well-formed schemas pass through
  * unchanged.
+ *
+ * Explicitly preserve JSON Schema's default openness for patched nested
+ * objects. Whether a Responses backend interpreted the implicit default as
+ * closed in #12889 remains unverified. Keep the existing root-object patch
+ * and any explicit additionalProperties constraint unchanged.
  */
 export function normalizeResponsesParameters(
   schema: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (schema === undefined) return undefined;
   if (schema === null || typeof schema !== 'object') return schema;
-  return normalizeResponsesSchemaNode(schema) as Record<string, unknown>;
+  return normalizeResponsesSchemaNode(schema, true) as Record<string, unknown>;
 }
 
-function normalizeResponsesSchemaNode(node: unknown): unknown {
+function normalizeResponsesSchemaNode(node: unknown, isRoot = false): unknown {
   if (Array.isArray(node)) {
     return node.map((item) => normalizeResponsesSchemaNode(item));
   }
@@ -960,6 +984,9 @@ function normalizeResponsesSchemaNode(node: unknown): unknown {
 
   if (out['type'] === 'object' && out['properties'] === undefined) {
     out['properties'] = {};
+    if (!isRoot && out['additionalProperties'] === undefined) {
+      out['additionalProperties'] = true;
+    }
   }
 
   return out;

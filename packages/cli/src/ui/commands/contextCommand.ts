@@ -35,6 +35,11 @@ import {
   formatContextFileDisplayPath,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
+import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  getAutoMemorySnapshot,
+  withoutAutoMemorySnapshots,
+} from '@qwen-code/qwen-code-core/memory/request-context.js';
 import { t } from '../../i18n/index.js';
 import * as path from 'node:path';
 import { getSanitizedExtensionDisplayName } from '../../utils/extension-mention.js';
@@ -400,9 +405,14 @@ export async function collectContextData(
   // `getStartupContextLength` and bill the whole prelude to `messages`.
   const history =
     activeChat?.getHistoryShallow?.() ?? activeChat?.getHistory?.() ?? [];
+  // Determine the boundary before filtering; catalog-only entries can disappear.
   const preludeLength = getStartupContextLength(history);
-  const prelude = measureStartupPrelude(history.slice(0, preludeLength));
-  const conversationHistory = history.slice(preludeLength);
+  const prelude = measureStartupPrelude(
+    withoutAutoMemorySnapshots(history.slice(0, preludeLength)),
+  );
+  const conversationHistory = withoutAutoMemorySnapshots(
+    history.slice(preludeLength),
+  );
   // Skill-listing reminders appended after the prelude are listing cost, not
   // conversation, and are billed with the startup listing under `skills`.
   const tailSkillListings = measureTailSkillListings(conversationHistory);
@@ -461,11 +471,27 @@ export async function collectContextData(
     config.getWorkingDir(),
     extensionContextFileOwners(config, config.getWorkingDir()),
   );
-  const autoMemoryPrompt = config.getAutoMemoryPrompt();
-  if (autoMemoryPrompt) {
+  const catalog = config.getAutoMemoryContext?.() ?? '';
+  // Older snapshots remain in the request too; suppression hides all of them.
+  const snapshots = catalog
+    ? history.flatMap((content) =>
+        (content.parts ?? []).filter(
+          (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
+        ),
+      )
+    : [];
+  const pendingSnapshot = getAutoMemorySnapshot(history, catalog);
+  if (pendingSnapshot) snapshots.push(pendingSnapshot);
+  const autoMemoryTokens =
+    estimateContextTextTokens(config.getAutoMemoryPrompt()) +
+    snapshots.reduce(
+      (sum, part) => sum + estimateContextTextTokens(part.text ?? ''),
+      0,
+    );
+  if (autoMemoryTokens > 0) {
     memoryFiles.push({
       path: t('auto memory'),
-      tokens: estimateContextTextTokens(autoMemoryPrompt),
+      tokens: autoMemoryTokens,
     });
   }
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
@@ -616,16 +642,45 @@ export async function collectContextData(
   let detailMemoryFiles: ContextMemoryDetail[];
   let detailSkills: ContextSkillDetail[];
 
+  // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
+  // the MCP schemas together exceed the declared tool list, that excess would
+  // push the estimate past the window, or come straight out of `messages`
+  // against a provider total.
+  // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
+  // to the Skill definition `skills` carries, so the three rows still account
+  // for exactly `allToolsTokens` plus the listing and the loaded bodies.
+  const clampDeficit = Math.max(
+    0,
+    skillToolDefinitionTokens + mcpToolsTotalTokens - allToolsTokens,
+  );
+  const clampedMcpTools = Math.max(0, mcpToolsTotalTokens - clampDeficit);
+  const clampedSkills =
+    skillsTokens - Math.max(0, clampDeficit - mcpToolsTotalTokens);
+  const clampedBuiltinTools = Math.max(
+    0,
+    allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
+  );
+  // The MCP detail rows sit under the mcp row, so they carry its deficit too.
+  const mcpDetailShare =
+    mcpToolsTotalTokens > 0 ? clampedMcpTools / mcpToolsTotalTokens : 1;
+  const scaleTokens = <T extends { tokens: number }>(
+    items: T[],
+    factor: number,
+  ): T[] =>
+    factor < 1
+      ? items.map((item) => ({
+          ...item,
+          tokens: Math.round(item.tokens * factor),
+        }))
+      : items;
+
   if (!hasTokenCount) {
     totalTokens = 0;
     displaySystemPrompt = systemPromptTokens;
-    displaySkills = skillsTokens;
+    displaySkills = clampedSkills;
     displayStartupContext = startupContextTokens;
-    displayBuiltinTools = Math.max(
-      0,
-      allToolsTokens - skillToolDefinitionTokens - mcpToolsTotalTokens,
-    );
-    displayMcpTools = mcpToolsTotalTokens;
+    displayBuiltinTools = clampedBuiltinTools;
+    displayMcpTools = clampedMcpTools;
     displayMemoryFiles = memoryFilesTokens;
     // Include the conversation: a `/model` switch, `/restore` or a resume
     // zeroes the provider count while leaving `this.history` intact, and such a
@@ -634,7 +689,7 @@ export async function collectContextData(
     messagesTokens = conversationTokens;
     freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
     detailBuiltinTools = builtinTools;
-    detailMcpTools = mcpTools;
+    detailMcpTools = scaleTokens(mcpTools, mcpDetailShare);
     detailMemoryFiles = memoryFiles;
     detailSkills = skills;
   } else {
@@ -658,23 +713,6 @@ export async function collectContextData(
     // overshoot is absorbed by the `messages` cap below.
     const scale = rawOverhead > totalTokens ? totalTokens / rawOverhead : 1;
 
-    // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
-    // the MCP schemas together exceed the declared tool list, that excess would
-    // be charged to the overhead and taken straight back out of `messages`.
-    // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
-    // to the Skill definition `skills` carries, so the three rows still account
-    // for exactly `allToolsTokens` plus the listing and the loaded bodies.
-    const clampDeficit = Math.max(
-      0,
-      skillToolDefinitionTokens + mcpToolsTotalTokens - allToolsTokens,
-    );
-    const clampedMcpTools = Math.max(0, mcpToolsTotalTokens - clampDeficit);
-    const clampedSkills =
-      skillsTokens - Math.max(0, clampDeficit - mcpToolsTotalTokens);
-    const clampedBuiltinTools = Math.max(
-      0,
-      allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
-    );
     // The clamped categories partition `rawOverhead` before scaling. Flooring
     // each share keeps their sum at or below `totalTokens`; independently
     // rounding them can overshoot the total by a token with no negative row
@@ -718,17 +756,9 @@ export async function collectContextData(
       contextWindowSize - totalTokens - autocompactBuffer,
     );
 
-    const scaleDetail = <T extends { tokens: number }>(items: T[]): T[] =>
-      scale < 1
-        ? items.map((item) => ({
-            ...item,
-            tokens: Math.round(item.tokens * scale),
-          }))
-        : items;
-
-    detailBuiltinTools = scaleDetail(builtinTools);
-    detailMcpTools = scaleDetail(mcpTools);
-    detailMemoryFiles = scaleDetail(memoryFiles);
+    detailBuiltinTools = scaleTokens(builtinTools, scale);
+    detailMcpTools = scaleTokens(mcpTools, scale * mcpDetailShare);
+    detailMemoryFiles = scaleTokens(memoryFiles, scale);
     detailSkills =
       scale < 1
         ? skills.map((item) => ({

@@ -5,42 +5,13 @@
  */
 
 /**
- * Client for `GET /workspaces/:ws/agent/events`, the collaboration stream.
+ * Client for the session-agents stream under `/workspaces/:ws/agent/`
+ * (`session-events?sessionId=`: a chat session's live agent runs). The roster
+ * has no stream; the Agents page polls it.
  *
  * `fetch` rather than `EventSource`: the daemon wants a bearer header, which
  * `EventSource` cannot send. Frames are plain `event:` + one `data:` line.
  */
-
-export interface AgentPermissionPromptView {
-  requestId: string;
-  title: string;
-  options: Array<{ optionId: string; name: string; kind?: string }>;
-}
-
-export interface AgentRunStepView {
-  id: string;
-  title: string;
-  status: 'running' | 'done' | 'failed';
-}
-
-export interface AgentRunProgressEvent {
-  type: 'progress';
-  threadId: string;
-  runId: string;
-  attempt: number;
-  sessionId: string;
-  stage: string;
-  detail: string;
-  outputText: string;
-  thoughtText: string;
-  activityAt: number;
-  permission?: AgentPermissionPromptView;
-  steps?: AgentRunStepView[];
-}
-
-export type AgentLiveEvent =
-  | { type: 'changed'; threadId?: string }
-  | AgentRunProgressEvent;
 
 export type AgentStreamState = 'open' | 'closed';
 
@@ -48,7 +19,7 @@ const MAX_RETRY_MS = 15_000;
 
 interface SharedStream {
   listeners: Set<{
-    onEvent: (event: AgentLiveEvent) => void;
+    onEvent: (event: unknown) => void;
     onState: (state: AgentStreamState) => void;
   }>;
   state: AgentStreamState;
@@ -62,10 +33,10 @@ const shared = new Map<string, SharedStream>();
  * connection: browsers allow only a handful per origin, and the sidebar plus
  * an open conversation would otherwise hold several for the same workspace.
  */
-export function subscribeAgentStream(
+export function subscribeAgentStream<T = unknown>(
   url: string,
   token: string | undefined,
-  onEvent: (event: AgentLiveEvent) => void,
+  onEvent: (event: T) => void,
   onState: (state: AgentStreamState) => void,
 ): () => void {
   const key = `${url}\n${token ?? ''}`;
@@ -91,7 +62,8 @@ export function subscribeAgentStream(
     shared.set(key, created);
     entry = created;
   }
-  const listener = { onEvent, onState };
+  // Every subscriber of one URL reads the same stream, so they agree on `T`.
+  const listener = { onEvent: onEvent as (event: unknown) => void, onState };
   entry.listeners.add(listener);
   // A late joiner learns where the shared stream is, so it polls while the
   // stream is down just as the first subscriber does.
@@ -108,7 +80,7 @@ export function subscribeAgentStream(
 function openStream(
   url: string,
   token: string | undefined,
-  onEvent: (event: AgentLiveEvent) => void,
+  onEvent: (event: unknown) => void,
   onState: (state: AgentStreamState) => void,
 ): () => void {
   let stopped = false;
@@ -160,7 +132,7 @@ function openStream(
           .join('\n');
         if (!data) continue;
         try {
-          onEvent(JSON.parse(data) as AgentLiveEvent);
+          onEvent(JSON.parse(data) as unknown);
         } catch {
           // A malformed frame is skipped; the next `changed` resyncs anyway.
         }

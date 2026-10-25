@@ -253,4 +253,38 @@ export function registerManagedRuntimeToolRoutes(
     },
     handleManagedRuntimeJsonError,
   );
+
+  app.post(
+    routes.get('acknowledge')!.path,
+    managedRuntimeNoStore,
+    authorizeManagedRuntime(identity),
+    nameManagedRuntimeIncarnation(identity),
+    managedRuntimeJsonBody(routes.get('acknowledge')!.requestBodyLimitBytes),
+    (req: express.Request, res: express.Response) => {
+      const body = parseClosedBody(req.body, ['protocolVersion', 'reference']);
+      const reference = body && parseReference(body['reference']);
+      if (!body || !reference) {
+        invalid(res);
+        return;
+      }
+      try {
+        const view = executor.acknowledge(reference);
+        if (!view) {
+          res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+          return;
+        }
+        res.status(200).json({
+          protocolVersion: 2,
+          state: view.state,
+        });
+      } catch (error) {
+        if (error instanceof ManagedToolConflictError) {
+          res.status(409).json({ code: error.code, error: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+    handleManagedRuntimeJsonError,
+  );
 }

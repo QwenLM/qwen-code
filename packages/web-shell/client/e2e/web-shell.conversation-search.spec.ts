@@ -204,3 +204,18 @@ test('search keyboard and previous/next controls wrap and Enter locates the sele
     page.locator('[data-web-shell-message-list] [class*="flash"]'),
   ).toContainText(/Synthetic message 1$/);
 });
+
+test('search stays reachable when the expanded rail hides the timeline', async ({
+  page,
+  baseURL,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await setup(page, baseURL);
+  const button = searchButton(page);
+  await expect(button).toBeVisible();
+  await expect(
+    page.getByRole('navigation', { name: /Session timeline/ }),
+  ).toBeHidden();
+  await button.click();
+  await expect(page.locator('[data-conversation-search] input')).toBeFocused();
+});

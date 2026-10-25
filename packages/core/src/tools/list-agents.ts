@@ -171,10 +171,9 @@ export class ListAgentsTool extends BaseDeclarativeTool<
     super(
       ListAgentsTool.Name,
       ToolDisplayNames.LIST_AGENTS,
-      'List addressable ordinary background subagents in the current ' +
-        'session, including agents restored from a prior session run, and — ' +
-        'when cross-session messaging is enabled — the other Qwen Code ' +
-        "sessions running on this machine, plus this session's own name. " +
+      'List addressable ordinary background subagents in this session and, when cross-session messaging is on, the other Qwen Code sessions on this machine.\n\n' +
+        'Including agents restored from a prior session run, plus this ' +
+        "session's own name. " +
         'Named Agent Team teammates are NOT listed here: they have their own ' +
         'team lifecycle and deliver their final reports automatically, so do ' +
         'not use list_agents (or poll task_list) to wait for a teammate. Use ' +
@@ -193,6 +192,9 @@ export class ListAgentsTool extends BaseDeclarativeTool<
         properties: {},
         additionalProperties: false,
       },
+      true,
+      false,
+      true,
     );
   }
 

@@ -15,13 +15,24 @@ import {
   OUTPUT_TOKEN_CEILING,
 } from './tokenLimits.js';
 
-vi.mock('../models/model-catalog.js', () => {
+vi.mock('../models/model-catalog.js', async (importOriginal) => {
   const entries: Record<string, { context?: number; output?: number }> = {
     'catalog-model': { context: 123_456, output: 7_890 },
     'qwen-catalog-context-only': { context: 50_000 },
     'qwen-catalog-tiny': { context: 5 },
+    // Spelling twins: `findTokenLimit` consults OUTPUT_PATTERNS against the
+    // other spelling only when this one matched no row.
+    'glm-4-7': { context: 200_000, output: 131_072 },
+    'qwen3-8-max': { context: 262_144, output: 131_072 },
   };
-  return { lookupModelCatalog: (model: string) => entries[model] };
+  // Only the catalog read is stubbed; versionSpellingAlias is a pure string
+  // rewrite, so the twin fallback sees the real rule.
+  const { versionSpellingAlias } =
+    await importOriginal<typeof import('../models/model-catalog.js')>();
+  return {
+    lookupModelCatalog: (model: string) => entries[model],
+    versionSpellingAlias,
+  };
 });
 
 describe('normalize', () => {
@@ -726,6 +737,23 @@ describe('models.dev catalog', () => {
     expect(tokenLimit('qwen-catalog-context-only', 'input')).toBe(50_000);
     expect(tokenLimit('qwen-catalog-context-only', 'output')).toBe(32_768);
     expect(hasExplicitOutputLimit('qwen-catalog-context-only')).toBe(true);
+  });
+
+  it('lets a curated row on the other spelling outrank the catalog output', () => {
+    // OUTPUT_PATTERNS is written against one spelling of a version while the
+    // catalog commits both, so the spelling no row names fell through to
+    // models.dev's unadjusted `output` (131,072) and outranked the 16,384
+    // `/^glm-4\.7/` pins its twin to. `hasExplicitOutputLimit` reads the same
+    // rule, or a limit this curated would not clamp an explicit max_tokens.
+    expect(tokenLimit('glm-4-7', 'output')).toBe(16_384);
+    expect(defaultOutputCeiling('glm-4-7')).toBe(16_384);
+    expect(hasExplicitOutputLimit('glm-4-7')).toBe(true);
+    // The twin is a fallback, not an override: `qwen3-8-max` keeps the 32,768
+    // `/^qwen/` family row even though `qwen3.8-max` matches the more specific
+    // `/^qwen3\.\d/` row at 65,536. That two-spelling gap predates the alias
+    // pass (`/^qwen3\.\d/` has always been written dot-only) and closing it is
+    // a curated-row decision, not something the fallback should settle.
+    expect(tokenLimit('qwen3-8-max', 'output')).toBe(32_768);
   });
 
   it('ignores catalog windows too small for the agent loop', () => {

@@ -23,6 +23,7 @@ import {
   MODEL_CATALOG_URL_ENV,
   MODELS_DEV_URL,
   parseModelCatalog,
+  versionSpellingAlias,
   type ModelCatalog,
   type ModelCatalogEntry,
 } from './model-catalog.js';
@@ -138,15 +139,18 @@ function servesAgentTurns(model: ModelsDevModel): boolean {
   );
 }
 
-/** `toLimits` builds its keys in a fixed order, so this compares by value. */
+/**
+ * `toLimits` and the modality union below both build their keys in a fixed
+ * order, so this compares whole entries by value.
+ */
 function sameEntry(a: ModelCatalogEntry, b: ModelCatalogEntry): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /**
  * Projects a models.dev `api.json` payload onto the catalog shape: one entry
- * per normalized model id with only the fields the limit and modality tables
- * consume.
+ * per normalized model id, committed under both spellings of its version, with
+ * only the fields the limit and modality tables consume.
  *
  * Two ids can land on the same key, either because they normalize together
  * (`qwen3-max` and `qwen3-max-20260123`) or because several providers serve
@@ -219,11 +223,15 @@ export function trimModelsDevCatalog(
       }
     }
   }
-  const agreed: Array<readonly [string, ModelCatalogEntry]> = [];
-  for (const key of new Set([
+  // Every key the projection considered, whether or not it ended up writing
+  // one. Reserving all of them, rather than only the written ones, is what
+  // keeps the alias pass below from resurrecting a key this loop dropped.
+  const seen = new Set([
     ...limitCandidates.keys(),
     ...modalityCandidates.keys(),
-  ])) {
+  ]);
+  const agreed: Array<readonly [string, ModelCatalogEntry]> = [];
+  for (const key of seen) {
     const entry: ModelCatalogEntry = {};
     const limits = limitCandidates.get(key);
     if (
@@ -234,7 +242,18 @@ export function trimModelsDevCatalog(
     }
     const allModalities = modalityCandidates.get(key);
     if (allModalities) {
-      const merged = Object.assign({}, ...allModalities);
+      // Union in CATALOG_MODALITIES order. `Object.assign` would order the keys
+      // by provider iteration instead, so two spelling twins of one model —
+      // which by construction arrive from different providers — could agree on
+      // every fact yet serialize differently and be judged a disagreement by
+      // the alias pass below, silently dropping the alias.
+      const present = new Set(allModalities.flatMap((m) => Object.keys(m)));
+      const merged: InputModalities = {};
+      for (const modality of CATALOG_MODALITIES) {
+        if (present.has(modality)) {
+          merged[modality] = true;
+        }
+      }
       // A declared-text-only record ({}) is kept only on entries that ship
       // limits: there it is fidelity the union can later narrow against. On
       // its own it carries no usable fact, so it must not create an entry —
@@ -246,6 +265,38 @@ export function trimModelsDevCatalog(
     }
     if (Object.keys(entry).length > 0) {
       agreed.push([key, entry]);
+    }
+  }
+  // Commit every entry under the other spelling of its version too, so the
+  // dotted and dashed ids a vendor accepts both reach it (#13209).
+  const aliasCandidates = new Map<string, ModelCatalogEntry[]>();
+  for (const [key, entry] of agreed) {
+    const alias = versionSpellingAlias(key);
+    // A key the projection considered describes a model of its own: if it was
+    // written it keeps its own numbers, and if it was dropped because its
+    // allowlisted providers disagreed on limits then the veto stands — letting
+    // a spelling twin write it would assert the very limits the disagreement
+    // rule above refused to guess, on an entry the twin's endpoint never
+    // published. An alias normalize() does not return unchanged is unreachable
+    // by its own spelling (Claude's dotted minor is folded to dashes), so it
+    // would be a dead key — the same class isModelCatalogKey keeps out of the
+    // projection above.
+    if (!alias || seen.has(alias) || !isModelCatalogKey(alias)) {
+      continue;
+    }
+    const existing = aliasCandidates.get(alias);
+    if (existing) {
+      existing.push(entry);
+    } else {
+      aliasCandidates.set(alias, [entry]);
+    }
+  }
+  for (const [alias, candidates] of aliasCandidates) {
+    // Two spellings claiming one alias with different numbers would let the
+    // payload order decide what a user gets; drop it, as the provider and
+    // alias disagreement rules above do.
+    if (candidates.every((candidate) => sameEntry(candidate, candidates[0]!))) {
+      agreed.push([alias, candidates[0]!]);
     }
   }
   return {

@@ -7,6 +7,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
@@ -49,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private var activeDialog: AlertDialog? = null
     private var activeJsResult: JsResult? = null
     private var connectionAttempt = 0
+    private var recovery: ConnectionRecovery? = null
     private val filePicker: NativeFilePicker by lazy { NativeFilePicker(this) { filePickerLauncher.launch(it) } }
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         filePicker.result(it.resultCode, it.data)
@@ -81,16 +83,29 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
-        loadProfiles()
+        loadProfiles(ConnectionRecovery.fromBundle(savedInstanceState?.getBundle("connection-recovery")))
     }
 
-    private fun loadProfiles() {
+    private fun loadProfiles(snapshot: ConnectionRecovery? = null) {
         try {
             val storage = store ?: AndroidProfileStore(this).also { store = it }
             state = storage.vault.load()
             retireBrowserProfiles()
-            showProfiles()
+            if (snapshot == null) showProfiles() else restoreConnection(snapshot)
         } catch (_: Exception) { showStorageError() }
+    }
+
+    private fun restoreConnection(snapshot: ConnectionRecovery) {
+        val profile = snapshot.findProfile(state) ?: return showProfiles()
+        if (snapshot.retryRequired) showRecovery(snapshot)
+        else connect(profile, snapshot.navigation)
+    }
+
+    private fun showRecovery(snapshot: ConnectionRecovery) {
+        recovery = snapshot.copy(retryRequired = true)
+        showMessage(getString(R.string.connection_interrupted), getString(R.string.connection_resume_hint)) {
+            restoreConnection(snapshot.copy(retryRequired = false))
+        }
     }
 
     private fun retireBrowserProfiles() {
@@ -119,13 +134,13 @@ class MainActivity : AppCompatActivity() {
         setPadding(padding, padding, padding, padding)
     }
 
-    private fun LinearLayout.label(value: String, heading: Boolean = false) {
-        addView(TextView(context).apply { text = value; textSize = if (heading) 22f else 16f })
-    }
+    private fun LinearLayout.label(value: String, heading: Boolean = false): TextView =
+        TextView(context).apply { text = value; textSize = if (heading) 22f else 16f }
+            .also { addView(it) }
 
-    private fun LinearLayout.button(value: String, action: () -> Unit) {
-        addView(Button(context).apply { text = value; setOnClickListener { action() } })
-    }
+    private fun LinearLayout.button(value: String, action: () -> Unit): Button =
+        Button(context).apply { text = value; setOnClickListener { action() } }
+            .also { addView(it) }
 
     private fun showProfiles() {
         destroyConnection()
@@ -137,7 +152,9 @@ class MainActivity : AppCompatActivity() {
                 label(profile.name, true)
                 label(profile.origin)
                 button(getString(R.string.connect)) { connect(profile) }
+                    .contentDescription = getString(R.string.connect_profile, profile.name)
                 button(getString(R.string.edit)) { editProfile(profile) }
+                    .contentDescription = getString(R.string.edit_named_profile, profile.name)
                 button(getString(R.string.delete)) {
                     activeDialog = AlertDialog.Builder(this@MainActivity)
                         .setTitle(R.string.delete_profile)
@@ -149,7 +166,7 @@ class MainActivity : AppCompatActivity() {
                                 showProfiles()
                             } catch (_: Exception) { showStorageError() }
                         }.show()
-                }
+                }.contentDescription = getString(R.string.delete_named_profile, profile.name)
             }
             button(getString(R.string.add_profile)) { editProfile(null) }
         }
@@ -159,8 +176,10 @@ class MainActivity : AppCompatActivity() {
     private fun editProfile(previous: ConnectionProfile?) {
         val form = column().apply { importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS }
         fun field(label: Int, value: String, type: Int): EditText {
-            form.label(getString(label))
+            val caption = form.label(getString(label))
             return EditText(this).apply {
+                id = View.generateViewId()
+                caption.labelFor = id
                 hint = getString(label)
                 setText(value)
                 isSingleLine = true
@@ -180,7 +199,12 @@ class MainActivity : AppCompatActivity() {
             form.addView(this)
         }
         form.label(getString(R.string.credential_hint))
-        val error = TextView(this).also { form.addView(it) }
+        val error = TextView(this).apply { accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
+            .also { form.addView(it) }
+        fun showError(message: CharSequence?) {
+            error.text = message
+            error.post { error.requestRectangleOnScreen(Rect(0, 0, error.width, error.height), false) }
+        }
         val dialog = AlertDialog.Builder(this)
             .setTitle(if (previous == null) R.string.add_profile else R.string.edit_profile)
             .setView(ScrollView(this).apply { addView(form) })
@@ -200,19 +224,20 @@ class MainActivity : AppCompatActivity() {
                     state = store!!.vault.upsert(state, profile)
                     dialog.dismiss()
                     showProfiles()
-                } catch (invalid: IllegalArgumentException) { error.text = invalid.message }
-                catch (_: Exception) { error.setText(R.string.save_failed) }
+                } catch (invalid: IllegalArgumentException) { showError(invalid.message) }
+                catch (_: Exception) { showError(getString(R.string.save_failed)) }
             }
         }
         dialog.show()
     }
 
-    private fun connect(profile: ConnectionProfile) {
+    private fun connect(profile: ConnectionProfile, navigation: ConnectionNavigation = ConnectionNavigation()) {
         destroyConnection()
         try { state = store!!.vault.load() }
         catch (_: Exception) { showStorageError(); return }
         val current = state.profiles.find { it.id == profile.id && it.browserId == profile.browserId }
             ?: return showProfiles()
+        recovery = ConnectionRecovery(current.id, current.browserId, navigation)
         val major = WebViewCompat.getCurrentWebViewPackage(this)?.versionName?.substringBefore('.')?.toIntOrNull()
         if (major == null || major < 111) {
             showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
@@ -223,7 +248,7 @@ class MainActivity : AppCompatActivity() {
                 val profiles = ProfileStore.getInstance()
                 if (BrowserProfilePreparation.isPending(current.browserName)) {
                     activeProfile = current
-                    showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint)) { connect(current) }
+                    showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint)) { connect(current, navigation) }
                     return
                 }
                 if (!current.needsBrowserInitialization(profiles.allProfileNames)) {
@@ -234,7 +259,7 @@ class MainActivity : AppCompatActivity() {
                 if (WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA)) {
                     activeProfile = current
                     if (!BrowserProfilePreparation.reserve(current.browserName)) {
-                        showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint)) { connect(current) }
+                        showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint)) { connect(current, navigation) }
                         return
                     }
                     val attempt = connectionAttempt
@@ -255,7 +280,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     } catch (_: Exception) {
                         BrowserProfilePreparation.release(current.browserName)
-                        showMessage(getString(R.string.browser_preparation_failed), getString(R.string.preparing_browser_hint)) { connect(current) }
+                        showMessage(getString(R.string.browser_preparation_failed), getString(R.string.preparing_browser_hint)) { connect(current, navigation) }
                     }
                 } else showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
             } catch (_: Exception) { showStorageError() }
@@ -272,7 +297,7 @@ class MainActivity : AppCompatActivity() {
             showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
             return
         }
-        val loadUrl = Uri.parse(profile.origin).buildUpon()
+        val loadUrl = Uri.parse(recovery?.navigation?.url(profile.origin) ?: profile.origin).buildUpon()
             .encodedFragment(profile.token?.let { "token=${Uri.encode(it)}" }).build().toString()
         webView = view
         activeProfile = profile
@@ -332,6 +357,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
         view.webViewClient = object : WebViewClient() {
+            override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                if (view === webView && OriginPolicy.isSameOrigin(profile.origin, url)) {
+                    recovery = recovery?.copy(navigation = ConnectionNavigation.capture(profile.origin, url))
+                }
+            }
+
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 if (view === webView) {
                     filePicker.cancel()
@@ -360,8 +391,9 @@ class MainActivity : AppCompatActivity() {
 
             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                 if (view === webView) {
+                    val snapshot = recovery ?: ConnectionRecovery(profile.id, profile.browserId)
                     destroyConnection()
-                    showMessage(getString(R.string.renderer_stopped), getString(R.string.retry_connection)) { connect(profile) }
+                    showRecovery(snapshot)
                 }
                 return true
             }
@@ -380,18 +412,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showConnectionError(view: WebView, profile: ConnectionProfile) {
-        filePicker.cancel()
-        cancelMicrophone()
-        if (microphoneAuthorized) {
-            destroyConnection()
-            showMessage(getString(R.string.connection_failed), getString(R.string.connection_failed_hint)) { connect(profile) }
-            return
-        }
-        cancelDialog()
-        (view.parent as? ViewGroup)?.removeView(view)
-        showMessage(getString(R.string.connection_failed), getString(R.string.connection_failed_hint)) {
-            if (view === webView) connect(profile)
-        }
+        if (view !== webView) return
+        val snapshot = recovery ?: ConnectionRecovery(profile.id, profile.browserId)
+        destroyConnection()
+        showRecovery(snapshot)
     }
 
     private fun showMessage(title: String, message: String, retry: (() -> Unit)? = null) {
@@ -407,9 +431,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun showStorageError() {
         destroyConnection()
-        setContentView(column().apply {
+        val content = column().apply {
             label(getString(R.string.storage_unavailable), true)
             label(getString(R.string.storage_unavailable_hint))
+                .accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             button(getString(R.string.retry)) { loadProfiles() }
             button(getString(R.string.reset_profiles)) {
                 activeDialog = AlertDialog.Builder(this@MainActivity)
@@ -424,7 +449,8 @@ class MainActivity : AppCompatActivity() {
                         } catch (_: Exception) { showStorageError() }
                     }.show()
             }
-        })
+        }
+        setContentView(ScrollView(this).apply { addView(content) })
     }
 
     private fun cancelDialog() {
@@ -445,6 +471,7 @@ class MainActivity : AppCompatActivity() {
         val previous = webView
         webView = null
         activeProfile = null
+        recovery = null
         (previous?.parent as? ViewGroup)?.removeView(previous)
         previous?.stopLoading()
         previous?.destroy()
@@ -503,6 +530,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
+        val profile = activeProfile
+        val view = webView
+        if (microphoneAuthorized) {
+            recovery = null
+        } else if (profile != null && view != null && OriginPolicy.isSameOrigin(profile.origin, view.url.orEmpty())) {
+            recovery = recovery?.copy(navigation = ConnectionNavigation.capture(profile.origin, view.url))
+        }
+        recovery?.let { outState.putBundle("connection-recovery", it.toBundle()) }
         outState.putBoolean("microphone-in-flight", microphone.awaitingResult)
         outState.putBoolean("file-picker-in-flight", filePicker.awaitingResult)
         super.onSaveInstanceState(outState)

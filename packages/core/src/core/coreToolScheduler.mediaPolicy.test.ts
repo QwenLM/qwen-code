@@ -215,6 +215,62 @@ describe('CoreToolScheduler media-policy modelAccess gate', () => {
     expect(executeFn).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      'merges lockedArguments into a hook replacement',
+      { quality: 10 },
+      undefined,
+    ],
+    [
+      'rejects a hook replacement that names a lockedArguments key',
+      { output_dir: '/evil' },
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    ],
+  ])('%s', async (_label, updatedInput, errorType) => {
+    const executeFn = resolving('ok');
+    const tool = mediaTool(executeFn);
+    const config = makeConfig({
+      tool,
+      approvalMode: ApprovalMode.YOLO,
+      omniPolicyTools: modelAccessFor({
+        enabled: true,
+        lockedArguments: { output_dir: '/objects' },
+      }),
+    });
+    Object.assign(config, {
+      getDisableAllHooks: () => false,
+      getMessageBus: () => ({
+        request: vi.fn(async (hookRequest: { eventName: string }) => ({
+          success: true,
+          output:
+            hookRequest.eventName === 'PreToolUse'
+              ? { hookSpecificOutput: { updatedInput } }
+              : {},
+        })),
+      }),
+    });
+
+    const response = await executeToolCall(
+      config,
+      request({
+        name: tool.name,
+        args: { quality: 55 },
+        executionOrigin: { kind: 'model' },
+      }),
+      new AbortController().signal,
+    );
+
+    expect(response.errorType).toBe(errorType);
+    if (errorType) {
+      expect(executeFn).not.toHaveBeenCalled();
+    } else {
+      expect(executeFn).toHaveBeenCalledWith({
+        quality: 10,
+        output_dir: '/objects',
+      });
+    }
+  });
+
   it('rejects a forged fixed_policy origin on a non-media-policy tool', async () => {
     const executeFn = vi.fn();
     const response = await run(

@@ -162,7 +162,10 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/cancel$/,
     mapping: {
       method: 'session/cancel',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
+      extractParams: (segs, body) => ({
+        ...bodyRecord(body),
+        sessionId: segs[0],
+      }),
       notification: true,
     },
   },
@@ -602,6 +605,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     mapping: {
       method: '_qwen/workspace/trust/request',
       extractParams: (_s, body) => bodyRecord(body),
+    },
+  },
+  // POST /workspace/trust/grant → _qwen/workspace/trust/grant
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/trust\/grant\/?$/,
+    mapping: {
+      method: '_qwen/workspace/trust/grant',
+      extractParams: () => ({}),
     },
   },
   // GET /workspace/permissions → _qwen/workspace/permissions

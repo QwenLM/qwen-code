@@ -8,6 +8,10 @@ import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
+// The #13003 experiment flag is read through its single definition, kept in a
+// no-import leaf module so telemetry can share it with `memory/recall.ts`
+// (which owns the flag but already imports this file) without a module cycle.
+import { isSkipSelectorOnUniqueStrongHitEnabled } from '../memory/recall-experiment.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
@@ -78,6 +82,7 @@ import {
   recordGoalStateMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
+  recordToolResultSizeMetrics,
   recordToolExecutionMetrics,
   recordRepeatedToolFailureGuardMetrics,
   recordArenaSessionStartedMetrics,
@@ -99,11 +104,14 @@ import type {
   IdeConnectionEvent,
   StartSessionEvent,
   ToolCallEvent,
+  ToolResultSizeEvent,
+  ToolResultPersistedEvent,
   UserPromptEvent,
   UserRetryEvent,
   FlashFallbackEvent,
   NextSpeakerCheckEvent,
   LoopDetectedEvent,
+  LoopProtectionEvent,
   RepeatedToolFailureGuardEvent,
   LoopDetectionDisabledEvent,
   SlashCommandEvent,
@@ -365,6 +373,54 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     recordToolExecutionMetrics(config, {
       execution_status: normalizedEvent.execution_status,
       tool_type: normalizedEvent.tool_type,
+    });
+  });
+}
+
+export function logToolResultSize(
+  config: Config,
+  event: ToolResultSizeEvent,
+): void {
+  runToolTelemetrySink(() => {
+    QwenLogger.getInstance(config)?.logToolResultSizeEvent(event);
+  });
+  if (!isTelemetrySdkInitialized()) return;
+  runToolTelemetrySink(() => {
+    logs.getLogger(SERVICE_NAME).emit({
+      body: `Tool result size: ${event.function_name} (${event.layer}).`,
+      attributes: {
+        ...getCommonAttributes(config),
+        ...event,
+        'event.name': `${SERVICE_NAME}.${event['event.name']}`,
+      },
+    });
+  });
+  if (event.layer === 'injection')
+    runToolTelemetrySink(() => {
+      recordToolResultSizeMetrics(config, event);
+    });
+}
+
+export function logToolResultPersisted(
+  config: Config,
+  event: ToolResultPersistedEvent,
+): void {
+  // Output paths stay local; this event's public sinks carry numbers only.
+  runToolTelemetrySink(() => {
+    QwenLogger.getInstance(config)?.logToolResultPersistedEvent(event);
+  });
+  if (!isTelemetrySdkInitialized()) return;
+  runToolTelemetrySink(() => {
+    logs.getLogger(SERVICE_NAME).emit({
+      body: `Tool result persisted: ${event.tool_name}.`,
+      attributes: {
+        ...getCommonAttributes(config),
+        'event.name': `${SERVICE_NAME}.tool_result_persisted`,
+        'event.timestamp': event['event.timestamp'],
+        tool_name: event.tool_name,
+        bytes_written: event.bytes_written,
+        prompt_id: event.prompt_id,
+      },
     });
   });
 }
@@ -706,6 +762,20 @@ export function logLoopDetected(
     attributes,
   };
   logger.emit(logRecord);
+}
+
+export function logLoopProtection(
+  config: Config,
+  event: LoopProtectionEvent,
+): void {
+  QwenLogger.getInstance(config)?.logLoopProtectionEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Loop protection ${event.decision}. Type: ${event.loop_type}.`,
+    attributes: { ...getCommonAttributes(config), ...event },
+  });
 }
 
 export function logRepeatedToolFailureGuard(
@@ -1617,6 +1687,9 @@ export function logMemoryRecall(
     fast_duration_ms: event.fast_duration_ms,
     selector_duration_ms: event.selector_duration_ms,
   };
+  if (event.selector_skipped !== undefined) {
+    attributes['selector_skipped'] = event.selector_skipped;
+  }
 
   const logger = logs.getLogger(SERVICE_NAME);
   logger.emit({
@@ -1626,6 +1699,18 @@ export function logMemoryRecall(
   recordMemoryRecallMetrics(config, event.duration_ms, {
     strategy: event.strategy,
     docs_selected: event.docs_selected,
+    // The selector_skipped metric dimension belongs to the #13003
+    // skip-selector experiment: attach it only while the experiment is
+    // enabled AND the recall mode had a skip decision to make (structured;
+    // legacy recalls leave the event field undefined), so deployments
+    // without the flag keep the pre-existing attribute space on these
+    // series and legacy-mode recalls do not mix a constant `false` into the
+    // experiment's control series. Logs keep any explicit decision,
+    // regardless of the experiment flag.
+    ...(isSkipSelectorOnUniqueStrongHitEnabled() &&
+    typeof event.selector_skipped === 'boolean'
+      ? { selector_skipped: event.selector_skipped }
+      : {}),
   });
 }
 

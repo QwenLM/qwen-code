@@ -24,6 +24,10 @@ import { ToolNames } from '../../tools/tool-names.js';
 import { serializeContextUsage } from '../../telemetry/context-usage.js';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { appendAdditionalContext } from '../toolHookTriggers.js';
+import {
+  appendAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+} from '../../memory/request-context.js';
 import { createContextUsageSnapshot } from './context-usage-snapshot.js';
 import {
   content,
@@ -34,6 +38,7 @@ import {
 function createConfig(options?: {
   userMemory?: string;
   autoMemory?: string;
+  autoMemoryContext?: string;
   cachedSkills?: SkillConfig[] | null;
   loadedSkillNames?: ReadonlySet<string>;
   loadedSkillContents?: ReadonlySet<string>;
@@ -56,6 +61,7 @@ function createConfig(options?: {
   return {
     getUserMemory: () => options?.userMemory ?? '',
     getAutoMemoryPrompt: () => options?.autoMemory ?? '',
+    getAutoMemoryContext: () => options?.autoMemoryContext ?? '',
     getAutoCompactThreshold: () => options?.autoCompactThreshold,
     getToolRegistry: () => ({
       getTool: (name: string) => tools.get(name),
@@ -318,5 +324,77 @@ describe('createContextUsageSnapshot', () => {
     expect(
       createContextUsageSnapshot(request, createConfig(), Number.NaN),
     ).toBeUndefined();
+  });
+});
+
+describe('memory attribution', () => {
+  it('counts every retained snapshot once without classifying identical user text as memory', () => {
+    const first = getAutoMemorySnapshot([], 'catalog A')!;
+    const contents: Content[] = [userText(first.text!)];
+    appendAutoMemorySnapshot(contents, first);
+    contents.push(
+      { role: 'model', parts: [{ text: 'answer' }] },
+      userText('next'),
+    );
+    const second = getAutoMemorySnapshot(contents, 'catalog B')!;
+    appendAutoMemorySnapshot(contents, second);
+    const original = structuredClone(contents);
+    const snapshot = createContextUsageSnapshot(
+      requestOf(contents),
+      createConfig({ autoMemoryContext: 'catalog B' }),
+      100000,
+    )!;
+    expect(snapshot.breakdown.memory_files_tokens).toBe(
+      estimateContextTextTokens(first.text!) +
+        estimateContextTextTokens(second.text!),
+    );
+    expect(snapshot.breakdown.messages_tokens).toBe(
+      estimateContentTokens([
+        userText(first.text!),
+        contents[1],
+        userText('next'),
+      ]),
+    );
+    expect(contents).toEqual(original);
+  });
+  it('counts only the injected final catalog as memory, preserving prior identical user text', () => {
+    const catalog = 'current catalog';
+    const config = createConfig({
+      autoMemory: 'policy',
+      autoMemoryContext: catalog,
+    });
+    const conversation: Content[] = [
+      userText(catalog),
+      { role: 'model', parts: [{ text: 'answer' }] },
+      userText('question'),
+    ];
+    const contents = [
+      ...conversation.slice(0, -1),
+      {
+        ...conversation.at(-1),
+        parts: [{ text: 'question' }, { text: catalog }],
+      },
+    ];
+    const request = requestOf(contents, { systemInstruction: 'policy' });
+    const snapshot = createContextUsageSnapshot(request, config, 100000)!;
+    expect(snapshot.breakdown.memory_files_tokens).toBe(
+      estimateContextTextTokens('policy') + estimateContextTextTokens(catalog),
+    );
+    expect(snapshot.breakdown.messages_tokens).toBe(
+      estimateContentTokens(conversation),
+    );
+    expect(contents.at(-1)?.parts).toHaveLength(2);
+
+    const withoutTail = createContextUsageSnapshot(
+      requestOf(conversation, { systemInstruction: 'policy' }),
+      config,
+      100000,
+    )!;
+    expect(withoutTail.breakdown.memory_files_tokens).toBe(
+      estimateContextTextTokens('policy'),
+    );
+    expect(withoutTail.breakdown.messages_tokens).toBe(
+      estimateContentTokens(conversation),
+    );
   });
 });

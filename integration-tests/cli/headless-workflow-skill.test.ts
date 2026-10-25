@@ -179,6 +179,9 @@ describe('headless extension workflow Skill entry', () => {
       );
       expect(messageText(skillResult!)).not.toContain('not found');
     },
-    60_000,
+    // Inherit the suite's CI-aware default timeout (300s) instead of a tight
+    // per-test cap: on the sandbox:docker leg a shared-daemon stall window
+    // longer than 60s exhausted this test's retries while siblings on the
+    // suite default rode the same window out (#13518).
   );
 });

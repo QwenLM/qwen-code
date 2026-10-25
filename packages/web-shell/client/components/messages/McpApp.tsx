@@ -5,9 +5,12 @@ import {
 } from '@modelcontextprotocol/ext-apps/app-bridge';
 import {
   McpAppHostContext,
+  useMcpAppAdmission,
+  McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
 } from '../../mcpAppHostContext';
+import { useI18n } from '../../i18n';
 import { useTheme } from '../../themeContext';
 import styles from './McpApp.module.css';
 
@@ -16,6 +19,7 @@ type AppToolResult = Parameters<AppBridge['sendToolResult']>[0];
 
 export interface McpAppDisplay {
   type: 'mcp_app';
+  requiredFeature?: 'generated-ui';
   serverName: string;
   resourceUri: string;
   html: string;
@@ -158,10 +162,36 @@ function acquireAppToolSlot(signal: AbortSignal): Promise<() => void> {
   });
 }
 
+export function GeneratedUiFallback({ display }: { display: McpAppDisplay }) {
+  const { t } = useI18n();
+  return (
+    <div className={styles.fallback}>
+      <div>{display.fallbackText}</div>
+      <div>{t('mcpApp.generatedUi.unavailable')}</div>
+    </div>
+  );
+}
+
 export function McpApp({ display }: { display: McpAppDisplay }) {
+  const allowed = useMcpAppAdmission(display);
+  return allowed ? (
+    <McpAppRuntime display={display} />
+  ) : (
+    <GeneratedUiFallback display={display} />
+  );
+}
+
+function McpAppRuntime({ display }: { display: McpAppDisplay }) {
   const daemonBaseUrl = useContext(McpAppHostContext);
   const sessionId = useContext(McpAppSessionContext);
   const tools = useContext(McpAppToolsContext);
+  const messages = useContext(McpAppMessagesContext);
+  const messageHost =
+    sessionId && messages?.sessionId === sessionId ? messages : undefined;
+  const requestMessage =
+    import.meta.env.MODE === 'transcript'
+      ? undefined
+      : messageHost?.requestMessage;
   const callTool =
     sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
   const theme = useTheme();
@@ -203,6 +233,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       { name: 'qwen-code-web-shell', version: '0.0.1' },
       {
         ...(callTool ? { serverTools: {} } : {}),
+        ...(requestMessage ? { message: { text: {} } } : {}),
         sandbox: {
           ...(current.csp ? { csp: current.csp } : {}),
         },
@@ -211,6 +242,38 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     );
     bridgeRef.current = bridge;
     const appAbort = new AbortController();
+    let messagePending = false;
+    if (requestMessage) {
+      bridge.onmessage = async (params, extra) => {
+        const signal = AbortSignal.any([extra.signal, appAbort.signal]);
+        const content = params.content;
+        if (
+          signal.aborted ||
+          messagePending ||
+          params.role !== 'user' ||
+          content.length !== 1 ||
+          content[0]?.type !== 'text' ||
+          content[0].text.length > 16 * 1024 ||
+          !content[0].text.trim() ||
+          new TextEncoder().encode(content[0].text).byteLength > 16 * 1024
+        ) {
+          return { isError: true };
+        }
+        messagePending = true;
+        try {
+          return await requestMessage({
+            serverName: current.serverName,
+            resourceUri: current.resourceUri,
+            text: content[0].text,
+            signal,
+          });
+        } catch {
+          return { isError: true };
+        } finally {
+          messagePending = false;
+        }
+      };
+    }
     if (callTool) {
       bridge.oncalltool = async (params, extra) => {
         const signal = AbortSignal.any([extra.signal, appAbort.signal]);
@@ -262,6 +325,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       active = false;
       clearTimeout(readyTimeout);
       bridge.oncalltool = undefined;
+      bridge.onmessage = undefined;
       appAbort.abort();
       iframe.removeAttribute('src');
       bridgeRef.current = null;
@@ -326,6 +390,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       active = false;
       clearTimeout(readyTimeout);
       bridge.oncalltool = undefined;
+      bridge.onmessage = undefined;
       appAbort.abort();
       bridgeRef.current = null;
       const unload = () => {
@@ -350,6 +415,8 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     sandboxUrl,
     dataSandbox,
     callTool,
+    requestMessage,
+    sessionId,
     display.serverName,
     display.resourceUri,
     display.html,

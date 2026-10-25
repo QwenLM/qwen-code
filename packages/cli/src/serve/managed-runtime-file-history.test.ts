@@ -481,6 +481,80 @@ it('rejects symlinks, traversal, foreign owners and mutation without preparation
   expect(await readFile(path.join(root, 'outside'), 'utf8')).toBe('decoy');
 });
 
+it('rejects a relative file path that resolves outside the workspace', async () => {
+  const runtime = randomUUID();
+  const tools = createManagedToolSet(workspace, runtime);
+  const executor = new ManagedToolExecutor(async () => tools);
+  const reference = {
+    sessionId: runtime,
+    promptId: randomUUID(),
+    callId: randomUUID(),
+    argsDigest: 'digest',
+  };
+  expect(
+    await executor.execute(reference, 'write_file', {
+      file_path: '../escape',
+      content: 'x',
+    }),
+  ).toMatchObject({
+    executionStatus: 'error',
+    error: {
+      message: expect.stringContaining(
+        'not within the Session working directory',
+      ),
+    },
+  });
+  expect(await stat(path.join(root, 'escape')).catch(() => null)).toBeNull();
+  expect(
+    await executor.execute(
+      { ...reference, callId: randomUUID() },
+      'write_file',
+      { file_path: 'inside', content: 'x' },
+    ),
+  ).toMatchObject({ executionStatus: 'success' });
+  expect(await readFile(path.join(workspace, 'inside'), 'utf8')).toBe('x');
+});
+
+it('rejects a relative read path that escapes the workspace, by traversal or link', async () => {
+  const runtime = randomUUID();
+  const tools = createManagedToolSet(workspace, runtime);
+  const executor = new ManagedToolExecutor(async () => tools);
+  const reference = {
+    sessionId: runtime,
+    promptId: randomUUID(),
+    callId: randomUUID(),
+    argsDigest: 'digest',
+  };
+  await writeFile(path.join(root, 'secret'), 'sensitive');
+  await writeFile(path.join(workspace, 'inside'), 'x');
+  await symlink(path.join(root, 'secret'), path.join(workspace, 'link'));
+  // Reads never pass through file history, so the executor's containment
+  // check is their only guard.
+  for (const filePath of ['../secret', 'link']) {
+    expect(
+      await executor.execute(
+        { ...reference, callId: randomUUID() },
+        'read_file',
+        { file_path: filePath },
+      ),
+    ).toMatchObject({
+      executionStatus: 'error',
+      error: {
+        message: expect.stringContaining(
+          'not within the Session working directory',
+        ),
+      },
+    });
+  }
+  expect(
+    await executor.execute(
+      { ...reference, callId: randomUUID() },
+      'read_file',
+      { file_path: 'inside' },
+    ),
+  ).toMatchObject({ executionStatus: 'success' });
+});
+
 it('admits history preparation beside async Hooks while retaining their close and undo hold', async () => {
   const runtime = 'hooks-activation-original';
   const holds = vi.fn(() => true);
@@ -521,6 +595,57 @@ it('admits history preparation beside async Hooks while retaining their close an
   });
   executor.closeSessionAdmission(runtime);
 });
+
+it.skipIf(process.platform === 'win32')(
+  'records and rewinds the path consumed by an escaped write',
+  async () => {
+    const file = path.join(workspace, 'notes file.txt');
+    await writeFile(file, 'before');
+    const runtime = randomUUID();
+    const executor = new ManagedToolExecutor(async () =>
+      createManagedToolSet(workspace, runtime),
+    );
+    const control = (
+      operation: Parameters<typeof executor.controlFileHistory>[2],
+    ) => executor.controlFileHistory(owner, runtime, operation);
+    try {
+      await control({ kind: 'raw-file-history', action: 'bind', state: null });
+      await control({
+        kind: 'raw-file-history',
+        action: 'prepare',
+        promptId: runtime,
+        paths: ['notes file.txt'],
+      });
+      const answer = await executor.execute(
+        {
+          sessionId: runtime,
+          promptId: runtime,
+          callId: randomUUID(),
+          argsDigest: 'digest',
+        },
+        'write_file',
+        { file_path: String.raw`notes\ file.txt`, content: 'after' },
+      );
+      expect(answer.executionStatus).toBe('success');
+      expect(await readFile(file, 'utf8')).toBe('after');
+      const saved = parseHostedFileHistoryState(
+        await control({ kind: 'raw-file-history', action: 'snapshot' }),
+        owner,
+      );
+      expect(Object.keys(saved.files)).toEqual(['notes file.txt']);
+      expect(
+        await control({
+          kind: 'raw-file-history',
+          action: 'rewind',
+          promptId: runtime,
+        }),
+      ).toMatchObject({ conflict: false, filesChanged: ['notes file.txt'] });
+      expect(await readFile(file, 'utf8')).toBe('before');
+    } finally {
+      await executor.close();
+    }
+  },
+);
 
 it('wires history to the real raw executor and preserves its original invocation', async () => {
   const runtime = randomUUID();

@@ -5,7 +5,7 @@ import {
   installMockDaemon,
 } from './utils/mockDaemon';
 
-test('downloads silently, shows a version-adjacent button and restarts in place @smoke', async ({
+test('downloads silently, shows an update action in More and restarts in place @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -47,8 +47,8 @@ test('downloads silently, shows a version-adjacent button and restarts in place 
   await expect(entry).toHaveCount(0);
   expect(restarts).toBe(0);
   status = { ...status, state: 'ready' };
+  await page.getByRole('button', { name: '更多', exact: true }).click();
   await expect(entry).toHaveAccessibleName('更新');
-  const version = page.getByTitle('Qwen Code v0.24.4', { exact: true });
   for (const width of [220, 343, 360, 260]) {
     await page.evaluate((sidebarWidth) => {
       localStorage.setItem(
@@ -57,27 +57,20 @@ test('downloads silently, shows a version-adjacent button and restarts in place 
       );
     }, width);
     await page.reload();
+    await page.getByRole('button', { name: '更多', exact: true }).click();
     await expect(entry).toBeVisible();
     const buttonBox = (await entry.boundingBox())!;
-    const versionBox = (await version.boundingBox())!;
     const settingsBox = (await page
       .getByRole('button', { name: '设置', exact: true })
       .boundingBox())!;
-    expect(buttonBox.x).toBeGreaterThan(versionBox.x + versionBox.width);
-    expect(
-      Math.abs(
-        buttonBox.y +
-          buttonBox.height / 2 -
-          versionBox.y -
-          versionBox.height / 2,
-      ),
-    ).toBeLessThan(2);
+    expect(buttonBox.width).toBeGreaterThan(100);
     expect(buttonBox.y + buttonBox.height).toBeLessThan(settingsBox.y);
   }
   await page.screenshot({ path: testInfo.outputPath('update-sidebar.png') });
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '收起', exact: true }).click();
+  await page.getByRole('button', { name: '更多', exact: true }).click();
   await expect(entry).toBeVisible();
-  expect((await entry.boundingBox())!.width).toBeLessThanOrEqual(32);
   expect(preparations).toBe(1);
   expect(restarts).toBe(0);
   const beforeRestartUrl = page.url();
@@ -85,6 +78,8 @@ test('downloads silently, shows a version-adjacent button and restarts in place 
   await expect(entry).toHaveAccessibleName('重启中…');
   await expect(entry).toBeDisabled();
   expect(restarts).toBe(1);
+  await page.keyboard.press('Escape');
+  await expect(entry).toHaveCount(0);
   status = { state: 'up-to-date', currentVersion: '0.24.6', canInstall: false };
   const reloaded = page.waitForEvent('load');
   await reloaded;
@@ -107,6 +102,7 @@ test('older daemons do not expose update controls @smoke', async ({
     return route.abort();
   });
   await page.goto(`/session/${scenario.sessionId}?language=en`);
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await expect(
     page.getByRole('button', { name: 'Settings', exact: true }),
   ).toBeVisible();
@@ -165,6 +161,7 @@ test('returns to the original task after a restart-time session 404 @smoke', asy
   await daemon.sse.waitForConnection(scenario.sessionId);
   const originalUrl = page.url();
   const entry = page.locator('[data-web-shell-update]');
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await expect(entry).toHaveAccessibleName('Update');
   await entry.click();
   await expect(entry).toHaveAccessibleName('Restarting…');
@@ -193,7 +190,7 @@ test('returns to the original task after a restart-time session 404 @smoke', asy
   expect(restarts).toBe(1);
 });
 
-test('nightly versions leave the update button visible in a narrow sidebar', async ({
+test('nightly versions and update remain readable in More with a narrow sidebar', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -217,21 +214,18 @@ test('nightly versions leave the update button visible in a narrow sidebar', asy
     }),
   );
   await page.goto(`/session/${scenario.sessionId}?language=en`);
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   const button = page.getByRole('button', { name: 'Update', exact: true });
   await expect(button).toBeVisible();
   const buttonBox = (await button.boundingBox())!;
-  const sidebarBox = (await page
-    .getByRole('complementary', { name: 'Workspace sidebar' })
-    .boundingBox())!;
-  expect(buttonBox.x + buttonBox.width).toBeLessThan(
-    sidebarBox.x + sidebarBox.width,
-  );
+  expect(buttonBox.width).toBeGreaterThan(100);
   const badge = page.getByTitle(`Qwen Code v${version}`, { exact: true });
   await expect(badge).toHaveCSS('text-overflow', 'ellipsis');
+  await expect(badge).toBeVisible();
+  const menu = page.locator('[data-web-shell-sidebar-more]');
   expect(
-    await badge.evaluate(
-      (element) => element.scrollWidth > element.clientWidth,
+    await menu.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
     ),
   ).toBe(true);
-  expect((await badge.boundingBox())!.x).toBeLessThan(buttonBox.x);
 });
