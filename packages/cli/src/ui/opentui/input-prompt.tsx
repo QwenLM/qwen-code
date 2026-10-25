@@ -67,6 +67,7 @@ import { randomUUID } from 'node:crypto';
 import { classifyPastedImagePaths } from '../utils/pasted-image-paths.js';
 import { editTextInExternalEditor } from '../utils/external-editor.js';
 import type { Key } from '../hooks/useKeypress.js';
+import { useDoublePress } from '../hooks/useDoublePress.js';
 import type { VimBuffer } from '../hooks/vim.js';
 import {
   useTextBuffer,
@@ -255,6 +256,7 @@ export interface InputPromptProps {
   onInterrupt?: (onSettled?: OpenTuiCancelSettled) => void;
   onCancelCommand?: () => boolean;
   onRetry?: () => void;
+  onRewind?: () => void;
   approvalMode?: ApprovalMode;
   placeholder?: string;
   topRightLabel?: string;
@@ -511,6 +513,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     : completionIndex;
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [escapeArmed, setEscapeArmed] = useState(false);
+  const [rewindArmed, setRewindArmed] = useState(false);
+  const rewindPress = useDoublePress(() => props.onRewind?.(), setRewindArmed);
   const draftRef = useRef<Draft>(newDraft());
   const claimedDraftRef = useRef<Draft | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -1775,6 +1779,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           return;
         }
       }
+      if (!bufferRef.current.text && props.onRewind) {
+        rewindPress();
+        return;
+      }
       const effect = escapeRef.current!.handleEscape(bufferRef.current.text);
       if (effect === 'arm') {
         setEscapeArmed(true);
@@ -2337,6 +2345,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         </box>
       )}
       {escapeArmed && <text fg={C.dim}>{ESCAPE_ARM_HINT}</text>}
+      {rewindArmed && <text fg={C.dim}>{t('Press Esc again to rewind')}</text>}
     </box>
   );
 }
