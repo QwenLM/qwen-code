@@ -133,21 +133,205 @@ class ManagedAgentPreflightTest {
 
     @Test
     void probesTheHarnessCapabilitiesEndpoint() throws IOException {
-        HttpServer server = HttpServer.create(
-                new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/capabilities", exchange -> {
-            exchange.sendResponseHeaders(200, -1);
-            exchange.close();
-        });
-        server.start();
+        HttpServer server = capabilitiesServer(capabilities(DIGEST, ""));
         try {
-            assertEquals(ManagedAgentPreflight.Status.PASS,
-                    ManagedAgentPreflight.harnessCheck(harness(
-                            "http://127.0.0.1:"
-                                    + server.getAddress().getPort())).status());
+            String url = "http://127.0.0.1:" + server.getAddress().getPort();
+            ManagedAgentPreflight.Check check =
+                    ManagedAgentPreflight.harnessCheck(harness(url), "0.26.0");
+            assertEquals(ManagedAgentPreflight.Status.PASS, check.status());
+            assertEquals(url + "/capabilities compatible: Hosted Harness"
+                    + " protocol 1, capability digest matches, Qwen Code 0.26.0",
+                    check.detail());
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void negotiatesWithTheHarnessAsTheFirstSessionDoes() throws IOException {
+        String other = "sha256:" + "b".repeat(64);
+        HttpServer mismatched = capabilitiesServer(capabilities(other, ""));
+        try {
+            ManagedAgentPreflight.Check check = ManagedAgentPreflight.harnessCheck(
+                    harness("http://127.0.0.1:" + mismatched.getAddress().getPort()));
+            assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+            assertTrue(check.detail().endsWith(
+                    "advertises another capability digest"), check.detail());
+            assertEquals("give the Harness and the control plane the same"
+                    + " QWEN_MANAGED_AGENT_CAPABILITY_DIGEST", check.fix());
+            assertFalse(check.detail().contains(other), "the digest stays out");
+        } finally {
+            mismatched.stop(0);
+        }
+        HttpServer old = capabilitiesServer(capabilities(DIGEST, "")
+                .replace("\"managed_session_journal_delta_v1\",", ""));
+        try {
+            ManagedAgentPreflight.Check check = ManagedAgentPreflight.harnessCheck(
+                    harness("http://127.0.0.1:" + old.getAddress().getPort()),
+                    "0.26.0");
+            assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+            assertTrue(check.detail().endsWith("is not a compatible Hosted Harness:"
+                    + " Endpoint does not advertise managed_session_journal_delta_v1"),
+                    check.detail());
+            assertEquals("install Qwen Code 0.26.0", check.fix());
+        } finally {
+            old.stop(0);
+        }
+    }
+
+    @Test
+    void comparesTheHarnessVersionWithTheManifest() throws IOException {
+        HttpServer server = capabilitiesServer(capabilities(DIGEST, ""));
+        try {
+            ManagedAgentPreflight.Check check = ManagedAgentPreflight.harnessCheck(
+                    harness("http://127.0.0.1:" + server.getAddress().getPort()),
+                    "0.27.0");
+            assertEquals(ManagedAgentPreflight.Status.WARN, check.status());
+            assertTrue(check.detail().endsWith("Qwen Code 0.26.0, but this"
+                    + " distribution was built for 0.27.0"), check.detail());
+            assertEquals("install Qwen Code 0.27.0", check.fix());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void requiresTheLifecycleTheWorkspaceToolsNeed() throws IOException {
+        HttpServer textOnly = capabilitiesServer(capabilities(DIGEST, "")
+                .replace("\"lifecycleProtocolVersion\":1,", ""));
+        HttpServer filesOnly = capabilitiesServer(capabilities(DIGEST, ""));
+        try {
+            ManagedAgentProperties files = harness(
+                    "http://127.0.0.1:" + textOnly.getAddress().getPort());
+            files.getHarness().setWorkspaceFilesEnabled(true);
+            ManagedAgentPreflight.Check noFiles =
+                    ManagedAgentPreflight.harnessCheck(files);
+            assertEquals(ManagedAgentPreflight.Status.FAIL, noFiles.status());
+            assertTrue(noFiles.detail().endsWith("does not support Workspace files"));
+            ManagedAgentProperties shell = harness(
+                    "http://127.0.0.1:" + filesOnly.getAddress().getPort());
+            shell.getHarness().setWorkspaceFilesEnabled(true);
+            shell.getHarness().setWorkspaceShellEnabled(true);
+            ManagedAgentPreflight.Check noShell =
+                    ManagedAgentPreflight.harnessCheck(shell);
+            assertEquals(ManagedAgentPreflight.Status.FAIL, noShell.status());
+            assertEquals("set QWEN_HOSTED_LIFECYCLE_V2_PROFILES=hosted-workspace-shell/1"
+                    + " in the Harness environment", noShell.fix());
+        } finally {
+            textOnly.stop(0);
+            filesOnly.stop(0);
+        }
+        HttpServer withShell = capabilitiesServer(
+                capabilities(DIGEST, "\"hosted-workspace-shell/1\""));
+        try {
+            ManagedAgentProperties shell = harness(
+                    "http://127.0.0.1:" + withShell.getAddress().getPort());
+            shell.getHarness().setWorkspaceFilesEnabled(true);
+            shell.getHarness().setWorkspaceShellEnabled(true);
+            assertEquals(ManagedAgentPreflight.Status.PASS,
+                    ManagedAgentPreflight.harnessCheck(shell).status());
+        } finally {
+            withShell.stop(0);
+        }
+    }
+
+    @Test
+    void readsTheQwenCodeVersionFromTheManifestBesideLib(@TempDir Path directory)
+            throws IOException {
+        Path lib = Files.createDirectories(directory.resolve("lib"));
+        Path jar = Files.writeString(lib.resolve("server.jar"), "");
+        Files.writeString(directory.resolve("manifest.json"),
+                "{\"compatibility\":{\"qwenCodeVersion\":\"0.26.0\"}}");
+        assertEquals("0.26.0", ManagedAgentPreflight.manifestQwenCodeVersion(jar.toString()));
+        // A development classpath has no manifest to compare with.
+        assertNull(ManagedAgentPreflight.manifestQwenCodeVersion(
+                jar + java.io.File.pathSeparator + jar));
+        assertNull(ManagedAgentPreflight.manifestQwenCodeVersion(lib.toString()));
+        Files.delete(directory.resolve("manifest.json"));
+        assertNull(ManagedAgentPreflight.manifestQwenCodeVersion(jar.toString()));
+    }
+
+    @Test
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.LINUX)
+    void reportsRuntimeWorkersLeftFromAnEarlierRun(@TempDir Path directory)
+            throws Exception {
+        Path state = Files.createDirectory(directory.resolve("state"));
+        Path elsewhere = Files.createDirectory(directory.resolve("elsewhere"));
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setStateDirectory(state.toString());
+        // Workers run with the state directory as their working directory.
+        Process worker = new ProcessBuilder("sh", "-c", "sleep 60", "managed-runtime-worker")
+                .directory(state.toFile()).start();
+        Process other = new ProcessBuilder("sh", "-c", "sleep 60", "managed-runtime-worker")
+                .directory(elsewhere.toFile()).start();
+        Process notWorker = new ProcessBuilder("sh", "-c", "sleep 60")
+                .directory(state.toFile()).start();
+        try {
+            ManagedAgentPreflight.Check check = ManagedAgentPreflight.workersCheck(
+                    properties, List.of(worker.toHandle(), other.toHandle(), notWorker.toHandle()));
+            assertEquals(ManagedAgentPreflight.Status.WARN, check.status());
+            assertEquals("1 Runtime worker(s) of an earlier run are alive (pid "
+                    + worker.pid() + ")", check.detail());
+            assertTrue(check.fix().contains("systemctl kill --kill-whom=all"));
+        } finally {
+            worker.destroyForcibly().waitFor();
+            other.destroyForcibly().waitFor();
+            notWorker.destroyForcibly().waitFor();
+        }
+        assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
+                .workersCheck(properties, List.of(worker.toHandle())).status());
+        properties.getRuntimeBroker().setEnabled(false);
+        assertEquals(ManagedAgentPreflight.Status.SKIP, ManagedAgentPreflight
+                .workersCheck(properties, List.of()).status());
+    }
+
+    @Test
+    void checksTheListenersInsteadOfBindingThemOnline() throws IOException {
+        try (java.net.ServerSocket listener = new java.net.ServerSocket(0, 1,
+                java.net.InetAddress.getLoopbackAddress())) {
+            ManagedAgentPreflight.Check open = ManagedAgentPreflight.listeningCheck(
+                    "server", "0.0.0.0", listener.getLocalPort());
+            assertEquals(ManagedAgentPreflight.Status.PASS, open.status());
+            assertEquals("127.0.0.1:" + listener.getLocalPort()
+                    + " is listening (online)", open.detail());
+        }
+        int closed;
+        try (java.net.ServerSocket probe = new java.net.ServerSocket(0)) {
+            closed = probe.getLocalPort();
+        }
+        ManagedAgentPreflight.Check silent = ManagedAgentPreflight.listeningCheck(
+                "broker", "127.0.0.1", closed);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, silent.status());
+        assertEquals("broker-port", silent.name());
+        String[] args = {"--check", "--online", "--server.port=" + closed, "--spring.datasource.url="};
+        List<String> online = ManagedAgentPreflight.checks(args).stream()
+                .map(check -> check.name() + ":" + check.status()).toList();
+        assertTrue(online.contains("server-port:FAIL"), online.toString());
+        assertTrue(online.contains("workers:SKIP"), online.toString());
+    }
+
+    // The smallest envelope HostedHarnessClient accepts, as the Harness sends it.
+    private static String capabilities(String digest, String v2Profiles) {
+        return "{\"v\":1,\"qwenCodeVersion\":\"0.26.0\",\"transports\":[\"rest\"],"
+                + "\"features\":[\"managed_session_journal_delta_v1\",\"hosted_harness_private_v1\"],"
+                + "\"hostedHarness\":{\"protocolVersions\":{\"current\":1,\"supported\":[1]},"
+                + "\"bootId\":\"" + java.util.UUID.randomUUID() + "\",\"capabilityDigest\":\""
+                + digest + "\",\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":["
+                + v2Profiles + "]}}";
+    }
+
+    private static HttpServer capabilitiesServer(String body) throws IOException {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        byte[] bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        server.createContext("/capabilities", exchange -> {
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        return server;
     }
 
     @Test
@@ -174,10 +358,13 @@ class ManagedAgentPreflightTest {
         HttpServer server = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", 0), 0);
         AtomicReference<String> authorization = new AtomicReference<>();
+        byte[] body = capabilities(DIGEST, "").getBytes(
+                java.nio.charset.StandardCharsets.UTF_8);
         server.createContext("/capabilities", exchange -> {
             authorization.set(
                     exchange.getRequestHeaders().getFirst("Authorization"));
-            exchange.sendResponseHeaders(200, -1);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
             exchange.close();
         });
         server.start();
@@ -429,10 +616,13 @@ class ManagedAgentPreflightTest {
         HttpServer server = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", 0), 0);
         AtomicReference<String> authorization = new AtomicReference<>();
+        byte[] body = capabilities(DIGEST, "").getBytes(
+                java.nio.charset.StandardCharsets.UTF_8);
         server.createContext("/capabilities", exchange -> {
             authorization.set(
                     exchange.getRequestHeaders().getFirst("Authorization"));
-            exchange.sendResponseHeaders(200, -1);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
             exchange.close();
         });
         server.start();

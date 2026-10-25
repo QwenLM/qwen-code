@@ -1,7 +1,12 @@
 package com.alibaba.qwen.code.managedagent.preflight;
 
+import com.alibaba.qwen.code.daemon.DaemonException;
+import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
+import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
+import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,6 +33,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
@@ -47,6 +53,7 @@ import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
@@ -57,6 +64,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Read-only deployment preflight for the reference distribution.
@@ -70,6 +78,7 @@ public final class ManagedAgentPreflight {
             "--spring.config.additional-location=";
     static final String CONFIG_LOCATION_ENV =
             "SPRING_CONFIG_ADDITIONAL_LOCATION";
+    static final String ONLINE_ARG = "--online";
     private static final String OPTIONAL_PREFIX = "optional:";
     private static final String FILE_PREFIX = "file:";
     private static final Pattern DIGEST =
@@ -93,6 +102,8 @@ public final class ManagedAgentPreflight {
     }
 
     static List<Check> checks(String[] args) {
+        // While the server runs it holds its ports and its Runtime workers.
+        boolean online = Arrays.asList(args).contains(ONLINE_ARG);
         List<Check> checks = new ArrayList<>();
         ConfigurableEnvironment environment = baseEnvironment(args);
         List<String> locations = configLocations(args, environment);
@@ -106,21 +117,26 @@ public final class ManagedAgentPreflight {
         checks.add(startupValidationCheck(properties));
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
-        checks.add(harnessCheck(properties));
+        checks.add(harnessCheck(properties, distributionQwenCodeVersion()));
         checks.add(credentialsFileCheck(properties, access.account()));
         checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
         checks.add(workspaceCheck(properties));
-        checks.add(portCheck("server",
-                environment.getProperty("server.address", "127.0.0.1"),
-                environment.getProperty("server.port", Integer.class,
-                        DEFAULT_SERVER_PORT)));
+        String serverAddress = environment.getProperty("server.address", "127.0.0.1");
+        int serverPort = environment.getProperty("server.port", Integer.class,
+                DEFAULT_SERVER_PORT);
+        checks.add(online ? listeningCheck("server", serverAddress, serverPort)
+                : portCheck("server", serverAddress, serverPort));
         if (properties.getRuntimeBroker().isEnabled()) {
-            checks.add(portCheck("broker",
-                    properties.getRuntimeBroker().getHost(),
-                    properties.getRuntimeBroker().getPort()));
+            ManagedAgentProperties.RuntimeBroker broker = properties.getRuntimeBroker();
+            checks.add(online ? listeningCheck("broker", broker.getHost(), broker.getPort())
+                    : portCheck("broker", broker.getHost(), broker.getPort()));
         }
+        checks.add(online ? new Check("workers", Status.SKIP,
+                "online: the running server owns its Runtime workers", null)
+                : workersCheck(properties, ProcessHandle.allProcesses()
+                        .collect(Collectors.toList())));
         Check database = databaseCheck(environment);
         checks.add(database);
         checks.add(database.status() == Status.PASS
@@ -488,6 +504,15 @@ public final class ManagedAgentPreflight {
     }
 
     static Check harnessCheck(ManagedAgentProperties properties) {
+        return harnessCheck(properties, null);
+    }
+
+    /**
+     * Probes the Harness, then negotiates with it as the first Session does,
+     * and compares its Qwen Code version with the distribution's manifest.
+     */
+    static Check harnessCheck(ManagedAgentProperties properties,
+            String expectedQwenCodeVersion) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
         if (!harness.isEnabled()) {
             return new Check("harness", Status.SKIP, "disabled", null);
@@ -516,13 +541,13 @@ public final class ManagedAgentPreflight {
                     "token is still the shipped template placeholder",
                     "set " + tokenSetting);
         }
+        String digestSetting = StringUtils.isBlank(file)
+                ? "QWEN_MANAGED_AGENT_CAPABILITY_DIGEST"
+                : "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST in " + file;
         if (!isDigest(harness.getCapabilityDigest())) {
             return new Check("harness", Status.FAIL,
                     "capability digest is not sha256:<64 lowercase hex>",
-                    "set " + (StringUtils.isBlank(file)
-                            ? "QWEN_MANAGED_AGENT_CAPABILITY_DIGEST"
-                            : "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST in "
-                                    + file));
+                    "set " + digestSetting);
         }
         if (harness.getPool().isEnabled()) {
             if (!properties.getSessionStore().isEnabled() || StringUtils.isBlank(properties.getSessionStore().getBindingKey())) {
@@ -561,10 +586,8 @@ public final class ManagedAgentPreflight {
                         url + " answered " + response.statusCode(),
                         "start a compatible Hosted Harness");
             }
-            return new Check("harness", Status.PASS,
-                    url + " reachable; the digest is checked on the first "
-                            + "Session",
-                    null);
+            return compatibilityCheck(url, response.body(), harness,
+                    digestSetting, expectedQwenCodeVersion);
         } catch (IOException | RuntimeException error) {
             return new Check("harness", Status.FAIL,
                     url + " is unreachable: " + rootMessage(error),
@@ -573,6 +596,172 @@ public final class ManagedAgentPreflight {
             Thread.currentThread().interrupt();
             return new Check("harness", Status.FAIL,
                     url + " probe was interrupted", null);
+        }
+    }
+
+    private static Check compatibilityCheck(String url, String body,
+            ManagedAgentProperties.Harness harness, String digestSetting,
+            String expectedQwenCodeVersion) {
+        String install = expectedQwenCodeVersion == null
+                ? "install the Qwen Code version the distribution manifest names"
+                : "install Qwen Code " + expectedQwenCodeVersion;
+        HostedHarnessCapabilities capabilities;
+        // The same client and rules the first Session uses.
+        try (HostedHarnessClient negotiation = HostedHarnessClient.builder()
+                .baseUri(URI.create(harness.getBaseUrl()))
+                .bearerToken(harness.getToken())
+                .capabilityDigest(harness.getCapabilityDigest())
+                .connectTimeout(Duration.ofMillis(TIMEOUT_MILLIS))
+                .requestTimeout(Duration.ofMillis(TIMEOUT_MILLIS))
+                .build()) {
+            capabilities = negotiation.capabilities();
+        } catch (HostedHarnessCapabilityMismatchException mismatch) {
+            return new Check("harness", Status.FAIL,
+                    url + " advertises another capability digest",
+                    "give the Harness and the control plane the same "
+                            + digestSetting);
+        } catch (DaemonException | IllegalArgumentException incompatible) {
+            return new Check("harness", Status.FAIL,
+                    url + " is not a compatible Hosted Harness: "
+                            + rootMessage(incompatible), install);
+        }
+        if (harness.isWorkspaceFilesEnabled()
+                && capabilities.getLifecycleProtocolVersion() != 1) {
+            return new Check("harness", Status.FAIL,
+                    url + " does not support Workspace files", install);
+        }
+        if (harness.isWorkspaceShellEnabled() && !capabilities
+                .getLifecycleV2Profiles().contains(WorkspaceToolProfiles.SHELL)) {
+            return new Check("harness", Status.FAIL,
+                    url + " does not offer " + WorkspaceToolProfiles.SHELL,
+                    "set QWEN_HOSTED_LIFECYCLE_V2_PROFILES="
+                            + WorkspaceToolProfiles.SHELL
+                            + " in the Harness environment");
+        }
+        String version = qwenCodeVersion(body);
+        String detail = url + " compatible: Hosted Harness protocol "
+                + capabilities.getCurrentProtocolVersion()
+                + ", capability digest matches"
+                + (version == null ? "" : ", Qwen Code " + version);
+        if (version != null && expectedQwenCodeVersion != null
+                && !version.equals(expectedQwenCodeVersion)) {
+            return new Check("harness", Status.WARN, detail
+                    + ", but this distribution was built for "
+                    + expectedQwenCodeVersion, install);
+        }
+        return new Check("harness", Status.PASS, detail, null);
+    }
+
+    private static String qwenCodeVersion(String body) {
+        try {
+            JsonNode version = new ObjectMapper().readTree(body)
+                    .path("qwenCodeVersion");
+            return version.isTextual() ? version.asText() : null;
+        } catch (IOException | RuntimeException error) {
+            return null;
+        }
+    }
+
+    /**
+     * The Qwen Code version the reference distribution was built for. Its
+     * launcher runs {@code java -jar lib/<jar>}, and manifest.json sits
+     * beside lib/.
+     */
+    static String distributionQwenCodeVersion() {
+        return manifestQwenCodeVersion(System.getProperty("java.class.path", ""));
+    }
+
+    static String manifestQwenCodeVersion(String classPath) {
+        // A development classpath lists several entries and finds no manifest.
+        if (!classPath.endsWith(".jar")) {
+            return null;
+        }
+        try {
+            Path lib = Path.of(classPath).toAbsolutePath().getParent();
+            Path manifest = lib == null || lib.getParent() == null ? null
+                    : lib.getParent().resolve("manifest.json");
+            if (manifest == null || !Files.isRegularFile(manifest)) {
+                return null;
+            }
+            JsonNode version = new ObjectMapper().readTree(manifest.toFile())
+                    .path("compatibility").path("qwenCodeVersion");
+            return version.isTextual() ? version.asText() : null;
+        } catch (IOException | RuntimeException error) {
+            return null;
+        }
+    }
+
+    // KillMode=process leaves Runtime workers running after the server stops,
+    // and a following start races them for the state directory and Workspace.
+    // Workers run with the state directory as their working directory.
+    static Check workersCheck(ManagedAgentProperties properties,
+            List<ProcessHandle> processes) {
+        ManagedAgentProperties.RuntimeBroker broker = properties.getRuntimeBroker();
+        if (!broker.isEnabled() || !"local-process".equals(broker.getProvisioner())
+                || StringUtils.isBlank(broker.getStateDirectory())) {
+            return new Check("workers", Status.SKIP,
+                    "no local-process Runtime configured", null);
+        }
+        if (!Files.isDirectory(Path.of("/proc"))) {
+            return new Check("workers", Status.SKIP,
+                    "not checked without /proc", null);
+        }
+        Path state;
+        try {
+            state = Path.of(broker.getStateDirectory()).toRealPath();
+        } catch (IOException | RuntimeException missing) {
+            return new Check("workers", Status.SKIP,
+                    "state directory does not exist yet", null);
+        }
+        List<Long> alive = processes.stream()
+                .filter(process -> isWorkerOf(process, state))
+                .map(ProcessHandle::pid).sorted()
+                .collect(Collectors.toList());
+        if (alive.isEmpty()) {
+            return new Check("workers", Status.PASS,
+                    "no Runtime worker of an earlier run is alive", null);
+        }
+        return new Check("workers", Status.WARN, alive.size()
+                + " Runtime worker(s) of an earlier run are alive (pid "
+                + alive.stream().map(String::valueOf)
+                        .collect(Collectors.joining(", "))
+                + ")",
+                "stop them before starting the server: systemctl kill"
+                        + " --kill-whom=all -s TERM qwen-managed-agent-server,"
+                        + " or kill those pids");
+    }
+
+    private static boolean isWorkerOf(ProcessHandle process, Path state) {
+        if (process.pid() == ProcessHandle.current().pid()
+                || !process.info().arguments()
+                        .map(arguments -> Arrays.asList(arguments)
+                                .contains("managed-runtime-worker"))
+                        .orElse(false)) {
+            return false;
+        }
+        try {
+            return Files.readSymbolicLink(Path.of("/proc",
+                    Long.toString(process.pid()), "cwd")).equals(state);
+        } catch (IOException | RuntimeException unreadable) {
+            return false;
+        }
+    }
+
+    // --online: the running server holds the ports, so check that it
+    // listens there instead of trying to bind them.
+    static Check listeningCheck(String name, String address, int port) {
+        String host = address == null || address.isBlank()
+                || "0.0.0.0".equals(address) || "::".equals(address)
+                ? "127.0.0.1" : address;
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MILLIS);
+            return new Check(name + "-port", Status.PASS,
+                    host + ":" + port + " is listening (online)", null);
+        } catch (IOException | RuntimeException error) {
+            return new Check(name + "-port", Status.FAIL,
+                    "nothing listens on " + host + ":" + port,
+                    "start the server, or run --check without --online"
+                            + " while it is stopped");
         }
     }
 

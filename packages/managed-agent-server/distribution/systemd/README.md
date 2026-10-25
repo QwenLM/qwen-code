@@ -111,8 +111,10 @@ sudo systemd-run --wait --pipe --collect \
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
-`--check` binds the configured ports, so it reports a false failure while the
-service is running.
+`--check` binds the configured ports, and its `workers` row warns about Runtime
+workers still running from an earlier start, so run it while the service is
+stopped. While the service runs, add `--online`: the port rows then check that
+the server and Broker listen, and the `workers` row is skipped.
 
 ## Why the kill modes differ
 
