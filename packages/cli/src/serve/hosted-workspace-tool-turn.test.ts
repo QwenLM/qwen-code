@@ -8105,31 +8105,38 @@ it('completes and replays durable Hook results after a live pending approval cha
     readSettings: async () => ({ mode, timeoutMs: 60_000 }),
   };
   turn = createTurn(false, approval, create());
-  const signal = new AbortController().signal;
+  const controller = new AbortController();
+  const { signal } = controller;
   const running = turn.execute([calls[1]], [parts[1]], 'model', signal);
-  const requestId = await requested();
-  mode = 'yolo';
-  const responses = await running;
-  expect(session.authority.action(requestId)?.state).toBe('decided');
-  expect(broker.execute).toHaveBeenCalledOnce();
-  expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(editB);
-  expect(
-    seen.find(({ event }) => event === HookEventName.PreToolUse)?.input,
-  ).toMatchObject({ permission_mode: 'default' });
-  expect(
-    seen.find(({ event }) => event === HookEventName.PostToolUse)?.input,
-  ).toMatchObject({ permission_mode: 'yolo' });
-  const history = await session.sink.project();
-  await expect(
-    createTurn(false, approval, create()).resumeHookResults(
-      responses,
-      'model',
-      signal,
-    ),
-  ).resolves.toEqual(responses);
-  expect(seen).toHaveLength(4);
-  expect(await session.sink.project()).toEqual(history);
-  expect(broker.execute).toHaveBeenCalledOnce();
+  const settled = running.catch(() => undefined);
+  try {
+    const requestId = await requested();
+    mode = 'yolo';
+    const responses = await running;
+    expect(session.authority.action(requestId)?.state).toBe('decided');
+    expect(broker.execute).toHaveBeenCalledOnce();
+    expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(editB);
+    expect(
+      seen.find(({ event }) => event === HookEventName.PreToolUse)?.input,
+    ).toMatchObject({ permission_mode: 'default' });
+    expect(
+      seen.find(({ event }) => event === HookEventName.PostToolUse)?.input,
+    ).toMatchObject({ permission_mode: 'yolo' });
+    const history = await session.sink.project();
+    await expect(
+      createTurn(false, approval, create()).resumeHookResults(
+        responses,
+        'model',
+        signal,
+      ),
+    ).resolves.toEqual(responses);
+    expect(seen).toHaveLength(4);
+    expect(await session.sink.project()).toEqual(history);
+    expect(broker.execute).toHaveBeenCalledOnce();
+  } finally {
+    controller.abort();
+    await settled;
+  }
 });
 
 it('preserves each durable Hook mode when the live selection changes within a batch', async () => {
