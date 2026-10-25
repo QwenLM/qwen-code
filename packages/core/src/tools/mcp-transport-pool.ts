@@ -125,6 +125,7 @@ export class McpTransportPool {
    * teardown — once set, a fresh pool is required for further work.
    */
   private draining = false;
+  private readonly drainWaiters = new Set<() => void>();
   /**
    * Monotonic per-server-name index for `entryIndex`. Each
    * new entry for a name gets `nextIndexByName.get(name)++`; old
@@ -253,11 +254,20 @@ export class McpTransportPool {
       if (cleanups.length === 0) break;
       // A deadline bounds this caller, not the old transport's lifetime.
       // Keep the barrier on timeout so a later acquire cannot spawn over it.
-      await runWithTimeout(
-        Promise.all(cleanups),
-        Math.max(0, cleanupDeadline - Date.now()),
-        `MCP cleanup for '${serverName}'`,
-      );
+      let wakeForDrain!: () => void;
+      const drainStarted = new Promise<void>((resolve) => {
+        wakeForDrain = resolve;
+        this.drainWaiters.add(resolve);
+      });
+      try {
+        await runWithTimeout(
+          Promise.race([Promise.all(cleanups), drainStarted]),
+          Math.max(0, cleanupDeadline - Date.now()),
+          `MCP cleanup for '${serverName}'`,
+        );
+      } finally {
+        this.drainWaiters.delete(wakeForDrain);
+      }
       for (const cleanup of cleanups) completedCleanups.add(cleanup);
       if (this.draining) {
         throw new Error(
@@ -775,6 +785,8 @@ export class McpTransportPool {
     // attempting to attach mid-drain doesn't end up holding a handle
     // to an entry that's about to be force-closed.
     this.draining = true;
+    for (const wake of this.drainWaiters) wake();
+    this.drainWaiters.clear();
     const deadline = Date.now() + timeoutMs;
 
     // Wait for in-flight spawn promises to settle BEFORE taking the

@@ -684,6 +684,59 @@ describe('McpTransportPool', () => {
       },
     );
 
+    it.each(cleanupTransports)(
+      'wakes a waiting $transport replacement before retirement cleanup settles',
+      async ({ transport, cfg }) => {
+        const mocked = mockMcpSuccess();
+        const connect = vi.spyOn(McpClient.prototype, 'connect');
+        const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+        const r = mkSessionRegistries();
+        const first = await pool.acquire(
+          'srv',
+          cfg,
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        let finish!: () => void;
+        vi.spyOn(first.client, 'disconnect').mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+        (mocked as unknown as { onerror: (error: Error) => void }).onerror(
+          new Error('EPIPE'),
+        );
+        let outcome: string | undefined;
+        const nextOutcome = pool
+          .acquire(
+            'srv',
+            cfg,
+            transport === 'stdio' ? 'b' : 'a',
+            r.tools,
+            r.prompts,
+            r.resources,
+          )
+          .then(
+            () => (outcome = 'connected'),
+            (error: Error) => (outcome = error.message),
+          );
+        await vi.advanceTimersByTimeAsync(0);
+        const draining = pool.drainAll({ timeoutMs: 100 });
+        try {
+          await vi.advanceTimersByTimeAsync(100);
+          await draining;
+          expect(outcome).toContain('is draining');
+          expect(connect).toHaveBeenCalledTimes(1);
+        } finally {
+          finish();
+          await nextOutcome;
+        }
+      },
+    );
+
     it.each(cleanupTransports.filter(({ transport }) => transport !== 'stdio'))(
       'limits unpooled $transport cleanup waits to the session and transport config',
       async ({ cfg }) => {
