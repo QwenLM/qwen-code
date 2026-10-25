@@ -14,7 +14,7 @@ import {
   translateAndCheckAbsoluteWorkspacePath,
   MAX_WORKSPACE_PATH_LENGTH,
 } from '@qwen-code/acp-bridge/workspacePaths';
-import { realpathSync } from 'node:fs';
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
@@ -50,6 +50,11 @@ import {
   NativeDirectoryPickerUnavailableError,
   pickNativeDirectory,
 } from '../native-directory-picker.js';
+import {
+  GitCloneRequestError,
+  type TargetRejection,
+  type WorkspaceGitCloner,
+} from '../workspace-git-clone.js';
 
 // Upper bound on total registered workspaces (startup + dynamic). Each
 // registration allocates a full runtime (bridge, channel factory, sub-session
@@ -215,6 +220,7 @@ export interface WorkspaceManagementRouteDeps {
     signal?: AbortSignal,
   ) => Promise<string | undefined>;
   reservedWorkspaceRoots?: readonly string[];
+  workspaceGitCloner?: WorkspaceGitCloner;
 }
 
 export type { WorkspaceRemovalActivity } from '../workspace-activity.js';
@@ -265,17 +271,55 @@ export function registerWorkspaceManagementRoutes(
     runtimeRemoval,
     pickWorkspaceDirectory: pickWorkspaceDirectoryOverride,
     reservedWorkspaceRoots = [],
+    workspaceGitCloner,
   } = deps;
   const pickWorkspaceDirectory =
     pickWorkspaceDirectoryOverride ?? pickNativeDirectory;
-  const canonicalizeIfPresent = (candidate: string): string => {
+  const canonicalizeIfPresent = (
+    candidate: string,
+    seen: ReadonlySet<string> = new Set(),
+  ): string => {
     const resolved = resolve(candidate);
-    try {
-      return realpathSync.native(resolved);
-    } catch {
-      return resolved;
+    let current = resolved;
+    const missing: string[] = [];
+    for (;;) {
+      try {
+        const canonical = realpathSync.native(current);
+        return missing.length === 0
+          ? canonical
+          : join(canonical, ...missing.reverse());
+      } catch {
+        try {
+          if (!seen.has(current) && lstatSync(current).isSymbolicLink()) {
+            const link = readlinkSync(current);
+            const parent = dirname(current);
+            const destination = isAbsolute(link)
+              ? link
+              : join(canonicalizeIfPresent(parent, seen), link);
+            return canonicalizeIfPresent(
+              join(destination, ...missing.reverse()),
+              new Set([...seen, current]),
+            );
+          }
+        } catch {
+          // Not a symlink (or unreadable); walk to the parent below.
+        }
+        const parent = dirname(current);
+        if (parent === current) return resolved;
+        missing.push(basename(current));
+        current = parent;
+      }
     }
   };
+  // Case-folded containment is deliberately conservative: on a
+  // case-insensitive filesystem `Documents/qwen code` is the physical
+  // ancestor of `Documents/Qwen Code/Conversations`, and a clone target there
+  // must not own the reserved root's cleanup scope.
+  const isWithinOrEqual = (child: string, parent: string): boolean =>
+    child === parent ||
+    isWithinRoot(child, parent) ||
+    child.toLowerCase() === parent.toLowerCase() ||
+    isWithinRoot(child.toLowerCase(), parent.toLowerCase());
   const isReservedWorkspacePath = (candidate: string): boolean => {
     const resolvedCandidate = resolve(candidate);
     const canonicalCandidate = canonicalizeIfPresent(candidate);
@@ -287,6 +331,21 @@ export function registerWorkspaceManagementRoutes(
         isWithinRoot(resolvedCandidate, resolvedRoot) ||
         canonicalCandidate === canonicalRoot ||
         isWithinRoot(canonicalCandidate, canonicalRoot)
+      );
+    });
+  };
+  // A clone target that contains a reserved root is just as unsafe: the
+  // clone's cancel/failure cleanup deletes the target recursively, and a
+  // reserved root created inside it while the job runs would go with it.
+  const containsReservedWorkspaceRoot = (candidate: string): boolean => {
+    const resolvedCandidate = resolve(candidate);
+    const canonicalCandidate = canonicalizeIfPresent(candidate);
+    return reservedWorkspaceRoots.some((configuredRoot) => {
+      const resolvedRoot = resolve(configuredRoot);
+      const canonicalRoot = canonicalizeIfPresent(configuredRoot);
+      return (
+        isWithinOrEqual(resolvedRoot, resolvedCandidate) ||
+        isWithinOrEqual(canonicalRoot, canonicalCandidate)
       );
     });
   };
@@ -302,6 +361,11 @@ export function registerWorkspaceManagementRoutes(
   // infrastructure: the capacity projection skips them just like it skips
   // the published internal runtime.
   const internalAdditionsInFlight = new Set<string>();
+  // Canonical targets of running clone jobs, held until the job and its
+  // failure/cancel cleanup settle. A clone's cleanup removes its directory
+  // recursively, so an overlapping clone or registration must not start
+  // underneath an active target.
+  const activeCloneTargets = new Set<string>();
   let sealed = false;
   let activeOperations = 0;
   let pendingScratchCreations = 0;
@@ -402,6 +466,14 @@ export function registerWorkspaceManagementRoutes(
       );
     });
 
+  const conflictsWithActiveClone = (canonical: string): boolean =>
+    [...activeCloneTargets].some(
+      (target) =>
+        canonical === target ||
+        isWithinRoot(canonical, target) ||
+        isWithinRoot(target, canonical),
+    );
+
   const assertOwnedRuntimeAdmission = (
     canonical: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
@@ -413,7 +485,10 @@ export function registerWorkspaceManagementRoutes(
     if (workspaceRegistry.getManagedByWorkspaceCwd(canonical)) {
       throw new Error('Workspace is already registered');
     }
-    const nestingConflict = [
+    if (activeCloneTargets.has(canonical)) {
+      throw new Error('Workspace path is being cloned');
+    }
+    const nestingWithRegistered = [
       ...workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
       ...[...inFlight].flatMap(([cwd, operation]) =>
         operation === 'addition' ? [cwd] : [],
@@ -423,10 +498,20 @@ export function registerWorkspaceManagementRoutes(
       if (isWithinRoot(cwd, canonical)) return true;
       return provenance !== 'live-conversation' && isWithinRoot(canonical, cwd);
     });
+    // A clone's cancel/failure cleanup deletes its target recursively, so
+    // even the Live runtime must stay outside an active clone target in both
+    // directions. The Live exemption only covers one fixed, daemon-owned root
+    // relative to user workspaces, never a target that may disappear.
+    const nestingWithActiveClone = [...activeCloneTargets].some(
+      (target) =>
+        target === canonical ||
+        isWithinRoot(target, canonical) ||
+        isWithinRoot(canonical, target),
+    );
     // Live uses one fixed, daemon-owned root and every request resolves its
     // runtime exactly; user-selected and scratch runtimes keep the strict
     // no-nesting boundary.
-    if (nestingConflict) {
+    if (nestingWithRegistered || nestingWithActiveClone) {
       throw new Error('Workspace path nests with an existing workspace');
     }
     // The owned Conversations runtime is daemon infrastructure: user
@@ -1036,6 +1121,169 @@ export function registerWorkspaceManagementRoutes(
   );
 
   const protectExistingWorkspaceRegistration = mutate({ strict: true });
+
+  const validateGitCloneTarget = (
+    candidate: string,
+  ): TargetRejection | undefined => {
+    if (
+      isReservedWorkspacePath(candidate) ||
+      containsReservedWorkspaceRoot(candidate)
+    ) {
+      return {
+        status: 409,
+        code: 'target_reserved',
+        message: 'Workspace path overlaps a reserved Conversations root.',
+      };
+    }
+    if (managedScratchRoot) {
+      const scratchRoot = managedScratchRoot.canonicalRoot;
+      if (
+        isWithinRoot(candidate, scratchRoot) ||
+        isWithinRoot(scratchRoot, candidate)
+      ) {
+        return {
+          status: 409,
+          code: 'scratch_root_conflict',
+          message: 'Workspace path conflicts with the managed scratch root',
+        };
+      }
+    }
+    if (
+      workspaceRegistry.getManagedByWorkspaceCwd(candidate) ||
+      inFlight.has(candidate)
+    ) {
+      return {
+        status: 409,
+        code: 'target_nested',
+        message: 'Workspace path is already registered',
+      };
+    }
+    if (conflictsWithRegisteredWorkspace(candidate)) {
+      return {
+        status: 409,
+        code: 'target_nested',
+        message: 'Workspace path nests with an existing workspace',
+      };
+    }
+    if (conflictsWithActiveClone(candidate)) {
+      return {
+        status: 409,
+        code: 'target_nested',
+        message: 'Workspace path overlaps an active clone',
+      };
+    }
+    for (const cwd of inFlight.keys()) {
+      if (
+        cwd !== candidate &&
+        (isWithinRoot(candidate, cwd) || isWithinRoot(cwd, candidate))
+      ) {
+        return {
+          status: 409,
+          code: 'target_nested',
+          message: 'Workspace path nests with an existing workspace',
+        };
+      }
+    }
+    return undefined;
+  };
+
+  const startGitCloneWorkspace = async (
+    res: Response,
+    body: Record<string, unknown>,
+  ): Promise<void> => {
+    if (!workspaceGitCloner) {
+      res.status(501).json({
+        error: 'Git workspace cloning is not available',
+        code: 'git_clone_not_available',
+      });
+      return;
+    }
+    if (
+      typeof body['url'] !== 'string' ||
+      typeof body['target'] !== 'string' ||
+      Object.keys(body).some(
+        (key) => key !== 'kind' && key !== 'url' && key !== 'target',
+      )
+    ) {
+      res.status(400).json({
+        error: 'Git clone requests must be { kind: "git", url, target }',
+        code: 'invalid_workspace_request',
+      });
+      return;
+    }
+    if (sealed) {
+      sendSealed(res);
+      return;
+    }
+    operationStarted();
+    try {
+      const { jobId } = await workspaceGitCloner.start({
+        url: body['url'],
+        target: body['target'],
+        validateTarget: validateGitCloneTarget,
+        reserveTarget: (target) => activeCloneTargets.add(target),
+        releaseTarget: (target) => activeCloneTargets.delete(target),
+      });
+      res.status(202).json({ kind: 'git-workspace-clone', jobId });
+    } catch (error) {
+      if (error instanceof GitCloneRequestError) {
+        res.status(error.status).json({
+          error: error.message,
+          code: error.code,
+        });
+        return;
+      }
+      writeStderrLine(
+        `qwen serve: git workspace clone failed to start: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      res.status(500).json({
+        error: 'Failed to start workspace clone',
+        code: 'git_clone_failed',
+      });
+    } finally {
+      operationFinished();
+    }
+  };
+
+  app.get('/workspace-git-clone-jobs/:jobId', (req: Request, res: Response) => {
+    const snapshot = workspaceGitCloner?.get(String(req.params['jobId']));
+    if (!snapshot) {
+      res.status(404).json({
+        error: 'Workspace clone job not found',
+        code: 'clone_job_not_found',
+      });
+      return;
+    }
+    res.status(200).json(snapshot);
+  });
+
+  app.delete(
+    '/workspace-git-clone-jobs/:jobId',
+    mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      if (!workspaceGitCloner) {
+        res.status(501).json({
+          error: 'Git workspace cloning is not available',
+          code: 'git_clone_not_available',
+        });
+        return;
+      }
+      const snapshot = await workspaceGitCloner.cancel(
+        String(req.params['jobId']),
+      );
+      if (!snapshot) {
+        res.status(404).json({
+          error: 'Workspace clone job not found',
+          code: 'clone_job_not_found',
+        });
+        return;
+      }
+      res.status(200).json(snapshot);
+    },
+  );
+
   app.post(
     '/workspaces',
     mutate(),
@@ -1050,6 +1298,10 @@ export function registerWorkspaceManagementRoutes(
     async (req: Request, res: Response) => {
       const body = safeBody(req);
       if ('kind' in body) {
+        if (body['kind'] === 'git') {
+          await startGitCloneWorkspace(res, body);
+          return;
+        }
         if (
           body['kind'] !== 'scratch' ||
           'cwd' in body ||
@@ -1265,6 +1517,7 @@ export function registerWorkspaceManagementRoutes(
         }
         const nested =
           conflictsWithRegisteredWorkspace(canonical) ||
+          conflictsWithActiveClone(canonical) ||
           [...inFlight].some(
             ([cwd, operation]) =>
               cwd !== canonical &&
@@ -1403,6 +1656,7 @@ export function registerWorkspaceManagementRoutes(
       // /project/sub) can't both pass while neither is in the registry yet.
       const nested =
         conflictsWithRegisteredWorkspace(canonical) ||
+        conflictsWithActiveClone(canonical) ||
         [...inFlight].some(
           ([cwd, operation]) =>
             cwd !== canonical &&
@@ -2207,6 +2461,7 @@ export function registerWorkspaceManagementRoutes(
     quarantineOwnedRuntime,
     async sealAndWait() {
       sealed = true;
+      await workspaceGitCloner?.sealAndWait();
       if (activeOperations === 0) return;
       await new Promise<void>((resolveIdle) => idleWaiters.add(resolveIdle));
     },

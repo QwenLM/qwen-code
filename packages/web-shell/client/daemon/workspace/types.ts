@@ -25,6 +25,7 @@ import type {
   DaemonChannelUpsertRequest,
   DaemonClient,
   DaemonCreateAgentRequest,
+  DaemonGitCloneJob,
   DaemonWorkspaceGenerationEvent,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
@@ -750,6 +751,12 @@ export interface DaemonWorkspaceActions {
     options?: { persist?: boolean; displayName?: string },
   ): Promise<DaemonAddWorkspaceResult>;
   addScratchWorkspace(): Promise<DaemonAddWorkspaceResult>;
+  startGitWorkspaceClone(input: {
+    url: string;
+    target: string;
+  }): Promise<{ jobId: string }>;
+  getGitWorkspaceCloneJob(jobId: string): Promise<DaemonGitCloneJob>;
+  cancelGitWorkspaceClone(jobId: string): Promise<DaemonGitCloneJob>;
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;
