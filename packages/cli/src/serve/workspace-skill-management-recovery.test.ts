@@ -195,12 +195,9 @@ describe('workspace Skill install recovery', () => {
   it('falls back to git when a Contents API listing reaches the page limit', async () => {
     const workspace = await temporary();
     const fixture = await temporary();
-    await fs.mkdir(path.join(fixture, 'skills/foo'), { recursive: true });
-    await fs.writeFile(
-      path.join(fixture, 'skills/foo/SKILL.md'),
-      markdown('foo'),
-    );
-    await fs.writeFile(path.join(fixture, 'skills/foo/a.txt'), 'must survive');
+    await fs.writeFile(path.join(fixture, 'SKILL.md'), markdown('foo'));
+    await fs.writeFile(path.join(fixture, 'a.txt'), 'must survive');
+    const before = new Set(await fs.readdir(os.tmpdir()));
     execFileMock.mockImplementation(
       (
         _file: string,
@@ -208,9 +205,18 @@ describe('workspace Skill install recovery', () => {
         _options: unknown,
         callback: (error: Error | null, stdout: string, stderr: string) => void,
       ) => {
+        const checkout = args[args.length - 1];
         const operation =
           args[0] === 'clone'
-            ? fs.cp(fixture, args[args.length - 1], { recursive: true })
+            ? fs.cp(fixture, checkout, { recursive: true }).then(async () => {
+                await fs.mkdir(path.join(checkout, '.git'), {
+                  recursive: true,
+                });
+                await fs.writeFile(
+                  path.join(checkout, '.git/config'),
+                  '[remote "origin"]\n\turl = https://x-access-token:ghp_SECRET@github.com/owner/repo.git\n',
+                );
+              })
             : Promise.resolve();
         void operation.then(
           () => callback(null, '', ''),
@@ -221,21 +227,21 @@ describe('workspace Skill install recovery', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: string) => {
-        if (input.includes('/contents/skills/foo?')) {
+        if (input.includes('/contents?ref=main')) {
           return Response.json(
             Array.from({ length: 1000 }, (_, index) =>
               index === 0
                 ? {
                     name: 'SKILL.md',
                     type: 'file',
-                    path: 'skills/foo/SKILL.md',
+                    path: 'SKILL.md',
                     download_url:
-                      'https://raw.githubusercontent.com/owner/repo/main/skills/foo/SKILL.md',
+                      'https://raw.githubusercontent.com/owner/repo/main/SKILL.md',
                   }
                 : {
                     name: `missing-${index}.txt`,
                     type: 'file',
-                    path: `skills/foo/missing-${index}.txt`,
+                    path: `missing-${index}.txt`,
                   },
             ),
           );
@@ -248,13 +254,41 @@ describe('workspace Skill install recovery', () => {
       scope: 'workspace',
       source: {
         type: 'github',
-        url: 'https://github.com/owner/repo/blob/main/skills/foo/SKILL.md',
+        url: 'https://github.com/owner/repo/blob/main/SKILL.md',
       },
     });
     expect(execFileMock).toHaveBeenCalled();
     expect(
+      (await fs.readdir(path.join(workspace, '.qwen/skills/foo'))).sort(),
+    ).toEqual(['SKILL.md', 'a.txt']);
+    expect(
       await fs.readFile(path.join(workspace, '.qwen/skills/foo/a.txt'), 'utf8'),
     ).toBe('must survive');
+    expect(
+      (await fs.readdir(os.tmpdir())).filter(
+        (name) => name.startsWith('qwen-skill-git-') && !before.has(name),
+      ),
+    ).toEqual([]);
+  });
+
+  it('excludes a root-level .git directory from a folder install', async () => {
+    const workspace = await temporary();
+    const source = await temporary();
+    await fs.writeFile(path.join(source, 'SKILL.md'), markdown('foo'));
+    await fs.writeFile(path.join(source, 'a.txt'), 'must survive');
+    await fs.mkdir(path.join(source, '.git'));
+    await fs.writeFile(
+      path.join(source, '.git/config'),
+      '[remote "origin"]\n\turl = https://x-access-token:ghp_SECRET@github.com/owner/repo.git\n',
+    );
+    await installWorkspaceSkill(workspace, {
+      name: 'foo',
+      scope: 'workspace',
+      source: { type: 'folder', path: source },
+    });
+    expect(
+      (await fs.readdir(path.join(workspace, '.qwen/skills/foo'))).sort(),
+    ).toEqual(['SKILL.md', 'a.txt']);
   });
 
   it('keeps a live staging directory when another scope shares the base directory', async () => {
@@ -418,21 +452,40 @@ describe('workspace Skill install recovery', () => {
         throw error;
       }
     };
-    await expect(
-      installWorkspaceSkill(
-        workspace,
-        {
-          name: 'foo',
-          scope: 'workspace',
-          source: {
-            type: 'github',
-            url: 'https://github.com/owner/repo/blob/main/skills/foo/SKILL.md',
+    const readdirTargets: string[] = [];
+    const nativeReaddir = fs.readdir.bind(fs);
+    const readdirSpy = vi.spyOn(fs, 'readdir').mockImplementation(((
+      ...args: Parameters<typeof fs.readdir>
+    ) => {
+      readdirTargets.push(String(args[0]));
+      return nativeReaddir(...args);
+    }) as typeof fs.readdir);
+    try {
+      await expect(
+        installWorkspaceSkill(
+          workspace,
+          {
+            name: 'foo',
+            scope: 'workspace',
+            source: {
+              type: 'github',
+              url: 'https://github.com/owner/repo/blob/main/skills/foo/SKILL.md',
+            },
           },
-        },
-        undefined,
-        generationClosed,
-      ),
-    ).rejects.toMatchObject({ name: 'WorkspaceGenerationClosedError' });
+          undefined,
+          generationClosed,
+        ),
+      ).rejects.toMatchObject({ name: 'WorkspaceGenerationClosedError' });
+      expect(
+        readdirTargets.filter((target) =>
+          target
+            .split(path.sep)
+            .some((segment) => segment.startsWith('qwen-skill-git-')),
+        ),
+      ).toEqual([]);
+    } finally {
+      readdirSpy.mockRestore();
+    }
   });
 
   it('keeps public git fallback independent of a rejected API token', async () => {
@@ -486,7 +539,9 @@ describe('workspace Skill install recovery', () => {
     expect(execFileMock).toHaveBeenCalledTimes(2);
     for (const [, argv, options] of execFileMock.mock.calls) {
       expect(JSON.stringify([argv, options])).not.toContain(token);
-      expect(options).not.toHaveProperty('env');
+      expect(options).toMatchObject({
+        env: { GIT_TERMINAL_PROMPT: '0' },
+      });
     }
   });
 });

@@ -405,19 +405,31 @@ async function downloadGitHubDirectoryWithGit(
         `https://github.com/${owner}/${repo}.git`,
         checkout,
       ],
-      { timeout: 60_000, maxBuffer: 1024 * 1024 },
+      {
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      },
     );
     if (directory) {
       await execFileAsync(
         'git',
         ['-C', checkout, 'sparse-checkout', 'set', '--cone', directory],
-        { timeout: 30_000, maxBuffer: 1024 * 1024 },
+        {
+          timeout: 30_000,
+          maxBuffer: 1024 * 1024,
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        },
       );
     } else {
       await execFileAsync(
         'git',
         ['-C', checkout, 'sparse-checkout', 'disable'],
-        { timeout: 30_000, maxBuffer: 1024 * 1024 },
+        {
+          timeout: 30_000,
+          maxBuffer: 1024 * 1024,
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        },
       );
     }
     assertGenerationOpen?.();

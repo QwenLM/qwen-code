@@ -334,7 +334,12 @@ Implementation scope.
 - GitHub Contents API listings stop at the API's 1000-entry page maximum.
   A listing at that length is treated as truncated and re-read through the
   existing git fallback, so enumeration completeness does not depend on the
-  API walk. A 2000-file API walk can still be slow or rate-limited. The new
+  API walk where the git transport can authenticate: public repositories, or
+  hosts with git credentials configured. For a private repository reached
+  with only the configured API token, a listing at or above 1000 entries has
+  no working transport until the deferred fallback authentication lands (see
+  the Git credential bullet below). A 2000-file API walk can still be slow
+  or rate-limited. The new
   file cap is a ceiling, not a completion-time guarantee. Both the SDK
   request and Web Shell action currently time out after 30 s. A slow
   install may finish on the daemon after the client reports a timeout;
@@ -342,7 +347,9 @@ Implementation scope.
 - Git fallback keeps the existing Git environment and credential helpers. The
   configured API token is not injected into Git subprocesses. Dedicated private
   repository fallback authentication is deferred: it needs host scoping,
-  inherited configuration preservation, and lazy-fetch coverage.
+  inherited configuration preservation, and lazy-fetch coverage. This deferral
+  is a correctness boundary for the ≥1000-entry listing path above, not just an
+  enhancement.
 - Web Shell and the CLI do not share a module for this constant. The two
   literals must be kept equal by review.
 - ZIP compression ratio is not limited separately. The archive and
@@ -371,7 +378,10 @@ installed skill. Replacing an existing skill briefly keeps a backup of the
 old tree as well. The git fallback briefly keeps the temp checkout and the
 staging copy until `finally` deletes the checkout. The checkout itself
 is not bounded by the installer caps: git materializes it before the
-copy validates sizes. Do not treat 128 MiB as a disk-usage bound.
+copy validates sizes. The ≥1000-entry page-limit trigger routes the
+largest directories through this path deterministically, so the unbounded
+checkout cost is no longer limited to 429/5xx retries. Do not treat
+128 MiB as a disk-usage bound.
 A failed install must still delete staging. A partial entry that crossed
 the cap lives only inside that staging directory.
 
@@ -395,6 +405,8 @@ Touch only:
   (new; Contents API failure retry with a staging reset, and artifact-prefix
   collision isolation)
 - `packages/web-shell/client/components/skills/SkillInstallDialog.tsx`
+- `packages/web-shell/client/components/skills/SkillInstallDialog.test.tsx`
+  (error-code rows for the new size and file-count codes)
 - `packages/web-shell/client/i18n.tsx` (English and Chinese catalogs)
 
 Do not touch `error-handlers.ts`, `workspace-skills.ts` (the route passes
@@ -452,7 +464,9 @@ Remove both current sentences that say `6 MB`. Do not describe
 accept 249 bytes the server rejects.
 
 A short comment next to `MAX_ZIP_ARCHIVE_BYTES` records the envelope
-formula. The number is otherwise unexplained. No other new comments.
+formula; the number is otherwise unexplained. Two further why-comments are
+budgeted: one above the Contents-API page limit and one on the
+`liveInstallArtifacts` invariant. No other new comments.
 
 ## Validation
 
@@ -486,9 +500,10 @@ files.
 - `does not create Skill directories after the generation closes` still
   leaves no skill directory. Adjust its check index if needed.
 
-No Web Shell test asserts the 6 MB string (`SkillsManagerPage.test.tsx`
-does not). Updating both i18n catalogs and the dialog constant is the UI
-change. Do not add a browser suite for this.
+No existing Web Shell test asserts the 6 MB string
+(`SkillsManagerPage.test.tsx` does not). The UI change is the two i18n
+catalogs, the dialog constant, and the error-code rows added to
+`SkillInstallDialog.test.tsx`. Do not add a browser suite for this.
 
 The implementation PR runs the focused installer tests, Web Shell
 typecheck for the dialog and i18n edits, and `npm run typecheck` for the

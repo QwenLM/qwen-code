@@ -282,14 +282,18 @@ MAX_ZIP_ARCHIVE_BYTES   = 3 * floor(10_485_430 / 4) // 7_864_071
   `MAX_ZIP_ARCHIVE_BYTES` 封顶，可以接受。本次不要另加把 ZIP 先落盘再读的
   读取器。
 - GitHub Contents API 的目录列表在 API 的 1000 条目分页上限处停止。达到该
-  长度的列表会被视为被截断，并改用现有 git 回退重新读取，因此枚举完整性
-  不依赖 API 遍历。2000 个文件的 API 遍历仍可能很慢或触发速率限制。新的
-  文件数上限不保证完成时间。SDK 请求和 Web Shell 操作当前都在 30 秒后
-  超时；客户端报告超时后，daemon 仍可能完成安装。取消机制与超时调整留作
-  后续工作。
+  长度的列表会被视为被截断，并改用现有 git 回退重新读取，因此，在 git
+  传输能够完成认证的范围内（公开仓库，或已配置 git 凭据的主机），枚举
+  完整性不依赖 API 遍历。对于只能凭已配置 API token 访问的私有仓库，
+  达到或超过 1000 条目的列表在延期的回退认证落地之前没有可用的传输通道
+  （见下一条 Git 凭据约束）。2000 个文件的 API 遍历仍可能很慢或触发速率
+  限制。新的文件数上限不保证完成时间。SDK 请求和 Web Shell 操作当前都在
+  30 秒后超时；客户端报告超时后，daemon 仍可能完成安装。取消机制与超时
+  调整留作后续工作。
 - Git 回退沿用现有 Git 环境和凭证助手，不向 Git 子进程注入配置的 API token。
   私有仓库回退认证留待后续处理，需要限定凭证主机、保留继承配置，并覆盖
-  延迟拉取文件内容的路径。
+  延迟拉取文件内容的路径。这一延期是上述 ≥1000 条目列表路径的正确性边界，
+  而不只是增强项。
 - Web Shell 与 CLI 没有可供这个常量共用的模块。两个字面量必须在评审时保持
   相等。
 - 不单独限制 ZIP 压缩比。压缩包和展开字节上限分别生效，高压缩比的包
@@ -311,7 +315,9 @@ MAX_ZIP_ARCHIVE_BYTES   = 3 * floor(10_485_430 / 4) // 7_864_071
 **磁盘。** 暂存目录最多可放 64 MiB，rename 之后这就是已安装的技能。替换
 已有技能时，旧树的备份会短时间同时存在。git 回退在 `finally` 删除检出之前，
 会短时间同时保留临时检出和暂存副本。检出本身不受安装器上限约束：git
-先将文件落盘，随后复制时才检查大小。因此 128 MiB 不是磁盘占用上限。
+先将文件落盘，随后复制时才检查大小。达到 1000 条目分页上限的列表会让
+最大的那些目录确定性地走这条路径，因此不受限的检出成本不再只出现在
+429/5xx 重试时。128 MiB 仍然不是磁盘占用上限。
 失败的安装仍必须
 删除暂存目录。越过上限的半截条目只能留在该暂存目录内。
 
@@ -333,6 +339,8 @@ closes` 在第三次 `assertGenerationOpen` 时抛出，并期望不存在 `.qwe
 - `packages/cli/src/serve/workspace-skill-management-recovery.test.ts`
   （新增；Contents API 失败后的重试与暂存重置，以及安装产物前缀碰撞的隔离）
 - `packages/web-shell/client/components/skills/SkillInstallDialog.tsx`
+- `packages/web-shell/client/components/skills/SkillInstallDialog.test.tsx`
+  （新增大小与文件数错误码的用例行）
 - `packages/web-shell/client/i18n.tsx`（英文和中文两份目录）
 
 不要改 `error-handlers.ts`、`workspace-skills.ts`（路由只原样传递
@@ -386,8 +394,9 @@ closes` 在第三次 `assertGenerationOpen` 时抛出，并期望不存在 `.qwe
 删掉现在这两句带 `6 MB` 的文案。界面不要把 7,864,071 字节说成 7.5 MiB：
 7.5 MiB 是 7,864,320，会比服务端多接受 249 字节。
 
-在 `MAX_ZIP_ARCHIVE_BYTES` 旁用简短注释写明信封公式。否则这个数字无法解释。
-除此之外不新增注释。
+在 `MAX_ZIP_ARCHIVE_BYTES` 旁用简短注释写明信封公式，否则这个数字无法解释。
+另有两处 why 注释计入预算：一处说明 Contents API 分页上限，一处说明
+`liveInstallArtifacts` 不变量。除此之外不新增注释。
 
 ## 验证
 
@@ -417,8 +426,10 @@ closes` 在第三次 `assertGenerationOpen` 时抛出，并期望不存在 `.qwe
 - `does not create Skill directories after the generation closes` 仍然不留下
   技能目录。需要时调整它的检查序号。
 
-没有 Web Shell 测试断言 6 MB 这句文案（`SkillsManagerPage.test.tsx` 没有）。
-界面改动就是更新两份 i18n 目录和对话框常量。不必为此新增浏览器套件。
+现有 Web Shell 测试中没有断言 6 MB 这句文案的用例
+（`SkillsManagerPage.test.tsx` 没有）。界面改动包括两份 i18n 目录、对话框
+常量，以及 `SkillInstallDialog.test.tsx` 中新增的错误码用例。不必为此新增
+浏览器套件。
 
 实现 PR 运行聚焦的安装器测试、针对对话框和 i18n 改动的 Web Shell
 typecheck，以及对所改包的 `npm run typecheck`。不需要超出这些测试的新 E2E
