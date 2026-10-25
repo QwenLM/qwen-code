@@ -1,0 +1,83 @@
+name: 'Warm pool Java tool cache'
+
+# Seeds the per-runner tool cache with arm64 Temurin JDKs so setup-java
+# resolves from cache instead of api.adoptium.net, which several Hangzhou
+# hosts cannot reach (run 40209529060 probes both halves of the pool).
+# Idempotent: a version already carrying .complete is skipped. The verify
+# job proves the layout by making setup-java resolve the same specs.
+on:
+  push:
+    branches: ['ci/warm-pool-java-toolcache']
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+env:
+  JDK11_URL: 'https://github.com/adoptium/temurin11-binaries/releases/download/jdk-11.0.32.1%2B1/OpenJDK11U-jdk_aarch64_linux_hotspot_11.0.32.1_1.tar.gz'
+  JDK11_SHA256: 'f27033e6f7523c1b0b2565a78e9c0e0abe5596a854ce00ca04ec1b06ece7a935'
+  JDK11_DIR: '11.0.32-101'
+  JDK17_URL: 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_linux_hotspot_17.0.20.1_1.tar.gz'
+  JDK17_SHA256: '457b57af8f9c93ec39080bb8c764f559dc8c89a6da1a39d718a400b7890d3e41'
+  JDK17_DIR: '17.0.20-101'
+  JDK21_URL: 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.13_9.tar.gz'
+  JDK21_SHA256: 'e3522e707fc7dbe2a72c30746b1e7068301a0213ecd213d4491f35a14eb55578'
+  JDK21_DIR: '21.0.13-9'
+
+jobs:
+  seed:
+    name: 'Seed arm64 JDKs'
+    runs-on: ['self-hosted', 'Linux', 'ARM64', 'ecs-qwen']
+    timeout-minutes: 20
+    steps:
+      - name: 'Report host'
+        run: 'hostname; uname -m; echo "TOOL_CACHE=${RUNNER_TOOL_CACHE}"'
+      - name: 'Seed 11 / 17 / 21'
+        run: |-
+          set -uo pipefail
+          [ "$(uname -m)" = 'aarch64' ] || { echo '::notice::not an arm64 host, nothing to seed'; exit 0; }
+          dest="${RUNNER_TOOL_CACHE:?}/Java_Temurin-Hotspot_jdk"
+          seed() {
+            local dir="$1" url="$2" sha="$3"
+            local target="${dest}/${dir}/arm64"
+            if [ -f "${target}/.complete" ]; then echo "skip ${dir}: already cached"; return 0; fi
+            local work; work="$(mktemp -d)"
+            for attempt in 1 2 3; do
+              if curl -fsSL --retry 3 --retry-delay 5 --retry-max-time 120 --max-time 600 "${url}" -o "${work}/jdk.tgz"; then break; fi
+              [ "${attempt}" = 3 ] && { echo "::error::cannot download ${dir}"; rm -rf "${work}"; return 1; }
+              sleep $((attempt * 10))
+            done
+            if ! echo "${sha}  ${work}/jdk.tgz" | sha256sum --check --status; then
+              echo "::error::checksum mismatch for ${dir}"; rm -rf "${work}"; return 1
+            fi
+            tar -xzf "${work}/jdk.tgz" -C "${work}"
+            src="$(find "${work}" -maxdepth 1 -mindepth 1 -type d -name 'jdk-*' -print -quit)"
+            rm -rf "${target}"; mkdir -p "${dest}/${dir}"
+            mv -- "${src}" "${target}"
+            touch "${target}/.complete"
+            rm -rf "${work}"
+            echo "seeded ${dir}"
+          }
+          seed "${JDK11_DIR}" "${JDK11_URL}" "${JDK11_SHA256}"
+          seed "${JDK17_DIR}" "${JDK17_URL}" "${JDK17_SHA256}"
+          seed "${JDK21_DIR}" "${JDK21_URL}" "${JDK21_SHA256}"
+          find "${dest}" -maxdepth 3 -name '.complete' -printf '%h\n' | sort
+
+      - name: 'Verify setup-java 11'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+          cache: ''
+      - name: 'Verify setup-java 17'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654'
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: ''
+      - name: 'Verify setup-java 21'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654'
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: ''
