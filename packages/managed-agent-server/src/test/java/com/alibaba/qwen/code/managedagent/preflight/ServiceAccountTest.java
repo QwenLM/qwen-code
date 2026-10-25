@@ -68,7 +68,54 @@ class ServiceAccountTest {
     }
 
     @Test
-    void readsNoFileThatIsMissing(@TempDir Path directory) {
+    void needsTheDirectoriesOnBothSidesOfASymbolicLink(@TempDir Path directory) throws IOException {
+        Path shared = Files.createDirectory(directory.resolve("shared"));
+        Path file = Files.writeString(shared.resolve("application.yml"), "");
+        mode(file, "rw-r--r--");
+        Path hidden = Files.createDirectory(directory.resolve("private"));
+        Path link = Files.createSymbolicLink(hidden.resolve("application.yml"),
+                Path.of("..", "shared", "application.yml"));
+        ServiceAccount other = new ServiceAccount(STRANGER, Set.of());
+        mode(directory, "rwx--x--x");
+        mode(shared, "rwx--x--x");
+        mode(hidden, "rwx--x--x");
+        assertTrue(other.canRead(link));
+        // The directory holding the link keeps the account out, although
+        // every directory above the target lets it in.
+        mode(hidden, "rwx------");
+        assertTrue(other.canRead(file));
+        assertFalse(other.canRead(link));
+    }
+
+    @Test
+    void needsTheDirectoriesAboveASymbolicLinksTarget(@TempDir Path directory) throws IOException {
+        Path outer = Files.createDirectory(directory.resolve("outer"));
+        Path inner = Files.createDirectory(outer.resolve("config"));
+        mode(Files.writeString(inner.resolve("application.yml"), ""), "rw-r--r--");
+        Path linked = Files.createSymbolicLink(directory.resolve("config"), inner);
+        ServiceAccount other = new ServiceAccount(STRANGER, Set.of());
+        mode(directory, "rwx--x--x");
+        mode(outer, "rwx--x--x");
+        mode(inner, "rwx--x--x");
+        assertTrue(other.canRead(linked.resolve("application.yml")));
+        // Only the target's path passes through outer, which the link's own
+        // path never names.
+        mode(outer, "rwx------");
+        assertFalse(other.canRead(linked.resolve("application.yml")));
+    }
+
+    @Test
+    void refusesASymbolicLinkLoop(@TempDir Path directory) throws IOException {
+        mode(directory, "rwx--x--x");
+        Files.createSymbolicLink(directory.resolve("a"), Path.of("b"));
+        Files.createSymbolicLink(directory.resolve("b"), Path.of("a"));
+        ServiceAccount other = new ServiceAccount(STRANGER, Set.of());
+        assertThrows(IOException.class, () -> other.canRead(directory.resolve("a")));
+    }
+
+    @Test
+    void readsNoFileThatIsMissing(@TempDir Path directory) throws IOException {
+        mode(directory, "rwx--x--x");
         ServiceAccount other = new ServiceAccount(STRANGER, Set.of());
         assertThrows(IOException.class,
                 () -> other.canRead(directory.resolve("missing.env")));

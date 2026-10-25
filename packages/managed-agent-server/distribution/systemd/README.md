@@ -38,10 +38,11 @@ secret file is group- or world-readable; a WARN does not fail `--check`, so
 apply the `chmod 600` it prints. A `root`-owned `0600` `harness.env` would be
 unreadable to the service, which the `credentials` row reports as FAIL.
 `server.env` sets `QWEN_MANAGED_AGENT_SERVICE_USER=qwen-managed-agent`, so both
-rows check access as that account, including every directory above the file,
-even when `--check` runs as root; the `service-user` row shows the account and
-its groups. `systemd` reads environment files as root, so
-`0640 root:qwen-managed-agent` is enough for `server.env`.
+rows check access as that account, including every directory on the file's
+path and along any symbolic link's target, even when `--check` runs as root;
+the `service-user` row shows the account and its groups. `systemd` reads
+environment files as root, so `0640 root:qwen-managed-agent` is enough for
+`server.env`.
 
 The Harness token and capability digest live only in `harness.env`:
 `server.env` points `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` at it, and

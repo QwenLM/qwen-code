@@ -41,7 +41,7 @@ With the option:
 | `mysql-setup.sql`                            | root : root               | `0600` |
 | the directory, when the bootstrap creates it | root : account's group    | `0750` |
 
-Each file is written to a temporary name, given its owner and mode, then renamed, so it never appears with another owner. An existing directory is left unchanged, since it may be shared, such as `/etc`. The bootstrap then checks that the account can enter the directory and every directory above it. It applies the owner bits to the owner, then the group bits to members, then the others bits, as the kernel does. If any directory blocks the account, the bootstrap writes nothing and names that directory.
+Each file is written to a temporary name, given its owner and mode, then renamed, so it never appears with another owner. An existing directory is left unchanged, since it may be shared, such as `/etc`. The bootstrap then checks that the account can enter every directory the kernel passes through to reach the directory, and the directory itself. It walks the path as the kernel resolves it, so a symbolic link adds the directories along its target, while the directory that holds the link stays on the list. It applies the owner bits to the owner, then the group bits to members, then the others bits, as the kernel does. If any directory blocks the account, the bootstrap writes no file and names that directory. A directory it has just created stays, already with its final owner and mode, so a rerun after the fix uses it.
 
 `server.env` records the account as `QWEN_MANAGED_AGENT_SERVICE_USER`. Without the option, the bootstrap behaves as before, except for the database password and the SQL file.
 
@@ -66,12 +66,12 @@ A new setting, `qwen.managed-agent.service-user` (`QWEN_MANAGED_AGENT_SERVICE_US
 - `FAIL` when no such account exists, which `id -Gn` shows by printing nothing. It also exits 1 for an account in a group without a name, but then prints that group's number, which is how the file attributes name it too, so preflight keeps the groups.
 - `WARN` when `id` cannot run. The rows fall back to the process.
 
-For a resolved account, the `config` and `credentials` rows check access from the file's real path. The account must be able to enter every directory above the file and read the file, judged with the same owner, group and others order. A failure reads "`<path>` is not readable by `<account>`", and the fix names the `chown`, the `chmod 600` and the directories. A filesystem without POSIX attributes falls back to the process check.
+For a resolved account, the `config` and `credentials` rows walk the file's path as the kernel resolves it. The account must be able to enter every directory the walk looks a name up in, including the directories on the way to a symbolic link and those along its target, and it must be able to read the file. Access is judged with the same owner, group and others order. More than 40 links in one path count as unreadable, as the kernel's `ELOOP` does. A failure reads "`<path>` is not readable by `<account>`", and the fix names the `chown`, the `chmod 600` and the directories. A filesystem without POSIX attributes falls back to the process check.
 
 ## Failure semantics
 
 - `--service-user` while not root, with a malformed name, or with an unknown account: the bootstrap exits 1 before writing anything.
-- A directory the account cannot enter: exit 1, naming the directory, before any file is written.
+- A directory the account cannot enter: exit 1, naming the directory, before any file is written. A configuration directory the bootstrap created in this run stays.
 - `QWEN_MANAGED_AGENT_SERVICE_USER` names a missing account: the `service-user` row fails, so `--check` exits 1.
 - A secret file the account cannot read: the `config` or `credentials` row fails, so `--check` exits 1.
 
@@ -87,9 +87,10 @@ For a resolved account, the `config` and `credentials` rows check access from th
 - Bootstrap unit tests:
   - the rendered `server.env` with and without the account, and the exact SQL statements;
   - name, root and lookup refusals from `lookupServiceUser`;
-  - the owner, group and others order in `accountCanEnter`.
-- A root-only bootstrap test with `nobody`: a `0700` parent refuses before any file is written, and after `chmod 755` every file and the directory get the table's owners and modes.
-- `ServiceAccountTest`: the bit order on real files, every directory above the file, a missing file, and a real `id` lookup.
+  - the owner, group and others order in `accountCanEnter`;
+  - the directories `directoriesToEnter` lists for an absolute and a relative symbolic link, and a link loop.
+- A root-only bootstrap test with `nobody`: a `0700` parent refuses before any file is written, and after `chmod 755` every file and the directory get the table's owners and modes. A link to a directory under a `0700` directory refuses too, naming that directory, and writes nothing.
+- `ServiceAccountTest`: the bit order on real files, every directory above the file, a directory on either side of a symbolic link, a link loop, a missing file, and a real `id` lookup.
 - `ManagedAgentPreflightTest`: each `service-user` row state, and the `config` and `credentials` rows failing for an account that cannot read the file while passing for its owner.
 - End to end as root with a new system account and MySQL on the host network:
   - the bootstrap gives the files their owners;

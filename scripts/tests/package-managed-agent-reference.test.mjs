@@ -10,7 +10,9 @@ import {
   chmod,
   mkdtemp,
   mkdir,
+  readdir,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -23,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   accountCanEnter,
+  directoriesToEnter,
   generateSecrets,
   lookupServiceUser,
   renderApplicationYml,
@@ -423,6 +426,36 @@ test('bootstrap checks directory entry the way the kernel does', () => {
   );
 });
 
+test('bootstrap follows symbolic links to the directories the account enters', async () => {
+  const temporary = await realpath(
+    await mkdtemp(path.join(os.tmpdir(), 'qwen-bootstrap-links-')),
+  );
+  try {
+    const target = path.join(temporary, 'private', 'config');
+    await mkdir(target, { recursive: true });
+    await mkdir(path.join(temporary, 'etc'));
+    const absolute = path.join(temporary, 'etc', 'qwen-managed-agent');
+    await symlink(target, absolute);
+    const relative = path.join(temporary, 'etc', 'relative');
+    await symlink(path.join('..', 'private', 'config'), relative);
+    for (const link of [absolute, relative]) {
+      const entered = await directoriesToEnter(link);
+      // The directory holding the link, and one that only the target names.
+      assert.ok(entered.includes(path.join(temporary, 'etc')), link);
+      assert.ok(entered.includes(path.join(temporary, 'private')), link);
+      assert.equal(entered.at(-1), target, link);
+    }
+    await symlink('loop-b', path.join(temporary, 'loop-a'));
+    await symlink('loop-a', path.join(temporary, 'loop-b'));
+    await assert.rejects(
+      directoriesToEnter(path.join(temporary, 'loop-a')),
+      /Too many symbolic links/,
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test('bootstrap writes private files without printing secrets', async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'qwen-bootstrap-'));
   try {
@@ -518,10 +551,10 @@ test(
       const [uid] = ids('-u');
       const [gid] = ids('-g');
       const directory = path.join(temporary, 'config');
-      const run = () =>
+      const run = (target = directory) =>
         execFileSync(
           process.execPath,
-          [script, '--directory', directory, '--service-user', user],
+          [script, '--directory', target, '--service-user', user],
           { encoding: 'utf8', stdio: 'pipe' },
         );
       // mkdtemp's 0700 parent keeps the account out, so nothing is written.
@@ -550,6 +583,19 @@ test(
         await readFile(path.join(directory, 'server.env'), 'utf8'),
         /^QWEN_MANAGED_AGENT_SERVICE_USER=nobody$/m,
       );
+      // A 0700 directory reached only through a symbolic link keeps the
+      // account out too.
+      const hidden = path.join(temporary, 'private');
+      await mkdir(path.join(hidden, 'config'), { recursive: true });
+      await chmod(hidden, 0o700);
+      const linked = path.join(temporary, 'linked');
+      await symlink(path.join(hidden, 'config'), linked);
+      assert.throws(
+        () => run(linked),
+        (error) =>
+          String(error.stderr).includes(`${user} cannot enter ${hidden}`),
+      );
+      assert.deepEqual(await readdir(path.join(hidden, 'config')), []);
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }

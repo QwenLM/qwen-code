@@ -3,12 +3,17 @@ package com.alibaba.qwen.code.managedagent.preflight;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystemLoopException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -21,6 +26,8 @@ import java.util.stream.Collectors;
  */
 final class ServiceAccount {
     private static final long LOOKUP_TIMEOUT_SECONDS = 5;
+    // Linux's limit on symbolic links followed in one path lookup.
+    private static final int MAX_SYMBOLIC_LINKS = 40;
 
     private final String name;
     private final Set<String> groups;
@@ -75,15 +82,49 @@ final class ServiceAccount {
         return groups;
     }
 
-    /** Whether the account can enter every directory above the file and read it. */
+    /**
+     * Whether the account can read the file. It must enter every directory
+     * the kernel looks a name up in while it resolves the path: those on the
+     * way to a symbolic link as well as those on the link's target.
+     */
     boolean canRead(Path file) throws IOException {
-        Path real = file.toRealPath();
-        for (Path directory = real.getParent(); directory != null; directory = directory.getParent()) {
-            if (!allows(Files.readAttributes(directory, PosixFileAttributes.class), false)) {
+        Path absolute = file.toAbsolutePath();
+        Path current = Objects.requireNonNull(absolute.getRoot(), "an absolute path has a root");
+        Deque<Path> names = new ArrayDeque<>();
+        absolute.forEach(names::addLast);
+        int links = 0;
+        while (!names.isEmpty()) {
+            Path name = names.removeFirst();
+            if (!allows(Files.readAttributes(current, PosixFileAttributes.class), false)) {
                 return false;
             }
+            if (name.toString().equals(".")) {
+                continue;
+            }
+            if (name.toString().equals("..")) {
+                // The current directory is already resolved, so this is its real parent.
+                current = current.getParent() == null ? current : current.getParent();
+                continue;
+            }
+            Path next = current.resolve(name);
+            if (!Files.isSymbolicLink(next)) {
+                current = next;
+                continue;
+            }
+            if (++links > MAX_SYMBOLIC_LINKS) {
+                throw new FileSystemLoopException(file.toString());
+            }
+            Path target = Files.readSymbolicLink(next);
+            if (target.isAbsolute()) {
+                current = Objects.requireNonNull(target.getRoot(), "an absolute path has a root");
+            }
+            List<Path> targetNames = new ArrayList<>();
+            target.forEach(targetNames::add);
+            for (int index = targetNames.size() - 1; index >= 0; index--) {
+                names.addFirst(targetNames.get(index));
+            }
         }
-        return allows(Files.readAttributes(real, PosixFileAttributes.class), true);
+        return allows(Files.readAttributes(current, PosixFileAttributes.class), true);
     }
 
     // As the kernel does: the owner bits apply to the owner alone, then the

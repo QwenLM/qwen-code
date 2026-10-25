@@ -867,7 +867,8 @@ class ManagedAgentPreflightTest {
                 credentials.detail());
         assertEquals("chown qwen-preflight-stranger " + harness + ", chmod 600 "
                 + harness + ", and let qwen-preflight-stranger enter every"
-                + " directory above it", credentials.fix());
+                + " directory on its path, following symbolic links",
+                credentials.fix());
         ManagedAgentPreflight.Check config = ManagedAgentPreflight.configFileCheck(
                 List.of("file:" + application), stranger);
         assertEquals(ManagedAgentPreflight.Status.FAIL, config.status());

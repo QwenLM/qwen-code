@@ -19,8 +19,10 @@ import {
   access,
   chmod,
   chown,
+  lstat,
   mkdir,
   open,
+  readlink,
   rename,
   rm,
   stat,
@@ -40,6 +42,8 @@ const GROUP_FILE_MODE = 0o640;
 const GROUP_DIRECTORY_MODE = 0o750;
 // It is written unquoted into server.env, so keep to the portable user names.
 const SERVICE_USER = /^[a-z_][a-z0-9_-]{0,31}$/;
+// Linux's limit on symbolic links followed in one path lookup.
+const MAX_SYMBOLIC_LINKS = 40;
 
 export function generateSecrets(keyId = DEFAULT_KEY_ID) {
   return Object.freeze({
@@ -205,15 +209,50 @@ export function accountCanEnter({ uid, gid, mode }, account) {
   return (mode & 0o001) !== 0;
 }
 
-async function firstBlockedDirectory(directory, account) {
-  for (let current = directory; ; current = path.dirname(current)) {
-    if (!accountCanEnter(await stat(current), account)) {
-      return current;
+// The directories the kernel enters to reach an absolute directory path: each
+// one it looks a name up in, on the way to a symbolic link and along the link's
+// target, then the directory the path resolves to.
+export async function directoriesToEnter(directory) {
+  const entered = [];
+  const names = directory.split(path.sep).filter(Boolean);
+  let current = path.parse(directory).root;
+  let links = 0;
+  while (names.length > 0) {
+    const name = names.shift();
+    entered.push(current);
+    if (name === '.') {
+      continue;
     }
-    if (current === path.dirname(current)) {
-      return undefined;
+    if (name === '..') {
+      // The current directory is already resolved, so this is its real parent.
+      current = path.dirname(current);
+      continue;
+    }
+    const next = path.join(current, name);
+    if (!(await lstat(next)).isSymbolicLink()) {
+      current = next;
+      continue;
+    }
+    if (++links > MAX_SYMBOLIC_LINKS) {
+      throw new Error(`Too many symbolic links in ${directory}.`);
+    }
+    const target = await readlink(next);
+    if (path.isAbsolute(target)) {
+      current = path.parse(target).root;
+    }
+    names.unshift(...target.split(path.sep).filter(Boolean));
+  }
+  entered.push(current);
+  return entered;
+}
+
+async function firstBlockedDirectory(directory, account) {
+  for (const entered of await directoriesToEnter(directory)) {
+    if (!accountCanEnter(await stat(entered), account)) {
+      return entered;
     }
   }
+  return undefined;
 }
 
 async function main() {

@@ -349,7 +349,7 @@ public final class ManagedAgentPreflight {
     private static String unreadableFix(ServiceAccount account, String path) {
         return "chown " + account.name() + " " + path + ", chmod 600 " + path
                 + ", and let " + account.name()
-                + " enter every directory above it";
+                + " enter every directory on its path, following symbolic links";
     }
 
     // One policy for every file that holds a secret: WARN, not FAIL, when
