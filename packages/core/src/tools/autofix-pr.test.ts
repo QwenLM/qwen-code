@@ -1402,8 +1402,10 @@ describe('background fixes', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(fix.done).toBe(true);
     expect(cancel).toHaveBeenCalledWith('agent-1');
-    // The helper waits for the stopped agent to settle, at most 15 seconds.
+    // The helper waits for the stopped agent to settle, at most 15 seconds:
+    // given a real second to start, it has not.
     await vi.advanceTimersByTimeAsync(14_000);
+    execFileSync('sleep', ['1']);
     expect(log().at(-1)).not.toMatch(/^sync/);
     await vi.advanceTimersByTimeAsync(1_000);
     expect((await syncing).error).toBeUndefined();
