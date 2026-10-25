@@ -1152,6 +1152,45 @@ describe('user Skill activation routes', () => {
     expect(secondaryPublish).toHaveBeenCalledWith(event);
   });
 
+  it('publishes to a draining workspace that is no longer active', async () => {
+    const persist = vi
+      .fn()
+      .mockResolvedValue(
+        persistResult(
+          [{ skillName: 'pdf', changed: true }],
+          [{ key: 'skills.disabled', value: ['pdf'] }],
+        ),
+      );
+    const h = createHarness(true, false, {
+      persistUserSkillActivation: persist,
+    });
+    const drainingPublish = vi.fn();
+    const draining = {
+      ...h.runtime,
+      workspaceId: 'workspace-draining',
+      workspaceCwd: '/draining',
+      primary: false,
+      bridge: { ...h.runtime.bridge, publishWorkspaceEvent: drainingPublish },
+    } as WorkspaceRuntime;
+    h.workspaceRegistry.add(draining);
+    expect(h.workspaceRegistry.beginDrain(draining)).toBe(true);
+
+    const response = await request(h.app)
+      .put('/skills/pdf/activation')
+      .send({ state: 'disabled' });
+
+    expect(response.status).toBe(200);
+    expect(drainingPublish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'settings_changed',
+        data: expect.objectContaining({
+          key: 'skills.disabled',
+          scope: 'user',
+        }),
+      }),
+    );
+  });
+
   it('passes the default mode through and omits mode when enabling', async () => {
     const persist = vi.fn(async (skillNames: readonly string[]) =>
       persistResult(

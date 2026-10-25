@@ -5944,23 +5944,52 @@ async function runQwenServeImpl(
       const skillsByName = new Map(
         skills?.map((skill) => [skill.name.trim().toLowerCase(), skill]),
       );
+      // A request may use the authored spelling (`pdf`) of an Extension Skill
+      // whose registry name carries the prefix (`rust:pdf`). Match it only
+      // when exactly one extension claims it: an ambiguous authored name must
+      // not toggle a different skill, and an exact registry match always wins.
+      const skillsByAuthoredName = new Map<
+        string,
+        ServeWorkspaceSkillStatus | undefined
+      >();
+      for (const skill of skills ?? []) {
+        if (skill.level !== 'extension' || !skill.extensionName) continue;
+        const authored = skill.name
+          .slice(skill.extensionName.length + 1)
+          .trim()
+          .toLowerCase();
+        skillsByAuthoredName.set(
+          authored,
+          skillsByAuthoredName.has(authored) ? undefined : skill,
+        );
+      }
       return skillNames.map((skillName) => {
-        const skill = skillsByName.get(skillName.trim().toLowerCase());
-        if (!skill) {
-          const prefixEnd = skillName.indexOf(':');
+        const normalized = skillName.trim().toLowerCase();
+        const exact = skillsByName.get(normalized);
+        if (exact) {
+          if (exact.level !== 'extension' || !exact.extensionName) {
+            return { name: skillName };
+          }
           return {
             name: skillName,
-            ...(prefixEnd > 0
-              ? { authoredName: skillName.slice(prefixEnd + 1) }
-              : {}),
+            authoredName: exact.name.slice(exact.extensionName.length + 1),
           };
         }
-        if (skill.level !== 'extension' || !skill.extensionName) {
-          return { name: skillName };
+        const authoredMatch = skillsByAuthoredName.get(normalized);
+        if (authoredMatch?.extensionName) {
+          return {
+            name: authoredMatch.name,
+            authoredName: authoredMatch.name.slice(
+              authoredMatch.extensionName.length + 1,
+            ),
+          };
         }
+        const prefixEnd = skillName.indexOf(':');
         return {
           name: skillName,
-          authoredName: skillName.slice(skill.extensionName.length + 1),
+          ...(prefixEnd > 0
+            ? { authoredName: skillName.slice(prefixEnd + 1) }
+            : {}),
         };
       });
     };
@@ -6200,7 +6229,10 @@ async function runQwenServeImpl(
           : skillNames.map((name) => ({ name }));
         let next = initial;
         const outcomes: PersistUserSkillActivationResult['outcomes'] =
-          skillNames.map((skillName) => ({ skillName, changed: false }));
+          skillIdentities.map((identity) => ({
+            skillName: identity.name,
+            changed: false,
+          }));
         // A grant a standing entry still forbids is not a write: the merged
         // config would keep the skill disabled while the route reported an
         // enable. A User entry another name in this batch already removed
@@ -6223,7 +6255,7 @@ async function runQwenServeImpl(
           const refused: number[] = [];
           let listChanged = false;
           for (const index of pending) {
-            const skillName = skillNames[index]!;
+            const skillName = skillIdentities[index]!.name;
             const block = enabled ? stillBlocked(index) : null;
             if (block) {
               outcomes[index] = { skillName, changed: false, block };

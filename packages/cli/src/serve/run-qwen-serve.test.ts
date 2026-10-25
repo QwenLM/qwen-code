@@ -1576,6 +1576,42 @@ describe('workspace skill settings persistence', () => {
     ).toEqual({ disabled: ['locked'], enabled: ['pdf', 'rust:pdf'] });
   });
 
+  it('resolves a bare authored name to the extension registry spelling on a user enable', async () => {
+    writeSkillSettings([], ['rust:pdf']);
+    const { persistUserSkillActivation } = await captureSkillPersistence([
+      skillStatus('rust:pdf', 'extension', 'rust'),
+    ]);
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['pdf'], true, 'hard'),
+    ).resolves.toEqual({
+      outcomes: [{ skillName: 'rust:pdf', changed: true }],
+      settingsChanges: [
+        { key: 'skills.disabled', value: undefined },
+        { key: 'skills.enabled', value: ['rust:pdf'] },
+      ],
+    });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'))
+        .skills,
+    ).toEqual({ enabled: ['rust:pdf'] });
+  });
+
+  it('does not guess between extensions that share an authored name', async () => {
+    writeSkillSettings([], []);
+    const { persistUserSkillActivation } = await captureSkillPersistence([
+      skillStatus('a:pdf', 'extension', 'a'),
+      skillStatus('b:pdf', 'extension', 'b'),
+    ]);
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['pdf'], true, 'hard'),
+    ).resolves.toEqual({
+      outcomes: [{ skillName: 'pdf', changed: true }],
+      settingsChanges: [{ key: 'skills.enabled', value: ['pdf'] }],
+    });
+  });
+
   it('rechecks a batch until a multi-step alias chain converges', async () => {
     writeSkillSettings(['y:z', 'z']);
     const { persistDisabledSkillsBatch } = await captureSkillPersistence([

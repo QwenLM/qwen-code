@@ -4080,7 +4080,7 @@ Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_na
 
 Capability tag: `user_skill_activation`. There is no workspace-qualified form: the route writes the user settings file, which every workspace merges, so it is selected by no workspace — like `PUT /extensions/activation`.
 
-Enable or disable a Skill in the user settings scope. The trimmed path name is written verbatim; send the registry name (`rust:pdf` for an Extension Skill) so grants match. Each request leaves the name in exactly one user list:
+Enable or disable a Skill in the user settings scope. A disable writes the trimmed path name verbatim. An enable resolves it against the workspace skill catalog: an exact registry-name match wins, and a bare authored spelling (`pdf`) is written as its registry spelling (`rust:pdf`) when exactly one Extension Skill claims it, so grants match; an ambiguous or unknown name is written verbatim. The response reports the spelling that was written. Each request leaves that spelling in exactly one user list:
 
 | `state`    | `mode`           | User settings change                                                                |
 | ---------- | ---------------- | ----------------------------------------------------------------------------------- |
@@ -4088,9 +4088,9 @@ Enable or disable a Skill in the user settings scope. The trimmed path name is w
 | `disabled` | `default`        | add to `skills.defaultDisabled`; remove from `skills.disabled` and `skills.enabled` |
 | `enabled`  | ignored          | add to `skills.enabled`; remove from `skills.disabled` and `skills.defaultDisabled` |
 
-A `hard` disable cannot be lifted by any other scope, so workspace toggles for that name report it as locked by `User`. A `default` disable can be cancelled per workspace by an identically spelled workspace `skills.enabled` entry. Only the exact spelling is edited; entries in other spellings and unrelated names are preserved.
+A `hard` disable cannot be lifted by any other scope, so workspace toggles for that name report it as locked by `User`. A `default` disable can be cancelled per workspace by an identically spelled workspace `skills.enabled` entry. Only the resolved spelling is edited; entries in other spellings and unrelated names are preserved.
 
-An enable is refused, without writing, when a standing entry would keep the Skill disabled: a `skills.disabled` entry in System or SystemDefaults settings under either spelling, a User `skills.disabled` entry in the other spelling, or a `skills.defaultDisabled` entry no identically spelled `skills.enabled` entry cancels. Workspace entries never refuse a user write; they keep gating only their own workspace. The route does not require the primary workspace to be trusted.
+An enable is refused, without writing, when a standing entry would keep the Skill disabled: a `skills.disabled` entry in System or SystemDefaults settings under either spelling, a User `skills.disabled` entry in the other spelling, or a `skills.defaultDisabled` entry in the other spelling that no identically spelled `skills.enabled` entry in System, SystemDefaults, or User settings cancels. An entry in the registry spelling never refuses the enable: the write removes it and records `skills.enabled` in its place. Workspace entries never refuse a user write; they keep gating only their own workspace. The route does not require the primary workspace to be trusted.
 
 Request:
 
@@ -4111,7 +4111,7 @@ Response (200):
 }
 ```
 
-`mode` is echoed only for `state: "disabled"`. A refused enable answers `200` with `changed: false` and `block: { reason, list, entry, scope }` naming the entry to edit. When nothing changed, `activation` is `applied` and no event is emitted. Otherwise every registered workspace runtime is reconciled: `reconciling` means at least one trusted live runtime is re-reading workspace and user settings in its ACP child and active sessions, `deferred` means no runtime was live and the next child start reads the committed file. Each changed key (`skills.disabled`, `skills.defaultDisabled`, `skills.enabled`) emits `settings_changed` with `scope: "user"` and the `skill_toggle` `mutation` object on every workspace's event stream.
+`mode` is echoed only for `state: "disabled"`. A refused enable answers `200` with `changed: false` and `block: { reason, list, entry, scope }` naming the entry to edit. When nothing changed, `activation` is `applied` and no event is emitted. Otherwise every managed workspace runtime is reconciled: `reconciling` means at least one trusted runtime that supports runtime lifecycle is live and is re-reading workspace and user settings in its ACP child and active sessions; `deferred` means no such runtime was reconciled — none was live, the live one is draining, or it lacks lifecycle support — and the next child start reads the committed file. An untrusted runtime is never reconciled and keeps its previously read user settings until it restarts. Each changed key (`skills.disabled`, `skills.defaultDisabled`, `skills.enabled`) emits `settings_changed` with `scope: "user"` and the `skill_toggle` `mutation` object on every managed workspace's event stream.
 
 Errors:
 

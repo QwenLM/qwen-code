@@ -37110,6 +37110,74 @@ describe('sessionLanguage multi-session propagation', () => {
     }
   });
 
+  it('names both scopes when an atomic workspace and user reload fails', async () => {
+    const settings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(false),
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {
+          reason: 'settings',
+          settingsScopes: ['workspace', 'user'],
+        }),
+      ).rejects.toThrow('Failed to reload workspace and user skill settings');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('forwards settingsScopes from a paired-engine skills change', async () => {
+    const settings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1,
+        kind: 'skills',
+        tightening: false,
+        cwd: '/work/project',
+        reason: 'all',
+        settingsScopes: ['workspace', 'user'],
+      });
+
+      expect(settings.reloadScopesFromDiskAtomically).toHaveBeenCalledWith([
+        SettingScope.Workspace,
+        SettingScope.User,
+      ]);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('refreshes busy skill sessions and reports per-session failures', async () => {
     const bootstrapSettings = {
       merged: {},

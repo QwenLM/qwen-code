@@ -705,7 +705,7 @@ export function registerWorkspaceSkillsRoutes(
     if (changedSkills.length === 0) {
       return { persisted, activation: 'applied' as const };
     }
-    const runtimes = deps.workspaceRegistry?.listAll() ?? [
+    const runtimes = deps.workspaceRegistry?.listManaged() ?? [
       deps.workspaceRuntime,
     ];
     const activation = reconcileSkills(runtimes, { userSettings: true });

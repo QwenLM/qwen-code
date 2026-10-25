@@ -10964,7 +10964,13 @@ class QwenAgent implements Agent {
             case 'skills':
               await this.extMethodInternal(
                 SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-                { cwd: changeCwd, reason: params['reason'] ?? 'all' },
+                {
+                  cwd: changeCwd,
+                  reason: params['reason'] ?? 'all',
+                  ...(params['settingsScopes'] !== undefined
+                    ? { settingsScopes: params['settingsScopes'] }
+                    : {}),
+                },
               );
               break;
             default:
@@ -15613,7 +15619,11 @@ class QwenAgent implements Agent {
                 SettingScope.Workspace,
               );
           if (!reloaded) {
-            throw new Error('Failed to reload workspace skill settings');
+            const scopes = includeUserSettings
+              ? 'workspace and user'
+              : 'workspace';
+            debugLogger.warn(`Failed to reload ${scopes} skill settings`);
+            throw new Error(`Failed to reload ${scopes} skill settings`);
           }
         }
         const sessions = selectedSessions ?? this.getActiveSessions();
