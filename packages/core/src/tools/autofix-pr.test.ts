@@ -1234,7 +1234,10 @@ describe('background fixes', () => {
     fix.end({ status: 'completed', report: 'fixed "Test"' });
     // The claim waits for the body to settle, at most 15 seconds.
     const claiming = run({ ...claim, task: 'feedc0ffee12' });
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(log().at(-1)).not.toMatch(/^fix-end/);
+    expect(backgroundFixOf('session-a', 12)).toBe(fix);
+    await vi.advanceTimersByTimeAsync(1_000);
     const claimed = await claiming;
     expect(JSON.parse(String(claimed.llmContent))).toEqual({
       attempt: fix.attempt,
