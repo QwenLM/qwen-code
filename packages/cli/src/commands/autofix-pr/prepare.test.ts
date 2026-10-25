@@ -448,11 +448,41 @@ describe('runPrepare (real git)', () => {
 
   it('resumes in the owning session without touching the worktree', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
-    mocks.gh.mockImplementation(() => {
-      throw new Error('a resume must not call gh');
+    const answer = mocks.gh.getMockImplementation()!;
+    // A resume asks GitHub only who the author is.
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] !== 'pr' || !args.includes('author')) {
+        throw new Error(`a resume must not call gh ${args.join(' ')}`);
+      }
+      return answer(...args);
     });
     runPrepare({ pr: 7, repo: 'o/r' });
     expect(lastReport()).toMatchObject({ resumed: true, headSha });
+  });
+
+  it('asks GitHub again whether the author can push, whatever the state file says', () => {
+    const paths = autofixPrPaths(clone, 7);
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        return JSON.stringify(
+          prView({ headRefOid: headSha, author: { login: 'outsider' } }),
+        );
+      }
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      if (args[0] === 'api') return 'read';
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(paths.statePath)!.authorCanPush).toBe(false);
+    // The PR's own code ran beside the state file and wrote it.
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      authorCanPush: true,
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ resumed: true, authorCanPush: false });
+    expect(readState(paths.statePath)!.authorCanPush).toBe(false);
   });
 
   it('resumes from inside the autofix worktree', () => {

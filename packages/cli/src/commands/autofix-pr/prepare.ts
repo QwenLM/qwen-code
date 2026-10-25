@@ -270,18 +270,32 @@ export function runPrepare(args: PrepareArgs): void {
         tookOver = true;
       }
       assertOwnedBySession(existing);
+      // The state file sits beside the worktree, in reach of the code a
+      // round runs: whether the PR's author can push — which decides
+      // whether the PR may be watched at all — is asked of GitHub again,
+      // not read back from it.
+      ensureAuthenticated();
+      const { author } = JSON.parse(
+        gh('pr', 'view', String(args.pr), '-R', args.repo, '--json', 'author'),
+      ) as { author: { login: string } | null };
+      const canPush = authorCanPush(
+        args.repo,
+        author?.login ?? '',
+        currentUser(),
+      );
       // A start resumes a watch `cleanup` ended keeping its worktree: the
       // user asked for it, and the start's confirmation said what the
       // worktree holds.
       wasEnded = existing.ended;
-      if (wasEnded) {
+      if (wasEnded || canPush !== existing.authorCanPush) {
         existing = withWatchLock(paths, args.pr, () => {
           const current = requireState(paths.statePath, args.pr);
           // Taken over meanwhile: not this start's to resume.
           assertOwnedBySession(current);
           const { ended: _resumed, ...rest } = current;
-          writeState(paths.statePath, rest);
-          return rest;
+          const next = { ...rest, authorCanPush: canPush };
+          writeState(paths.statePath, next);
+          return next;
         });
       }
       report(

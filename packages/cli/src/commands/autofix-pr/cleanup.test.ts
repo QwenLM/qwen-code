@@ -426,6 +426,14 @@ describe('runCleanup (real git)', () => {
     expect(existsSync(paths.statePath)).toBe(true);
   });
 
+  it('discards a state that is not a regular file with --force, without blocking on it', () => {
+    rmSync(paths.statePath);
+    execFileSync('mkfifo', [paths.statePath]);
+    expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
+    runCleanup(7, true);
+    expect(existsSync(paths.statePath)).toBe(false);
+  });
+
   it('discards an unreadable state file only with --force', () => {
     writeFileSync(paths.statePath, '{');
     expect(() => runCleanup(7, false)).toThrow(SyntaxError);

@@ -172,8 +172,9 @@ export function runCleanup(
       if (state) {
         withWatchLock(paths, prNumber, () => {
           const current = readState(paths.statePath);
-          // Taken over meanwhile: the watch is the new owner's.
-          if (!current || current.sessionId !== currentSessionId()) return;
+          if (!current) return;
+          // Taken over meanwhile: the watch is the new owner's, and goes on.
+          assertOwnedBySession(current);
           const { watch: _ended, ...rest } = current;
           writeState(paths.statePath, {
             ...rest,

@@ -508,6 +508,10 @@ function isNeedsHumanItem(value: unknown): value is NeedsHumanItem {
 
 export function readState(statePath: string): AutofixPrState | null {
   if (!existsSync(statePath)) return null;
+  // A FIFO planted under the name would block every helper.
+  if (!lstatSync(statePath).isFile()) {
+    throw new Error(`${statePath} is not a regular file`);
+  }
   const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as AutofixPrState;
   if (parsed.version !== 1) {
     throw new Error(

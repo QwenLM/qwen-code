@@ -56,6 +56,7 @@ describe('runSchedule', () => {
       pushedShas: [],
       handledCommentIds: [],
       postedCommentIds: [],
+      authorCanPush: true,
       ...patch,
     });
 
@@ -222,6 +223,9 @@ describe('runSchedule', () => {
 
   it('refuses a watch of a PR whose author cannot push, which is --once only', () => {
     write({ authorCanPush: false });
+    expect(() => runSchedule({ pr: 7 })).toThrow(/only --once/);
+    // A state that does not say the author can push gives no permission.
+    write({ authorCanPush: undefined });
     expect(() => runSchedule({ pr: 7 })).toThrow(/only --once/);
     expect(state().watch).toBeUndefined();
   });

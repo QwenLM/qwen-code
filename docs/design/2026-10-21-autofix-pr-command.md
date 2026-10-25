@@ -185,7 +185,10 @@ worktree included:
    leftover worktree, or a leftover branch that may hold commits beyond the
    recorded head, is a refusal that points to `cleanup`.
 7. Re-running `prepare` in the owning session while the worktree exists reports
-   the existing state with `resumed: true` and calls nothing else. If the
+   the existing state with `resumed: true`, asking GitHub only who the
+   PR's author is and whether they can push: the state file sits beside the
+   worktree, in reach of the code a round runs, so `authorCanPush` is never
+   read back from it. If the
    worktree was removed (also with `rm -rf`, which `git worktree prune`
    clears), it is recreated and the recorded `pushedShas`,
    `handledCommentIds` and `postedCommentIds` are kept, with the budgets,
@@ -968,9 +971,12 @@ gate and the prompt are not composed in a prompt.
   take-over, before its round. A watch with no task recorded (a
   `--once` start, or one `cleanup` ended keeping its worktree) is refused,
   and so is one the round ended: it is started again with `/autofix-pr <n>`.
-- A PR whose author cannot push (`authorCanPush: false`) is refused: its
-  code runs with the user's credentials in reach, which is confirmed for one
-  `--once` round at a time, never for a watch.
+- A PR whose author cannot push is refused — any state but
+  `authorCanPush: true`: its code runs with the user's credentials in reach,
+  which is confirmed for one `--once` round at a time, never for a watch.
+- Fields of `watch`, `ended` or `needsHuman` that this CLI does not know — a
+  newer one's — are dropped when it reads the state, and so are not written
+  back.
 - Only the owning session may run it; nothing is recorded when a task cannot
   be made.
 
@@ -1130,10 +1136,14 @@ Replies are on by default; `--no-reply` turns them off.
   does not run, after one confirmation, and creates the task `schedule`
   recorded at the start (`schedule --again`), so the watch goes on with the
   same interval, `--no-reply` and instructions. A task that expired is
-  resumed the same way. Before the round it runs `schedule --again`, whose
-  new task id stops every other task of the watch — one in a second
-  process of the same session included — and deletes the PR's tasks left
-  in this session; it
+  resumed the same way. It takes over and runs `schedule --again` for
+  every watch it resumes before any round runs — a round's fix agent works
+  beside the other watches' state files — and leaves out one whose printed
+  options are not those it asked about; the new task ids stop every other
+  task of the watches, one in a second process of the same session
+  included, and it deletes the PRs' tasks left in this session. Then it
+  runs a round of each under its task, then creates each task from what
+  was printed, once `status` shows the watch still records it; it
   leaves out, unless the PR is named, a watch another session's gate
   checked within two of its intervals; and a watch `stop` ended while
   keeping its worktree has no task recorded, so it is not resumed.
