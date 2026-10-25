@@ -72,10 +72,10 @@ async function fixture(root) {
       'class Latest {}',
     'packages/cli/src/serve/capabilities.ts':
       "export const SERVE_PROTOCOL_VERSION = 'v1' as const;\n",
-    'packages/cli/src/serve/broker-managed-runtime-provider.ts':
+    'packages/cli/src/serve/managed-runtime-broker-client.ts':
       'export const MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = 2 as const;\n',
     'packages/cli/src/serve/hosted-harness-contract.ts':
-      "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
+      "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n).split(',');\n",
     'docs/users/managed-agent-reference-deployment.md': 'deploy\n',
     'docs/users/managed-agent-reference-deployment.zh-CN.md': '部署\n',
     'docs/users/hosted-workspace-recovery.md': 'recover\n',
@@ -123,7 +123,7 @@ test('packages an independently verifiable reference distribution', async () => 
     );
     assert.deepEqual(result.manifest.defaults, {
       publicShellEnabled: false,
-      v2CapabilityAdvertisementEnabled: false,
+      v2CapabilityAdvertisementEnabled: true,
     });
 
     await mkdir(extracted);
@@ -294,7 +294,16 @@ test('ships systemd units with the documented kill modes', async () => {
   assert.match(harness, /^StateDirectory=qwen-managed-agent$/m);
   assert.match(harness, /--profile hosted-harness/);
   assert.match(harness, /--no-web/);
-  assert.match(harness, /QWEN_HOSTED_HARNESS_BROKER_ARGS/);
+  // The Broker token reaches the Harness through harness.env, never argv.
+  assert.doesNotMatch(harness, /BROKER/);
+  assert.match(
+    harness,
+    /^EnvironmentFile=\/etc\/qwen-managed-agent\/harness\.env$/m,
+  );
+  assert.match(
+    harness,
+    /^ExecStart=\/usr\/local\/bin\/qwen serve --profile hosted-harness --hostname 127\.0\.0\.1 --port 4170 --no-web$/m,
+  );
   assert.ok(server.endsWith('\n'));
   assert.ok(harness.endsWith('\n'));
   assert.doesNotMatch(server, /\t/);
@@ -305,10 +314,21 @@ test('bootstrap renders matching credentials and a 32-byte key', () => {
   const secrets = generateSecrets('reference-test');
   assert.match(secrets.digest, /^sha256:[0-9a-f]{64}$/);
   assert.equal(Buffer.from(secrets.credentialKey, 'base64').length, 32);
-  assert.ok(renderHarnessEnv(secrets).includes(secrets.token));
-  const server = renderServerEnv(secrets, '/tmp/application.yml');
-  assert.ok(server.includes(secrets.token));
-  assert.ok(server.includes(secrets.digest));
+  const harness = renderHarnessEnv(secrets);
+  assert.ok(harness.includes(secrets.token));
+  // The control plane refuses a `;` comment, which a shell stops reading the file at.
+  assert.doesNotMatch(harness, /^\s*;/m);
+  assert.ok(
+    harness
+      .split('\n')
+      .includes(`QWEN_MANAGED_RUNTIME_BROKER_TOKEN=${secrets.brokerToken}`),
+  );
+  assert.match(
+    harness,
+    /^QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:4182$/m,
+  );
+  const server = renderServerEnv('/tmp/application.yml', '/tmp/harness.env');
+  assertReadsHarnessCredentials(server, secrets, '/tmp/harness.env');
   assertDerivesSessionStoreWiring(server);
   assert.match(
     renderApplicationYml(secrets),
@@ -339,7 +359,17 @@ test('bootstrap writes private files without printing secrets', async () => {
       'utf8',
     );
     const token = harness.match(/^QWEN_SERVER_TOKEN=([0-9a-f]{64})$/m)[1];
-    assert.ok(server.includes(`QWEN_MANAGED_AGENT_HARNESS_TOKEN=${token}`));
+    const digest = harness.match(
+      /^QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=(sha256:[0-9a-f]{64})$/m,
+    )[1];
+    const brokerToken = harness.match(
+      /^QWEN_MANAGED_RUNTIME_BROKER_TOKEN=([0-9a-f]{64})$/m,
+    )[1];
+    assertReadsHarnessCredentials(
+      server,
+      { token, digest, brokerToken },
+      path.join(directory, 'harness.env'),
+    );
     assert.match(application, /credential-key: '[A-Za-z0-9+/=]{44}'/);
     for (const name of ['harness.env', 'server.env', 'application.yml']) {
       assert.equal(
@@ -347,7 +377,9 @@ test('bootstrap writes private files without printing secrets', async () => {
         0o600,
       );
     }
-    assert.ok(!output.includes(token));
+    for (const secret of [token, digest, brokerToken]) {
+      assert.ok(!output.includes(secret));
+    }
     assert.throws(
       () =>
         execFileSync(process.execPath, [script, '--directory', directory], {
@@ -514,6 +546,15 @@ test('leaves the Session Store wiring to the server defaults in the env template
   );
   assert.match(template, /^QWEN_MANAGED_AGENT_HARNESS_ENABLED=true$/m);
   assertDerivesSessionStoreWiring(template);
+  assert.doesNotMatch(
+    template,
+    /^QWEN_MANAGED_AGENT_(HARNESS_TOKEN|CAPABILITY_DIGEST)=/m,
+  );
+  assert.doesNotMatch(template, /RUNTIME_BROKER_TOKEN/);
+  assert.match(
+    template,
+    /^QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE=\/etc\/qwen-managed-agent\/harness\.env$/m,
+  );
 });
 
 // The server derives the store switch, URL and workspace ID; an explicit
@@ -526,6 +567,55 @@ function assertDerivesSessionStoreWiring(env) {
     /^QWEN_MANAGED_AGENT_WORKSPACE_CWD=\/srv\/qwen-workspace$/m,
   );
 }
+
+// harness.env is the one copy of the shared credentials; server.env names it.
+function assertReadsHarnessCredentials(
+  server,
+  { token, digest, brokerToken },
+  harnessEnv,
+) {
+  assert.ok(!server.includes(token));
+  assert.ok(!server.includes(digest));
+  assert.ok(!server.includes(brokerToken));
+  assert.doesNotMatch(
+    server,
+    /^QWEN_MANAGED_AGENT_(HARNESS_TOKEN|CAPABILITY_DIGEST|RUNTIME_BROKER_TOKEN)=/m,
+  );
+  assert.ok(
+    server
+      .split('\n')
+      .includes(`QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE='${harnessEnv}'`),
+  );
+}
+
+test('ships the Harness credential keys the control plane reads', async () => {
+  const template = await readFile(
+    new URL(
+      '../../packages/managed-agent-server/distribution/systemd/harness.env.example',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  // The control plane matches these keys exactly, from the start of a line,
+  // and accepts only these characters in their values.
+  assert.match(template, /^QWEN_SERVER_TOKEN=[A-Za-z0-9._:/+=-]+$/m);
+  assert.match(
+    template,
+    /^QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=sha256:[A-Za-z0-9._:/+=-]+$/m,
+  );
+  // It refuses a `;` comment, which a shell stops reading the file at.
+  assert.doesNotMatch(template, /^\s*;/m);
+  // The tool path's pair ships commented, for the operator to enable together.
+  assert.match(
+    template,
+    /^# QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:4182$/m,
+  );
+  assert.match(
+    template,
+    /^# QWEN_MANAGED_RUNTIME_BROKER_TOKEN=[A-Za-z0-9._:/+=-]+$/m,
+  );
+  assert.doesNotMatch(template, /^#? *QWEN_HOSTED_HARNESS_BROKER_ARGS=/m);
+});
 
 test('rejects a stable distribution version', async () => {
   await assert.rejects(
@@ -564,8 +654,9 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
       name: 'commented lifecycle v2 default',
       file: 'packages/cli/src/serve/hosted-harness-contract.ts',
       contents:
-        "/*\nprocess.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n*/\nconst profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n).split(',');\n",
-      error: /Hosted lifecycle v2 profiles must default to empty/,
+        "/*\nprocess.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n*/\nconst profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
+      error:
+        /Hosted lifecycle v2 profiles must default to canonical Shell only/,
     },
     {
       name: 'duplicate public Shell default',

@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  parseManagedPermissionRules,
+  nonEmptyManagedPermissionRules,
+  type ManagedPermissionRules,
+} from './managed-permission-rules.js';
+
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isIPv4 } from 'node:net';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
@@ -31,12 +37,23 @@ import {
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import {
+  CHECKPOINT_HISTORY_KIND,
+  checkpointHistoryPage,
+  checkpointStorageBody,
+  isPagedHarnessCheckpoint,
+} from './managed-checkpoint-history.js';
+import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
   HOSTED_MODEL_REQUEST_BYTES,
   hostedRecoveryReferences,
   parseHostedRecoveryResource,
 } from './hosted-recovery-records.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
+import type {
+  HostedHarnessPlacement,
+  HostedHarnessReleaseRequest,
+  HostedHarnessReleaseReceipt,
+} from './hosted-harness-release.js';
 import {
   MANAGED_TOOL_RESULT_KINDS,
   parseToolResultManifestBytes,
@@ -72,6 +89,8 @@ export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
 const MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
 
 export function managedSessionInlineResourceBytes(kind: string): number {
+  if (kind === 'managed-checkpoint')
+    return MANAGED_SESSION_LIMITS.maxEventBytes;
   if (kind === 'managed-input') return MAX_ATTACHMENT_INPUT_BYTES;
   if (kind === 'managed-agent-skills') return 2 * 1024 * 1024;
   if (kind === 'hosted-model-request') return HOSTED_MODEL_REQUEST_BYTES;
@@ -129,6 +148,12 @@ export interface CsiApplicationRetirementStatus {
   readonly finalizeReceiptSha256: string | null;
 }
 
+export interface ManagedQueuedUserMessage {
+  readonly id: string;
+  readonly revision: number;
+  readonly input: readonly unknown[];
+}
+
 export interface HttpManagedSessionStores {
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
@@ -144,15 +169,24 @@ export interface HttpManagedSessionStores {
   };
   assertWritable(): Promise<void>;
   stopLocal(): Promise<void>;
+  quiesceOwnership(placement: HostedHarnessPlacement): Promise<void>;
+  releaseOwnership(
+    request: HostedHarnessReleaseRequest,
+  ): Promise<HostedHarnessReleaseReceipt>;
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
   authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+  claimUserMessages(
+    promptId: string,
+    initialOnly?: boolean,
+  ): Promise<ManagedQueuedUserMessage[]>;
 }
 
 export interface ManagedSessionApprovalSelection {
-  readonly mode: 'default' | 'auto-edit' | 'yolo';
+  readonly mode: 'default' | 'auto-edit' | 'yolo' | 'auto';
+  readonly permissionRules?: ManagedPermissionRules;
   readonly revision: number;
 }
 
@@ -238,12 +272,16 @@ export function createHttpManagedSessionStores(
     },
     assertWritable: () => client.assertWritable(),
     stopLocal: () => client.stopLocal(),
+    quiesceOwnership: (placement) => client.quiesceOwnership(placement),
+    releaseOwnership: (request) => client.releaseOwnership(request),
     close: () => client.seal(),
     setLifecycleAuthority: (authority) =>
       client.setLifecycleAuthority(authority),
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
     approvalSelection: () => client.approvalSelection(),
+    claimUserMessages: (promptId, initialOnly) =>
+      client.claimUserMessages(promptId, initialOnly),
   };
 }
 
@@ -569,7 +607,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
     if (source.byteLength > maxBytes) {
       throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${maxBytes}-byte inline limit; OSS storage is not enabled.`,
+        `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
       );
     }
     const bytes = Buffer.from(source);
@@ -626,8 +664,16 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       const staged = this.staged.get(ref.resourceId);
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
-        pending.push(...collectNestedResourceRefs(ref, staged.bytes));
-      } else if (isReferenceContainer(ref.kind)) {
+        const nested = collectNestedResourceRefs(ref, staged.bytes);
+        pending.push(
+          ...(ref.kind === CHECKPOINT_HISTORY_KIND
+            ? nested.filter((child) => this.staged.has(child.resourceId))
+            : nested),
+        );
+      } else if (
+        ref.kind !== CHECKPOINT_HISTORY_KIND &&
+        isReferenceContainer(ref.kind)
+      ) {
         pending.push(...collectNestedResourceRefs(ref, await this.read(ref)));
       }
     }
@@ -715,6 +761,11 @@ class ManagedSessionStoreHttpClient {
   private readonly fetchFn: typeof fetch;
   private grant: WriterGrant | undefined;
   private renewPromise: Promise<void> | undefined;
+  private ownershipRelease?: {
+    request: HostedHarnessReleaseRequest;
+    body: Readonly<Record<string, unknown>>;
+    receipt?: HostedHarnessReleaseReceipt;
+  };
   /**
    * The re-acquisition a lapsed lease started. Seal and local stop await it
    * so they never read the grant-less window as "never held a writer", and a
@@ -767,6 +818,49 @@ class ManagedSessionStoreHttpClient {
     });
   }
 
+  async claimUserMessages(
+    promptId: string,
+    initialOnly?: boolean,
+  ): Promise<ManagedQueuedUserMessage[]> {
+    await this.assertWritable();
+    let value: unknown;
+    try {
+      value = await this.json('/user-messages:claim', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: this.grant!.writerGeneration,
+        promptId,
+        initialOnly: initialOnly ?? false,
+      });
+    } catch (error) {
+      if (
+        error instanceof ManagedSessionStoreHttpError &&
+        error.status === 404 &&
+        error.remoteCode === 'not_found'
+      )
+        return [];
+      throw error;
+    }
+    if (!Array.isArray(value) || value.length > 32)
+      throw corrupt('invalid user message queue.');
+    return value.map((entry) => {
+      const message = asRecord(entry, 'queued user message');
+      if (
+        typeof message['id'] !== 'string' ||
+        !message['id'].startsWith('umsg_') ||
+        !Number.isSafeInteger(message['revision']) ||
+        Number(message['revision']) < 1 ||
+        !Array.isArray(message['input'])
+      )
+        throw corrupt('invalid queued user message.');
+      return {
+        id: message['id'],
+        revision: Number(message['revision']),
+        input: message['input'],
+      };
+    });
+  }
+
   async approvalSelection(): Promise<
     ManagedSessionApprovalSelection | undefined
   > {
@@ -779,17 +873,37 @@ class ManagedSessionStoreHttpClient {
     if (value === null) return undefined;
     const selection = asRecord(value, 'approval selection');
     if (
-      Object.keys(selection).length !== 2 ||
-      !['default', 'auto-edit', 'yolo'].includes(String(selection['mode'])) ||
+      Object.keys(selection).length !==
+        (selection['permissionRules'] === undefined ? 2 : 3) ||
+      !['default', 'auto-edit', 'yolo', 'auto'].includes(
+        String(selection['mode']),
+      ) ||
       typeof selection['mode'] !== 'string' ||
       typeof selection['revision'] !== 'number' ||
       !Number.isSafeInteger(selection['revision']) ||
       selection['revision'] < 0
     )
       throw corrupt('approval selection is invalid.');
+    let permissionRules: ManagedPermissionRules | undefined;
+    try {
+      permissionRules =
+        selection['permissionRules'] === undefined
+          ? undefined
+          : nonEmptyManagedPermissionRules(
+              parseManagedPermissionRules(selection['permissionRules']),
+            );
+    } catch {
+      throw corrupt('approval selection rules are invalid.');
+    }
+    if (
+      selection['revision'] === 0 &&
+      (selection['mode'] === 'auto' || permissionRules)
+    )
+      throw corrupt('approval selection revision is invalid.');
     return {
       mode: selection['mode'] as ManagedSessionApprovalSelection['mode'],
       revision: selection['revision'],
+      ...(permissionRules ? { permissionRules } : {}),
     };
   }
 
@@ -867,6 +981,8 @@ class ManagedSessionStoreHttpClient {
   }
 
   async acquireWriter(): Promise<void> {
+    if (this.ownershipRelease)
+      throw corrupt('ownership release has fenced this writer.');
     if (this.grant !== undefined || this.sealed || this.locallyStopped) {
       throw new ManagedSessionRecordError(
         'the HTTP Managed Session writer is already opened or sealed.',
@@ -1036,6 +1152,18 @@ class ManagedSessionStoreHttpClient {
         break;
       } catch (error) {
         await this.annotateWriterRefusal(error);
+        // The store replays committed commands before evaluating these atomic guards.
+        if (
+          descriptor.operation === 'manageMcp' &&
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 409 &&
+          [
+            'unsupported_feature',
+            'turn_active',
+            'session_context_busy',
+          ].includes(error.remoteCode)
+        )
+          throw new ManagedSessionCommitRejectedError(error);
         if (
           attempt === 0 &&
           error instanceof ManagedSessionStoreHttpError &&
@@ -1815,12 +1943,132 @@ class ManagedSessionStoreHttpClient {
     await this.acquirePromise?.catch(() => undefined);
   }
 
+  async releaseOwnership(
+    request: HostedHarnessReleaseRequest,
+  ): Promise<HostedHarnessReleaseReceipt> {
+    assertManagedSessionStableId(request.operationId, 'release operationId');
+    assertManagedSessionStableId(request.instanceId, 'release instanceId');
+    if (
+      request.bootId !== this.writerId ||
+      !Number.isSafeInteger(request.placementEpoch) ||
+      request.placementEpoch < 1
+    )
+      throw corrupt('ownership release does not match the writer.');
+    if (!this.ownershipRelease) {
+      const grant = this.requireGrant();
+      if (
+        request.commitProof.lastCommitSequence !== grant.committedSequence ||
+        request.commitProof.committedPrefixHash !== grant.lastCommitDigest
+      )
+        throw corrupt('ownership release does not match the committed head.');
+      this.stopWriterRenewal();
+      this.ownershipRelease = {
+        request: { ...request, commitProof: { ...request.commitProof } },
+        body: {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: grant.writerGeneration,
+          journalRevision: grant.journalRevision,
+          ...request,
+          commitProof: { ...request.commitProof },
+        },
+      };
+    }
+    const release = this.ownershipRelease;
+    if (
+      request.operationId !== release.request.operationId ||
+      request.instanceId !== release.request.instanceId ||
+      request.bootId !== release.request.bootId ||
+      request.placementEpoch !== release.request.placementEpoch ||
+      request.commitProof.lastCommitSequence !==
+        release.request.commitProof.lastCommitSequence ||
+      request.commitProof.committedPrefixHash !==
+        release.request.commitProof.committedPrefixHash
+    )
+      throw corrupt('ownership release identity changed.');
+    if (release.receipt) return release.receipt;
+    await this.renewPromise?.catch(() => undefined);
+    const value = asRecord(
+      await this.json('/writers:release-ownership', 'POST', release.body),
+      'ownership release receipt',
+    );
+    const proof = asRecord(value['commitProof'], 'release commit proof');
+    const receipt: HostedHarnessReleaseReceipt = {
+      format: 'qwen-hosted-harness-release/1',
+      state: 'RELEASED',
+      tenantId: string(value['tenantId'], 'tenantId'),
+      workspaceId: string(value['workspaceId'], 'workspaceId'),
+      sessionId: string(value['sessionId'], 'sessionId'),
+      operationId: string(value['operationId'], 'operationId'),
+      instanceId: string(value['instanceId'], 'instanceId'),
+      bootId: string(value['bootId'], 'bootId'),
+      placementEpoch: safeCounter(value['placementEpoch'], 'placementEpoch'),
+      writerGeneration: safeCounter(
+        value['writerGeneration'],
+        'writerGeneration',
+      ),
+      journalRevision: safeCounter(value['journalRevision'], 'journalRevision'),
+      committedSequence: safeCounter(
+        value['committedSequence'],
+        'committedSequence',
+      ),
+      commitProof: {
+        lastCommitSequence: safeCounter(
+          proof['lastCommitSequence'],
+          'lastCommitSequence',
+        ),
+        committedPrefixHash: digest(
+          proof['committedPrefixHash'],
+          'committedPrefixHash',
+        ),
+      },
+    };
+    if (
+      value['format'] !== receipt.format ||
+      value['state'] !== receipt.state ||
+      !managedSessionKeysEqual(receipt, this.sessionKey) ||
+      receipt.operationId !== request.operationId ||
+      receipt.instanceId !== request.instanceId ||
+      receipt.bootId !== request.bootId ||
+      receipt.placementEpoch !== request.placementEpoch ||
+      receipt.writerGeneration !== release.body['writerGeneration'] ||
+      receipt.journalRevision !== release.body['journalRevision'] ||
+      receipt.committedSequence !== request.commitProof.lastCommitSequence ||
+      receipt.commitProof.lastCommitSequence !==
+        request.commitProof.lastCommitSequence ||
+      receipt.commitProof.committedPrefixHash !==
+        request.commitProof.committedPrefixHash
+    )
+      throw corrupt('ownership release receipt does not match the request.');
+    release.receipt = receipt;
+    this.sealed = true;
+    this.resources.clear();
+    return receipt;
+  }
+
+  async quiesceOwnership(placement: HostedHarnessPlacement): Promise<void> {
+    const grant = this.requireGrant();
+    const response = asRecord(
+      await this.json('/writers:quiesce-ownership', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: grant.writerGeneration,
+        ...placement,
+      }),
+      'ownership quiesce receipt',
+    );
+    if (response['state'] !== 'QUIESCING')
+      throw corrupt('ownership quiesce was not acknowledged.');
+  }
+
   stopWriterRenewal(): void {
     this.renewalStopped = true;
     this.stopRenewal();
   }
 
   private async ensureWriter(): Promise<void> {
+    if (this.ownershipRelease)
+      throw corrupt('ownership release has fenced this writer.');
     if (this.retirementJoin)
       throw corrupt('original CSI writer admission is closed.');
     // A concurrent re-acquisition owns the grant-less window; wait for it
@@ -1861,6 +2109,10 @@ class ManagedSessionStoreHttpClient {
   }
 
   private renewWriter(): Promise<void> {
+    if (this.ownershipRelease)
+      return Promise.reject(
+        corrupt('ownership release has fenced this writer.'),
+      );
     if (this.retirementJoin)
       return Promise.reject(corrupt('original CSI writer renewal is closed.'));
     if (this.locallyStopped) {
@@ -2200,6 +2452,8 @@ class ManagedSessionStoreHttpClient {
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
   ): Promise<Response> {
+    if (this.ownershipRelease && path !== '/writers:release-ownership')
+      throw corrupt('ownership release has fenced this writer.');
     if (this.locallyStopped) {
       throw new ManagedSessionRecordError(
         'the HTTP Managed Session writer is locally stopped.',
@@ -2639,7 +2893,11 @@ export function collectNestedResourceRefs(
       return checked;
     });
   }
+  if (ref.kind === CHECKPOINT_HISTORY_KIND)
+    return collectRefs([checkpointHistoryPage(bytes)]);
   if (ref.kind === 'managed-checkpoint') {
+    if (isPagedHarnessCheckpoint(bytes))
+      return collectRefs([checkpointStorageBody(bytes)]);
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
   }
@@ -2721,6 +2979,7 @@ function isReferenceContainer(kind: string): boolean {
     [
       'managed-definition',
       'managed-checkpoint',
+      CHECKPOINT_HISTORY_KIND,
       'managed-file_history',
       'managed-action-options',
       'managed-hook-plan',

@@ -447,6 +447,14 @@ class SurfaceAdmissionAcceptanceTest {
                 if (entry.capabilities().contains(Capability.ACTION_RESPOND)) {
                     expect(entry, OPERATOR, 202, "action_response");
                     expect(entry, OWNER_RANK, 202, "action_response");
+                } else if (entry.capabilities().contains(Capability.MCP_MANAGEMENT)) {
+                    if (entry == SurfaceRegistry.PUBLIC_MCP_MANAGEMENT || entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
+                        expectAdmitted(entry, OPERATOR);
+                        expectAdmitted(entry, OWNER_RANK);
+                    } else {
+                        expect(entry, OPERATOR, 409, "unsupported_feature");
+                        expect(entry, OWNER_RANK, 409, "unsupported_feature");
+                    }
                 } else if (entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
                         || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)) {
                     expect(entry, OPERATOR, 409, "unsupported_feature");
@@ -460,8 +468,11 @@ class SurfaceAdmissionAcceptanceTest {
                 // stay invisible so an unauthenticated caller learns
                 // nothing about the bound Session.
                 boolean actorRequired = entry.capabilities().contains(Capability.SESSION_CWD_CHANGE)
+                        || entry.capabilities().contains(Capability.MCP_MANAGEMENT)
                         || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
-                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION);
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)
+                        || entry.capabilities().contains(Capability.USER_MESSAGE_QUERY)
+                        || entry.capabilities().contains(Capability.USER_MESSAGE_COMMAND);
                 expect(entry, null, actorRequired ? 401 : 404,
                         actorRequired
                                 ? "actor_required" : "session_not_found");
@@ -531,6 +542,7 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case SESSION_OPTIONS ->
                 expect(entry, null, 401, "actor_required");
+            case INTERNAL_OPERATOR -> expect(entry, null, 403, "external_storage_registration_denied");
             case INTERNAL_WRITER ->
                 expectInternal(entry);
             default -> throw new AssertionError(
@@ -1336,7 +1348,7 @@ class SurfaceAdmissionAcceptanceTest {
      */
     private void expectInternal(SurfaceRegistry entry) throws Exception {
         int status = switch (entry.capabilities().iterator().next()) {
-            case STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
+            case STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
                     STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
                     STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, PUB_FINISHED,
@@ -1456,7 +1468,8 @@ class SurfaceAdmissionAcceptanceTest {
         String session = artifactArm ? ARTIFACT_SESSION : bound;
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
-        variables.put("operationId", "op_0000000000000000");
+        variables.put("operationId", entry.capabilities().contains(Capability.MCP_MANAGEMENT)
+                ? "11111111-1111-4111-8111-111111111111" : "op_0000000000000000");
         variables.put("taskId", entry.capabilities().contains(
                 Capability.TASK_CANCEL) ? settledTask
                 : "task_0000000000000000");
@@ -1548,9 +1561,18 @@ class SurfaceAdmissionAcceptanceTest {
 
     private String bodyFor(SurfaceRegistry entry, String tenant,
             String session) {
+        if (entry == SurfaceRegistry.INTERNAL_WRITER_QUIESCE_OWNERSHIP
+                || entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP) {
+            String scope = "\"workspaceId\":\"ws\",\"writerId\":\"boot-probe\",\"writerGeneration\":1,"
+                    + "\"instanceId\":\"pod-probe\",\"bootId\":\"boot-probe\",\"placementEpoch\":1";
+            return "{" + scope + (entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP
+                    ? ",\"operationId\":\"release-probe\",\"journalRevision\":1,\"commitProof\":{\"lastCommitSequence\":1,"
+                            + "\"committedPrefixHash\":\"" + "a".repeat(64) + "\"}" : "") + "}";
+        }
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case STORE_USER_MESSAGE_CLAIM -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"promptId\":\"prompt-probe\",\"initialOnly\":false}";
             case SESSION_CREATE -> publicSurface
                     ? "{\"agent_id\":\"qwen-code\",\"input\":[],"
                             + "\"workspace\":{\"workspace_id\":\"ws\"}}"
@@ -1579,7 +1601,16 @@ class SurfaceAdmissionAcceptanceTest {
                             + nextKey() + "\",\"expectedCompactionRevision\":0}";
             case SESSION_LIST -> "{}";
             case SESSION_GET -> "{\"sessionId\":\"" + session + "\"}";
-            case TRANSCRIPT_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case USER_MESSAGE_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case USER_MESSAGE_COMMAND -> publicSurface
+                    ? "{\"action\":\"resume\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"" + nextKey()
+                            + "\",\"command\":{\"action\":\"resume\"}}";
+            case SESSION_RECOVERY_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_RECOVERY_RECHECK -> publicSurface
+                    ? "{\"turnId\":\"turn_0000000000000000\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"turnId\":\"turn_0000000000000000\"}";
+            case TRANSCRIPT_QUERY, ITEM_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case TAIL_EVENTS -> "{\"sessionId\":\"" + session
                     + "\",\"afterSequence\":0}";
             case TASK_LIST -> "{\"sessionId\":\"" + session + "\"}";
@@ -1627,6 +1658,16 @@ class SurfaceAdmissionAcceptanceTest {
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
             case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";
+            case MCP_MANAGEMENT -> {
+                if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
+                    yield "{\"sessionId\":\"" + session + "\"}";
+                }
+                if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT_OPERATION) {
+                    yield "{\"sessionId\":\"" + session + "\",\"operationId\":\"11111111-1111-4111-8111-111111111111\"}";
+                }
+                yield "{" + (publicSurface ? "" : "\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"mcp-management\",")
+                        + "\"action\":\"restart\",\"serverId\":\"docs\",\"expectedRevision\":0}";
+            }
             case SESSION_APPROVAL_CHANGE -> "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"approval-change\",\"approvalMode\":\"yolo\",\"expectedRevision\":0}";
             case SESSION_MODEL_CHANGE -> "{\"sessionId\":\"" + session
@@ -1851,8 +1892,7 @@ class SurfaceAdmissionAcceptanceTest {
                     mock(ToolExecutionRepository.class),
                     mock(RuntimeBindingRepository.class),
                     new ToolPublicationStore.Capacity(1024L * 1024 * 1024,
-                            1024L * 1024 * 1024, 1024L * 1024 * 1024, 4),
-                    false);
+                            1024L * 1024 * 1024, 1024L * 1024 * 1024, 4));
         }
 
         /**

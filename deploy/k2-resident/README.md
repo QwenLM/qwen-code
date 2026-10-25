@@ -15,6 +15,8 @@ proposal #14761. Optional explicit idle retirement is implemented in #14765 and
 described below. This configuration needs no Go toolchain, custom containerd/shim,
 node collector or cold-bootstrap installation.
 
+The [2026-10-24 scope decision](../../docs/design/2026-10-23-csi-evidence-source.md) confirms that complete CSI auditing is not a first-release prerequisite. Session handoff retains the original Pod/PVC; explicit idle retirement retains storage ownership. Platform-managed reclamation and cross-Workspace volume reuse remain follow-up work.
+
 ## Trusted platform and supported storage
 
 Trust the administrator, Kubernetes control plane, host and qualified CSI driver.

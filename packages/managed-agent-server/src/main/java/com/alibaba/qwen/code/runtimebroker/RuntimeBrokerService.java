@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
@@ -318,7 +319,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return failed(conflict("runtime_admission_closed", "A durable drain fence is required"));
         }
         return drainBindings(tenantId, harnessSessionId, null)
-                .thenCompose(ignored -> releaseSharedSessions(tenantId, harnessSessionId, null, null));
+                .thenCompose(ignored -> settleHarnessSessions(tenantId, harnessSessionId, null, true, null));
     }
 
     public CompletionStage<Void> closeResidentHarnessSession(RuntimeProvisionRequest request, String harnessSessionId) {
@@ -375,17 +376,21 @@ public final class RuntimeBrokerService implements AutoCloseable {
         // Per-Session evidence never needs a shared worker stopped, so stoppedOnly
         // applies to Session-isolated bindings alone.
         return drainResourceBindings(tenantId, harnessSessionId, authority, stoppedOnly, null)
-                .thenCompose(ignored -> releaseSharedSessions(tenantId, harnessSessionId, authority, null));
+                .thenCompose(ignored -> settleHarnessSessions(tenantId, harnessSessionId, authority, true, null));
     }
 
-    /**
-     * Releases a closing Session's Runtime Sessions on shared bindings, one
-     * Runtime Session at a time, without draining the binding other Sessions
-     * still use. Runs after the Session-isolated pass, so it finds only
-     * Runtime Sessions that pass cannot reach.
-     */
-    private CompletionStage<Void> releaseSharedSessions(String tenantId, String harnessSessionId,
-            RuntimeLifecycleAuthority authority, RuntimeSessionRecord after) {
+    public CompletionStage<Void> prepareHarnessResources(String tenantId, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        requireOpen();
+        if (!bindingRepository.isHarnessDraining(tenantId, harnessSessionId)) {
+            return failed(conflict("runtime_admission_closed", "Resource drain requires DRAINING"));
+        }
+        return settleHarnessSessions(tenantId, harnessSessionId, authority, false, null);
+    }
+
+    /** Stops ordinary holds before MCP drains; shared workers remain owned by their other Sessions. */
+    private CompletionStage<Void> settleHarnessSessions(String tenantId, String harnessSessionId,
+            RuntimeLifecycleAuthority authority, boolean release, RuntimeSessionRecord after) {
         var batch = sessionRepository.findActiveByHarnessSession(tenantId, harnessSessionId, after, 100);
         CompletionStage<Void> work = CompletableFuture.completedFuture(null);
         for (var record : batch) {
@@ -397,7 +402,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (binding == null) {
                 return failed(conflict("workspace_close_identity_unverified", "Saved release binding is missing"));
             }
-            if (!HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
+            if (release && !HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
                 continue;
             }
             if (binding.getGeneration() != record.getRuntimeGeneration()
@@ -410,11 +415,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     bindingRepository.requireHarnessCleanup(binding.getRequest(), record.getSession().getScope(),
                             harnessSessionId, authority);
                 }
-                return releaseSavedSession(binding, record, null);
+                return releaseSavedSession(binding, record, null, release);
             });
         }
-        return work.thenCompose(ignored -> batch.size() < 100 ? requireSharedReleased(tenantId, harnessSessionId)
-                : releaseSharedSessions(tenantId, harnessSessionId, authority, batch.getLast()));
+        return work.thenCompose(ignored -> batch.size() < 100
+                ? release ? requireSharedReleased(tenantId, harnessSessionId) : CompletableFuture.completedFuture(null)
+                : settleHarnessSessions(tenantId, harnessSessionId, authority, release, batch.getLast()));
     }
 
     private CompletionStage<Void> requireSharedReleased(String tenantId, String harnessSessionId) {
@@ -809,6 +815,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
             BindingRenewal renewal) {
+        return releaseSavedSession(binding, record, renewal, true);
+    }
+
+    private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
+            BindingRenewal renewal, boolean release) {
         if (binding.getLease() == null || binding.getProvisionSeed() == null || binding.getResourceHandle() == null
                 || !(ResidentWorkspaceProfile.selects(binding.getRequest())
                         || HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
@@ -829,6 +840,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 && observation.getLossEvidence() != null
                                 && observation.getLossEvidence().matches(binding.getProvisionSeed(),
                                         binding.getResourceHandle(), binding.getLease())) {
+                            if (!release) {
+                                return failed(conflict("workspace_close_identity_unverified", "Original worker cannot prepare its resources"));
+                            }
                             // A lost shared worker settles through the loss path; one
                             // Session's close never retires the binding.
                             if (ResidentWorkspaceProfile.selects(binding.getRequest())
@@ -859,7 +873,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         var adopted = CompletableFuture.completedFuture(
                                 new SessionContext(record.getSession(), binding, binding.getLease()));
                         var existing = sessions.putIfAbsent(record.getRuntimeSessionId(), adopted);
-                        return releaseOriginalSession(binding, record, existing == null ? adopted : existing)
+                        return releaseOriginalSession(binding, record, existing == null ? adopted : existing, release)
                                 .whenComplete((ignored, error) -> {
                                     if (existing == null && error != null) {
                                         sessions.remove(record.getRuntimeSessionId(), adopted);
@@ -867,7 +881,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 });
                     });
         } else {
-            result = releaseOriginalSession(binding, record, context);
+            result = releaseOriginalSession(binding, record, context, release);
         }
         return result.exceptionallyCompose(error -> {
             Throwable cause = unwrap(error);
@@ -879,12 +893,25 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<Void> releaseOriginalSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
-            CompletionStage<SessionContext> context) {
+            CompletionStage<SessionContext> context, boolean release) {
         return context.thenCompose(original -> {
             requireSameSession(original.session(), record.getSession());
             if (!original.binding().getBindingId().equals(binding.getBindingId())
                     || original.binding().getGeneration() != binding.getGeneration()) {
                 throw conflict("workspace_close_identity_unverified", "Release generation differs");
+            }
+            if (!release) {
+                return settleUnprovenBackgroundRows(original, true).thenRun(() -> {
+                    original.lock();
+                    try {
+                        if (original.hasActiveControl() || executionRepository.hasActiveByRuntimeSession(
+                                binding.getBindingId(), binding.getGeneration(), record.getRuntimeSessionId())) {
+                            throw conflict("workspace_close_execution_unsettled", "Original background work is unsettled");
+                        }
+                    } finally {
+                        original.unlock();
+                    }
+                });
             }
             // The close cascade's release is the drain arm: a live hold row
             // gets its stop here, where the caller's fence can wait for the
@@ -900,6 +927,77 @@ public final class RuntimeBrokerService implements AutoCloseable {
     public CompletionStage<RuntimeBindingRecord> warm(
             String harnessSessionId) {
         return warm(harnessSessionId, null);
+    }
+
+    public CompletionStage<RuntimeScope> capabilities(
+            String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        requireOpen();
+        String harnessId = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                "harnessSessionId");
+        return resolveScope(harnessId, true, authority);
+    }
+
+    public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId) {
+        requireOpen();
+        String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        return resolveScope(harnessId, true, null).thenCompose(scope -> {
+            bindingRepository.requireHarnessAdmission(scope, harnessId, null);
+            RuntimeSessionRecord owner = runtimeSessionId == null ? null
+                    : sessionRepository.findHistorical(scope.getTenantId(), harnessId,
+                            BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"));
+            if (runtimeSessionId != null && owner == null) {
+                throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is unavailable.");
+            }
+            if (owner == null) {
+                var active = sessionRepository.findActiveByHarnessSession(scope.getTenantId(), harnessId, null, 2);
+                if (active.size() > 1) {
+                    throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is ambiguous.");
+                }
+                owner = active.isEmpty() ? null : active.getFirst();
+            }
+            CompletionStage<RuntimeBindingRecord> selected;
+            if (owner != null) {
+                RuntimeBindingRecord original = bindingRepository.findById(owner.getBindingId());
+                if (!owner.getSession().getHarnessSessionId().equals(harnessId)
+                        || !owner.getSession().getScope().equals(scope) || owner.getState() != RuntimeSessionRecord.State.READY
+                        || original == null || original.getGeneration() != owner.getRuntimeGeneration()
+                        || original.getState() != RuntimeBindingRecord.State.READY || original.isDrainRequested()
+                        || !original.getRequest().getScope().equals(scope)) {
+                    throw conflict("managed_mcp_owner_unavailable", "The original MCP Runtime is unavailable.");
+                }
+                selected = matchingLiveBinding(original) == null
+                        ? recoverBinding(original.getBindingId(), original.getGeneration(), true)
+                        : CompletableFuture.completedFuture(original);
+                selected = selected.thenApply(record -> {
+                    if (!record.sameIdentity(original) || record.getGeneration() != original.getGeneration()) {
+                        throw conflict("managed_mcp_owner_unavailable", "The original MCP Runtime changed.");
+                    }
+                    return record;
+                });
+            } else {
+                RuntimeProvisionRequest request = provisionRequest(scope, harnessId);
+                RuntimeBindingRecord existing = bindingRepository.findOrCreate(request);
+                if (existing.getState() != RuntimeBindingRecord.State.READY
+                        && existing.getState() != RuntimeBindingRecord.State.PROVISIONING) {
+                    throw conflict("managed_mcp_owner_unavailable", "The selected MCP Runtime is unavailable.");
+                }
+                selected = ensureBinding(request).thenApply(BindingContext::record);
+            }
+            return selected.thenCompose(record -> {
+                RuntimeBindingRecord current = bindingRepository.findById(record.getBindingId());
+                if (current == null || !current.sameIdentity(record) || current.getGeneration() != record.getGeneration()
+                        || current.getState() != RuntimeBindingRecord.State.READY || current.isDrainRequested()) {
+                    throw conflict("managed_mcp_owner_unavailable", "The selected MCP Runtime changed.");
+                }
+                requireLiveBinding(current);
+                if (!provisioner.isUsable(current.getLease())) {
+                    throw unavailable("managed_mcp_owner_unavailable", "The selected MCP Runtime is not alive.");
+                }
+                bindingRepository.requireHarnessAdmission(current.getRequest(), scope, harnessId, null);
+                return transport.mcpDefinitions(current);
+            });
+        });
     }
 
     public CompletionStage<RuntimeBindingRecord> warm(String harnessSessionId, RuntimeLifecycleAuthority authority) {
@@ -1448,6 +1546,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
                                 && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
                             throw invalid("runtime_payload_invalid", "The private CSI profile requires a file Tool v2 payload");
+                        }
+                        if (ResidentWorkspaceProfile.selects(context.binding().getRequest().getScope())
+                                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
+                            Map<String, Object> refusal = new LinkedHashMap<>();
+                            refusal.put("executionStatus", "not_started");
+                            refusal.put("responseParts", List.of());
+                            refusal.put("capture", null);
+                            refusal.put("error", Map.of("type", "resident_tool_unsupported",
+                                    "message", "Resident Workspace supports only read_file, write_file and edit."));
+                            ToolExecutionRecord settled = executionRepository.settlePrepared(record, refusal, clock.instant());
+                            return CompletableFuture.completedFuture(settled == null
+                                    ? requireExecution(context, executionId) : settled);
                         }
                         if (v3) {
                             if (!"run_shell_command".equals(payload.get("toolName"))
@@ -3511,12 +3621,23 @@ public final class RuntimeBrokerService implements AutoCloseable {
         try {
             provisioner.reserveResource(claimed);
         } catch (RuntimeException failure) {
+            // Pre-create admission has not committed a resource identity yet,
+            // so any retryable failure leaves the binding PROVISIONING with its
+            // original seed for a later Broker round. Once a handle exists,
+            // only the capacity/busy answers are known to stay adoptable; the
+            // external provisioner's retryable reserveResource outcomes are
+            // exactly capacity and shutdown.
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
-                    && ((request.isManagedContext() && brokerFailure.getStatusCode() == 409
-                            && "workspace_csi_busy".equals(brokerFailure.getCode()))
-                            || (!request.isManagedContext() && "kubernetes-scratch".equals(request.getProvisionerKind())
-                                    && brokerFailure.getStatusCode() == 503
-                                    && "runtime_kubernetes_capacity".equals(brokerFailure.getCode())));
+                    && (claimed.getResourceHandle() == null
+                            || (request.isManagedContext() && brokerFailure.getStatusCode() == 409
+                                    && "workspace_csi_busy".equals(brokerFailure.getCode()))
+                            || (!request.isManagedContext() && brokerFailure.getStatusCode() == 503
+                                    && (("kubernetes-scratch".equals(request.getProvisionerKind())
+                                            && "runtime_kubernetes_capacity".equals(brokerFailure.getCode()))
+                                            || (ExternalRuntimeProvisioner.KIND.equals(request.getProvisionerKind())
+                                                    && ("runtime_external_capacity".equals(brokerFailure.getCode())
+                                                            || "runtime_external_unavailable"
+                                                                    .equals(brokerFailure.getCode()))))));
             if (!busy) {
                 blockRecoveryQuietly(claimed, failure);
             }
@@ -3626,7 +3747,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                                 cause);
                                     }
                                 } else if (currentClaim
-                                        .getResourceHandle() == null) {
+                                        .getResourceHandle() == null
+                                        // The external ensureResource commits
+                                        // nothing before the handle is returned.
+                                        && !ExternalRuntimeProvisioner.KIND
+                                                .equals(request.getProvisionerKind())) {
                                     blockRecoveryQuietly(currentClaim, cause);
                                 }
                             }

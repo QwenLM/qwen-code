@@ -97,6 +97,11 @@ export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
 export { SessionRouter } from './SessionRouter.js';
 export {
+  singleScopeRoutingKey,
+  unwrapMessageRoutingKey,
+  wrapMessageRoutingKey,
+} from './SessionRouter.js';
+export {
   sanitizeSenderName,
   sanitizePromptText,
   sanitizeDisplayText,

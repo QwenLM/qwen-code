@@ -94,6 +94,60 @@ class ManagedWorkspaceAdmissionTest {
     @Autowired
     private PlatformTransactionManager transactionManager;
 
+    @Test
+    void publicChildrenKeepLaunchPolicyAndModelAfterParentChangesAndDeploymentDisable() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-public-child", "storage-public-child", WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-public-child", "actor-a", true);
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        assertThat(properties.getHarness().isWorkspaceChildAgentsEnabled()).isTrue();
+        properties.getHarness().setApprovalMode("default");
+        var enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var tx = new TransactionTemplate(transactionManager);
+        var selection = new WorkspaceSelection("ws-public-child", ".");
+        var old = tx.execute(status -> enabled.insertWorkspaceSessionCommand(tenant, "actor-a", "old", "old-digest",
+                "qwen-code", null, null, List.of(), null, selection));
+        assertThat(enabled.requireSession(tenant, old.sessionId()).publicChildAgentsVersion()).isZero();
+        var parent = tx.execute(status -> enabled.insertWorkspaceSessionCommand(tenant, "actor-a", "public", "public-digest",
+                "qwen-code", null, null, List.of(), null, selection, null, true, null, true, List.of(), true));
+        assertThat(enabled.requireSession(tenant, parent.sessionId()).publicChildAgentsVersion()).isEqualTo(1);
+        var snapshot = mapper.readTree("""
+                {"version":1,"sourcePromptId":"source-1","approvalMode":"auto-edit","approvalRevision":2,
+                 "modelId":"launch-model","modelRevision":4,"skillsRef":null,
+                 "modelRoute":{"authType":"openai","endpointDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "providerPin":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                 "origin":{"modelId":"source-model","authType":"openai","endpointDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "providerPin":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+                """);
+        jdbc.update("UPDATE ma_session SET selected_approval_mode = 'auto', approval_revision = 3 WHERE tenant_id = ? AND session_id = ?",
+                tenant, parent.sessionId());
+        properties.getHarness().setWorkspaceChildAgentsEnabled(false);
+        var disabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var lineage = new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(parent.sessionId(), parent.sessionId(), "run-public", 1);
+        var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "write a file"));
+        var autoSnapshot = ((com.fasterxml.jackson.databind.node.ObjectNode) snapshot.deepCopy()).put("approvalMode", "auto");
+        assertThatThrownBy(() -> tx.execute(status -> disabled.insertPublicChildSessionCommand(tenant, parent.sessionId(), "auto-launch", "auto-digest",
+                "child", input, "payload", lineage, autoSnapshot))).isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("child_launch_snapshot_invalid"));
+        var child = tx.execute(status -> disabled.insertPublicChildSessionCommand(tenant, parent.sessionId(), "launch", "launch-digest",
+                "child", input, "payload", lineage, snapshot));
+        assertThat(disabled.requireSession(tenant, child.sessionId()).publicChildAgentsVersion()).isEqualTo(1);
+        assertThat(disabled.requireSession(tenant, child.sessionId()).approvalMode()).isEqualTo("auto-edit");
+        var model = disabled.findTurnModelSelection(tenant, child.sessionId(), disabled.findTurn(tenant, child.sessionId(), child.turnId()).orElseThrow().promptId());
+        assertThat(model.modelId()).isEqualTo("launch-model");
+        assertThat(model.revision()).isEqualTo(1);
+        assertThat(tx.execute(status -> disabled.insertPublicChildSessionCommand(tenant, parent.sessionId(), "launch", "launch-digest",
+                "child", input, "payload", lineage, snapshot)).sessionId()).isEqualTo(child.sessionId());
+        assertThatThrownBy(() -> tx.execute(status -> disabled.insertTurnCommand(tenant, "actor-a", "new-child-turn", "digest",
+                child.sessionId(), input, "payload"))).isInstanceOf(ManagedAgentException.class);
+        var fresh = tx.execute(status -> disabled.insertWorkspaceSessionCommand(tenant, "actor-a", "disabled", "disabled-digest",
+                "qwen-code", null, null, List.of(), null, selection, null, true, null, true, List.of(), true));
+        assertThat(disabled.requireSession(tenant, fresh.sessionId()).publicChildAgentsVersion()).isZero();
+    }
+
     @ParameterizedTest
     @CsvSource({"false, yolo", "false, default", "false, auto-edit", "true, default", "true, auto-edit"})
     void internalTeamLeadPinsPrivatePolicyAndSeparatesPublicReplay(boolean shellEnabled, String mode) {

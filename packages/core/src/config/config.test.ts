@@ -3048,6 +3048,23 @@ describe('Server Config (config.ts)', () => {
       expectRebound(child, parent, worktreeDir);
     });
 
+    it.each([undefined, 'CLI', 'desktop'])(
+      'preserves runtime channel %s through nested agent configs',
+      (channel) => {
+        const parent = makeConfig({ channel });
+        const { config: child } = deriveAgentConfig(
+          parent,
+          path.resolve('/tmp/agent'),
+        );
+        const { config: nested } = deriveAgentConfig(
+          child,
+          path.resolve('/tmp/nested-agent'),
+        );
+        expect(child.getChannel()).toBe(channel);
+        expect(nested.getChannel()).toBe(channel);
+      },
+    );
+
     it('rebinds agent workspace getters and private field reads together', () => {
       const agentWorkspace = path.resolve('/tmp/agent-workspace');
       const parent = makeConfig({ fileFiltering: ignoreFiles() });

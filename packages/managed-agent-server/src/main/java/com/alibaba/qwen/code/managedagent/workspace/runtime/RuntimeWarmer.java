@@ -40,6 +40,12 @@ public interface RuntimeWarmer {
                 new UnsupportedOperationException("Workspace resource drain is unavailable"));
     }
 
+    default CompletionStage<Void> prepareWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return java.util.concurrent.CompletableFuture.failedFuture(
+                new UnsupportedOperationException("Workspace resource preparation is unavailable"));
+    }
+
     default CompletionStage<Void> recoverStoppedWorkspaceResources(String tenantId, String sessionId,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         return java.util.concurrent.CompletableFuture.failedFuture(
