@@ -391,6 +391,7 @@ export interface ChatRecord {
   /** Optional subtype for distinguishing non-standard records */
   subtype?:
     | 'chat_compression'
+    | 'memory_catalog_snapshot'
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
@@ -3497,6 +3498,19 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving omni recall record:', error);
+    }
+  }
+
+  recordMemoryCatalogSnapshot(snapshot: Part): void {
+    try {
+      this.appendRecord({
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'memory_catalog_snapshot',
+        message: { role: 'user', parts: [snapshot] },
+      });
+    } catch (error) {
+      debugLogger.error('Error saving memory catalog snapshot:', error);
     }
   }
 
