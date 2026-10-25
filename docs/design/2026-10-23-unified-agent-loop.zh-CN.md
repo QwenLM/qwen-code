@@ -351,7 +351,7 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 
 - 设置开启时，ACP 的 prompt 轮次与现在相比有以下有意的差异。其中大多数源于 client 为 ACP 做了它为其他入口做的事：
   - 日期与上次不同时，prompt 会带上 client 的日期提醒；系统提醒改由 client 生成，包括 advisor 与已暂停 Goal 的提醒，并且排在 ACP 一次性提示的前面，而不是后面；
-  - UserPromptSubmit 也会为这一轮的工具结果请求运行，输入是请求的文本，与其他入口相同（#9511）；在这里被拦截时，轮次结束并显示拦截提示，这一轮的工具调用以“被 hook 拦截”的结果关闭；
+  - UserPromptSubmit 也会为这一轮的工具结果请求运行，输入是请求的文本，与其他入口相同（#9511）；在这里被拦截时，轮次结束并显示拦截提示，这一轮的工具调用以“被 hook 拦截”的结果关闭，随结果一起取走的输入仍保留在历史中；
   - session token 限制在 client 压缩历史之前检查，而不是之后；
   - client 的会话轮数上限对 ACP prompt 生效；`model.skipLoopDetection` 为 false 时它的内容和 thought 循环启发式检测也生效，启用时 next-speaker 检查也一样（#14114）；
   - 工具结果请求会带上召回结果和排队的循环提醒，并运行 client 只按大小判断的 microcompaction，托管记忆任务（包括 skill review）由 client 执行，prompt 计入提交署名；

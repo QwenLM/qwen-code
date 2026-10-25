@@ -4656,6 +4656,166 @@ describe('Session', () => {
       ).not.toHaveBeenCalled();
     });
 
+    it('keeps the input taken with the results of a tool-result round the hook blocked', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      let drained = false;
+      vi.mocked(mockClient.extMethod).mockImplementation(async (method) => {
+        if (method === 'craft/drainMidTurnQueue' && !drained) {
+          drained = true;
+          return { messages: ['use plan B instead'], hasQueuedPrompt: false };
+        }
+        return { messages: [] };
+      });
+      useSharedRounds(
+        [
+          toolCall({
+            id: 'call-read',
+            name: 'read_file',
+            args: { file_path: '/tmp/a.txt' },
+          }),
+          finished(),
+        ],
+        [
+          {
+            type: core.LlmEventType.UserPromptSubmitBlocked,
+            value: { reason: 'secret in output', originalPrompt: '' },
+          },
+        ],
+      );
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      const closed = vi
+        .mocked(mockChat.addHistory)
+        .mock.calls.map(([content]) => content)
+        .find((content) =>
+          content.parts?.some(
+            (part) => part.functionResponse?.id === 'call-read',
+          ),
+        );
+      expect(closed?.parts?.[0]).toMatchObject({
+        functionResponse: {
+          id: 'call-read',
+          response: {
+            error: expect.stringContaining('UserPromptSubmit hook blocked'),
+          },
+        },
+      });
+      // The input the drain took is already shown as delivered.
+      expect(JSON.stringify(closed?.parts?.slice(1))).toContain(
+        'use plan B instead',
+      );
+    });
+
+    it('keeps the results of a tool-result round cancelled before its request went out', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      let pushes = 0;
+      Object.assign(mockChat, {
+        getUserContentPushCount: vi.fn(() => pushes),
+      });
+      const send = useSharedRounds();
+      send
+        .mockImplementationOnce(() =>
+          (async function* () {
+            pushes++;
+            yield toolCall({
+              id: 'call-read',
+              name: 'read_file',
+              args: { file_path: '/tmp/a.txt' },
+            });
+            yield finished();
+          })(),
+        )
+        // The client throws when the turn is cancelled during the
+        // tool-result round's UserPromptSubmit hook, before the push.
+        .mockImplementationOnce((_parts: Part[], signal: AbortSignal) =>
+          (async function* () {
+            await session.cancelPendingPrompt();
+            if (signal.aborted) {
+              throw new DOMException('aborted', 'AbortError');
+            }
+            yield text('never');
+          })(),
+        );
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('cancelled');
+      expect(send).toHaveBeenCalledTimes(2);
+      // The tools ran, so their results close the calls, not the repair's
+      // "retry if needed".
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'call-read',
+                response: expect.objectContaining({ output: 'done' }),
+              }),
+            }),
+          ]),
+        }),
+      );
+    });
+
+    it('judges a next-speaker continuation in the round by its own response', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      let pushes = 0;
+      Object.assign(mockChat, {
+        getUserContentPushCount: vi.fn(() => pushes),
+      });
+      const send = useSharedRounds();
+      send.mockImplementation(() => {
+        pushes++;
+        return createEmptyStream();
+      });
+      send.mockImplementationOnce(() =>
+        (async function* () {
+          pushes++;
+          yield text('first part');
+          yield finished(FinishReason.MAX_TOKENS, {
+            promptTokenCount: 10,
+            candidatesTokenCount: 4,
+          });
+          // The client's next-speaker check sends "Please continue."
+          pushes++;
+          yield toolCall({
+            id: 'call-write',
+            name: 'write_file',
+            args: { file_path: '/tmp/notes.txt', content: 'all of it' },
+          });
+          yield finished(FinishReason.STOP, {
+            promptTokenCount: 20,
+            candidatesTokenCount: 6,
+          });
+        })(),
+      );
+      const emitUsage = vi.spyOn(
+        (
+          session as unknown as {
+            messageEmitter: {
+              emitUsageMetadata: (...args: unknown[]) => Promise<void>;
+            };
+          }
+        ).messageEmitter,
+        'emitUsageMetadata',
+      );
+
+      await prompt();
+
+      // The first response's cut does not refuse the continuation's edit.
+      expect(execute).toHaveBeenCalledOnce();
+      // Each response reports its own usage.
+      expect(
+        emitUsage.mock.calls.map(
+          ([usage]) =>
+            (usage as { candidatesTokenCount?: number }).candidatesTokenCount,
+        ),
+      ).toEqual([4, 6]);
+    });
+
     it.each([
       [
         'the session token limit',

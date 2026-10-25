@@ -7749,7 +7749,7 @@ export class Session implements SessionContext {
                 );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
-                const streamStartTime = Date.now();
+                let streamStartTime = Date.now();
                 const messageDisplay = sharedModelRound
                   ? null
                   : this.#createMessageDisplayDispatcher(pendingSend.signal);
@@ -7786,6 +7786,11 @@ export class Session implements SessionContext {
                     outputTruncated: false,
                     refusedPartialEdits: new Set(),
                   };
+                  // The user-content push a response answers. A next-speaker
+                  // continuation sends another request within the round, and
+                  // its response starts its own facts and usage, as a new send
+                  // does on the current path.
+                  let responsePushCount: number | undefined;
                   let loopStop:
                     | ({ loopType: LoopType } & LoopStopDetail)
                     | undefined;
@@ -7844,6 +7849,30 @@ export class Session implements SessionContext {
                       {
                         onModelEvent: async (event) => {
                           if (pendingSend.signal.aborted) return;
+                          const pushCount =
+                            this.#getCurrentChat().getUserContentPushCount?.();
+                          if (pushCount !== responsePushCount) {
+                            if (responsePushCount !== undefined) {
+                              attempt = {
+                                outputTruncated: false,
+                                refusedPartialEdits: new Set(),
+                              };
+                              if (usageMetadata) {
+                                this.#recordPromptTokenCount(
+                                  usageMetadata,
+                                  requestRouteKey,
+                                );
+                                await this.messageEmitter.emitUsageMetadata(
+                                  usageMetadata,
+                                  '',
+                                  Date.now() - streamStartTime,
+                                );
+                                usageMetadata = null;
+                              }
+                              streamStartTime = Date.now();
+                            }
+                            responsePushCount = pushCount;
+                          }
                           // Closed when a response finishes and opened by the
                           // next one, such as a next-speaker continuation. The
                           // first event also takes input that arrived before
@@ -7977,6 +8006,18 @@ export class Session implements SessionContext {
                   } catch (error) {
                     streamFailed = true;
                     if (!cutForInput()) {
+                      // A round that threw before its request pushed the
+                      // message, such as a cancel during a tool-result round's
+                      // UserPromptSubmit hook, keeps it as the stops below do.
+                      if (requestUnsent()) {
+                        if (pendingSend.signal.aborted) {
+                          markApiHistoryPrompt(message, responseCapture.turnId);
+                        }
+                        this.#preserveUnsentMessageHistory(
+                          message,
+                          pendingSend.signal.aborted,
+                        );
+                      }
                       return this.#endFailedModelRound(
                         error,
                         pendingSend.signal,
@@ -8023,13 +8064,21 @@ export class Session implements SessionContext {
                             ]
                           : [],
                     );
+                    // Input taken with the results, already shown as
+                    // delivered, stays in history with the closed calls, as a
+                    // stopped tool run keeps it.
                     if (!pushed && blockedCalls.length > 0) {
                       this.#getCurrentChat().addHistory({
                         role: 'user',
-                        parts: buildSyntheticToolResponseParts(
-                          blockedCalls,
-                          USER_PROMPT_BLOCKED_TOOL_RESULT,
-                        ),
+                        parts: [
+                          ...buildSyntheticToolResponseParts(
+                            blockedCalls,
+                            USER_PROMPT_BLOCKED_TOOL_RESULT,
+                          ),
+                          ...(message.parts ?? []).filter(
+                            (part) => !part.functionResponse,
+                          ),
+                        ],
                       });
                     }
                     return { stopReason: 'end_turn' };

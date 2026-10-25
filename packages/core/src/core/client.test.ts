@@ -12997,6 +12997,26 @@ Other open files:
         );
       });
 
+      it('still appends an unchanged block to a request with no parts of its own', async () => {
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [
+              { text: 'earlier prompt' },
+              createUserPromptSubmitContextPart('extra hook context'),
+            ],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        // An ACP prompt whose only block was dropped resolves to no parts;
+        // the block is then what keeps the request non-empty.
+        await run([], 'prompt-hook-context-empty');
+
+        expect(getLastTurnRequestText()).toContain('extra hook context');
+      });
+
       it('still appends when caller-authored tagged text merely matches in shape', async () => {
         // A user message can end in the wrapped block byte-for-byte; without
         // injector-owned provenance that is not evidence of a prior
