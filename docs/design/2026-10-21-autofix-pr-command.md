@@ -130,7 +130,8 @@ with unit tests; judgment stays in the skill.
   ├─ qwen autofix-pr schedule  record the watch's task, print its cron, gate and prompt
   ├─ qwen autofix-pr status    every watch of the clone, read from its files
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
-  └─ cron_create               session-only, recurring, gate:
+  └─ cron_create               recurring, gate (session-only; durable and bound
+                               to the session in a daemon):
                                "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId> --task <task>";
                                the prompt says how to handle the events the gate printed
 
@@ -1133,7 +1134,10 @@ Replies are on by default; `--no-reply` turns them off.
   (Section 6.11), once `status` shows the watch still records it — what the
   round's fix agent could have written to the state file never reaches the
   task: a
-  session-only recurring job, cron `*/<every> * * * *` (default `*/2`), the
+  recurring job — session-only in a terminal session, durable and bound to the
+  session in a daemon (`QWEN_CODE_SERVE=1`), whose idle reclaim would otherwise
+  take a session-only task's in-memory scheduler with it — cron
+  `*/<every> * * * *` (default `*/2`), the
   gate `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId> --task <task>`
   (the host it passed to `prepare`, the session that owns the watch), and a
   prompt that tells the model how to handle the events in the gate output
@@ -1143,7 +1147,9 @@ Replies are on by default; `--no-reply` turns them off.
 - Fires that arrive while the session is busy wait in the notification queue;
   the probe runs once when the session is idle and prints everything new
   since its previous run.
-- The job ends with the process. The state file stays, owned by the session
+- The job ends with the process, except in a daemon session: there the task is
+  durable and bound to its session, so the daemon keeps it resident and
+  rehydrates it after a restart. The state file stays, owned by the session
   that wrote it, and a new session's `prepare` refuses it (Section 6.1).
   A later session takes the watch over, its pushes and budgets kept, with
   `prepare --take-over` once the user agrees (Section 6.1, step 5).
@@ -1281,9 +1287,7 @@ Delivery plan:
    `/autofix-pr resume` takes watches over and schedules that task again.
    Still to come: the fix agent in the background with an `inFlight`
    record, and the budgets of Section 10 not enforced yet.
-5. Follow-ups: durable watching in daemon sessions (`durable` with
-   `sessionMode: "current"`, once the gate supports it), and a configurable
-   bot allowlist.
+5. Follow-ups: a configurable bot allowlist.
 
 Open questions:
 

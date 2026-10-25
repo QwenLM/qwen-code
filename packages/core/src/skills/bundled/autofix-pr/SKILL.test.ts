@@ -185,7 +185,12 @@ describe('bundled autofix-pr skill', () => {
       "They were printed before the round, so nothing the round's fix agent did can change them.",
     );
     expect(body).toContain(
-      "create the task with `cron_create` from step 6's `cron`, `recurring`, `gate` and `prompt`, exactly as printed",
+      "create the task with `cron_create` from step 6's `cron`, `recurring`, `gate` and `prompt`",
+    );
+    // A daemon session reclaims an idle one, which would stop a session-only
+    // watch with no report: the task it prints is durable and bound there.
+    expect(body).toContain(
+      'prints `durable: true` with `sessionMode: "current"`',
     );
   });
 

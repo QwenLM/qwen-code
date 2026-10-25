@@ -33,6 +33,7 @@ describe('runSchedule', () => {
   let repo: string;
   let savedCwd: string;
   let savedSession: string | undefined;
+  let savedServe: string | undefined;
   let paths: ReturnType<typeof autofixPrPaths>;
 
   const state = () => readState(paths.statePath)!;
@@ -69,6 +70,10 @@ describe('runSchedule', () => {
     savedCwd = process.cwd();
     savedSession = process.env['QWEN_CODE_SESSION_ID'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    // The suite runs under `qwen serve` too: a terminal session is the case
+    // without the marker, so no ambient value may speak for it.
+    savedServe = process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_SERVE'];
     process.chdir(repo);
   });
 
@@ -76,6 +81,8 @@ describe('runSchedule', () => {
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
+    if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = savedServe;
     rmSync(repo, { recursive: true, force: true });
   });
 
@@ -97,6 +104,29 @@ describe('runSchedule', () => {
       instructions: '',
       task: task.task,
     });
+  });
+
+  it('schedules a durable task bound to the conversation in a daemon session', () => {
+    const saved = process.env['QWEN_CODE_SERVE'];
+    process.env['QWEN_CODE_SERVE'] = '1';
+    try {
+      const task = runSchedule({ pr: 7 });
+      expect(task).toEqual({
+        cron: '*/2 * * * *',
+        recurring: true,
+        gate: `${GATE}${task.task}`,
+        prompt: `Run /autofix-pr tick o/r#7 --task ${task.task}`,
+        durable: true,
+        sessionMode: 'current',
+        every: 2,
+        reply: true,
+        instructions: '',
+        task: expect.stringMatching(TASK),
+      });
+    } finally {
+      if (saved === undefined) delete process.env['QWEN_CODE_SERVE'];
+      else process.env['QWEN_CODE_SERVE'] = saved;
+    }
   });
 
   it("puts --no-reply and the user's instructions, on one line, into the prompt", () => {
