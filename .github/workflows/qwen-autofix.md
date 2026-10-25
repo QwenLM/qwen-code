@@ -4574,8 +4574,9 @@ producing a round that quietly measures nothing.
 
 ### 159. route · Takeover round budget — '<cmd> for N' bounds a window's rounds and releases the PR when the budget is spent…
 
-In `route` · `Decide phases`, `takeover-command` · `Toggle takeover label`, and
-`review-scan` · `Scan for PRs with new feedback`.
+In `route` · `Decide phases`, `takeover-command` · `Toggle takeover label`,
+`review-scan` · `Scan for PRs with new feedback`, `review-address` · `Prepare
+branch and feedback`, and the report script's `emit_growth_audit_marker`.
 
 ```text
 '@qwen-code /takeover' engages a persistent engagement capped at
