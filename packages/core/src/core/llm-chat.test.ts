@@ -106,6 +106,10 @@ import {
 } from '../utils/api-history-metadata.js';
 import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
+import {
+  createUserPromptSubmitContextPart,
+  wrapUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
   getToolCallPreparations,
@@ -3947,6 +3951,107 @@ describe('LlmChat', async () => {
       expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
         123_457,
       );
+    });
+
+    it('re-appends a suppressed hook block when the send compacts', async () => {
+      mockCompressOnce(
+        compressed(1000, 200, [userText('summary'), modelText('ok')]),
+      );
+      mockStream(textStream('answer'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'go' },
+          'prompt-id-hook-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(1);
+    });
+
+    it('does not append a second suppressed hook block when the request already carries it', async () => {
+      mockCompressOnce(
+        compressed(1000, 200, [userText('summary'), modelText('ok')]),
+      );
+      mockStream(textStream('answer'));
+
+      // The ACP send re-appends the block after a compaction of its own and
+      // still forwards the option, so this rescue must not add a second copy.
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [{ text: 'go' }, createUserPromptSubmitContextPart('CTX')],
+          },
+          'prompt-id-hook-already-present',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(1);
+    });
+
+    it('leaves a suppressed hook block unappended when the send does not compact', async () => {
+      mockCompress(noop());
+      mockStream(textStream('answer'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'go' },
+          'prompt-id-hook-no-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      // The COMPRESSED conjunct is the whole gate: `compressionInfo` is
+      // assigned on every send (NOOP on the exact-route arm), so without it
+      // the rescue would re-append on every suppressed turn.
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(0);
+    });
+
+    it('re-appends a suppressed hook block when a reactive compaction replaces history', async () => {
+      reactiveCompaction(135_000);
+      mockRequests(tooLong(), textStream('answer after compaction'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'prompt-id-hook-reactive-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      const sentParts = (
+        requestAt(1) as { contents: Content[] }
+      ).contents.flatMap((entry) => entry.parts ?? []);
+      expect(
+        sentParts.filter(
+          (part) => part.text === wrapUserPromptSubmitContext('CTX'),
+        ),
+      ).toHaveLength(1);
     });
 
     it('yields a COMPRESSED stream event as the first event after auto-compression succeeds', async () => {

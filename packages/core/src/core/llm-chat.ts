@@ -160,6 +160,10 @@ import {
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
+import {
   type ChatCompressionInfo,
   CompressionStatus,
   isCompressionFailureStatus,
@@ -728,6 +732,12 @@ export interface LlmChatSendOptions {
    * public transcript (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * A `UserPromptSubmit` block suppressed as already delivered. Compression
+   * can drop the history entry holding its only copy inside this same send,
+   * so it is re-appended when the send compacts.
+   */
+  suppressedHookContext?: string;
 }
 
 export type ChatCompressionObserver = (
@@ -3889,6 +3899,23 @@ export class LlmChat {
             },
           );
         }
+        if (
+          options?.suppressedHookContext &&
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
+          // One owner per send: the caller may already have appended the
+          // block after a compaction of its own.
+          !hasUserPromptSubmitContext(
+            userContent,
+            options.suppressedHookContext,
+          )
+        ) {
+          // Compaction replaced the history holding the block's only copy, so
+          // the model would otherwise not see it on this turn at all.
+          userContent.parts = [
+            ...(userContent.parts ?? []),
+            createUserPromptSubmitContextPart(options.suppressedHookContext),
+          ];
+        }
         const localPromptTokensAfterCompression = shouldForceFromHard
           ? estimatePendingPrompt(userContent)
           : 0;
@@ -4983,6 +5010,23 @@ export class LlmChat {
                         self.history.push(
                           createUserContent([{ text: noticeText }]),
                         );
+                      }
+                    }
+
+                    // Same one-copy problem for a suppressed hook block: the
+                    // compaction replaced the history entry that held it.
+                    if (options?.suppressedHookContext) {
+                      const lastContent = self.history.at(-1);
+                      const hookContextPart = createUserPromptSubmitContextPart(
+                        options.suppressedHookContext,
+                      );
+                      if (lastContent?.role === 'user') {
+                        lastContent.parts = [
+                          ...(lastContent.parts ?? []),
+                          hookContextPart,
+                        ];
+                      } else {
+                        self.history.push(createUserContent([hookContextPart]));
                       }
                     }
                     requestContents = self.getRequestHistoryForRoute(
