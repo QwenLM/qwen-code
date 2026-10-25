@@ -2421,6 +2421,135 @@ describe('loadCliConfig', () => {
       );
     });
 
+    it.each([
+      'openai:gpt-4o\0https://corp-llm.example/v1',
+      'gpt-4o\0https://corp-llm.example/v1',
+      'gpt-4o',
+      'openai:gpt-4o',
+    ])(
+      'accepts %j registered on an allowed route while the same id is dropped elsewhere (R3-12)',
+      async (selector) => {
+        // Drop records name routes: gpt-4o is dropped on the off-list
+        // endpoint but registered on the on-list one, so the selector is a
+        // valid, allowlist-compliant advisor model (issue #12805).
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        const config = await loadCliConfig(
+          {
+            advisorModel: selector,
+            model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+            providerProtocol: { mycorp: 'openai' },
+            modelProviders: {
+              openai: [
+                {
+                  id: 'gpt-4o',
+                  name: 'GPT-4o external',
+                  baseUrl: 'https://external-llm.example/v1',
+                  envKey: 'EXT_KEY',
+                },
+              ],
+              mycorp: [
+                {
+                  id: 'gpt-4o',
+                  name: 'GPT-4o corp',
+                  baseUrl: 'https://corp-llm.example/v1',
+                  envKey: 'CORP_KEY',
+                },
+              ],
+            } as never,
+          },
+          argv,
+        );
+
+        expect(config.getAdvisorModel()).toBe(selector);
+      },
+    );
+
+    it('lists only advisor-eligible models in the dropped-model remedy (R5-12)', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      let message = '';
+      try {
+        await loadCliConfig(
+          {
+            advisorModel: 'ext-model',
+            model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+            modelProviders: {
+              openai: [
+                {
+                  id: 'ext-model',
+                  name: 'External Model',
+                  baseUrl: 'https://external-llm.example/v1',
+                  envKey: 'EXT_KEY',
+                },
+                {
+                  id: 'corp-image',
+                  name: 'Corp Image',
+                  baseUrl: 'https://corp-llm.example/v1',
+                  envKey: 'CORP_KEY',
+                  imageOnly: true,
+                },
+                {
+                  id: 'corp-chat',
+                  name: 'Corp Chat',
+                  baseUrl: 'https://corp-llm.example/v1',
+                  envKey: 'CORP_KEY',
+                },
+              ],
+            },
+          },
+          argv,
+        );
+      } catch (e) {
+        message = String((e as Error).message);
+      }
+
+      expect(message).toContain(
+        "was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'",
+      );
+      expect(message).toContain('Configured models: corp-chat.');
+      expect(message).not.toContain('corp-image');
+    });
+
+    it('honors the workspace-only exemption handed to loadCliConfig (R5-11)', async () => {
+      // The 12th parameter must reach the resolver and the registry: with a
+      // workspace-only list, personal Qwen login resolves and the built-in
+      // model registers; without it the same settings fail closed.
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings = {
+        model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+        security: { auth: { selectedType: AuthType.QWEN_OAUTH } },
+      };
+
+      const config = await loadCliConfig(
+        settings,
+        argv,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      expect(
+        config
+          .getModelsConfig()
+          .getAvailableModelsForAuthType(AuthType.QWEN_OAUTH)
+          .map((m) => m.id),
+      ).toEqual([DEFAULT_QWEN_MODEL]);
+
+      await expect(loadCliConfig(settings, argv)).rejects.toThrow(
+        'Personal Qwen login and an operator-scope allowlist are mutually exclusive',
+      );
+    });
+
     it('explains the Qwen OAuth sentinel drop instead of suggesting an endpoint', async () => {
       // The built-in model is dropped with the non-URL sentinel: its
       // endpoint is discovered at login, so "allow its endpoint" is an

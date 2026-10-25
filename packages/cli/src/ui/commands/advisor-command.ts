@@ -18,6 +18,7 @@ import {
   isAdvisorModelEligible,
 } from '../../config/advisor-model.js';
 import { buildAdvisorAllowlistHint } from '../../config/config.js';
+import { findUnregisteredAllowlistDrop } from '../../utils/aux-model-selector.js';
 import {
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
@@ -172,13 +173,20 @@ async function setAdvisorModel(
 
   if (model) {
     const availability = checkAdvisorModelAvailability(config, model);
-    if (!availability.available) {
+    // Same drop-precedence rule as the startup check (issue #12805): the
+    // availability escape hatch re-admits a dropped model that is the
+    // current runtime model, but enabling and persisting it would make every
+    // later launch refuse to start. The escape hatch stays display-only.
+    const dropped = findUnregisteredAllowlistDrop(config, model);
+    if (dropped || !availability.available) {
       return {
         type: 'message',
         messageType: 'error',
         content: unavailableModelMessage(
           model,
-          availability.availableModelIds,
+          dropped
+            ? availability.availableModelIds.filter((id) => id !== dropped.id)
+            : availability.availableModelIds,
           buildAdvisorAllowlistHint(config, model),
         ),
       };

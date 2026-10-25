@@ -250,6 +250,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
 import {
+  isAllowedBaseUrlsWorkspaceOnly,
   loadSettings,
   reloadEnvironment,
   SettingScope,
@@ -4457,6 +4458,9 @@ class QwenAgent implements Agent {
           undefined,
           undefined,
           buildEnabledSkillNamesProvider(settings),
+          // Workspace-only allowlist exemption for the Qwen OAuth built-ins
+          // (issue #12805), derived from the same LoadedSettings.
+          isAllowedBaseUrlsWorkspaceOnly(settings),
         ),
       );
       config.setMcpTransportPool(this.mcpPool);
@@ -15681,6 +15685,11 @@ class QwenAgent implements Agent {
           }
         : undefined,
       agentHostReadOnly ? undefined : buildEnabledSkillNamesProvider(settings),
+      // Workspace-only allowlist exemption for the Qwen OAuth built-ins
+      // (issue #12805), derived from the LoadedSettings mergedSettings came
+      // from — omitting it fails personal Qwen login closed with an
+      // operator-scope error for a repository's own list.
+      isAllowedBaseUrlsWorkspaceOnly(settings),
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);

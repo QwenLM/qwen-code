@@ -231,7 +231,11 @@ describe('advisorCommand', () => {
     mockContext.services.config = createConfig({
       getAllowedModelBaseUrls: () => ['https://corp-llm.example/v1'],
       getAllowlistDroppedModels: () => [
-        { id: 'missing-model', baseUrl: 'https://external-llm.example/v1' },
+        {
+          id: 'missing-model',
+          authType: 'openai',
+          baseUrl: 'https://external-llm.example/v1',
+        },
       ],
     }) as unknown as Config;
 
@@ -244,6 +248,42 @@ describe('advisorCommand', () => {
         "Model 'missing-model' was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'.",
       ),
     });
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setAdvisorModel).not.toHaveBeenCalled();
+  });
+
+  it('refuses a dropped model the availability escape hatch re-admits (R5-3)', async () => {
+    // The dropped model is the current runtime model, so availability
+    // reports it available; enabling and persisting it would make every
+    // later launch refuse to start (issue #12805).
+    mockCheckAvailability.mockReturnValue({
+      available: true,
+      availableModelIds: ['advisor-model', 'ext-model'],
+    });
+    mockContext.services.config = createConfig({
+      getAllowedModelBaseUrls: () => ['https://corp-llm.example/v1'],
+      getAllowlistDroppedModels: () => [
+        {
+          id: 'ext-model',
+          authType: 'openai',
+          baseUrl: 'https://external-llm.example/v1',
+        },
+      ],
+    }) as unknown as Config;
+
+    const result = await advisorCommand.action!(mockContext, 'ext-model');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining(
+        "Model 'ext-model' was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'.",
+      ),
+    });
+    // The remedy list omits the dropped id the escape hatch re-added.
+    expect((result as { content: string }).content).not.toMatch(
+      /Configured models:.*ext-model/,
+    );
     expect(setValue).not.toHaveBeenCalled();
     expect(setAdvisorModel).not.toHaveBeenCalled();
   });

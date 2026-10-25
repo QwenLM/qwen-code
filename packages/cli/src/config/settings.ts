@@ -598,6 +598,29 @@ export function isAllowedBaseUrlsWorkspaceOnly(
   );
 }
 
+/**
+ * The managed model policy (issue #12805) as `ModelsConfig` options, read
+ * from one LoadedSettings: the allowlist travels with its workspace-only
+ * exemption and the operator builtins disable, so a site that builds a
+ * registry cannot pass the list without the rest (a site that passed only
+ * the list dropped the built-ins a workspace-only list must keep).
+ * `allowedModelBaseUrls` is `undefined` when no policy is set — never
+ * coerced to `[]`.
+ */
+export function readModelPolicyOptions(loadedSettings: LoadedSettings): {
+  allowedModelBaseUrls: readonly string[] | undefined;
+  qwenOAuthBuiltinsDisabled: boolean;
+  allowedBaseUrlsWorkspaceOnly: boolean;
+} {
+  const model = loadedSettings.merged.model;
+  return {
+    allowedModelBaseUrls: model?.allowedBaseUrls,
+    qwenOAuthBuiltinsDisabled: model?.qwenOAuthBuiltinsDisabled === true,
+    allowedBaseUrlsWorkspaceOnly:
+      isAllowedBaseUrlsWorkspaceOnly(loadedSettings),
+  };
+}
+
 type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
 
 type TightenOnlyVerdict =

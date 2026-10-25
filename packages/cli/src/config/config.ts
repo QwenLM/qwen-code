@@ -59,9 +59,11 @@ import {
   type OutputStyleDefinition,
   validateModelProvidersConfig,
   isBaseUrlAllowed,
+  assertAllowedBaseUrlsSetting,
   DYNAMIC_QWEN_OAUTH_BASE_URL,
 } from '@qwen-code/qwen-code-core';
 import {
+  findUnregisteredAllowlistDrop,
   formatAuxModelSelectorForDisplay,
   publishableSelectorBaseUrl,
 } from '../utils/aux-model-selector.js';
@@ -1277,26 +1279,6 @@ function resolveAdvisorModel(
 }
 
 /**
- * The allowlist-dropped entry a raw advisor selector refers to, if any
- * (bare id or the authType-qualified form). `undefined` when no policy is
- * in force. Issue #12805.
- */
-function findAllowlistDroppedModel(
-  config: Config,
-  rawModel: string,
-): { id: string; baseUrl: string } | undefined {
-  if (!config.getAllowedModelBaseUrls()) return undefined;
-  const endpointIndex = rawModel.indexOf('\0');
-  const modelId = (
-    endpointIndex < 0 ? rawModel : rawModel.slice(0, endpointIndex)
-  ).trim();
-  if (modelId === '') return undefined;
-  return config
-    .getAllowlistDroppedModels()
-    .find((entry) => entry.id === modelId || modelId.endsWith(`:${entry.id}`));
-}
-
-/**
  * When the managed endpoint allowlist (`model.allowedBaseUrls`) is why the
  * advisor model is unavailable, say so and name the setting — the previous
  * message never did, and it interpolated the raw selector (credentials and
@@ -1331,12 +1313,11 @@ export function buildAdvisorAllowlistHint(
     const endpointDisplay = publishableSelectorBaseUrl(endpoint);
     return `Model endpoint '${endpointDisplay ?? '(redacted)'}' is not in the managed allowlist 'model.allowedBaseUrls'. Ask the operator to add it to the allowlist or choose a model on an allowed endpoint.`;
   }
-  // The registry records the bare model id it dropped, while the advisor
-  // selector may be authType-qualified (`openai:ext-model` — the form the
-  // picker persists and /advisor writes). Match both, so the canonical
-  // selector still names model.allowedBaseUrls instead of a bare
-  // "not configured" (issue #12805).
-  const dropped = findAllowlistDroppedModel(config, rawModel);
+  // Drop records name routes, and the selector may be authType-qualified
+  // (`openai:ext-model` — the form the picker persists and /advisor
+  // writes) and endpoint-qualified; the shared predicate matches both and
+  // ignores an id whose selected route is registered (issue #12805).
+  const dropped = findUnregisteredAllowlistDrop(config, rawModel);
   if (dropped) {
     // Built-in Qwen OAuth models are dropped with the non-URL sentinel:
     // their endpoint is discovered dynamically at login, so "allow its
@@ -1379,26 +1360,27 @@ function validateCliAdvisorModel(
   const modelName = rawModel.trim();
   if (!modelName || modelName.toLowerCase() === 'off') return;
 
-  // A model the managed allowlist dropped is unavailable even when the
-  // current-model escape hatch in checkAdvisorModelAvailability would
-  // re-admit it (a dropped default model is still the "current" model at
-  // boot): the operator's lockdown is policy, not a registry gap
-  // (issue #12805).
-  if (findAllowlistDroppedModel(config, modelName)) {
-    throw new FatalConfigError(
-      formatUnavailableAdvisorModelMessage(
-        formatAuxModelSelectorForDisplay(modelName),
-        config.getAllConfiguredModels().map((model) => model.id),
-        buildAdvisorAllowlistHint(config, modelName),
-      ),
-    );
-  }
-
   const availability = checkAdvisorModelAvailability(
     config,
     modelName,
     startupContext,
   );
+  // A model the managed allowlist dropped is unavailable even when the
+  // current-model escape hatch in checkAdvisorModelAvailability would
+  // re-admit it (a dropped default model is still the "current" model at
+  // boot): the operator's lockdown is policy, not a registry gap
+  // (issue #12805). The remedy list is the advisor-eligible one, minus the
+  // dropped id the escape hatch re-added.
+  const dropped = findUnregisteredAllowlistDrop(config, modelName);
+  if (dropped) {
+    throw new FatalConfigError(
+      formatUnavailableAdvisorModelMessage(
+        formatAuxModelSelectorForDisplay(modelName),
+        availability.availableModelIds.filter((id) => id !== dropped.id),
+        buildAdvisorAllowlistHint(config, modelName),
+      ),
+    );
+  }
   if (!availability.available) {
     throw new FatalConfigError(
       formatUnavailableAdvisorModelMessage(
@@ -2357,15 +2339,9 @@ export async function loadCliConfig(
   // (self-restriction). A non-array value is a startup error, not a silent
   // no-policy: degenerate per-entry values are warned-and-skipped by the
   // registry, but a mistyped list key must not start the session unmanaged.
-  const allowedModelBaseUrls = settings.model?.allowedBaseUrls;
-  if (
-    allowedModelBaseUrls !== undefined &&
-    !Array.isArray(allowedModelBaseUrls)
-  ) {
-    throw new FatalConfigError(
-      `model.allowedBaseUrls must be an array of base URL strings; got ${typeof allowedModelBaseUrls}. Remove or correct the value to start.`,
-    );
-  }
+  const allowedModelBaseUrls = assertAllowedBaseUrlsSetting(
+    settings.model?.allowedBaseUrls,
+  );
   // Operator-scope Qwen OAuth builtins disable (issue #12805): honored only
   // from System, User, or SystemDefaults settings — a workspace-scope value
   // is stripped from the merge (WORKSPACE_RESTRICTED_SETTINGS), so the

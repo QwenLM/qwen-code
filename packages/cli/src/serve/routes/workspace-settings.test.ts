@@ -170,6 +170,109 @@ describe('aux-model endpoint allowlist gate (advisorModel/imageModel)', () => {
     expect(prepared.persistedValue).toBe('openai:ext\0https://corp.example/v1');
   });
 
+  // A policy under which `gpt-4o` (no baseUrl → protocol default
+  // api.openai.com) is dropped, `corp` is registered on-list, and the
+  // built-in coder-model is dropped by the operator-scope list.
+  const droppedPolicy = () =>
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: {
+        model: { allowedBaseUrls: policy },
+        modelProviders: {
+          openai: [
+            { id: 'gpt-4o', envKey: 'OPENAI_API_KEY' },
+            { id: 'corp', baseUrl: 'https://corp.example/v1' },
+          ],
+        },
+      },
+    } as never);
+
+  it.each(['advisorModel', 'imageModel'])(
+    'rejects an off-list endpoint-qualified %s selector',
+    (key) => {
+      vi.mocked(loadSettings).mockReturnValue({
+        merged: { model: { allowedBaseUrls: policy } },
+      } as never);
+      expect(() =>
+        prepareSettingWrite(
+          '/workspace',
+          SettingScope.User,
+          key,
+          'openai:img\0https://external-llm.example/v1',
+          undefined,
+          true,
+        ),
+      ).toThrow(
+        new RegExp(
+          `${key} endpoint is not in the managed allowlist 'model\\.allowedBaseUrls'`,
+        ),
+      );
+    },
+  );
+
+  it.each([
+    ['advisorModel', 'openai:gpt-4o\0'],
+    ['advisorModel', 'openai:gpt-4o'],
+    ['advisorModel', 'gpt-4o'],
+    ['imageModel', 'openai:gpt-4o\0'],
+  ])(
+    'rejects an endpoint-less %s selector %j for a dropped model (R5-2)',
+    (key, value) => {
+      droppedPolicy();
+      expect(() =>
+        prepareSettingWrite(
+          '/workspace',
+          SettingScope.User,
+          key,
+          value,
+          undefined,
+          true,
+        ),
+      ).toThrow(
+        new RegExp(
+          `${key} model 'gpt-4o' was excluded from the model registry by the managed allowlist`,
+        ),
+      );
+    },
+  );
+
+  it.each(['openai:corp\0https://corp.example/v1', 'openai:corp', 'corp'])(
+    'still persists a registered on-list selector %j under the policy',
+    (value) => {
+      droppedPolicy();
+      expect(
+        prepareSettingWrite(
+          '/workspace',
+          SettingScope.User,
+          'advisorModel',
+          value,
+          undefined,
+          true,
+        ).persistedValue,
+      ).toBe(value);
+    },
+  );
+
+  it('still persists a bare selector for an exempt built-in (workspace-only list)', () => {
+    vi.mocked(loadSettings).mockReturnValue({
+      isTrusted: true,
+      merged: { model: { allowedBaseUrls: policy } },
+      system: { settings: {} },
+      systemDefaults: { settings: {} },
+      user: { settings: {} },
+      workspace: { settings: { model: { allowedBaseUrls: policy } } },
+    } as never);
+    expect(
+      prepareSettingWrite(
+        '/workspace',
+        SettingScope.Workspace,
+        'advisorModel',
+        'coder-model',
+        undefined,
+        true,
+      ).persistedValue,
+    ).toBe('coder-model');
+  });
+
   it('leaves the write untouched when no policy is set', () => {
     vi.mocked(loadSettings).mockReturnValue({ merged: {} } as never);
 
@@ -184,6 +287,42 @@ describe('aux-model endpoint allowlist gate (advisorModel/imageModel)', () => {
     expect(prepared.persistedValue).toBe(
       'openai:ext\0https://external-llm.example/v1',
     );
+  });
+});
+
+describe('aux-model allowlist refusal over HTTP (R5-20)', () => {
+  const offList = 'openai:ext\0https://external-llm.example/v1';
+  const withPolicy = () =>
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { model: { allowedBaseUrls: ['https://corp.example'] } },
+      user: { settings: {} },
+      workspace: { settings: {} },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+    } as never);
+
+  it('answers 400 with the policy message on POST /workspace/settings', async () => {
+    const { app, persistSetting } = makeApp();
+    withPolicy();
+    const res = await request(app)
+      .post('/workspace/settings')
+      .send({ scope: 'user', key: 'advisorModel', value: offList });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_value');
+    expect(res.body.error).toContain('model.allowedBaseUrls');
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('answers 400 with the policy message on POST /workspaces/:workspace/settings', async () => {
+    const { app, persistSetting } = makeQualifiedApp();
+    withPolicy();
+    const res = await request(app)
+      .post('/workspaces/primary/settings')
+      // advisorModel is workspace-restricted; imageModel reaches the gate.
+      .send({ scope: 'workspace', key: 'imageModel', value: offList });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_value');
+    expect(res.body.error).toContain('model.allowedBaseUrls');
+    expect(persistSetting).not.toHaveBeenCalled();
   });
 });
 
