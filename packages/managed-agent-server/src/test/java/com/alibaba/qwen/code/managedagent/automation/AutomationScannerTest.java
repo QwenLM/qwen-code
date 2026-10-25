@@ -2426,11 +2426,12 @@ class AutomationScannerTest {
             AutomationScanner pooled = scanner("scanner-backlog",
                     rows.getThreadPoolExecutor());
             clock.set(T0 + MINUTE + 1_000);
+            // The join is what drains the backlog: the tick answers with
+            // every submitted task's result, so a tick that returned after
+            // submitting would answer less than three. Pool gauges are not
+            // read here — the executor's counters move after a task's future
+            // unparks this joiner, so any of them can lag the answer.
             assertThat(pooled.tick(clock.get())).isEqualTo(3);
-            // The join is what drains the backlog: every submitted task has
-            // finished by the time the tick answers.
-            assertThat(rows.getThreadPoolExecutor().getCompletedTaskCount())
-                    .isEqualTo(3);
         } finally {
             rows.destroy();
         }
