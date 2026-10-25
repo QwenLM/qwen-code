@@ -576,7 +576,9 @@ end around the line `[... truncated for Mods ...]`, and `e.isTextTruncated` is
 Code passes both whole.
 
 `turn.complete` fires once the turn has ended. A turn still running when the
-session closes ends as `aborted` before `session.end`. The hook receives:
+session closes ends as `aborted` before `session.end`; a `turn.complete` that is
+already running or queued then still runs, within the same budget. The hook
+receives:
 
 | Field               | Value                                                                                                                                  |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |

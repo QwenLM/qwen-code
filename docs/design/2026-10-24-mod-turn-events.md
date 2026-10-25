@@ -52,7 +52,7 @@ The model request does not wait for the hooks. The turn's `tool.call` dispatches
 
 ### 3. `turn.complete`
 
-`turn.complete` fires once when the turn has ended. A turn still running when the session closes, for example on `/quit`, ends as `aborted` before `session.end`, within the same budget. Its input is:
+`turn.complete` fires once when the turn has ended. When the session closes, for example on `/quit`, other hooks are cancelled at once, but turn ends are not: a `turn.complete` already running, every one still queued, and that of a turn still running, which ends as `aborted`, run in order before `session.end`, within one budget of the same length as its. Its input is:
 
 - `answer`: the visible text of the turn's last model response, trimmed, or `""` if there is none. After a cancel during streaming it is the text received so far.
 - `durationMs`: how long the turn took.
@@ -122,16 +122,16 @@ These go into the user guide:
   - cancelling the turn ends its `turn.start` hooks, not its `turn.complete` hooks;
   - the answer through retries and cancels;
   - the reasons;
-  - the usage sums, with reasoning counted once for each provider;
+  - the usage sums, with reasoning counted once for each provider and a consistent total deciding, and the model of the turn's own prompt;
   - a prompt and an answer too long for a Mod payload;
   - the note, cut without splitting a character, kept to 4,096 characters in a terminal, and written beneath the answer in text mode;
   - the rules of `$.turn.abort`;
   - a failed hook;
   - a turn whose session has ended;
-  - a turn still running when the session closes, and an end the close overtook.
+  - a turn still running when the session closes, an end the close overtook, an end already running at the close, every queued end in order, and the budget that bounds them.
 - Host tests:
   - headless, on the current and the shared agent loop: an answer, a structured-output answer, a blocked prompt, the continuation of an interrupted turn, a Mod abort in JSON and text and from a `tool.call` hook, a Goal turn that a tool ends before a continuation, and a failed request;
-  - Ink: a turn from admission to idle, a Mod abort compared with Esc, a cancel without an Esc, a turn whose tools were cancelled or could not go on, a failed continuation, a slash command that waits for the Mods to start, and no hook without Mods;
+  - Ink: a turn from admission to idle, a Mod abort compared with Esc, a cancel without an Esc, a cancel in a later round that ends the `turn.start` hooks, a turn whose tools were cancelled or could not go on, a failed continuation, a slash command that waits for the Mods to start, and no hook without Mods;
   - OpenTUI: admission and a single end, interrupt and error, a Mod abort that lets the queue run, an Esc before or after a Mod abort, a retry with no typed prompt, and no hooks without Mods.
 - The built CLI against a fixture server, in headless JSON and text and in the Ink and OpenTUI terminals:
   - the `turn.start` text;
