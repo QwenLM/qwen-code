@@ -537,7 +537,7 @@ class HostedPublicWorkspaceIT {
         }
         assertThat(answered).hasSize(2);
         assertThat(modelFailure.get()).isNull();
-        assertThat(modelRequests).hasSize(shellLifecycleV2 ? 4 : 8);
+        assertThat(modelRequests).hasSize(4);
     }
 
     private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
@@ -1867,9 +1867,14 @@ class HostedPublicWorkspaceIT {
                 assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
                 assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
             } else if (shell) {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor", "glob");
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob");
+                body.path("tools").forEach(tool -> {
+                    if ("run_shell_command".equals(tool.at("/function/name").asText())) {
+                        assertThat(tool.at("/function/parameters/properties").has("is_background")).isFalse();
+                    }
+                });
             } else {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch");
             }
             // Count only this Turn's tool results, after the latest fixture prompt, so a later
             // Turn in the same Session runs the same write, edit and read sequence. Other user
@@ -1895,7 +1900,6 @@ class HostedPublicWorkspaceIT {
             int step = results.size();
             boolean definitionTurn = prompt.get().contains("G0_DEFINITION_APPROVAL_");
             boolean runShell = shell && prompt.get().contains("G0_SHELL");
-            boolean foregroundOnly = runShell && shellLifecycleV2;
             if (!runShell && step == 3) {
                 assertThat(results.get(2).toString()).contains("after");
             }
@@ -1903,14 +1907,8 @@ class HostedPublicWorkspaceIT {
             if (residentSecond && step >= 1) {
                 assertThat(results.getFirst().toString()).contains("after-first-" + tenant);
             }
-            if (runShell && shellFault == null && !foregroundOnly && step >= 1) {
-                assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
-            }
-            if (runShell && shellFault == null && !foregroundOnly && step >= 2) {
-                assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
-            }
-            if (runShell && shellFault == null && step >= (foregroundOnly ? 1 : 3) && "allow".equals(shellDecision)) {
-                assertThat(results.get(foregroundOnly ? 0 : 2).toString()).contains("G0_SHELL_STDOUT");
+            if (runShell && shellFault == null && step >= 1 && "allow".equals(shellDecision)) {
+                assertThat(results.getFirst().toString()).contains("G0_SHELL_STDOUT");
             }
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "g0-fixture");
@@ -1918,16 +1916,14 @@ class HostedPublicWorkspaceIT {
             var delta = choice.putObject("delta").put("role", "assistant");
             boolean publicParent = publicChildren && tools.contains("agent");
             boolean toolCall = publicChildren ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
-                    : step < (definitionTurn ? 2 : shellFault != null || foregroundOnly ? 1 : 3);
+                    : step < (definitionTurn ? 2 : runShell ? 1 : 3);
             if (toolCall) {
-                String name = runShell ? (!foregroundOnly && shellFault == null && step == 0 ? "monitor" : "run_shell_command")
+                String name = runShell ? "run_shell_command"
                         : (residentSecond ? List.of("read_file", "edit", "read_file")
                                 : List.of("write_file", "edit", "read_file")).get(step);
-                Map<String, Object> args = runShell ? switch (foregroundOnly ? 2 : step) {
-                    case 0 -> Map.of("command", "printf 'monitor\\n' >> monitor-proof.txt");
-                    case 1 -> Map.of("command", "printf 'background\\n' >> background-proof.txt", "is_background", true);
-                    default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof");
-                } : switch (step) {
+                Map<String, Object> args = runShell
+                        ? Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof")
+                        : switch (step) {
                     case 0 -> Map.of("file_path", "proof.txt", "content", "before");
                     case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", resident ? "after-first-" + tenant : "after");
                     default -> Map.of("file_path", "proof.txt");

@@ -666,11 +666,6 @@ async function hostedApprovalForTurn(
   promptId: string,
 ): Promise<HostedApprovalTurnOptions | undefined> {
   if (!session.approval) return undefined;
-  const settings = (await hostedTurnApproval(
-    session.managed,
-    promptId,
-    session.approval,
-  ))!;
   const live =
     session.stores &&
     !session.definition?.['lineage'] &&
@@ -679,6 +674,17 @@ async function hostedApprovalForTurn(
       'hosted-workspace-shell/1',
       'hosted-workspace-files/3',
     ].includes(session.toolProfile ?? '');
+  const admission = await readHostedTurnApprovalSelection(
+    session.managed,
+    promptId,
+    live ? () => session.stores!.approvalSelection() : undefined,
+  );
+  const settings = (await hostedTurnApproval(
+    session.managed,
+    promptId,
+    session.approval,
+    admission,
+  ))!;
   return {
     settings,
     waiters: session.waiters,
@@ -687,7 +693,7 @@ async function hostedApprovalForTurn(
       ? {
           readSettings: createHostedLiveApprovalReader(
             settings,
-            await readHostedTurnApprovalSelection(session.managed, promptId),
+            admission,
             () => session.stores!.approvalSelection(),
           ),
         }
@@ -1080,6 +1086,30 @@ function record(
   };
 }
 
+async function readHostedClassifierUserText(
+  session: HostedSession,
+): Promise<ReadonlyMap<string, string>> {
+  const accepted = session.managed.authority
+    .eventsInSequenceRange(1, session.managed.authority.committedSequence)
+    .filter(
+      (event) =>
+        event.kind === 'input.accepted' &&
+        event.payload['source'] === 'hosted-harness',
+    )
+    .slice(-40);
+  return new Map(
+    await Promise.all(
+      accepted.map(async (event) => {
+        const promptId = String(event.payload['inputId']);
+        return [
+          promptId,
+          (await readHostedInput(session.managed, promptId, '')).text,
+        ] as const;
+      }),
+    ),
+  );
+}
+
 /**
  * The child orchestration a Turn of this Session gets, the same for an
  * ordinary Turn and a recovered one: its funnel, its depth, whether the
@@ -1122,7 +1152,8 @@ function childAgentsOf(session: HostedSession) {
         return {
           version: 1 as const,
           sourcePromptId: promptId,
-          approvalMode: selection.mode,
+          approvalMode:
+            selection.mode === 'auto' ? ('default' as const) : selection.mode,
           approvalRevision: selection.revision,
           modelId: model,
           modelRevision: modelSelection?.revision ?? 0,
@@ -3060,6 +3091,38 @@ async function eventEnvelope(
   }
   if (
     event.kind === 'message.committed' &&
+    event.payload['role'] === 'user' &&
+    String(event.payload['messageId']).startsWith('umsg_')
+  ) {
+    const message = JSON.parse(
+      (
+        await readManagedMessageBody(
+          (ref) => session.managed.resources.read(ref),
+          event.payload['contentRef'] as unknown as ManagedSessionDurableRef,
+        )
+      ).toString('utf8'),
+    ) as ChatRecord;
+    if (message.subtype !== 'mid_turn_user_message')
+      return {
+        v: 1,
+        id: event.sequence,
+        type: 'managed_journal_event',
+        data: { sessionId },
+      };
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'user_message_consumed',
+      promptId: message.daemonPromptId,
+      data: {
+        sessionId,
+        messageId: message.uuid,
+        parts: message.message?.parts ?? [],
+      },
+    };
+  }
+  if (
+    event.kind === 'message.committed' &&
     (event.payload['role'] === 'assistant' ||
       event.payload['role'] === 'tool_result')
   ) {
@@ -3373,7 +3436,8 @@ async function executeHostedTurn(
       const options = await readHostedActionOptions(session.managed, original);
       try {
         const liveApproval =
-          options.toolName !== 'exit_plan_mode'
+          options.toolName !== 'exit_plan_mode' &&
+          !options.requiresHumanDecision
             ? await hostedApprovalForTurn(session, promptId)
             : undefined;
         onResumeReady?.();
@@ -3549,6 +3613,12 @@ async function executeHostedTurn(
                 : { message: { role: 'user', parts: promptInput.parts } }),
             },
           );
+          const initialQueued = await session.stores?.claimUserMessages(
+            promptId,
+            true,
+          );
+          if (initialQueued?.length)
+            inputRecord.uuid = `${initialQueued[0].id}:${initialQueued[0].revision}`;
           await session.managed.sink.write(inputRecord);
           parentUuid = inputRecord.uuid;
         }
@@ -3690,6 +3760,8 @@ async function executeHostedTurn(
                   cwd,
                   history,
                   excludedPromptIds: unansweredPrompts(session),
+                  classifierUserText: () =>
+                    readHostedClassifierUserText(session),
                   commitCompression: async (payload) => {
                     await session.managed.sink.write(
                       record(session, sessionId, 'system', null, {
@@ -3701,6 +3773,41 @@ async function executeHostedTurn(
                   prompt: text,
                   attachmentParts: promptInput.attachments,
                   promptId,
+                  ...(session.stores
+                    ? {
+                        userMessages: {
+                          claim: async () =>
+                            (
+                              await session.stores!.claimUserMessages(promptId)
+                            ).map((message) => ({
+                              id: `${message.id}:${message.revision}`,
+                              ...parseHostedInput(message.input),
+                            })),
+                          commit: async (id: string, parts: Part[]) => {
+                            const message = record(
+                              session,
+                              sessionId,
+                              'user',
+                              parentUuid,
+                              {
+                                uuid: id,
+                                daemonPromptId: promptId,
+                                subtype: 'mid_turn_user_message',
+                                message: { role: 'user', parts },
+                              },
+                            );
+                            await session.managed.sink.write(message);
+                            parentUuid = message.uuid;
+                          },
+                          commitAssistant: async (
+                            parts: Part[],
+                            model: string,
+                          ) => {
+                            await commit('assistant', parts, model);
+                          },
+                        },
+                      }
+                    : {}),
                   signal: abort.signal,
                   modelScope,
                   workspaceContext,
@@ -7725,7 +7832,11 @@ export function registerHostedHarnessSessionRoutes(
                 ]
           ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
-            approvalSelection.mode !== session.approval.mode))
+            (approvalSelection.mode !== session.approval.mode ||
+              !isDeepStrictEqual(
+                approvalSelection.permissionRules,
+                session.approval.permissionRules,
+              ))))
       )
         throw new Error('Approval selection is unavailable for this Session.');
       if (
@@ -10363,6 +10474,7 @@ export function registerHostedHarnessSessionRoutes(
             cwd,
             history,
             excludedPromptIds: unansweredPrompts(session),
+            classifierUserText: () => readHostedClassifierUserText(session),
             commitCompression: async (payload) => {
               await session.managed.sink.write(
                 record(session, sessionId, 'system', null, {
@@ -10373,6 +10485,38 @@ export function registerHostedHarnessSessionRoutes(
             },
             prompt: '',
             promptId,
+            ...(session.stores
+              ? {
+                  userMessages: {
+                    claim: async () =>
+                      (await session.stores!.claimUserMessages(promptId)).map(
+                        (message) => ({
+                          id: `${message.id}:${message.revision}`,
+                          ...parseHostedInput(message.input),
+                        }),
+                      ),
+                    commit: async (id: string, parts: Part[]) => {
+                      const message = record(
+                        session,
+                        sessionId,
+                        'user',
+                        parentUuid,
+                        {
+                          uuid: id,
+                          daemonPromptId: promptId,
+                          subtype: 'mid_turn_user_message',
+                          message: { role: 'user', parts },
+                        },
+                      );
+                      await session.managed.sink.write(message);
+                      parentUuid = message.uuid;
+                    },
+                    commitAssistant: async (parts: Part[], model: string) => {
+                      await commit('assistant', parts, model);
+                    },
+                  },
+                }
+              : {}),
             signal: abort.signal,
             workspaceContext,
             agentDefinition: session.agentDefinition,

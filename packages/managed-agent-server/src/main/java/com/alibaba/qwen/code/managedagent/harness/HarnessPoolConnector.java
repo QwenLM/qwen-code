@@ -340,6 +340,16 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsAutoApproval() {
+        return feature("auto-approval/1") && supportsApprovalSelection();
+    }
+
+    @Override
+    public boolean supportsPermissionRules() {
+        return feature("permission-rules/1") && supportsApprovalSelection();
+    }
+
+    @Override
     public boolean supportsAgentDefinitionApprovalSelection() {
         return feature("agent-definition-approval-selection/1") && supportsApprovalSelection();
     }
@@ -348,6 +358,9 @@ public class HarnessPoolConnector implements HarnessConnector {
     public boolean supportsModelSelection() {
         return feature("model-selection/1");
     }
+
+    @Override
+    public boolean supportsUserMessageQueue() { return feature("user-message-queue/1"); }
 
     @Override
     public boolean supportsContextCompression() {
