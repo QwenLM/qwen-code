@@ -23,9 +23,11 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 
 - 目标：让等待变得确定。一个 waiter 的最坏等待时长是排在它前面的
   工作量，而不是它重新入队的次数。
-- 目标：其余语义不变。锁仍按 step 边界自动释放；固定的基础设施
-  签名错误文案（`lock not acquired within`）保留，`qwen-autofix.yml`
-  里的重跑分类器不受影响。
+- 目标：其余语义不变。锁仍按 step 边界自动释放。辅助脚本保留固定的
+  `lock not acquired within` 超时文案，但被容忍的写回超时不能被当成
+  基础设施故障：两处取锁点都会在写入日志前把它改写成
+  `lock wait exhausted`，因此 `qwen-autofix.yml` 的分类器不会匹配本
+  工作流刻意保持绿色的 step。
 - 非目标：降低总占用。按套件分片锁、限制每台宿主机注册数、加机器，
   都是正交工作，可以后续再做；有了公平性，这些工作的剩余价值才
   变得可衡量，而不是紧急。
@@ -91,24 +93,28 @@ managed-agent H2 套件（925 s）之上。2026-10-22 的 run 39811435705 中，
 fast job 两次尝试分别以票据 258 和 271 停在队首整整 5400 s，在 Maven 启动前失败。
 现在该 job 先从宿主缓存播种 job 本地仓库，三次 Maven 运行都不持锁，只在
 写回时取锁。写回取锁超时会发出警告并跳过复制，而不是让一个套件已经通过
-的 step 失败；`lock not acquired within` 子串、5400 s 预算与 fd 9 关闭
-逻辑都保持不变。
+的 step 失败；辅助脚本的 `lock not acquired within` 文案、5400 s 预算与
+fd 9 关闭逻辑都保持不变，step 会把捕获日志里的超时行改写掉，避免这次
+被容忍的跳过被归类为基础设施故障。
 
 套件失败时仍会走到写回，并以套件自身的状态退出，因此失败 PR 下载的构件不会
-丢失。925 s 套件因此不再与该宿主上的其他 leg 串行：本 job 唯一受锁保护的
-工作就是写回复制。播种使用 `cp -aln`，因此播种文件与宿主缓存共享 inode；
-套件不持锁运行之所以安全，只是因为被 pin 住的 Maven 以「临时文件 + rename」
-替换本地仓库文件，而非原地写入。一个原地写入的 resolver 会把不持锁的
-`mvn install` 变成对宿主共享字节的不持锁写入者，而除了 `MAVEN_VERSION`
-的取值之外，没有任何东西强制这一耦合。
+丢失。925 s 套件（整步 1205 s）因此不再与该宿主上的其他 leg 串行：本 job
+唯一受锁保护的工作就是写回复制。播种使用 `cp -aln`，因此播种文件与宿主缓存
+共享 inode。Maven 以「临时文件 + rename」替换构件，但它会原地截断并重写
+resolver 跟踪标记（`_remote.repositories`、`*.lastUpdated`、
+`resolver-status.properties`）；用被 pin 的 Maven 3.9.11 实测，当标记记录的
+仓库 id 与当前 settings 解析到的 id 不一致时，标记会被原地改写（inode 不变）。
+播种会删掉这些标记，以及本 job 自行构建的两个 in-house 坐标，因此不持锁的
+运行无法通过播种硬链接写进宿主缓存。Maven 会在 job 本地重建这些标记，写回
+在持锁时发布的是本 job 自己的副本；in-house 坐标按路径被写回排除。
 
 test job 中所有可能在池上运行的 Checkstyle 与发布构件 step 也从同一个
 job 本地仓库解析（托管 leg 在套件之后播种它），因此池宿主上没有任何
-Maven 运行会在写回之外修改宿主缓存。fast 档的写回取锁失败是刻意的
-非致命行为：fast 档会完全跳过 `mysql-integration`，因此 full 档 MariaDB
-通道现在是唯一会因锁饥饿而变红的通道。该 step 把辅助脚本的 `::error::`
-超时行降级为 `::warning::`，并把票据行写入 `$GITHUB_STEP_SUMMARY`，
-使跳过在绿色运行中无需翻日志即可看到。
+Maven 运行会在写回之外修改宿主缓存。写回取锁失败在两处都是刻意的
+非致命行为：复制是可选的，套件结果已经成立，因此等待超时会警告并跳过，
+而不是让 step 变红。test job 把辅助脚本的 `::error::` 超时行降级为
+`::warning::`，并把票据行写入 `$GITHUB_STEP_SUMMARY`，使跳过在绿色运行中
+无需翻日志即可看到。
 
 ### fast 档优先
 
@@ -206,7 +212,8 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
   pin 的是 source 该辅助脚本和两处 `sdk_java_lock_acquire 5400` 预算、
   每次 Maven 运行都在取锁之前、两处写回都关闭 fd 9、两个 job 上限、
-  test job 拿不到写回锁时跳过复制，以及 `.size-baseline` 记录的工作流新尺寸。
+  test job 拿不到写回锁时跳过复制、播种删掉的跟踪标记与 in-house 坐标，
+  以及 `.size-baseline` 记录的工作流新尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 
@@ -215,13 +222,15 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
 - `sdk-java.yml` 的两处取锁点都以 5400 秒通过该辅助脚本获取；
   test job 传入自己的 tier，在 150 分钟上限内运行，MariaDB 站点默认
   normal，上限为 310 分钟。
-- 每次 Maven 运行都从 job 本地仓库解析、位于取锁之前；test job 写回
-  取锁失败时跳过复制，但不让 step 失败。
+- 每次 Maven 运行都从 job 本地仓库解析、位于取锁之前；播种在未持锁运行
+  之前删掉 Maven 的跟踪标记与 in-house 坐标；test job 写回取锁失败时
+  跳过复制，但不让 step 失败。
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。
-- 错误文案仍包含子串 `lock not acquired within`，因此
-  `qwen-autofix.yml` 的 `INFRA_FAILURE_SIGNATURES` 保持匹配。
+- 辅助脚本的超时行仍包含子串 `lock not acquired within`；两处调用点在
+  写入日志前把它改写成 `lock wait exhausted`，因此被容忍的取锁失败不会
+  在失败运行上留下 `INFRA_FAILURE_SIGNATURES` 匹配。
 
 ## 未决问题
 

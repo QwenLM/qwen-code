@@ -26,9 +26,12 @@ hold at a time — no constant budget bounds the queue.
 - Goal: make the wait deterministic. A waiter's worst-case wait is the work
   ahead of it in line, not how often it has re-entered the queue.
 - Goal: preserve the current semantics elsewhere. The lock still releases
-  automatically at the step boundary; the pinned infrastructure-signature
-  error text (`lock not acquired within`) stays so the rerun classifier in
-  `qwen-autofix.yml` is untouched.
+  automatically at the step boundary. The helper keeps the pinned
+  `lock not acquired within` timeout text, but a tolerated write-back
+  timeout must not look like an infrastructure failure: both sites rewrite
+  that line to `lock wait exhausted` before it reaches the log, so
+  `qwen-autofix.yml`'s classifier never matches a step this workflow
+  deliberately kept green.
 - Non-goal: reducing total occupancy. Sharding the lock by suite, capping
   registrations per host, or adding hosts are orthogonal and can follow;
   fairness makes their remaining work measurable instead of urgent.
@@ -108,28 +111,34 @@ the sdk-java suite and the managed-agent H2 suite (925 s). On 2026-10-22 run
 repository from the host cache, runs all three Maven commands unlocked, and
 takes the lock only for its write-back. A write-back acquisition that times
 out warns and skips the copy instead of failing a step whose suite already
-passed; the `lock not acquired within` substring, the 5400 s budget, and the
-fd 9 closures are unchanged.
+passed; the helper's `lock not acquired within` text, the 5400 s budget, and
+the fd 9 closures are unchanged, while the step rewrites the timeout line in
+its captured log so the tolerated skip is not classified as infrastructure.
 
 A failed suite still reaches the write-back and exits with its own status, so
-a failing PR's downloads are not lost. The 925 s suite therefore no longer
-serializes against other legs on the host: the only lock-covered work in this
-job is the write-back copy. The seed is `cp -aln`, so seeded files share
-inodes with the host cache; running the suite unlocked is safe only because
-the pinned Maven replaces a local-repository file by temp-file + rename
-rather than writing in place. A resolver that writes in place would turn an
-unlocked `mvn install` into an unlocked writer of host-shared bytes, and
-nothing but `MAVEN_VERSION`'s value enforces that coupling.
+a failing PR's downloads are not lost. The 925 s suite (1205 s as a whole
+step) therefore no longer serializes against other legs on the host: the only
+lock-covered work in this job is the write-back copy. The seed is `cp -aln`,
+so seeded files share inodes with the host cache. Maven replaces artifacts by
+temp-file + rename, but it truncates and rewrites its resolver tracking
+markers (`_remote.repositories`, `*.lastUpdated`, `resolver-status.properties`)
+in place; measured with the pinned Maven 3.9.11, a marker whose recorded
+repository id differs from the id the current settings resolve through is
+rewritten in place (same inode). The seed drops those markers, and the two
+in-house coordinates this job builds locally, so an unlocked run cannot write
+through a seeded hardlink into the host cache. Maven recreates the markers
+job-locally, so the write-back publishes this job's own copies under the
+lock; the in-house coordinates are excluded from the write-back by path.
 
 The test job's pool-reachable Checkstyle and release-artifact steps resolve
 from the same job-local repository (the hosted legs seed it after their suite),
 so no Maven run on a pool host mutates the host cache outside the write-back.
-A missed write-back acquisition on the fast tier is deliberately non-fatal:
-`mysql-integration` is skipped there, so the full-tier MariaDB lane is the
-only lane that reddens on lock starvation. The step demotes the helper's
-`::error::` timeout line to `::warning::` and copies the ticket line into
-`$GITHUB_STEP_SUMMARY`, so the skip is visible on a green run without opening
-the log.
+A missed write-back acquisition is deliberately non-fatal at both sites: the
+copy is optional and the suite result already stands, so an expired wait
+warns and skips instead of reddening the step. The test job demotes the
+helper's `::error::` timeout line to `::warning::` and copies the ticket line
+into `$GITHUB_STEP_SUMMARY`, so the skip is visible on a green run without
+opening the log.
 
 ### Fast-tier priority
 
@@ -246,8 +255,9 @@ order this section exists to prevent.
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
   `sdk_java_lock_acquire 5400` budget at each acquisition site, every Maven
   run above its acquisition, both write-backs' fd 9 closes, both job
-  ceilings, the test job's skip when the write-back lock is unavailable, and
-  the `.size-baseline` records the workflow's new size.
+  ceilings, the test job's skip when the write-back lock is unavailable, the
+  seed's dropped tracking markers and in-house coordinates, and the
+  `.size-baseline` records the workflow's new size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -257,13 +267,16 @@ order this section exists to prevent.
   the test job passes its tier under a 150-minute ceiling and the MariaDB
   site defaults to normal under its 310-minute ceiling.
 - Every Maven run resolves from a job-local repository above its acquisition,
-  and the test job's failed write-back acquisition skips the copy without
-  failing the step.
+  the seed drops Maven's tracking markers and the in-house coordinates before
+  the unlocked runs, and the test job's failed write-back acquisition skips
+  the copy without failing the step.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
-- The error text still contains the substring `lock not acquired within`,
-  so `qwen-autofix.yml`'s `INFRA_FAILURE_SIGNATURES` keeps matching.
+- The helper's timeout line still contains the substring
+  `lock not acquired within`; both call sites rewrite it to
+  `lock wait exhausted` on the way to the log, so a tolerated acquisition
+  failure leaves no `INFRA_FAILURE_SIGNATURES` match on a failing run.
 
 ## Open questions
 

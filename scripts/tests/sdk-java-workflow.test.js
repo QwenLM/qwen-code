@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -149,9 +150,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.
     expect(block).toContain('flock --wait 5400 9');
-    expect(block).toContain(
-      '::warning::sdk-java host lock not acquired within',
-    );
+    expect(block).toContain('::warning::sdk-java host lock wait exhausted');
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
@@ -258,10 +257,10 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).not.toContain('::error::');
         expect(result.stdout).toContain(
-          '::warning::sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast)',
+          '::warning::sdk-java host lock wait exhausted after 90 minutes as queue ticket 1 (fast)',
         );
         expect(readFileSync(summary, 'utf8')).toContain(
-          'sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast)',
+          'sdk-java host lock wait exhausted after 90 minutes as queue ticket 1 (fast)',
         );
         expect(result.stdout).toContain(
           '::warning::Maven cache write-back skipped; the test result above is unaffected',
@@ -326,10 +325,10 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).not.toContain('::error::');
         expect(result.stdout).toContain(
-          '::warning::sdk-java host lock not acquired within 90 minutes',
+          '::warning::sdk-java host lock wait exhausted after 90 minutes',
         );
         expect(readFileSync(summary, 'utf8')).toContain(
-          'sdk-java host lock not acquired within 90 minutes',
+          'sdk-java host lock wait exhausted after 90 minutes',
         );
         expect(result.stdout).toContain(
           '::warning::Maven cache write-back skipped; the test result above is unaffected',
@@ -705,6 +704,17 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'mvn_status=0\n' +
         '          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true\n' +
+        '          # Maven rewrites its resolver tracking markers in place, so a\n' +
+        '          # seeded hardlink would let the unlocked runs mutate the host cache\n' +
+        '          # through it. Drop them and let Maven recreate them job-locally.\n' +
+        '          find "${RUNNER_TEMP}/m2-repo" \\\n' +
+        "            \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \\) \\\n" +
+        '            -delete 2>/dev/null || true\n' +
+        '          # The in-house coordinates are built locally below; a seeded\n' +
+        '          # hardlink there would also be rewritten through into the host\n' +
+        '          # cache. Drop them so the install writes fresh inodes.\n' +
+        '          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \\\n' +
+        '            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"\n' +
         '          mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?\n' +
         '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
         '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || mvn_status=$?\n' +
@@ -993,6 +1003,107 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(steps.indexOf(candidate), candidate.name).toBeGreaterThan(seedAt);
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'drops seeded resolver markers and in-house coordinates before Maven runs',
+    () => {
+      const run = parse(workflow).jobs.test.steps.find(
+        (s) => s.name === 'Run Java SDK tests (self-hosted)',
+      ).run;
+      const start = run.indexOf(
+        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+      );
+      expect(start).toBeGreaterThan(-1);
+      const end = run.indexOf('\nmvn --batch-mode', start);
+      expect(end).toBeGreaterThan(start);
+      const seed = run.slice(start, end);
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      mkdirSync(runnerTemp, { recursive: true });
+      const hostRepo = join(home, '.m2', 'repository');
+      const hostJars = [
+        ['com', 'alibaba', 'qwencode-sdk', '0.1.0-alpha', 'sdk.jar'],
+        [
+          'com',
+          'alibaba',
+          'qwen-managed-agent-server',
+          '0.1.0-alpha',
+          'server.jar',
+        ],
+        ['org', 'example', 'third-party', '1.0', 'third-party.jar'],
+      ].map((parts) => join(hostRepo, ...parts));
+      for (const jar of hostJars) {
+        mkdirSync(dirname(jar), { recursive: true });
+        writeFileSync(jar, 'host');
+      }
+      // Maven rewrites these tracking files in place, so a seeded hardlink
+      // would let the unlocked run mutate the host cache through it.
+      const hostMarkers = [
+        ['resolver-status.properties'],
+        ['_remote.repositories'],
+        ['third-party-1.0.pom.lastUpdated'],
+      ].map((parts) =>
+        join(hostRepo, 'org', 'example', 'third-party', '1.0', ...parts),
+      );
+      for (const marker of hostMarkers) {
+        writeFileSync(marker, 'host');
+      }
+      try {
+        const result = spawnSync('bash', ['-e', '-c', seed], {
+          encoding: 'utf8',
+          timeout: 5000,
+          env: {
+            ...process.env,
+            HOME: home,
+            RUNNER_TEMP: runnerTemp,
+          },
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(0);
+        for (const coordinate of [
+          'qwencode-sdk',
+          'qwen-managed-agent-server',
+        ]) {
+          expect(
+            existsSync(
+              join(runnerTemp, 'm2-repo', 'com', 'alibaba', coordinate),
+            ),
+          ).toBe(false);
+        }
+        expect(
+          existsSync(
+            join(
+              runnerTemp,
+              'm2-repo',
+              'org',
+              'example',
+              'third-party',
+              '1.0',
+              'third-party.jar',
+            ),
+          ),
+        ).toBe(true);
+        for (const jar of hostJars.slice(0, 2)) {
+          expect(readFileSync(jar, 'utf8')).toBe('host');
+          // The job-local copy held the only extra link; dropping it must
+          // leave the host file exactly as seeded.
+          expect(statSync(jar).nlink).toBe(1);
+        }
+        for (const marker of hostMarkers) {
+          expect(
+            existsSync(
+              join(runnerTemp, 'm2-repo', marker.slice(hostRepo.length + 1)),
+            ),
+          ).toBe(false);
+          expect(readFileSync(marker, 'utf8')).toBe('host');
+          expect(statSync(marker).nlink).toBe(1);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('keeps the self-hosted Maven bootstrap byte-identical across pool jobs', () => {
     // A step copied between jobs and later fixed in only one is the #13506
@@ -1706,23 +1817,21 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // Same ref-independence guard as the test job: a resumed release tag may
     // predate the helper, so this site must also keep the bare-lock arm.
     expect(step.run).toContain('flock --wait 5400 9');
+    // The write-back is best-effort at both sites: an expired wait warns
+    // and skips instead of reddening a suite that already passed.
     expect(step.run).toContain(
-      '::error::sdk-java host lock not acquired within',
-    );
-    expect(step.run).toContain(
-      '::error::sdk-java host lock not acquired within 90 minutes',
+      '::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget',
     );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
     // The fast tier owns the same lock: it overtakes this job only while
     // this ticket still waits, then waits out its hold. This write-back
-    // keeps the shorter budget because its hold is the bounded copy and it
-    // waits after the ~3-hour verify; the sibling test lane carries the
-    // longer budget pinned below. Run 39229303984 died at the old 60-minute
-    // wait before Maven started.
+    // keeps the 5400 s budget because its hold is the bounded copy and it
+    // waits after the ~3-hour verify. Run 39229303984 died at the old
+    // 60-minute wait before Maven started.
     expect(seconds).toBe(90 * 60);
     // This site stays in the normal class: a tier argument here would put
     // full-tier MariaDB holds ahead of fast PR-feedback work.
-    expect(step.run).toContain('sdk_java_lock_acquire 5400\n');
+    expect(step.run).toContain('sdk_java_lock_acquire 5400');
     // Promotion must fire strictly inside the acquisition budget; at or
     // above it the rename lands in the iteration whose timeout arm deletes
     // the ticket, and no test would see the anti-starvation arm go dead.
