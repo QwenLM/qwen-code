@@ -4,7 +4,7 @@
 
 ```text
 /autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions...]
-/autofix-pr status
+/autofix-pr status [<pr-number>]
 /autofix-pr resume [<pr-number>]
 /autofix-pr stop [<pr-number>]
 ```

@@ -34,6 +34,8 @@ import {
   MAX_NEEDS_HUMAN,
   REPLY_MARKER,
   assertWatching,
+  TASK_OPTION,
+  taskArg,
   autofixPrPaths,
   repoRoot,
   requireState,
@@ -321,6 +323,8 @@ export interface ReplyArgs {
   planPath: string;
   /** `--no-post`: record what was handled, post nothing (`--no-reply`). */
   post: boolean;
+  /** The scheduled task that woke the round. */
+  task?: string;
 }
 
 export function runReply(args: ReplyArgs): ReplyOutcome {
@@ -335,7 +339,7 @@ function replyLocked(
   paths: AutofixPrPaths,
 ): ReplyOutcome {
   let state = requireState(paths.statePath, args.pr);
-  assertWatching(state);
+  assertWatching(state, args.task);
   setGhHost(state.host);
   ensureAuthenticated();
   // Every bot thread the plan may name was asked about by the round's
@@ -635,7 +639,8 @@ export const replyCommand: CommandModule = {
         default: true,
         describe:
           'Post the replies and the summary; --no-post only records what was handled',
-      }),
+      })
+      .option('task', TASK_OPTION),
   handler: (argv) => {
     writeStdoutLine(
       JSON.stringify(
@@ -643,6 +648,7 @@ export const replyCommand: CommandModule = {
           pr: Number(argv['pr']),
           planPath: String(argv['plan']),
           post: Boolean(argv['post']),
+          task: taskArg(argv),
         }),
       ),
     );

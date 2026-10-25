@@ -360,7 +360,11 @@ describe('runCleanup (real git)', () => {
     writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
     runCleanup(7, false, true);
     expect(lastReport()).toMatchObject({ removed: false });
-    expect(readState(paths.statePath)!.sessionId).toBe('session-b');
+    // Ended under its new owner, as a stop of its own would.
+    expect(readState(paths.statePath)).toMatchObject({
+      sessionId: 'session-b',
+      ended: { reason: expect.stringMatching(/uncommitted changes/) },
+    });
     rmSync(join(paths.worktreePath, 'wip.txt'));
     process.env['QWEN_CODE_SESSION_ID'] = 'session-c';
     runCleanup(7, false, true);

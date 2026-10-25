@@ -27,6 +27,7 @@ import {
   keepHistory,
   readHistory,
   stateDefect,
+  assertOwnedBySession,
   withWatchLock,
   type AutofixPrState,
 } from './state.js';
@@ -90,6 +91,26 @@ describe('stateDefect', () => {
     pushCount: 0,
   };
 
+  it("says how to get another session's watch: resume for a watch, a start for --once", () => {
+    const saved = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    try {
+      const owned = { ...valid, sessionId: 'session-a' };
+      expect(() => assertOwnedBySession(owned)).toThrow(
+        /Take it over with `\/autofix-pr 7`, end it/,
+      );
+      expect(() =>
+        assertOwnedBySession({
+          ...owned,
+          watch: { every: 2, reply: true, instructions: '' },
+        }),
+      ).toThrow(/Take it over with `\/autofix-pr resume 7`/);
+    } finally {
+      if (saved === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = saved;
+    }
+  });
+
   it('accepts a state file as the helpers write it', () => {
     expect(stateDefect(valid)).toBeNull();
   });
@@ -121,7 +142,6 @@ describe('stateDefect', () => {
       ['watch', { every: 2, reply: true, instructions: 'a\u0085b' }],
       ['watch', { every: 2, reply: true, instructions: 'a\u202eb' }],
       ['watch', { every: 2, reply: true, instructions: '', task: 'x; id' }],
-      ['watch', { every: 2, reply: true, instructions: '', gate: 'sh' }],
       ['ended', { at: 'x' }],
       ['preparedAt', 3],
       ['watch', { every: 2, reply: true, instructions: 'x'.repeat(2001) }],

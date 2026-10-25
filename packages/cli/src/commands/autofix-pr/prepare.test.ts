@@ -527,7 +527,8 @@ describe('runPrepare (real git)', () => {
       handledCommentIds: ['C1'],
       ...budgets,
     });
-    expect(lastReport()).toMatchObject({ resumed: false });
+    // A start that is cancelled now must not clean the watch up.
+    expect(lastReport()).toMatchObject({ resumed: false, recreated: true });
   });
 
   it("reports whether the PR's author could push", () => {

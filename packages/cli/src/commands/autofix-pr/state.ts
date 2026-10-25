@@ -479,15 +479,11 @@ export function stateDefect(state: AutofixPrState): string | null {
   return null;
 }
 
-const WATCH_KEYS = new Set(['every', 'reply', 'instructions', 'task']);
-
 function isWatchOptions(value: unknown): value is AutofixPrWatchOptions {
   const watch = value as AutofixPrWatchOptions | null;
   return (
     typeof watch === 'object' &&
     watch !== null &&
-    // `schedule` prints a task from these and nothing else.
-    Object.keys(watch).every((key) => WATCH_KEYS.has(key)) &&
     WATCH_INTERVALS.includes(watch.every) &&
     typeof watch.reply === 'boolean' &&
     typeof watch.instructions === 'string' &&
@@ -844,6 +840,18 @@ export function requireState(
   return state;
 }
 
+/** `--task` of a round's helpers: the scheduled task that woke the round. */
+export const TASK_OPTION = {
+  type: 'string',
+  describe:
+    "The scheduled task that woke the round (its prompt's --task): refused unless it still drives the watch",
+} as const;
+
+/** The `--task` a helper was given, or undefined. */
+export function taskArg(argv: Record<string, unknown>): string | undefined {
+  return argv['task'] === undefined ? undefined : String(argv['task']);
+}
+
 /**
  * The checks of a round's helpers: the session owns the watch, a `cleanup`
  * that kept the worktree has not ended it, and — given the task that woke
@@ -852,13 +860,14 @@ export function requireState(
  * here rather than act on the PR with options the user has since changed.
  */
 export function assertWatching(state: AutofixPrState, task?: string): void {
-  assertOwnedBySession(state);
+  // First: a stopped watch says so to whichever session asks.
   if (state.ended) {
     throw new Error(
       `PR #${state.prNumber}'s watch was stopped (${state.ended.reason}); ` +
         `its worktree was kept. Start it again with /autofix-pr ${state.prNumber}.`,
     );
   }
+  assertOwnedBySession(state);
   if (task !== undefined && state.watch?.task !== task) {
     throw new Error(
       `task ${task} no longer drives PR #${state.prNumber}'s watch` +
@@ -874,7 +883,10 @@ export function assertOwnedBySession(state: AutofixPrState): void {
     throw new Error(
       `PR #${state.prNumber} is watched by another session ` +
         `(${state.sessionId || 'no session'}). Take it over with ` +
-        `\`/autofix-pr resume ${state.prNumber}\`, end it keeping its work with ` +
+        (state.watch
+          ? `\`/autofix-pr resume ${state.prNumber}\``
+          : `\`/autofix-pr ${state.prNumber}\``) +
+        `, end it keeping its work with ` +
         `\`qwen autofix-pr cleanup ${state.prNumber} --take-over\` (what ` +
         `\`/autofix-pr stop ${state.prNumber}\` runs), or discard it with ` +
         `\`cleanup ${state.prNumber} --force\`.`,

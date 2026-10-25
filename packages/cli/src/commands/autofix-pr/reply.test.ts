@@ -571,6 +571,24 @@ describe('runReply', () => {
     ]);
   });
 
+  it('posts nothing for a round its task no longer drives', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      watch: { every: 2, reply: false, instructions: '', task: 'bbbbbbbbbbbb' },
+    });
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        replies: [{ replyTo: 101, body: 'x', handled: ['PRRC_101'] }],
+      }),
+    );
+    // A later start turned replies off: the old task's round is not heard.
+    expect(() =>
+      runReply({ pr: 7, planPath, post: true, task: 'aaaaaaaaaaaa' }),
+    ).toThrow(/task aaaaaaaaaaaa no longer drives/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
   it('posts nothing for a watch cleanup ended', () => {
     writeState(paths.statePath, {
       ...state(),

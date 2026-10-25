@@ -248,6 +248,7 @@ export function runPrepare(args: PrepareArgs): void {
   };
   let existing = readState(paths.statePath);
   let tookOver = false;
+  let recreated = false;
   const takesOver = (state: AutofixPrState) =>
     args.takeOver === true && state.sessionId !== currentSessionId();
   if (existing) {
@@ -274,10 +275,10 @@ export function runPrepare(args: PrepareArgs): void {
       const wasEnded = existing.ended;
       if (wasEnded) {
         existing = withWatchLock(paths, args.pr, () => {
-          const { ended: _resumed, ...rest } = requireState(
-            paths.statePath,
-            args.pr,
-          );
+          const current = requireState(paths.statePath, args.pr);
+          // Taken over meanwhile: not this start's to resume.
+          assertOwnedBySession(current);
+          const { ended: _resumed, ...rest } = current;
           writeState(paths.statePath, rest);
           return rest;
         });
@@ -352,6 +353,7 @@ export function runPrepare(args: PrepareArgs): void {
       // The state written below names this session.
       if (takesOver(existing)) tookOver = true;
       else assertOwnedBySession(existing);
+      recreated = true;
     }
     // Never discard what an earlier watch left: only `cleanup` knows when that
     // is safe. The one exception is a branch whose worktree was removed and
@@ -504,6 +506,9 @@ export function runPrepare(args: PrepareArgs): void {
       : null;
   report(state, {
     resumed: false,
+    // The watch was there and keeps what it recorded: only its worktree is
+    // new. A start that is cancelled must not clean it up.
+    ...(recreated ? { recreated } : {}),
     url: pr.url,
     isDraft: pr.isDraft,
     isCrossRepository: pr.isCrossRepository,

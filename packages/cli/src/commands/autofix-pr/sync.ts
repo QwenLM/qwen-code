@@ -28,6 +28,8 @@ import { git, gitOpt } from '../review/lib/git.js';
 import { liveDestination, withLiveBase } from './push.js';
 import {
   assertWatching,
+  TASK_OPTION,
+  taskArg,
   autofixPrPaths,
   repoRoot,
   requireState,
@@ -445,19 +447,11 @@ export const syncCommand: CommandModule = {
         describe:
           "Return the worktree to the PR head, dropping a round's unpushed commits and uncommitted changes",
       })
-      .option('task', {
-        type: 'string',
-        describe:
-          "The scheduled task that woke the round (its prompt's --task): refused unless it still drives the watch",
-      }),
+      .option('task', TASK_OPTION),
   handler: (argv) => {
     writeStdoutLine(
       JSON.stringify(
-        runSync(
-          Number(argv['pr']),
-          Boolean(argv['discard']),
-          argv['task'] as string | undefined,
-        ),
+        runSync(Number(argv['pr']), Boolean(argv['discard']), taskArg(argv)),
       ),
     );
   },

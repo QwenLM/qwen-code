@@ -16,6 +16,8 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from '../review/lib/gh.js';
 import {
   assertWatching,
+  TASK_OPTION,
+  taskArg,
   assertPositiveInteger,
   autofixPrPaths,
   repoRoot,
@@ -72,14 +74,19 @@ function jobLog(repo: string, jobId: number): string {
  * minutes: the jobs left after it are listed, their logs not read. */
 const CI_LOG_BUDGET_MS = 8 * 60_000;
 
-export function runCiLog(prNumber: number, runId: number, limit: number): void {
+export function runCiLog(
+  prNumber: number,
+  runId: number,
+  limit: number,
+  task?: string,
+): void {
   // `slice(-0)` and `slice(NaN)` both keep the whole log.
   assertPositiveInteger(limit, '--lines');
   assertPositiveInteger(runId, 'run id');
   const root = repoRoot();
   const paths = autofixPrPaths(root, prNumber);
   const state = requireState(paths.statePath, prNumber);
-  assertWatching(state);
+  assertWatching(state, task);
   setGhHost(state.host);
   ensureAuthenticated();
   // From the start: listing the jobs of a large run takes its time too.
@@ -163,8 +170,14 @@ export const ciLogCommand: CommandModule = {
         type: 'number',
         default: 200,
         describe: 'Lines to keep from the end of each failed job',
-      }),
+      })
+      .option('task', TASK_OPTION),
   handler: (argv) => {
-    runCiLog(Number(argv['pr']), Number(argv['run-id']), Number(argv['lines']));
+    runCiLog(
+      Number(argv['pr']),
+      Number(argv['run-id']),
+      Number(argv['lines']),
+      taskArg(argv),
+    );
   },
 };

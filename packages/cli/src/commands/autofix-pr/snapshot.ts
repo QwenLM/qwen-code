@@ -1750,7 +1750,8 @@ export interface SnapshotArgs {
   /** With `--gate`: the session whose scheduled task runs this gate, as
    * `prepare` reported it. */
   session?: string;
-  /** With `--gate`: the task, as `schedule` minted it. */
+  /** The task, as `schedule` minted it: with `--gate`, the task whose gate
+   * this is; without, the task that woke the round. */
   task?: string;
 }
 
@@ -1955,7 +1956,7 @@ export function runSnapshot(args: SnapshotArgs): void {
     autofixPrPaths(repoRoot(), args.pr).statePath,
     args.pr,
   );
-  assertWatching(state);
+  assertWatching(state, args.task);
   setGhHost(state.host);
   ensureAuthenticated();
   const { pr } = fetchPrData(state, roundReplyCheck(state));
@@ -2061,7 +2062,7 @@ export const snapshotCommand: CommandModule = {
       .option('task', {
         type: 'string',
         describe:
-          "With --gate: the scheduled task's id (schedule's task); a watch another task drives answers stop",
+          "The scheduled task's id (schedule's task): with --gate, a watch another task drives answers stop; without, a round woken by another task is refused",
       }),
   handler: (argv) => {
     runSnapshot({

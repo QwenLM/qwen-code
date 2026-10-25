@@ -71,7 +71,10 @@ export function unsavedWork(
     // Explicit: `status.showUntrackedFiles=no` would hide new files, and an
     // `ignore` setting for a submodule (in git config or `.gitmodules`) the
     // changes inside it.
+    // No optional locks: `status` asks while a round's agent may commit
+    // there, and a refreshed index would take its index.lock.
     const status = gitOpt(
+      '--no-optional-locks',
       '-C',
       paths.worktreePath,
       'status',

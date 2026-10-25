@@ -208,6 +208,10 @@ describe('runSync (real git, bare remote)', () => {
       ended: { at: '2026-10-25T00:00:00.000Z', reason: 'kept' },
     });
     expect(() => runSync(7, true)).toThrow(/watch was stopped/);
+    // Whichever session asks: a stopped watch is no other session's to
+    // resume, and the answer says how to get it back.
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    expect(() => runSync(7)).toThrow(/Start it again with \/autofix-pr 7/);
   });
 
   it('fast-forwards the worktree to a head someone else pushed and records it', () => {

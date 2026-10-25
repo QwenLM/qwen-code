@@ -77,7 +77,7 @@ Non-goals (first version):
 
 ```text
 /autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions...]
-/autofix-pr status
+/autofix-pr status [<pr-number>]
 /autofix-pr resume [<pr-number>]
 /autofix-pr stop [<pr-number>]
 ```
@@ -179,7 +179,7 @@ worktree included:
    scheduled task goes on, so `prepare --take-over` moves the watch — its
    history and budgets kept — to the session that asks, when the user says
    so; the helpers of the session it was taken from refuse from then on,
-   and its scheduled task stops at its next fire: its gate names the session that made it (`--session`, the `sessionId` `prepare` reports), and until then moves no cursor — it asks again whose the watch is before it writes one — and only wakes it (`watched_elsewhere`, with the owner as `session`). Each task also names the id `schedule` minted for it (`--task`, Section 6.11): a gate whose id is not the one the state file records — a task a later start or resume replaced, or a copy in a second process of the same session (`qwen --continue`), where the helpers would accept its rounds — answers the same, and one whose watch `cleanup` removed answers `watch_ended`. Either event names the gate's own session and task (`gateSession`, `gateTask`), so the round deletes exactly that task.
+   and its scheduled task stops at its next fire: its gate names the session that made it (`--session`, the `sessionId` `prepare` reports), and until then moves no cursor — it asks again whose the watch is before it writes one — and only wakes it (`watched_elsewhere`, with the owner as `session`). Each task also names the id `schedule` minted for it (`--task`, Section 6.11): a gate whose id is not the one the state file records — a task a later start or resume replaced, or a copy in a second process of the same session (`qwen --continue`), where the helpers would accept its rounds — answers the same, and one whose watch `cleanup` removed answers `watch_ended`. Either event names the gate's own session and task (`gateSession`, `gateTask`), so the round deletes exactly that task. A round of the old owner that is already under way is stopped by its next helper call, which carries the task too (Section 6.8); its fix agent, which calls no helper, is not, and may go on committing into the worktree, where the new owner's round could push it. That is a known limit: the take-over and resume questions say so when `status` reports `checkedRecently`, and a take-over is best made once the other session has stopped.
 6. Fetch `refs/pull/<n>/head` into local branch `qwen-autofix/pr-<n>` and
    create the worktree on it. `prepare` never discards earlier work: a
    leftover worktree, or a leftover branch that may hold commits beyond the
@@ -189,7 +189,9 @@ worktree included:
    worktree was removed (also with `rm -rf`, which `git worktree prune`
    clears), it is recreated and the recorded `pushedShas`,
    `handledCommentIds` and `postedCommentIds` are kept, with the budgets,
-   the recorded task (`watch`) and `needsHuman`. With `--take-over`, the
+   the recorded task (`watch`) and `needsHuman`, and the report says
+   `recreated: true`: a start that is then cancelled must not clean up a
+   watch it did not make. With `--take-over`, the
    watch moves to this session only once the PR has passed step 2, so a
    refusal leaves it with the session that has it. A state file for
    another repository's PR of the same number is a refusal. Repositories
@@ -739,11 +741,13 @@ run `/qreview <number>`, or a verification pass, per PR.
 ### 6.8 `sync <pr> [--discard] [--task <id>]`
 
 A round starts with `sync`, so it also checks that the round may run: the
-watch is this session's and not ended (Section 6.6), and — with `--task`,
-the task the round's prompt names — that this task still drives it. A fire
-queued before a later `schedule` replaced its task, or before `stop` ended
-the watch, is refused here and the round deletes the task. `snapshot`,
-`ci-log`, `push`, `reply` and `rerun` refuse an ended watch the same way.
+watch is not ended (Section 6.6) and is this session's, and — with
+`--task`, the task the round's prompt names — that this task still drives
+it. A fire queued before a later `schedule` replaced its task, or before
+`stop` ended the watch, is refused here and the round deletes the task.
+`snapshot`, `ci-log`, `push`, `reply` and `rerun` take the same `--task`
+and refuse the same way, so a round that was past its `sync` when its task
+was replaced stops at its next helper.
 
 Adopts a head someone else pushed. It fetches the PR branch from the push
 target — the ref the push lease protects, which moves at once, unlike
@@ -910,7 +914,8 @@ the reason for a state file that could not be read. Each watch carries:
 - `needsHuman` (Section 6.5);
 - the worktree's path and whether it exists, and `worktreeWork`: what the
   worktree or its branch holds that the PR does not, judged as `cleanup`
-  judges it without asking the remote, or null. A round that starts on it
+  judges it without asking the remote or taking the index lock, or null.
+  A round that starts on it
   discards it, so a take-over or a resume says so before it asks.
 
 The gate cursor outlives a watch (Section 6.6), so it is read only when it
@@ -920,7 +925,8 @@ reopened and watched again is a former watch's), and one that cannot be
 read leaves `stopped` null instead of hiding the watch. A state file is
 read under the name the helpers give it (no leading zero) and must name its
 own PR, and neither it nor the cursor is read unless it is a regular file
-(a FIFO under that name would block); anything else is `unreadable`.
+(a FIFO under that name would block); anything else is `unreadable`, with
+the file and the way out (`cleanup <n> --force`).
 
 A scheduled task lives in the session that created it, which the helper
 cannot see: the skill joins the list with `cron_list` to say which watches

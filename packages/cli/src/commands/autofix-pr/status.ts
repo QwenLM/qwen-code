@@ -183,9 +183,13 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         ]),
       });
     } catch (err) {
+      const message = (err as Error).message;
       (outcome.unreadable ??= []).push({
         pr,
-        error: (err as Error).message,
+        // Whatever went wrong, it names the file and the way out.
+        error: message.includes('cleanup')
+          ? message
+          : `${paths.statePath}: ${message}; \`qwen autofix-pr cleanup ${pr} --force\` discards it.`,
       });
     }
   }

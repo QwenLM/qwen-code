@@ -349,6 +349,14 @@ describe('runPush (real git, bare remote)', () => {
     expect(() => runPush(7)).toThrow(/invalid pushTarget/);
   });
 
+  it('pushes nothing for a round its task no longer drives', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      watch: { every: 2, reply: true, instructions: '', task: 'bbbbbbbbbbbb' },
+    });
+    expect(() => runPush(7, 'aaaaaaaaaaaa')).toThrow(/no longer drives/);
+  });
+
   it('pushes nothing for a watch cleanup ended, whose work it kept', () => {
     writeState(paths.statePath, {
       ...state(),

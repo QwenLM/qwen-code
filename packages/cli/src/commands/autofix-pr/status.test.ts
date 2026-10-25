@@ -202,7 +202,12 @@ describe('runStatus', () => {
       outcome.watches.map(({ pr, lastCheck }) => ({ pr, lastCheck })),
     ).toEqual([{ pr: 7, lastCheck: null }]);
     expect(outcome.unreadable).toEqual([
-      { pr: 8, error: expect.stringMatching(/not a regular file/) },
+      {
+        pr: 8,
+        error: expect.stringMatching(
+          /not a regular file; `qwen autofix-pr cleanup 8 --force` discards it/,
+        ),
+      },
     ]);
   });
 
