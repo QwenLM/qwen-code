@@ -13540,6 +13540,16 @@ Other open files:
         expect(recordFileHistorySnapshot).toHaveBeenCalledWith(latestSnapshot);
       });
 
+      it('leaves the snapshot to a host that recorded the user turn', async () => {
+        await run([{ text: 'user' }], 'prompt-host', {
+          type: SendMessageType.UserQuery,
+          userTurnRecordedByHost: true,
+        });
+
+        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+        expect(recordFileHistorySnapshot).not.toHaveBeenCalled();
+      });
+
       it('does not call makeSnapshot for ToolResult and Retry turns', async () => {
         await collectStream(SendMessageType.ToolResult, 'prompt-tool-result');
         await collectStream(SendMessageType.Retry, 'prompt-retry');

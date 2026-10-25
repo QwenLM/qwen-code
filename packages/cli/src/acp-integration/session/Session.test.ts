@@ -4491,11 +4491,33 @@ describe('Session', () => {
         promptAdmission: { blocked: false },
       });
       expect(agentText()).toContain('Hello');
+      // The session snapshots its user turn; the option keeps the client's off.
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledOnce();
       // The session runs the client's memory tasks once its turn ends.
       expect(
         mockLlmClient.runManagedAutoMemoryBackgroundTasks,
       ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+    });
+
+    it('takes the file-history snapshot of a prompt cancelled before its first send', async () => {
+      const send = useSharedRounds([text('Hello'), finished()]);
+      Object.assign(mockLlmClient, {
+        admitUserPrompt: vi.fn(async () => {
+          await session.cancelPendingPrompt();
+          return { blocked: false };
+        }),
+      });
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('cancelled');
+      expect(send).not.toHaveBeenCalled();
+      // The cancelled prompt stays a user turn, so rewind needs its snapshot.
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledOnce();
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
+        'test-session-id########1',
+      );
     });
 
     it("runs the requested tools with the session's executor and sends their results", async () => {
@@ -27843,6 +27865,134 @@ describe('Session', () => {
               ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
             },
           );
+
+          /**
+           * Holds the first request before it reaches history until `push`,
+           * then holds its response, after `beforeAnswer` events, until it is
+           * cut or released.
+           */
+          function holdSharedRequest(beforeAnswer: unknown[] = []) {
+            let markReached!: () => void;
+            const reached = new Promise<void>((resolve) => {
+              markReached = resolve;
+            });
+            let markPushed!: () => void;
+            const pushedNow = new Promise<void>((resolve) => {
+              markPushed = resolve;
+            });
+            let push!: () => void;
+            const pushGate = new Promise<void>((resolve) => {
+              push = resolve;
+            });
+            let release!: () => void;
+            const released = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            let pushes = 0;
+            Object.assign(mockChat, {
+              getUserContentPushCount: vi.fn(() => pushes),
+            });
+            const sends: Array<
+              [Part[], AbortSignal, string, Record<string, unknown>]
+            > = [];
+            mockConfig.isUnifiedAgentLoopEnabled = vi
+              .fn()
+              .mockReturnValue(true);
+            Object.assign(mockLlmClient, {
+              admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
+              sendMessageStream: vi.fn(
+                (
+                  parts: Part[],
+                  signal: AbortSignal,
+                  promptId: string,
+                  options: Record<string, unknown>,
+                ) => {
+                  sends.push([parts, signal, promptId, options]);
+                  if (sends.length > 1) {
+                    pushes++;
+                    return createEmptyStream();
+                  }
+                  return (async function* () {
+                    markReached();
+                    await pushGate;
+                    pushes++;
+                    markPushed();
+                    for (const event of beforeAnswer) yield event;
+                    await Promise.race([
+                      released,
+                      new Promise<void>((resolve) =>
+                        signal.addEventListener('abort', () => resolve(), {
+                          once: true,
+                        }),
+                      ),
+                    ]);
+                    if (signal.aborted) {
+                      yield { type: core.LlmEventType.UserCancelled };
+                    }
+                  })();
+                },
+              ),
+            });
+            return { reached, pushedNow, push, release, sends };
+          }
+
+          it('cuts a response that has not answered yet', async () => {
+            mockClient.extMethod = vi
+              .fn()
+              .mockResolvedValueOnce({ messages: ['use plan B instead'] })
+              .mockResolvedValue({ messages: [] });
+            const { pushedNow, push, release, sends } = holdSharedRequest();
+
+            const done = startPrompt();
+            push();
+            await pushedNow;
+            // The request is out and the model has not answered yet.
+            session.sendMidTurnInputNow();
+            try {
+              await vi.waitFor(() => expect(sends[0][1].aborted).toBe(true));
+            } finally {
+              release();
+            }
+
+            await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+            expect(sends).toHaveLength(2);
+            expect(sends[1][0]).toEqual([
+              { text: `${interruptPrefix}use plan B instead` },
+            ]);
+            expect(sends[1][3]).toMatchObject({
+              type: core.SendMessageType.Steer,
+            });
+          });
+
+          it('takes input sent before the request went out once its response opens', async () => {
+            mockClient.extMethod = vi
+              .fn()
+              .mockResolvedValueOnce({ messages: ['use plan B instead'] })
+              .mockResolvedValue({ messages: [] });
+            const { reached, push, release, sends } = holdSharedRequest([
+              { type: core.LlmEventType.Content, value: 'plan A' },
+            ]);
+
+            const done = startPrompt();
+            await reached;
+            // A cut now would drop the prompt the request carries.
+            session.sendMidTurnInputNow();
+            await nextTick();
+            expect(drainCalls()).toHaveLength(0);
+            expect(sends[0][1].aborted).toBe(false);
+            push();
+            try {
+              await vi.waitFor(() => expect(sends[0][1].aborted).toBe(true));
+            } finally {
+              release();
+            }
+
+            await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+            expect(sends).toHaveLength(2);
+            expect(sends[1][0]).toEqual([
+              { text: `${interruptPrefix}use plan B instead` },
+            ]);
+          });
 
           it('leaves a finished response alone while the round goes on', async () => {
             mockClient.extMethod = vi

@@ -7230,10 +7230,11 @@ export class Session implements SessionContext {
             // Goal or channel sends its model rounds through `LlmClient` on
             // the shared agent loop's round. `LlmClient` then does the steps
             // the current path does here itself: UserPromptSubmit on the
-            // admitted verdict, memory recall, the file-history snapshot,
-            // system reminders and workflow intent. ACP keeps the interaction
-            // span, its tool step with the tool-call guards, and the Stop hook
-            // in its Stop loop, which also runs ACP's own continuations.
+            // admitted verdict, memory recall, system reminders and workflow
+            // intent. ACP keeps the user turn with its file-history snapshot,
+            // the interaction span, its tool step with the tool-call guards,
+            // and the Stop hook in its Stop loop, which also runs ACP's own
+            // continuations.
             const sharedModelRound =
               this.config.isUnifiedAgentLoopEnabled?.() === true &&
               isFreshUserTurn &&
@@ -7385,8 +7386,10 @@ export class Session implements SessionContext {
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
             // Restore continuations record no user message; rewindToTurn()
-            // indexes snapshots by user-turn position, so skip them.
-            if (!isRestoreAskUserQuestion && !sharedModelRound) {
+            // indexes snapshots by user-turn position, so skip them. Taken
+            // here on the shared round too: a prompt cancelled before its
+            // first send still keeps its user turn.
+            if (!isRestoreAskUserQuestion) {
               try {
                 const fileHistoryService = this.config.getFileHistoryService();
                 await fileHistoryService.makeSnapshot(promptId);
@@ -7711,10 +7714,15 @@ export class Session implements SessionContext {
                 const preparationTracker = new ToolCallPreparationTracker(
                   this.toolCallEmitter,
                 );
+                // The shared round's request reaches history inside the
+                // client; until then a cut would drop the message it carries.
+                let requestUnsent = () => false;
                 const responseInterrupt = this.#openResponseInterrupt(
                   pendingSend.signal,
                   () =>
-                    functionCalls.length > 0 || preparationTracker.hasToolCall,
+                    functionCalls.length > 0 ||
+                    preparationTracker.hasToolCall ||
+                    requestUnsent(),
                   !channelTurn,
                 );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
@@ -7745,6 +7753,13 @@ export class Session implements SessionContext {
                     channelDeliveryResponseBlock?.parts.length ?? 0;
                   const pushCountBefore =
                     this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
+                  requestUnsent = () => {
+                    const pushCount =
+                      this.#getCurrentChat().getUserContentPushCount?.();
+                    return (
+                      pushCount !== undefined && pushCount <= pushCountBefore
+                    );
+                  };
                   let attempt: ModelResponseFacts = {
                     outputTruncated: false,
                     refusedPartialEdits: new Set(),
@@ -7771,6 +7786,9 @@ export class Session implements SessionContext {
                   // The error a response reported, thrown once the client has
                   // finished the round.
                   let streamError: StructuredError | undefined;
+                  // Open from the send, as `watch` is open once the request is
+                  // out: input sent before the model answers cuts the wait.
+                  responseInterrupt.begin();
                   try {
                     ({ stop: roundStop } = await runModelRound(
                       this.config.getLlmClient(),
@@ -7800,8 +7818,10 @@ export class Session implements SessionContext {
                       {
                         onModelEvent: async (event) => {
                           if (pendingSend.signal.aborted) return;
-                          // Open while a response streams, as `watch` keeps
-                          // the window around the current path's stream.
+                          // Closed when a response finishes and opened by the
+                          // next one, such as a next-speaker continuation. The
+                          // first event also takes input that arrived before
+                          // the request went out.
                           if (event.type === LlmEventType.Finished) {
                             responseOpened = false;
                             responseInterrupt.end();

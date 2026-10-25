@@ -282,9 +282,9 @@ export interface SendMessageOptions {
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
   /**
-   * The host already recorded this UserQuery's user message and started its
-   * todo work chain, as ACP does when it admits a prompt, so the client does
-   * neither.
+   * The host already recorded this UserQuery's user message, started its todo
+   * work chain and took its file-history snapshot, as ACP does when it admits
+   * a prompt, so the client does none of them.
    */
   userTurnRecordedByHost?: boolean;
   /** Also yield `ToolCallPreparation` for calls the model starts streaming. */
@@ -4575,7 +4575,10 @@ export class LlmClient {
 
         this.sessionTurnCount++;
 
-        if (messageType === SendMessageType.UserQuery) {
+        if (
+          messageType === SendMessageType.UserQuery &&
+          !options?.userTurnRecordedByHost
+        ) {
           try {
             await this.config.getFileHistoryService().makeSnapshot(prompt_id);
             try {
