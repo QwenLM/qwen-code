@@ -854,14 +854,27 @@ export class OpenTuiSlashDispatcher {
                 };
               }
               case 'load_history': {
-                this.services.config
-                  ?.getGeminiClient()
+                const sessionId = this.services.config?.getSessionId();
+                const snapshot = [...this.host.getHistory()];
+                await this.services.config
+                  ?.getLlmClient()
                   ?.setHistory(result.clientHistory);
+                const current = this.host.getHistory();
+                if (
+                  abortController.signal.aborted ||
+                  sessionId !== this.services.config?.getSessionId() ||
+                  current.length !== snapshot.length ||
+                  current.some((item, index) => item !== snapshot[index])
+                )
+                  return { kind: 'handled' };
                 fullCommandContext.ui.clear();
                 const now = Date.now();
-                result.history.forEach((item, index) => {
-                  fullCommandContext.ui.addItem(item, now + index);
-                });
+                fullCommandContext.ui.loadHistory(
+                  result.history.map((item, index) => ({
+                    ...item,
+                    id: now + index,
+                  })),
+                );
                 return { kind: 'handled' };
               }
               case 'quit':
