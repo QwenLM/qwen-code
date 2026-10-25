@@ -51,6 +51,7 @@ import {
 } from '../commands/types.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
+import { rewindCommand } from '../commands/rewindCommand.js';
 import {
   getInteractiveModSession,
   isModRecoveryCommand,
@@ -215,7 +216,7 @@ export interface SlashCommandProcessorActions {
   openMcpDialog: () => void;
   openHooksDialog: () => void;
   openStatsDialog: () => void;
-  openRewindSelector: () => void;
+  openRewindSelector: (origin?: 'slash-command') => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
   clearPendingState: () => void;
@@ -1356,7 +1357,12 @@ export const useSlashCommandProcessor = (
                       actions.openExtensionsManagerDialog();
                       return { type: 'handled' };
                     case 'rewind':
-                      actions.openRewindSelector();
+                      actions.openRewindSelector(
+                        commandToExecute.kind === CommandKind.BUILT_IN &&
+                          commandToExecute.action === rewindCommand.action
+                          ? 'slash-command'
+                          : undefined,
+                      );
                       return { type: 'handled' };
                     case 'diff':
                       actions.openDiffDialog();

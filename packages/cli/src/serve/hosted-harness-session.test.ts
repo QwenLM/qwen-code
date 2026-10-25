@@ -23573,6 +23573,23 @@ describe('Hosted Harness tool approvals', () => {
     );
   }
 
+  it('accepts the classifier auto mode for a files Session', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: files,
+      approvalMode: 'auto',
+    });
+    expect(created.status).toBe(200);
+    expect(created.body.approvalMode).toBe('auto');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId as string,
+    );
+  });
+
   it('pins a mode that can ask at creation and refuses other modes', async () => {
     const server = await app(true);
     const create = (extra: Record<string, unknown>) =>

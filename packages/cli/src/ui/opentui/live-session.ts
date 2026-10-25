@@ -21,6 +21,7 @@
  */
 
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
+import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import {
   InteractiveModToolScheduler,
   type InteractiveCompletedToolCall,
@@ -698,6 +699,7 @@ export async function* livePromptEvents(
       `Timed out after ${STARTUP_CHAT_WAIT_MS}ms waiting for the startup chat to become ready`,
     );
   }
+  const sessionId = config.getSessionId();
   const current = () => options?.isCurrentTurn?.() !== false;
   const dualOutput = options?.dualOutput;
   const promptId = options?.promptId ?? nextLivePromptId(config);
@@ -1171,10 +1173,10 @@ export async function* livePromptEvents(
       if (resp) {
         const final = finalResponses[index];
         responseParts.push(...final.responseParts);
-        if (usesMods)
-          config
-            .getChatRecordingService()
-            ?.recordToolResult(final.responseParts, {
+        if (current() && config.getSessionId() === sessionId)
+          config.getChatRecordingService()?.recordToolResult(
+            final.responseParts,
+            {
               callId: call.request.callId,
               status: call.status,
               resultDisplay: resp.resultDisplay,
@@ -1183,7 +1185,9 @@ export async function* livePromptEvents(
               executionStatus: resp.executionStatus,
               persistedOutputFiles: final.persistedOutputFiles,
               artifacts: final.artifacts,
-            });
+            },
+            goalToolResultProvenance(call.request, final.responseParts),
+          );
       }
     }
     // ink use-llm-stream parity (:5328): when every tool in the batch was

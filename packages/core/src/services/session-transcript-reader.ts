@@ -287,6 +287,7 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
       projection: boolean;
       displayText: string | undefined;
     }>;
+    turnPromptIds?: Array<string | undefined>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
@@ -492,6 +493,7 @@ function buildManagedSessionRestoreProjection(
       ...(titleProjection.lastProjectionText !== undefined
         ? { lastProjectionTextForTitle: titleProjection.lastProjectionText }
         : {}),
+      turnPromptIds: turnStateValue.turnPromptIds,
       ...(input.customTitle !== undefined
         ? { customTitle: input.customTitle }
         : {}),
@@ -1899,6 +1901,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.turnResultPromptId) +
       estimateStringBytes(entry.daemonPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
+      estimateStringBytes(entry.turnHint.turnPromptId) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
@@ -3635,6 +3638,7 @@ export class SessionTranscriptReader {
         ...(titleProjection.lastProjectionText !== undefined
           ? { lastProjectionTextForTitle: titleProjection.lastProjectionText }
           : {}),
+        turnPromptIds: turnStateValue.turnPromptIds,
         ...(customTitle !== undefined ? { customTitle } : {}),
         ...(titleSource !== undefined ? { titleSource } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),

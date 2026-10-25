@@ -119,6 +119,9 @@ vi.mock('@opentui/react', () => ({ useRenderer: () => mocks.renderer }));
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { C } from './theme.js';
+import { foldLiveEvent } from './live-session-model.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
+import { ToolCallStatus, type HistoryItem } from '../types.js';
 import type {
   LiveAssistantItem,
   LiveHistoryItem,
@@ -137,6 +140,177 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('keeps replayed batches with the same wire call ID in distinct height slots', () => {
+    const group = (id: number, result: string): HistoryItem => ({
+      id,
+      type: 'tool_group',
+      batchId: `batch-${id}`,
+      tools: [
+        {
+          callId: 'same-wire',
+          name: 'run_shell_command',
+          description: 'owned command',
+          status: ToolCallStatus.Success,
+          resultDisplay: result,
+          confirmationDetails: undefined,
+        },
+      ],
+    });
+    const history = [
+      group(1, 'first replay result'),
+      group(2, 'second replay result'),
+    ];
+    const items = projectHistoryToStreamEvents(history, {}).reduce<
+      readonly LiveHistoryItem[]
+    >(foldLiveEvent, []);
+    const cards = items.filter((item) => item.kind === 'tool');
+    expect(cards).toHaveLength(2);
+    expect(new Set(cards.map((item) => item.renderId)).size).toBe(2);
+    expect(cards.every((item) => item.renderId !== undefined)).toBe(true);
+    expect(cards.map((item) => item.canonicalHistoryItem)).toEqual(history);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const view = render(<OpenTuiTranscriptView items={items} />);
+      expect(view.container.textContent).toContain('first replay result');
+      expect(view.container.textContent).toContain('second replay result');
+      expect(
+        errors.mock.calls.filter((args) =>
+          args.some(
+            (value) => typeof value === 'string' && /same key/i.test(value),
+          ),
+        ),
+      ).toEqual([]);
+      view.unmount();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+  it('keeps separate mounted tool cards when batches reuse a provider call ID', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const view = render(
+        <OpenTuiTranscriptView
+          items={[
+            toolItem({ done: true, success: true, output: 'earlier result' }),
+            toolItem({
+              renderId: 'next-batch',
+              confirm: 'pending',
+              description: 'next approval',
+            }),
+          ]}
+          awaitingCallId="t1"
+        />,
+      );
+      expect(view.container.textContent).toContain('earlier result');
+      expect(view.container.textContent).toContain('next approval');
+      expect(
+        errors.mock.calls.filter((args) =>
+          args.some(
+            (value) => typeof value === 'string' && /same key/i.test(value),
+          ),
+        ),
+      ).toEqual([]);
+      view.unmount();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+  it('matches Ink retry wording while the countdown advances', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      const retry: LiveHistoryItem = {
+        kind: 'retry',
+        id: 'retry-wording',
+        attempt: 1,
+        maxRetries: 10,
+        delayMs: 5_000,
+        startedAt: Date.now(),
+      };
+      view = render(<OpenTuiTranscriptView items={[retry]} />);
+      expect(view.container.textContent).toContain(
+        'Rate limit exceeded. Please wait and try again.',
+      );
+      expect(view.container.textContent).toContain(
+        '↻ Retrying in 5 seconds… (attempt 1/10)',
+      );
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(view.container.textContent).toContain(
+        '↻ Retrying in 4 seconds… (attempt 1/10)',
+      );
+      expect(view.container.textContent).not.toContain('Retrying in 5');
+      view.rerender(
+        <OpenTuiTranscriptView
+          items={[
+            {
+              ...retry,
+              attempt: 2,
+              maxRetries: 3,
+              message: 'PROVIDER RETRY REASON',
+            },
+          ]}
+        />,
+      );
+      expect(view.container.textContent).toContain('PROVIDER RETRY REASON');
+      expect(view.container.textContent).not.toContain(
+        'Rate limit exceeded. Please wait and try again.',
+      );
+      expect(view.container.textContent).toContain(
+        '↻ Retrying in 4 seconds… (attempt 2/3)',
+      );
+    } finally {
+      view?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('filters restored suppression only at display time, including full-detail mode', () => {
+    const hidden: LiveHistoryItem = {
+      kind: 'user',
+      id: 'hidden',
+      text: 'HIDDEN TURN',
+      display: { suppressOnRestore: true },
+    };
+    const summary: LiveHistoryItem = {
+      kind: 'info',
+      id: 'summary',
+      text: 'COLLAPSED SUMMARY',
+      display: { kind: 'collapse-summary' },
+    };
+    const view = render(<OpenTuiTranscriptView items={[hidden, summary]} />);
+    expect(view.container.textContent).not.toContain('HIDDEN TURN');
+    expect(view.container.textContent).toContain('COLLAPSED SUMMARY');
+    view.rerender(
+      <OpenTuiTranscriptView items={[hidden, summary]} thoughtsExpanded />,
+    );
+    expect(view.container.textContent).not.toContain('HIDDEN TURN');
+    view.rerender(
+      <OpenTuiTranscriptView items={[{ ...hidden, display: undefined }]} />,
+    );
+    expect(view.container.textContent).toContain('HIDDEN TURN');
+    expect(view.container.textContent).not.toContain('COLLAPSED SUMMARY');
+  });
+
+  it('uses resumed read detail only in full-detail mode and sanitizes raw controls', () => {
+    const item = toolItem({
+      tool: 'read_file',
+      done: true,
+      output: 'summary only',
+      detailedDisplay: 'FULL\u001b[31m CONTENT\u0007',
+    });
+    const view = render(
+      <OpenTuiTranscriptView items={[item]} thoughtsExpanded={false} />,
+    );
+    expect(view.container.textContent).toContain('summary only');
+    expect(view.container.textContent).not.toContain('FULL');
+    view.rerender(<OpenTuiTranscriptView items={[item]} thoughtsExpanded />);
+    expect(view.container.textContent).toContain('FULL\\u001b[31m CONTENT');
+    expect(view.container.textContent).not.toContain('summary only');
+    expect(view.container.textContent).not.toContain('\u001b');
+    expect(view.container.textContent).not.toContain('\u0007');
+  });
+
   it('keeps a pending MCP-shaped card description visible (R1-10)', () => {
     // An MCP confirmation dialog shows only the server and tool names — no
     // args — so the card is the only surface that carries the arguments.
@@ -1375,57 +1549,5 @@ describe('OpenTuiTranscriptView scroll host', () => {
     view.unmount();
     expect(mocks.renderer.count('frame')).toBe(0);
     expect(view.scrollListeners()).toBe(0);
-  });
-});
-
-describe('retry countdown wording', () => {
-  it('matches Ink retry wording while the countdown advances', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(100_000);
-    let view: ReturnType<typeof render> | undefined;
-    try {
-      const retry: LiveHistoryItem = {
-        kind: 'retry',
-        id: 'retry-wording',
-        attempt: 1,
-        maxRetries: 10,
-        delayMs: 5_000,
-        startedAt: Date.now(),
-      };
-      view = render(<OpenTuiTranscriptView items={[retry]} />);
-      expect(view.container.textContent).toContain(
-        'Rate limit exceeded. Please wait and try again.',
-      );
-      expect(view.container.textContent).toContain(
-        '↻ Retrying in 5 seconds… (attempt 1/10)',
-      );
-      act(() => vi.advanceTimersByTime(1_000));
-      expect(view.container.textContent).toContain(
-        '↻ Retrying in 4 seconds… (attempt 1/10)',
-      );
-      expect(view.container.textContent).not.toContain('Retrying in 5');
-      view.rerender(
-        <OpenTuiTranscriptView
-          items={[
-            {
-              ...retry,
-              attempt: 2,
-              maxRetries: 3,
-              message: 'PROVIDER RETRY REASON',
-            },
-          ]}
-        />,
-      );
-      expect(view.container.textContent).toContain('PROVIDER RETRY REASON');
-      expect(view.container.textContent).not.toContain(
-        'Rate limit exceeded. Please wait and try again.',
-      );
-      expect(view.container.textContent).toContain(
-        '↻ Retrying in 4 seconds… (attempt 2/3)',
-      );
-    } finally {
-      view?.unmount();
-      vi.useRealTimers();
-    }
   });
 });
