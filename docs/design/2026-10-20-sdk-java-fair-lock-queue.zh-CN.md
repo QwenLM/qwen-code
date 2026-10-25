@@ -90,8 +90,10 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 复制会从整个 job 本地副本中删除 `_remote.repositories`、
 `maven-metadata-local.xml`、`resolver-status.properties` 和
 `*.lastUpdated`，让 Maven 重新创建。只有缓存写回会修改 `~/.m2`，因此只有
-写回取锁：它先删除宿主缓存中本就不应存在的 in-house 坐标，再发布本 job 的
-增量。种子复制是尽力而为的，放在取锁之前；两次 Maven 运行不持锁；写回只取
+写回取锁：它先删除宿主缓存中本就不应存在的 in-house 坐标，也不再发布上述
+resolver 簿记文件，再发布本 job 的构件增量。job 内后续步骤直接从 job 本地
+副本解析、无需再 unlink，因为那里的簿记 inode 不再与宿主缓存共享。种子复制
+是尽力而为的，放在取锁之前；两次 Maven 运行不持锁；写回只取
 一次锁，且它的 `rm`、`mkdir` 和有界 `find`/`cp` 子进程会关闭 fd 9，避免
 幸存进程继续持有锁。这样一次持锁只量一次复制，而不是一整套测试。
 
@@ -218,10 +220,10 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
   pin 的是 source 该辅助脚本和两处 `sdk_java_lock_acquire 5400` 预算、
   每条持锁通道的 Maven 运行在取锁之前、写回子进程关闭 fd 9、写回对宿主
-  缓存中 in-house 坐标的删除、`sdk-java.yml` 与
-  `release-managed-agent-reference.yml` 两处种子对 resolver 簿记文件的
-  unlink、test job 对套件退出状态的保留、Checkstyle 步骤的 Java 21
-  生产者顺序，以及 `.size-baseline` 记录的工作流新尺寸。
+  缓存中 in-house 坐标的删除和对 resolver 簿记文件的排除、
+  `sdk-java.yml` 与 `release-managed-agent-reference.yml` 两处种子对
+  resolver 簿记文件的 unlink、test job 对套件退出状态的保留、Checkstyle
+  步骤的 Java 21 生产者顺序，以及 `.size-baseline` 记录的工作流新尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 

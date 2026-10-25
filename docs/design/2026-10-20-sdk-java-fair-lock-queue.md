@@ -106,8 +106,11 @@ bookkeeping in place through those links; the seed therefore unlinks
 `resolver-status.properties`, and `*.lastUpdated` across the whole job-local
 copy and lets Maven create fresh ones. Only the cache write-back may mutate
 `~/.m2`, so only the write-back takes the lock: it drops the in-house
-coordinates the host cache must never carry, then publishes this job's
-delta. The seed is best-effort and runs before the acquisition; the Maven
+coordinates the host cache must never carry and never publishes the same
+resolver bookkeeping, then publishes this job's artifact delta. A later
+step in the job resolves from the job-local copy without unlinking, because
+no bookkeeping inode there is shared with the host cache. The seed is
+best-effort and runs before the acquisition; the Maven
 runs run unlocked; the write-back holds one acquisition, and its `rm`,
 `mkdir`, and bounded `find`/`cp` children drop fd 9 so a survivor cannot
 retain the lock. A hold now measures the copy instead of the suite.
@@ -262,8 +265,8 @@ order this section exists to prevent.
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
   `sdk_java_lock_acquire 5400` budget at each acquisition site, each locked
   lane's Maven runs above its acquisition and its write-back children's fd 9
-  close, the write-back's host-cache in-house prune, the seed's resolver
-  bookkeeping unlink across `sdk-java.yml` and
+  close, the write-back's host-cache in-house prune and resolver-bookkeeping
+  exclusion, the seed's resolver bookkeeping unlink across `sdk-java.yml` and
   `release-managed-agent-reference.yml`, the test job's suite-status
   preservation, the Checkstyle step's Java-21 producer ordering, and the
   `.size-baseline` records the workflow's new size.

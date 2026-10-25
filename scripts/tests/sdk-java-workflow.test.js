@@ -28,7 +28,7 @@ const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
   .join(',');
 
 const writeBackFind =
-  "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
+  "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \\) -prune -o -type f -links 1 ! -name '_remote.repositories' ! -name 'maven-metadata-local.xml' ! -name 'resolver-status.properties' ! -name '*.lastUpdated' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
 
 const seedUnlink =
   "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' \\) -delete 2>/dev/null || true";
@@ -166,32 +166,6 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
-    // The suite step's write-back republishes its job-local delta into the
-    // host cache as hardlinks. A later step that runs Maven against that
-    // repository must unlink the resolver bookkeeping first, or it rewrites
-    // the host inodes outside the lock (issue #15281).
-    const steps = parse(workflow).jobs.test.steps;
-    const lockAt = steps.findIndex((candidate) =>
-      candidate.run?.includes('sdk-java-tests.lock'),
-    );
-    expect(lockAt, 'test').toBeGreaterThan(-1);
-    const localMaven = steps
-      .slice(lockAt + 1)
-      .filter((candidate) =>
-        candidate.run?.includes('-Dmaven.repo.local=${RUNNER_TEMP}/m2-repo'),
-      );
-    expect(localMaven.map((candidate) => candidate.name)).toEqual([
-      'Run Managed Agent Server Checkstyle',
-    ]);
-    for (const candidate of localMaven) {
-      const unlinkAt = candidate.run.indexOf(seedUnlink);
-      expect(unlinkAt, candidate.name).toBeGreaterThan(-1);
-      for (const command of candidate.run.match(/^\s*mvn .+$/gm) ?? []) {
-        expect(candidate.run.indexOf(command), candidate.name).toBeGreaterThan(
-          unlinkAt,
-        );
-      }
-    }
   });
 
   it('keeps the host lock out of every locked child', () => {
@@ -652,8 +626,19 @@ describe('SDK Java self-hosted workflow guards', () => {
             mkdirSync(dirname(join(host, path)), { recursive: true });
             writeFileSync(join(host, path), body);
           }
-          mkdirSync(join(repo, 'org/example/lib'), { recursive: true });
+          mkdirSync(join(repo, 'org/example/lib/1.0'), { recursive: true });
           writeFileSync(join(repo, 'org/example/lib/new.jar'), 'new');
+          // Resolver bookkeeping is job-local by design: a hardlinked
+          // _remote.repositories or *.lastUpdated would be rewritten in place
+          // by the next job's Maven outside the lock (issue #15281).
+          for (const name of [
+            '_remote.repositories',
+            'maven-metadata-local.xml',
+            'resolver-status.properties',
+            'new.jar.lastUpdated',
+          ]) {
+            writeFileSync(join(repo, 'org/example/lib/1.0', name), name);
+          }
           const result = spawnSync('bash', ['-e', '-c', writeBack], {
             encoding: 'utf8',
             timeout: 10000,
@@ -682,6 +667,17 @@ describe('SDK Java self-hosted workflow guards', () => {
             existsSync(join(host, 'org/example/lib/new.jar')),
             locked.name,
           ).toBe(true);
+          for (const name of [
+            '_remote.repositories',
+            'maven-metadata-local.xml',
+            'resolver-status.properties',
+            'new.jar.lastUpdated',
+          ]) {
+            expect(
+              existsSync(join(host, 'org/example/lib/1.0', name)),
+              locked.name + name,
+            ).toBe(false);
+          }
         } finally {
           rmSync(dir, { recursive: true, force: true });
         }
@@ -699,6 +695,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     failAt = 1,
     exitCode = 1,
     lockScript = 'sdk_java_lock_acquire() { :; }\n',
+    helper = true,
   } = {}) => {
     const suite = parse(workflow).jobs.test.steps.find(
       (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
@@ -711,12 +708,20 @@ describe('SDK Java self-hosted workflow guards', () => {
     mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
     mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
     writeFileSync(join(runnerTemp, 'm2-repo', 'downloaded.jar'), 'new');
-    mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
-    writeFileSync(
-      join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
-      lockScript,
-    );
+    if (helper) {
+      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+      writeFileSync(
+        join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+        lockScript,
+      );
+    }
     mkdirSync(bin, { recursive: true });
+    if (!helper) {
+      // A tag resumed from release-sdk-java.yml may predate the helper, so
+      // the bare-lock fallback runs; shim flock to time out so its timeout
+      // arm is the branch under test.
+      writeFileSync(join(bin, 'flock'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    }
     // Fail exactly one invocation: with every call failing, a later
     // `|| suite_status=$?` re-sets the status after the first guard is
     // removed, so the case would pass without pinning the guard.
@@ -820,6 +825,22 @@ describe('SDK Java self-hosted workflow guards', () => {
         failAt: 0,
         lockScript: lockTimeoutShim,
       });
+      try {
+        expect(run.result.status, run.suite.name + run.result.stderr).toBe(1);
+        expect(run.published(), run.suite.name).toBe(false);
+      } finally {
+        run.cleanup();
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'fails the bare-lock fallback when the helper is absent and the lock times out',
+    () => {
+      // The fallback is reachable only from release-sdk-java.yml resuming a
+      // pre-helper tag, a lane PR CI never runs. A timeout there must skip
+      // the unlocked write-back instead of publishing without the lock.
+      const run = runSelfHostedSuite({ failAt: 0, helper: false });
       try {
         expect(run.result.status, run.suite.name + run.result.stderr).toBe(1);
         expect(run.published(), run.suite.name).toBe(false);
@@ -996,12 +1017,6 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       '          if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then\n' +
         '            export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${RUNNER_TEMP}/m2-repo"\n' +
-        "            # The suite step's write-back published this repository's\n" +
-        '            # resolver bookkeeping into the host cache as hardlinks; unlink\n' +
-        '            # those names so this run cannot rewrite the shared inodes.\n' +
-        '            ' +
-        seedUnlink +
-        '\n' +
         '          fi\n' +
         '          mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle',
     );

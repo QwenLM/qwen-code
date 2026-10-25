@@ -297,12 +297,14 @@ jobs:
             # No write-back child inherits fd 9, or a cancelled job's survivor
             # would hold the host lock until it exits. The in-house coordinates
             # are never published, so drop any pre-PR copies from the host cache
-            # in the same locked stanza.
+            # in the same locked stanza. Resolver bookkeeping stays job-local:
+            # publishing it would hardlink an inode every later Maven run must
+            # rewrite outside the lock.
             write_back=0
             rm -rf -- "${HOME}/.m2/repository/com/alibaba/qwencode-sdk" "${HOME}/.m2/repository/com/alibaba/qwen-managed-agent-server" 9>&- || write_back=$?
             mkdir -p "${HOME}/.m2/repository" 9>&- || write_back=$?
             cd "${RUNNER_TEMP}/m2-repo"
-            timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+            timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 ! -name '_remote.repositories' ! -name 'maven-metadata-local.xml' ! -name 'resolver-status.properties' ! -name '*.lastUpdated' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
             if [ "${write_back}" -eq 124 ]; then
               echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
             elif [ "${write_back}" -ne 0 ]; then
@@ -351,13 +353,11 @@ jobs:
         run: |-
           # The ECS leg resolves the SDK from the job-local repository the
           # self-hosted step installed it into; the hosted leg's SDK comes
-          # from the default repository the state-test step populated.
+          # from the default repository the state-test step populated. The
+          # write-back never publishes resolver bookkeeping, so this run
+          # resolves from the job-local copy without unlinking.
           if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then
             export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${RUNNER_TEMP}/m2-repo"
-            # The suite step's write-back published this repository's
-            # resolver bookkeeping into the host cache as hardlinks; unlink
-            # those names so this run cannot rewrite the shared inodes.
-            find "${RUNNER_TEMP}/m2-repo" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' \) -delete 2>/dev/null || true
           fi
           mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle
 
@@ -857,12 +857,14 @@ jobs:
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits. The in-house coordinates
           # are never published, so drop any pre-PR copies from the host cache
-          # in the same locked stanza.
+          # in the same locked stanza. Resolver bookkeeping stays job-local:
+          # publishing it would hardlink an inode every later Maven run must
+          # rewrite outside the lock.
           write_back=0
           rm -rf -- "${HOME}/.m2/repository/com/alibaba/qwencode-sdk" "${HOME}/.m2/repository/com/alibaba/qwen-managed-agent-server" 9>&- || write_back=$?
           mkdir -p "${HOME}/.m2/repository" 9>&- || write_back=$?
           cd "${RUNNER_TEMP}/m2-repo"
-          timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 ! -name '_remote.repositories' ! -name 'maven-metadata-local.xml' ! -name 'resolver-status.properties' ! -name '*.lastUpdated' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
