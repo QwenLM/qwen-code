@@ -43,6 +43,32 @@ const makeModel = (
 };
 
 describe('flattenModelsBySource', () => {
+  it('attaches raw-key billing to collapsed, split, and aggregate fallback entries', () => {
+    const model = 'model-001';
+    const counts = {
+      [model]: { total: 30, bySource: { main: 0, 'agent::child': 30 } },
+    };
+    const main = coreWithRequests(1);
+    expect(
+      flattenModelsBySource({ [model]: makeModel({ main }) }, counts)[0]
+        .billableOutputTokens,
+    ).toBe(30);
+    expect(
+      flattenModelsBySource(
+        { [model]: makeModel({ main, 'agent::child': main }) },
+        counts,
+      ).map((entry) => entry.billableOutputTokens),
+    ).toEqual([0, 30]);
+    expect(
+      flattenModelsBySource({ [model]: { ...main, bySource: {} } }, counts)[0]
+        .billableOutputTokens,
+    ).toBe(30);
+    expect(
+      flattenModelsBySource({ [model]: makeModel({ main }) })[0]
+        .billableOutputTokens,
+    ).toBeUndefined();
+  });
+
   it('omits models with zero requests', () => {
     const entries = flattenModelsBySource({
       'idle-model': makeModel({}),
