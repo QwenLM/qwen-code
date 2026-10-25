@@ -2440,6 +2440,7 @@ describe('sanitizedGitEnv', () => {
         expect(env[key]).toBeUndefined();
       }
       expect(env['GIT_NO_REPLACE_OBJECTS']).toBe('1');
+      expect(env['GIT_GRAFT_FILE']).toBe('/dev/null/grafts');
     } finally {
       process.env = saved;
     }

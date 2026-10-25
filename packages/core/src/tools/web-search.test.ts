@@ -1263,6 +1263,39 @@ describe('WebSearchTool execute', () => {
     };
     expect(opts.defaultHeaders['X-Gateway-Route']).toBe('ds');
     expect(opts.defaultHeaders['User-Agent']).toContain('QwenCode/');
+    expect(opts.defaultHeaders).not.toHaveProperty('X-DashScope-Source-Config');
+  });
+
+  it.each([
+    [undefined, 'qwen-code-cli'],
+    ['CLI', 'qwen-code-cli'],
+    ['desktop', 'qwen-code-desktop'],
+  ])('attributes searches from channel %s', async (channel, t1) => {
+    respond([SEARCH_ITEM, MESSAGE_ITEM]);
+    await runSearch({
+      ...makeConfig({
+        models: [
+          dsModel({
+            baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+            generationConfig: {
+              customHeaders: { 'x-dashscope-source-config': 'user' },
+            },
+          }),
+        ],
+      }),
+      getChannel: () => channel,
+    } as Config);
+    const opts = mockCtorOpts.current as {
+      defaultHeaders: Record<string, string>;
+    };
+    expect(opts.defaultHeaders['X-DashScope-Source-Config']).toBe(
+      JSON.stringify({
+        channel: 'qianwenai-inner-agents',
+        source: 'model',
+        tags: { t1, t2: 'payg' },
+      }),
+    );
+    expect(opts.defaultHeaders).not.toHaveProperty('x-dashscope-source-config');
   });
 
   it('installs dynamic header expansion on the search client fetch', async () => {
