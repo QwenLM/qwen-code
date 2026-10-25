@@ -129,6 +129,27 @@ describe('runTestDelta', () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+  it('reruns a related run on base as written, like a whole suite', () => {
+    const related =
+      'npm exec --workspace="packages/core" --yes=false -- vitest related --run "src/a.ts"';
+    const ran: string[] = [];
+    const r = runWith(
+      [
+        cmd({
+          command: related,
+          output: ' FAIL  src/a.test.ts > case\n FAIL  src/b.test.ts > case',
+        }),
+      ],
+      (command) => {
+        ran.push(command);
+        return cmd({ command, output: ' FAIL  src/b.test.ts > case' });
+      },
+    );
+    expect(ran).toEqual([related]);
+    expect(r.netNew).toEqual(['src/a.test.ts']);
+    expect(r.shared).toEqual(['src/b.test.ts']);
+  });
+
   it('refuses the base-side rerun under `required` instead of running it on the host', () => {
     // The PR side now runs in a container with an env allowlist and no
     // network. Running the base side on the host anyway does not just break

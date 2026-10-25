@@ -68,7 +68,8 @@ import { TEST_COMMAND_RE } from './lib/npm-toolchain.js';
  * round-trips through the report into a shell.
  *
  * Restricting to the emitter's own grammar costs nothing real — `build-test`
- * produces `npm test` and `npm test --workspace="<dir>"`, both matched — and
+ * produces `npm test`, `npm test --workspace="<dir>"` and the related run
+ * (`npm exec … -- vitest related --run "<path>"…`), all matched — and
  * anything outside it is skipped and disclosed rather than run, which is
  * the same treatment every other thing this command cannot do gets.
  */

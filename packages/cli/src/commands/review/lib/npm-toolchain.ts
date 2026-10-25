@@ -30,6 +30,7 @@ import {
 import { resolveTestScope, type TestScope } from './workspace-scope.js';
 import { DEFAULT_WHOLE_CALL_BUDGET_S } from './build-budget.js';
 import { killedFromOutside, ranOutOfHeap } from './heap.js';
+import { relatedTests, type RelatedSelection } from './related-tests.js';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
 
 /**
@@ -66,6 +67,88 @@ function buildCommand(dir: string): string {
 /** The test command for a dir: the root package takes no `--workspace`. */
 function testCommand(dir: string): string {
   return dir === '.' ? 'npm test' : `npm test --workspace=${shellArg(dir)}`;
+}
+/**
+ * The command that runs only `dir`'s tests related to the diff. `npm exec`
+ * runs it in the workspace with the workspace's own `vitest`, as `npm test`
+ * does; `--yes=false` keeps npm from fetching one when there is none (the
+ * run env sets `npm_config_yes`). The paths are `PATH_TOKEN_RE`-clean, so
+ * quoting them is enough.
+ */
+function relatedCommand(dir: string, selection: RelatedSelection): string {
+  const workspace = dir === '.' ? '' : ` --workspace=${shellArg(dir)}`;
+  const config = selection.config ? ` --config "${selection.config}"` : '';
+  return (
+    `npm exec${workspace} --yes=false -- vitest related --run${config} ` +
+    selection.paths.map((p) => `"${p}"`).join(' ')
+  );
+}
+/** `relatedCommand`'s grammar; the dir is its first group. */
+const RELATED_COMMAND_RE =
+  /^npm exec(?: --workspace="([\w@./-]+)")? --yes=false -- vitest related --run(?: --config "(?!-)[\w@./-]+")?(?: "(?!-)[\w@./-]+")+$/;
+
+/** The dir a related run ran in (`.` for the root), or undefined for a whole suite. */
+export function relatedTestDir(command: string): string | undefined {
+  const m = RELATED_COMMAND_RE.exec(command);
+  return m ? (m[1] ?? '.') : undefined;
+}
+
+/**
+ * Each suite's test command for one run: the related run where `relatedTests`
+ * selects one, the whole suite otherwise. The fresh run and `--resume` build
+ * it from the same tree and plan, so a continuation runs what the first call
+ * would have.
+ */
+function testCommands(
+  root: string,
+  args: Pick<ToolchainRunArgs, 'changedFiles' | 'renamedFrom'>,
+  scope: { globs: string[]; singleRoot: boolean; graph: WorkspacePackage[] },
+): (dir: string) => string {
+  const related = relatedTests({
+    root,
+    changed: args.changedFiles,
+    renamedFrom: args.renamedFrom ?? [],
+    ownerOf: (file) =>
+      scope.singleRoot ? null : workspaceDirFor(file, scope.globs),
+    reachOf: (dir) => buildSetFor([dir], scope.graph),
+  });
+  return (dir) => {
+    const selection = related.select(dir);
+    return selection ? relatedCommand(dir, selection) : testCommand(dir);
+  };
+}
+
+/** The dirs whose suite ran only its related tests, sorted. */
+function relatedDirs(test: CommandResult[]): string[] {
+  const dirs = test
+    .map((t) => relatedTestDir(t.command))
+    .filter((d): d is string => d !== undefined);
+  return [...new Set(dirs)].sort();
+}
+
+/**
+ * What the related runs leave out, for the note. A related run that found
+ * nothing to run passes (vitest's `passWithNoTests`), and "Everything
+ * passed" beside it must not read as a suite that ran.
+ */
+function relatedTestsSentence(test: CommandResult[]): string {
+  const dirs = relatedDirs(test);
+  if (dirs.length === 0) return '';
+  const none = relatedDirs(
+    test.filter(
+      (t) => t.exitCode === 0 && /No test files found/.test(t.output),
+    ),
+  );
+  return (
+    ` In ${dirs.join(', ')}, only the tests related to the diff ran ` +
+    '(`vitest related`: the tests that import a changed file, or import a ' +
+    'file that names one) — not the whole suite. A test that reads a ' +
+    'changed file without naming it, or lists a directory, is not among ' +
+    'them.' +
+    (none.length > 0
+      ? ` In ${none.join(', ')}, no test is related to the diff, so none ran.`
+      : '')
+  );
 }
 /**
  * The installer a repo's lockfile calls for, or null when it commits neither.
@@ -116,8 +199,12 @@ export function npmInstallComplete(root: string): boolean {
  * The character class covers every workspace dir this repo shape produces;
  * a dir exotic enough to fall outside it costs that report its resume (a
  * named refusal, pointing at a fresh run), never a verbatim re-execution.
+ * The related run (`relatedCommand`) is the second form: its paths are
+ * quoted tokens of the same character class, none of them a flag.
  */
-export const TEST_COMMAND_RE = /^npm test(?: --workspace="[\w@./-]+")?$/;
+export const TEST_COMMAND_RE = new RegExp(
+  `${/^npm test(?: --workspace="[\w@./-]+")?$/.source}|${RELATED_COMMAND_RE.source}`,
+);
 
 /**
  * Workspace packages the compiler said it could not resolve.
@@ -318,9 +405,10 @@ function resumeNpmToolchain(
     ...pendingDirs.filter((d) => affectedSet.has(d)),
     ...pendingDirs.filter((d) => !affectedSet.has(d)),
   ];
+  const commandFor = testCommands(root, args, scopeOf(root));
   const work: Array<{ command: string; dir: string | null }> = [
     ...retryCommands.map((command) => ({ command, dir: null })),
-    ...orderedPending.map((dir) => ({ command: testCommand(dir), dir })),
+    ...orderedPending.map((dir) => ({ command: commandFor(dir), dir })),
   ];
   if (work.length === 0) {
     // "Every suite ran" and "no suite ever ran" both reach here with nothing
@@ -525,10 +613,40 @@ function resumeNpmToolchain(
         timedOut,
         [...stillPending, ...unattemptedRetries],
         stillClamped,
-      ) + (testScope?.caveat ? ` Caveat: ${testScope.caveat}.` : ''),
+      ) +
+      relatedTestsSentence(mergedTest) +
+      (testScope?.caveat ? ` Caveat: ${testScope.caveat}.` : ''),
     ...(testScope ? { testScope } : {}),
   };
+  // Read off the merged commands, not carried: a continuation's suites are
+  // related or whole by the same selection, and the field names both.
+  const related = relatedDirs(mergedTest);
+  if (related.length > 0) merged.relatedTests = related;
+  else delete merged.relatedTests;
   return merged;
+}
+
+/**
+ * The scope graph as the fresh run reads it, for a continuation: it runs no
+ * scope decision of its own, but its related runs need what each suite can
+ * import from.
+ */
+function scopeOf(root: string): {
+  globs: string[];
+  singleRoot: boolean;
+  graph: WorkspacePackage[];
+} {
+  const globs = readWorkspaceGlobs(root);
+  const rootPkg = readRootPackage(root);
+  const singleRoot = globs.length === 0 && rootPkg !== null;
+  const { packages } = readWorkspacePackages(root);
+  const graph =
+    singleRoot && rootPkg
+      ? [rootPkg]
+      : rootPkg
+        ? [rootPkg, ...packages]
+        : packages;
+  return { globs, singleRoot, graph };
 }
 
 /** The merged report's one-line story, rewritten for the continued run. */
@@ -1233,6 +1351,11 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       ? new Set(reverseDependencyClosure(notBuilt, scopeGraph))
       : new Set<string>();
   const notRun: string[] = [];
+  const commandFor = testCommands(root, args, {
+    globs,
+    singleRoot,
+    graph: scopeGraph,
+  });
   for (let i = 0; i < runnableDirs.length; i++) {
     const dir = runnableDirs[i];
     if (untestable.has(dir)) {
@@ -1258,12 +1381,14 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     // 401s) was admitted with 286s of its 300s deadline and killed, and
     // nothing downstream could tell that from a suite that genuinely hangs.
     const deadline = Math.min(perCommandMs, remaining);
-    const r = exec(testCommand(dir), root, deadline);
+    const r = exec(commandFor(dir), root, deadline);
     const clamped = r.timedOut && deadline < perCommandMs;
     results.test.push(clamped ? { ...r, clamped: true } : r);
     if (r.timedOut) results.timedOut.push(r.command);
     if (r.exitCode !== 0) results.ok = false;
   }
+  const related = relatedDirs(results.test);
+  if (related.length > 0) results.relatedTests = related;
 
   // The test phase ran NOTHING and left work behind: stamp it. A single-root
   // run in this state writes no testScope and keeps ok: true (the build
@@ -1357,6 +1482,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
           'the changed workspaces and every workspace declared to depend on ' +
           'them that defines a test script. Everything passed.';
       }
+      testsClause += relatedTestsSentence(results.test);
       if (testScope?.caveat) testsClause += ` Caveat: ${testScope.caveat}.`;
       // The root is not a workspace: count it separately, or a 22-member repo
       // reports "of 23" — a number in a report whose thesis is honest numbers.
@@ -1391,6 +1517,8 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
         .filter(Boolean)
         .join(' ');
     }
+    // The ok branch says it inside its tests clause, ahead of the caveat.
+    if (!results.ok) results.note += relatedTestsSentence(results.test);
   }
 
   // A failure note must carry the caveat too — the note is what the brief
