@@ -31,8 +31,12 @@ import {
   type Snapshot,
 } from './snapshot.js';
 import {
+  MAX_NEEDS_HUMAN,
   REPLY_MARKER,
-  assertOwnedBySession,
+  assertWatching,
+  isRegularFile,
+  TASK_OPTION,
+  taskArg,
   autofixPrPaths,
   repoRoot,
   requireState,
@@ -46,6 +50,9 @@ import {
 /** GitHub refuses a comment body longer than this. */
 const MAX_BODY_CHARS = 65_536;
 
+/** Longest `needsHuman` line kept; a longer one is cut. */
+const MAX_NEEDS_HUMAN_CHARS = 300;
+
 export interface ReplyPlan {
   /** Replies to review threads, by the thread's first comment. */
   replies?: Array<{ replyTo: number; body: string; handled: string[] }>;
@@ -57,6 +64,8 @@ export interface ReplyPlan {
   handledChecks?: string[];
   /** The head's merge conflict was left for a human. */
   handledConflict?: boolean;
+  /** One line per item the round left for a person, for `status`. */
+  needsHuman?: string[];
 }
 
 export interface ReplyOutcome {
@@ -115,6 +124,7 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
     'handled',
     'handledChecks',
     'handledConflict',
+    'needsHuman',
   ]);
   const unknown = Object.keys(plan).filter((key) => !known.has(key));
   if (unknown.length > 0) {
@@ -188,6 +198,19 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
     handled,
     handledChecks: stringList(plan['handledChecks'], 'handledChecks'),
     handledConflict: conflict === true,
+    // Shown in a list, one line each.
+    needsHuman: stringList(plan['needsHuman'], 'needsHuman').map((text) => {
+      // By code point, so a cut never splits a surrogate pair.
+      const line = [
+        ...text
+          .replace(/\p{Cf}/gu, '')
+          .replace(/[\s\p{Cc}]+/gu, ' ')
+          .trim(),
+      ];
+      return line.length > MAX_NEEDS_HUMAN_CHARS
+        ? `${line.slice(0, MAX_NEEDS_HUMAN_CHARS - 1).join('')}…`
+        : line.join('');
+    }),
   };
 }
 
@@ -204,6 +227,8 @@ function keyHead(key: string): string | null {
  * the head carries.
  */
 function snapshotChecks(path: string): Set<string> {
+  // A FIFO in its place would block, the lock held.
+  if (!isRegularFile(path)) return new Set();
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -301,6 +326,8 @@ export interface ReplyArgs {
   planPath: string;
   /** `--no-post`: record what was handled, post nothing (`--no-reply`). */
   post: boolean;
+  /** The scheduled task that woke the round. */
+  task?: string;
 }
 
 export function runReply(args: ReplyArgs): ReplyOutcome {
@@ -315,7 +342,7 @@ function replyLocked(
   paths: AutofixPrPaths,
 ): ReplyOutcome {
   let state = requireState(paths.statePath, args.pr);
-  assertOwnedBySession(state);
+  assertWatching(state, args.task);
   setGhHost(state.host);
   ensureAuthenticated();
   // Every bot thread the plan may name was asked about by the round's
@@ -451,6 +478,26 @@ function replyLocked(
     }
     currentChecks.push(key);
   }
+
+  // Kept per head, newest last: a later round answers new events only, so
+  // what an earlier one left stays listed until the watch ends. Recorded
+  // before anything is posted: a reply that reaches the PR marks its
+  // comments handled at once, and a round after a later failure would not
+  // see them again.
+  const now = new Date().toISOString();
+  const needsHuman = [
+    ...(state.needsHuman ?? []),
+    ...[...new Set(plan.needsHuman)]
+      .filter(
+        (text) =>
+          text !== '' &&
+          !(state.needsHuman ?? []).some(
+            (item) => item.sha === head && item.text === text,
+          ),
+      )
+      .map((text) => ({ sha: head, at: now, text })),
+  ].slice(-MAX_NEEDS_HUMAN);
+  if (needsHuman.length > 0) record({ needsHuman });
 
   const outcome: ReplyOutcome = {
     posted: [],
@@ -599,7 +646,8 @@ export const replyCommand: CommandModule = {
         default: true,
         describe:
           'Post the replies and the summary; --no-post only records what was handled',
-      }),
+      })
+      .option('task', TASK_OPTION),
   handler: (argv) => {
     writeStdoutLine(
       JSON.stringify(
@@ -607,6 +655,7 @@ export const replyCommand: CommandModule = {
           pr: Number(argv['pr']),
           planPath: String(argv['plan']),
           post: Boolean(argv['post']),
+          task: taskArg(argv),
         }),
       ),
     );

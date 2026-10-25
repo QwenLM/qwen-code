@@ -1362,6 +1362,7 @@ public class ManagedSessionStore {
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
+        ManagedUserMessageStore.capture(jdbc, tenantId, sessionId, applied.records());
         publishJournalAfterCommit(validated.recordBytes());
         return new CommitReceipt(revision, request.transactionId(),
                 request.commandId(), request.operation(),

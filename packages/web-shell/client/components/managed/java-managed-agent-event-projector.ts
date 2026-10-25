@@ -107,6 +107,7 @@ function eventType(
 ): ManagedAgentSessionEventType | undefined {
   switch (type) {
     case 'turn.accepted':
+    case 'item.input.added':
       return 'accepted';
     case 'environment.provisioning':
       return 'runtime_starting';

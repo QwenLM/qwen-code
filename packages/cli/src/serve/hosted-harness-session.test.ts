@@ -378,6 +378,7 @@ vi.mock(
         resourceStore,
         toolResultResources: state.toolResults ?? resourceStore,
         assertWritable: state.assertWritable,
+        claimUserMessages: async () => [],
         setLifecycleAuthority: state.setLifecycleAuthority,
         authorizeOrdinary: state.authorizeOrdinary,
         authorizeLifecycle: state.authorizeLifecycle,
@@ -16363,7 +16364,6 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'web_fetch',
       'run_shell_command',
-      'monitor',
       'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
@@ -16430,7 +16430,6 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'web_fetch',
       'run_shell_command',
-      'monitor',
       'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
