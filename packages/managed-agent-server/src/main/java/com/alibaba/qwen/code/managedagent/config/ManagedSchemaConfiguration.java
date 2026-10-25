@@ -57,11 +57,11 @@ public class ManagedSchemaConfiguration {
             }
             // Broker may have initialized the same canonical baseline first.
             if (populated) {
-                int version = ManagedSchema.schemaVersion(source);
+                ManagedSchema.validate(source);
                 if (!history) {
                     org.flywaydb.core.Flyway.configure()
                             .configuration(flyway.getConfiguration())
-                            .baselineVersion(Integer.toString(version))
+                            .baselineVersion("1")
                             .load()
                             .baseline();
                 }

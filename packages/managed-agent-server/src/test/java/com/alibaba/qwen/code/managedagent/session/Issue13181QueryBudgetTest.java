@@ -82,9 +82,7 @@ import static org.mockito.Mockito.when;
  *   <li>listPublicSessions / listWebShellSessions assemble a page from a
  *       fixed number of grouped batch queries.</li>
  *   <li>Tool-publication authorization and async heartbeats
- *       read the activation state from the journal head when journal-head-authorization is enabled (the flag
- *       ships false), rescanning the journal only for pre-migration heads
- *       (and backfilling them).</li>
+ *       read activation state from the journal head and refuse stale projections.</li>
  * </ol>
  */
 class Issue13181QueryBudgetTest {
@@ -1150,13 +1148,7 @@ class Issue13181QueryBudgetTest {
     }
 
     private PublicationFixture publicationFixture(Fixture fixture) {
-        return publicationFixture(fixture, true);
-    }
-
-    private PublicationFixture publicationFixture(Fixture fixture,
-            boolean journalHeadAuthorization) {
-        journal = PublicationJournalFixture.create(fixture.dataSource,
-                journalHeadAuthorization);
+        journal = PublicationJournalFixture.create(fixture.dataSource);
         binding = journal.binding;
         checkpoint = journal.checkpoint;
         journal.reserve();
@@ -1361,14 +1353,10 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void preV36CommitSkewStillFencesWhileTheHeadGateIsOff() {
+    void staleHeadStampRefusesAuthorizationWithoutScanning() {
         Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture, false);
-        // The head columns hold the active activation from the dispatch
-        // commit. A pre-V36 binary then commits a release: the journal gains
-        // the row and the revision bumps, but the columns stay untouched.
-        // Reproduce that exact skew by restoring the columns and their stamp
-        // after a real release commit.
+        PublicationFixture publication = publicationFixture(fixture);
+        // Restore a stale active projection after a committed release.
         var head = fixture.jdbc.queryForMap("SELECT activation_id,"
                 + " activation_phase, activation_event_epoch,"
                 + " activation_expires_at, activation_head_revision"
@@ -1387,83 +1375,12 @@ class Issue13181QueryBudgetTest {
                 head.get("activation_event_epoch"),
                 head.get("activation_expires_at"),
                 head.get("activation_head_revision"));
-        // The gate ships off: authorization reads the journal and fences
-        // the release instead of trusting the stale active head.
+        // A stale projection cannot authorize the original execution.
         fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().verifyDispatch(
                 publication.executions().findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
-        // The legacy path's cost is explicit: one locked journal read (the
-        // release sits at the latest revision), no head write.
-        assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isEqualTo(1);
-        assertThat(fixture.ledger.count("update ma_session_head"))
-                .isZero();
-        // The renew path's evidence read must not trust the stale head
-        // either.
-        assertThatThrownBy(() -> publication.store().apply(request("renew"),
-                WRITER_TOKEN, PUBLICATION_TOKEN))
-                .hasMessageContaining("Activation is not active");
-    }
-
-    @Test
-    void staleHeadStampRescansInsteadOfTrustingTheColumns() {
-        Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture);
-        // The rolling-window residue: columns backfilled active, then a
-        // pre-V36 binary commits a release, bumping journal_revision without
-        // touching the columns. Reproduce by restoring the columns and their
-        // stamp after a real release commit, with the gate ON.
-        var head = fixture.jdbc.queryForMap("SELECT activation_id,"
-                + " activation_phase, activation_event_epoch,"
-                + " activation_expires_at, activation_head_revision"
-                + " FROM ma_session_head");
-        append("activation.release",
-                event(journal.sequence + 1, "activation.changed",
-                        activation("released")) + COMMIT_MARKER,
-                1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
-                "checkpoint-1");
-        fixture.jdbc.update("UPDATE ma_session_head SET"
-                        + " activation_id = ?, activation_phase = ?,"
-                        + " activation_event_epoch = ?,"
-                        + " activation_expires_at = ?,"
-                        + " activation_head_revision = ?",
-                head.get("activation_id"), head.get("activation_phase"),
-                head.get("activation_event_epoch"),
-                head.get("activation_expires_at"),
-                head.get("activation_head_revision"));
-        // The stamp lags journal_revision, so the head is not trusted: the
-        // legacy scan fences the released activation even with the gate on.
-        fixture.ledger.reset();
-        assertThatThrownBy(() -> publication.store().verifyDispatch(
-                publication.executions().findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN))
-                .hasMessageContaining("Original activation is fenced");
-        assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isGreaterThan(0);
-    }
-
-    @Test
-    void staleHeadStampRebackfillsAndRejoinsTheHeadPath() {
-        Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture);
-        // The self-heal arm: the columns are current but the stamp lags, so
-        // the first authorization scans and re-stamps; the next reads the
-        // head again.
-        fixture.jdbc.update("UPDATE ma_session_head SET"
-                + " activation_head_revision = activation_head_revision - 1");
-        publication.store().verifyDispatch(publication.executions()
-                .findByExecutionCallId("execution-1"), "pub-1",
-                PUBLICATION_TOKEN);
-        var head = fixture.jdbc.queryForMap("SELECT activation_head_revision,"
-                + " journal_revision FROM ma_session_head");
-        assertThat(head.get("activation_head_revision"))
-                .isEqualTo(head.get("journal_revision"));
-        fixture.ledger.reset();
-        publication.store().verifyDispatch(publication.executions()
-                .findByExecutionCallId("execution-1"), "pub-1",
-                PUBLICATION_TOKEN);
         assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
     }
@@ -1472,10 +1389,7 @@ class Issue13181QueryBudgetTest {
     void noChangeCommitDoesNotRestampASkewedHead() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        // The rolling-window skew: the columns hold the active activation,
-        // then a pre-V36 binary commits a release (journal row + revision
-        // bump, columns and stamp untouched) — reproduced by restoring the
-        // pre-commit columns and stamp after a real release commit.
+        // Simulate a stale active projection without rewinding the journal.
         var head = fixture.jdbc.queryForMap("SELECT activation_id,"
                 + " activation_phase, activation_event_epoch,"
                 + " activation_expires_at, activation_head_revision"
@@ -1506,24 +1420,21 @@ class Issue13181QueryBudgetTest {
                         + " FROM ma_session_head");
         assertThat(stamped.get("activation_head_revision"))
                 .isNotEqualTo(stamped.get("journal_revision"));
-        // The skew stays detectable: authorization rescans the journal and
-        // fences the release.
+        // The skew stays detectable and authorization refuses it.
         fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().verifyDispatch(
                 publication.executions().findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
         assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isGreaterThan(0);
+                "for update")).isZero();
     }
 
     @Test
     void unrepresentableExpiresAtFencesTheHeadCleanly() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        // An activation with no expiresAt: id/phase are stored, the expiry
-        // column stays NULL, and the head branch must refuse cleanly (a
-        // missing expiry fails exactly like the scan's absent read).
+        // A missing expiry cannot authorize an active grant.
         ObjectNode noExpiry = JSON.createObjectNode()
                 .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active");
@@ -1612,9 +1523,7 @@ class Issue13181QueryBudgetTest {
     void expiredActivationFencesThroughTheHead() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        // A warm head carrying an already-expired activation: both grant
-        // paths must refuse through the head columns, exactly as the scan
-        // would refuse the same payload.
+        // Both grant paths refuse an expired activation through the head.
         ObjectNode expired = JSON.createObjectNode()
                 .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active")
@@ -1642,29 +1551,25 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void legacyHeadRenewBackfillsFromTheJournalScan() {
+    void missingActivationHeadRefusesAuthorizationWithoutScanning() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        // Simulate a pre-V36 head: the evidence scan on renew authorizes
-        // from the journal and backfills the head columns.
         fixture.jdbc.update("UPDATE ma_session_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
                 + " activation_event_epoch = NULL,"
                 + " activation_expires_at = NULL,"
                 + " activation_head_revision = NULL");
-        publication.store().apply(request("renew"), WRITER_TOKEN,
-                PUBLICATION_TOKEN);
-        assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
-                        + " ma_session_head", String.class))
-                .isEqualTo("active");
-        // The next authorization reads the head: zero journal reads.
         fixture.ledger.reset();
-        publication.store().verifyDispatch(publication.executions()
-                .findByExecutionCallId("execution-1"), "pub-1",
-                PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count(
-                "from ma_session_journal_tx", "for update"))
-                .isZero();
+        assertThatThrownBy(() -> publication.store().apply(request("renew"),
+                WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Activation is not active");
+        assertThatThrownBy(() -> publication.store().verifyDispatch(
+                publication.executions().findByExecutionCallId("execution-1"),
+                "pub-1", PUBLICATION_TOKEN))
+                .hasMessageContaining("Original activation is fenced");
+        assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
+                        + " ma_session_head", String.class)).isNull();
     }
 
     @Test
@@ -1721,109 +1626,6 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void oversizedActivationPhaseBlanksTheHeadColumnsCleanly() {
-        Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture);
-        // The phase arm of the width guard: a 33+ character phase with a
-        // conforming id blanks the columns instead of failing the commit,
-        // and the stamp still advances.
-        append("activation.wide-phase",
-                event(journal.sequence + 1, "activation.changed",
-                        JSON.createObjectNode()
-                                .put("activationId", ACTIVATION_ID)
-                                .put("epoch", 1)
-                                .put("phase", "active-" + "a".repeat(40))
-                                .put("expiresAt",
-                                        System.currentTimeMillis() + 180000))
-                        + COMMIT_MARKER,
-                1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
-                "checkpoint-1");
-        assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
-                        + " ma_session_head", String.class))
-                .isNull();
-        var head = fixture.jdbc.queryForMap("SELECT activation_head_revision,"
-                + " journal_revision FROM ma_session_head");
-        assertThat(head.get("activation_head_revision"))
-                .isEqualTo(head.get("journal_revision"));
-        // Authorization reads the journal and fences the unknown phase.
-        fixture.ledger.reset();
-        assertThatThrownBy(() -> publication.store().verifyDispatch(
-                publication.executions().findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN))
-                .hasMessageContaining("Original activation is fenced");
-        assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isGreaterThan(0);
-    }
-
-    @Test
-    void oversizedJournalActivationFencesAuthorizationCleanly() {
-        Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture);
-        // A non-conforming writer commits an activation.changed wider than
-        // the V36 columns; the commit blanks the head columns.
-        append("activation.oversize",
-                event(journal.sequence + 1, "activation.changed",
-                        JSON.createObjectNode()
-                                .put("activationId",
-                                        "activation-" + "a".repeat(600))
-                                .put("epoch", 1).put("phase", "active")
-                                .put("expiresAt",
-                                        System.currentTimeMillis() + 180000))
-                        + COMMIT_MARKER,
-                1, List.of(), null);
-        assertThat(fixture.jdbc.queryForObject("SELECT activation_id FROM"
-                        + " ma_session_head", String.class))
-                .isNull();
-        // Authorization reads the journal and fences the id mismatch
-        // cleanly — no storage error from writing the oversized value.
-        assertThatThrownBy(() -> publication.store().verifyDispatch(
-                publication.executions().findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN))
-                .hasMessageContaining("Original activation is fenced");
-    }
-
-    @Test
-    void publicationAuthorizationRescansAndBackfillsPreMigrationHeads() {
-        Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture);
-        ToolPublicationStore store = publication.store();
-        JdbcToolExecutionRepository executions = publication.executions();
-        int filler = 30;
-        for (int index = 0; index < filler; index++) {
-            append("tool.dispatch",
-                    event(journal.sequence + 1, "tool.intent",
-                            JSON.createObjectNode()) + COMMIT_MARKER,
-                    1, List.of(), null);
-        }
-        // Simulate a journal last written before migration V36.
-        fixture.jdbc.update("UPDATE ma_session_head SET"
-                + " activation_id = NULL, activation_phase = NULL,"
-                + " activation_event_epoch = NULL,"
-                + " activation_expires_at = NULL,"
-                + " activation_head_revision = NULL");
-
-        fixture.ledger.reset();
-        store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN);
-        long scans = fixture.ledger.count(
-                "from ma_session_journal_tx", "for update");
-        System.out.println("[issue-13181] legacy head verifyDispatch: "
-                + scans + " locked journal reads, then backfilled");
-        // The legacy fallback scans the filler revisions plus the
-        // activation's own.
-        assertThat(scans).isEqualTo(filler + 1L);
-        // The scan backfills the head, so later checks are O(1).
-        assertThat(fixture.jdbc.queryForObject(
-                "SELECT activation_phase FROM ma_session_head",
-                String.class)).isEqualTo("active");
-        fixture.ledger.reset();
-        store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isZero();
-    }
-
-    @Test
     void renewReadsTheIntentAtItsOwnRevision() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
@@ -1851,15 +1653,13 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void stringExpiresAtReadsConsistentlyAcrossTheScanAndTheHead() {
+    void stringExpiresAtIsProjectedIntoTheHead() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
         ToolPublicationStore store = publication.store();
         JdbcToolExecutionRepository executions = publication.executions();
         long expiry = System.currentTimeMillis() + 180000;
-        // A non-conforming writer sends expiresAt as a JSON string; the
-        // commit must store what the scans have always parsed, or the head
-        // would fence what the scan authorizes.
+        // Numeric strings use the same bounded expiry projection as numbers.
         ObjectNode stringExpiry = JSON.createObjectNode()
                 .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active")
@@ -1873,23 +1673,6 @@ class Issue13181QueryBudgetTest {
                         + " FROM ma_session_head",
                 Long.class)).isEqualTo(expiry);
         // The head branch authorizes it without a journal read.
-        fixture.ledger.reset();
-        store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isZero();
-        // A pre-V36 head scans the journal, parses the same value, and
-        // backfills it; the next authorization reads the head again.
-        fixture.jdbc.update("UPDATE ma_session_head SET"
-                + " activation_id = NULL, activation_phase = NULL,"
-                + " activation_event_epoch = NULL,"
-                + " activation_expires_at = NULL,"
-                + " activation_head_revision = NULL");
-        store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN);
-        assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
-                        + " FROM ma_session_head",
-                Long.class)).isEqualTo(expiry);
         fixture.ledger.reset();
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);

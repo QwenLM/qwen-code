@@ -42,6 +42,7 @@ const mocks = vi.hoisted(() => ({
     createSession: vi.fn(),
     submitPrompt: vi.fn(),
     cancel: vi.fn(),
+    queryCancelOperation: vi.fn(),
   },
 }));
 
@@ -173,7 +174,6 @@ function summary(
     sessionId,
     activeTurnId: 'p1',
     title: `Task ${sessionId}`,
-    workspaceCwd: '/workspace',
     createdAt: 10,
     updatedAt: 20,
     admittedAt: 10,
@@ -225,10 +225,8 @@ describe('ManagedSessionsPage', () => {
     vi.clearAllMocks();
     mocks.restoreEditorDraft.mockReturnValue('');
     provider = {
-      kind: 'java',
       storageKey: 'http://managed-test',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       ...mocks.client,
     };
     sessionStorage.clear();
@@ -267,7 +265,18 @@ describe('ManagedSessionsPage', () => {
       sessionId: 's1',
       turnId: 'p-next',
     });
-    mocks.client.cancel.mockResolvedValue({ accepted: true });
+    mocks.client.cancel.mockResolvedValue({
+      sessionId: 's1',
+      turnId: 'p1',
+      operationId: 'cancel-1',
+    });
+    mocks.client.queryCancelOperation.mockResolvedValue({
+      sessionId: 's1',
+      operationId: 'cancel-1',
+      type: 'cancel',
+      status: 'running',
+      replayed: false,
+    });
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -294,7 +303,6 @@ describe('ManagedSessionsPage', () => {
           <ManagedSessionsPage
             sessionId={sessionId}
             onSelectSession={onSelect}
-            workspaceCwd="/workspace"
             managedAgentProvider={managedAgentProvider ?? undefined}
             navigationTarget={navigationTarget}
             interactive={interactive}
@@ -391,22 +399,70 @@ describe('ManagedSessionsPage', () => {
       )!;
       expect(nav.textContent).toContain(active.title);
       expect(nav.textContent).not.toContain(archived.title);
-      await act(async () => {
-        [...nav.querySelectorAll('button')]
-          .find((button) => button.textContent === 'Archived')!
-          .click();
-        await flush();
-      });
+      const archiveSlot = document.createElement('aside');
+      container.appendChild(archiveSlot);
+      if (withWorkspaceBinding) {
+        expect(nav.querySelector('[aria-pressed]')).toBeNull();
+        expect(mocks.client.listSessions).toHaveBeenCalledOnce();
+        await render('s1', 'en', provider, slot, true, {
+          archivedNavigationTarget: archiveSlot,
+        });
+      } else {
+        await act(async () => {
+          [...nav.querySelectorAll('button')]
+            .find((button) => button.textContent === 'Archived')!
+            .click();
+          await flush();
+        });
+      }
       expect(
         mocks.client.listSessions.mock.calls.map(
           ([options]) => options.archiveState,
         ),
       ).toEqual(['unarchived', 'archived']);
-      expect(nav.textContent).toContain(archived.title);
-      expect(nav.textContent).not.toContain(active.title);
+      if (withWorkspaceBinding) {
+        expect(archiveSlot.textContent).toContain(archived.title);
+        expect(archiveSlot.textContent).not.toContain(active.title);
+        expect(nav.textContent).toContain(active.title);
+        expect(nav.textContent).not.toContain(archived.title);
+      } else {
+        expect(nav.textContent).toContain(archived.title);
+        expect(nav.textContent).not.toContain(active.title);
+      }
       expect(onSelect).not.toHaveBeenCalled();
     },
   );
+
+  it('restores the active list when returning home from standalone archived history', async () => {
+    provider = {
+      ...provider,
+      lifecycle: { submit: vi.fn(), unarchive: vi.fn(), query: vi.fn() },
+    };
+    mocks.client.listSessions.mockImplementation(
+      async ({ archiveState }: { archiveState?: string }) => ({
+        sessions: [
+          summary(archiveState === 'archived' ? 'archived' : 'active', {
+            lifecycleStatus:
+              archiveState === 'archived' ? 'archived' : 'active',
+          }),
+        ],
+      }),
+    );
+    await render();
+    await click('Archived');
+    expect(container.querySelector('nav')?.textContent).toContain(
+      'Task archived',
+    );
+    const slot = document.createElement('aside');
+    document.body.appendChild(slot);
+    try {
+      await render(undefined, 'en', provider, slot);
+      expect(slot.textContent).toContain('Task active');
+      expect(slot.textContent).not.toContain('Task archived');
+    } finally {
+      slot.remove();
+    }
+  });
 
   it.each(['closed', 'archived'])(
     'keeps %s history read only when native recovery is ready',
@@ -564,6 +620,45 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('nav')?.textContent).toContain(
       'Confirmed name',
     );
+  });
+
+  it('queries complete history from the shared sidebar search without duplicate controls', async () => {
+    provider = { ...provider, titleSearch: true };
+    mocks.client.listSessions.mockImplementation(
+      async ({ titleQuery }: { titleQuery?: string }) => ({
+        sessions: [
+          titleQuery
+            ? summary('remote', { title: 'Remote history' })
+            : summary('recent', { title: 'Recent task' }),
+        ],
+      }),
+    );
+    const slot = document.createElement('aside');
+    document.body.appendChild(slot);
+    try {
+      await render(undefined, 'en', provider, slot, true, {
+        navigationSearch: 'Remote history',
+      });
+      expect(mocks.client.listSessions).toHaveBeenLastCalledWith(
+        expect.objectContaining({ titleQuery: 'Remote history' }),
+      );
+      expect(slot.querySelector('nav')).not.toBeNull();
+      expect(slot.textContent).toContain('Remote history');
+      expect(slot.textContent).not.toContain('Recent task');
+      expect(slot.querySelector('input')).toBeNull();
+      expect(slot.textContent).not.toContain('Managed sessions');
+      expect(slot.textContent).not.toContain('Refresh');
+
+      await render(undefined, 'en', provider, slot, true, {
+        navigationSearch: '',
+      });
+      expect(
+        mocks.client.listSessions.mock.calls.at(-1)?.[0],
+      ).not.toHaveProperty('titleQuery');
+      expect(slot.textContent).toContain('Recent task');
+    } finally {
+      slot.remove();
+    }
   });
 
   it('does not expose rename when permission or interactivity is missing', async () => {
@@ -861,6 +956,64 @@ describe('ManagedSessionsPage', () => {
       'This session does not support changing its approval policy',
     );
   });
+
+  it('retains attachment support while refreshing and applies an explicit revocation', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+        },
+      }),
+    );
+    await render('s1');
+    const composer = container.querySelector('form');
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+    let resolveSummary!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementation(
+      () => new Promise((resolve) => (resolveSummary = resolve)),
+    );
+    await act(async () => {
+      [...container.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Refresh')!
+        .click();
+      await flush();
+    });
+    expect(container.querySelector('form')).toBe(composer);
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+    await act(async () => {
+      resolveSummary(summary('s1'));
+      await flush();
+    });
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(false);
+  });
+
+  it.each(['session', 'provider'] as const)(
+    'does not carry attachment support into a different %s while loading',
+    async (change) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: {
+            canSend: true,
+            canCancel: false,
+            inputAttachments: true,
+          },
+        }),
+      );
+      await render('s1');
+      expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+      mocks.client.getSession.mockImplementation(() => new Promise(() => {}));
+      await render(
+        change === 'session' ? 's2' : 's1',
+        'en',
+        change === 'provider'
+          ? { ...provider, storageKey: 'other-provider' }
+          : provider,
+      );
+      expect(mocks.editorProps?.attachmentsEnabled).toBe(false);
+    },
+  );
 
   it('shows the actual model and context in the fixed composer and retains them after refresh', async () => {
     const observation = {
@@ -1688,8 +1841,8 @@ describe('ManagedSessionsPage', () => {
         expect.objectContaining({ cursor: 'sessions-next' }),
       );
       await act(async () =>
-        [...slot.querySelectorAll('button')]
-          .find((item) => item.textContent === 'Task s2')!
+        slot
+          .querySelector<HTMLElement>('[data-managed-session-id="s2"]')!
           .click(),
       );
       expect(openSession).toHaveBeenCalledWith('s2', 'ws-b');
@@ -1708,9 +1861,13 @@ describe('ManagedSessionsPage', () => {
     }
   });
 
-  it.each(['completed', 'failed', 'cancelled'] as const)(
+  it.each([
+    ['completed', 'Completed'],
+    ['failed', 'Failed'],
+    ['cancelled', 'Cancelled'],
+  ] as const)(
     'retains selected status after switching and clears a background %s task without losing paged rows',
-    async (phase) => {
+    async (phase, statusLabel) => {
       vi.useFakeTimers();
       const bound = { workspaceId: 'ws-a', cwdRelative: '.' };
       let first = summary('s1', { phase: 'tool_running', workspace: bound });
@@ -1747,9 +1904,15 @@ describe('ManagedSessionsPage', () => {
         slot.querySelector(`[data-managed-session-id="${id}"]`)!;
       try {
         await render('s1', 'en', provider, slot);
-        expect(row('s1').getAttribute('title')).toBe('Executing tool');
+        await act(async () => {
+          row('s1').dispatchEvent(new Event('pointerover', { bubbles: true }));
+          await vi.advanceTimersByTimeAsync(300);
+        });
+        const details = () =>
+          document.querySelector('[data-web-shell-session-details-content]')!;
+        expect(details().textContent).toContain('Executing tool');
         await render('s2', 'en', provider, slot);
-        expect(row('s1').getAttribute('title')).toBe('Executing tool');
+        expect(details().textContent).toContain('Executing tool');
         expect(
           row('s1').querySelector('[data-web-shell-session-running]'),
         ).not.toBeNull();
@@ -1768,6 +1931,7 @@ describe('ManagedSessionsPage', () => {
         expect(
           row('s1').querySelector('[data-web-shell-session-running]'),
         ).toBeNull();
+        expect(details().textContent).toContain(statusLabel);
         expect(row('s3')).not.toBeNull();
         expect(mocks.client.listSessions).toHaveBeenCalledTimes(2);
         const firstReads = mocks.client.getSession.mock.calls.filter(
@@ -1925,8 +2089,8 @@ describe('ManagedSessionsPage', () => {
         });
         expect(slot.querySelector('[aria-current]')).toBeNull();
         await act(async () =>
-          [...slot.querySelectorAll('button')]
-            .find((item) => item.textContent?.includes('Task s1'))!
+          slot
+            .querySelector<HTMLElement>('[data-managed-session-id="s1"]')!
             .click(),
         );
         expect(
@@ -2665,7 +2829,7 @@ describe('ManagedSessionsPage', () => {
           {
             ...event(1, ''),
             type: 'tool_requested',
-            data: { toolCallId: 'call-1', toolName, input },
+            data: { itemId: 'item-1', toolCallId: 'call-1', toolName, input },
           },
         ],
         lastEventId: 1,
@@ -3199,16 +3363,15 @@ describe('ManagedSessionsPage', () => {
       sessions: [summary('java-session')],
     });
     const provider: ManagedAgentProvider = {
-      kind: 'java',
       storageKey: 'https://java.example/agent',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       listSessions,
       getSession: vi.fn(),
       getTranscript: vi.fn(),
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -3217,9 +3380,7 @@ describe('ManagedSessionsPage', () => {
     await render(undefined, 'en', provider);
 
     expect(container.textContent).toContain('Task java-session');
-    expect(listSessions).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceCwd: undefined }),
-    );
+    expect(listSessions.mock.calls[0][0]).not.toHaveProperty('workspaceCwd');
     expect(mocks.useWorkspace).not.toHaveBeenCalled();
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
   });
@@ -3433,7 +3594,6 @@ describe('ManagedSessionsPage', () => {
     const [first, retry] = mocks.client.createSession.mock.calls;
     expect(first?.[0]).toEqual({
       text: 'Do the work',
-      workspaceCwd: undefined,
     });
     expect(retry?.[0]).toEqual(first?.[0]);
     expect(retry?.[1].idempotencyKey).toBe(first?.[1].idempotencyKey);
@@ -3505,7 +3665,6 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.createSession).toHaveBeenCalledTimes(2);
     expect(mocks.client.createSession.mock.calls[1]?.[0]).toEqual({
       text: 'Do the other work',
-      workspaceCwd: undefined,
     });
     expect(
       mocks.client.createSession.mock.calls[1]?.[1].idempotencyKey,
@@ -3930,29 +4089,6 @@ describe('ManagedSessionsPage', () => {
         container.querySelectorAll('[role="status"], [aria-live]'),
       ).map((node) => node.textContent),
     ).toContain('Request discarded. The draft is back in the composer.');
-  });
-
-  it('does not refetch the list when a dropped workspace path changes', async () => {
-    await render('s1');
-    expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      root.render(
-        <I18nProvider language="en">
-          <ManagedSessionsPage
-            sessionId="s1"
-            onSelectSession={onSelect}
-            workspaceCwd="/other"
-            managedAgentProvider={provider}
-          />
-        </I18nProvider>,
-      );
-      await flush();
-    });
-
-    // The provider drops workspaceCwd from the request, so the new folder
-    // changes nothing: the fetched page (and its pagination) must survive.
-    expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
   });
 
   it('gates sending and cancels the captured Prompt without treating acceptance as terminal', async () => {
