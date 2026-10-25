@@ -368,6 +368,19 @@ jobs:
             mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
           fi
 
+      - name: 'Upload Maven test reports on failure'
+        if: 'failure() || cancelled()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'sdk-java-test-reports-${{ matrix.os }}-java-${{ matrix.java }}'
+          path: |
+            packages/sdk-java/qwencode/target/surefire-reports/*.txt
+            packages/sdk-java/qwencode/target/surefire-reports/*.dumpstream
+            packages/managed-agent-server/target/surefire-reports/*.txt
+            packages/managed-agent-server/target/surefire-reports/*.dumpstream
+          if-no-files-found: 'ignore'
+          retention-days: 7
+
       - name: 'Run Java SDK Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'
@@ -922,6 +935,19 @@ jobs:
       # .mvn/maven.config, so compare what ran with the source tree.
       - name: 'Check that every non-Hosted integration test class ran'
         run: 'node scripts/check-failsafe-reports.js non-hosted packages/managed-agent-server'
+
+      - name: 'Upload Maven test reports on failure'
+        if: 'failure() || cancelled()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'sdk-java-test-reports-${{ matrix.database }}-integration-java-21'
+          path: |
+            packages/managed-agent-server/target/surefire-reports/*.txt
+            packages/managed-agent-server/target/surefire-reports/*.dumpstream
+            packages/managed-agent-server/target/failsafe-reports/*.txt
+            packages/managed-agent-server/target/failsafe-reports/*.dumpstream
+          if-no-files-found: 'ignore'
+          retention-days: 7
 
       # The host's docker cleanup service fires once a day and reaps qwen-code-*
       # containers only past a strict 24h age gate, so a cancelled job can strand
