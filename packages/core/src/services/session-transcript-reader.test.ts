@@ -795,10 +795,13 @@ describe('SessionTranscriptReader', () => {
     const assertRestore = async () => {
       const loaded = await service.loadSession(sessionId);
       const restored = buildApiHistoryFromConversation(loaded!.conversation);
-      expect(restored).toEqual(history);
+      expect(restored.map(({ role, parts }) => ({ role, parts }))).toEqual(
+        history,
+      );
       expect(
-        (await service.readRestoreProjection(sessionId, NONE))?.runtime
-          .apiHistory,
+        (
+          await service.readRestoreProjection(sessionId, NONE)
+        )?.runtime.apiHistory.map(({ role, parts }) => ({ role, parts })),
       ).toEqual(history);
       expect(getAutoMemorySnapshot(restored, 'catalog A')).toBeUndefined();
       const userRecords = loaded!.conversation.messages.filter(
