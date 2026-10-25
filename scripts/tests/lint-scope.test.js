@@ -14,6 +14,8 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  readdirSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -275,22 +277,59 @@ describe.skipIf(process.platform === 'win32')(
 describe.skipIf(process.platform === 'win32')(
   'incremental lint subprocesses',
   () => {
-    // The mock bin plus the minimum the child needs: Node's own directory for
-    // the mock shebangs, git's for the scope, and the base system dirs for the
-    // shell builtins — but no user bin directory, so an ambient yamllint
-    // cannot satisfy `command -v` and hide an installer.
-    const constrainedPath = () =>
-      [
-        join(repo, 'node_modules', '.bin'),
-        dirname(process.execPath),
-        dirname(
-          execFileSync('sh', ['-c', 'command -v git'], {
-            encoding: 'utf8',
-          }).trim(),
-        ),
+    // A PATH the child can actually run on, with the ambient yamllint removed:
+    // the mock bin, then a fixture bin mirroring every system executable except
+    // `yamllint*`. The installers need the real coreutils and tar, so dropping
+    // the system directories outright would fail the child — but leaving them
+    // in would let the pool's own yamllint (in both /usr/local/bin and
+    // /usr/bin on the ECS images) satisfy `command -v` and hide the installer
+    // this case exists to observe. HOME is pinned to a fixture with no
+    // `.local/bin`, so the entry the child appends on Linux cannot supply one
+    // either.
+    const hermeticEnv = () => {
+      const home = join(root, 'home');
+      const bin = join(home, 'strict-bin');
+      mkdirSync(bin, { recursive: true });
+      for (const directory of [
         '/bin',
+        '/sbin',
         '/usr/bin',
-      ].join(':');
+        '/usr/sbin',
+        '/usr/local/bin',
+        '/usr/local/sbin',
+      ]) {
+        if (!existsSync(directory)) continue;
+        for (const name of readdirSync(directory)) {
+          if (name.startsWith('yamllint')) continue;
+          const link = join(bin, name);
+          if (existsSync(link)) continue;
+          try {
+            symlinkSync(join(directory, name), link);
+          } catch {
+            // A non-symlinkable entry (an existing name, a broken link) is not
+            // needed by the child.
+          }
+        }
+      }
+      for (const [name, command] of [
+        ['node', process.execPath],
+        ['env', 'command -v env'],
+        ['git', 'command -v git'],
+      ]) {
+        const link = join(bin, name);
+        rmSync(link, { force: true });
+        symlinkSync(
+          command.startsWith('/')
+            ? command
+            : execFileSync('sh', ['-c', command], { encoding: 'utf8' }).trim(),
+          link,
+        );
+      }
+      return {
+        HOME: home,
+        PATH: [join(repo, 'node_modules', '.bin'), bin].join(':'),
+      };
+    };
 
     const run = (lanes, fail = '', script = lintScript, options = {}) => {
       const { env: envOverrides = {}, omit = [], extra = [] } = options;
@@ -511,16 +550,22 @@ describe.skipIf(process.platform === 'win32')(
     it('installs only the linters a changed file needs', () => {
       put('changed.yml', 'name: test\n');
       commit();
+      const env = hermeticEnv();
       expect(() =>
         execFileSync('sh', ['-c', 'command -v yamllint'], {
-          env: { PATH: constrainedPath() },
+          env,
           stdio: 'ignore',
         }),
       ).toThrow();
+      // The child does not use this PATH verbatim: it applies getLinterPath(),
+      // which appends $HOME/.local/bin on Linux — where this repository's own
+      // `pip3 install --user yamllint` lands. The fixture home has no such
+      // directory, so the net above and the PATH under test still agree.
+      expect(existsSync(join(env.HOME, '.local', 'bin'))).toBe(false);
       const result = run(['setup'], '', lintScript, {
-        // Constrained PATH: an ambient yamllint from a developer venv or a
-        // runner image would satisfy `command -v` and hide the installer.
-        env: { PATH: constrainedPath() },
+        // Hermetic PATH: an ambient yamllint from a developer venv or a runner
+        // image would satisfy `command -v` and hide the installer.
+        env,
         omit: ['yamllint'],
         extra: ['pip3'],
       });
@@ -535,7 +580,7 @@ describe.skipIf(process.platform === 'win32')(
       put('image.png', Buffer.from([0x89, 0x50, 0x4e, 0x47]));
       commit();
       const result = run(['setup'], '', lintScript, {
-        env: { PATH: constrainedPath() },
+        env: hermeticEnv(),
         omit: ['eslint', 'prettier', 'shellcheck', 'actionlint', 'yamllint'],
         extra: ['pip3'],
       });
