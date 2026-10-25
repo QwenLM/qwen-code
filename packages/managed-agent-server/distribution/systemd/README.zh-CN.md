@@ -70,3 +70,17 @@ curl --fail http://127.0.0.1:8080/actuator/health
 - `/etc/qwen-managed-agent` — 凭据与 `application.yml`。
 - `/var/lib/qwen-managed-agent` — Runtime 状态。
 - `/srv/qwen-workspace` — Workspace；迁移位置时同步调整 `ReadWritePaths`。
+
+## Extension 执行
+
+执行默认关闭。先单独启用包发布，再配置
+`QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED=true`、
+`QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE=linux-cgroup`、位于 Workspace 存储之外的绝对私有
+`QWEN_MANAGED_AGENT_EXTENSION_CACHE_DIRECTORY`，并将
+`QWEN_MANAGED_AGENT_EXTENSION_CGROUP_ROOT` 指向每台 LOCAL 或 SSH Runtime 主机上可写、已委派的
+cgroup-v2 子树。管理员必须为服务委派 cgroup；普通可写目录不足以提供此能力。
+缺少 cgroup 支持时激活失败，不回退到进程组。
+
+macOS 原生 LOCAL 必须显式选择 `developer-process-group` 且清空 cgroup root。
+该模式的回执仅证明已登记进程组，不证明已脱离进程组的后代被回收，不属于生产进程树监管配置。
+持久 owner journal 或停止证明缺失、不确定时，恢复继续保留 hold。

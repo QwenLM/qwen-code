@@ -120,3 +120,20 @@ them before restarting with
 - `/etc/qwen-managed-agent` — credentials and `application.yml`.
 - `/var/lib/qwen-managed-agent` — Runtime state.
 - `/srv/qwen-workspace` — Workspace; adjust `ReadWritePaths` when it moves.
+
+## Extension execution
+
+Execution is disabled by default. Enable package publishing separately, then set
+`QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED=true`,
+`QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE=linux-cgroup`, an absolute private
+`QWEN_MANAGED_AGENT_EXTENSION_CACHE_DIRECTORY` outside Workspace storage, and
+`QWEN_MANAGED_AGENT_EXTENSION_CGROUP_ROOT` to a writable delegated cgroup-v2
+subtree on each LOCAL or SSH Runtime host. The service must receive delegation
+from its administrator; a writable ordinary directory is insufficient. Missing
+cgroup support fails activation; no process-group fallback is used.
+
+Native macOS LOCAL requires explicit `developer-process-group` mode and an empty
+cgroup root. Its receipt proves registered process groups only. It does not prove
+that detached descendants were reclaimed and is not a production process-tree
+profile. Recovery retains holds when the durable owner journal or stop proof is
+missing or uncertain.

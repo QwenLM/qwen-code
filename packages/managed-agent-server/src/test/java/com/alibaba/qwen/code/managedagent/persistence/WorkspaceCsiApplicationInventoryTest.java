@@ -769,8 +769,8 @@ class WorkspaceCsiApplicationInventoryTest {
     @Test
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
-        assertThat(snapshot.tables()).hasSize(32);
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(749);
+        assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(783);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -1215,7 +1215,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var valueOnly = WorkspaceCsiApplicationInventory.expectedImage(observed.tables());
         var restored = WorkspaceCsiApplicationInventory.restoreCanonical(valueOnly.bytes());
         assertThat(restored.bytes()).isEqualTo(valueOnly.bytes());
-        assertThat(restored.tables()).hasSize(32);
+        assertThat(restored.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
         assertThat(restored.rowCount()).isEqualTo(observed.rowCount());
         assertThat(observed.blockers()).isNotEmpty();
         byte[] trailing = java.util.Arrays.copyOf(valueOnly.bytes(), valueOnly.bytes().length + 1);
@@ -1423,7 +1423,8 @@ class WorkspaceCsiApplicationInventoryTest {
         var result = readKeys(expected, queries);
         assertThat(result.blockers()).isEmpty();
         assertThat(result.bytes()).isEqualTo(expected.bytes());
-        assertThat(queries.stream().filter(sql -> sql.startsWith("SELECT t.* FROM ma_"))).hasSize(32);
+        assertThat(queries.stream().filter(sql -> sql.startsWith("SELECT t.* FROM ma_")))
+                .hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
         assertThat(queries).noneMatch(sql -> sql.contains("FOR UPDATE"));
         assertThat(queries).anyMatch(sql -> sql.startsWith("SELECT t.* FROM ma_storage_owner t WHERE") && sql.contains("storage_key = ?"));
         assertThat(queries).noneMatch(sql -> sql.contains("physical_key = ?"));

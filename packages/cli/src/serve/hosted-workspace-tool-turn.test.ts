@@ -12557,3 +12557,63 @@ it('refuses a malformed permission rewrite on an admitted background Shell', asy
   expect(broker.executeV3).not.toHaveBeenCalled();
   expect(broker.acquire).toHaveBeenCalledOnce();
 });
+
+it.each(['auto', 'yolo'] as const)(
+  'enforces Session deny rules on extension command steps in %s mode',
+  async (mode) => {
+    turn = createTurn(true, {
+      mode,
+      permissionRules: { allow: [], ask: [], deny: ['Bash'] },
+    });
+    const signal = new AbortController().signal;
+    await turn.declarations(signal);
+    const permission = await (
+      turn as unknown as {
+        commandPermission(
+          id: string,
+          toolName: 'shell',
+          input: Record<string, unknown>,
+          signal: AbortSignal,
+          outerCallId: string,
+        ): Promise<{ allowed: boolean; approvalMode: string }>;
+      }
+    ).commandPermission(
+      'command-step',
+      'shell',
+      { command: 'printf denied' },
+      signal,
+      'outer-command',
+    );
+    expect(permission).toMatchObject({ allowed: false, approvalMode: mode });
+    expect(actionIds()).toEqual([]);
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it('honors an explicit Session allow rule for an extension command step', async () => {
+  turn = createTurn(true, {
+    mode: 'default',
+    permissionRules: { allow: ['Bash'], ask: [], deny: [] },
+  });
+  const signal = new AbortController().signal;
+  await turn.declarations(signal);
+  const permission = await (
+    turn as unknown as {
+      commandPermission(
+        id: string,
+        toolName: 'shell',
+        input: Record<string, unknown>,
+        signal: AbortSignal,
+        outerCallId: string,
+      ): Promise<{ allowed: boolean }>;
+    }
+  ).commandPermission(
+    'command-step',
+    'shell',
+    { command: 'printf allowed' },
+    signal,
+    'outer-command',
+  );
+  expect(permission.allowed).toBe(true);
+  expect(actionIds()).toEqual([]);
+});

@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type {
+  ManagedPackagePreparationRequest,
+  ManagedPackagePreparation,
+} from './managed-extension-package-types.js';
 import {
   validateStartupConfigRequest,
   assertStartupConfigApplied,
@@ -1898,6 +1902,67 @@ export class DaemonClient {
       `/session/${urlEncode(sessionId)}/resources`,
       'GET /session/:id/resources',
       { clientId, mode: 'rest' },
+    );
+  }
+
+  async prepareManagedPackage(
+    request: ManagedPackagePreparationRequest,
+    options?: { clientId?: string; signal?: AbortSignal },
+  ): Promise<ManagedPackagePreparation> {
+    return this.jsonRequest(
+      '/workspace/extensions/managed-packages/prepare',
+      'Prepare Managed extension package',
+      {
+        method: 'POST',
+        body: request,
+        clientId: options?.clientId,
+        signal: options?.signal,
+        timeoutMs: 10 * 60_000,
+        mode: 'rest',
+      },
+    );
+  }
+
+  async readPreparedManagedPackage(
+    archiveUrl: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    if (
+      !/^\/workspace\/extensions\/managed-packages\/[0-9a-f-]{36}\/archive$/.test(
+        archiveUrl,
+      )
+    )
+      throw new Error('Invalid Managed package preparation reference');
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${archiveUrl}`,
+      { method: 'GET', headers: this.headers({}), signal },
+      async (response) => {
+        if (!response.ok)
+          throw await this.failOnError(
+            response,
+            'Read prepared Managed package',
+          );
+        const limit = 100 * 1024 * 1024;
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('Managed package stream is missing');
+        const chunks: Array<Uint8Array<ArrayBuffer>> = [];
+        let length = 0;
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            length += value.length;
+            if (length > limit)
+              throw new Error('Managed package exceeds 100 MiB');
+            chunks.push(new Uint8Array(value));
+          }
+        } finally {
+          await reader.cancel();
+        }
+        return new Blob(chunks, { type: 'application/octet-stream' });
+      },
+      undefined,
+      'rest',
     );
   }
 

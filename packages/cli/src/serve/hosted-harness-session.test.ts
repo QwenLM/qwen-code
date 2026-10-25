@@ -102,6 +102,7 @@ import {
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import { MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST } from './managed-extension-profile.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 import {
@@ -545,16 +546,28 @@ afterEach(async () => {
   listeners.clear();
 });
 
-async function app(withBroker = false, instanceId?: string) {
+async function app(
+  withBroker = false,
+  instanceId?: string,
+  extensionPackages = true,
+) {
   const result = express();
   result.use(express.json());
-  const contract = createHostedHarnessContract(
+  const advertised = createHostedHarnessContract(
     `sha256:${'a'.repeat(64)}`,
     BOOT_ID,
 
     ['hosted-workspace-shell/1', 'hosted-workspace-mcp/1'],
     instanceId,
   );
+  const contract = extensionPackages
+    ? advertised
+    : {
+        ...advertised,
+        features: advertised.features?.filter(
+          (feature) => feature !== 'session-extension-packages/1',
+        ),
+      };
   installHostedHarnessContractMiddleware(result, contract);
   registerHostedHarnessSessionRoutes(
     result,
@@ -23334,6 +23347,165 @@ describe('Hosted Harness tool approvals', () => {
 
   const files = 'hosted-workspace-files/1';
 
+  it('loads a failed initial extension selection for management while keeping the first Prompt blocked', async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'capabilityDigest',
+      'get',
+    ).mockReturnValue(MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST);
+    vi.mocked(HostedWorkspaceBroker.prototype.warm).mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'original-binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    let failPrepare = true;
+    const runtimeStates = new Map<string, string>();
+    const control = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'extensionControl')
+      .mockImplementation(async (operation) => {
+        const common = {
+          operationId: operation.operationId,
+          executionMode: 'developer-process-group',
+        };
+        if (operation.kind === 'extension-prepare') {
+          if (failPrepare) throw new Error('invalid initial package');
+          runtimeStates.set(operation.operationId, 'prepared');
+          return {
+            ...common,
+            state: 'prepared',
+            expectedRevision: operation.expectedRevision,
+            revision: operation.expectedRevision + 1,
+            packages: operation.extensions.map((pin) => ({
+              pin,
+              assetRoot: `extension://${pin.extensionId}/`,
+              contributions: {
+                skills: [],
+                commands: [],
+                agents: [],
+                context: [],
+                mcpServers: {},
+                hooks: {},
+                settings: [],
+              },
+            })),
+            mcpServers: [],
+            hookCatalog: null,
+          };
+        }
+        if (operation.kind === 'extension-activate')
+          runtimeStates.set(operation.operationId, 'active');
+        return {
+          ...common,
+          state: runtimeStates.get(operation.operationId),
+          revision: 1,
+        };
+      });
+    const initialSelection = {
+      operationId: randomUUID(),
+      actorKey: 'a'.repeat(64),
+      expectedRevision: 0,
+      extensions: [
+        {
+          extensionId: 'sample',
+          packageRevision: 1,
+          packageDigest: 'b'.repeat(64),
+        },
+      ],
+    };
+    const definition = {
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      publicChildAgentsVersion: 1,
+      agentDefinition: {
+        agentId: `agent_${'c'.repeat(32)}`,
+        revision: '1',
+        digest: 'd'.repeat(64),
+      },
+      initialSelection,
+    };
+    const original = await app(true);
+    await headers(supertest(original).post('/session'))
+      .send({ ...definition, sessionId: SESSION_ID, sessionScope: 'thread' })
+      .expect(503);
+    await headers(supertest(original).post(`/session/${SESSION_ID}/load`))
+      .send(definition)
+      .expect(503);
+    expect(control.mock.calls.map(([operation]) => operation.kind)).toEqual([
+      'extension-status',
+      'extension-status',
+      'extension-prepare',
+    ]);
+    const replacement = await app(true);
+    const attachment = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ ...definition, passiveManagedRuntimeRecovery: true })
+      .expect(200);
+    expect(control).toHaveBeenCalledTimes(3);
+    expect(HostedWorkspaceBroker.prototype.warm).toHaveBeenCalledOnce();
+    expect(state.model).not.toHaveBeenCalled();
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', attachment.body.clientId);
+    const prompt = [{ type: 'text', text: 'start after configuration' }];
+    const promptBody = {
+      prompt,
+      promptId: PROMPT_ID,
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+    };
+    await authorize(
+      supertest(replacement).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .send(promptBody)
+      .expect(409);
+    failPrepare = false;
+    const repair = await authorize(
+      supertest(replacement).post(
+        `/session/${SESSION_ID}/extensions/management`,
+      ),
+    )
+      .send({ ...initialSelection, operationId: randomUUID() })
+      .expect(202);
+    expect(repair.body).toMatchObject({
+      revision: 1,
+      operation: { state: 'active' },
+    });
+    const callsBeforeConflict = control.mock.calls.length;
+    const rejected = await authorize(
+      supertest(replacement).post(
+        `/session/${SESSION_ID}/extensions/management`,
+      ),
+    )
+      .send({ ...initialSelection, operationId: randomUUID() })
+      .expect(409);
+    expect(rejected.body).toMatchObject({
+      error: 'extension_config_revision_conflict',
+    });
+    expect(control).toHaveBeenCalledTimes(callsBeforeConflict);
+    state.model.mockResolvedValue({ text: 'ready', model: 'test-model' });
+    await authorize(
+      supertest(replacement).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .send(promptBody)
+      .expect(202);
+    await waitFor(async () => {
+      const status = await authorize(
+        supertest(replacement).get(`/session/${SESSION_ID}/status`),
+      );
+      expect(status.body).toMatchObject({
+        hasActivePrompt: false,
+        recoveryBlocked: false,
+      });
+    });
+    expect(state.model).toHaveBeenCalledOnce();
+    await authorize(
+      supertest(replacement).post(`/session/${SESSION_ID}/detach`),
+    ).expect(204);
+  });
+
   it.each(['write_file', 'exit_plan_mode'] as const)(
     'rechecks live approval after a cold restore while preserving %s approval semantics',
     async (toolName) => {
@@ -38499,6 +38671,72 @@ describe('Hosted Harness stored definitions', () => {
       maxRetries: 5,
       retryDelay: 100,
     });
+  });
+
+  it('creates and cold-loads a custom public Shell definition with base Hooks and no extension selection', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    ).mockResolvedValue([]);
+    const server = await app(true);
+    const request = {
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      publicChildAgentsVersion: 1,
+      lifecycleProtocolVersion: 2,
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+      },
+      hookCatalog: {
+        catalogId: 'deployment',
+        catalogRevision: 1,
+        definitionDigest: 'c'.repeat(64),
+      },
+    };
+    const created = await headers(supertest(server).post('/session')).send({
+      ...request,
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+    });
+    expect(created.status).toBe(200);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .expect(204);
+    const replacement = await app(true);
+    const loaded = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ ...request, passiveManagedRuntimeRecovery: true })
+      .expect(200);
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(replacement).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .expect(204);
+    const refused = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    ).send({ ...request, publicChildAgentsVersion: 0 });
+    expect(refused.status).toBe(409);
+  });
+
+  it('keeps the public custom Shell gate closed on the legacy extension contract', async () => {
+    const server = await app(true, undefined, false);
+    await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        publicChildAgentsVersion: 1,
+        agentDefinition: {
+          agentId: `agent_${'a'.repeat(32)}`,
+          revision: '1',
+          digest: 'b'.repeat(64),
+        },
+      })
+      .expect(400);
   });
 
   it('pins creation-time Skills for the built-in agent across resident and cold loads', async () => {

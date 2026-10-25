@@ -22713,6 +22713,7 @@ export function App({
                       <DaemonStatusDialog />
                     ) : activePanel === 'extensions' ? (
                       <ExtensionsManagerPage
+                        managed={managedMode && managedAgentProvider ? { provider: managedAgentProvider, workspaceId: managedWorkspaceId ?? undefined, sessionId: managedSessionId } : undefined}
                         onClose={closePanel}
                         initialFocusRef={panelHeadingRef}
                       />

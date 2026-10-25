@@ -59,6 +59,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private final SessionStore sessionStore = new SessionStore();
     private final ToolPublication toolPublication = new ToolPublication();
     private final Artifacts artifacts = new Artifacts();
+    private final Extensions extensions = new Extensions();
+    private final ManagedExtensions managedExtensions = new ManagedExtensions();
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
@@ -122,6 +124,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public Artifacts getArtifacts() {
         return artifacts;
+    }
+
+    public ManagedExtensions getManagedExtensions() { return managedExtensions; }
+
+    public Extensions getExtensions() {
+        return extensions;
     }
 
     public Dispatch getDispatch() {
@@ -1227,6 +1235,34 @@ public class ManagedAgentProperties implements EnvironmentAware {
         public void setVerificationBytesPerSecond(Long value) { verificationBytesPerSecond = value; }
         public Duration getMaxVerificationTimeout() { return maxVerificationTimeout; }
         public void setMaxVerificationTimeout(Duration value) { maxVerificationTimeout = value; }
+    }
+
+    public static class ManagedExtensions {
+        private boolean enabled;
+        private String mode = "linux-cgroup";
+        private String cacheDirectory = "";
+        private String cgroupRoot = "";
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean value) { enabled = value; }
+        public String getMode() { return mode; }
+        public void setMode(String value) { mode = value; }
+        public String getCacheDirectory() { return cacheDirectory; }
+        public void setCacheDirectory(String value) { cacheDirectory = value; }
+        public String getCgroupRoot() { return cgroupRoot; }
+        public void setCgroupRoot(String value) { cgroupRoot = value; }
+    }
+
+    public static class Extensions {
+        private boolean enabled;
+        private String artifactDirectory = "";
+        private List<String> allowedActors = List.of();
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getArtifactDirectory() { return artifactDirectory; }
+        public void setArtifactDirectory(String value) { artifactDirectory = value; }
+        public List<String> getAllowedActors() { return allowedActors; }
+        public void setAllowedActors(List<String> value) { allowedActors = List.copyOf(value); }
     }
 
     public static class Artifacts {
