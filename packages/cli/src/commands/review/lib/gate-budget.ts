@@ -15,7 +15,14 @@
  */
 export const GATE_OUTPUT_BUDGET_BYTES = 12 * 1024;
 
-/** The UTF-8 size of `value` printed as one JSON line. */
+/**
+ * The UTF-8 size of `value` printed as one JSON line, as a gate hands it on:
+ * a Managed automation sanitizes the output before it cuts it, writing each
+ * `<` as `&lt;` (core's `sanitizeGateOutput`, which otherwise only removes
+ * characters), so a body full of `<` grows fourfold past the cut.
+ */
 export function jsonBytes(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  const line = JSON.stringify(value);
+  const lessThan = line.match(/</g)?.length ?? 0;
+  return Buffer.byteLength(line, 'utf8') + 3 * lessThan;
 }

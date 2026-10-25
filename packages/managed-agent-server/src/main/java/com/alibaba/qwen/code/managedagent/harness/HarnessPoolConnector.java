@@ -340,6 +340,16 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsAutoApproval() {
+        return feature("auto-approval/1") && supportsApprovalSelection();
+    }
+
+    @Override
+    public boolean supportsPermissionRules() {
+        return feature("permission-rules/1") && supportsApprovalSelection();
+    }
+
+    @Override
     public boolean supportsAgentDefinitionApprovalSelection() {
         return feature("agent-definition-approval-selection/1") && supportsApprovalSelection();
     }
@@ -348,6 +358,9 @@ public class HarnessPoolConnector implements HarnessConnector {
     public boolean supportsModelSelection() {
         return feature("model-selection/1");
     }
+
+    @Override
+    public boolean supportsUserMessageQueue() { return feature("user-message-queue/1"); }
 
     @Override
     public boolean supportsContextCompression() {
@@ -367,6 +380,21 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public boolean supportsSessionSkills() {
         return feature("session-skills/2");
+    }
+
+    @Override
+    public boolean supportsSessionExtensions() {
+        return feature("session-extension-packages/1");
+    }
+
+    @Override
+    public Map<String, Object> applyExtensions(String tenant, String session, Map<String, Object> command) {
+        return call(tenant, session, leaf -> leaf.applyExtensions(tenant, session, command));
+    }
+
+    @Override
+    public Map<String, Object> continueExtensionOperation(String tenant, String session, String operationId, boolean recoverPrevious) {
+        return call(tenant, session, leaf -> leaf.continueExtensionOperation(tenant, session, operationId, recoverPrevious));
     }
 
     @Override

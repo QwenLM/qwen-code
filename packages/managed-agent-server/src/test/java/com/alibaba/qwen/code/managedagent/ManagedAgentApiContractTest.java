@@ -119,6 +119,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -1506,6 +1507,10 @@ class ManagedAgentApiContractTest {
         exchange(drift, "changeWebShellSessionApproval", 409,
                 post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant).principal(actor),
                 "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
+        exchange(drift, "changeWebShellSessionApproval", 400,
+                post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"default\",\"expectedRevision\":0,\"idempotencyKey\":\"invalid-rules\","
+                        + "\"permissionRules\":{\"allow\":[\"Read(/tmp/**)\"],\"ask\":[],\"deny\":[]}}");
         exchange(drift, "changeWebShellSessionApproval", 401,
                 post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
@@ -1746,6 +1751,17 @@ class ManagedAgentApiContractTest {
         exchangeAgents(drift, tenant, otherTenant);
         exchangeChannels(drift, tenant, otherTenant);
         exchangeWorkspaceRegistration(drift, tenant);
+        exchange(drift, "queryUserMessages", 404,
+                get("/v1/agents/sessions/missing/user-messages").header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(drift, "commandUserMessages", 404,
+                post("/v1/agents/sessions/missing/user-messages").header(TENANT, tenant).principal(actor(tenant)).header(IDEMPOTENCY_KEY, "queue-missing"),
+                "{\"action\":\"resume\"}");
+        exchange(drift, "webShellQueryUserMessages", 404,
+                post(WEB_SHELL + "/user-messages/query").header(TENANT, tenant).principal(actor(tenant)), "{\"sessionId\":\"missing\"}");
+        exchange(drift, "webShellCommandUserMessages", 404,
+                post(WEB_SHELL + "/user-messages/command").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"missing\",\"idempotencyKey\":\"queue-missing\",\"command\":{\"action\":\"resume\"}}");
+        exchangeExtensions(drift, workspaceTenant, actor, publicBoundId);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -3033,6 +3049,28 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void sessionPolicyContractsCarryClassifierRulesAndOmitAnEmptySelection() throws Exception {
+        var rules = Map.of("allow", List.of("Read"), "ask", List.<String>of(), "deny", List.of("Bash(rm *)"));
+        var options = new ApiModels.WebShellSessionApproval("auto", 1, List.of("default", "auto"), true,
+                false, false, true, true, rules);
+        JsonNode selected = objectMapper.valueToTree(options);
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellSessionApproval", selected)).isEmpty();
+        assertThat(selected.path("permissionRulesSupported").asBoolean()).isTrue();
+        var result = new ApiModels.WebShellApprovalChangeResult("session", "auto", 1, false, false, rules);
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellApprovalChangeResult", objectMapper.valueToTree(result))).isEmpty();
+        JsonNode legacy = objectMapper.valueToTree(new ApiModels.WebShellApprovalChangeResult("session", "default", 1, false));
+        assertThat(legacy.has("permissionRules")).isFalse();
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellApprovalChangeResult", legacy)).isEmpty();
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellChangeApprovalRequest", objectMapper.readTree("""
+                {"sessionId":"session","approvalMode":"auto","expectedRevision":0,"idempotencyKey":"rules",
+                 "permissionRules":{"allow":[],"ask":[],"deny":[]}}
+                """))).isEmpty();
+        assertThat(CONTRACT.validate("#/components/schemas/ManagedPermissionRules", objectMapper.readTree("""
+                {"allow":["Read","Read"],"ask":[],"deny":[]}
+                """))).isNotEmpty();
+    }
+
+    @Test
     void thePublishedAggregateBudgetIsTheEnforcedOne() throws Exception {
         String tenant = "tenant-contract-budget-" + UUID.randomUUID();
         String sessionId = json(webShell(tenant, "/sessions/create",
@@ -3354,6 +3392,62 @@ class ManagedAgentApiContractTest {
         assertThat(web.get("deliveryState").asText()).isEqualTo("pending");
         awaitIdle(tenant, webSessionId);
         assertThat(drift).isEmpty();
+    }
+
+    private void exchangeExtensions(Map<String, String> drift, String tenant,
+            AuthenticatedTenantActor actor, String sessionId) throws Exception {
+        String base = "/v1/agents/workspaces/ws-default/extensions";
+        String id = "ext_11111111-1111-4111-8111-111111111111";
+        String operation = "11111111-1111-4111-8111-111111111111";
+        String digest = "a".repeat(64);
+        String encodedManifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(("{\"schemaVersion\":1,\"compilerVersion\":1,"
+                + "\"name\":\"fixture\",\"version\":\"1\",\"target\":{\"platform\":\"linux\",\"arch\":\"x64\"},\"components\":[\"skills\"]}")
+                .getBytes(StandardCharsets.UTF_8));
+        exchange(drift, "listWorkspaceExtensionPackages", 200, get(base).header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "createWorkspaceExtensionPackage", 401, post(base).header(TENANT, tenant)
+                .header(IDEMPOTENCY_KEY, "extension-publish").param("manifest", encodedManifest).param("packageDigest", digest)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "publishWorkspaceExtensionPackage", 401, put(base + "/" + id + "/packages/" + digest)
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "extension-update").param("manifest", encodedManifest)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "getWorkspaceExtensionPackage", 404, get(base + "/" + id + "/packages/1")
+                .param("packageDigest", digest).header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "readWorkspaceExtensionArchive", 404, get(base + "/" + id + "/packages/1/archive")
+                .param("packageDigest", digest).header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "getWorkspaceExtensionPackageSettings", 404, get(base + "/" + id + "/settings")
+                .header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "setWorkspaceExtensionPackageSettings", 401, post(base + "/" + id + "/settings")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "extension-settings"), "{\"expectedRevision\":0,\"values\":{}}");
+        exchange(drift, "getWorkspaceExtensionPackageOperation", 404, get(base + "/operations/" + operation)
+                .header(TENANT, tenant).principal(actor), null);
+        String web = WEB_SHELL + "/workspace-extensions";
+        String workspace = "{\"workspaceId\":\"ws-default\"";
+        String extension = workspace + ",\"extensionId\":\"" + id + "\"";
+        exchange(drift, "queryWorkspaceExtensionPackages", 200, post(web + "/query").header(TENANT, tenant).principal(actor), workspace + "}");
+        exchange(drift, "queryWorkspaceExtensionPackage", 404, post(web + "/packages/query").header(TENANT, tenant).principal(actor),
+                workspace + ",\"pin\":{\"extensionId\":\"" + id + "\",\"packageRevision\":1,\"packageDigest\":\"" + digest + "\"}}");
+        exchange(drift, "queryWorkspaceExtensionPackageSettings", 404, post(web + "/settings/query").header(TENANT, tenant).principal(actor), extension + "}");
+        exchange(drift, "submitWorkspaceExtensionPackageSettings", 401, post(web + "/settings/submit").header(TENANT, tenant),
+                extension + ",\"idempotencyKey\":\"extension-settings-web\",\"expectedRevision\":0,\"values\":{}}");
+        exchange(drift, "queryWorkspaceExtensionPackageOperation", 404, post(web + "/operations/query").header(TENANT, tenant).principal(actor),
+                workspace + ",\"operationId\":\"" + operation + "\"}");
+        exchange(drift, "publishWebShellWorkspaceExtensionPackage", 401, post(web + "/publish").header(TENANT, tenant)
+                .header(IDEMPOTENCY_KEY, "extension-publish-web").param("workspaceId", "ws-default").param("packageDigest", digest).param("manifest", encodedManifest)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        String session = "/v1/agents/sessions/" + sessionId + "/extensions";
+        exchange(drift, "getSessionExtensionConfiguration", 200, get(session).header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "applySessionExtensionConfiguration", 409, post(session).header(TENANT, tenant).principal(actor)
+                .header(IDEMPOTENCY_KEY, "extension-apply"), "{\"expectedConfigRevision\":0,\"extensions\":[]}");
+        exchange(drift, "getSessionExtensionOperation", 404, get(session + "/operations/" + operation).header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "continueSessionExtensionOperation", 409, post(session + "/operations/" + operation + "/continue").header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "recoverPreviousSessionExtensions", 409, post(session + "/operations/" + operation + "/recover-previous").header(TENANT, tenant).principal(actor), null);
+        String query = "{\"sessionId\":\"" + sessionId + "\"";
+        String control = query + ",\"operationId\":\"" + operation + "\"}";
+        exchange(drift, "webShellSessionExtensionsQuery", 200, post(WEB_SHELL + "/session-extensions/query").header(TENANT, tenant).principal(actor), query + "}");
+        exchange(drift, "webShellSessionExtensionsSubmit", 409, post(WEB_SHELL + "/session-extensions/submit").header(TENANT, tenant).principal(actor),
+                query + ",\"idempotencyKey\":\"extension-apply-web\",\"command\":{\"expectedConfigRevision\":0,\"extensions\":[]}}");
+        exchange(drift, "webShellSessionExtensionsContinue", 409, post(WEB_SHELL + "/session-extensions/continue").header(TENANT, tenant).principal(actor), control);
+        exchange(drift, "webShellSessionExtensionsRecoverPrevious", 409, post(WEB_SHELL + "/session-extensions/recover-previous").header(TENANT, tenant).principal(actor), control);
     }
 
     private String exchange(Map<String, String> drift, String operationId,

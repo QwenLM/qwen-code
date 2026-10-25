@@ -527,7 +527,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. */
+        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads. */
         post: operations["changeWebShellSessionApproval"];
         delete?: never;
         options?: never;
@@ -832,6 +832,210 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/user-messages/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query or mutate the durable Session user message queue */
+        post: operations["webShellQueryUserMessages"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/user-messages/command": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query or mutate the durable Session user message queue */
+        post: operations["webShellCommandUserMessages"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation. */
+        post: operations["queryWorkspaceExtensionPackages"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/packages/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation. */
+        post: operations["queryWorkspaceExtensionPackage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/settings/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation. */
+        post: operations["queryWorkspaceExtensionPackageSettings"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/settings/submit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires the same Workspace operator and deployment permission as publication. Writes a complete encrypted settings revision with optimistic concurrency; old pinned revisions remain available. No values are returned. */
+        post: operations["submitWorkspaceExtensionPackageSettings"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/operations/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation. The querying actor must own the original publication or settings operation. */
+        post: operations["queryWorkspaceExtensionPackageOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an ACTIVE Workspace, an authenticated operator and the deployment extension allowlist. The Idempotency-Key binds an actor-scoped durable operation. Publication retains immutable tar.gz bytes under a server-assigned stable extension identity; it does not activate a Session. The manifest query is base64url JSON and is covered by the existing request signature. Archive contents and Runtime compatibility are validated by the target compiler before activation. */
+        post: operations["publishWebShellWorkspaceExtensionPackage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision. */
+        post: operations["webShellSessionExtensionsQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/submit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision. */
+        post: operations["webShellSessionExtensionsSubmit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/continue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision. */
+        post: operations["webShellSessionExtensionsContinue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/recover-previous": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision. */
+        post: operations["webShellSessionExtensionsRecoverPrevious"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -961,6 +1165,8 @@ export interface components {
             planMode?: boolean;
             /** @description Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency. */
             skills?: components["schemas"]["SessionCreationSkill"][];
+            /** @description Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime. */
+            extensionPins?: components["schemas"]["ManagedExtensionPackagePin"][];
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */
@@ -1038,7 +1244,7 @@ export interface components {
              * @description Current effective approval policy; initialApprovalMode retains the immutable creation policy.
              * @enum {string}
              */
-            approvalMode?: "default" | "auto-edit" | "yolo";
+            approvalMode?: "default" | "auto" | "auto-edit" | "yolo";
             modelContext?: components["schemas"]["WebShellModelContext"];
             modelSelection?: components["schemas"]["WebShellModelSelection"];
             /** Format: int64 */
@@ -1748,15 +1954,19 @@ export interface components {
             /** @description Execution approval can change during a Turn when true. Missing means idle-only; Plan changes remain idle-only. */
             liveSupported?: boolean;
             /** @enum {string} */
-            approvalMode: "default" | "auto-edit" | "yolo";
+            approvalMode: "default" | "auto" | "auto-edit" | "yolo";
             /** Format: int64 */
             approvalRevision: number;
-            availableApprovalModes: ("default" | "auto-edit" | "yolo")[];
+            availableApprovalModes: ("default" | "auto" | "auto-edit" | "yolo")[];
             supported: boolean;
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
             /** @description Optional deployment capability; missing means false. */
             planModeSupported?: boolean;
+            /** @description Persisted rules, including when execution capability is unavailable. Omitted when empty. */
+            permissionRules?: components["schemas"]["ManagedPermissionRules"];
+            /** @description Owner-authorized Session rule editing is available only with Harness permission-rules/1 support. Missing means false. Rule changes require an idle Session. */
+            permissionRulesSupported?: boolean;
         };
         WebShellChangeApprovalRequest: {
             sessionId: string;
@@ -1765,19 +1975,23 @@ export interface components {
             idempotencyKey: string;
             requestId?: string;
             /** @enum {string} */
-            approvalMode: "default" | "auto-edit" | "yolo";
+            approvalMode: "default" | "auto" | "auto-edit" | "yolo";
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
+            /** @description Omission preserves the persisted rules. Supplying three empty arrays clears them. Rule edits require an idle Session, and share the approval revision and idempotency receipt with mode changes. */
+            permissionRules?: components["schemas"]["ManagedPermissionRules"];
         };
         WebShellApprovalChangeResult: {
             sessionId: string;
             /** @enum {string} */
-            approvalMode: "default" | "auto-edit" | "yolo";
+            approvalMode: "default" | "auto" | "auto-edit" | "yolo";
             /** Format: int64 */
             approvalRevision: number;
             replayed: boolean;
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
+            /** @description Committed rules; omitted when empty. Replayed requests return their original policy receipt. */
+            permissionRules?: components["schemas"]["ManagedPermissionRules"];
         };
         WebShellRuntimeNode: {
             nodeId: string;
@@ -2109,6 +2323,167 @@ export interface components {
              */
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
         };
+        /** @description Session-scoped portable permission-rules/1. Each rule must be trimmed, nonempty, free of control characters, and at most 512 UTF-8 bytes. At most 32 unique strings per list, 64 across all lists and 8192 UTF-8 bytes of compact JSON. Tool names and aliases match whole tools; MCP names may end with a wildcard. Bash/Shell/run_shell_command/monitor command globs and WebFetch/web_fetch(domain:host) are supported; file-path specifiers and arbitrary tool predicates are rejected. Deny takes precedence over ask, then allow, in every mode. Rules do not provide filesystem or process isolation. */
+        ManagedPermissionRules: {
+            allow: string[];
+            ask: string[];
+            deny: string[];
+        };
+        UserMessage: {
+            id: string;
+            sequence: number;
+            revision: number;
+            /** @enum {string} */
+            state: "queued" | "claimed" | "recovery_blocked";
+            input: {
+                type: string;
+                text?: string;
+                resource?: {
+                    uri: string;
+                    text: string;
+                    mimeType: string;
+                };
+            }[];
+            turnId?: string | null;
+        };
+        UserMessageSnapshot: {
+            paused: boolean;
+            messages: components["schemas"]["UserMessage"][];
+        };
+        /** @description submit queues input; edit only changes queued input. withdraw removes queued input or explicitly discards recovery_blocked input without replaying it. Unknown delivery may already have reached the original Turn: discarding does not undo it, preserves late durable receipts and keeps the queue paused until resume. In-flight claimed input remains immutable. Commands replay the actor-scoped recorded result before checking new-work availability. */
+        UserMessageCommand: {
+            /** @enum {string} */
+            action: "submit" | "edit" | "withdraw" | "resume";
+            messageId?: string;
+            expectedRevision?: number;
+            input?: components["schemas"]["InputBlock"][];
+        };
+        WebShellUserMessageQuery: {
+            sessionId: string;
+        };
+        WebShellUserMessageCommand: {
+            sessionId: string;
+            idempotencyKey: string;
+            command: components["schemas"]["UserMessageCommand"];
+        };
+        ManagedExtensionPackagePin: {
+            extensionId: string;
+            /** Format: int64 */
+            packageRevision: number;
+            packageDigest: string;
+            /** Format: int64 */
+            settingsRevision?: number;
+        };
+        ManagedExtensionPackageManifest: {
+            /** @enum {integer} */
+            schemaVersion: 1;
+            /** @enum {integer} */
+            compilerVersion: 1;
+            name: string;
+            version: string;
+            target: {
+                /** @enum {string} */
+                platform: "linux" | "darwin";
+                /** @enum {string} */
+                arch: "x64" | "arm64" | "any";
+            };
+            components: ("skills" | "commands" | "agents" | "context" | "mcp" | "hooks" | "settings")[];
+            /** @enum {string} */
+            sourceType?: "git" | "github-release" | "npm" | "directory" | "archive" | "archive-url" | "link" | "snapshot";
+            /** @description Exact source commit, resolved npm version, or imported content revision. Supplied together with sourceType. */
+            sourceRevision?: string;
+        };
+        ManagedExtensionPackage: {
+            pin: components["schemas"]["ManagedExtensionPackagePin"];
+            manifest: components["schemas"]["ManagedExtensionPackageManifest"];
+            /** Format: int64 */
+            byteLength: number;
+        };
+        ManagedExtensionPackageCatalog: {
+            supported: boolean;
+            extensions: components["schemas"]["ManagedExtensionPackage"][];
+        };
+        ManagedExtensionPackageSettings: {
+            /** Format: int64 */
+            settingsRevision: number;
+            configuredKeys: string[];
+        };
+        ManagedExtensionPackageOperation: {
+            operationId: string;
+            extensionId: string;
+            /** @enum {string} */
+            kind: "publish" | "settings";
+            /** @enum {string} */
+            state: "pending" | "settled";
+            /** Format: int64 */
+            revision: number;
+            packageDigest: string | null;
+        };
+        WebShellExtensionWorkspaceQuery: {
+            workspaceId: string;
+        };
+        WebShellExtensionQuery: {
+            workspaceId: string;
+            extensionId: string;
+        };
+        WebShellExtensionOperationQuery: {
+            workspaceId: string;
+            operationId: string;
+        };
+        WebShellExtensionPackageQuery: {
+            workspaceId: string;
+            pin: components["schemas"]["ManagedExtensionPackagePin"];
+        };
+        WebShellExtensionSettingsSubmit: {
+            workspaceId: string;
+            extensionId: string;
+            idempotencyKey: string;
+            /** Format: int64 */
+            expectedRevision: number;
+            /** @description Complete settings revision, bounded to 8 KiB UTF-8 JSON. Values are encrypted at rest and never returned by metadata or operation queries. */
+            values: {
+                [key: string]: string;
+            };
+        };
+        ManagedExtensionApplySelection: {
+            expectedConfigRevision: number;
+            extensions: components["schemas"]["ManagedExtensionPackagePin"][];
+        };
+        ManagedExtensionApplyOperation: {
+            /** Format: uuid */
+            operationId: string;
+            /** @enum {string} */
+            state: "preparing" | "prepared" | "committed" | "active" | "recovery_required" | "failed";
+            /** @enum {string} */
+            mode: "apply" | "recoverPrevious";
+            revision: number;
+            error?: {
+                code: string;
+            };
+        };
+        ManagedExtensionManagementSnapshot: {
+            sessionId: string;
+            supported: boolean;
+            revision: number;
+            extensions: components["schemas"]["ManagedExtensionPackagePin"][];
+            requestedExtensions: components["schemas"]["ManagedExtensionPackagePin"][];
+            operation?: components["schemas"]["ManagedExtensionApplyOperation"];
+        };
+        WebShellExtensionSessionQuery: {
+            sessionId: string;
+            /** Format: uuid */
+            operationId?: string;
+        };
+        WebShellExtensionSessionOperation: {
+            sessionId: string;
+            /** Format: uuid */
+            operationId: string;
+        };
+        WebShellExtensionSessionSubmit: {
+            sessionId: string;
+            idempotencyKey: string;
+            command: components["schemas"]["ManagedExtensionApplySelection"];
+        };
     };
     responses: {
         /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. Artifact content reads may also return artifact_content_forbidden when the actor cannot read the original bytes. */
@@ -2193,7 +2568,9 @@ export interface components {
             };
         };
     };
-    parameters: never;
+    parameters: {
+        IdempotencyKey: string;
+    };
     requestBodies: never;
     headers: {
         /** @description True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the recorded outcome on the Session as last visible — a rename or unarchive replay after delete answers with the Session's pre-delete status rather than 404, while a create replay after delete answers 404 on the public create route, which re-reads the Session before responding, and answers the recorded 202 admission carrying the tombstoned sessionId on the WebShell create route, which does not re-read it; operation responses represent the original operation at its current state. */
@@ -3848,6 +4225,411 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["CursorExpired"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellQueryUserMessages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellUserMessageQuery"];
+            };
+        };
+        responses: {
+            /** @description Authoritative queue snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserMessageSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellCommandUserMessages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellUserMessageCommand"];
+            };
+        };
+        responses: {
+            /** @description Authoritative queue snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserMessageSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    queryWorkspaceExtensionPackages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionWorkspaceQuery"];
+            };
+        };
+        responses: {
+            /** @description Persisted Workspace extension resource. Contains no settings values or executable recipes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageCatalog"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWorkspaceExtensionPackage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionPackageQuery"];
+            };
+        };
+        responses: {
+            /** @description Persisted Workspace extension resource. Contains no settings values or executable recipes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWorkspaceExtensionPackageSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionQuery"];
+            };
+        };
+        responses: {
+            /** @description Persisted Workspace extension resource. Contains no settings values or executable recipes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageSettings"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    submitWorkspaceExtensionPackageSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionSettingsSubmit"];
+            };
+        };
+        responses: {
+            /** @description Persisted Workspace extension resource. Contains no settings values or executable recipes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWorkspaceExtensionPackageOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionOperationQuery"];
+            };
+        };
+        responses: {
+            /** @description Persisted Workspace extension resource. Contains no settings values or executable recipes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    publishWebShellWorkspaceExtensionPackage: {
+        parameters: {
+            query: {
+                workspaceId: string;
+                extensionId?: string;
+                packageDigest: string;
+                manifest: string;
+            };
+            header: {
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Persisted Workspace extension resource. Contains no settings values or executable recipes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellSessionExtensionsQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionSessionQuery"];
+            };
+        };
+        responses: {
+            /** @description Persisted or reconciled Session configuration; contains no settings values or private executable recipes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionManagementSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    webShellSessionExtensionsSubmit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionSessionSubmit"];
+            };
+        };
+        responses: {
+            /** @description Persisted or reconciled Session configuration; contains no settings values or private executable recipes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionManagementSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    webShellSessionExtensionsContinue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionSessionOperation"];
+            };
+        };
+        responses: {
+            /** @description Persisted or reconciled Session configuration; contains no settings values or private executable recipes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionManagementSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    webShellSessionExtensionsRecoverPrevious: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionSessionOperation"];
+            };
+        };
+        responses: {
+            /** @description Persisted or reconciled Session configuration; contains no settings values or private executable recipes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionManagementSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
 }

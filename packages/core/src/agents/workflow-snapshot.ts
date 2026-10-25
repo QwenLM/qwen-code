@@ -678,7 +678,29 @@ async function pruneSnapshots(config: Config, dir: string): Promise<void> {
   // Before the retention check, not after it: a project under the cap would
   // otherwise keep every temp file a crash ever left in this directory.
   await sweepSnapshotTempFiles(dir, entries);
-  const files = entries.filter((f) => f.endsWith('.json'));
+  const candidates = entries.filter((f) => f.endsWith('.json'));
+  if (candidates.length <= MAX_RETAINED_SNAPSHOTS) return;
+  // Only well-formed snapshots count toward the cap. `listWorkflowSnapshots`
+  // filters `.json` too, but then skips whatever `isWorkflowSnapshot` rejects,
+  // so a malformed file never reaches the user's history. Counting it here
+  // would push the project over the cap and evict a real run in its place —
+  // oldest-mtime-first, so the newest malformed file survives while a
+  // legitimate snapshot is silently lost. Such a file is left on disk: prune
+  // is best-effort and only ever removes what this module wrote.
+  const settled = await Promise.all(
+    candidates.map(async (f) => {
+      try {
+        const parsed: unknown = JSON.parse(
+          await fs.readFile(`${dir}/${f}`, 'utf8'),
+        );
+        return isWorkflowSnapshot(parsed) ? f : undefined;
+      } catch (e) {
+        debugLogger.warn(`prune skipped unreadable snapshot ${f}: ${e}`);
+        return undefined;
+      }
+    }),
+  );
+  const files = settled.filter((f): f is string => f !== undefined);
   if (files.length <= MAX_RETAINED_SNAPSHOTS) return;
   // Sort by mtime ascending (oldest first) and unlink the overflow.
   const stats = await Promise.all(

@@ -9,6 +9,9 @@ public final class ManagedSchemaContract {
                     "ma_session",
                     "ma_session_head",
                     "ma_turn",
+                    "ma_user_message_queue",
+                    "ma_user_message",
+                    "ma_user_message_command",
                     "ma_session_journal_tx",
                     "ma_event_stream",
                     "ma_public_event",
@@ -16,6 +19,9 @@ public final class ManagedSchemaContract {
                     "ma_snapshot",
                     "ma_session_record",
                     "ma_agent_definition",
+                    "ma_extension_package",
+                    "ma_extension_settings",
+                    "ma_extension_operation",
                     "ma_resource",
                     "ma_resource_ref",
                     "ma_output_capture",
@@ -79,7 +85,8 @@ public final class ManagedSchemaContract {
         AUTOMATION,
         CHANNEL_INGRESS,
         ACTION_DECISION,
-        WORKSPACE_CREATE
+        WORKSPACE_CREATE,
+        EXTERNAL_STORAGE
     }
 
     public enum ReceiptScope {

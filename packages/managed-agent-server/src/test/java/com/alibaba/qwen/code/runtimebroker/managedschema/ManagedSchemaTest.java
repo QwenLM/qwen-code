@@ -55,7 +55,7 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void initializesExactly32TablesAndValidatesWithoutRewriting() throws Exception {
+    void initializesExactlyTheTargetTablesAndValidatesWithoutRewriting() throws Exception {
         DataSource source = source();
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
@@ -64,7 +64,7 @@ class ManagedSchemaTest {
         try (var connection = source.getConnection()) {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
-            assertEquals(32, ManagedSchemaCatalog.tables(connection).size());
+            assertEquals(ManagedSchemaContract.TABLES.size(), ManagedSchemaCatalog.tables(connection).size());
         }
     }
 
@@ -565,8 +565,10 @@ class ManagedSchemaTest {
                                         !tables.isEmpty()
                                                 && ManagedSchemaContract.TABLES.containsAll(
                                                         tables)));
+        Set<String> originalTargets = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
+        originalTargets.removeAll(Set.of("ma_extension_package", "ma_extension_settings", "ma_extension_operation"));
         assertEquals(
-                ManagedSchemaContract.TABLES,
+                originalTargets,
                 inventory.values().stream()
                         .flatMap(java.util.Collection::stream)
                         .collect(java.util.stream.Collectors.toSet()));
