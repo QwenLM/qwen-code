@@ -1563,6 +1563,40 @@ describe('ChatCompressionService.compress cache sharing', () => {
     },
   );
 
+  it('does not slim the history for an equivalent selector on the shared path', async () => {
+    const history = turns('x'.repeat(120_000), 'ack');
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
+    await expectShared({
+      history,
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://same.invalid/v1',
+      compactionModel: 'openai:test-model',
+      configuredModels: [
+        {
+          id: 'test-model',
+          contextWindowSize: 220_000,
+          registryBaseUrl: 'https://same.invalid/v1',
+        },
+      ],
+    });
+
+    expect(slimSpy).not.toHaveBeenCalled();
+  });
+
+  it('still slims for a genuinely distinct compaction model', async () => {
+    const history = turns('x'.repeat(120_000), 'ack');
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
+    await expectCold({
+      history,
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://same.invalid/v1',
+      compactionModel: 'compact-model',
+      configuredModels: [{ id: 'compact-model', contextWindowSize: 220_000 }],
+    });
+
+    expect(slimSpy).toHaveBeenCalled();
+  });
+
   it('preserves the main system, tools, and complete history before the compression directive', async () => {
     const history = makeHistory(42);
     const { config, generateText } = await expectShared(
