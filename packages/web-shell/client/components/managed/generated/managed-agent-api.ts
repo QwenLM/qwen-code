@@ -2178,6 +2178,7 @@ export interface components {
             paused: boolean;
             messages: components["schemas"]["UserMessage"][];
         };
+        /** @description submit queues input; edit only changes queued input. withdraw removes queued input or explicitly discards recovery_blocked input without replaying it. Unknown delivery may already have reached the original Turn: discarding does not undo it, preserves late durable receipts and keeps the queue paused until resume. In-flight claimed input remains immutable. Commands replay the actor-scoped recorded result before checking new-work availability. */
         UserMessageCommand: {
             /** @enum {string} */
             action: "submit" | "edit" | "withdraw" | "resume";

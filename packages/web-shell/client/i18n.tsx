@@ -171,6 +171,9 @@ const EN: Messages = {
   'managed.queue.resume': 'Continue sending',
   'managed.queue.edit': 'Edit',
   'managed.queue.withdraw': 'Withdraw',
+  'managed.queue.discard': 'Discard from queue',
+  'managed.queue.unknownDelivery':
+    'Delivery is unconfirmed. Discarding stops this message from blocking the queue; it does not undo any input already received. Continue sending explicitly afterward.',
   'managed.queue.save': 'Save',
   'managed.queue.cancelEdit': 'Cancel edit',
   'managed.queue.waiting': 'Waiting to insert',
@@ -4655,6 +4658,9 @@ const ZH: Messages = {
   'managed.queue.resume': '继续发送',
   'managed.queue.edit': '编辑',
   'managed.queue.withdraw': '撤回',
+  'managed.queue.discard': '从队列丢弃',
+  'managed.queue.unknownDelivery':
+    '投递结果不明。丢弃可解除该消息对队列的阻塞，但不会撤销已收到的输入；随后需显式继续发送。',
   'managed.queue.save': '保存',
   'managed.queue.cancelEdit': '取消编辑',
   'managed.queue.waiting': '等待插入',

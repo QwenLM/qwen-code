@@ -85,6 +85,11 @@ export function ManagedUserMessageQueue({
                 .join('\n')}
             </div>
           )}
+          {message.state === 'recovery_blocked' && message.turnId && (
+            <p className="text-xs text-muted-foreground">
+              {t('managed.queue.unknownDelivery')}
+            </p>
+          )}
           <div className="flex gap-2 text-xs text-muted-foreground">
             <span>
               {t(
@@ -96,7 +101,7 @@ export function ManagedUserMessageQueue({
               )}
             </span>
             {(message.state === 'queued' ||
-              (message.state === 'recovery_blocked' && !message.turnId)) && (
+              message.state === 'recovery_blocked') && (
               <>
                 {message.state === 'queued' && (
                   <Button
@@ -127,7 +132,11 @@ export function ManagedUserMessageQueue({
                     })
                   }
                 >
-                  {t('managed.queue.withdraw')}
+                  {t(
+                    message.state === 'recovery_blocked' && message.turnId
+                      ? 'managed.queue.discard'
+                      : 'managed.queue.withdraw',
+                  )}
                 </Button>
               </>
             )}

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore.Command;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore.Message;
@@ -16,7 +17,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -48,6 +48,8 @@ class ManagedUserMessageStoreTest {
     private ObjectMapper json;
     @Autowired
     private RequestDigests digests;
+    @Autowired
+    private ManagedAgentStore store;
 
     private ManagedUserMessageStore messages;
     private String session;
@@ -76,6 +78,29 @@ class ManagedUserMessageStoreTest {
         assertThat(command("first-key", first)).isEqualTo(admitted);
         assertThat(query().messages()).hasSize(2);
         assertCode("idempotency_conflict", () -> command("first-key", submit("changed")));
+    }
+
+    @Test
+    void replaysCommittedReceiptAfterSessionClosesButRefusesFreshCommands() {
+        Command first = submit("first");
+        Snapshot admitted = command("first-key", first);
+        jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?", TENANT, session);
+
+        assertThat(command("first-key", first)).isEqualTo(admitted);
+        assertCode("idempotency_conflict", () -> command("first-key", submit("changed")));
+        assertCode("session_not_active", () -> command("new-key", first));
+    }
+
+    @Test
+    void admitsClaimedSeedThroughTheRealSchemaAdapterAndKeepsTheQueueBarrier() {
+        Message first = command("first", submit("first")).messages().getFirst();
+        assertCode("user_message_queue_pending", () -> store.insertTurnCommand(TENANT, "queue-test", "ordinary-key",
+                "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR));
+        jdbc.update("UPDATE ma_user_message SET state = 'claimed' WHERE tenant_id = ? AND session_id = ?", TENANT, session);
+
+        var admission = store.insertTurnCommand(TENANT, "queue-test", "user-queue:" + first.id(),
+                "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR);
+        assertThat(admission.turnId()).isNotBlank();
     }
 
     @Test
@@ -166,6 +191,37 @@ class ManagedUserMessageStoreTest {
     }
 
     @Test
+    void discardsUnknownDeliveryWithoutReplayingAndStillAcceptsItsLateReceipt() throws Exception {
+        Message first = command("first", submit("first")).messages().getFirst();
+        String prompt = turn("RUNNING");
+        messages.claim(TENANT, session, prompt, false);
+        jdbc.update("UPDATE ma_turn SET status = 'FAILED' WHERE tenant_id = ? AND session_id = ?", TENANT, session);
+        assertThat(query().messages().getFirst().state()).isEqualTo("recovery_blocked");
+
+        Snapshot discarded = command("discard", new Command("withdraw", first.id(), 1L, null));
+        assertThat(discarded.messages()).isEmpty();
+        assertThat(discarded.paused()).isTrue();
+        assertThat(state(first)).isEqualTo("withdrawn");
+        assertThat(command("resume", new Command("resume", null, null, null)).paused()).isFalse();
+        assertThat(messages.readySessions()).noneMatch(row -> session.equals(row.get("session")));
+        capture(first.id() + ":1", 9);
+        assertThat(state(first)).isEqualTo("consumed");
+    }
+
+    @Test
+    void ignoresMalformedQueueIdentitiesWithoutBreakingOtherJournalCommits() throws Exception {
+        Message first = command("first", submit("first")).messages().getFirst();
+        messages.claim(TENANT, session, turn("RUNNING"), false);
+        for (String identity : List.of(first.id(), first.id() + ":", first.id() + ":abc",
+                first.id() + ":9999999999999999999", first.id() + ":0", "ordinary-message:1")) {
+            capture(identity, 8);
+            assertThat(state(first)).isEqualTo("claimed");
+        }
+        capture(first.id() + ":1", 9);
+        assertThat(state(first)).isEqualTo("consumed");
+    }
+
+    @Test
     void leavesUnclaimedInputQueuedWhenOnlyACompletedTurnExists() {
         Message first = command("first", submit("first")).messages().getFirst();
         String prompt = turn("COMPLETED");
@@ -210,7 +266,7 @@ class ManagedUserMessageStoreTest {
     }
 
     private Snapshot query() {
-        return messages.query(TENANT, ACTOR, session);
+        return messages.queryMessages(TENANT, ACTOR, session);
     }
 
     private String turn(String status) {
@@ -230,11 +286,10 @@ class ManagedUserMessageStoreTest {
     }
 
     private void capture(String identity, long sequence) throws Exception {
-        byte[] record = (json.writeValueAsString(Map.of("managedSession", Map.of(
+        var record = json.valueToTree(Map.of("managedSession", Map.of(
                 "kind", "message.committed", "sequence", sequence,
-                "payload", Map.of("role", "user", "messageId", identity)))) + "\n")
-                .getBytes(StandardCharsets.UTF_8);
-        ManagedUserMessageStore.capture(jdbc, json, TENANT, session, record);
+                "payload", Map.of("role", "user", "messageId", identity))));
+        ManagedUserMessageStore.capture(jdbc, TENANT, session, List.of(record));
     }
 
     private void assertCode(String code, org.assertj.core.api.ThrowableAssert.ThrowingCallable action) {

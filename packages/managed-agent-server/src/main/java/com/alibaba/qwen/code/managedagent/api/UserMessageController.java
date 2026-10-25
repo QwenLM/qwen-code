@@ -22,7 +22,7 @@ public class UserMessageController {
 
     @GetMapping("/v1/agents/sessions/{sessionId}/user-messages")
     public Snapshot query(TenantContext tenant, @PathVariable String sessionId) {
-        return messages.query(tenant.tenantId(), tenant.actorId(), sessionId);
+        return messages.queryMessages(tenant.tenantId(), tenant.actorId(), sessionId);
     }
 
     @PostMapping("/v1/agents/sessions/{sessionId}/user-messages")

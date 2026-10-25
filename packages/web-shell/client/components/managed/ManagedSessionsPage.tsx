@@ -361,6 +361,8 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const summary = detail.summary;
+  const active = summary && isManagedSessionRunning(summary.phase);
   const recovery = useManagedRecovery(
     provider,
     clientId,
@@ -1031,7 +1033,7 @@ function ManagedSessionsContent({
         if (
           userMessages.supported &&
           images?.length &&
-          (detail.summary?.activeTurnId ||
+          (active ||
             userMessages.snapshot?.messages.length ||
             userMessages.snapshot?.paused)
         )
@@ -1051,7 +1053,7 @@ function ManagedSessionsContent({
         queued:
           !!sessionId &&
           userMessages.supported &&
-          (!!detail.summary?.activeTurnId ||
+          (!!active ||
             !!userMessages.snapshot?.messages.length ||
             !!userMessages.snapshot?.paused),
         text: submittedText,
@@ -1174,7 +1176,6 @@ function ManagedSessionsContent({
     }
   }
 
-  const summary = detail.summary;
   const attachmentCapability = useRef({ sessionId, enabled: false });
   if (attachmentCapability.current.sessionId !== sessionId)
     attachmentCapability.current = { sessionId, enabled: false };
@@ -1256,9 +1257,6 @@ function ManagedSessionsContent({
     modelContext.contextWindowSize !== undefined &&
     Number.isSafeInteger(modelContext.contextWindowSize) &&
     modelContext.contextWindowSize > 0;
-  const active =
-    summary &&
-    !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
   useEffect(() => {
     if (
       !home ||
@@ -2216,7 +2214,7 @@ function ManagedSessionsContent({
                 fileReferenceActions={referenceActions}
                 persistFileReferences
                 attachmentsEnabled={
-                  attachmentCapability.current.enabled && !summary?.activeTurnId
+                  attachmentCapability.current.enabled && !active
                 }
                 visibleToolbarActions={
                   interactive
@@ -2419,7 +2417,7 @@ function ManagedSessionsContent({
                   )
                 }
                 placeholderText={t(
-                  summary?.activeTurnId && userMessages.supported
+                  active && userMessages.supported
                     ? 'managed.queue.placeholder'
                     : 'managed.prompt',
                 )}

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,8 +20,10 @@ public class UserMessageDispatcher {
         for (var session : messages.readySessions()) {
             try {
                 messages.startNext(session.get("tenant"), session.get("session"));
-            } catch (RuntimeException unavailable) {
+            } catch (ManagedAgentException unavailable) {
                 LOG.debug("User message dispatch deferred for Session {}", session.get("session"), unavailable);
+            } catch (RuntimeException failure) {
+                LOG.warn("User message dispatch failed for Session {}", session.get("session"), failure);
             } finally {
                 messages.attempted(session.get("tenant"), session.get("session"));
             }

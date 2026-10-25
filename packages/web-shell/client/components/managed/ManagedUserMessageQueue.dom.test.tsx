@@ -89,8 +89,8 @@ describe('ManagedUserMessageQueue', () => {
       ],
     });
   });
-  it('makes claimed input immutable and blocked delivery non-resumable', () => {
-    const { container } = render({
+  it('discards unknown delivery explicitly while keeping resume blocked', async () => {
+    const { container, command } = render({
       paused: true,
       messages: [
         {
@@ -100,9 +100,22 @@ describe('ManagedUserMessageQueue', () => {
         },
       ],
     });
-    expect(container.textContent).not.toContain('managed.queue.withdraw');
+    expect(container.textContent).toContain('managed.queue.unknownDelivery');
     expect(container.textContent).not.toContain('managed.queue.edit');
     expect(button(container, 'managed.queue.resume').disabled).toBe(true);
+    await act(async () => button(container, 'managed.queue.discard').click());
+    expect(command).toHaveBeenCalledWith({
+      action: 'withdraw',
+      messageId: 'umsg_1',
+      expectedRevision: 3,
+    });
+  });
+  it('keeps an in-flight claim immutable', () => {
+    const { container } = render({
+      paused: false,
+      messages: [{ ...snapshot.messages[0], state: 'claimed', turnId: 'turn' }],
+    });
+    expect(container.querySelectorAll('button')).toHaveLength(0);
   });
   it('allows withdrawing a context mismatch that was never dispatched', async () => {
     const { container, command } = render({

@@ -8,7 +8,7 @@ Managed Turn admission rejects a second active Turn. Browser pending input is an
 
 ## Behavior
 
-Accept text and existing file references, at most 32 outstanding messages per Session. Preserve FIFO and separate message identities. Allow versioned edit/withdraw only before claim. Consume before model requests after complete tool results and before final settlement. Do not bypass approval. Normal completion carries remaining messages into one follow-up Turn. Stop/failure pauses work until explicit resume. Images remain idle-only.
+Accept text and existing file references, at most 32 outstanding messages per Session. Preserve FIFO and separate message identities. Allow versioned edits only before claim. In-flight claims are immutable; a blocked claim can be explicitly discarded from the queue without replaying or undoing its uncertain delivery, followed by explicit resume. Preserve the claim revision so late original durable receipts can still settle a discarded message. Consume before model requests after complete tool results and before final settlement. Do not bypass approval. Normal completion carries remaining messages into one follow-up Turn. Stop/failure pauses work until explicit resume. Images remain idle-only.
 
 ## Ownership and recovery
 
@@ -22,8 +22,8 @@ Session-scoped user-message submit/query/edit/withdraw/resume operations use exi
 
 ## Validation
 
-See `.qwen/e2e-tests/managed-user-message-queue.md`. Cover FIFO, hooks, tool/approval boundaries, capacity, permissions, lifecycle, lost replies, restarts and writer takeover. SQL concurrency requires MySQL evidence; fixture tests do not establish real-provider acceptance.
+Cover FIFO, hooks, tool/approval boundaries, capacity, permissions, lifecycle, lost replies, restarts and writer takeover. SQL concurrency requires MySQL evidence; fixture tests do not establish real-provider acceptance.
 
 ## Status
 
-Implementation added locally. TypeScript verification and a bundled Harness capability smoke are recorded in the E2E report. Java/MySQL concurrency, interrupted-Turn recovery and real-provider acceptance remain pending. A consumed user record alone does not prove a model completed processing it; an unprovable interrupted delivery remains blocked. No production or full fault-matrix acceptance is claimed.
+Implementation added locally. TypeScript verification and a bundled Harness capability smoke are recorded in the E2E report. Java/MySQL concurrency, interrupted-Turn recovery and real-provider acceptance remain pending. Command retries replay their actor-scoped receipt before new-work state and availability checks. A consumed user record alone does not prove a model completed processing it; an unprovable interrupted delivery remains blocked until an explicit discard or original durable receipt. No production or full fault-matrix acceptance is claimed.

@@ -1988,12 +1988,17 @@ public class ManagedAgentService {
 
     public boolean supportsUserMessageQueue() { return harness.supportsUserMessageQueue(); }
 
-    public SessionRecord authorizeUserMessages(String tenantId, String actorId, String sessionId) {
+    public SessionRecord authorizeUserMessageActor(String tenantId, String actorId, String sessionId) {
         if (actorId == null || actorId.isBlank()) {
             throw new ManagedAgentException(HttpStatus.UNAUTHORIZED, "actor_required", "An authenticated actor is required.");
         }
         SessionRecord session = store.requireSession(tenantId, sessionId);
         requireSubmitterRole(session, actorId);
+        return session;
+    }
+
+    public SessionRecord authorizeUserMessages(String tenantId, String actorId, String sessionId) {
+        SessionRecord session = authorizeUserMessageActor(tenantId, actorId, sessionId);
         requireVisibleSession(session);
         requireSubmitterFacts(session, actorId);
         if (!"ACTIVE".equals(session.status())) {

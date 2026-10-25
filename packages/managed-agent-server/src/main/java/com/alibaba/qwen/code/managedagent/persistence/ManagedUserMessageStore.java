@@ -41,7 +41,7 @@ public class ManagedUserMessageStore {
     public record Command(String action, String messageId, Long expectedRevision, List<InputBlock> input) { }
 
     @Transactional
-    public Snapshot query(String tenant, String actor, String session) {
+    public Snapshot queryMessages(String tenant, String actor, String session) {
         agents.authorizeUserMessages(tenant, actor, session);
         if (!agents.supportsUserMessageQueue()) {
             throw conflict("unsupported_feature");
@@ -53,11 +53,11 @@ public class ManagedUserMessageStore {
 
     @Transactional
     public Snapshot command(String tenant, String actor, String session, String key, Command command) {
-        agents.authorizeUserMessages(tenant, actor, session);
+        agents.authorizeUserMessageActor(tenant, actor, session);
         if (key == null || key.isBlank() || key.length() > 128) {
             throw refusal("invalid_request", "A bounded Idempotency-Key is required.");
         }
-        lock(tenant, session);
+        lockSession(tenant, session);
         if (command == null || command.action() == null) {
             throw refusal("invalid_request", "A queue action is required.");
         }
@@ -72,6 +72,8 @@ public class ManagedUserMessageStore {
             }
             return decode(replay.getFirst().getValue(), Snapshot.class);
         }
+        agents.authorizeUserMessages(tenant, actor, session);
+        lock(tenant, session);
         if (!agents.supportsUserMessageQueue()) {
             throw conflict("unsupported_feature");
         }
@@ -96,9 +98,14 @@ public class ManagedUserMessageStore {
             }
             case "edit", "withdraw" -> {
                 String input = "edit".equals(command.action()) ? encode(agents.userMessageInput(command.input())) : null;
+                if (input == null && snapshot(tenant, session).messages().stream()
+                        .anyMatch(message -> message.id().equals(command.messageId()) && "recovery_blocked".equals(message.state()))) {
+                    jdbc.update("UPDATE ma_user_message_queue SET paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+                }
+                // Keep a blocked claim's identity so a late durable receipt can still settle it.
                 int changed = input == null
-                        ? jdbc.update("UPDATE ma_user_message SET state = 'withdrawn', revision = revision + 1"
-                                + " WHERE tenant_id = ? AND session_id = ? AND message_id = ? AND revision = ? AND (state = 'queued' OR (state = 'recovery_blocked' AND turn_id IS NULL))",
+                        ? jdbc.update("UPDATE ma_user_message SET revision = CASE WHEN state = 'queued' THEN revision + 1 ELSE revision END, state = 'withdrawn'"
+                                + " WHERE tenant_id = ? AND session_id = ? AND message_id = ? AND revision = ? AND state IN ('queued', 'recovery_blocked')",
                                 tenant, session, command.messageId(), command.expectedRevision())
                         : jdbc.update("UPDATE ma_user_message SET input_json = ?, revision = revision + 1"
                                 + " WHERE tenant_id = ? AND session_id = ? AND message_id = ? AND revision = ? AND state = 'queued'",
@@ -228,13 +235,17 @@ public class ManagedUserMessageStore {
                 + " AND s.session_id = ma_user_message.session_id AND s.status <> 'ACTIVE')");
     }
 
-    private void lock(String tenant, String session) {
+    private String lockSession(String tenant, String session) {
         var status = jdbc.query("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 (row, index) -> row.getString(1), tenant, session);
         if (status.isEmpty()) {
             throw new ManagedAgentException(HttpStatus.NOT_FOUND, "session_not_found", "Session not found.");
         }
-        if (!"ACTIVE".equals(status.getFirst())) {
+        return status.getFirst();
+    }
+
+    private void lock(String tenant, String session) {
+        if (!"ACTIVE".equals(lockSession(tenant, session))) {
             throw conflict("session_not_active");
         }
         if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_user_message_queue WHERE tenant_id = ? AND session_id = ?",
@@ -280,26 +291,36 @@ public class ManagedUserMessageStore {
                         decodeInput(row.getString(5)), row.getString(6)), args.toArray());
     }
 
-    public static void capture(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session, byte[] records) {
-        for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
-            try {
-                JsonNode event = json.readTree(line).path("managedSession");
-                if (!"message.committed".equals(event.path("kind").asText())
-                        || !"user".equals(event.path("payload").path("role").asText())) {
-                    continue;
-                }
-                String identity = event.path("payload").path("messageId").asText();
-                int separator = identity.lastIndexOf(':');
-                if (!identity.startsWith("umsg_") || separator < 0) {
-                    continue;
-                }
-                long revision = Long.parseLong(identity.substring(separator + 1));
-                jdbc.update("UPDATE ma_user_message SET state = 'consumed', consumed_sequence = ? WHERE tenant_id = ?"
-                                + " AND session_id = ? AND message_id = ? AND revision = ? AND state IN ('claimed', 'recovery_blocked')",
-                        event.path("sequence").asLong(), tenant, session, identity.substring(0, separator), revision);
-            } catch (com.fasterxml.jackson.core.JsonProcessingException | NumberFormatException error) {
-                throw new IllegalArgumentException("Invalid user message receipt", error);
+    public static void capture(JdbcTemplate jdbc, String tenant, String session, List<JsonNode> records) {
+        for (JsonNode record : records) {
+            JsonNode event = record.path("managedSession");
+            if (!"message.committed".equals(event.path("kind").asText())
+                    || !"user".equals(event.path("payload").path("role").asText())) {
+                continue;
             }
+            String identity = event.path("payload").path("messageId").asText();
+            int separator = identity.lastIndexOf(':');
+            if (!identity.startsWith("umsg_") || separator < 0) {
+                continue;
+            }
+            String revisionText = identity.substring(separator + 1);
+            if (revisionText.isEmpty() || revisionText.length() > 19
+                    || !revisionText.chars().allMatch(character -> character >= '0' && character <= '9')) {
+                continue;
+            }
+            long revision;
+            try {
+                revision = Long.parseLong(revisionText);
+            } catch (NumberFormatException ignored) {
+                continue;
+            }
+            if (revision < 1) {
+                continue;
+            }
+            jdbc.update("UPDATE ma_user_message SET state = 'consumed', consumed_sequence = ? WHERE tenant_id = ?"
+                            + " AND session_id = ? AND message_id = ? AND revision = ? AND turn_id IS NOT NULL"
+                            + " AND state IN ('claimed', 'recovery_blocked', 'withdrawn')",
+                    event.path("sequence").asLong(), tenant, session, identity.substring(0, separator), revision);
         }
     }
 
