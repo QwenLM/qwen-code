@@ -6,6 +6,7 @@
 // @vitest-environment jsdom
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
@@ -52,6 +53,7 @@ import {
   runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import type { CommandContext } from '../commands/types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
@@ -111,6 +113,13 @@ const MockedLlmClientClass = vi.hoisted(() =>
     this.getHistoryFunctionResponseIds = vi
       .fn()
       .mockReturnValue(new Set<string>());
+    // Same production-path rationale as getHistoryFunctionResponseIds:
+    // default to "no synthesized placeholders in history" so the dedup
+    // dispatcher keeps its old drop behavior unless a test opts in.
+    this.getSynthesizedRepairCallIds = vi
+      .fn()
+      .mockReturnValue(new Set<string>());
+    this.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(false);
     // Stream-side duplicate provider-id replay detection consults the
     // fingerprint map; default to empty (no handled calls in history).
     this.getHistoryToolCallFingerprints = vi
@@ -224,7 +233,8 @@ vi.mock('./useLogger.js', () => ({
 
 const mockStartNewPrompt = vi.fn();
 const mockAddUsage = vi.fn();
-vi.mock('../contexts/SessionContext.js', () => ({
+vi.mock('../contexts/SessionContext.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../contexts/SessionContext.js')>()),
   useSessionStats: vi.fn(() => ({
     startNewPrompt: mockStartNewPrompt,
     addUsage: mockAddUsage,
@@ -239,10 +249,85 @@ vi.mock('./slashCommandProcessor.js', () => ({
   handleSlashCommand: vi.fn().mockReturnValue(false),
 }));
 
+vi.mock('./useKeypress.js', () => ({ useKeypress: vi.fn() }));
+
 // --- END MOCKS ---
 
 // --- Tests for useLlmStream Hook ---
 describe('useLlmStream', () => {
+  it('does not dispatch a cancelled slash after its old logger resolves into a held successor', async () => {
+    let releaseOldLog!: () => void;
+    const oldLog = new Promise<void>((resolve) => {
+      releaseOldLog = resolve;
+    });
+    const logMessage = vi
+      .fn()
+      .mockImplementation((_sender, text) =>
+        text === '/rewind' ? oldLog : Promise.resolve(),
+      );
+    let releaseSuccessor!: () => void;
+    const heldSuccessor = new Promise<void>((resolve) => {
+      releaseSuccessor = resolve;
+    });
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.Content,
+          value: 'successor stays active',
+        };
+        await heldSuccessor;
+        yield {
+          type: ServerLlmEventType.Finished,
+          value: { reason: FinishReason.STOP, usageMetadata: undefined },
+        };
+      })(),
+    );
+    mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+    const { result } = renderTestHook([], undefined, undefined, undefined, {
+      logMessage,
+    } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+    let oldRequest!: Promise<void>;
+    let successorRequest: Promise<void> | undefined;
+    await act(async () => {
+      oldRequest = result.current.submitQuery('/rewind');
+    });
+    await waitFor(() =>
+      expect(logMessage).toHaveBeenCalledWith(
+        MessageSenderType.USER,
+        '/rewind',
+      ),
+    );
+    act(() => result.current.cancelOngoingRequest());
+    await waitFor(() =>
+      expect(result.current.streamingState).toBe(StreamingState.Idle),
+    );
+    try {
+      await act(async () => {
+        successorRequest = result.current.submitQuery('successor prompt');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+      const successorSignal = mockSendMessageStream.mock
+        .calls[0]?.[1] as AbortSignal;
+      expect(successorSignal.aborted).toBe(false);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        releaseOldLog();
+        await oldRequest;
+      });
+      expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).toHaveBeenCalledOnce();
+      expect(successorSignal.aborted).toBe(false);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+    } finally {
+      releaseOldLog();
+      releaseSuccessor();
+      await act(async () => {
+        await oldRequest;
+        await successorRequest;
+      });
+    }
+  });
+
   let mockAddItem: Mock;
   let mockConfig: Config;
   let mockOnDebugMessage: Mock;
@@ -1095,6 +1180,401 @@ describe('useLlmStream', () => {
     expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
       'onWorkflowIntentApplied',
     );
+  });
+
+  it.each([
+    ['', false],
+    ['owned-checkpoint', false],
+    ['owned-checkpoint', true],
+  ] as const)(
+    'admits real /restore %s through real history publication and joined Ink processor context (cancelled=%s)',
+    async (args, cancelled) => {
+      const { useRef, useState, useCallback } = await import('react');
+      const { makeFakeConfig } = await import('@qwen-code/qwen-code-core');
+      const { useHistory } = await vi.importActual<
+        typeof import('./useHistoryManager.js')
+      >('./useHistoryManager.js');
+      const { restoreCommand } = await import('../commands/restoreCommand.js');
+      const { createMockCommandContext } = await import(
+        '../../test-utils/mockCommandContext.js'
+      );
+      const { CommandService } = await import(
+        '../../services/CommandService.js'
+      );
+      const { useSlashCommandProcessor } = await vi.importActual<
+        typeof import('./slashCommandProcessor.js')
+      >('./slashCommandProcessor.js');
+      const directory = await fs.mkdtemp(
+        path.join(tmpdir(), 'restore-joined-'),
+      );
+      let releaseLog!: () => void;
+      const heldLog = new Promise<void>((resolve) => {
+        releaseLog = resolve;
+      });
+      let pending: Promise<void> | undefined;
+      let primaryFailure: unknown;
+      let successor: Promise<void> | undefined;
+      let releaseFs = () => {};
+      let releaseSuccessor = () => {};
+      let unmount: (() => void) | undefined;
+      const createService = CommandService.create.bind(CommandService);
+      let restoreRegistry: (() => void) | undefined;
+      try {
+        await fs.writeFile(
+          path.join(directory, 'owned-checkpoint.json'),
+          JSON.stringify({
+            toolCall: { name: 'run_shell_command', args: 'ls' },
+          }),
+        );
+        const config = Object.assign(
+          makeFakeConfig({ targetDir: directory }),
+          mockConfig,
+        );
+        vi.spyOn(config, 'getFileCheckpointingEnabled').mockReturnValue(true);
+        vi.spyOn(
+          config.storage,
+          'getProjectTempCheckpointsDir',
+        ).mockReturnValue(directory);
+        const command = restoreCommand(config)!;
+        const directContext = createMockCommandContext({
+          services: { config },
+        });
+        const direct = await command.action!(directContext, args);
+        expect(direct).toEqual(
+          args
+            ? {
+                type: 'tool',
+                toolName: 'run_shell_command',
+                toolArgs: 'ls',
+              }
+            : {
+                type: 'message',
+                messageType: 'info',
+                content: 'Available tool calls to restore:\n\nowned-checkpoint',
+              },
+        );
+        const actualAction = command.action!;
+        const action = vi.fn(actualAction);
+        // Keep the real registry clone/parser/context; isolate unrelated loaders.
+        const registry = vi
+          .spyOn(CommandService, 'create')
+          .mockImplementation((_loaders, signal, disabled) =>
+            createService(
+              [{ loadCommands: async () => [{ ...command, action }] }],
+              signal,
+              disabled,
+            ),
+          );
+        restoreRegistry = () => registry.mockRestore();
+        const logMessage = vi.fn(() => heldLog);
+        const client = config.getLlmClient();
+        const extensionStates = new Map();
+        const loadHistory = vi.fn();
+        const actions = {
+          clearPendingState: vi.fn(),
+          setDebugMessage: vi.fn(),
+          dispatchExtensionStateUpdate: vi.fn(),
+          addConfirmUpdateExtensionRequest: vi.fn(),
+        } as unknown as Parameters<typeof useSlashCommandProcessor>[12];
+        const logger = { logMessage } as unknown as NonNullable<
+          Parameters<typeof useLlmStream>[20]
+        >;
+        const hook = renderHook(() => {
+          const { history, addItem: addRealHistoryItem } = useHistory();
+          const addHistoryItem = useCallback<
+            UseHistoryManagerReturn['addItem']
+          >(
+            (...parameters) => {
+              mockAddItem(...parameters);
+              return addRealHistoryItem(...parameters);
+            },
+            [addRealHistoryItem],
+          );
+          const idle = useRef(true);
+          const handler = useRef<Parameters<typeof useLlmStream>[7]>(
+            async () => false,
+          );
+          const [processing, setProcessing] = useState(false);
+          const llm = useLlmStream(
+            client,
+            history,
+            addHistoryItem,
+            config,
+            true,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            (...parameters) => handler.current(...parameters),
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            async () => {},
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+            undefined,
+            logger,
+          );
+          const slash = useSlashCommandProcessor(
+            config,
+            mockLoadedSettings,
+            history,
+            addHistoryItem,
+            vi.fn(),
+            loadHistory,
+            vi.fn(),
+            async () => false,
+            processing,
+            setProcessing,
+            idle,
+            vi.fn(),
+            actions,
+            extensionStates,
+            true,
+            null,
+            vi.fn(),
+          );
+          handler.current = slash.handleSlashCommand;
+          // The real AppContainer publication, derived from actual hook state.
+          idle.current = llm.streamingState === StreamingState.Idle;
+          return { llm, slash, history };
+        });
+        unmount = hook.unmount;
+        await waitFor(() =>
+          expect(
+            hook.result.current.slash.slashCommands.some(
+              (entry) => entry.name === 'restore',
+            ),
+          ).toBe(true),
+        );
+        await act(async () => {
+          pending = hook.result.current.llm.submitQuery(
+            args ? `/restore ${args}` : '/restore',
+          );
+        });
+        await waitFor(() => expect(logMessage).toHaveBeenCalledOnce());
+        expect(hook.result.current.llm.streamingState).toBe(
+          StreamingState.Responding,
+        );
+        expect(action).not.toHaveBeenCalled();
+        const enteredFs = vi.fn();
+        pendingToolPersistence.directory = directory;
+        pendingToolPersistence.wait = new Promise<void>((resolve) => {
+          releaseFs = resolve;
+        });
+        pendingToolPersistence.entered = enteredFs;
+        if (cancelled) {
+          const heldSuccessor = new Promise<void>((resolve) => {
+            releaseSuccessor = resolve;
+          });
+          mockSendMessageStream.mockReturnValue(
+            (async function* () {
+              yield {
+                type: ServerLlmEventType.Content,
+                value: 'healthy successor',
+              };
+              await heldSuccessor;
+              yield {
+                type: ServerLlmEventType.Finished,
+                value: { reason: FinishReason.STOP, usageMetadata: undefined },
+              };
+            })(),
+          );
+          await act(async () => {
+            releaseLog();
+          });
+          await waitFor(() => expect(enteredFs).toHaveBeenCalledOnce());
+          expect(action).toHaveBeenCalledOnce();
+          const oldCommandSignal = action.mock.calls[0][0].abortSignal!;
+          expect(oldCommandSignal.aborted).toBe(false);
+          act(() => hook.result.current.llm.cancelOngoingRequest());
+          await waitFor(() =>
+            expect(hook.result.current.llm.streamingState).toBe(
+              StreamingState.Idle,
+            ),
+          );
+          await act(async () => {
+            successor = hook.result.current.llm.submitQuery(
+              'healthy restore successor',
+            );
+          });
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          const successorSignal = mockSendMessageStream.mock
+            .calls[0][1] as AbortSignal;
+          expect(successorSignal.aborted).toBe(false);
+          expect(hook.result.current.llm.streamingState).toBe(
+            StreamingState.Responding,
+          );
+          const itemsBeforeOldFs = mockAddItem.mock.calls.slice();
+          // Only LLM ownership was cancelled; the command signal stays healthy.
+          expect(oldCommandSignal.aborted).toBe(false);
+          await act(async () => {
+            releaseFs();
+            await pending;
+          });
+          expect(await action.mock.results[0].value).toBeUndefined();
+          expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+          expect(loadHistory).not.toHaveBeenCalled();
+          expect(mockAddItem.mock.calls).toEqual(itemsBeforeOldFs);
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+          expect(successorSignal.aborted).toBe(false);
+          expect(hook.result.current.llm.streamingState).toBe(
+            StreamingState.Responding,
+          );
+          await act(async () => {
+            releaseSuccessor();
+            await successor;
+          });
+          return;
+        }
+        await act(async () => {
+          releaseLog();
+        });
+        await waitFor(() => expect(enteredFs).toHaveBeenCalledOnce());
+        await waitFor(() =>
+          expect(hook.result.current.history).toContainEqual(
+            expect.objectContaining({
+              type: 'user',
+              text: args ? `/restore ${args}` : '/restore',
+            }),
+          ),
+        );
+        await act(async () => {
+          releaseFs();
+          await pending;
+        });
+        expect(action).toHaveBeenCalledOnce();
+        const actionContext = action.mock.calls[0][0];
+        expect(actionContext.abortSignal?.aborted).toBe(false);
+        expect(config.getSessionId()).toBe('test-session-id');
+        // Baseline must fail on the actual action outcome, not a mock return.
+        expect(await action.mock.results[0].value).toEqual(direct);
+        if (args) expect(mockScheduleToolCalls).toHaveBeenCalledOnce();
+        else {
+          expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(mockAddItem).toHaveBeenCalledWith(
+            expect.objectContaining({
+              text: 'Available tool calls to restore:\n\nowned-checkpoint',
+            }),
+            expect.any(Number),
+          );
+        }
+      } catch (error) {
+        primaryFailure = error;
+        throw error;
+      } finally {
+        releaseLog();
+        releaseFs();
+        releaseSuccessor();
+        try {
+          await act(async () => {
+            const settled = await Promise.allSettled(
+              [pending, successor].filter(Boolean),
+            );
+            const rejected = settled.filter(
+              (item) => item.status === 'rejected',
+            );
+            if (rejected.length > 0)
+              throw new AggregateError(
+                [
+                  ...(primaryFailure === undefined ? [] : [primaryFailure]),
+                  ...rejected.map(
+                    (item) => (item as PromiseRejectedResult).reason,
+                  ),
+                ],
+                'Restore joined request or cleanup failed',
+              );
+          });
+        } finally {
+          pendingToolPersistence.directory = '';
+          pendingToolPersistence.wait = undefined;
+          pendingToolPersistence.entered = undefined;
+          unmount?.();
+          restoreRegistry?.();
+          await fs.rm(directory, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.each(['/rewind', '/model fake-model payload', '/slow-custom'])(
+    'keeps admitted %s preprocessing busy until its deferred recall write completes',
+    async (command) => {
+      let releaseLog!: () => void;
+      const heldLog = new Promise<void>((resolve) => {
+        releaseLog = resolve;
+      });
+      const logMessage = vi.fn().mockReturnValue(heldLog);
+      const { result } = renderTestHook([], undefined, undefined, undefined, {
+        logMessage,
+      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+      mockHandleSlashCommand.mockImplementation(async () => {
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        return { type: 'handled' };
+      });
+      let request!: Promise<void>;
+      await act(async () => {
+        request = result.current.submitQuery(command);
+      });
+      await waitFor(() =>
+        expect(logMessage).toHaveBeenCalledWith(
+          MessageSenderType.USER,
+          command,
+        ),
+      );
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+      await act(async () => {
+        releaseLog();
+        await request;
+      });
+      expect(mockHandleSlashCommand).toHaveBeenCalledOnce();
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    },
+  );
+
+  it('rejects slash rewind admission while a model response is held', async () => {
+    let releaseStream!: () => void;
+    const heldStream = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: ServerLlmEventType.Content, value: 'working' };
+        await heldStream;
+        yield {
+          type: ServerLlmEventType.Finished,
+          value: { reason: FinishReason.STOP, usageMetadata: undefined },
+        };
+      })(),
+    );
+    const { result } = renderTestHook();
+    let request!: Promise<void>;
+    await act(async () => {
+      request = result.current.submitQuery('held model prompt');
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    try {
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        await result.current.submitQuery('/rewind');
+      });
+      expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).toHaveBeenCalledOnce();
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+    } finally {
+      releaseStream();
+      await act(async () => {
+        await request;
+      });
+    }
   });
 
   it('keeps display-only composer text intact in row, recall and cancel without creating hook provenance', async () => {
@@ -10109,12 +10589,13 @@ describe('useLlmStream', () => {
   });
 
   it('drops a late tool result whose callId is already paired in chat.history (Race A dedup)', async () => {
-    // Race A repro: the chat-internal repair pass already synthesized a
-    // functionResponse for this callId on the Retry push (because the
-    // partial-tool_use turn was orphan when Ctrl+Y landed). The live
-    // scheduler's late real result must NOT also be submitted, otherwise
-    // the wire payload would carry two functionResponse parts for the
-    // same callId and the second one would land as an orphan tool_result.
+    // Race A repro, DROP side of the boundary this PR introduces: history
+    // already carries a GENUINE functionResponse for this callId (recorded
+    // by the earlier push) and `getSynthesizedRepairCallIds` keeps its
+    // default empty Set, so the live scheduler's late real result must NOT
+    // be submitted -- otherwise the wire payload would carry two
+    // functionResponse parts for the same callId and the second one would
+    // land as an orphan tool_result.
     // The dedup MUST run regardless of `isResponding`, because the
     // scheduler's `onAllToolCallsComplete` is single-shot and would
     // otherwise leave the tool stuck in `completed-but-not-submitted`.
@@ -10155,9 +10636,9 @@ describe('useLlmStream', () => {
     } as unknown as TrackedCompletedToolCall;
 
     const client = new MockedLlmClientClass(mockConfig);
-    // Simulate the chat-internal repair pass having already planted a
-    // synthetic functionResponse for the same callId on the previous
-    // (Retry) push. The dedup dispatcher consults
+    // History already answers this callId with a genuine response from the
+    // previous (Retry) push, so this is the drop branch: the dispatcher
+    // must not offer the chat a swap. The dedup dispatcher consults
     // `getHistoryFunctionResponseIds` first; we override the default
     // empty-Set mock to return the matching callId so the fast path
     // is what production code exercises in this test (instead of
@@ -10188,7 +10669,7 @@ describe('useLlmStream', () => {
               id: 'call_race_A',
               name: 'read_file',
               response: {
-                error: 'Tool execution result was not recorded',
+                output: 'already-recorded file contents',
               },
             },
           },
@@ -10249,8 +10730,341 @@ describe('useLlmStream', () => {
       path: '/tmp/x.txt',
     });
 
-    // No follow-up submission: the synthetic in history already closes
+    // Widening `replaceableTools` to every deduped tool -- i.e. dropping
+    // the `synthesizedRepairCallIds.has(...)` filter -- turns this red:
+    // a genuine duplicate would then be offered to the replace path.
+    expect(client.replaceSynthesizedToolResponse).not.toHaveBeenCalled();
+
+    // No follow-up submission: the response already in history closes
     // the tool_use ↔ tool_result pair.
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('replaces a synthesized orphan-repair placeholder with the late real tool result (issue #15297)', async () => {
+    // Race C + interleaved send: the stream died after the functionCall
+    // chunks, a later send's inline repair synthesized the placeholder,
+    // and only then did the scheduler's real result complete. The
+    // placeholder is the only thing answering the callId, so the real
+    // result must REPLACE it (and be recorded) instead of being dropped
+    // — otherwise the model believes a successful tool "was not
+    // recorded" and re-applies edits that already landed.
+    const lateRealParts = [
+      {
+        functionResponse: {
+          id: 'call_15297',
+          name: 'edit',
+          response: { output: 'Edit applied' },
+        },
+      },
+    ];
+    const lateRealResult = {
+      request: {
+        callId: 'call_15297',
+        name: 'edit',
+        args: { path: '/tmp/x.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-15297',
+      },
+      status: 'success',
+      responseSubmittedToLlm: false,
+      response: {
+        callId: 'call_15297',
+        responseParts: lateRealParts,
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'edit',
+        displayName: 'Edit',
+        description: 'Edit a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'edit /tmp/x.txt',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    const client = new MockedLlmClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_15297']));
+    // The answering response is the synthesized repair placeholder, not
+    // a genuine result.
+    client.getSynthesizedRepairCallIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_15297']));
+    client.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(true);
+    const recordToolResult = vi.fn();
+    mockConfig.getChatRecordingService = vi
+      .fn()
+      .mockReturnValue({ recordToolResult });
+    mockUseDualOutput.mockReturnValue(mockDualOutput);
+    mockDualOutput.emitToolResult.mockClear();
+    // Pin the finalized value distinctly from the raw scheduler response.
+    // `finalizeToolResponses` returns entries untouched when no batch
+    // budget is configured, so without this the two are the same array by
+    // identity and the assertions below cannot tell them apart. In
+    // production an over-budget late result is truncated and its overflow
+    // persisted, so splicing or recording `response.responseParts` instead
+    // of the finalizer's `entry.responseParts` would put the untruncated
+    // payload back on the wire and defeat the batch budget.
+    const finalizedParts = [
+      {
+        functionResponse: {
+          id: 'call_15297',
+          name: 'edit',
+          response: { output: 'Edit applied (finalized)' },
+        },
+      },
+    ];
+    mockFinalizeToolResponses.mockResolvedValueOnce([
+      {
+        callId: 'call_15297',
+        toolName: 'edit',
+        responseParts: finalizedParts,
+        persistedOutputFiles: ['out.txt'],
+        artifacts: [],
+      },
+    ]);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([lateRealResult]);
+      }
+    });
+
+    // The placeholder is swapped for the finalized real parts in place…
+    expect(client.replaceSynthesizedToolResponse).toHaveBeenCalledWith(
+      'call_15297',
+      finalizedParts,
+    );
+    // …the real result reaches the transcript (the drop path never
+    // records, which is what produced phantom unanswered calls)…
+    expect(recordToolResult).toHaveBeenCalledWith(
+      finalizedParts,
+      expect.objectContaining({
+        callId: 'call_15297',
+        status: 'success',
+        persistedOutputFiles: ['out.txt'],
+      }),
+      undefined,
+    );
+    // …and the sidecar sees it too — every other completion path emits,
+    // so a stream-json consumer must not lose the late real result.
+    expect(mockDualOutput.emitToolResult).toHaveBeenCalledWith(
+      lateRealResult.request,
+      lateRealResult.response,
+    );
+    // …and the scheduler bookkeeping still reflects the executed tool.
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['call_15297']);
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('edit', {
+      path: '/tmp/x.txt',
+    });
+    // Replacement keeps the pair closed in place — no extra send.
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  // The two repair-dispatcher tests below differ only in callId/name/args,
+  // so build the completed-tool shape once.
+  const lateCompletedTool = (
+    callId: string,
+    name: string,
+    args: Record<string, unknown>,
+    output: string,
+  ) =>
+    ({
+      request: {
+        callId,
+        name,
+        args,
+        isClientInitiated: false,
+        prompt_id: `prompt-${callId}`,
+      },
+      status: 'success',
+      responseSubmittedToLlm: false,
+      response: {
+        callId,
+        responseParts: [
+          { functionResponse: { id: callId, name, response: { output } } },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name,
+        displayName: name,
+        description: name,
+        build: vi.fn(),
+      },
+      invocation: { getDescription: () => `${name} ${callId}` },
+    }) as unknown as TrackedCompletedToolCall;
+
+  it('skips the placeholder replacement when the session swaps during finalize', async () => {
+    // `finalizeToolResponses` is awaited between reading the synthesized
+    // set and splicing history (it can persist overflow output to disk),
+    // and `recordToolResult` resolves its session at write time. A /clear
+    // or /resume landing inside that await leaves the captured chat
+    // abandoned, so without the `isCurrentSession()` guard the abandoned
+    // session's result would be recorded into the NEW session's
+    // transcript. The ids fall through to the drop bookkeeping instead.
+    const late = lateCompletedTool(
+      'call_15297',
+      'edit',
+      { path: '/tmp/x.txt' },
+      'Edit applied',
+    );
+    const client = new MockedLlmClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_15297']));
+    client.getSynthesizedRepairCallIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_15297']));
+    client.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(true);
+    const recordToolResult = vi.fn();
+    mockConfig.getChatRecordingService = vi
+      .fn()
+      .mockReturnValue({ recordToolResult });
+    // Flip the session identity inside the finalize await, after
+    // `handleCompletedTools` captured `sessionId`.
+    mockFinalizeToolResponses.mockImplementationOnce(async () => {
+      mockConfig.getSessionId = () => 'swapped-session-id';
+      return [
+        {
+          callId: 'call_15297',
+          toolName: 'edit',
+          responseParts: late.response.responseParts,
+        },
+      ];
+    });
+
+    const { completeToolRound } = renderTestHook([], client);
+    await completeToolRound([late]);
+
+    expect(client.replaceSynthesizedToolResponse).not.toHaveBeenCalled();
+    expect(recordToolResult).not.toHaveBeenCalled();
+    // The dedup bookkeeping still runs, so the scheduler unblocks and the
+    // locally executed tool is still counted.
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['call_15297']);
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('edit', {
+      path: '/tmp/x.txt',
+    });
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('routes a mixed late-result batch: replaces the acknowledged placeholder, drops the refused one and the genuine duplicate', async () => {
+    // One batch, one tool per dispatcher branch:
+    // - `call_replaced`: synthesized placeholder, chat accepts the swap ->
+    //   splice + transcript record + sidecar emit.
+    // - `call_refused`: the synthesized set names it, but the chat's
+    //   splice-time re-check refuses (history was rewritten during the
+    //   await). Without the early return it would gain a second durable
+    //   tool result for one call and vanish from the `[REPAIR] Dropping`
+    //   breadcrumb.
+    // - `call_genuine`: only in `getHistoryFunctionResponseIds`, so the
+    //   `synthesizedRepairCallIds.has(...)` filter must keep it out of the
+    //   replace path entirely.
+    const replaced = lateCompletedTool(
+      'call_replaced',
+      'edit',
+      { path: '/tmp/a.txt' },
+      'A applied',
+    );
+    const refused = lateCompletedTool(
+      'call_refused',
+      'edit',
+      { path: '/tmp/b.txt' },
+      'B applied',
+    );
+    const genuine = lateCompletedTool(
+      'call_genuine',
+      'read_file',
+      { path: '/tmp/c.txt' },
+      'C contents',
+    );
+    const client = new MockedLlmClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(
+        new Set(['call_replaced', 'call_refused', 'call_genuine']),
+      );
+    client.getSynthesizedRepairCallIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_replaced', 'call_refused']));
+    client.replaceSynthesizedToolResponse = vi.fn(
+      (callId: string) => callId === 'call_replaced',
+    );
+    const recordToolResult = vi.fn();
+    mockConfig.getChatRecordingService = vi
+      .fn()
+      .mockReturnValue({ recordToolResult });
+    mockUseDualOutput.mockReturnValue(mockDualOutput);
+    mockDualOutput.emitToolResult.mockClear();
+
+    const { completeToolRound } = renderTestHook([], client);
+    await completeToolRound([replaced, refused, genuine]);
+
+    // Only the ids the synthesized set named are offered to the chat;
+    // dropping the filter turns the second assertion red.
+    expect(client.replaceSynthesizedToolResponse).toHaveBeenCalledTimes(2);
+    expect(client.replaceSynthesizedToolResponse).not.toHaveBeenCalledWith(
+      'call_genuine',
+      expect.anything(),
+    );
+    // The refused id is neither recorded nor emitted: deleting the
+    // replacement-refused early return turns both counts red.
+    expect(recordToolResult).toHaveBeenCalledTimes(1);
+    expect(recordToolResult).toHaveBeenCalledWith(
+      replaced.response.responseParts,
+      expect.objectContaining({ callId: 'call_replaced', status: 'success' }),
+      undefined,
+    );
+    expect(mockDualOutput.emitToolResult).toHaveBeenCalledTimes(1);
+    expect(mockDualOutput.emitToolResult).toHaveBeenCalledWith(
+      replaced.request,
+      replaced.response,
+    );
+    // All three still get the dedup bookkeeping.
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+      'call_replaced',
+      'call_refused',
+      'call_genuine',
+    ]);
+    expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(3);
     expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
@@ -14163,6 +14977,288 @@ describe('useLlmStream', () => {
       expect(scheduledSignal?.aborted).toBe(true);
     });
 
+    it.each([false, true])(
+      'owns a restored client tool before immediate completion with rewritten arguments=%s',
+      async (rewritten) => {
+        const { LlmClient: ActualClient } = await import(
+          '@qwen-code/qwen-code-core/core/client.js'
+        );
+        const { LlmChat } = await import(
+          '@qwen-code/qwen-code-core/core/llm-chat.js'
+        );
+        const { makeFakeConfig } = await import(
+          '@qwen-code/qwen-code-core/test-utils/config.js'
+        );
+        const { createRestoreToolResponseBinding } = await import(
+          '../utils/restore-tool-response.js'
+        );
+        const directory = await fs.mkdtemp(
+          path.join(tmpdir(), 'restore-ink-caller-'),
+        );
+        const realConfig = makeFakeConfig({
+          targetDir: directory,
+          cwd: directory,
+          disableAllHooks: true,
+          usageStatisticsEnabled: false,
+        });
+        const client = new ActualClient(realConfig);
+        const chat = new LlmChat(realConfig);
+        chat.setTools([]);
+        vi.spyOn(client, 'getChat').mockReturnValue(chat);
+        vi.spyOn(client, 'isInitialized').mockReturnValue(true);
+        const sends = vi.spyOn(client, 'sendMessageStream');
+        mockConfig.getLlmClient = vi.fn(() => client);
+        const args = {
+          file_path: path.join(directory, 'owned.txt'),
+          old_string: 'A',
+          new_string: 'B',
+        };
+        client.setHistory([
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'original-ink-edit', name: 'edit', args } },
+            ],
+          },
+        ]);
+        const binding = createRestoreToolResponseBinding(
+          mockConfig,
+          'edit',
+          args,
+        )!;
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'schedule_tool',
+          toolName: 'edit',
+          toolArgs: args,
+          restoreResponseBinding: binding,
+        });
+        const hook = renderTestHook([], client);
+        let completion: Promise<void> | undefined;
+        mockScheduleToolCalls.mockImplementation(
+          (requests: ToolCallRequestInfo[]) => {
+            const request = requests[0];
+            expect(binding.executionCallId).toBe(request.callId);
+            const onComplete = hook.getLastOnComplete();
+            if (!onComplete)
+              throw new Error('actual completion callback missing');
+            completion = onComplete([
+              {
+                request: rewritten
+                  ? {
+                      ...request,
+                      args: {
+                        ...request.args,
+                        new_string: 'USER_APPROVED',
+                        modified_by_user: true,
+                      },
+                    }
+                  : request,
+                status: 'success',
+                responseSubmittedToLlm: false,
+                tool: { displayName: 'Edit' },
+                response: {
+                  callId: request.callId,
+                  responseParts: [
+                    {
+                      functionResponse: {
+                        id: request.callId,
+                        name: 'edit',
+                        response: { output: 'NEW_IMMEDIATE_REPLAY_RESULT' },
+                      },
+                    },
+                  ],
+                  resultDisplay: 'done',
+                },
+              } as TrackedCompletedToolCall,
+            ]);
+          },
+        );
+        try {
+          await act(async () => {
+            await hook.result.current.submitQuery('/restore owned');
+            await completion;
+          });
+          expect(mockScheduleToolCalls).toHaveBeenCalledOnce();
+          expect(client.getHistoryShallow()).toHaveLength(2);
+          expect(client.getHistoryShallow()[1].parts).toEqual([
+            {
+              functionResponse: {
+                id: 'original-ink-edit',
+                name: 'edit',
+                response: { output: 'NEW_IMMEDIATE_REPLAY_RESULT' },
+              },
+            },
+          ]);
+          expect(sends).not.toHaveBeenCalled();
+          expect(chat.peekLastHistoryEntry()?.role).toBe('user');
+          expect(binding.tail.parts?.[0].functionCall?.args).toEqual(args);
+          expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+            mockScheduleToolCalls.mock.calls[0][0][0].callId,
+          ]);
+        } finally {
+          await fs.rm(directory, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('does not publish a restored response cancelled while actual hook finalization is held', async () => {
+      const { LlmClient: ActualClient } = await import(
+        '@qwen-code/qwen-code-core/core/client.js'
+      );
+      const { LlmChat } = await import(
+        '@qwen-code/qwen-code-core/core/llm-chat.js'
+      );
+      const { makeFakeConfig } = await import(
+        '@qwen-code/qwen-code-core/test-utils/config.js'
+      );
+      const { createRestoreToolResponseBinding } = await import(
+        '../utils/restore-tool-response.js'
+      );
+      const directory = await fs.mkdtemp(
+        path.join(tmpdir(), 'restore-ink-caller-'),
+      );
+      const realConfig = makeFakeConfig({
+        targetDir: directory,
+        cwd: directory,
+        disableAllHooks: true,
+        usageStatisticsEnabled: false,
+      });
+      const client = new ActualClient(realConfig);
+      const chat = new LlmChat(realConfig);
+      chat.setTools([]);
+      vi.spyOn(client, 'getChat').mockReturnValue(chat);
+      vi.spyOn(client, 'isInitialized').mockReturnValue(true);
+      const sends = vi.spyOn(client, 'sendMessageStream');
+      mockConfig.getLlmClient = vi.fn(() => client);
+      const args = {
+        file_path: path.join(directory, 'owned.txt'),
+        old_string: 'A',
+        new_string: 'B',
+      };
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'original-ink-edit', name: 'edit', args } },
+          ],
+        },
+      ]);
+      const publish = vi.fn().mockResolvedValue(true);
+      const recorder = { restoreToolBranch: publish };
+      Object.assign(mockConfig, {
+        getChatRecordingService: vi.fn(() => recorder),
+        getFileHistoryService: vi.fn(() => ({ getSnapshots: () => [] })),
+      });
+      const binding = createRestoreToolResponseBinding(
+        mockConfig,
+        'edit',
+        args,
+        {
+          recorder: recorder as unknown as NonNullable<
+            ReturnType<Config['getChatRecordingService']>
+          >,
+          truncatedCount: 1,
+        },
+      )!;
+      const addHistory = vi.spyOn(client, 'addHistory');
+      let releaseFinalize!: () => void;
+      const heldFinalize = new Promise<void>((resolve) => {
+        releaseFinalize = resolve;
+      });
+      const enteredFinalize = vi.fn();
+      mockFinalizeToolResponses.mockImplementationOnce(
+        async (_config: unknown, entries: unknown[]) => {
+          enteredFinalize();
+          await heldFinalize;
+          return entries;
+        },
+      );
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'schedule_tool',
+        toolName: 'edit',
+        toolArgs: args,
+        restoreResponseBinding: binding,
+      });
+      const hook = renderTestHook([], client);
+      let completion: Promise<void> | undefined;
+      let scheduledSignal: AbortSignal | undefined;
+      let terminal: TrackedCompletedToolCall[] = [];
+      mockScheduleToolCalls.mockImplementation(
+        (requests: ToolCallRequestInfo[], signal: AbortSignal) => {
+          scheduledSignal = signal;
+          const request = requests[0];
+          const onComplete = hook.getLastOnComplete();
+          if (!onComplete)
+            throw new Error('actual completion callback missing');
+          terminal = [
+            {
+              request,
+              status: 'success',
+              responseSubmittedToLlm: false,
+              tool: { displayName: 'Edit' },
+              response: {
+                callId: request.callId,
+                responseParts: [
+                  {
+                    functionResponse: {
+                      id: request.callId,
+                      name: 'edit',
+                      response: { output: 'NEW_IMMEDIATE_REPLAY_RESULT' },
+                    },
+                  },
+                ],
+                resultDisplay: 'done',
+              },
+            } as TrackedCompletedToolCall,
+          ];
+          completion = onComplete(terminal);
+        },
+      );
+      try {
+        await act(async () => {
+          await hook.result.current.submitQuery('/restore owned');
+        });
+        await waitFor(() => expect(enteredFinalize).toHaveBeenCalledOnce());
+        expect(mockScheduleToolCalls).toHaveBeenCalledOnce();
+        expect(terminal).toHaveLength(1);
+        expect(terminal[0].status).toBe('success');
+        expect(terminal[0].responseSubmittedToLlm).toBe(false);
+        act(() => hook.rerenderWithToolCalls(terminal));
+        await waitFor(() =>
+          expect(hook.result.current.streamingState).toBe(
+            StreamingState.Responding,
+          ),
+        );
+        expect(enteredFinalize).toHaveBeenCalledOnce();
+        expect(scheduledSignal?.aborted).toBe(false);
+        expect(publish).not.toHaveBeenCalled();
+        expect(addHistory).not.toHaveBeenCalled();
+        act(() => hook.result.current.cancelOngoingRequest());
+        expect(scheduledSignal?.aborted).toBe(true);
+        // No successor or history reset: the same foreground object is still captured.
+        expect(chat.peekLastHistoryEntry()).toBe(binding.tail);
+        expect(chat.getHistoryReplacementRevision()).toBe(binding.revision);
+        await act(async () => {
+          releaseFinalize();
+          await completion;
+        });
+        expect(publish).not.toHaveBeenCalled();
+        expect(addHistory).not.toHaveBeenCalled();
+        expect(client.getHistoryShallow()).toHaveLength(1);
+        expect(
+          client.getHistoryFunctionResponseIds().has('original-ink-edit'),
+        ).toBe(false);
+        expect(sends).not.toHaveBeenCalled();
+      } finally {
+        releaseFinalize();
+        try {
+          await completion;
+        } finally {
+          await fs.rm(directory, { recursive: true, force: true });
+        }
+      }
+    });
+
     it('should stop processing and not call Gemini when a command is handled without a tool call', async () => {
       const uiOnlyCommandResult: SlashCommandProcessorResult = {
         type: 'handled',
@@ -14182,6 +15278,7 @@ describe('useLlmStream', () => {
           undefined,
           undefined,
           'test-session-id########5',
+          expect.any(Function),
         );
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
         expect(mockSendMessageStream).not.toHaveBeenCalled(); // No LLM call made
@@ -14214,6 +15311,7 @@ describe('useLlmStream', () => {
           undefined,
           undefined,
           'test-session-id########5',
+          expect.any(Function),
         );
 
         expect(localMockSendMessageStream).not.toHaveBeenCalledWith(
@@ -14257,6 +15355,7 @@ describe('useLlmStream', () => {
           undefined,
           undefined,
           'test-session-id########5',
+          expect.any(Function),
         );
         expect(localMockSendMessageStream).toHaveBeenCalledWith(
           '',
@@ -15415,6 +16514,7 @@ describe('useLlmStream', () => {
               undefined,
               undefined,
               undefined,
+              expect.any(Function),
             ),
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -15502,6 +16602,7 @@ describe('useLlmStream', () => {
               undefined,
               undefined,
               undefined,
+              expect.any(Function),
             ),
           );
 
@@ -17657,6 +18758,95 @@ describe('useLlmStream', () => {
         ),
       );
 
+    it('keeps a held shell responding after submission preprocessing settles', async () => {
+      let finishShell!: () => void;
+      const shellDone = new Promise<void>((resolve) => {
+        finishShell = resolve;
+      });
+      const handleShellCommand = vi.fn(() => {
+        vi.mocked(useShellCommandProcessor).mock.lastCall?.[2](shellDone);
+        return true;
+      });
+      vi.mocked(useShellCommandProcessor).mockReturnValue({
+        handleShellCommand,
+        activeShellPtyId: null,
+      });
+      const { result } = renderWithShellMode(false);
+      await act(async () => {
+        await result.current.submitQuery(
+          'held shell',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      expect(handleShellCommand).toHaveBeenCalledOnce();
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        finishShell();
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('does not let a cancelled shell completion clear a held successor', async () => {
+      let finishOld!: () => void;
+      let finishNew!: () => void;
+      const oldDone = new Promise<void>((resolve) => {
+        finishOld = resolve;
+      });
+      const newDone = new Promise<void>((resolve) => {
+        finishNew = resolve;
+      });
+      const handleShellCommand = vi.fn(
+        (query: PartListUnion, _signal: AbortSignal) => {
+          vi.mocked(useShellCommandProcessor).mock.lastCall?.[2](
+            query === 'old shell' ? oldDone : newDone,
+          );
+          return true;
+        },
+      );
+      vi.mocked(useShellCommandProcessor).mockReturnValue({
+        handleShellCommand,
+        activeShellPtyId: null,
+      });
+      const { result } = renderWithShellMode(false);
+      await act(async () => {
+        await result.current.submitQuery(
+          'old shell',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      const oldSignal = handleShellCommand.mock.calls[0][1];
+      expect(oldSignal.aborted).toBe(false);
+      act(() => result.current.cancelOngoingRequest());
+      expect(oldSignal.aborted).toBe(true);
+      await act(async () => {
+        await result.current.submitQuery(
+          'new shell',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      expect(handleShellCommand).toHaveBeenCalledTimes(2);
+      const newSignal = handleShellCommand.mock.calls[1][1];
+      await act(async () => {
+        finishOld();
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      expect(newSignal.aborted).toBe(false);
+      act(() => result.current.cancelOngoingRequest());
+      expect(newSignal.aborted).toBe(true);
+      await act(async () => {
+        finishNew();
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+
     it('routes to the shell when the entry was submitted in shell mode, even if shell mode is off at drain', async () => {
       const handleShellCommand = vi.fn().mockReturnValue(true);
       vi.mocked(useShellCommandProcessor).mockReturnValue({
@@ -19275,6 +20465,7 @@ describe('useLlmStream', () => {
           undefined,
           undefined,
           'test-session-id########5',
+          expect.any(Function),
         );
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {

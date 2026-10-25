@@ -114,10 +114,12 @@ import {
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
+import { memoryCommand } from '../commands/memory.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
 import { daemonCommand } from '../commands/daemon.js';
+import { attachCommand } from '../commands/attach.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { agentsCommand } from '../commands/agents.js';
 import { batchCommand } from '../commands/batch.js';
@@ -890,6 +892,7 @@ export async function parseArguments(): Promise<CliArgs> {
     )
     // Register MCP subcommands
     .command(mcpCommand)
+    .command(memoryCommand)
     // Register Extension subcommands
     .command(extensionsCommand)
     .command(authCommand)
@@ -902,6 +905,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register `qwen daemon` (local daemon inspection and control)
     .command(daemonCommand)
+    // Register `qwen attach` (terminal client for a running daemon session)
+    .command(attachCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
     // Register `qwen agents` (join a coordinator; session_send MCP server)
@@ -917,6 +922,10 @@ export async function parseArguments(): Promise<CliArgs> {
   if (rawArgv.includes('review')) {
     const { reviewCommand } = await import('../commands/review.js');
     yargsInstance.command(reviewCommand);
+  }
+  if (rawArgv.includes('autofix-pr')) {
+    const { autofixPrCommand } = await import('../commands/autofix-pr.js');
+    yargsInstance.command(autofixPrCommand);
   }
 
   for (const [option, message] of Object.entries(
@@ -949,13 +958,16 @@ export async function parseArguments(): Promise<CliArgs> {
   if (
     result._.length > 0 &&
     (result._[0] === 'mcp' ||
+      result._[0] === 'memory' ||
       result._[0] === 'extensions' ||
       result._[0] === 'auth' ||
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
+      result._[0] === 'autofix-pr' ||
       result._[0] === 'sessions' ||
       result._[0] === 'daemon' ||
+      result._[0] === 'attach' ||
       result._[0] === 'agents' ||
       result._[0] === 'board' ||
       result._[0] === 'batch' ||
@@ -2730,6 +2742,7 @@ export async function loadCliConfig(
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
+    unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop ?? false,
     agentCollaborationEnabled:
       settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,

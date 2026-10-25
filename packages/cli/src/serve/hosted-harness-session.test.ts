@@ -255,6 +255,7 @@ const state = vi.hoisted(() => ({
   toolResults: null as DurableToolResultResourceStore | null,
   publicationRequest: vi.fn(),
   storeOptions: [] as Array<Record<string, unknown>>,
+  ownershipReleases: [] as Array<Record<string, unknown>>,
   setLifecycleAuthority: vi.fn(),
   authorizeLifecycle: vi.fn(async () => undefined),
   authorizeOrdinary: vi.fn(async (_kind?: 'legacy-close') => undefined),
@@ -360,18 +361,24 @@ vi.mock(
         }
         return published;
       };
+      const journalStore = new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: options.sessionKey.sessionId,
+        transcriptPath: path.join(
+          state.root,
+          `${options.sessionKey.sessionId}.jsonl`,
+        ),
+      });
+      let journal: Awaited<ReturnType<typeof journalStore.open>> | undefined;
+      const openJournal = journalStore.open.bind(journalStore);
+      journalStore.open = async (request) =>
+        (journal = await openJournal(request));
       return {
-        journalStore: new LocalJsonlManagedSessionJournalStore({
-          runtimeBaseDir: state.root,
-          sessionId: options.sessionKey.sessionId,
-          transcriptPath: path.join(
-            state.root,
-            `${options.sessionKey.sessionId}.jsonl`,
-          ),
-        }),
+        journalStore,
         resourceStore,
         toolResultResources: state.toolResults ?? resourceStore,
         assertWritable: state.assertWritable,
+        claimUserMessages: async () => [],
         setLifecycleAuthority: state.setLifecycleAuthority,
         authorizeOrdinary: state.authorizeOrdinary,
         authorizeLifecycle: state.authorizeLifecycle,
@@ -386,6 +393,28 @@ vi.mock(
           rememberAdmission: () => undefined,
         },
         close: async () => undefined,
+        stopLocal: async () => undefined,
+        quiesceOwnership: async () => undefined,
+        releaseOwnership: async (
+          request: Record<string, unknown> & {
+            commitProof: {
+              lastCommitSequence: number;
+              committedPrefixHash: string;
+            };
+          },
+        ) => {
+          state.ownershipReleases.push(request);
+          await journal!.seal(request.commitProof);
+          return {
+            format: 'qwen-hosted-harness-release/1',
+            state: 'RELEASED',
+            ...options.sessionKey,
+            ...request,
+            writerGeneration: 1,
+            journalRevision: 1,
+            committedSequence: request.commitProof.lastCommitSequence,
+          };
+        },
       };
     },
   }),
@@ -490,6 +519,10 @@ const listeners = new Set<Server>();
 
 beforeEach(() => {
   wakeDeps.runTurnGate = undefined;
+  vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'resolveCapabilities',
+  ).mockResolvedValue();
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
   vi.spyOn(
@@ -512,7 +545,7 @@ afterEach(async () => {
   listeners.clear();
 });
 
-async function app(withBroker = false) {
+async function app(withBroker = false, instanceId?: string) {
   const result = express();
   result.use(express.json());
   const contract = createHostedHarnessContract(
@@ -520,6 +553,7 @@ async function app(withBroker = false) {
     BOOT_ID,
 
     ['hosted-workspace-shell/1', 'hosted-workspace-mcp/1'],
+    instanceId,
   );
   installHostedHarnessContractMiddleware(result, contract);
   registerHostedHarnessSessionRoutes(
@@ -1337,6 +1371,7 @@ describe('Hosted Harness no-tool session', () => {
     });
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.toolResults = null;
+    state.ownershipReleases.length = 0;
     state.assertWritable.mockReset();
     state.assertWritable.mockResolvedValue(undefined);
     state.authorizeLifecycle.mockReset();
@@ -1475,6 +1510,8 @@ describe('Hosted Harness no-tool session', () => {
       { toolProfile: 'hosted-workspace-files/1', custom: false },
       { toolProfile: 'hosted-workspace-files/1', custom: true },
       { toolProfile: 'hosted-workspace-shell/1', custom: true },
+      { toolProfile: 'hosted-workspace-files/3', custom: true },
+      { toolProfile: 'hosted-workspace-files/3', custom: false },
     ].flatMap((profile) =>
       [undefined, { mode: 'yolo', revision: 1 }].map((approvalSelection) => ({
         ...profile,
@@ -2869,6 +2906,279 @@ describe('Hosted Harness no-tool session', () => {
     firedAt: Date.parse('2026-03-08T07:00:05Z'),
   });
 
+  it.each([false, true])(
+    'retains a completed gate release failure while the pool drains (retry: %s)',
+    async (retry) => {
+      const server = await app(true, 'pod-gate');
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      const acquire = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+        .mockResolvedValue();
+      const prepare = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'prepareReplayable')
+        .mockResolvedValue({
+          executionCallId: 'gate-execution',
+          settled: {
+            executionStatus: 'success',
+            responseParts: [{ text: '{"kind":"quiet","durationMs":3}' }],
+          },
+        });
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockRejectedValue(
+          new HostedWorkspaceBrokerRejection(503, 'runtime_unavailable', {
+            message: 'fixture release refused',
+          }),
+        );
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        toolProfile: 'hosted-workspace-shell/1',
+        managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+        harnessPlacement: {
+          instanceId: 'pod-gate',
+          bootId: BOOT_ID,
+          placementEpoch: 1,
+        },
+      });
+      expect(created.status).toBe(200);
+      const authorized = (request: supertest.Test) =>
+        headers(request).set(
+          'X-Qwen-Client-Id',
+          created.body.clientId as string,
+        );
+      const operations = (body: Record<string, unknown>) =>
+        authorized(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...body });
+      const snapshot = () =>
+        headers(supertest(server).get('/internal/hosted-harness/v1/instance'));
+      try {
+        expect(
+          (
+            await operations({
+              kind: 'define_schedule',
+              scheduleId: AUTOMATION_ID,
+              definition: { ...automationDefinition, gate: 'printf gate' },
+            })
+          ).status,
+        ).toBe(202);
+        const before = await snapshot();
+        const fired = await operations(fireBody());
+        expect(fired.status).toBe(503);
+        expect(fired.body.code).toBe('automation_operation_failed');
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(prepare).toHaveBeenCalledTimes(1);
+        expect(acquire).not.toHaveBeenCalled();
+        expect(state.model).not.toHaveBeenCalled();
+        if (retry) {
+          release.mockResolvedValue();
+          const retried = await operations(fireBody());
+          expect(retried.status).toBe(202);
+          expect(retried.body.gate.outcome).toBe('quiet');
+        }
+        await vi.waitFor(
+          async () => {
+            const ended = await snapshot();
+            expect(ended.body.counters.inFlightMutations).toBe(0);
+            expect(ended.body.counters.openingSessions).toBe(0);
+          },
+          { timeout: SETTLE_TIMEOUT_MS },
+        );
+        const drained = await headers(
+          supertest(server).post('/internal/hosted-harness/v1/instance:drain'),
+        ).send({ operationId: randomUUID(), expectedBootId: BOOT_ID });
+        expect(drained.status).toBe(202);
+        await vi.waitFor(
+          async () => {
+            const after = await snapshot();
+            const observation = {
+              before: before.body,
+              fire: { status: fired.status, body: fired.body },
+              drain: { status: drained.status, body: drained.body },
+              after: after.body,
+              ownershipReleases: state.ownershipReleases,
+            };
+            expect(observation).toMatchObject({
+              after: {
+                state: retry ? 'DRAINED' : 'QUIESCING',
+                counters: {
+                  inFlightMutations: 0,
+                  attachedSessions: retry ? 0 : 1,
+                  heldResources: retry ? 0 : 1,
+                },
+              },
+              ownershipReleases: retry ? [{ placementEpoch: 1 }] : [],
+            });
+          },
+          { timeout: SETTLE_TIMEOUT_MS },
+        );
+      } finally {
+        release.mockResolvedValue();
+        await authorized(supertest(server).delete(`/session/${SESSION_ID}`));
+      }
+    },
+  );
+
+  it('keeps interrupted initialization unresolved after quiesce instead of claiming DRAINED', async () => {
+    const server = await app(false, 'pod-a');
+    let entered!: () => void;
+    let unblock!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const original = LocalManagedSessionResourceStore.prototype.read;
+    let held = false;
+    const read = vi
+      .spyOn(LocalManagedSessionResourceStore.prototype, 'read')
+      .mockImplementation(async function (
+        this: LocalManagedSessionResourceStore,
+        ref,
+      ) {
+        if (ref.kind === 'managed-definition' && !held) {
+          held = true;
+          entered();
+          await gate;
+        }
+        return original.call(this, ref);
+      });
+    const opening = headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+        harnessPlacement: {
+          instanceId: 'pod-a',
+          bootId: BOOT_ID,
+          placementEpoch: 1,
+        },
+      })
+      .then((response) => response);
+    try {
+      await started;
+      const draining = await headers(
+        supertest(server).post('/internal/hosted-harness/v1/instance:drain'),
+      ).send({ operationId: randomUUID(), expectedBootId: BOOT_ID });
+      expect(draining.body.state).toBe('QUIESCING');
+      expect(draining.body.counters.openingSessions).toBeGreaterThan(0);
+      unblock();
+      expect((await opening).body.code).toBe('hosted_harness_quiescing');
+      const unresolved = await headers(
+        supertest(server).get('/internal/hosted-harness/v1/instance'),
+      );
+      expect(unresolved.body.state).toBe('QUIESCING');
+      expect(unresolved.body.counters.openingSessions).toBe(1);
+      expect(state.ownershipReleases).toHaveLength(0);
+      expect(state.model).not.toHaveBeenCalled();
+    } finally {
+      unblock();
+      await opening;
+      read.mockRestore();
+    }
+  });
+
+  it('quiesces after the running Turn and releases without starting or cancelling queued wake input', async () => {
+    const server = await app(false, 'pod-a');
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+      harnessPlacement: {
+        instanceId: 'pod-a',
+        bootId: BOOT_ID,
+        placementEpoch: 1,
+      },
+    });
+    expect(created.status).toBe(200);
+    const authorized = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId as string);
+    const operations = (body: Record<string, unknown>) =>
+      authorized(
+        supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+      ).send({ operationId: randomUUID(), ...body });
+    expect(
+      (
+        await operations({
+          kind: 'define_schedule',
+          scheduleId: AUTOMATION_ID,
+          definition: automationDefinition,
+        })
+      ).status,
+    ).toBe(202);
+    let finish!: () => void;
+    state.model.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return { text: 'finished original Turn', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'foreground before drain' }];
+    const body = {
+      promptId: PROMPT_ID,
+      prompt,
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+    };
+    const submit = (payload: Record<string, unknown>) =>
+      authorized(supertest(server).post(`/session/${SESSION_ID}/prompt`)).send(
+        payload,
+      );
+    expect((await submit(body)).status).toBe(202);
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    const fired = await operations(fireBody());
+    expect(fired.status).toBe(202);
+    try {
+      const drained = await headers(
+        supertest(server).post('/internal/hosted-harness/v1/instance:drain'),
+      ).send({ operationId: randomUUID(), expectedBootId: BOOT_ID });
+      expect(drained.body.state).toBe('QUIESCING');
+      expect((await submit(body)).status).toBe(202);
+      expect(
+        (await submit({ ...body, promptId: randomUUID() })).body.code,
+      ).toBe('hosted_harness_quiescing');
+      expect(state.ownershipReleases).toHaveLength(0);
+      finish();
+      await vi.waitFor(
+        async () => {
+          const instance = await headers(
+            supertest(server).get('/internal/hosted-harness/v1/instance'),
+          );
+          expect(instance.body.state).toBe('DRAINED');
+        },
+        { timeout: SETTLE_TIMEOUT_MS },
+      );
+      expect(state.model).toHaveBeenCalledTimes(1);
+      expect(state.ownershipReleases).toHaveLength(1);
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      expect(
+        journal.events.filter(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            event.payload['turnId'] === fired.body.inputId,
+        ),
+      ).toHaveLength(1);
+      expect(
+        journal.events.filter(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === fired.body.inputId,
+        ),
+      ).toHaveLength(0);
+      expect(
+        journal.events.filter((event) => event.kind === 'lifecycle.changed'),
+      ).toHaveLength(0);
+    } finally {
+      finish?.();
+    }
+  });
+
   it('defines, fires and settles an automation run through the operations route', async () => {
     const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
@@ -2947,6 +3257,15 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(perRun.status).toBe(409);
     expect(perRun.body.code).toBe('automation_mode_disabled');
+    // A gate the shell checks refuse is a pre-commit refusal of its own, so
+    // the control plane can release the caller's key.
+    const backgrounded = await operations({
+      kind: 'define_schedule',
+      scheduleId: AUTOMATION_ID,
+      definition: { ...automationDefinition, gate: 'sleep 5 &' },
+    });
+    expect(backgrounded.status).toBe(400);
+    expect(backgrounded.body.code).toBe('automation_gate_invalid');
     const badCron = await operations({
       kind: 'define_schedule',
       scheduleId: AUTOMATION_ID,
@@ -3356,7 +3675,7 @@ describe('Hosted Harness no-tool session', () => {
         trigger: 'scheduled',
         firedAt: Date.parse('2026-03-08T07:00:05Z'),
       });
-      if (cancel) await automations.requestCancel(fired.run.automationRunId);
+      if (cancel) await automations.requestCancel(fired.run!.automationRunId);
       return fired.inputId;
     } finally {
       await managed.close().catch(() => undefined);
@@ -3447,7 +3766,7 @@ describe('Hosted Harness no-tool session', () => {
         daemonPromptId: fired.inputId,
         message: { role: 'user', parts: [{ text: 'queued' }] },
       } as never);
-      if (cancel) await automations.requestCancel(fired.run.automationRunId);
+      if (cancel) await automations.requestCancel(fired.run!.automationRunId);
       return fired.inputId;
     } finally {
       await managed.close().catch(() => undefined);
@@ -15917,6 +16236,7 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'glob',
     ]);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -15966,6 +16286,7 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'glob',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
@@ -16045,8 +16366,8 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'run_shell_command',
-      'monitor',
       'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
@@ -16111,8 +16432,8 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'run_shell_command',
-      'monitor',
       'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
@@ -16581,6 +16902,7 @@ describe('Hosted Harness no-tool session', () => {
           'read_file',
           'write_file',
           'edit',
+          'web_fetch',
           ...(profile.includes('shell') ? ['run_shell_command', 'glob'] : []),
         ]);
       };
@@ -21589,7 +21911,7 @@ describe('Hosted Harness no-tool session', () => {
       });
       const originalRun = managed.authority.extensionRecord(
         'automation_run',
-        queued.run.automationRunId,
+        queued.run!.automationRunId,
       );
       expect(originalRun).toBeDefined();
       const before = managed.authority.eventsInSequenceRange(
@@ -21664,7 +21986,10 @@ describe('Hosted Harness no-tool session', () => {
         ),
       ).toBe(false);
       expect(
-        authority.extensionRecord('automation_run', queued.run.automationRunId),
+        authority.extensionRecord(
+          'automation_run',
+          queued.run!.automationRunId,
+        ),
       ).toEqual(originalRun);
       expect(state.model).toHaveBeenCalledOnce();
       expect(state.model.mock.calls[0]?.[0].promptId).toBe(PROMPT_ID);
@@ -23165,6 +23490,7 @@ describe('Hosted Harness tool approvals', () => {
   it.each([
     ['hosted-workspace-files/1', true],
     ['hosted-workspace-files/2', false],
+    ['hosted-workspace-files/3', true],
     ['hosted-workspace-shell/1', true],
     ['hosted-workspace-read/1', false],
   ] as const)(
@@ -23244,6 +23570,23 @@ describe('Hosted Harness tool approvals', () => {
     );
   }
 
+  it('accepts the classifier auto mode for a files Session', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: files,
+      approvalMode: 'auto',
+    });
+    expect(created.status).toBe(200);
+    expect(created.body.approvalMode).toBe('auto');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId as string,
+    );
+  });
+
   it('pins a mode that can ask at creation and refuses other modes', async () => {
     const server = await app(true);
     const create = (extra: Record<string, unknown>) =>
@@ -23255,7 +23598,6 @@ describe('Hosted Harness tool approvals', () => {
       });
     for (const extra of [
       { approvalMode: 'plan' },
-      { approvalMode: 'auto' },
       { approvalMode: null },
       { approvalMode: 'default', approvalTimeoutMs: 999 },
     ]) {
@@ -25457,6 +25799,34 @@ describe('Hosted Harness refusal reasons', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }
 
+  // The lifecycle protocol is why a Shell Session cannot be retired by
+  // default, so the refusal has to name itself instead of reading like a
+  // missing guard: protocol 1 commits one effects phase and stays with the
+  // files profile, protocol 2 only admits the profiles the Harness contract
+  // lists.
+  it('names a lifecycle protocol the Session profile is not admitted for', async () => {
+    const server = await app(true);
+    const load = (toolProfile: string, lifecycleProtocolVersion: 1 | 2) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        toolProfile,
+        lifecycleProtocolVersion,
+        lifecycleAuthority: {
+          operationId: `lifecycle-${lifecycleProtocolVersion}`,
+          claimGeneration: 1,
+        },
+      });
+    // files/1 is a real profile, but the contract admits only shell/1 and
+    // mcp/1 for protocol 2.
+    const v2 = await load('hosted-workspace-files/1', 2);
+    expect(v2.status).toBe(409);
+    expect(v2.body.code).toBe('hosted_lifecycle_profile_unavailable');
+    // shell/1 is a lifecycle-v2 profile, but protocol 1 stays with files/1.
+    const v1 = await load('hosted-workspace-shell/1', 1);
+    expect(v1.status).toBe(409);
+    expect(v1.body.code).toBe('hosted_lifecycle_profile_unavailable');
+  });
+
   it('names a blocked restore bundle on a cold load', async () => {
     await createAndDetach();
     // A blocked bundle without a basis must carry both refs null
@@ -25905,12 +26275,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
   });
 
-  async function replacementApp() {
+  async function replacementApp(instanceId?: string) {
     const result = express();
     result.use(express.json());
     const contract = createHostedHarnessContract(
       `sha256:${'a'.repeat(64)}`,
       BOOT_ID_2,
+      undefined,
+      instanceId,
     );
     installHostedHarnessContractMiddleware(result, contract);
     registerHostedHarnessSessionRoutes(result, contract, state.root, {
@@ -26096,6 +26468,65 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
     return { server, loaded };
   }
+
+  it.each([false, true])(
+    'keeps a quiescing recovery load in the pool-wait lane (resident: %s)',
+    async (resident) => {
+      await parkToolTurn();
+      const server = await replacementApp('recovery-pod');
+      const descriptor = {
+        managedSessionStore: {
+          ...storeFor(BOOT_ID_2),
+          writerToken: 'a'.repeat(32),
+        },
+        harnessPlacement: {
+          instanceId: 'recovery-pod',
+          bootId: BOOT_ID_2,
+          placementEpoch: 1,
+        },
+        toolProfile: FILE_PROFILE,
+      };
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+        state: 'prepared',
+      });
+      if (resident) {
+        const attached = await replacementHeaders(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({ ...descriptor, passiveManagedRuntimeRecovery: true });
+        expect(attached.status).toBe(200);
+      }
+      try {
+        acquireSpy.mockClear();
+        const execute = vi.mocked(HostedWorkspaceBroker.prototype.execute);
+        execute.mockClear();
+        const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+        release.mockClear();
+        acquireSpy.mockImplementationOnce(async () => {
+          const draining = await replacementHeaders(
+            supertest(server).post(
+              '/internal/hosted-harness/v1/instance:drain',
+            ),
+          ).send({ operationId: randomUUID(), expectedBootId: BOOT_ID_2 });
+          expect(draining.status).toBe(202);
+          expect(draining.body.state).toBe('QUIESCING');
+          expect(draining.body.counters.inFlightMutations).toBeGreaterThan(0);
+        });
+        const loaded = await replacementHeaders(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({ ...descriptor, driveRuntimeRecovery: true });
+        expect(loaded.status).toBe(409);
+        expect(loaded.body.code).toBe('hosted_harness_quiescing');
+        expect(acquireSpy).toHaveBeenCalledOnce();
+        expect(execute).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledTimes(resident ? 0 : 1);
+      } finally {
+        if (resident)
+          await replacementHeaders(
+            supertest(server).delete(`/session/${SESSION_ID}`),
+          ).expect(204);
+      }
+    },
+  );
 
   it.each(['cancel', 'close', 'continue-refusal'])(
     'preserves the actual passive MCP owner through %s',
@@ -28857,6 +29288,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         'read_file',
         'write_file',
         'edit',
+        'web_fetch',
         ...(toolProfile.endsWith('/2') ? ['glob'] : []),
       ]);
       // The takeover-built attachment starts with an undefined slot: the
@@ -38202,12 +38634,15 @@ describe('Hosted Harness stored definitions', () => {
       agentDefinition: definition,
       agentInstructions: 'D8_PINNED_INSTRUCTIONS',
     });
-    await vi.waitFor(async () => {
-      const response = await headers(
-        supertest(server).delete(`/session/${SESSION_ID}`),
-      );
-      expect(response.status).toBe(204);
-    });
+    await vi.waitFor(
+      async () => {
+        const response = await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+        expect(response.status).toBe(204);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
   });
 
   it('loads published Skills from the saved resource after detach and rejects unbound Skill definitions', async () => {
@@ -38371,12 +38806,15 @@ describe('Hosted Harness stored definitions', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'read only',
@@ -38454,13 +38892,16 @@ describe('Hosted Harness stored definitions', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(replacement).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'read only',

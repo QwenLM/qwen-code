@@ -792,6 +792,23 @@ export class JavaManagedAgentClient {
     }
   }
 
+  queryUserMessages(sessionId: string, signal?: AbortSignal) {
+    return this.post<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >('/user-messages/query', { sessionId }, signal);
+  }
+
+  commandUserMessages(
+    sessionId: string,
+    command: import('./use-managed-user-messages').ManagedUserMessageCommand,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >('/user-messages/command', { sessionId, command, idempotencyKey }, signal);
+  }
+
   private async post<T>(
     path: string,
     body: unknown,
