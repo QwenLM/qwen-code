@@ -246,7 +246,7 @@ describe('resolveQwenHome', () => {
     beforeEach(() => {
       configHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sdk-xdg-'));
       fs.mkdirSync(path.join(configHome, 'qwen'));
-      fs.writeFileSync(path.join(configHome, 'qwen', 'installation_id'), 'id');
+      fs.writeFileSync(path.join(configHome, 'qwen', '.qwen-global-dir'), '');
       delete process.env['QWEN_HOME'];
       process.env['XDG_CONFIG_HOME'] = configHome;
       Object.defineProperty(process, 'platform', { value: 'linux' });
@@ -259,7 +259,7 @@ describe('resolveQwenHome', () => {
       fs.rmSync(configHome, { recursive: true, force: true });
     });
 
-    it('uses the XDG config directory on Linux once it holds Qwen Code files, like the CLI', () => {
+    it('uses the XDG config directory on Linux once it holds the marker, like the CLI', () => {
       expect(resolveQwenHome()).toBe(path.join(configHome, 'qwen'));
     });
 

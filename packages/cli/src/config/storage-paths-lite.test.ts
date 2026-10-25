@@ -324,7 +324,7 @@ describe('settings locations in a given environment', () => {
       const xdgDir = path.join(userHome, '.config', 'qwen');
       fs.mkdirSync(xdgDir, { recursive: true });
       expect(getGlobalQwenDirLite()).toBe(path.join(userHome, '.qwen'));
-      fs.writeFileSync(path.join(xdgDir, 'installation_id'), 'id');
+      fs.writeFileSync(path.join(xdgDir, '.qwen-global-dir'), '');
       expect(getGlobalQwenDirLite()).toBe(xdgDir);
       expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
     });

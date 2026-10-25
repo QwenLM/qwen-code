@@ -43,12 +43,12 @@ describe('channels/base paths – getGlobalQwenDir', () => {
       expect(getGlobalQwenDir()).toBe(path.join(home, '.config', 'qwen'));
     });
 
-    it('keeps an existing ~/.qwen on Linux until the XDG directory holds Qwen Code files', () => {
+    it('keeps an existing ~/.qwen on Linux until the XDG directory holds the marker', () => {
       const xdgDir = path.join(home, '.config', 'qwen');
       fs.mkdirSync(path.join(home, '.qwen'));
       fs.mkdirSync(xdgDir, { recursive: true });
       expect(getGlobalQwenDir()).toBe(path.join(home, '.qwen'));
-      fs.writeFileSync(path.join(xdgDir, 'output-language.md'), '');
+      fs.writeFileSync(path.join(xdgDir, '.qwen-global-dir'), '');
       expect(getGlobalQwenDir()).toBe(xdgDir);
     });
 

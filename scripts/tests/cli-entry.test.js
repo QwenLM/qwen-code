@@ -561,11 +561,11 @@ describe('scripts/cli-entry.js production entry', () => {
         );
       });
 
-      it('stays in ~/.config/qwen once it holds Qwen Code files, even next to ~/.qwen', async () => {
+      it('stays in ~/.config/qwen once it holds the marker, even next to ~/.qwen', async () => {
         existsSyncMock.mockImplementation((file) =>
           [
             '/home/test-user/.qwen',
-            '/home/test-user/.config/qwen/installation_id',
+            '/home/test-user/.config/qwen/.qwen-global-dir',
           ].includes(normalizePath(file)),
         );
         await import('../cli-entry.js?xdg-marked-home');

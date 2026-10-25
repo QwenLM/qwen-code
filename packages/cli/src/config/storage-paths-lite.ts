@@ -12,9 +12,9 @@ import * as path from 'node:path';
 // import @qwen-code/qwen-code-core because it runs before serve listener ready.
 export const SETTINGS_DIRECTORY_NAME = '.qwen';
 
-// Files Qwen Code writes into its global dir on first run; see
-// Storage.getGlobalQwenDir() in packages/core.
-const GLOBAL_DIR_MARKERS = ['installation_id', 'output-language.md'];
+// Written into the XDG directory while it is the default global dir in use;
+// see Storage.getGlobalQwenDir() in packages/core.
+const GLOBAL_DIR_MARKER = '.qwen-global-dir';
 
 /**
  * Whether a `QWEN_HOME` value expands against the home directory: `~`, or a
@@ -192,7 +192,7 @@ export function getDefaultQwenDirLite(
     'qwen',
   );
   return !fs.existsSync(legacyDir) ||
-    GLOBAL_DIR_MARKERS.some((file) => fs.existsSync(path.join(xdgDir, file)))
+    fs.existsSync(path.join(xdgDir, GLOBAL_DIR_MARKER))
     ? xdgDir
     : legacyDir;
 }

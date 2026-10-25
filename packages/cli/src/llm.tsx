@@ -1069,6 +1069,8 @@ export async function main() {
   // may have side effects.
   profileCheckpoint('after_sandbox_check');
 
+  Storage.markDefaultGlobalQwenDir();
+
   // Initialize output language file before config loads to ensure it's included in context
   if (!isBareMode(argv.bare)) {
     initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);

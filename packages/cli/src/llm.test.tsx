@@ -1792,6 +1792,12 @@ describe('llm.tsx main function', () => {
     vi.mocked(relaunchAppInChildProcess).mockResolvedValue(undefined);
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
     vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
+    // Bare mode writes neither installation_id nor output-language.md, so the
+    // global dir marker must not depend on either.
+    const markGlobalDir = vi
+      .spyOn(Storage, 'markDefaultGlobalQwenDir')
+      .mockImplementation(() => {});
+    let markGlobalDirCalls = 0;
 
     try {
       await main();
@@ -1802,8 +1808,11 @@ describe('llm.tsx main function', () => {
     } finally {
       process.argv = originalArgv;
       processExitSpy.mockRestore();
+      markGlobalDirCalls = markGlobalDir.mock.calls.length;
+      markGlobalDir.mockRestore();
     }
 
+    expect(markGlobalDirCalls).toBe(1);
     expect(createMinimalSettings).toHaveBeenCalledOnce();
     expect(loadSettings).not.toHaveBeenCalled();
     expect(loadCliConfig).toHaveBeenCalledWith(

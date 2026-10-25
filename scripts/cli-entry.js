@@ -101,10 +101,7 @@ function getDefaultQwenHome() {
       : join(home, '.config'),
     'qwen',
   );
-  return !existsSync(legacy) ||
-    ['installation_id', 'output-language.md'].some((file) =>
-      existsSync(join(xdg, file)),
-    )
+  return !existsSync(legacy) || existsSync(join(xdg, '.qwen-global-dir'))
     ? xdg
     : legacy;
 }

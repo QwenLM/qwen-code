@@ -22,9 +22,9 @@ const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
-// Written into the global dir on first run (installation_id unless usage
-// statistics are off, output-language.md unless in bare mode).
-const GLOBAL_DIR_MARKERS = ['installation_id', 'output-language.md'];
+// Written into the XDG directory while it is the default global dir in use;
+// see getGlobalQwenDir() and markDefaultGlobalQwenDir().
+const GLOBAL_DIR_MARKER = '.qwen-global-dir';
 
 // Win32 and darwin default volumes equate names differing only in case,
 // and realpath preserves the spelling it was given — so the same physical
@@ -214,14 +214,40 @@ export class Storage {
         : path.join(homeDir, '.config'),
       'qwen',
     );
-    // An existing ~/.qwen keeps working unless the XDG dir already holds files
-    // Qwen Code writes on first run: then a ~/.qwen recreated later (e.g. by
-    // an older release) cannot pull the install back, while an unrelated
-    // ~/.config/qwen never takes over an existing ~/.qwen.
+    // An existing ~/.qwen keeps working unless the XDG dir holds the marker
+    // Qwen Code writes there while using it as the default: then a ~/.qwen
+    // recreated later (e.g. by an older release) cannot pull the install back,
+    // while an unrelated ~/.config/qwen never takes over an existing ~/.qwen.
     return !fs.existsSync(legacyDir) ||
-      GLOBAL_DIR_MARKERS.some((file) => fs.existsSync(path.join(xdgDir, file)))
+      fs.existsSync(path.join(xdgDir, GLOBAL_DIR_MARKER))
       ? xdgDir
       : legacyDir;
+  }
+
+  /**
+   * Writes the marker getGlobalQwenDir() looks for when the XDG directory is
+   * the default global dir in use. Not under QWEN_HOME, so a redirected run
+   * never claims the directory it was pointed at.
+   */
+  static markDefaultGlobalQwenDir(): void {
+    const homeDir = os.homedir();
+    if (process.env['QWEN_HOME'] || !homeDir) {
+      return;
+    }
+    const dir = Storage.getGlobalQwenDir();
+    const marker = path.join(dir, GLOBAL_DIR_MARKER);
+    if (dir === path.join(homeDir, QWEN_DIR) || fs.existsSync(marker)) {
+      return;
+    }
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        marker,
+        'Qwen Code keeps its global directory here even if ~/.qwen exists.\n',
+      );
+    } catch {
+      // Best effort: the next start tries again.
+    }
   }
 
   static getMcpOAuthTokensPath(): string {

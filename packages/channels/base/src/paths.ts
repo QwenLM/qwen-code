@@ -30,9 +30,9 @@ export function resolvePath(dir: string): string {
   return path.resolve(resolved);
 }
 
-// Files Qwen Code writes into its global dir on first run; see
-// Storage.getGlobalQwenDir() in packages/core.
-const GLOBAL_DIR_MARKERS = ['installation_id', 'output-language.md'];
+// Written into the XDG directory while it is the default global dir in use;
+// see Storage.getGlobalQwenDir() in packages/core.
+const GLOBAL_DIR_MARKER = '.qwen-global-dir';
 
 /**
  * Returns the global Qwen home directory (config, credentials, etc.).
@@ -64,7 +64,7 @@ export function getGlobalQwenDir(): string {
     'qwen',
   );
   return !fs.existsSync(legacyDir) ||
-    GLOBAL_DIR_MARKERS.some((file) => fs.existsSync(path.join(xdgDir, file)))
+    fs.existsSync(path.join(xdgDir, GLOBAL_DIR_MARKER))
     ? xdgDir
     : legacyDir;
 }

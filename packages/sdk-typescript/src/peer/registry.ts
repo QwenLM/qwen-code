@@ -74,9 +74,9 @@ export function isValidSessionKind(kind: string): boolean {
   return KIND_RE.test(kind);
 }
 
-// Files Qwen Code writes into its global dir on first run; see
-// Storage.getGlobalQwenDir() in packages/core.
-const GLOBAL_DIR_MARKERS = ['installation_id', 'output-language.md'];
+// Written into the XDG directory while it is the default global dir in use;
+// see Storage.getGlobalQwenDir() in packages/core.
+const GLOBAL_DIR_MARKER = '.qwen-global-dir';
 
 /**
  * The Qwen home this process should use: `explicit`, else `QWEN_HOME`, else
@@ -119,9 +119,7 @@ export function resolveQwenHome(explicit?: string): string {
     'qwen',
   );
   return !fsSync.existsSync(legacyDir) ||
-    GLOBAL_DIR_MARKERS.some((file) =>
-      fsSync.existsSync(path.join(xdgDir, file)),
-    )
+    fsSync.existsSync(path.join(xdgDir, GLOBAL_DIR_MARKER))
     ? xdgDir
     : legacyDir;
 }

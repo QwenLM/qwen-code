@@ -88,12 +88,12 @@ describe('vscode-ide-companion paths – getGlobalQwenDir', () => {
       expect(getGlobalQwenDir()).toBe(xdgDir());
     });
 
-    it('keeps an existing ~/.qwen on Linux until the XDG directory holds Qwen Code files', () => {
+    it('keeps an existing ~/.qwen on Linux until the XDG directory holds the marker', () => {
       fs.mkdirSync(legacyDir());
       expect(getGlobalQwenDir()).toBe(legacyDir());
       fs.mkdirSync(xdgDir(), { recursive: true });
       expect(getGlobalQwenDir()).toBe(legacyDir());
-      fs.writeFileSync(path.join(xdgDir(), 'installation_id'), 'id');
+      fs.writeFileSync(path.join(xdgDir(), '.qwen-global-dir'), '');
       expect(getGlobalQwenDir()).toBe(xdgDir());
     });
 

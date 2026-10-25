@@ -560,21 +560,45 @@ describe('Storage – default global dir (XDG Base Directory)', () => {
     expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
   });
 
-  it.each(['installation_id', 'output-language.md'])(
-    'prefers the XDG directory next to ~/.qwen once it holds %s',
-    (marker) => {
-      create(legacyDir());
-      create(xdgDir());
-      actualFs.writeFileSync(path.join(xdgDir(), marker), '');
-      expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
-    },
-  );
+  it('prefers the XDG directory next to ~/.qwen once it holds the marker', () => {
+    create(legacyDir());
+    create(xdgDir());
+    actualFs.writeFileSync(path.join(xdgDir(), '.qwen-global-dir'), '');
+    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+  });
 
   it('stays in the XDG directory when ~/.qwen is recreated after first run', () => {
     expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
-    new InstallationManager().getInstallationId();
+    Storage.markDefaultGlobalQwenDir();
     create(legacyDir());
     expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+  });
+
+  it.each(['installation_id', 'output-language.md'])(
+    'does not treat %s alone as the marker',
+    (file) => {
+      // Both can be written while QWEN_HOME points at the XDG directory.
+      create(legacyDir());
+      create(xdgDir());
+      actualFs.writeFileSync(path.join(xdgDir(), file), '');
+      expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
+    },
+  );
+
+  it('does not mark the directory QWEN_HOME points at', () => {
+    create(legacyDir());
+    vi.stubEnv('QWEN_HOME', xdgDir());
+    new InstallationManager().getInstallationId();
+    Storage.markDefaultGlobalQwenDir();
+    vi.stubEnv('QWEN_HOME', undefined);
+    expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
+  });
+
+  it('writes no marker while ~/.qwen is in use', () => {
+    create(legacyDir());
+    Storage.markDefaultGlobalQwenDir();
+    expect(actualFs.existsSync(xdgDir())).toBe(false);
+    expect(actualFs.readdirSync(legacyDir())).toEqual([]);
   });
 
   it('uses an absolute XDG_CONFIG_HOME', () => {
