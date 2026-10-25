@@ -138,6 +138,67 @@ For a binding without durable identity the embedding service must reconcile a
 persisted lease before reuse and own the process adoption or reprovisioning
 policy; a durable binding is reconciled and adopted by the Broker itself.
 
+## External Workspace storage registration
+
+Operators can reserve an immutable `EXTERNAL` storage ownership record through
+`POST /internal/managed-workspaces/v1/storage:register-external`. This is metadata
+registration only: it creates no Workspace, Session, worker, remote call or local
+filesystem access. It needs no external provisioner profile. Existing execution
+and local recovery paths refuse these aliases. See the
+[registration design](../../../docs/design/2026-10-25-external-storage-registration.md).
+
+The listener must be explicitly bound to loopback (`server.address` for a shared
+listener, or `qwen.managed-agent.internal-server.address` for a dedicated internal
+listener). Use literal `127.0.0.1` or `::1`. Both local and peer addresses must be
+loopback; forwarded headers do not grant access. A dedicated internal listener
+also requires its configured port. Send `Authorization: Bearer <runtime-broker.token>`
+and `X-Qwen-Tenant-Id`. An empty Broker token or a non-loopback listener is refused,
+even if ordinary API authentication is open. The operator credential authorizes
+the named tenant; ordinary Workspace grants do not authorize registration.
+
+```json
+{
+  "identity": {
+    "providerId": "provider-a",
+    "physicalKey": "persistent-volume-42",
+    "registrationRevision": 1
+  },
+  "alias": {
+    "tenantWorkspaceId": "workspace-42",
+    "aliasPath": "/external/workspace-42",
+    "mountRoot": "/workspace"
+  },
+  "idempotencyKey": "register-workspace-42",
+  "requestId": "operator-request-42"
+}
+```
+
+`providerId`, `physicalKey` and `tenantWorkspaceId` use `[A-Za-z0-9._-]{1,128}`;
+`registrationRevision` is positive. The provider must supply durable storage
+identity, never a sandbox ID. `tenantWorkspaceId` reserves the tenant's storage ID
+for a future Workspace; an existing alias, Workspace or Runtime binding is never
+adopted. Paths are absolute, non-root, at most 2048 characters and use nonempty
+`[A-Za-z0-9._-]+` components other than `.` and `..`. Backslashes, duplicate or
+trailing separators are rejected. Registration does not attest permissions or
+existence on the worker; its physical owner remains `UNVERIFIED`.
+
+A provider/physicalKey pair has one immutable tenant and alias, independent of
+revision. Alias paths are exclusive across external registrations, including
+across tenants. Attempts to change ownership return `409 alias_conflict` with a
+sanitized message. The tenant-scoped `idempotencyKey` uses
+`[A-Za-z0-9._:-]{1,128}`; the same key with different registration data returns
+`409 idempotency_conflict`. A committed retry returns the original `registrationId`,
+`storageKind`, `registration` and `registeredAt` (epoch milliseconds), including
+after restart. Optional `requestId` is visible ASCII of 1–128 characters and only
+sets HTTP correlation; changing it does not change the durable request digest.
+All responses are `Cache-Control: no-store`. Success is HTTP 200; invalid input is
+400, operator admission failure 403, and payloads over 16 KiB 413.
+
+Registration, owner and idempotency receipt commit atomically. The fresh V1 schema
+adds the `EXTERNAL_STORAGE` receipt namespace; existing development catalogs must
+be recreated under the existing fresh-schema policy. There is no update,
+re-registration, retirement, mount or execution API in this increment.
+
 ## Experimental Kubernetes scratch Runtime
 
 `KubernetesRuntimeProvisioner` implements the K1 slice of the
