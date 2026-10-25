@@ -85,8 +85,9 @@ it('hands qwen serve only Broker variables that serve removes from its environme
   expect(state.process.exitCode).toBeUndefined();
   expect(state.spawned).toHaveLength(1);
   const [{ command, args, env }] = state.spawned;
-  // The profile is what makes serve remove the pair; any other launch would
-  // start a default daemon with it.
+  // serve.ts deletes both unconditionally; the profile is what makes
+  // validateHostedHarnessProfile accept them, and a launch without it exits
+  // instead of starting a default daemon.
   expect(command).toBe('/usr/local/bin/qwen');
   expect(args).toEqual([
     'serve',
