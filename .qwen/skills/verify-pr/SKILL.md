@@ -21,6 +21,11 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
   **PR head**. Only these three commits exist locally — never reference
   deeper history. The PR's effective diff is `git diff HEAD^1..HEAD`; the
   verified head to cite is `git rev-parse HEAD^2`.
+- **The `.qwen` tree is base-pinned.** The lane replaces it with
+  `git archive "$BASE_OID" -- .qwen` (then root-owned, read-only) before you
+  start, while `scripts/tests/**` stays at the PR head — so a `scripts/tests`
+  assertion that reads a skill file in that tree sees the base version, and
+  an expected-red there is a lane artifact, not a defect.
 - **Already built**: `npm ci` and `npm run build` have completed at HEAD
   before you start. Do not redo them; rebuild only what your A/B needs.
 - **Java toolchain, only when `QWEN_VERIFY_JAVA=1`.** The lane sets that

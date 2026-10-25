@@ -5269,14 +5269,11 @@ describe('qwen-triage verify hardening round 2', () => {
   // The TUI renders `argument-hint` beside the command name; without the field
   // `/verify-pr` looks like it takes no arguments, unlike `/review`.
   it('declares an argument hint for the command prompt', () => {
-    const hint = /^argument-hint: '([^']+)'/m.exec(verifySkill)?.[1] ?? '';
+    const frontmatter = parse(/^---\n([\s\S]*?)\n---/.exec(verifySkill)[1]);
 
-    expect(hint).toContain('<pr-number>');
-    expect(hint).toContain('--publish');
-    expect(hint).toContain('--watch');
-    expect(hint).toContain('--repo');
-    expect(hint).toContain('--assets-repo');
-    expect(hint).toContain('--assets-branch');
+    expect(frontmatter['argument-hint']).toBe(
+      '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
+    );
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
