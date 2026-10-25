@@ -378,6 +378,197 @@ describe('ReadFileTool', () => {
       },
     );
 
+    it.skipIf(!['linux', 'darwin'].includes(process.platform)).each([
+      ['other file', false],
+      ['same file', false],
+      ['same file', true],
+    ] as const)(
+      'keeps replacement-history read authority when an old read settles: %s, failure=%s',
+      async (target, ownerFailure) => {
+        const oldPath = await put('old-generation.txt', 'old owner bytes');
+        const healthyPath =
+          target === 'same file'
+            ? oldPath
+            : await put('healthy-generation.txt', 'healthy owner bytes');
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        let entered!: () => void;
+        let release!: () => void;
+        const started = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const failure = new Error('old read owner failed after replacement');
+        let first = true;
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) => {
+          const isOld = first;
+          first = false;
+          const result = await producer(request, async (source) => {
+            if (isOld) {
+              if (source.kind !== 'descriptor')
+                throw new Error('expected ordinary descriptor');
+              const actualRead = source.fileHandle.read.bind(source.fileHandle);
+              let paused = false;
+              Object.assign(source.fileHandle, {
+                read: async (
+                  buffer: Buffer,
+                  offset: number,
+                  length: number,
+                  position: number,
+                ) => {
+                  const result = await actualRead(
+                    buffer,
+                    offset,
+                    length,
+                    position,
+                  );
+                  if (!paused) {
+                    paused = true;
+                    entered();
+                    await held;
+                  }
+                  return result;
+                },
+              });
+            }
+            return operation(source);
+          });
+          if (isOld && ownerFailure) throw failure;
+          return result;
+        };
+        const boundTool = new ReadFileTool(
+          makeConfig({ getFileSystemService: () => service }),
+        );
+        const writes = vi.spyOn(fileReadCache, 'recordRead');
+        // Attach the rejection observer before any intentionally failing owner settles.
+        const old = read(oldPath, boundTool).then(
+          (result) => ({ result, error: undefined }),
+          (error: unknown) => ({ result: undefined, error }),
+        );
+        try {
+          await started;
+          const oldGeneration = fileReadCache.getClearGeneration();
+          fileReadCache.clear();
+          expect(fileReadCache.getClearGeneration()).toBeGreaterThan(
+            oldGeneration,
+          );
+          expect(fileReadCache.check(await fsp.stat(oldPath)).state).toBe(
+            'unknown',
+          );
+          const healthy = await read(healthyPath, boundTool);
+          expect(healthy.error).toBeUndefined();
+          expect(healthy.llmContent).toBe(
+            target === 'same file' ? 'old owner bytes' : 'healthy owner bytes',
+          );
+          const current = fileReadCache.check(await fsp.stat(healthyPath));
+          expect(current.state).toBe('fresh');
+          if (current.state !== 'fresh')
+            throw new Error('healthy read did not establish authority');
+          const entry = { ...current.entry };
+          expect(writes).toHaveBeenCalledTimes(1);
+          release();
+          const settled = await old;
+          if (ownerFailure) expect(settled.error).toBe(failure);
+          else expect(settled.result?.error).toBeUndefined();
+          // Neither late recording nor late error cleanup may alter successor authority.
+          expect(writes).toHaveBeenCalledTimes(1);
+          expect(fileReadCache.check(await fsp.stat(healthyPath))).toEqual({
+            state: 'fresh',
+            entry,
+          });
+          if (target === 'other file')
+            expect(fileReadCache.check(await fsp.stat(oldPath)).state).toBe(
+              'unknown',
+            );
+        } finally {
+          release();
+          await old;
+          writes.mockRestore();
+        }
+      },
+    );
+
+    it('does not invalidate a healthy same-file read when an old recorded owner fails after history clear', async () => {
+      const filePath = await put(
+        'recorded-before-clear.txt',
+        'same file bytes',
+      );
+      const service = new StandardFileSystemService();
+      const producer = service.withReadFile.bind(service);
+      let entered!: () => void;
+      let release!: () => void;
+      const recorded = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const failure = new Error(
+        'old owner rejected its already-recorded result',
+      );
+      let first = true;
+      service.withReadFile = async <T>(
+        request: FileReadRequest,
+        operation: (source: FileReadSource) => Promise<T>,
+      ) => {
+        const isOld = first;
+        first = false;
+        const result = await producer(request, operation);
+        if (isOld) {
+          // The real Read operation has already assigned recordedStats here.
+          expect(fileReadCache.check(await fsp.stat(filePath)).state).toBe(
+            'fresh',
+          );
+          entered();
+          await held;
+          throw failure;
+        }
+        return result;
+      };
+      const boundTool = new ReadFileTool(
+        makeConfig({ getFileSystemService: () => service }),
+      );
+      const writes = vi.spyOn(fileReadCache, 'recordRead');
+      const invalidations = vi.spyOn(fileReadCache, 'invalidate');
+      const old = read(filePath, boundTool).then(
+        (result) => ({ result, error: undefined }),
+        (error: unknown) => ({ result: undefined, error }),
+      );
+      try {
+        await recorded;
+        expect(writes).toHaveBeenCalledTimes(1);
+        const generation = fileReadCache.getClearGeneration();
+        fileReadCache.clear();
+        expect(fileReadCache.getClearGeneration()).toBeGreaterThan(generation);
+        const healthy = await read(filePath, boundTool);
+        expect(healthy.error).toBeUndefined();
+        expect(healthy.llmContent).toBe('same file bytes');
+        const current = fileReadCache.check(await fsp.stat(filePath));
+        expect(current.state).toBe('fresh');
+        if (current.state !== 'fresh')
+          throw new Error('healthy read did not record');
+        const entry = { ...current.entry };
+        expect(writes).toHaveBeenCalledTimes(2);
+        release();
+        expect((await old).error).toBe(failure);
+        expect(invalidations).not.toHaveBeenCalled();
+        expect(fileReadCache.check(await fsp.stat(filePath))).toEqual({
+          state: 'fresh',
+          entry,
+        });
+      } finally {
+        release();
+        await old;
+        writes.mockRestore();
+        invalidations.mockRestore();
+      }
+    });
+
     it.skipIf(!['linux', 'darwin'].includes(process.platform))(
       'keeps a prior full read when a later read fails before recording',
       async () => {
