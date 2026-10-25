@@ -84,7 +84,23 @@ it('hands qwen serve only Broker variables that serve removes from its environme
   expect(state.errors).toEqual([]);
   expect(state.process.exitCode).toBeUndefined();
   expect(state.spawned).toHaveLength(1);
-  const [{ args, env }] = state.spawned;
+  const [{ command, args, env }] = state.spawned;
+  // The profile is what makes serve remove the pair; any other launch would
+  // start a default daemon with it.
+  expect(command).toBe('/usr/local/bin/qwen');
+  expect(args).toEqual([
+    'serve',
+    '--profile',
+    'hosted-harness',
+    '--http-bridge',
+    '--no-web',
+    '--hostname',
+    '127.0.0.1',
+    '--port',
+    '4170',
+    '--workspace',
+    '/var/run/qwen/workspace',
+  ]);
   expect(env.QWEN_MANAGED_RUNTIME_BROKER_URL).toBe(brokerUrl);
   expect(env.QWEN_MANAGED_RUNTIME_BROKER_TOKEN).toBe('broker-secret');
   expect(args.join(' ')).not.toContain('broker-secret');
@@ -136,9 +152,14 @@ it('names a Broker URL that does not parse', async () => {
   ]);
 });
 
-it('refuses a plaintext Broker URL', async () => {
-  state.process.env.QWEN_MANAGED_RUNTIME_BROKER_URL =
-    'http://runtime-broker.example.internal';
+it.each([
+  'http://runtime-broker.example.internal',
+  'https://user@runtime-broker.example.internal',
+  'https://user:secret@runtime-broker.example.internal',
+  'https://runtime-broker.example.internal/?token=x',
+  'https://runtime-broker.example.internal/#x',
+])('refuses %s as a Broker URL', async (url) => {
+  state.process.env.QWEN_MANAGED_RUNTIME_BROKER_URL = url;
   await launch();
 
   expect(state.process.exitCode).toBe(1);
