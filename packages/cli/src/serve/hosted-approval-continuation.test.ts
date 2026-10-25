@@ -29,9 +29,15 @@ import {
 import { findHostedApprovalContinuation } from './hosted-approval-continuation.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { hostedPublicPlanActive } from './hosted-plan-mode.js';
+import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 afterEach(() => vi.restoreAllMocks());
+
+// The observed chain is a serial run of fsync-backed publishes and journal
+// commits; a fixed 10s budget flaked on a loaded runner (#15176).
+const WAIT_TIMEOUT_MS = slowHostBudgetMs(10_000, 45_000);
+const TEST_TIMEOUT_MS = slowHostBudgetMs(20_000, 75_000);
 
 it.each(
   ['allow', 'deny', 'cancelled', 'expired']
@@ -309,7 +315,7 @@ it.each(
           requestId = authorization.checkpoint.approval!.requestId;
           expect(first.authority.action(requestId)?.state).toBe('requested');
         },
-        { timeout: 10_000 },
+        { timeout: WAIT_TIMEOUT_MS },
       );
       const action = first.authority.action(requestId)!;
       const descriptor = JSON.parse(
@@ -462,5 +468,5 @@ it.each(
       await rm(root, { recursive: true, force: true });
     }
   },
-  20_000,
+  TEST_TIMEOUT_MS,
 );
