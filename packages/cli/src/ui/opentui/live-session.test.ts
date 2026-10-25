@@ -17,12 +17,16 @@ import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   ApprovalMode,
+  CoreToolScheduler,
+  LlmEventType,
   MockTool,
   getUnsupportedImageFormatWarning,
   SendMessageType,
 } from '@qwen-code/qwen-code-core';
 import type {
   Config,
+  ServerLlmStreamEvent,
+  ToolCallRequestInfo,
   SendMessageOptions,
   ToolCallConfirmationDetails,
   VisionBridgeModelSelection,
@@ -39,6 +43,8 @@ import {
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
@@ -245,6 +251,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             return {
               nativeAttemptsObserved: a.__modOutput !== undefined,
               request: {
+                ...c,
                 callId: c.callId,
                 name: c.name ?? 'test_tool',
                 args: c.args ?? {},
@@ -331,8 +338,12 @@ function createFakeConfig(
   isInitialized: () => boolean = () => true,
   recorder?: {
     recordMidTurnUserMessage: (...args: unknown[]) => void;
+    recordToolResult?: ChatRecordingService['recordToolResult'];
   },
 ) {
+  const chatRecorder = recorder
+    ? { recordToolResult: vi.fn(), ...recorder }
+    : undefined;
   // One stable client object: tests spy on its addHistory through
   // getGeminiClient() (R5-4/R6-5).
   const client = {
@@ -357,7 +368,7 @@ function createFakeConfig(
     // Pinning a bridge model is what turns `shouldRunVisionBridge` on; every
     // other test leaves it undefined and the prompt rides through untouched.
     getDefaultVisionBridgeModel: () => bridgeModel,
-    getChatRecordingService: () => recorder,
+    getChatRecordingService: () => chatRecorder,
     getDebugLogger: () => ({
       debug: () => {},
       warn: () => {},
@@ -368,6 +379,7 @@ function createFakeConfig(
 
 /** One tool batch on call 1, plain finish on the continuation call. */
 function oneToolBatchStream(request: {
+  goalContext?: ToolCallRequestInfo['goalContext'];
   callId: string;
   name: string;
   args?: unknown;
@@ -394,6 +406,191 @@ async function drain<T>(gen: AsyncGenerator<T>): Promise<T[]> {
 }
 
 describe('livePromptEvents', () => {
+  it('records a native model result once using the same finalized response sent to the model', async () => {
+    const request = { callId: 'native-recorded', name: 'read_file', args: {} };
+    const stream = oneToolBatchStream(request);
+    const recordToolResult = vi.fn();
+    const config = createFakeConfig(stream, undefined, () => true, {
+      recordMidTurnUserMessage: vi.fn(),
+      recordToolResult,
+    } as Parameters<typeof createFakeConfig>[3]);
+    await drain(livePromptEvents(config, 'read', new AbortController().signal));
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(recordToolResult).toHaveBeenCalledOnce();
+    const [parts, metadata] = recordToolResult.mock.calls[0];
+    expect(parts).toEqual(stream.mock.calls[1][0]);
+    expect(metadata.callId).toBe(request.callId);
+    expect(metadata.status).toBe('success');
+    expect(parts).toEqual([
+      {
+        functionResponse: {
+          id: request.callId,
+          name: request.name,
+          response: { ok: true },
+        },
+      },
+    ]);
+  });
+
+  it.each(['turn', 'session'] as const)(
+    'does not record an old model result after the %s changes while rendering completion',
+    async (scope) => {
+      const stream = oneToolBatchStream({
+        callId: 'old-owner-result',
+        name: 'read_file',
+        args: {},
+      });
+      const recordToolResult = vi.fn();
+      const config = createFakeConfig(stream, undefined, () => true, {
+        recordMidTurnUserMessage: vi.fn(),
+        recordToolResult,
+      } as Parameters<typeof createFakeConfig>[3]);
+      let current = true;
+      let sessionId = 'session-1';
+      Object.assign(config, { getSessionId: () => sessionId });
+      let invalidated = false;
+      for await (const event of livePromptEvents(config, 'read', undefined, {
+        isCurrentTurn: () => current,
+      })) {
+        if (event.type === 'tool-end' && event.id === 'old-owner-result') {
+          invalidated = true;
+          if (scope === 'turn') current = false;
+          else sessionId = 'session-2';
+        }
+      }
+      expect(invalidated).toBe(true);
+      expect(recordToolResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['read_file', 'get_goal'])(
+    'retains real Goal provenance options for native %s result',
+    async (name) => {
+      const permit = {
+        goalId: 'goal-native',
+        revision: 2,
+        turnId: 'turn-native',
+      };
+      const request = {
+        callId: 'goal-call',
+        name,
+        args: {},
+        goalContext: permit,
+      };
+      const stream = oneToolBatchStream(request);
+      const recordToolResult = vi.fn();
+      const config = createFakeConfig(stream, undefined, () => true, {
+        recordMidTurnUserMessage: vi.fn(),
+        recordToolResult,
+      });
+      await drain(livePromptEvents(config, 'go', new AbortController().signal));
+      expect(recordToolResult).toHaveBeenCalledOnce();
+      const [parts, metadata, options] = recordToolResult.mock.calls[0];
+      expect(parts).toEqual(stream.mock.calls[1][0]);
+      expect(metadata).toMatchObject({
+        callId: request.callId,
+        status: 'success',
+      });
+      expect(options).toEqual(goalToolResultProvenance(request, parts));
+      expect(options).toEqual(
+        name === 'get_goal'
+          ? { goalContext: permit, provenance: 'goal_runtime' }
+          : { goalContext: permit },
+      );
+      expect(options.goalContext).not.toBe(permit);
+    },
+  );
+  it.each([
+    { type: LlmEventType.Retry },
+    {
+      type: LlmEventType.ModelFallback,
+      fromModel: 'primary-model',
+      toModel: 'fallback-model',
+      fallbackIndex: 1,
+    },
+  ] satisfies ServerLlmStreamEvent[])(
+    'executes only fresh tools after $type discards a failed attempt',
+    async (boundary) => {
+      const oldRequest: ToolCallRequestInfo = {
+        callId: 'discarded-attempt-tool',
+        name: 'test_tool',
+        args: { attempt: 'discarded' },
+        isClientInitiated: false,
+        prompt_id: 'same-prompt',
+      };
+      const freshRequest: ToolCallRequestInfo = {
+        ...oldRequest,
+        callId: 'fresh-attempt-tool',
+        args: { attempt: 'fresh' },
+      };
+      let sends = 0;
+      const sendMessageStream = vi.fn(
+        function* (): Generator<ServerLlmStreamEvent> {
+          sends += 1;
+          if (sends === 1) {
+            yield { type: LlmEventType.ToolCallRequest, value: oldRequest };
+            yield boundary;
+            yield { type: LlmEventType.ToolCallRequest, value: freshRequest };
+          }
+        },
+      );
+      const schedule = vi.spyOn(CoreToolScheduler.prototype, 'schedule');
+      try {
+        await drain(livePromptEvents(createFakeConfig(sendMessageStream), 'q'));
+
+        expect(schedule).toHaveBeenCalledExactlyOnceWith(
+          [freshRequest],
+          expect.any(AbortSignal),
+        );
+        expect(sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(sendMessageStream.mock.calls[1]).toEqual([
+          [
+            {
+              functionResponse: {
+                name: freshRequest.name,
+                id: freshRequest.callId,
+                response: { ok: true },
+              },
+            },
+          ],
+          expect.any(AbortSignal),
+          expect.any(String),
+          { type: SendMessageType.ToolResult },
+        ]);
+      } finally {
+        schedule.mockRestore();
+      }
+    },
+  );
+
+  it('explicit Retry reuses prepared parts without rereading mentions or rebridging media', async () => {
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const content = [{ text: '@owned.txt already expanded' }, imagePart];
+    await drain(
+      livePromptEvents(config, 'unused draft', undefined, {
+        promptId: 'same-id',
+        submittedPrompt: '@owned.txt',
+        humanInput: { text: 'original' },
+        retry: {
+          content,
+          modelOverride: 'skill-model',
+          inlineModelOverride: false,
+        },
+      }),
+    );
+    expect(sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+      content,
+      expect.any(AbortSignal),
+      'same-id',
+      { type: SendMessageType.Retry, modelOverride: 'skill-model' },
+    );
+    expect(atMocks.calls).toHaveLength(0);
+    expect(visionMocks.run).not.toHaveBeenCalled();
+  });
+
   /** A `@path` read as the expander reports it (ink's tool_group entry). */
   const readDisplay = (
     overrides: Partial<IndividualToolCallDisplay> = {},
