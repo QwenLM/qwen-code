@@ -60,19 +60,12 @@ concurrency:
   # repo's namespace and PR runs DO cancel in progress, so a fork whose
   # default branch is `main` cancels a victim PR's run on every push.
   # Supersede within a PR is kept: one branch backs one open PR per fork.
-  # `main` never cancels in progress, and that is intended rather than
-  # accidental: a shared group holds at most one running plus one pending
-  # run, and a newer pending run REPLACES the older one even with
-  # cancel-in-progress: false, so back-to-back merges still coalesce onto the
-  # newest tree — but the in-flight run always finishes and reports. Merges
-  # land every ~18min (median) against this ~30min lane, and with no merge
-  # queue this run is the only fast witness of a merged tree; cancelling it
-  # starved the suite once already — e2e.yml measured 67 of 100 push runs
-  # cancelled and only 25 ever reported (#5859). The coverage upload is
-  # `always()`-gated, so a cancelled run would also publish partial coverage
-  # under the complete run's artifact name. Release branches are treated the
-  # same way.
-  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
+  # A ref-only group replaces older pending main pushes even when cancellation
+  # is disabled. Give each push-tip SHA its own group so every merged tree can
+  # report independently. Repeated pushes/reruns of one SHA still share a group.
+  # Keep running main and release validations uncancellable.
+  group: |-
+    ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref }}
   cancel-in-progress: |-
     ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}
 
@@ -1226,9 +1219,18 @@ jobs:
         env:
           LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
-          # Bound transfer on the shared runners. lint-scope falls back to full
-          # checks when this history cannot prove the PR's merge base.
-          git fetch --no-tags --depth=100 origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
+          # Blobless, and not optional: `Report test growth` may already have
+          # fetched the merge base with --filter=blob:none, leaving commits and
+          # trees without blobs. A later plain fetch then dies resolving
+          # thin-pack deltas against blobs this checkout does not have
+          # (`fatal: missing blob object`), and continue-on-error turns that
+          # into a silent full scan. lint-scope reads only commits and trees.
+          # The unset is load-bearing: the filter is recorded on the remote and
+          # later fetches in this checkout must stay ordinary.
+          git -c extensions.partialClone=origin -c remote.origin.promisor=true \
+            fetch --no-tags --depth=100 --filter=blob:none \
+            origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
+          git config --unset remote.origin.partialclonefilter || true
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
