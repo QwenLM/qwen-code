@@ -485,8 +485,8 @@ echo REACHED_END`,
             join(home, '.m2', 'repository', 'com', 'example', 'a.jar'),
             'jar',
           );
-          // The resolver rewrites these tracking files in place. A seeded
-          // hardlink would carry that write into the host cache unlocked.
+          // A resolver that rewrites these tracking files in place would
+          // carry that write through a seeded hardlink into the host cache.
           const tracking = [
             '_remote.repositories',
             'b.pom.lastUpdated',
@@ -586,6 +586,85 @@ echo REACHED_END`,
         // The seed stays best-effort, but the postmortem must see the failure.
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).toContain('SEED_STATUS=1');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux').each([
+    ['test', 'Run Java SDK tests (self-hosted)'],
+    [
+      'mysql-integration',
+      'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
+    ],
+  ])(
+    'reports a failed seed in the %s step summary while the lane stays green',
+    (jobName, stepName) => {
+      const run = parse(workflow).jobs[jobName].steps.find(
+        (candidate) => candidate.name === stepName,
+      ).run;
+      const lines = run.split('\n');
+      const start = lines.findIndex((line) =>
+        line.includes('SDK_JAVA_M2_SEED_EXISTED=1'),
+      );
+      const reported = lines.findIndex((line) =>
+        line.includes('sdk-java cache seed failed on'),
+      );
+      const end = lines.findIndex(
+        (line, index) => index > reported && line.trim() === 'fi',
+      );
+      expect(start, 'seed probe present').toBeGreaterThan(-1);
+      expect(reported, 'seed failure summary present').toBeGreaterThan(start);
+      expect(end, 'seed failure summary closed').toBeGreaterThan(reported);
+      const seed = lines.slice(start, end + 1).join('\n');
+      const dir = mkdtempSync(join(tmpdir(), `sdk-seed-report-${jobName}-`));
+      try {
+        const home = join(dir, 'home');
+        const runnerTemp = join(dir, 'runner-temp');
+        const shims = join(dir, 'bin');
+        mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+        mkdirSync(runnerTemp);
+        mkdirSync(shims);
+        writeFileSync(join(shims, 'cp'), '#!/bin/sh\nexit 1\n', {
+          mode: 0o755,
+        });
+        const seedRun = (env) =>
+          spawnSync(
+            'bash',
+            ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', seed],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                HOME: home,
+                RUNNER_TEMP: runnerTemp,
+                RUNNER_NAME: 'ecs-runner-7',
+                ...env,
+              },
+            },
+          );
+        // The seed stays best-effort, so the lane is green either way; only
+        // a failed copy leaves the postmortem a line.
+        const failedSummary = join(dir, 'failed.md');
+        const failed = seedRun({
+          PATH: `${shims}:${process.env.PATH}`,
+          GITHUB_STEP_SUMMARY: failedSummary,
+        });
+        expect(failed.status, failed.stderr).toBe(0);
+        expect(readFileSync(failedSummary, 'utf8')).toContain(
+          'sdk-java cache seed failed on ecs-runner-7: status 1; host cache present at seed: 1',
+        );
+        const cleanSummary = join(dir, 'clean.md');
+        const clean = seedRun({ GITHUB_STEP_SUMMARY: cleanSummary });
+        expect(clean.status, clean.stderr).toBe(0);
+        expect(existsSync(cleanSummary)).toBe(false);
+        // A replay or local run may not set the summary path at all.
+        const unset = seedRun({
+          PATH: `${shims}:${process.env.PATH}`,
+          GITHUB_STEP_SUMMARY: '',
+        });
+        expect(unset.status, unset.stderr).toBe(0);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
