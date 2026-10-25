@@ -1,4 +1,8 @@
 import {
+  MANAGED_EXTENSION_MESSAGES_EN,
+  MANAGED_EXTENSION_MESSAGES_ZH,
+} from './components/managed/managed-extension-messages.js';
+import {
   MANAGED_LIFECYCLE_MESSAGES_EN,
   MANAGED_LIFECYCLE_MESSAGES_ZH,
 } from './components/managed/managed-lifecycle-messages.js';
@@ -162,6 +166,7 @@ const EN: Messages = {
   'managed.refresh': 'Refresh',
   'managed.empty': 'No managed tasks yet.',
   'managed.loading': 'Loading…',
+  'managed.todo.loadedWindow': 'From the loaded session transcript.',
   'managed.more': 'Load more',
   'managed.titleSearch': 'Search session titles',
   'managed.titleSearchPlaceholder': 'Filter by title…',
@@ -2191,6 +2196,23 @@ const EN: Messages = {
   'workspaceHost.loadingFolders': 'Loading folders from this computer…',
   'workspaceHost.connectionError':
     'Could not load workspace capabilities from this computer.',
+  'workspaceDirectories.title': 'Workspace directories',
+  'workspaceDirectories.description':
+    'Tools can read and edit these directories in addition to the workspace root. New sessions inherit this list.',
+  'workspaceDirectories.warning':
+    'Adding a directory widens file access beyond the workspace root. Only add directories you trust.',
+  'workspaceDirectories.primary': 'Primary',
+  'workspaceDirectories.empty': 'No extra directories.',
+  'workspaceDirectories.add': 'Add directory',
+  'workspaceDirectories.addTitle': 'Add directory to workspace',
+  'workspaceDirectories.addSubmit': 'Add directory',
+  'workspaceDirectories.pathHint':
+    'Enter an absolute path on the machine running this workspace.',
+  'workspaceDirectories.remove': 'Remove directory',
+  'workspaceDirectories.loading': 'Loading directories…',
+  'workspaceDirectories.loadFailed':
+    'Could not load the workspace directories.',
+  'workspaceDirectories.removeFailed': 'Could not remove the directory',
   'sidebar.removeWorkspace': 'Remove workspace',
   'sidebar.workspaceActions': 'Workspace actions',
   'sidebar.renameWorkspace': 'Rename…',
@@ -4598,6 +4620,7 @@ const EN: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...MANAGED_MCP_MESSAGES_EN,
+  ...MANAGED_EXTENSION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -4679,6 +4702,7 @@ const ZH: Messages = {
   'managed.refresh': '刷新',
   'managed.empty': '暂无托管任务。',
   'managed.loading': '加载中…',
+  'managed.todo.loadedWindow': '来自当前已加载的会话记录。',
   'managed.more': '加载更多',
   'managed.titleSearch': '搜索会话标题',
   'managed.titleSearchPlaceholder': '按标题筛选…',
@@ -5173,6 +5197,7 @@ const ZH: Messages = {
   'toolName.cron_create': '创建定时任务',
   'toolName.cron_list': '定时任务列表',
   'toolName.cron_delete': '删除定时任务',
+  'toolName.autofix_pr': 'PR 自动修复',
   'toolName.task_create': '创建任务',
   'toolName.task_update': '更新任务',
   'toolName.task_list': '任务列表',
@@ -6630,6 +6655,21 @@ const ZH: Messages = {
   'workspaceHost.unsupported': '这台计算机不支持添加工作区。',
   'workspaceHost.loadingFolders': '正在从这台计算机加载目录…',
   'workspaceHost.connectionError': '无法从这台计算机加载工作区能力。',
+  'workspaceDirectories.title': '工作区目录',
+  'workspaceDirectories.description':
+    '除工作区根目录外，工具还可以读写这些目录。新建会话会继承该列表。',
+  'workspaceDirectories.warning':
+    '添加目录会扩大工具在工作区根目录之外的文件访问范围，请只添加你信任的目录。',
+  'workspaceDirectories.primary': '主目录',
+  'workspaceDirectories.empty': '暂无额外目录。',
+  'workspaceDirectories.add': '添加目录',
+  'workspaceDirectories.addTitle': '向工作区添加目录',
+  'workspaceDirectories.addSubmit': '添加目录',
+  'workspaceDirectories.pathHint': '请输入运行此工作区的机器上的绝对路径。',
+  'workspaceDirectories.remove': '移除目录',
+  'workspaceDirectories.loading': '正在加载目录…',
+  'workspaceDirectories.loadFailed': '无法加载工作区目录。',
+  'workspaceDirectories.removeFailed': '无法移除该目录',
   'sidebar.removeWorkspace': '移除工作区',
   'sidebar.workspaceActions': '工作区操作',
   'sidebar.renameWorkspace': '重命名…',
@@ -8843,6 +8883,7 @@ const ZH: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...MANAGED_MCP_MESSAGES_ZH,
+  ...MANAGED_EXTENSION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,

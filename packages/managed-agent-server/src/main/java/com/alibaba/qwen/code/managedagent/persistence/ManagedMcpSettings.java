@@ -17,6 +17,10 @@ public final class ManagedMcpSettings {
     private ManagedMcpSettings() { }
 
     public static void require(JsonNode body) {
+        if (ManagedConfigInstall.isPackageConfig(body)) {
+            ManagedConfigInstall.require(body);
+            return;
+        }
         ManagedExtensionRecords.closed(body, Set.of("kind", "schemaVersion", "servers", "command",
                 "operationId", "revision", "previousRecordRef"), "MCP settings");
         check("hosted-mcp-settings".equals(body.path("kind").textValue())
