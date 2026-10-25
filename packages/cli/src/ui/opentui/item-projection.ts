@@ -33,7 +33,7 @@ import type {
   SkillLevel,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
-import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { isCollapsibleTool } from '../utils/tool-group-summary.js';
 import { ToolCallStatus } from '../types.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import {
