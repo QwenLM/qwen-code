@@ -399,6 +399,35 @@ describe('useComposerCore history and drafts', () => {
     },
   );
 
+  it.each([false, true])(
+    'keeps ArrowDown in a short panel recall until paging returns to its draft (paged: %s)',
+    async (paged) => {
+      const entry = 'short entry';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify([entry, 'newest prompt']),
+      );
+      const onFocusFooter = vi.fn(() => true);
+      await mount({ onFocusFooter });
+      act(() => latest!.setText('unsent draft'));
+      if (paged) {
+        act(() => pressHistoryKey('ArrowUp'));
+        expect(latest!.getText()).toBe('newest prompt');
+      }
+      act(() => latest!.searchState.restoreSearchMatch!(entry));
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(latest!.getText()).toBe(entry);
+      expect(onFocusFooter).not.toHaveBeenCalled();
+
+      act(() => pressHistoryKey('ArrowUp'));
+      expect(latest!.getText()).toBe('newest prompt');
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(latest!.getText()).toBe(entry);
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(onFocusFooter).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.each(['ArrowUp', 'ArrowDown'] as const)(
     'keeps a selected history entry when pressing %s',
     async (key) => {

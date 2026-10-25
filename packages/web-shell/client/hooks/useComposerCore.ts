@@ -3893,6 +3893,7 @@ export function useComposerCore(
           }
           const next = history.navigateDown();
           if (next === null) {
+            if (isBrowsingHistory) return true;
             return onFocusFooterRef.current?.() ?? false;
           }
           const returningToPromptDraft = !history.isNavigating();
