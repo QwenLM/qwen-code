@@ -17,6 +17,7 @@ import {
 import {
   resolveModOptions,
   resolveModToolDialect,
+  resolveModUnsupportedEvents,
 } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
@@ -164,6 +165,13 @@ export class ModSession implements ICommandLoader {
                   marketplace,
                 )
               : undefined,
+            unsupportedEvents: source
+              ? resolveModUnsupportedEvents(
+                  this.optionScopes,
+                  extension.name,
+                  marketplace,
+                )
+              : undefined,
             options: source
               ? resolveModOptions(
                   source.userConfig,
@@ -216,17 +224,26 @@ export class ModSession implements ICommandLoader {
       const ordered = orderModPlugins(mods);
       if (ordered.length) {
         this.runtime = await ModRuntime.createGroup(
-          ordered.map(({ extension, source, options, toolDialect }) => ({
-            id: extension.id,
-            name: extension.name,
-            source: {
-              root: source!.root,
-              entry: source!.entry,
-              source: source!.source,
-            },
-            options,
-            toolDialect,
-          })),
+          ordered.map(
+            ({
+              extension,
+              source,
+              options,
+              toolDialect,
+              unsupportedEvents,
+            }) => ({
+              id: extension.id,
+              name: extension.name,
+              source: {
+                root: source!.root,
+                entry: source!.entry,
+                source: source!.source,
+              },
+              options,
+              toolDialect,
+              unsupportedEvents,
+            }),
+          ),
           this.config.getTargetDir(),
           (entry, plugin) => {
             if (this.commandSignal?.aborted || this.toolSignal?.aborted) return;
@@ -240,6 +257,7 @@ export class ModSession implements ICommandLoader {
           signal,
           (name) => this.config.getToolRegistry().ensureTool(name),
           this.terminal?.surface ?? null,
+          this.config.getCliVersion() || 'unknown',
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({

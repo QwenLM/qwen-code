@@ -123,6 +123,7 @@
     "prepare:package": "node scripts/prepare-package.js",
     "package:hosted-installation": "node scripts/build-hosted-installation-assets.js",
     "package:standalone": "node scripts/create-standalone-package.js",
+    "package:managed-runtime": "node scripts/create-managed-runtime-package.js",
     "package:standalone:release": "node scripts/build-standalone-release.js",
     "verify:installation-release": "node scripts/verify-installation-release.js",
     "release:version": "node scripts/version.js",

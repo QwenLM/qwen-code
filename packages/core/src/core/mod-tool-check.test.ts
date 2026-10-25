@@ -38,6 +38,7 @@ function setup(
   modToolCheck?: ModToolCheck,
   options: {
     name?: string;
+    kind?: Kind;
     permission?: PermissionDecision;
     interaction?: boolean;
     config?: Partial<ConfigParameters>;
@@ -66,7 +67,7 @@ function setup(
   );
   const tool = new MockTool({
     name: options.name ?? 'checked_tool',
-    kind: Kind.Read,
+    kind: options.kind ?? Kind.Read,
     params: {
       type: 'object',
       properties: { value: { type: 'string' } },
@@ -225,6 +226,111 @@ describe('headless-owned Mod tool.check restriction', () => {
     expect(harness.getConfirmationDetails).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [{}, Kind.Read, { isReadOnly: true }],
+    [{ inputFormat: InputFormat.STREAM_JSON }, Kind.Edit, { approver: 'host' }],
+    [
+      { interactive: true },
+      Kind.Search,
+      { approver: 'person', isReadOnly: true },
+    ],
+  ] as const)(
+    'reports who can answer and whether the call reads (%o, %s)',
+    async (config, kind, facts) => {
+      const check = vi.fn<ModToolCheck>(async (_input, verdict) => verdict);
+      const harness = setup(check, { kind, config });
+      await harness.run();
+      expect(check.mock.calls[0][0]).toEqual({
+        tool: 'checked_tool',
+        input: { value: 'original' },
+        tool_use_id: 'mod-checked-call',
+        ...facts,
+      });
+    },
+  );
+
+  it.each([ApprovalMode.YOLO, ApprovalMode.AUTO_EDIT, ApprovalMode.DEFAULT])(
+    'puts a Mod own ask to the permission host under %s',
+    async (approvalMode) => {
+      const harness = setup(
+        async () => ({
+          decision: 'ask',
+          reason: 'Check the branch first',
+          plugin: 'guard',
+        }),
+        { config: { approvalMode, inputFormat: InputFormat.STREAM_JSON } },
+      );
+      await harness.schedule();
+      const waiting = harness.waiting();
+      expect(waiting?.confirmationDetails).toMatchObject({
+        hideAlwaysAllow: true,
+        prompt: expect.stringContaining('Mod guard: Check the branch first'),
+      });
+      expect(harness.execute).not.toHaveBeenCalled();
+      await waiting!.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      expect((await harness.settled()).status).toBe('success');
+      expect(harness.execute).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not let the AUTO classifier approve a Mod own ask', async () => {
+    const harness = setup(async () => ({ decision: 'ask', plugin: 'guard' }), {
+      name: 'read_file',
+      config: {
+        approvalMode: ApprovalMode.AUTO,
+        inputFormat: InputFormat.STREAM_JSON,
+      },
+    });
+    vi.spyOn(harness.config.getLlmClient(), 'getHistoryTail').mockReturnValue(
+      [],
+    );
+    vi.spyOn(
+      harness.config.getLlmClient(),
+      'getTrustedUserAnswers',
+    ).mockReturnValue([]);
+    await harness.schedule();
+    expect(harness.waiting()?.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+      prompt: expect.stringContaining(
+        'Mod guard requested confirmation before running read_file.',
+      ),
+    });
+    expect(harness.execute).not.toHaveBeenCalled();
+  });
+
+  it('denies a Mod own ask under YOLO where nobody can answer', async () => {
+    const harness = setup(async () => ({ decision: 'ask', plugin: 'guard' }), {
+      config: { approvalMode: ApprovalMode.YOLO },
+    });
+    const call = await harness.run();
+    expect(call.status).toBe('error');
+    expect(call.response.error?.message).toBe(
+      'Qwen Code could not ask the user to confirm "checked_tool" in non-interactive mode, so it was not run. Mod guard requested confirmation before running checked_tool.',
+    );
+    expect(call.response.approvalRequired).toBeUndefined();
+    expect(harness.execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps a Mod own ask from a PermissionRequest allow', async () => {
+    const harness = setup(async () => ({ decision: 'ask', plugin: 'guard' }), {
+      config: { inputFormat: InputFormat.STREAM_JSON },
+      hookOutput: (event) =>
+        event === 'PermissionRequest'
+          ? { hookSpecificOutput: { decision: { behavior: 'allow' } } }
+          : {},
+    });
+    await harness.schedule();
+    const waiting = harness.waiting();
+    expect(waiting).toBeDefined();
+    expect(harness.execute).not.toHaveBeenCalled();
+    await waiting!.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.Cancel,
+    );
+    expect((await harness.settled()).status).toBe('cancelled');
+  });
+
   it('uses the existing stream-json confirmation for Mod ask', async () => {
     const harness = setup(async () => ({ decision: 'ask' }), {
       config: { inputFormat: InputFormat.STREAM_JSON },
@@ -281,6 +387,7 @@ describe('headless-owned Mod tool.check restriction', () => {
         tool: 'checked_tool',
         tool_use_id: 'mod-checked-call',
         input: { value: 'rewritten' },
+        isReadOnly: true,
       });
       (input.input as Record<string, unknown>)['value'] = 'tampered';
       return verdict;
