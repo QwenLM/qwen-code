@@ -8,12 +8,12 @@ import { wrapSystemReminder } from '../core/environmentContext.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 import {
-  INDEX_ALSO_OPEN,
-  INDEX_HOOK_SEPARATOR,
+  formatIndexEntry,
   INDEX_TRUNCATION_NOTICE,
   MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
+  parseIndexEntry,
   trimIndexToBudgetDetailed,
 } from './index-budget.js';
 
@@ -167,24 +167,18 @@ const MAX_NAMED_DROPPED_ENTRIES = 3;
 const MAX_DROPPED_ENTRY_NAME_CHARS = 60;
 
 const INDEX_ENTRY_TITLE = /^\s*-\s*\[([^\]]+)\]/;
-function descriptionFreeIndexEntry(line: string): string {
-  if (!INDEX_ENTRY_TITLE.test(line)) {
-    return line;
+function descriptionFreeIndexEntry(
+  line: string,
+): { min: number; max: number } | undefined {
+  const entry = parseIndexEntry(line);
+  if (!entry) {
+    return undefined;
   }
-  const targetStart = line.indexOf('](');
-  const targetEnd = targetStart < 0 ? -1 : line.indexOf(')', targetStart + 2);
-  if (targetEnd < 0 || !line.startsWith(INDEX_HOOK_SEPARATOR, targetEnd + 1)) {
-    return line;
-  }
-  const link = line.slice(0, targetEnd + 1);
-  // Grouped links follow the description and must not count as shortenable.
-  const alsoStart = line.lastIndexOf(INDEX_ALSO_OPEN);
-  const suffix =
-    alsoStart >= link.length + INDEX_HOOK_SEPARATOR.length &&
-    line.trimEnd().endsWith(')')
-      ? line.slice(alsoStart)
-      : '';
-  return `${link}${suffix}`;
+  const max = formatIndexEntry({ ...entry, description: undefined }).length;
+  // A hook can itself end in text identical to a grouped-link suffix.
+  const min =
+    entry.description !== undefined && entry.suffix ? entry.link.length : max;
+  return { min, max };
 }
 
 function droppedEntryName(line: string): string {
@@ -222,11 +216,19 @@ function describeDroppedEntries(
   }.`;
 }
 
-function truncateManagedAutoMemoryIndex(indexContent: string): string {
+function truncateManagedAutoMemoryIndex(
+  indexContent: string,
+  indexIsGenerated: boolean,
+): string {
   const trimmed = normalizeContent(indexContent).trim();
-  const lines = trimmed.split('\n');
-  const lineCount = lines.length;
-  const charCount = trimmed.length;
+  // Writer notices describe omissions before saving, not during prompt loading.
+  const hasWriterNotice = trimmed.endsWith(INDEX_TRUNCATION_NOTICE);
+  const entryContent = hasWriterNotice
+    ? trimmed.slice(0, -INDEX_TRUNCATION_NOTICE.length)
+    : trimmed;
+  const entries = entryContent.split('\n');
+  const lineCount = entries.length;
+  const charCount = entryContent.length;
   const wasLineTruncated = lineCount > MAX_MANAGED_AUTO_MEMORY_INDEX_LINES;
   const wasCharTruncated = charCount > MAX_INDEX_CHARS;
 
@@ -234,26 +236,35 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     return trimmed;
   }
 
-  // The writer's trailing notice must not compete with its retained entries.
-  const hasWriterNotice = trimmed.endsWith(INDEX_TRUNCATION_NOTICE);
-  const entries = hasWriterNotice
-    ? trimmed.slice(0, -INDEX_TRUNCATION_NOTICE.length).split('\n')
-    : lines;
   const { content, dropped } = trimIndexToBudgetDetailed(entries);
   const candidates = entries.slice(0, MAX_MANAGED_AUTO_MEMORY_INDEX_LINES);
   const candidateCharCount = candidates.join('\n').length;
   const ordinaryCharCount = candidates
     .map((line) => line.slice(0, MAX_INDEX_LINE_CHARS))
     .join('\n').length;
-  const noticeOverhead = hasWriterNotice ? INDEX_TRUNCATION_NOTICE.length : 0;
-  const canFitWithoutDescriptions =
-    candidates.map(descriptionFreeIndexEntry).join('\n').length +
-      noticeOverhead <=
-    MAX_INDEX_CHARS;
+  let minimumCharCount = candidates.length - 1;
+  let maximumCharCount = minimumCharCount;
+  let allRecognized = true;
+  for (const line of candidates) {
+    const floor = descriptionFreeIndexEntry(line);
+    if (!floor) {
+      allRecognized = false;
+      break;
+    }
+    minimumCharCount += floor.min;
+    maximumCharCount += floor.max;
+  }
+  const canFitWithoutDescriptions = !allRecognized
+    ? undefined
+    : maximumCharCount <= MAX_INDEX_CHARS
+      ? true
+      : minimumCharCount > MAX_INDEX_CHARS
+        ? false
+        : undefined;
   // Blame long candidates only when the ordinary-entry bound clears overflow.
   const overlongEntriesCauseOverflow =
-    candidateCharCount + noticeOverhead > MAX_INDEX_CHARS &&
-    ordinaryCharCount + noticeOverhead <= MAX_INDEX_CHARS;
+    candidateCharCount > MAX_INDEX_CHARS &&
+    ordinaryCharCount <= MAX_INDEX_CHARS;
 
   const reason =
     wasCharTruncated && !wasLineTruncated
@@ -266,18 +277,26 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
         ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
         : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
+  const shorteningAdvice = indexIsGenerated
+    ? 'Shorten nonempty `description` frontmatter in the topic files, then regenerate and check the index; prune or merge memory files if necessary.'
+    : canFitWithoutDescriptions === undefined
+      ? 'Check whether you can shorten index descriptions, or prune or merge entries to fit the character budget.'
+      : `Prune or merge entries, or shorten index descriptions to bring the total within ${MAX_INDEX_CHARS} UTF-16 code units.`;
+  const combinedCharacterAdvice =
+    canFitWithoutDescriptions === false
+      ? 'prune or merge more entries.'
+      : canFitWithoutDescriptions === true && !indexIsGenerated
+        ? `shorten descriptions enough to fit ${MAX_INDEX_CHARS} UTF-16 code units, or prune or merge more entries.`
+        : shorteningAdvice;
+
   const lever = overlongEntriesCauseOverflow
     ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
     : wasLineTruncated && candidateCharCount > MAX_INDEX_CHARS
-      ? ` Shortening entries cannot reduce the line count — prune or merge entries. The first ${candidates.length} entries also exceed the character budget; ${
-          canFitWithoutDescriptions
-            ? `shorten descriptions enough to fit ${MAX_INDEX_CHARS} UTF-16 code units, or prune or merge more entries.`
-            : 'prune or merge more entries.'
-        }`
+      ? ` Shortening entries cannot reduce the line count — prune or merge entries. The first ${candidates.length} entries also exceed the character budget; ${combinedCharacterAdvice}`
       : wasLineTruncated
         ? ' Shortening entries cannot reduce the line count — prune or merge entries.'
-        : canFitWithoutDescriptions
-          ? ` Prune or merge entries, or shorten index descriptions to bring the total within ${MAX_INDEX_CHARS} UTF-16 code units.`
+        : canFitWithoutDescriptions !== false
+          ? ` ${shorteningAdvice}`
           : ' Prune or merge entries to fit the character budget.';
 
   return `${content}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedEntries(
@@ -334,13 +353,14 @@ function buildTeamScopeSection(): string[] {
 function renderIndexBlock(
   memoryDir: string,
   indexContent: string | null | undefined,
+  indexIsGenerated = false,
 ): string[] {
   const trimmed = indexContent?.trim();
   return [
     `## ${memoryDir}/MEMORY.md`,
     '',
     trimmed
-      ? truncateManagedAutoMemoryIndex(trimmed)
+      ? truncateManagedAutoMemoryIndex(trimmed, indexIsGenerated)
       : 'Your MEMORY.md is currently empty. When you save new memories, they will appear here.',
   ];
 }
@@ -362,7 +382,11 @@ function buildIndexSections(
   if (teamSection !== undefined) {
     sections.push(
       '',
-      ...renderIndexBlock(teamSection.memoryDir, teamSection.indexContent),
+      ...renderIndexBlock(
+        teamSection.memoryDir,
+        teamSection.indexContent,
+        true,
+      ),
     );
   }
   return sections;

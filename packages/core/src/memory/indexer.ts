@@ -32,6 +32,7 @@ import {
 import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
 import {
+  formatIndexEntry,
   INDEX_ALSO_OPEN,
   INDEX_HOOK_SEPARATOR,
   INDEX_TRUNCATION_NOTICE,
@@ -214,9 +215,13 @@ function docIndexLine(
   // A hook that FITS whole costs nothing beyond its bytes — keep it. Drop the
   // hook only when it would have to be CUT below MIN_INDEX_HOOK_CHARS.
   if (description.length > room && room < MIN_INDEX_HOOK_CHARS) {
-    return `${link}${suffix}`;
+    return formatIndexEntry({ link, description: undefined, suffix });
   }
-  return `${link}${INDEX_HOOK_SEPARATOR}${truncateIndexField(description, room)}${suffix}`;
+  return formatIndexEntry({
+    link,
+    description: truncateIndexField(description, room),
+    suffix,
+  });
 }
 
 /**
