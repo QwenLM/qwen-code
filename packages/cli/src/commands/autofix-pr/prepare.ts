@@ -230,9 +230,10 @@ export interface PrepareArgs {
 
 /**
  * A daemon session runs the fix agent's commands only inside the session's own
- * working directory or a worktree that session owns, so a worktree prepared
- * outside it can be created but never used: no test, no commit, no push.
- * Refuse here, before anything is made under `.qwen/tmp`.
+ * working directory or a worktree that session owns, so a worktree outside it
+ * can be created but never used: no test, no commit, no push. Refuse before a
+ * fresh start creates anything, and before a resume reports that same
+ * worktree as ready.
  */
 function assertSessionCanRunWorktree(root: string, worktreePath: string): void {
   if (process.env['QWEN_CODE_SERVE'] !== '1') return;
@@ -241,8 +242,8 @@ function assertSessionCanRunWorktree(root: string, worktreePath: string): void {
   throw new Error(
     `${worktreePath} is outside this session's working directory ` +
       `(${sessionDir}): the daemon runs the fix agent's commands only there, ` +
-      `so a watch here could never run its checks, commit or push. Open the ` +
-      `session at ${root} and prepare the PR there.`,
+      `so a watch here could never run its checks, commit or push. Prepare the ` +
+      `PR from ${root}, where the worktree is inside the session's directory.`,
   );
 }
 
@@ -254,6 +255,17 @@ export function runPrepare(args: PrepareArgs): void {
   const host = resolveGhHost(args.host) ?? 'github.com';
   const root = repoRoot();
   const paths = autofixPrPaths(root, args.pr);
+
+  // A resume hands back the same worktree, so both refusals come before the
+  // state is read: a symlinked parent would put the worktree somewhere else,
+  // and a daemon session runs commands only inside its own directory.
+  const redirected = redirectedAncestor(dirname(paths.worktreePath), root);
+  if (redirected !== null) {
+    throw new Error(
+      `refusing to prepare ${paths.worktreePath}: ${redirected} is a symlink.`,
+    );
+  }
+  assertSessionCanRunWorktree(root, paths.worktreePath);
 
   // State is keyed by PR number alone, and one clone can reach several
   // repositories with a PR of that number.
@@ -330,14 +342,6 @@ export function runPrepare(args: PrepareArgs): void {
   // One start at a time: two sessions starting the same PR would both pass
   // the leftover checks, and the one whose `worktree add` failed would roll
   // back the worktree and branch the other just made.
-  // Before anything is made under `.qwen/tmp`, the lock's directory included.
-  const redirected = redirectedAncestor(dirname(paths.worktreePath), root);
-  if (redirected !== null) {
-    throw new Error(
-      `refusing to create ${paths.worktreePath}: ${redirected} is a symlink.`,
-    );
-  }
-  assertSessionCanRunWorktree(root, paths.worktreePath);
   mkdirSync(dirname(paths.lockPath), { recursive: true });
   const state = withWatchLock(paths, args.pr, () => {
     // What was read before the lock may have moved since: another session

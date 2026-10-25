@@ -316,6 +316,32 @@ describe('runPrepare (real git)', () => {
     expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(true);
   });
 
+  it('refuses a resume in a daemon session that cannot run the worktree', () => {
+    // A resume reports the worktree already there, so the refusal has to come
+    // before the state is read: otherwise this session is handed a watch whose
+    // every command the daemon will refuse.
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    const elsewhere = join(dir, 'elsewhere');
+    run(clone, 'worktree', 'add', '-q', '-b', 'other', elsewhere, 'main');
+    const savedServe = process.env['QWEN_CODE_SERVE'];
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(elsewhere);
+    try {
+      expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+        /outside this session's working directory/,
+      );
+      expect(readState(paths.statePath)).toMatchObject({
+        worktreePath: paths.worktreePath,
+        sessionId: 'session-a',
+      });
+    } finally {
+      process.chdir(clone);
+      if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+      else process.env['QWEN_CODE_SERVE'] = savedServe;
+    }
+  });
+
   it('starts one watch at a time: a second start waits for the lock', () => {
     const paths = autofixPrPaths(clone, 7);
     mkdirSync(dirname(paths.lockPath), { recursive: true });
