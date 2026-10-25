@@ -56,6 +56,7 @@ public class LocalProcessRuntimeProvisionerTest {
                 "SPRING_APPLICATION_JSON", "QWEN_MANAGED_AGENT_HARNESS_TOKEN",
                 "QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY", "qwen_managed_agent_runtime_broker_token",
                 "QWEN_MANAGEDAGENT_AUTH_SIGNING_KEY", "OSS_ACCESS_KEY_SECRET",
+                "QWEN_MANAGED_RUNTIME_BROKER_TOKEN", "qwen_managed_runtime_broker_url",
                 // Worker inputs and the ordinary environment pass through.
                 "QWEN_MANAGED_MCP_CONFIG", "QWEN_MANAGED_HOOK_CONFIG", "PATH", "HOME",
                 "QWEN_HOME", "HTTPS_PROXY", "NODE_EXTRA_CA_CERTS")) {

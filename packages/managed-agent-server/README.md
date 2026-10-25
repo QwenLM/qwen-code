@@ -318,15 +318,23 @@ mvn spring-boot:run
 ```
 
 Instead of the token and digest, `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`
-can name the Harness's own environment file. The server then reads
-`QWEN_SERVER_TOKEN` and `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it into its
-configuration, never into its process environment, and refuses to start when
-either direct value is also set. Write each credential as `KEY=value` on one
-line, with no whitespace around the `=` and only letters, digits and `._:/+=-`
-in the value, and start comments with `#`. The server refuses, by file and
-line, any line it might read differently from systemd or a shell, such as a
-continuation, a carriage return from CRLF line endings, a `;` comment, an
-unterminated quote or text after a closing quote.
+can name the Harness's own environment file. While the Harness is enabled,
+the server then reads `QWEN_SERVER_TOKEN` and
+`QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it, and
+`QWEN_MANAGED_RUNTIME_BROKER_TOKEN` when the file sets it, into its
+configuration, never into its process environment. It refuses to start when a
+direct `QWEN_MANAGED_AGENT_HARNESS_TOKEN` or
+`QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` is also set, or a direct
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` beside a file Broker token. The file
+sets the Harness's `QWEN_MANAGED_RUNTIME_BROKER_URL` and
+`QWEN_MANAGED_RUNTIME_BROKER_TOKEN` together or neither; a file with only one
+of them, or with either one empty, refuses startup. Write each of these keys as `KEY=value` on one line,
+with no whitespace around the `=` and only letters, digits and `._:/+=-` in the
+value (the Broker URL may also use `[` and `]` to bracket an IPv6 literal, as
+in `http://[::1]:4182`), and start comments with `#`. The server
+refuses, by file and line, any line it might read differently from systemd or
+a shell, such as a continuation, a carriage return from CRLF line endings, a
+`;` comment, an unterminated quote or text after a closing quote.
 
 Create a Session:
 
@@ -732,10 +740,11 @@ It is read once at JVM startup, so if `mvn spring-boot:run` is already up
 on the 4170 value exported in Prerequisites, restart it with the override in
 place.
 
-`--port` is a request, not a guarantee: `qwen serve` moves to the next free
+The ordinary daemon treats `--port` as a request and moves to the next free
 port on a collision, and 4171 is exactly where a daemon displaced from 4170
-lands. Confirm each server's bound port in its startup line before exporting
-the base URL above.
+lands. The Hosted Harness profile never moves: it fails to start when its
+port is taken, naming the port. Start the Harness first, or confirm the
+daemon's bound port in its startup line.
 
 With both up, run from the repository root:
 
@@ -917,7 +926,14 @@ Session Store uses the persisted Workspace ID; public callers cannot choose the
 profile. W1c offline migration remains files/1-only and refuses persisted Shell
 definitions with `migration_profile_unsupported`. Configure the
 Harness's deployment-owned `--managed-runtime-broker-url` and
-`--managed-runtime-broker-token` options to reach this Broker. A repeated creation key returns
+`--managed-runtime-broker-token` options, or the `QWEN_MANAGED_RUNTIME_BROKER_URL`
+and `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` variables they fall back to, to reach
+this Broker. The variables keep the token off the command line, and `qwen
+serve` removes them from its environment once read, so no process the Harness
+starts inherits the token. When
+`QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` names that environment file
+and it sets the token, the control plane takes its Broker token from it and
+refuses a second, direct `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`. A repeated creation key returns
 the original Session/Turn; changed input conflicts. Disabling the Workspace files
 opt-in refuses creation with input, including replays, while empty bound creation
 remains available. The Shell opt-in selects the persisted profile; it does not
@@ -1054,6 +1070,8 @@ For the single-node local-process provisioner, also set:
 
 ```bash
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
+# Omit when QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE names a file that sets
+# QWEN_MANAGED_RUNTIME_BROKER_TOKEN; setting both refuses startup.
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN='replace-me'
 export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID='local-dev-v1'
 export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY='replace-with-base64-encoded-32-byte-key'
@@ -1063,9 +1081,48 @@ export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
+For the external scratch provisioner, set these instead of the node executable,
+worker entry and state directory (the Broker token and credential key pair are
+still required). External scratch also requires an explicit Workspace ID: the
+worker-side cwd cannot be hashed on the Broker host, so no ID can be derived
+for this kind.
+
+```bash
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN="$QWEN_EXTERNAL_BROKER_TOKEN"
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID='external-dev-v1'
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY="$QWEN_EXTERNAL_CREDENTIAL_KEY_BASE64"
+export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST="$QWEN_EXTERNAL_CAPABILITY_DIGEST"
+export QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER='external-scratch'
+export QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY='false'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL='https://provider.example/'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_TOKEN="$QWEN_EXTERNAL_PROVIDER_TOKEN"
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID='external'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT='30s'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT='2m'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID="$QWEN_EXTERNAL_WORKSPACE_ID"
+export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/workspace'
+```
+
+Keep Workspace files and Shell disabled. Fill the `$QWEN_EXTERNAL_*` variables
+with your own values from a secret store and pick a stable Workspace ID; they
+are placeholders for operator-supplied values, not usable defaults. Set the
+capability digest (`sha256:` plus 64 lowercase hexadecimal characters) even
+with Harness disabled; the embedded Broker requires it. The provider URL must
+be HTTP(S) without credentials, query or fragment, and the cwd is the
+worker-side path. The provider implements authenticated `provision`
+and `observe` routes and must persist its mapping from the Broker's logical
+handle to one immutable physical resource across restarts. There is no release
+route, so a closed Session's worker is not stopped and its provider TTL must be
+budgeted. This increment has no tool consumer yet: Session Turns warm the worker
+but the model receives no tools until the Workspace extension lands. See the
+[Broker guide](docs/runtime-broker.md#external-scratch-runtime-opt-in) and the
+[bilingual design](../../docs/design/2026-10-23-external-runtime-provider.md).
+
 Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
-`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
+`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `QWEN_MANAGED_RUNTIME_BROKER_`,
+`SPRING_` or `OSS_`. Every other
 variable of the server process still reaches the worker and its tools. Keep
 unrelated secrets out of the service environment. A worker that uses the
 artifact tool's `oss` publisher therefore needs its credentials under the
@@ -1149,10 +1206,13 @@ warns. Cadences bound through `@Scheduled` placeholders —
 and the startup warning cannot see them, so always write the suffix
 there.
 
-When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
+For the local-process and Kubernetes provisioners, when
+`QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical
 workspace path. An explicitly configured ID must match that value or startup
-fails before traffic is accepted.
+fails before traffic is accepted. The derivation does not apply to
+`external-scratch`, which requires an explicit ID because its worker-side cwd
+cannot be hashed on the Broker host.
 
 The Hosted file profile connects through the private Broker endpoint, which
 defaults to `http://127.0.0.1:4182`. When enabled, the embedded

@@ -3091,6 +3091,38 @@ async function eventEnvelope(
   }
   if (
     event.kind === 'message.committed' &&
+    event.payload['role'] === 'user' &&
+    String(event.payload['messageId']).startsWith('umsg_')
+  ) {
+    const message = JSON.parse(
+      (
+        await readManagedMessageBody(
+          (ref) => session.managed.resources.read(ref),
+          event.payload['contentRef'] as unknown as ManagedSessionDurableRef,
+        )
+      ).toString('utf8'),
+    ) as ChatRecord;
+    if (message.subtype !== 'mid_turn_user_message')
+      return {
+        v: 1,
+        id: event.sequence,
+        type: 'managed_journal_event',
+        data: { sessionId },
+      };
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'user_message_consumed',
+      promptId: message.daemonPromptId,
+      data: {
+        sessionId,
+        messageId: message.uuid,
+        parts: message.message?.parts ?? [],
+      },
+    };
+  }
+  if (
+    event.kind === 'message.committed' &&
     (event.payload['role'] === 'assistant' ||
       event.payload['role'] === 'tool_result')
   ) {
@@ -3581,6 +3613,12 @@ async function executeHostedTurn(
                 : { message: { role: 'user', parts: promptInput.parts } }),
             },
           );
+          const initialQueued = await session.stores?.claimUserMessages(
+            promptId,
+            true,
+          );
+          if (initialQueued?.length)
+            inputRecord.uuid = `${initialQueued[0].id}:${initialQueued[0].revision}`;
           await session.managed.sink.write(inputRecord);
           parentUuid = inputRecord.uuid;
         }
@@ -3735,6 +3773,41 @@ async function executeHostedTurn(
                   prompt: text,
                   attachmentParts: promptInput.attachments,
                   promptId,
+                  ...(session.stores
+                    ? {
+                        userMessages: {
+                          claim: async () =>
+                            (
+                              await session.stores!.claimUserMessages(promptId)
+                            ).map((message) => ({
+                              id: `${message.id}:${message.revision}`,
+                              ...parseHostedInput(message.input),
+                            })),
+                          commit: async (id: string, parts: Part[]) => {
+                            const message = record(
+                              session,
+                              sessionId,
+                              'user',
+                              parentUuid,
+                              {
+                                uuid: id,
+                                daemonPromptId: promptId,
+                                subtype: 'mid_turn_user_message',
+                                message: { role: 'user', parts },
+                              },
+                            );
+                            await session.managed.sink.write(message);
+                            parentUuid = message.uuid;
+                          },
+                          commitAssistant: async (
+                            parts: Part[],
+                            model: string,
+                          ) => {
+                            await commit('assistant', parts, model);
+                          },
+                        },
+                      }
+                    : {}),
                   signal: abort.signal,
                   modelScope,
                   workspaceContext,
@@ -10412,6 +10485,38 @@ export function registerHostedHarnessSessionRoutes(
             },
             prompt: '',
             promptId,
+            ...(session.stores
+              ? {
+                  userMessages: {
+                    claim: async () =>
+                      (await session.stores!.claimUserMessages(promptId)).map(
+                        (message) => ({
+                          id: `${message.id}:${message.revision}`,
+                          ...parseHostedInput(message.input),
+                        }),
+                      ),
+                    commit: async (id: string, parts: Part[]) => {
+                      const message = record(
+                        session,
+                        sessionId,
+                        'user',
+                        parentUuid,
+                        {
+                          uuid: id,
+                          daemonPromptId: promptId,
+                          subtype: 'mid_turn_user_message',
+                          message: { role: 'user', parts },
+                        },
+                      );
+                      await session.managed.sink.write(message);
+                      parentUuid = message.uuid;
+                    },
+                    commitAssistant: async (parts: Part[], model: string) => {
+                      await commit('assistant', parts, model);
+                    },
+                  },
+                }
+              : {}),
             signal: abort.signal,
             workspaceContext,
             agentDefinition: session.agentDefinition,

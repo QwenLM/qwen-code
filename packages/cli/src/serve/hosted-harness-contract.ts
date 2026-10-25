@@ -84,6 +84,7 @@ export function createHostedHarnessContract(
       'hosted_model_round_recovery_v1',
       'model-selection/1',
       'context-compression/1',
+      'user-message-queue/1',
       'public-child-agents/1',
       'approval-selection/1',
       'auto-approval/1',
