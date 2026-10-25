@@ -275,7 +275,25 @@ describe.skipIf(process.platform === 'win32')(
 describe.skipIf(process.platform === 'win32')(
   'incremental lint subprocesses',
   () => {
-    const run = (lanes, fail = '', script = lintScript, extraEnv = {}) => {
+    // The mock bin plus the minimum the child needs: Node's own directory for
+    // the mock shebangs, git's for the scope, and the base system dirs for the
+    // shell builtins — but no user bin directory, so an ambient yamllint
+    // cannot satisfy `command -v` and hide an installer.
+    const constrainedPath = () =>
+      [
+        join(repo, 'node_modules', '.bin'),
+        dirname(process.execPath),
+        dirname(
+          execFileSync('sh', ['-c', 'command -v git'], {
+            encoding: 'utf8',
+          }).trim(),
+        ),
+        '/bin',
+        '/usr/bin',
+      ].join(':');
+
+    const run = (lanes, fail = '', script = lintScript, options = {}) => {
+      const { env: envOverrides = {}, omit = [], extra = [] } = options;
       const bin = join(repo, 'node_modules', '.bin');
       const log = join(root, 'calls.jsonl');
       mkdirSync(bin, { recursive: true });
@@ -286,7 +304,9 @@ describe.skipIf(process.platform === 'win32')(
         'yamllint',
         'actionlint',
         'npm',
+        ...extra,
       ]) {
+        if (omit.includes(name)) continue;
         const file = join(bin, name);
         writeFileSync(
           file,
@@ -313,7 +333,7 @@ describe.skipIf(process.platform === 'win32')(
             LINT_BASE_SHA: baseSha,
             LINT_LOG: log,
             FAIL_LINTER: fail,
-            ...extraEnv,
+            ...envOverrides,
           },
         },
       );
@@ -461,9 +481,11 @@ describe.skipIf(process.platform === 'win32')(
       const summary = join(root, 'step-summary.md');
       const never = 'deadbeef'.repeat(5);
       const history = run(['eslint'], '', lintScript, {
-        LINT_BASE_SHA: never,
-        GITHUB_ACTIONS: 'true',
-        GITHUB_STEP_SUMMARY: summary,
+        env: {
+          LINT_BASE_SHA: never,
+          GITHUB_ACTIONS: 'true',
+          GITHUB_STEP_SUMMARY: summary,
+        },
       });
       expect(history.status, history.stderr).toBe(0);
       expect(history.stdout).toContain(
@@ -479,12 +501,49 @@ describe.skipIf(process.platform === 'win32')(
       put('eslint.config.js', 'export default [];\n');
       commit();
       const config = run(['eslint'], '', lintScript, {
-        GITHUB_ACTIONS: 'true',
-        GITHUB_STEP_SUMMARY: summary,
+        env: { GITHUB_ACTIONS: 'true', GITHUB_STEP_SUMMARY: summary },
       });
       expect(config.status, config.stderr).toBe(0);
       expect(config.stdout).not.toContain('::warning::');
       expect(existsSync(summary)).toBe(false);
+    });
+
+    it('installs only the linters a changed file needs', () => {
+      put('changed.yml', 'name: test\n');
+      commit();
+      expect(() =>
+        execFileSync('sh', ['-c', 'command -v yamllint'], {
+          env: { PATH: constrainedPath() },
+          stdio: 'ignore',
+        }),
+      ).toThrow();
+      const result = run(['setup'], '', lintScript, {
+        // Constrained PATH: an ambient yamllint from a developer venv or a
+        // runner image would satisfy `command -v` and hide the installer.
+        env: { PATH: constrainedPath() },
+        omit: ['yamllint'],
+        extra: ['pip3'],
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.calls).toEqual([
+        { name: 'pip3', args: ['install', '--user', 'yamllint==1.35.1'] },
+      ]);
+    });
+
+    it('runs no installer when the diff selects no lane', () => {
+      git('rm', 'unchanged.ts');
+      put('image.png', Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      commit();
+      const result = run(['setup'], '', lintScript, {
+        env: { PATH: constrainedPath() },
+        omit: ['eslint', 'prettier', 'shellcheck', 'actionlint', 'yamllint'],
+        extra: ['pip3'],
+      });
+      expect(result.status, result.stderr).toBe(0);
+      // setupLinters must skip a lane with nothing to lint *before* checking for
+      // its binary; otherwise every PR pays the tarball and pip installs this
+      // optimization removed, and no assertion could see it.
+      expect(result.calls).toEqual([]);
     });
 
     it('keeps the spawned linter temp dir inside the fixture', () => {
