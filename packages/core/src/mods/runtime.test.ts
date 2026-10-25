@@ -957,6 +957,40 @@ describe('ModRuntime with the real QuickJS worker', () => {
     );
   });
 
+  it('settles a $.turn.abort its own turn ending leaves unanswered', async () => {
+    const turn = new AbortController();
+    const runtime = await createTurns(
+      [
+        `let state = 'unasked';
+        export function register(on) {
+          on('turn.start', async ($, e, next) => {
+            state = 'pending';
+            await $.turn.abort({turnId: e.turnId}).then(
+              () => { state = 'resolved'; },
+              (error) => { state = String(error); });
+            return next(e);
+          });
+          on('turn.complete', ($, e) => ({text: state}));
+        }`,
+      ],
+      // As a session does, ending the turn ends the dispatch that asked.
+      () => turn.abort(),
+    );
+    // The answer is lost, so only the dispatch's end can settle the call.
+    const post = runtime['post'].bind(runtime);
+    vi.spyOn(runtime as never, 'post').mockImplementation(((
+      request: Parameters<typeof post>[0],
+      root: number,
+    ) => {
+      if (request.type !== 'turn-abort-result') post(request, root);
+    }) as never);
+    await runtime
+      .startTurn({ text: '', turnId: 'turn-1' }, turn.signal)
+      .catch(() => {});
+    // The next dispatch runs; the abandoned hook never resumed.
+    expect(await runtime.completeTurn(turnEnd, signal())).toBe('pending');
+  });
+
   it('lets another plugin deny or rewrite $.turn.abort', async () => {
     const asked: string[] = [];
     const runtime = await createTurns(

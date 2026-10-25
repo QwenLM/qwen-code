@@ -1530,6 +1530,22 @@ describe('Gemini Client (client.ts)', () => {
       expect(order).toEqual(['hook', 'admitted', 'request']);
     });
 
+    it('does not report the turn again for a continuation it sends', async () => {
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
+      vi.mocked(checkNextSpeaker)
+        .mockResolvedValueOnce({ reasoning: 'forced', next_speaker: 'model' })
+        .mockResolvedValue(null);
+      const admitted = vi.fn();
+      await run([{ text: 'hello' }], 'continued', {
+        type: SendMessageType.UserQuery,
+        onPromptAdmitted: admitted,
+      });
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+      expect(admitted).toHaveBeenCalledOnce();
+    });
+
     it('does not report a prompt a hook blocks', async () => {
       installMessageBus(
         vi.fn().mockResolvedValue({
