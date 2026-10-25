@@ -18,6 +18,8 @@ import type {
   DaemonTodoStatus,
   DaemonTodosSnapshot,
 } from '../../daemon/workspace/types';
+import { getDaemonToken } from '../../config/daemon';
+import { buildSessionPathname } from '../../utils/sessionPath';
 import { useI18n } from '../../i18n';
 import styles from './TodosDialog.module.css';
 
@@ -233,12 +235,16 @@ export function TodosDialog() {
 
   /**
    * Opens the session's conversation in a new browser tab at the Web Shell's
-   * `/session/<id>` route. The current search params (token, workspace
-   * context) carry over untouched so the new tab connects to the same daemon.
+   * `/session/<id>` route. The pathname goes through `buildSessionPathname`
+   * so any deployment base path is preserved, and the daemon token is
+   * re-attached from the client's token store (it is stripped from the URL
+   * at boot) so the new tab authenticates on token-auth deployments.
    */
   const openConversation = (sessionId: string) => {
     const url = new URL(window.location.href);
-    url.pathname = `/session/${encodeURIComponent(sessionId)}`;
+    url.pathname = buildSessionPathname(window.location.pathname, sessionId);
+    const token = getDaemonToken();
+    if (token) url.searchParams.set('token', token);
     window.open(url.toString(), '_blank', 'noopener');
   };
 
