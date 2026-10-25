@@ -465,6 +465,140 @@ describe('LocalControlSettingsCard', () => {
     await flush();
     expect(enableBodies).toHaveLength(2);
     expect(enableBodies[1]).not.toHaveProperty('address');
+
+    // The daemon kept the grant while the address-less retry bound the
+    // fallback. A second ordinary Disable→Enable must keep leaving that
+    // fallback unnamed: the card retained the auto-picked address, but it is
+    // not a choice the operator made, and naming it would supersede the
+    // still-standing grant.
+    act(() => {
+      buttonWithText(container, 'Disconnect phone access').click();
+    });
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+    expect(enableBodies).toHaveLength(3);
+    expect(enableBodies[2]).not.toHaveProperty('address');
+  });
+
+  it('does not name the auto-picked fallback on a cold mount while a grant stands (#14140)', async () => {
+    // The daemon rebound to a fallback after losing the granted address; a
+    // card mounted now sees only the fallback as a candidate. Disable→Enable
+    // must leave it unnamed, or the card would supersede the standing grant
+    // with a choice nobody made.
+    const enableBodies: Array<Record<string, unknown>> = [];
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET') === 'GET') {
+        return localControlResponse({
+          active: true,
+          address: '192.168.1.10',
+          interfaceName: 'en0',
+          interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      if (url.includes('/workspace/local-control/disable')) {
+        return localControlResponse({
+          active: false,
+          interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      enableBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
+      return localControlResponse({
+        active: true,
+        address: '192.168.1.10',
+        interfaceName: 'en0',
+        interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+        grantedAddress: '10.8.0.2',
+      });
+    });
+
+    const container = mount();
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Disconnect phone access').click();
+    });
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+
+    expect(enableBodies).toHaveLength(1);
+    expect(enableBodies[0]).not.toHaveProperty('address');
+  });
+
+  it('promotes the displayed auto-fill when a 409 makes the choice ambiguous (#14140)', async () => {
+    // A lone candidate auto-fills without a picker. If a second interface
+    // appears before the click, an address-less enable is ambiguous — and
+    // clicking the row the picker now shows fires no change event, so the
+    // displayed auto-fill itself must start being posted by name.
+    const enableBodies: Array<Record<string, unknown>> = [];
+    let refuse = true;
+    vi.mocked(fetch).mockImplementation(async (_input, init) => {
+      if ((init?.method ?? 'GET') === 'GET') {
+        return localControlResponse({
+          active: false,
+          interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+        });
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      enableBodies.push(body);
+      if (refuse) {
+        return localControlResponse(
+          {
+            error:
+              'Multiple local networks are available; choose which one to expose: en0 (192.168.1.10), en1 (192.168.1.20)',
+            code: 'ambiguous_lan_interface',
+            interfaces: [
+              { interfaceName: 'en0', address: '192.168.1.10' },
+              { interfaceName: 'en1', address: '192.168.1.20' },
+            ],
+          },
+          false,
+          409,
+        );
+      }
+      return localControlResponse({
+        active: true,
+        address: '192.168.1.10',
+        interfaceName: 'en0',
+        interfaces: [
+          { interfaceName: 'en0', address: '192.168.1.10' },
+          { interfaceName: 'en1', address: '192.168.1.20' },
+        ],
+      });
+    });
+
+    const container = mount();
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+    expect(enableBodies).toHaveLength(1);
+    expect(enableBodies[0]).not.toHaveProperty('address');
+    expect(container.querySelector('[aria-label="Local network"]')).not.toBe(
+      null,
+    );
+
+    refuse = false;
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+    expect(enableBodies).toHaveLength(2);
+    expect(enableBodies[1]).toMatchObject({ address: '192.168.1.10' });
   });
 
   it('posts the operator-chosen candidate by name (#14140)', async () => {

@@ -44,10 +44,11 @@ interface SelectionState {
   /** The address shown as selected in the picker. */
   selected: string;
   /**
-   * Whether `selected` is a named choice — the operator's pick or the
-   * retained address — rather than a single-candidate auto-fill. Only a
-   * named choice is posted as `address`: the daemon reads a named address as
-   * the operator's later choice and revokes the daemon-start grant (#14140).
+   * Whether `selected` is a named choice — the operator's pick or a
+   * retained address an address-less enable would not resolve to — rather
+   * than a single-candidate auto-fill. Only a named choice is posted as
+   * `address`: the daemon reads a named address as the operator's later
+   * choice and revokes the daemon-start grant (#14140).
    */
   named: boolean;
   /**
@@ -60,6 +61,20 @@ interface SelectionState {
   retained: RetainedSelection | undefined;
 }
 
+// An address-less enable resolves to a retained pick only when the automatic
+// candidate list is exactly that one address. Naming it then is unnecessary,
+// and naming any other address is the operator's later choice, which ends the
+// daemon-start grant (#14140).
+function autoResolves(
+  interfaces: LanCandidate[] | undefined,
+  retained: RetainedSelection,
+): boolean {
+  return (
+    interfaces?.length === 1 &&
+    interfaces[0]!.address === retained.candidate.address
+  );
+}
+
 // Re-run on every status update, not just mount: enable/disable responses
 // carry a fresh candidate list, and the selector only renders with 2+
 // candidates — so a selection that outlived a network change (same adapter,
@@ -70,19 +85,34 @@ function reconcileSelection(
   retained: RetainedSelection | undefined,
 ): SelectionState {
   if (!interfaces) return { ...current, retained };
-  if (current.selected && current.selected === retained?.candidate.address) {
-    return { ...current, named: true, retained };
+  if (retained && current.selected === retained.candidate.address) {
+    return {
+      ...current,
+      named: !autoResolves(interfaces, retained),
+      retained,
+    };
   }
   if (
     current.selected &&
     interfaces.some((c) => c.address === current.selected)
   ) {
-    return { ...current, retained };
+    // A second row makes an address-less enable ambiguous, so the displayed
+    // auto-fill must be posted by name — clicking the row already shown
+    // fires no change event, leaving that click as the only way out.
+    return {
+      ...current,
+      named: current.named || interfaces.length > 1,
+      retained,
+    };
   }
   // The committed pick outranks the single-candidate auto-fill: it is the
   // address the operator (or the daemon's grant) actually chose.
   if (retained) {
-    return { selected: retained.candidate.address, named: true, retained };
+    return {
+      selected: retained.candidate.address,
+      named: !autoResolves(interfaces, retained),
+      retained,
+    };
   }
   // A lone candidate is a fallback the daemon may pick for us, not a named
   // choice: posting it as one would supersede the daemon-start grant.
