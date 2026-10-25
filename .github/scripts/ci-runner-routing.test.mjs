@@ -980,6 +980,39 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     );
     assert.equal(gate.env?.OUT, '${{ runner.temp }}/opentui-noflicker-out');
   });
+
+  it('tui-parity changes gate is routed like the lanes it guards', () => {
+    // The changes job is the door to parity/noflicker: a 40-minute hosted
+    // queue wait behind it starves two pool-routed lanes. Route it like them;
+    // it runs no checkout, so the workspace-restore pin does not apply.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'tui-parity.yml'), 'utf8'),
+    );
+    const job = doc.jobs.changes;
+    const runsOn = String(job['runs-on']);
+    const route = (eventName, sameRepo, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo, assoc });
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+    assert.deepEqual(route('pull_request', true, 'NONE'), ECS_LABELS);
+    for (const assoc of TRUSTED) {
+      assert.deepEqual(route('pull_request', false, assoc), ECS_LABELS, assoc);
+    }
+    assert.deepEqual(route('workflow_dispatch', false, ''), ECS_LABELS);
+    for (const assoc of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE']) {
+      assert.deepEqual(
+        route('pull_request', false, assoc),
+        HOSTED_LABELS,
+        assoc,
+      );
+    }
+    assert.deepEqual(route('pull_request', true, 'OWNER', true), HOSTED_LABELS);
+    assert.ok(
+      !job.steps.some((s) =>
+        String(s.uses || '').startsWith('actions/checkout'),
+      ),
+      'changes gate must stay checkout-free; adding one re-adds the pool-hygiene requirement',
+    );
+  });
 });
 
 describe('control-plane jobs moved off the hosted queue', () => {
