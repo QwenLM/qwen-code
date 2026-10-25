@@ -533,10 +533,7 @@ function isLockRecord(value: unknown): value is SessionWriterLockRecord {
       typeof record['sealed_at'] === 'string' &&
       Number.isFinite(Date.parse(record['sealed_at'])) &&
       isSealedTranscriptProof(record['transcript']) &&
-      Number.isSafeInteger(record['last_commit_sequence']) &&
-      (record['last_commit_sequence'] as number) >= 0 &&
-      typeof record['committed_prefix_hash'] === 'string' &&
-      /^[0-9a-f]{64}$/.test(record['committed_prefix_hash'])
+      isValidCommitProof(record)
     );
   }
   return false;
@@ -1916,6 +1913,16 @@ export class SessionWriterLease {
     const processStartIdentity = await readProcessStartIdentity(process.pid);
     const pidNamespaceId = readPidNamespaceId();
     const lockSchema = normalizedOptions.lockSchema;
+    if (
+      lockSchema !== undefined &&
+      !isManagedFormatVersion(lockSchema.formatVersion)
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          `Managed lock schema formatVersion ${lockSchema.formatVersion} is not a supported log format`,
+        ),
+      });
+    }
     const lockRecord: ActiveLockRecord = {
       ...(lockSchema === undefined
         ? { schema_version: LOCK_SCHEMA_VERSION }
@@ -1986,6 +1993,21 @@ export class SessionWriterLease {
         throw new SessionWriterUnavailableError({
           cause: new Error(
             'Session writer lock uses a schema this acquire cannot continue',
+          ),
+        });
+      }
+      // The format barrier is two-directional here as it is for a sealed
+      // takeover: reclaiming a stale active lock from a newer format would
+      // rewrite the durable record at this binary's lower format and append
+      // records the newer binary's reader then refuses.
+      if (
+        isManagedLockRecord(state.record) &&
+        normalizedOptions.lockSchema !== undefined &&
+        normalizedOptions.lockSchema.formatVersion < state.record.format_version
+      ) {
+        throw new SessionWriterUnavailableError({
+          cause: new Error(
+            `Stale session writer lock format ${state.record.format_version} is newer than this binary's format ${normalizedOptions.lockSchema.formatVersion}`,
           ),
         });
       }
@@ -2085,6 +2107,21 @@ export class SessionWriterLease {
       throw new SessionWriterUnavailableError({
         cause: new Error(
           'Sealed session writer lock uses a schema this acquire cannot continue',
+        ),
+      });
+    }
+    // The barrier is two-directional: an older binary must not adopt a seal
+    // from a newer format and downgrade the record (the newer binary would
+    // then fail reading its own log and an aborted takeover deletes the
+    // lock entirely). A newer acquirer continues an older seal fine.
+    if (
+      isManagedLockRecord(observed.record) &&
+      options.lockSchema !== undefined &&
+      options.lockSchema.formatVersion < observed.record.format_version
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          `Sealed session writer lock format ${observed.record.format_version} is newer than this binary's format ${options.lockSchema.formatVersion}`,
         ),
       });
     }
@@ -2495,6 +2532,95 @@ export class SessionWriterLease {
     return this.runExclusive(() => this.appendJsonLineOnce(value));
   }
 
+  readTranscript(): Promise<string> {
+    return this.runExclusive(async () => {
+      await this.assertOwnedAndUnchangedOnce();
+      const handle = await openTranscriptForRead(
+        this.transcriptPath,
+        this.expectedTranscriptState,
+      );
+      if (!handle) return '';
+      try {
+        const text = await handle.readFile('utf8');
+        await this.assertOwnedAndUnchangedOnce();
+        if (
+          createHash('sha256').update(text).digest('hex') !==
+          this.expectedTranscriptHasher!.copy().digest('hex')
+        ) {
+          throw new SessionTranscriptChangedError();
+        }
+        return text;
+      } finally {
+        await handle.close();
+      }
+    });
+  }
+
+  replaceTranscript(text: string, expectedSha256: string): Promise<void> {
+    return this.runExclusive(async () => {
+      await this.assertOwnedAndUnchangedOnce();
+      if (
+        this.managedFormatVersion !== undefined ||
+        this.expectedTranscriptHasher!.copy().digest('hex') !== expectedSha256
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
+      const directoryPath = path.dirname(this.transcriptPath);
+      await fs.mkdir(directoryPath, { recursive: true, mode: 0o700 });
+      const directory = await openDurableLockDirectory(directoryPath);
+      const temporaryPath = path.join(
+        directoryPath,
+        `.${randomUUID()}.jsonl.tmp`,
+      );
+      let temporary: fs.FileHandle | undefined;
+      let replaced = false;
+      try {
+        temporary = await fs.open(temporaryPath, 'wx', 0o600);
+        const mode = this.expectedTranscriptState?.exists
+          ? this.expectedTranscriptState.fingerprint.mode
+          : undefined;
+        if (mode !== undefined) await temporary.chmod(mode & 0o777);
+        await temporary.writeFile(text, 'utf8');
+        await temporary.sync();
+        const replacementState = transcriptStateFromStat(
+          await temporary.stat(),
+        );
+        await temporary.close();
+        temporary = undefined;
+        await syncDurableLockDirectory(directory);
+        await this.assertOwnedAndUnchangedOnce();
+        await fs.rename(temporaryPath, this.transcriptPath);
+        replaced = true;
+        await syncDurableLockDirectory(directory);
+        const snapshot = await captureTranscriptSnapshot(
+          this.transcriptPath,
+          replacementState,
+          () => this.released,
+        );
+        const expectedHash = createHash('sha256').update(text).digest('hex');
+        if (snapshot.hasher.copy().digest('hex') !== expectedHash) {
+          throw new SessionTranscriptChangedError();
+        }
+        await this.readOwnedLock();
+        this.expectedTranscriptState = snapshot.state;
+        this.expectedTranscriptHasher = snapshot.hasher;
+      } catch (error) {
+        if (error instanceof SessionWriterError) throw error;
+        if (!replaced) {
+          await this.assertOwnedAndUnchangedOnce();
+          throw error;
+        }
+        throw new SessionWriterUnavailableError({
+          cause: error instanceof Error ? error : undefined,
+        });
+      } finally {
+        await temporary?.close().catch(() => undefined);
+        await fs.unlink(temporaryPath).catch(() => undefined);
+        await directory.handle.close().catch(() => undefined);
+      }
+    });
+  }
+
   /**
    * Discards a trailing byte range this owner has proven was never committed,
    * then re-pins the transcript proof.
@@ -2820,10 +2946,29 @@ export class SessionWriterLease {
   sealForHandoff(commitProof?: SessionWriterCommitProof): Promise<void> {
     if (this.terminalOperation === 'release') return this.release();
     this.terminalOperation = 'seal';
-    this.terminalPromise ??= this.runExclusive(() =>
+    if (this.terminalPromise) return this.terminalPromise;
+    const terminal = this.runExclusive(() =>
       this.sealForHandoffOnce(commitProof),
-    );
-    return this.terminalPromise;
+    ).catch((error: unknown) => {
+      // A retryable seal failure must not be memoized forever: a later
+      // close() retries the seal rather than replaying the rejection
+      // (review round 14, R14-4). A rolled-back seal left the writer
+      // unsealed (released === false), so the retry re-runs it. The
+      // terminal operation resets with it, or a later release() would
+      // read a cleared promise as a seal in flight.
+      if (
+        this.releaseRetryable &&
+        !this.released &&
+        !(error instanceof SessionWriterLostError) &&
+        this.terminalPromise === terminal
+      ) {
+        this.terminalPromise = undefined;
+        this.terminalOperation = undefined;
+      }
+      throw error;
+    });
+    this.terminalPromise = terminal;
+    return terminal;
   }
 
   get isReleased(): boolean {

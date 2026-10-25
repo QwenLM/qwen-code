@@ -33,6 +33,7 @@ import {
   recursivelyHydrateStrings,
   substituteHookVariables,
   performVariableReplacement,
+  replacePluginRootInMarkdown,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
@@ -1763,14 +1764,22 @@ export class ExtensionManager {
     }
 
     const extensions: Extension[] = [];
-    for (const subdir of subdirs) {
-      const extensionDir = path.join(extensionsDir, subdir);
-      const extension = await this.loadExtension(
-        { extensionDir, workspaceDir },
-        options,
+    const batchSize = 4;
+    for (let offset = 0; offset < subdirs.length; offset += batchSize) {
+      // Drain in-flight loads before a failure can release the store read lock.
+      const results = await Promise.allSettled(
+        subdirs
+          .slice(offset, offset + batchSize)
+          .map((subdir) =>
+            this.loadExtension(
+              { extensionDir: path.join(extensionsDir, subdir), workspaceDir },
+              options,
+            ),
+          ),
       );
-      if (extension != null) {
-        extensions.push(extension);
+      for (const result of results) {
+        if (result.status === 'rejected') throw result.reason;
+        if (result.value != null) extensions.push(result.value);
       }
     }
     return extensions;
@@ -2725,6 +2734,17 @@ export class ExtensionManager {
 
         const usesPluginVariables =
           originSource === 'Claude' || originSource === 'Qoder';
+        // ${CLAUDE_PLUGIN_ROOT} in markdown is how plugin authors reference their
+        // own scripts, so it resolves on every Claude/Qoder install regardless of
+        // whether the plugin ships hooks. The hook-conditional rewrites below stay
+        // gated on a hooks source.
+        if (usesPluginVariables) {
+          try {
+            replacePluginRootInMarkdown(stagingPath, destinationPath);
+          } catch (error) {
+            debugLogger.error('Plugin root markdown replacement failed', error);
+          }
+        }
         if (
           usesPluginVariables &&
           (fs.existsSync(hooksDir) ||

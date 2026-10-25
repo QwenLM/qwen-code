@@ -36,7 +36,8 @@ G1 therefore delivers:
    untrusted clients can reach the server.
 4. **Ungated modes and CI.** Both modes lose the stale gate, drive their
    physical tool through `write_file` (the publicly admitted profile), run in
-   the Hosted MySQL CI job, and the README describes them as runnable.
+   the Hosted MySQL CI job (now `hosted-failover-e2e`), and the README
+   describes them as runnable.
 
 Out of scope: public Shell profile selection, the G2 takeover reconciliation
 scan, G3 owner-affinity removal, and multi-Runtime takeover. Cancellation
@@ -81,8 +82,14 @@ takeover is implemented for contract completeness but has no E2E mode.
   and reports it by name, since no registered session exists to retire it;
   the record drains on the next successful load of that Session, and only
   session retirement discharges an abandonment otherwise.
-  Executions the Broker cannot account for report `unknown`, the coordinator
-  blocks the Turn as `managed_runtime_recovery_blocked`, and nothing replays.
+  Executions the Broker still cannot account for report `unknown`, the
+  coordinator blocks the Turn as `managed_runtime_recovery_blocked`, and
+  nothing replays. A record the Broker fenced terminally instead reports
+  `known` with `status.state: "abandoned"` — a distinct wire state the
+  client's validator accepts — so the coordinator can drive the
+  cancellation over it: the stop accepts the fence without observing a
+  stop, and the settle journals that execution's outcome as unobservable
+  rather than certifying a cancellation nobody witnessed.
 - **Continue runs the model from `results_ready`; cancel settles without new
   work.** `managed-runtime/continue` validates the prompt, checkpoint and
   activation identities, admits the continuation with a 200 receipt, then
@@ -104,8 +111,9 @@ takeover is implemented for contract completeness but has no E2E mode.
   the durable local-process provisioner, whose trusted host identity is
   Linux-only. The runner enables `durable-local-process` for these modes,
   creates the state directory owner-private, and refuses other platforms with
-  an explicit error pointing at the Hosted MySQL CI job. This is the boundary
-  #12766 already records; G1 does not change it.
+  an explicit error pointing at the Linux CI job that runs them (now the
+  Hosted failover E2E job). This is the boundary #12766 already records; G1
+  does not change it.
 - **The E2E seeds Workspace admission as deployment data** (registry row,
   access grant, Broker mount) and enables `harness.workspace-files-enabled`
   plus the trusted-actor header on both Spring owners. The physical side effect
@@ -115,7 +123,10 @@ takeover is implemented for contract completeness but has no E2E mode.
   wiring is no longer mode-gated: every mode's owners carry it (#13258), so
   its configuration matches the other modes.
 - **Both modes join the `hosted-harness-mysql` job**, which installs the MySQL
-  server binaries the runner needs for its private `mysqld`.
+  server binaries the runner needs for its private `mysqld`. They now run with
+  the later failover arms in the `hosted-failover-e2e` job, which installs
+  those binaries itself (see D11 of the
+  [replaceable-Harness design](2026-10-02-hosted-replaceable-harness.md)).
 
 ## Changes and ownership
 
@@ -169,9 +180,18 @@ Known follow-ups from the maintainer's real-environment verification:
   can legitimately take up to 120 s while the default coordinator
   `request-timeout` is 30 s.
 - A journal that contains `message.delta` events cannot be opened by a
-  Harness of an older build (`managed_session_open_failed`). Readers of this
-  build are fine; a rollback or a mixed fleet during a rolling deploy is not.
-  Upgrade the fleet before enabling Hosted Workspace turns, or gate rollback.
+  Harness of an older build. The released 0.24.7 refusal shape is a
+  fail-closed `POST /session/:id/load` answer: 503 with
+  `{"error":"managed_session_open_failed","code":"managed_session_open_failed"}`
+  — one step before the journal reader's own surface, and retried by the
+  coordinator while the fleet stays mixed. Since #13320 the Java client
+  surfaces the refusal code (`HarnessSessionRefusedException`) and the
+  coordinator names it in retry logs and in the recorded terminal failure
+  once the pre-admission retry budget runs out, so the rolling-deploy
+  runbook can tell "journal newer than the reader" apart from a genuinely
+  unavailable Harness. Readers of this build are fine; a rollback or a mixed
+  fleet during a rolling deploy is not. Upgrade the fleet before enabling
+  Hosted Workspace turns, or gate rollback.
 - A model fallback or retry that lands after the first streamed chunk fails
   the Turn terminally (`Hosted Harness cannot retract a published model
 attempt.`): once `message.delta` records are journaled, the partial attempt
@@ -180,4 +200,9 @@ attempt.`): once `message.delta` records are journaled, the partial attempt
   pre-streaming behavior did. A transient provider capacity event mid-stream
   therefore fails the Turn permanently rather than being retried by the
   coordinator (a `turn_result` is terminal). Classifying this settlement as
-  retryable for the coordinator is a follow-up.
+  retryable for the coordinator is a follow-up. (Superseded by #13319's
+  in-band retraction: a retry landing after publication replays the request
+  fresh, the Harness journals `message.retracted`, and the server empties the
+  message's deltas by source-sequence range and publishes
+  `stream.reconciled` — see
+  [2026-10-04-managed-midstream-retry-retraction](2026-10-04-managed-midstream-retry-retraction.md).)

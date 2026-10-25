@@ -2028,6 +2028,66 @@ class DaemonSessionClientTest {
         }
     }
 
+    /** Finite while the builder validates it, NaN once the admission body
+     * is encoded: content the builder accepted that still cannot encode. */
+    private static final class FlippingNumber extends Number {
+        private volatile boolean finite = true;
+
+        @Override
+        public int intValue() {
+            return 0;
+        }
+
+        @Override
+        public long longValue() {
+            return 0;
+        }
+
+        @Override
+        public float floatValue() {
+            return (float) doubleValue();
+        }
+
+        @Override
+        public double doubleValue() {
+            return finite ? 1.5 : Double.NaN;
+        }
+    }
+
+    @Test
+    void bodyThatCannotEncodeNeverReachesTheDaemonAndFreesThePromptSlot() {
+        AtomicInteger promptRequests = new AtomicInteger();
+        server.createContext("/session/session-1/prompt", exchange -> {
+            promptRequests.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            sendJson(exchange, 202,
+                    "{\"promptId\":\"prompt-1\",\"lastEventId\":0}");
+        });
+        server.createContext("/session/session-1/events", exchange ->
+                sendSse(exchange, textEvent(1, "hello") + terminalEvent(2)));
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = clientBuilder().build();
+                DaemonSessionClient session = daemon.createSession()) {
+            FlippingNumber number = new FlippingNumber();
+            PromptRequest request = PromptRequest.builder()
+                    .addContent(Map.of("type", "custom", "value", number))
+                    .build();
+            number.finite = false;
+            PromptCall call = session.startPrompt(request, PromptObserver.NOOP);
+            CompletionException failure = assertThrows(CompletionException.class,
+                    () -> call.acceptanceFuture()
+                            .orTimeout(ASYNC_WAIT_SECONDS, TimeUnit.SECONDS)
+                            .join());
+            assertInstanceOf(IllegalArgumentException.class, failure.getCause());
+            assertEquals(0, promptRequests.get());
+            // Nothing was dispatched, so nothing holds the session's single
+            // prompt slot: the next prompt is admitted, not refused locally.
+            assertEquals("hello", session.promptText("say hello").getText());
+            assertEquals(1, promptRequests.get());
+        }
+    }
+
     @Test
     void failedAdmissionContinuationWaitingForTerminalCannotBlockFailure()
             throws Exception {

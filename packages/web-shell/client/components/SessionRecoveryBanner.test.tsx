@@ -11,7 +11,8 @@ const state = vi.hoisted(() => ({
   streaming: 'idle',
   generation: 0,
   recoveryGeneration: 0,
-  continueSession: vi.fn<() => Promise<void>>(),
+  continueSession:
+    vi.fn<(options?: { confirmCancellation?: string }) => Promise<void>>(),
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
@@ -93,14 +94,55 @@ describe('SessionRecoveryBanner', () => {
     await act(async () => finish());
   });
 
+  it('asks before continuing a legacy cancellation and carries only its current identity', async () => {
+    state.connection.context!.recovery!.kind = 'interrupted_turn';
+    state.connection.context!.recovery!.cancellationConfirmationId =
+      'legacy-daemon';
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render();
+    expect(container.textContent).toContain('reason was not recorded');
+    expect(container.textContent).toContain('Some tool results were not saved');
+    expect(container.querySelector('button')?.textContent).toBe(
+      'Confirm and continue',
+    );
+    await act(async () => container.querySelector('button')!.click());
+    expect(confirm).toHaveBeenCalledWith(
+      'This turn may have been stopped intentionally. Do you want to continue it?',
+    );
+    expect(state.continueSession).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await act(async () => container.querySelector('button')!.click());
+    expect(state.continueSession).toHaveBeenCalledExactlyOnceWith({
+      confirmCancellation: 'legacy-daemon',
+    });
+    confirm.mockRestore();
+  });
+
+  it('does not reuse a confirmation after the recovery identity changes', async () => {
+    state.connection.context!.recovery!.cancellationConfirmationId =
+      'old-cancellation';
+    const confirm = vi.spyOn(window, 'confirm').mockImplementation(() => {
+      state.recoveryGeneration++;
+      state.connection.context!.recovery!.cancellationConfirmationId =
+        'new-cancellation';
+      return true;
+    });
+    render();
+    await act(async () => container.querySelector('button')!.click());
+    expect(state.continueSession).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
   it('shows tool interruption in Chinese and history gaps without a button', () => {
     state.connection.context!.recovery = {
       kind: 'interrupted_turn',
       canContinue: true,
+      cancellationConfirmationId: 'legacy-daemon',
     };
     render(false, 'zh-CN');
     expect(container.textContent).toContain('部分工具结果未保存');
-    expect(container.querySelector('button')?.textContent).toBe('继续执行');
+    expect(container.textContent).toContain('未记录来源');
+    expect(container.querySelector('button')?.textContent).toBe('确认并继续');
     state.connection.context!.recovery = {
       kind: 'degraded_history',
       canContinue: false,
@@ -113,6 +155,7 @@ describe('SessionRecoveryBanner', () => {
   it.each([
     'unsupported',
     'clean',
+    'cancelled',
     'busy',
     'disconnected',
     'loading',
@@ -127,6 +170,8 @@ describe('SessionRecoveryBanner', () => {
         kind: 'clean',
         canContinue: false,
       };
+    if (condition === 'cancelled')
+      state.connection.context!.recovery!.canContinue = false;
     if (condition === 'busy') state.streaming = 'responding';
     if (condition === 'disconnected') state.connection.status = 'disconnected';
     if (condition === 'loading') state.connection.loadingTranscript = true;

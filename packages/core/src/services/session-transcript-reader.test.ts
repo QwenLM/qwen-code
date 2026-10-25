@@ -44,6 +44,10 @@ import type { Config } from '../config/config.js';
 import { CompressionStatus } from '../core/turn.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
+  isApiHistoryDirectoryContext,
+  markApiHistoryDirectoryContext,
+} from '../utils/api-history-metadata.js';
+import {
   SessionSourceService,
   type SessionSourcesSnapshot,
 } from './session-sources.js';
@@ -51,7 +55,10 @@ import {
   ChatRecordingService,
   type ChatRecord,
 } from './chatRecordingService.js';
-import { buildSessionHistoryFromConversation } from './session-api-history.js';
+import {
+  buildSessionHistoryFromConversation,
+  getApiHistoryPromptId,
+} from './session-api-history.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import {
   buildApiHistoryFromConversation,
@@ -665,13 +672,91 @@ describe('SessionTranscriptReader', () => {
         { ...output, parentUuid: 'invocation' },
       ]);
       const custom = await service.readRestoreProjection(sessionId, NONE);
-      expect(custom?.runtime.apiHistory).toEqual([
-        answer.message,
-        user.message,
+      expect(
+        custom?.runtime.apiHistory.map(({ role, parts }) => ({ role, parts })),
+      ).toEqual([answer.message, user.message]);
+      expect(custom?.runtime.apiHistory.map(getApiHistoryPromptId)).toEqual([
+        undefined,
+        'legacy-record:u1',
       ]);
       expect(detectTurnInterruption(custom!.runtime.apiHistory).kind).toBe(
         'interrupted_prompt',
       );
+    },
+  );
+
+  it.each(['user', 'mid-turn'] as const)(
+    'keeps directory context non-interrupting after saving and reloading a checkpoint (%s)',
+    async (inputKind) => {
+      const config = {
+        storage: new Storage(workspaceDir),
+        getSessionId: () => sessionId,
+        getProjectRoot: () => workspaceDir,
+        getCliVersion: () => 'test',
+        getModel: () => 'test',
+        getAuthType: () => undefined,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getResumedSessionData: () => undefined,
+      } as unknown as Config;
+      const recorder = new ChatRecordingService(config, undefined, false);
+      const history = [
+        userText('review'),
+        modelText('done'),
+        markApiHistoryDirectoryContext(userText('Directory changed.')),
+        markApiHistoryDirectoryContext(userText('Directory structure.')),
+      ];
+      const wireHistory = JSON.parse(JSON.stringify(history));
+      recorder.recordChatCompression({
+        info: {
+          compressionStatus: CompressionStatus.COMPRESSED,
+          originalTokenCount: 100,
+          newTokenCount: 50,
+        },
+        compressedHistory: history,
+      });
+      await recorder.flush();
+
+      const service = svc();
+      const loaded = await service.loadSession(sessionId);
+      const checkpoint = loaded!.conversation.messages.find(
+        (entry) => entry.subtype === 'chat_compression',
+      );
+      expect(checkpoint?.systemPayload).toMatchObject({
+        compressedHistory: wireHistory,
+        directoryContextIndices: [2, 3],
+      });
+      const projection = await service.readRestoreProjection(sessionId, NONE);
+      const restored = buildSessionHistoryFromConversation(
+        loaded!.conversation,
+      );
+      for (const apiHistory of [
+        restored.apiHistory,
+        projection!.runtime.apiHistory,
+      ]) {
+        expect(JSON.stringify(apiHistory)).toBe(JSON.stringify(wireHistory));
+        expect(apiHistory.map(isApiHistoryDirectoryContext)).toEqual([
+          false,
+          false,
+          true,
+          true,
+        ]);
+        expect(detectTurnInterruption(apiHistory).kind).toBe('none');
+      }
+
+      if (inputKind === 'user') {
+        recorder.recordUserMessage([{ text: 'Unanswered real input' }]);
+      } else {
+        recorder.recordMidTurnUserMessage(
+          [{ text: 'Unanswered real input' }],
+          'Unanswered real input',
+        );
+      }
+      await recorder.flush();
+      const next = await service.readRestoreProjection(sessionId, NONE);
+      expect(detectTurnInterruption(next!.runtime.apiHistory)).toMatchObject({
+        kind: 'interrupted_prompt',
+        parts: expect.arrayContaining([{ text: 'Unanswered real input' }]),
+      });
     },
   );
 
@@ -681,6 +766,9 @@ describe('SessionTranscriptReader', () => {
       getSessionId: () => sessionId,
       getProjectRoot: () => workspaceDir,
       getCliVersion: () => 'test',
+      getModel: () => 'test',
+      getAuthType: () => undefined,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
       getResumedSessionData: () => undefined,
     } as unknown as Config;
     const recorder = new ChatRecordingService(config, undefined, false);
@@ -1137,13 +1225,40 @@ describe('SessionTranscriptReader', () => {
       },
       sys('compression', 'a1', 'chat_compression', compressedTurn()),
       sys('telemetry', 'compression', 'ui_telemetry', { uiEvent }),
-      sys('attribution', 'telemetry', 'attribution_snapshot', {
+      sys('request-start', 'telemetry', 'ui_telemetry', {
+        uiEvent: {
+          'event.name': 'request_lifecycle',
+          v: 1,
+          kind: 'request',
+          phase: 'started',
+          executionId: 'execution',
+          sessionId,
+          promptId: `${sessionId}########3`,
+          model: 'model',
+          startedAt: 10,
+        },
+      }),
+      sys('tool-start', 'request-start', 'ui_telemetry', {
+        uiEvent: {
+          'event.name': 'tool_lifecycle',
+          v: 1,
+          kind: 'tool',
+          phase: 'started',
+          executionId: 'tool-execution',
+          sessionId,
+          callId: 'call',
+          toolName: 'shell',
+          startedAt: 12,
+          executionStatus: 'running',
+        },
+      }),
+      sys('attribution', 'tool-start', 'attribution_snapshot', {
         snapshot: attributionSnapshot,
       }),
       sys('files', 'attribution', 'file_history_snapshot', {
         snapshots: [
           {
-            promptId: `${sessionId}########3`,
+            promptId: `${sessionId}########12`,
             timestamp: T0,
             trackedFileBackups: {},
           },
@@ -1192,9 +1307,11 @@ describe('SessionTranscriptReader', () => {
       loaded!.conversation.messages,
       sessionId,
     );
+    expect(turnState.initialTurn).toBe(12);
     expect(runtime?.recording.turnParentUuids).toEqual(
       turnState.turnParentUuids,
     );
+    expect(runtime?.recording.turnPromptIds).toEqual([`${sessionId}########3`]);
     expect(runtime?.initialTurn).toBe(turnState.initialTurn);
     expect(runtime?.backgroundNotificationTaskIds).toEqual(
       turnState.backgroundNotificationTaskIds,
@@ -1714,6 +1831,36 @@ describe('SessionTranscriptReader', () => {
     expect(projection?.runtime.recording.sessionApprovalMode).toEqual({
       mode: ApprovalMode.AUTO,
     });
+  });
+
+  it('preserves prompt snapshots through load and fork without changing restored state or model input', async () => {
+    const messages = chain(...TWO_TURNS);
+    const executionContext = {
+      modelId: 'recorded-prompt-model',
+      authType: 'openai',
+      approvalMode: ApprovalMode.YOLO,
+    };
+    messages[2].executionContext = executionContext;
+    await writeRecords(messages);
+    const service = svc();
+    const loaded = await service.loadSession(sessionId);
+    expect(loaded?.conversation.messages[0].executionContext).toBeUndefined();
+    expect(loaded?.conversation.messages[2].executionContext).toEqual(
+      executionContext,
+    );
+    const restored = await service.readRestoreProjection(sessionId, NONE);
+    expect(
+      restored?.runtime.apiHistory.map(({ role, parts }) => ({ role, parts })),
+    ).toEqual(messages.map((message) => message.message));
+    expect(restored?.runtime.recording.sessionModel).toBeUndefined();
+    expect(restored?.runtime.recording.sessionApprovalMode).toBeUndefined();
+
+    await service.forkSession(sessionId, otherSessionId);
+    const fork = await service.loadSession(otherSessionId);
+    expect(fork?.conversation.messages[0].executionContext).toBeUndefined();
+    expect(fork?.conversation.messages[2].executionContext).toEqual(
+      executionContext,
+    );
   });
 
   it('captures lastAssistantModel when no session_model record exists', async () => {
@@ -2282,9 +2429,15 @@ describe('SessionTranscriptReader', () => {
 
     const projection = await coldProjection();
 
-    expect(projection?.runtime.apiHistory).toEqual([
-      first.message,
-      second.message,
+    expect(
+      projection?.runtime.apiHistory.map(({ role, parts }) => ({
+        role,
+        parts,
+      })),
+    ).toEqual([first.message, second.message]);
+    expect(projection?.runtime.apiHistory.map(getApiHistoryPromptId)).toEqual([
+      'legacy-record:u1',
+      undefined,
     ]);
     expect(selectedReads).toEqual([
       { offset: 0, length: jsonBytes(first, second) },

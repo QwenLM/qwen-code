@@ -21,12 +21,18 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
 const cacheProducerWorkflow = readFileSync(
   '.github/workflows/pnpm-store.yml',
   'utf8',
 );
+const mavenRepoProducerWorkflow = readFileSync(
+  '.github/workflows/verify-maven-repo.yml',
+  'utf8',
+);
+const sdkJavaWorkflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
@@ -2279,12 +2285,13 @@ describe('qwen-triage verify hardening', () => {
     },
   );
 
-  it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
+  it.skipIf(!hasGnuRealpath || !arePermissionBitsEnforced())(
     'fails closed when the corrupt workspace cannot be unlinked',
     () => {
       // A swallowed `rm -f` failure would let the mkdir and the wipe run on
-      // a path that is still a symlink. Root bypasses the mode bits, so the
-      // fixture cannot produce the refusal there.
+      // a path that is still a symlink. Root with its DAC capabilities
+      // bypasses the mode bits, so the fixture cannot produce the refusal
+      // there.
       for (const stepName of WIPE_STEPS) {
         const parent = mkdtempSync(join(tmpdir(), 'verify-heal-perm-'));
         const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
@@ -3097,13 +3104,13 @@ describe('qwen-triage verify hardening', () => {
   it('strips GitHub command files from every node-run verify command', () => {
     // Bound to the commands that run as node before the agent: npm ci and
     // npm run build in the prepare step, the evidence browser download,
-    // and the flake gate's four pre-sample git invocations — the .git
+    // the flake gate's four pre-sample git invocations — the .git
     // sanitize, git reset --hard, git clean -ffd, and the PINNED_OID
-    // rev-parse (git filters run from PR-owned .git metadata). The slice
-    // stops at the agent step, whose own `runuser` launches qwen under
-    // `env -i` and needs no per-variable stripping; the gate's
-    // per-sample invocation is a line-continuation shape this
-    // single-line match does not fold. Covering all seven by
+    // rev-parse (git filters run from PR-owned .git metadata) — and the
+    // Java sibling install. The slice stops at the agent step, whose own
+    // `runuser` launches qwen under `env -i` and needs no per-variable
+    // stripping; the gate's per-sample invocation is a line-continuation
+    // shape this single-line match does not fold. Covering all eight by
     // construction (not enumeration) is what catches a future node-run
     // command added without the strip.
     const prepare = verifyJob.slice(
@@ -3111,7 +3118,7 @@ describe('qwen-triage verify hardening', () => {
       verifyJob.indexOf('Run verification agent'),
     );
     const commands = prepare.match(/runuser -u node -- env[\s\S]*?\n/g) ?? [];
-    expect(commands.length).toBe(7);
+    expect(commands.length).toBe(8);
     expect(step('Run verification agent')).toContain(
       'runuser -u node -- env -i',
     );
@@ -4838,6 +4845,255 @@ describe('qwen-triage verify hardening round 2', () => {
       'redact the recorded copy, not the request under test',
     );
 
+    // #13505 R3: a bot review with 4 Criticals landed on the previous head
+    // during the round and the report went out as ready to merge, unread;
+    // the comment was revised in place. The bot also rewrites its stage
+    // comments in place (#13536), so only `updated_at` shows the edit, and
+    // GitHub rewrote NUL/SOH escape text into caret forms inside code
+    // spans and fences (#12773 R1, #13505 R1), visible only on read-back.
+    const beforeScope = flat.slice(0, flat.indexOf('## Scope selection'));
+    expect(beforeScope).toContain(
+      'Guard the post against what landed during the round',
+    );
+    expect(flat).toContain(
+      'including a review whose `commit_id` is an older head',
+    );
+    expect(flat).toContain('only `updated_at` moves');
+    expect(flat).toContain('Keep the guard and the post in separate commands');
+    expect(flat).toContain(
+      'read the body back and compare it with the local file byte for byte',
+    );
+
+    // #13163 R7: a merge carried two review fixes in 507 hand-written lines
+    // that only `git show --remerge-diff` shows. #12627: a fix commit
+    // turned a transient 429 into a permanent RECOVERY_BLOCKED, so a
+    // production change re-runs every scenario. #13335: Java an automated
+    // round wrote without a JDK misbehaved on its first real boot.
+    expect(flat).toContain('Classify what changed before scoping a follow-up');
+    expect(flat).toContain('git merge-tree --write-tree');
+    expect(flat).toContain('git show --remerge-diff');
+    expect(flat).toContain(
+      'Re-run the whole scenario matrix, not only the scenarios that failed last round',
+    );
+    expect(flat).toContain('showing the comparator can report a difference');
+    expect(flat).toContain('Rebuild and run them before crediting them');
+
+    // #13550 R10: on the merge, `main`'s dropped columns made every child
+    // creation fail on `bad SQL grammar`. #13247 R3: the PR's Flyway check
+    // finished at 13:20 UTC and another PR merged its own V36 at 13:57.
+    expect(flat).toContain('always add that trial merge as a third arm');
+    expect(flat).toContain("git diff <merge-base> origin/main -- '*.sql'");
+    expect(flat).toContain(
+      'own green check is only as fresh as the `main` it ran against',
+    );
+    expect(flat).toContain('Trial-merge in-flight PRs');
+    // The pointer must resolve, and the script refuses a bare invocation,
+    // so the module list it names must exist where the skill says.
+    expect(existsSync('scripts/check-flyway-migrations.js')).toBe(true);
+    expect(flat).toContain('the module list `sdk-java.yml` passes it');
+    expect(readFileSync('.github/workflows/sdk-java.yml', 'utf8')).toContain(
+      'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode',
+    );
+
+    // #13352 R5: a `chmod 555` test was red on the clean tree as root and
+    // showed as a killer of every mutant. #12924: refusing runs whose
+    // marker was missing from the artifact caught two verifier mistakes.
+    // #13352 R4: ten isolated runs separated a real kill from a flake by
+    // assertion message. #12868 R5: per-condition mutants of an ID rule
+    // survived 6 of 7. #12943 R2: 16/16 killed, 13/16 by PR CI's selection.
+    // #12848 R1→R3: a survivor written off as covered by other clauses
+    // blocked Shell turns after any reload.
+    expect(flat).toContain(
+      'Make the mutation runner prove itself before any row counts',
+    );
+    expect(flat).toContain(
+      'through the exact runner, environment (`PATH`), user and test selection',
+    );
+    expect(flat).toContain('require exactly one match');
+    expect(flat).toContain('side-effecting marker');
+    expect(flat).toContain(
+      'removes strictly less than another is killed while the superset survives',
+    );
+    expect(flat).toContain('never by one isolated rerun');
+    expect(flat).toContain('one condition at a time');
+    expect(flat).toContain(
+      "count a kill for CI only if the killing test runs in the PR's CI selection",
+    );
+    expect(flat).toContain(
+      'before calling a survivor on a guard, fence or ownership check redundant',
+    );
+
+    // #13174 R9: a cancel fix held for turn 1 and wedged later turns.
+    // #13598 R2: round-1 prompts never reached a tool. #13572 R5: the
+    // defect appeared only with approvals on. The loop-guard count is
+    // read from core, so the skill cannot drift from the real threshold.
+    expect(flat).toContain(
+      'Parameterise scenarios along the axes author tests collapse',
+    );
+    expect(flat).toContain('approval mode (default versus auto-approve)');
+    expect(flat).toContain(
+      'five consecutive identical calls trip the core loop guard',
+    );
+    const loopSource = readFileSync(
+      'packages/core/src/services/loopDetectionService.ts',
+      'utf8',
+    );
+    expect(loopSource).toMatch(/const TOOL_CALL_LOOP_THRESHOLD = 5;/);
+
+    // #13354 R1: a PR Harness against a pre-PR server blocked every hosted
+    // turn. #12855 R2: after rollback and re-upgrade the Java row lagged
+    // the authority silently.
+    expect(flat).toContain('mixed-version matrix');
+    expect(flat).toContain(
+      'old-reads-new and new-talks-to-old in both directions, both deploy orders',
+    );
+    expect(flat).toContain(
+      'rollback followed by re-upgrade on the same database',
+    );
+
+    // #13572 R5: an unauthenticated readiness check turned a timeout into
+    // a "~40 s restart". #12868 R7: a probe without a limit waited 4 min
+    // 26 s. #13572 R4 / #12955: taps that buffered or swallowed aborts.
+    expect(flat).toContain(
+      'Harness checks fail closed; verdicts come from the backend',
+    );
+    expect(flat).toContain('Assert input shape before comparing');
+    expect(flat).toContain('Print the exit status next to every count');
+    expect(flat).toContain('never from page text that may echo the prompt');
+    expect(flat).toContain('record a timeout as "no answer within N s"');
+    expect(flat).toContain(
+      'Taps and proxies stream SSE and propagate upstream aborts',
+    );
+
+    // #13163 R5: a wedged turn's storage voided two runs. #13037 R3: runs
+    // overlapping a revocation probe were repeated. #13174 R6: probes that
+    // exited before `finally` leaked 100 + 12 processes. #13166 R5: a
+    // mutant regex ignored SIGTERM. #13114: bash ran text appended to a
+    // running runner.
+    expect(flat).toContain('### Rig hygiene (local rounds)');
+    expect(flat).toContain(
+      'fresh database, storage and workspace per scenario and per arm',
+    );
+    expect(flat).toContain('orphaned (ppid 1) processes');
+    expect(flat).toContain('`process.exit()` skips `finally`');
+    expect(flat).toContain('with `node --check`, never `import()`');
+    expect(flat).toContain('Do not edit a shell runner while it executes');
+    expect(flat).toContain('before a wait loop greps it');
+
+    // #13127 / #13218 R3: two posted figures needed correction commits.
+    // #13401 R3: a wrong claim reached a squash message that cannot be
+    // edited, so self-corrections lead the report.
+    const hardRules = flat.slice(flat.indexOf('## Hard rules'));
+    expect(hardRules).toContain('Keep a results ledger');
+    expect(hardRules).toContain('is reported as "not run"');
+    expect(hardRules).toContain(
+      'Generate every number in prose and figures from those files, never by hand',
+    );
+    const reportStructure = flat.slice(
+      flat.indexOf('### report.md structure'),
+      flat.indexOf('## Hard rules'),
+    );
+    expect(reportStructure).toContain(
+      'state it at the top, right after the Chinese summary',
+    );
+    expect(reportStructure).toContain(
+      'measured, inferred from code, or not run',
+    );
+    expect(reportStructure).toContain('label which SHA each result came from');
+    expect(reportStructure).toContain(
+      'matches the expectation, not by literal pass or fail',
+    );
+
+    // #12918: a deterministic unit failure the PR introduced was red in CI.
+    // #12250 R2: a "random flake" came from `main`. #12733, #12775,
+    // #12797, #12754, #13498: CI ran less than it appeared to.
+    expect(beforeScope).toContain('Local rounds start from CI');
+    expect(flat).toContain(
+      'pull the failing test names from every red job and reproduce them on both arms',
+    );
+    expect(flat).toContain("the same job on `main`'s latest push run");
+    expect(flat).toContain('a `-t` filter that matches zero tests and exits 0');
+    expect(flat).toContain(
+      'whether the job checked out the branch or the merge ref',
+    );
+
+    // #12754: the sandbox lane had no JDK and left roughly 900 Java lines
+    // unexecuted.
+    expect(flat).toContain('Java-centred PRs');
+    expect(flat).toContain('Measure `command -v java` first');
+    expect(flat).toContain(
+      'the verdict is `inconclusive`, never `merge-ready`',
+    );
+
+    // #13732 before/after re-run on #13174 R9 (issuecomment-6092937757):
+    // neither arm moved the parked Turn off the first Turn, because the axis
+    // rule lived only under the harness section and one arm used the PR's own
+    // tests as its A/B instrument. The axes now sit in the plan the agent
+    // follows, so they are pinned inside Scope selection. A third arm, with
+    // the rule keyed to the central claim, framed the claim as something else
+    // and never applied it, so the trigger is the diff.
+    const scopeSelection = flat.slice(
+      flat.indexOf('## Scope selection'),
+      flat.indexOf('## Method'),
+    );
+    expect(scopeSelection).toContain(
+      'When the diff changes how a Turn is cancelled, parked, taken over',
+    );
+    expect(scopeSelection).toContain(
+      'whether or not that code is the central claim',
+    );
+    expect(scopeSelection).toContain(
+      'it gets its own A/B as a secondary claim',
+    );
+    // A mandated secondary A/B with no budget line would eat the central one
+    // (#13819 review); it takes a harness slot instead.
+    expect(scopeSelection).toContain(
+      'takes one of the harness slots in item 2 rather than time from the central A/B',
+    );
+    // "item 2" is an ordinal, so pin that it still names the harness line.
+    // `^` needs real newlines, hence the raw slice, as in the item-4 pin.
+    const rawScopeSelection = verifySkill.slice(
+      verifySkill.indexOf('## Scope selection'),
+      verifySkill.indexOf('## Method'),
+    );
+    expect(rawScopeSelection).toMatch(
+      /^2\. \*\*One or two wire-oracle harnesses\*\*/m,
+    );
+    // The clause protects the central A/B's reservation, so pin that too.
+    expect(scopeSelection).toContain(
+      '**A/B load-bearing proof of the central claim** (always, ~half the budget)',
+    );
+    expect(scopeSelection).toContain(
+      'The trigger is therefore the diff, not the claim.',
+    );
+    expect(scopeSelection).toContain(
+      'name the scenario axes before choosing the A/B instrument',
+    );
+    expect(scopeSelection).toContain(
+      "even when the instrument is the PR's own test files",
+    );
+    expect(scopeSelection).toContain('parking Turn 2 after Turn 1 completed');
+    expect(scopeSelection).toContain(
+      'The report lists each axis with the settings that ran',
+    );
+    expect(scopeSelection).toContain('`expected 409 to be 200`');
+
+    // The same re-run: both arms blamed a merge-only red on the PR, while
+    // `main` had changed the one file the failing test reads.
+    const targetedGates = flat.slice(
+      flat.indexOf('### Targeted gates'),
+      flat.indexOf('### Match the method to the artifact type'),
+    );
+    expect(targetedGates).toContain(
+      'Attribute a red on the merge before blaming the PR.',
+    );
+    expect(targetedGates).toContain('run the test at `HEAD^2` too');
+    expect(targetedGates).toContain(
+      'diff the files it reads between `HEAD^2` and `HEAD`',
+    );
+    expect(targetedGates).toContain('is a semantic merge conflict');
+    expect(targetedGates).toContain('`expected 112 to be 104`');
+
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.
     expect(flat).toContain('references/android.md');
@@ -4942,6 +5198,72 @@ describe('qwen-triage verify hardening round 2', () => {
       );
       expect(output).toBe('8\n9\n-1\n');
     }
+  });
+
+  // The maintainer's publish round used to be a paragraph retyped every time
+  // ("English comment, collapsed Chinese, screenshots, my assets branch"), so
+  // the request and the report could drift apart. `--publish` has to resolve
+  // every one of those deliverables on its own, without weakening the repo
+  // rule it replaces.
+  it('resolves --publish to the whole local report deliverable', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('`/verify-pr <n> --publish`');
+    expect(flat).toContain('`--publish` in the invocation is that request');
+    // A stable host is a coordinate, so it resolves once and needs no flag.
+    expect(flat).toContain(
+      'the repository is `--assets-repo`, else `$QWEN_VERIFY_ASSETS_REPO`, else the resolved `--repo`',
+    );
+    expect(flat).toContain(
+      'the branch is `--assets-branch`, else `$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation`',
+    );
+    // settings.json fills the same variables, from operator scopes only.
+    expect(flat).toContain(
+      'fill those same variables at startup from operator scopes only',
+    );
+    // Posting is consent, not a coordinate: it stays per-invocation.
+    expect(flat).toContain('Only coordinates like these are defaultable');
+    expect(flat).toContain('posting stays a per-invocation request');
+    // The flag is not a shortcut around the metadata rule.
+    expect(flat).toContain('does not license an `origin` fallback');
+    // ...nor may the image host fall back to a contributor's fork.
+    expect(flat).toContain('Never fall back to `origin` for the host');
+    // Overwriting a published name leaves every older link on the old image.
+    expect(flat).toContain('A published filename is spent');
+    // A contents PUT cannot create the branch the first upload needs.
+    expect(flat).toContain('git/refs');
+    // ...and the sha to create it from is looked up in THAT repository.
+    expect(flat).toContain('.object.sha');
+    // The read-back must query the repository the blob was written to, not
+    // the PR's own repository, whose same path may not exist or may differ.
+    expect(flat).toContain('repos/<assets-repo>/contents/<path>?ref=');
+    // The deliverables are the skill's, not the maintainer's list.
+    expect(flat).toContain('do not ask the maintainer to restate them');
+  });
+
+  // Watch mode composes the shipped gate probe with cron_create. Each piece is
+  // pinned because dropping one turns the watch back into a polling task that
+  // spends a model turn per fire — the cost the design exists to avoid.
+  it('documents the watch mode on the shipped gate probe', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('`--watch` installs a standing trigger');
+    // The gate runs the wrapper, not the bare probe: the probe also reports
+    // comments and failed checks, and every non-empty gate output wakes the
+    // model whether or not the head moved.
+    expect(flat).toContain('scripts/verify-pr-watch-gate.mjs');
+    expect(flat).toContain('resync');
+    // One cursor serves one consumer; installing over an existing autofix
+    // watch would starve this one of head moves and lose `stop`.
+    expect(flat).toContain('--check');
+    expect(flat).toContain('--claim');
+    expect(flat).toContain('--release');
+    expect(flat).toContain('one cursor serves one consumer');
+    expect(flat).toContain('head_moved_externally');
+    expect(flat).toContain('verify-pr-watch-');
+    expect(flat).toContain('cron_delete');
+    // A binary without the probe must stop the setup, not schedule a dead gate.
+    expect(flat).toContain('schedule nothing');
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
@@ -7195,6 +7517,235 @@ describe('qwen-triage pnpm store producer', () => {
       );
       expect(job(jobName)).toContain("image: 'node:22-bookworm'");
     }
+  });
+});
+
+describe('qwen-triage verify Java toolchain', () => {
+  function envValue(text, name) {
+    return text.match(new RegExp(`^\\s+${name}:\\s*'([^']*)'`, 'm'))?.[1] ?? '';
+  }
+
+  function yamlScalar(raw) {
+    if (!raw) return '';
+    if (raw.startsWith("'")) return raw.slice(1, -1).replace(/''/g, "'");
+    return raw.startsWith('"') ? raw.slice(1, -1) : raw;
+  }
+
+  function moduleCoordinates() {
+    return [
+      'packages/managed-agent-server/pom.xml',
+      ...readdirSync('packages/sdk-java', { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => join('packages/sdk-java', entry.name, 'pom.xml')),
+    ]
+      .filter((pom) => existsSync(pom))
+      .map((pom) => {
+        const xml = readFileSync(pom, 'utf8').replace(
+          /<parent>[\s\S]*?<\/parent>/g,
+          '',
+        );
+        return {
+          groupId: xml.match(/<groupId>([^<]+)<\/groupId>/)?.[1],
+          artifactId: xml.match(/<artifactId>([^<]+)<\/artifactId>/)?.[1],
+        };
+      });
+  }
+
+  it('sets java from the full paginated file list, not a pipe', () => {
+    const resolve = stepIn('verify', 'Resolve PR and snapshot metadata');
+    const javaLine = resolve
+      .split('\n')
+      .find((line) =>
+        line.includes("grep -qE '^packages/(sdk-java|managed-agent-server)/'"),
+      );
+    expect(javaLine).toContain(
+      "grep -qE '^packages/(sdk-java|managed-agent-server)/' <<<",
+    );
+    expect(javaLine.trimStart().startsWith('if grep -qE ')).toBe(true);
+    expect(resolve).toContain('echo "java=true" >> "$GITHUB_OUTPUT"');
+    expect(job('tmux-testing')).not.toContain('Install Java toolchain');
+  });
+
+  it('installs the toolchain as root before checkout and only writes ready after both checksums', () => {
+    const verify = job('verify');
+    const toolchain = stepIn('verify', 'Install Java toolchain');
+    expect(verify.indexOf("'Install Java toolchain'")).toBeLessThan(
+      verify.indexOf("'Checkout PR merge ref'"),
+    );
+    expect(toolchain).toContain(
+      "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'",
+    );
+    expect(toolchain).toContain('prefix=/opt/verify-java');
+    const readyAt = toolchain.indexOf('"$prefix/ready"');
+    expect(toolchain.indexOf('sha256sum --check --status')).toBeGreaterThan(-1);
+    expect(toolchain.indexOf('sha256sum --check --status')).toBeLessThan(
+      readyAt,
+    );
+    expect(toolchain.indexOf('sha512sum --check --status')).toBeLessThan(
+      readyAt,
+    );
+    expect(toolchain.indexOf('"$prefix/jdk/bin/java" -version')).toBeLessThan(
+      readyAt,
+    );
+    expect(toolchain.indexOf('"$prefix/maven/bin/mvn" -version')).toBeLessThan(
+      readyAt,
+    );
+    // mvn refuses to start unless JAVA_HOME points at the JDK just unpacked.
+    const javaHomeAt = toolchain.indexOf('JAVA_HOME="$prefix/jdk"');
+    expect(javaHomeAt).toBeGreaterThan(-1);
+    expect(javaHomeAt).toBeLessThan(
+      toolchain.indexOf('"$prefix/maven/bin/mvn" -version'),
+    );
+    expect(
+      mavenRepoProducerWorkflow.indexOf('JAVA_HOME="$prefix/jdk"'),
+    ).toBeLessThan(
+      mavenRepoProducerWorkflow.indexOf('"$prefix/maven/bin/mvn" -version'),
+    );
+    expect(toolchain).toContain('::warning::');
+    expect(toolchain).not.toMatch(/\bexit 1\b/);
+  });
+
+  it('shares the Maven and Temurin pins with the producer and sdk-java.yml', () => {
+    const consumer = stepIn('verify', 'Install Java toolchain');
+    for (const name of ['MAVEN_VERSION', 'MAVEN_SHA512']) {
+      const pin = envValue(consumer, name);
+      expect(pin).toBeTruthy();
+      expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
+      expect(envValue(sdkJavaWorkflow, name)).toBe(pin);
+    }
+    for (const name of ['TEMURIN_VERSION', 'TEMURIN_SHA256', 'TEMURIN_URL']) {
+      const pin = envValue(consumer, name);
+      expect(pin).toBeTruthy();
+      expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
+    }
+  });
+
+  it('restores the Maven repo read-only before PR code runs', () => {
+    const verify = job('verify');
+    const clearAt = verify.indexOf("'Clear stale verify Maven repo'");
+    const restoreAt = verify.indexOf("'Restore verify Maven repo'");
+    const buildAt = verify.indexOf("'Install and build PR app'");
+    expect(clearAt).toBeGreaterThan(-1);
+    expect(clearAt).toBeLessThan(restoreAt);
+    expect(restoreAt).toBeLessThan(buildAt);
+    const restore = stepIn('verify', 'Restore verify Maven repo');
+    expect(restore).toContain('actions/cache/restore@');
+    expect(restore).toContain("id: 'maven-repo'");
+    expect(restore).toContain('continue-on-error: true');
+    expect(restore).not.toMatch(/uses:\s*'actions\/cache@/);
+    expect(verify).not.toContain('actions/cache/save@');
+
+    const yamlScalarOf = (text, field) =>
+      yamlScalar(text.match(new RegExp(`${field}:\\s*('[^']+'|"[^"]+")`))?.[1]);
+    expect(yamlScalarOf(mavenRepoProducerWorkflow, 'path')).toBe(
+      yamlScalarOf(restore, 'path'),
+    );
+    expect(yamlScalarOf(mavenRepoProducerWorkflow, 'key')).toBe(
+      yamlScalarOf(restore, 'key'),
+    );
+    expect(mavenRepoProducerWorkflow).toContain('actions/cache/save@');
+    expect(mavenRepoProducerWorkflow).toContain(
+      "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+    );
+    expect(mavenRepoProducerWorkflow).toContain("image: 'node:22-bookworm'");
+    expect(mavenRepoProducerWorkflow).toContain(
+      "options: '--init --user node'",
+    );
+    expect(verify).toContain("image: 'node:22-bookworm'");
+    expect(mavenRepoProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
+    expect(mavenRepoProducerWorkflow).toContain('workflow_dispatch:');
+    expect(mavenRepoProducerWorkflow).toContain(
+      '0057852bfaa89a56745cba8c7296529d2fc39830',
+    );
+    expect(restore).toContain('0057852bfaa89a56745cba8c7296529d2fc39830');
+  });
+
+  it('strips exactly the artifact ids published by the Maven modules', () => {
+    const coords = moduleCoordinates();
+    expect(coords.length).toBeGreaterThan(0);
+    const strip = mavenRepoProducerWorkflow.slice(
+      mavenRepoProducerWorkflow.indexOf('# verify-maven-repo-strip-begin'),
+      mavenRepoProducerWorkflow.indexOf('# verify-maven-repo-strip-end'),
+    );
+    const listed = strip
+      .match(/STRIP_ARTIFACTS=\(([^)]*)\)/)?.[1]
+      .split(/\s+/)
+      .filter(Boolean);
+    expect(listed?.slice().sort()).toEqual(
+      coords.map((coord) => coord.artifactId).sort(),
+    );
+    for (const coord of coords) {
+      expect(coord.groupId).toBe('com.alibaba');
+    }
+    expect(strip).toContain('${repo}/com/alibaba/${artifact}');
+    const buildAt = mavenRepoProducerWorkflow.indexOf(
+      "      - name: 'Populate verify Maven repo'",
+    );
+    expect(buildAt).toBeGreaterThan(-1);
+    const build = mavenRepoProducerWorkflow.slice(buildAt);
+    const qwencode = build.indexOf('packages/sdk-java/qwencode/pom.xml');
+    const server = build.indexOf('packages/managed-agent-server/pom.xml');
+    const client = build.indexOf('packages/sdk-java/client/pom.xml');
+    expect(qwencode).toBeGreaterThan(-1);
+    expect(qwencode).toBeLessThan(server);
+    expect(server).toBeLessThan(client);
+    expect(build.indexOf('# verify-maven-repo-strip-begin')).toBeGreaterThan(
+      client,
+    );
+  });
+
+  it('installs sibling modules as node, capped, without failing the job', () => {
+    const verify = job('verify');
+    const modules = stepIn('verify', 'Install Java modules');
+    expect(
+      verify.indexOf("'Flakiness gate: re-run changed test files'"),
+    ).toBeLessThan(verify.indexOf("'Install Java modules'"));
+    expect(verify.indexOf("'Install Java modules'")).toBeLessThan(
+      verify.indexOf("'Install evidence browser'"),
+    );
+    expect(modules).toContain('runuser -u node');
+    expect(modules).toContain('timeout -k 30 300');
+    expect(modules).toContain('-u ACTIONS_RUNTIME_TOKEN');
+    expect(modules).toContain('-u GITHUB_TOKEN');
+    expect(modules).toContain('-Dgpg.skip=true');
+    expect(modules).not.toContain('runtime-broker/pom.xml');
+    expect(modules).toContain('java-prepare.log');
+    expect(modules).toContain('steps.maven-repo.outputs.cache-hit');
+    expect(modules).toContain("GITHUB_TOKEN: ''");
+    expect(modules).not.toMatch(/\bexit 1\b/);
+    expect(modules).toContain("steps.prepare.outputs.verdict == ''");
+  });
+
+  it('injects the Java environment only when the ready marker exists', () => {
+    const runStep = stepIn('verify', 'Run verification agent');
+    const initialPath = runStep.indexOf('"PATH=$PATH"');
+    const guard = runStep.indexOf('if [ -f /opt/verify-java/ready ]');
+    const flag = runStep.indexOf('QWEN_VERIFY_JAVA=1');
+    expect(initialPath).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(initialPath);
+    expect(flag).toBeGreaterThan(guard);
+    const block = runStep.slice(guard, flag + 24);
+    expect(block).toContain('then');
+    expect(block).toContain('JAVA_HOME=/opt/verify-java/jdk');
+    expect(block).toContain(
+      'MAVEN_ARGS=-Dmaven.repo.local=${RUNNER_TEMP}/verify-maven-repo',
+    );
+    expect(block).toContain(
+      'PATH=/opt/verify-java/jdk/bin:/opt/verify-java/maven/bin:${PATH}',
+    );
+    expect(stepIn('tmux-testing', 'Run tmux real-user testing')).not.toContain(
+      'QWEN_VERIFY_JAVA',
+    );
+    expect(verifySkill).toContain('QWEN_VERIFY_JAVA=1');
+    expect(verifySkill).toContain('java-prepare.log');
+    expect(verifySkill).toContain('not SNAPSHOT');
+    expect(verifySkill).not.toContain('ships no JDK');
+  });
+
+  it('keeps ten minutes of headroom above the java-inclusive worst case', () => {
+    const verify = job('verify');
+    expect(verify).toContain('210 leaves 10m of headroom');
+    expect(verify.match(/^ {4}timeout-minutes: (\d+)/m)?.[1]).toBe('210');
   });
 });
 

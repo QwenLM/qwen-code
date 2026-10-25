@@ -15,6 +15,7 @@ import {
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
+import { getImportedProjectMemoryRoot } from './import-paths.js';
 import {
   parseAutoMemoryTopicDocument,
   rereadAutoMemoryDocument,
@@ -813,6 +814,33 @@ describe('auto-memory topic scanning', () => {
     );
   });
 
+  it('drops a selected memory that changes while its body is read', async () => {
+    const filePath = getAutoMemoryFilePath(projectRoot, 'context.md');
+    const content =
+      '---\ntype: project\nname: Context\ndescription: Project context\n---\nbody';
+    await fs.writeFile(filePath, content, 'utf-8');
+    const [doc] = await scanAutoMemoryTopicDocuments(projectRoot);
+    const readFile = fs.readFile;
+    const read = vi
+      .spyOn(fs, 'readFile')
+      .mockImplementationOnce(async (...args) => {
+        await fs.writeFile(
+          filePath,
+          content.replace('body', 'updated'),
+          'utf-8',
+        );
+        const changedAt = new Date(doc!.mtimeMs + 1_000);
+        await fs.utimes(filePath, changedAt, changedAt);
+        return readFile(...args);
+      });
+
+    try {
+      await expect(rereadAutoMemoryDocument(doc!)).resolves.toBeNull();
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   it('rejects a memory replaced by an outside symlink after scanning', async () => {
     const filePath = getAutoMemoryFilePath(
       projectRoot,
@@ -1165,6 +1193,64 @@ describe('auto-memory topic scanning', () => {
         delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
       } else {
         process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
+      }
+      clearAutoMemoryRootCache();
+    }
+  });
+
+  it('keeps native project memory when imported project memory exceeds the cap', async () => {
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const previousRuntime = process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'global');
+    process.env['QWEN_RUNTIME_DIR'] = path.join(tempDir, 'runtime');
+    clearAutoMemoryRootCache();
+    try {
+      const nativeRoot = getAutoMemoryRoot(projectRoot);
+      const old = new Date('2026-01-01T00:00:00Z');
+      const fresh = new Date('2026-02-01T00:00:00Z');
+      const write = async (file: string, name: string, timestamp: Date) => {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(
+          file,
+          `---\ntype: project\nname: ${name}\ndescription: fixture\n---\nbody`,
+        );
+        await fs.utimes(file, timestamp, timestamp);
+      };
+      for (let i = 0; i < 5; i++)
+        await write(path.join(nativeRoot, `native-${i}.md`), `Native${i}`, old);
+      const importedRoot = getImportedProjectMemoryRoot(projectRoot);
+      for (let i = 0; i < 201; i++)
+        await write(
+          path.join(importedRoot, 'imported', 'synthetic', `${i}.md`),
+          `Imported${i}`,
+          fresh,
+        );
+
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+      });
+
+      expect(snapshot.docs).toHaveLength(200);
+      expect(
+        snapshot.docs.filter((doc) => doc.relativePath.startsWith('native-')),
+      ).toHaveLength(5);
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+      if (previousBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
+      }
+      if (previousRuntime === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntime;
       }
       clearAutoMemoryRootCache();
     }

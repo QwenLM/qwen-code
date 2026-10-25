@@ -16,21 +16,21 @@ O3 让持久记录的工具结果可以通过 Java 公共 API 和 Managed WebShe
 
 下表路径相对仓库根目录；Ref 对应上面的已核查提交。
 
-| Ref     | 证据                                                                                                                                                                      | 对 O3 的影响                                                                                                          |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| main    | `packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/HarnessEventProjector.java:41–59,77–94` 只接受指定事件类型和工具标量字段 | 直接放开任意 output 会绕过回执与公开授权检查。                                                                        |
-| O2      | `packages/cli/src/serve/hosted-harness-session.ts:301–313,358–363` 的 journal 通知没有完整的公开结果描述                                                                  | Harness SSE 可以通知变化，但不能证明内容已接受，也不足以完成回填。                                                    |
-| O2      | `ToolPublicationAdmissionStore.java:37–129,160–174` 原子安装 outcome/manifest、提交回执，并记录带回执指针的 `REFERENCED`                                                  | `committed` 和 `blocked` 都进入 `REFERENCED`；仅凭此阶段不能授权下载。                                                |
-| O2      | `packages/cli/src/serve/hosted-workspace-tool-turn.ts:860–1000` 通过普通 inline outcome 与 journal 事务提交 `not_started`                                                 | 只在 publication admission 挂 O3 钩子会遗漏未启动结果。                                                               |
-| main/O2 | `ManagedAgentStore.java:344–346,417–419`、`HarnessCoordinator.java:325–327`、O2 `hosted-workspace-tool-turn.ts:569–580`                                                   | 公开 `turn_*` 与内部 prompt UUID 不同；Runtime call ID 与模型 call ID 也不同。                                        |
-| O2      | `ToolPublicationDataStore.java:1201–1313` 有精确区间校验，但需要 writer 授权                                                                                              | 浏览器需要范围受限的持久资源读取器；已关闭的 Session 不能为了下载而取得 writer。                                      |
-| main    | `ManagedAgentService.java:654–685`、`TenantContextFilter.java`、`ManagedWorkspaceRegistry.java`                                                                           | Workspace 读取检查可信 actor 的授权。只有租户请求头不足以使用 O3；当前可见性检查隐藏 `DELETED`，尚未隐藏 `DELETING`。 |
-| main    | OpenAPI v1.21.0 的 Artifact 列表/正文仍为 `planned`；`ManagedAgentService.java:481` 返回 `artifacts=false`                                                                | 需要明确补结果详情、Artifact 详情、版本/区间语义及 WebShell 契约。                                                    |
-| main    | `ManagedSessionStore.java:309–313` 与 `ManagedExtensionRecordStore.java:330–343` 已有 journal 提交配套持久公开投影                                                        | 可以复用事务和提交后事件设施，无须另建通用 outbox 派发器。                                                            |
-| main    | `ManagedAgentWebShell.tsx:32–33`、`managed-agent-provider.ts:82–145`、`ManagedSessionsPage.tsx:459–477`                                                                   | Managed UI 没有 daemon workspace context，也没有 Artifact 传输能力。                                                  |
-| main    | `ArtifactPanel.tsx:3745–3797` 与 `artifactUtils.ts:235–328` 可能将整个 daemon 文件拼成 Blob                                                                               | 复用视觉组件，不复用其 daemon 文件读取和下载路径。                                                                    |
+| Ref     | 证据                                                                                                                                                             | 对 O3 的影响                                                                                                          |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| main    | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/HarnessEventProjector.java:41–59,77–94` 只接受指定事件类型和工具标量字段 | 直接放开任意 output 会绕过回执与公开授权检查。                                                                        |
+| O2      | `packages/cli/src/serve/hosted-harness-session.ts:301–313,358–363` 的 journal 通知没有完整的公开结果描述                                                         | Harness SSE 可以通知变化，但不能证明内容已接受，也不足以完成回填。                                                    |
+| O2      | `ToolPublicationAdmissionStore.java:37–129,160–174` 原子安装 outcome/manifest、提交回执，并记录带回执指针的 `REFERENCED`                                         | `committed` 和 `blocked` 都进入 `REFERENCED`；仅凭此阶段不能授权下载。                                                |
+| O2      | `packages/cli/src/serve/hosted-workspace-tool-turn.ts:860–1000` 通过普通 inline outcome 与 journal 事务提交 `not_started`                                        | 只在 publication admission 挂 O3 钩子会遗漏未启动结果。                                                               |
+| main/O2 | `ManagedAgentStore.java:344–346,417–419`、`HarnessCoordinator.java:325–327`、O2 `hosted-workspace-tool-turn.ts:569–580`                                          | 公开 `turn_*` 与内部 prompt UUID 不同；Runtime call ID 与模型 call ID 也不同。                                        |
+| O2      | `ToolPublicationDataStore.java:1201–1313` 有精确区间校验，但需要 writer 授权                                                                                     | 浏览器需要范围受限的持久资源读取器；已关闭的 Session 不能为了下载而取得 writer。                                      |
+| main    | `ManagedAgentService.java:654–685`、`TenantContextFilter.java`、`ManagedWorkspaceRegistry.java`                                                                  | Workspace 读取检查可信 actor 的授权。只有租户请求头不足以使用 O3；当前可见性检查隐藏 `DELETED`，尚未隐藏 `DELETING`。 |
+| main    | OpenAPI v1.21.0 的 Artifact 列表/正文仍为 `planned`；`ManagedAgentService.java:481` 返回 `artifacts=false`                                                       | 需要明确补结果详情、Artifact 详情、版本/区间语义及 WebShell 契约。                                                    |
+| main    | `ManagedSessionStore.java:309–313` 与 `ManagedExtensionRecordStore.java:330–343` 已有 journal 提交配套持久公开投影                                               | 可以复用事务和提交后事件设施，无须另建通用 outbox 派发器。                                                            |
+| main    | `ManagedAgentWebShell.tsx:32–33`、`managed-agent-provider.ts:82–145`、`ManagedSessionsPage.tsx:459–477`                                                          | Managed UI 没有 daemon workspace context，也没有 Artifact 传输能力。                                                  |
+| main    | `ArtifactPanel.tsx:3745–3797` 与 `artifactUtils.ts:235–328` 可能将整个 daemon 文件拼成 Blob                                                                      | 复用视觉组件，不复用其 daemon 文件读取和下载路径。                                                                    |
 
-上述 Java store 路径位于 `packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/` 下；UI 路径位于 `packages/web-shell/client/` 下。这些是代码观察，不是本次新增行为。
+上述 Java store 路径位于 `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/` 下；UI 路径位于 `packages/web-shell/client/` 下。这些是代码观察，不是本次新增行为。
 
 ## 3. 结果状态与首个支持的表示
 
@@ -126,7 +126,7 @@ materializer 用数据库租约和 fencing token 领取有界工作。首片验�
 
 投影使用独立单线程调度器，已有 Harness、生命周期和消息任务保留默认调度器。READY 源不会再次认领：当前实现仅产生一次 projection_revision 1。重放消费者保留单调 revision 检查以拒绝重复或过期事件；第二次策略投影需要前文所述另行评审的表示 migration。公开 delivery pending 为预留值；已接受回执目前只公开 committed 或 blocked。缺失公开 Turn 映射有独立的 unsupported 诊断。
 
-元数据每请求评估一次当前原始读取策略，按 Session scope 批量查询 publication 可用性。内容读取仍在每个 chunk 边界重新检查权限与 catalog。初始 guard 和 range 边界先于元数据闭包读取。固定 revision 的读取仍验证完整不可变元数据闭包；本次不减少闭包验证，也不节流当前权限检查。审计区分 denied、rejected、interrupted 与 completed，包含成功的零字节流。
+元数据每请求评估一次当前原始读取策略，按 Session scope 批量查询 publication 可用性。内容读取仍在每个 chunk 边界重新检查权限与 catalog。初始 guard 和 range 边界先于元数据闭包读取。固定 revision 的读取仍验证完整不可变元数据闭包；本次不减少闭包验证，也不节流当前权限检查。审计区分 denied、rejected、interrupted 与 completed，包含成功的零字节流。（2026-10-02 由 issue #13181 取代：逐 chunk 的访问复检改为按 `qwen.managed-agent.artifacts.read-revalidation-interval` 窗口化，默认 5 秒；读取租约的持久性检查仍逐 chunk 执行。见[查询放大修复设计](2026-10-02-managed-agent-query-amplification.zh-CN.md) §7。）
 
 预览源窗口最多 8 KiB，另受 UTF-8 字节和 200 行上限约束。自动预览复用每个 artifact 已校验的元数据句柄；若校验相交分段需要读取超过 1 MiB，则省略预览。artifact 元数据与用户主动请求的内容仍可读取。WebShell 保留包含 lookback bytes 的四页缓存，同 Session 刷新期间保持输出面板打开，在当前 Turn 新增结果行前结算 assistant 文本。临时 429/503 内容读取按 Retry-After 对同一请求最多重试一次，等待上限五秒，超过上限的 Retry-After 直接返回错误而不提前重试；取消也会终止等待。每次普通测试运行都比较 Java 产生的契约 fixture，仅规范化时间戳和随机分配的 event ID。
 
@@ -173,7 +173,7 @@ O3 每项操作都要求可信 tenant/actor principal，再验证当前 Session/
 
 未知或不可读资源遵守产品 404 策略。允许发现 Artifact、但禁止读取原始 bytes 的调用者收到 `403 artifact_content_forbidden`。只有已授权调用者才能观察过期版本 `410`。O3 不使保留表示过期；`410` 为未来保留期实现预留，当前缺失或被隔离的内容按不可用处理。授权检查先于可能泄露长度/版本的 range 和 precondition 错误。审计 actor、作用域 ID、决定和字节数，不记录内容、凭证或签名链接。
 
-请求准入、首字节发送前，以及有界流 chunk 边界都检查权限与当前 catalog/表示可用性。撤权、删除或 quarantine 停止后续 chunk，已经发送的 bytes 无法收回。客户端断开时终止传输并释放并发名额。公开元数据及 bytes 响应使用 `Cache-Control: private, no-store`。
+请求准入、首字节发送前，以及有界流 chunk 边界都检查权限与当前 catalog/表示可用性。撤权、删除或 quarantine 停止后续 chunk，已经发送的 bytes 无法收回。客户端断开时终止传输并释放并发名额。公开元数据及 bytes 响应使用 `Cache-Control: private, no-store`。（2026-10-02 由 issue #13181 取代：流内访问复检至多每个 `read-revalidation-interval`（默认 5 秒）一次——撤权/删除在窗口到期后的第一个 chunk 边界生效；逐 chunk 的租约检查不变。见[查询放大修复设计](2026-10-02-managed-agent-query-amplification.zh-CN.md) §7。）
 
 ## 7. 精确 bytes、HTTP 与有界下载
 
@@ -227,7 +227,7 @@ O3 增加公开引用映射和读取准入，O4 负责物理垃圾回收。只�
 | 投影提交、响应/SSE 丢失                                                   | 结果/列表/Snapshot 恢复返回相同 ID 和 revision。                                                                                               |
 | Turn 先完成                                                               | 迟到结果更新已结算 Item，不产生新 Turn 或模型续跑。                                                                                            |
 | Session 删除与投影竞争                                                    | Session 行门禁阻止删除开始后的公开写入；源按恢复策略保留或 suppressed。                                                                        |
-| range/下载过程中撤权                                                      | 按约定 chunk 边界停止后续交付，不触发 Runtime 操作。                                                                                           |
+| range/下载过程中撤权                                                      | 按约定 chunk 边界停止后续交付，不触发 Runtime 操作。（自 2026-10-02 起，issue #13181：在复检窗口到期后的第一个 chunk 边界停止，默认 5 秒。）   |
 | 已接受 bytes 损坏或丢失                                                   | 可用性变为 unavailable，诊断有界；原执行/捕获事实保留。                                                                                        |
 | 未确认的 publication candidate 操作 deadline 在持久 finish/receipt 前到期 | 不公开已接受 Artifact；该 liveness 策略由 [#13019](https://github.com/QwenLM/qwen-code/issues/13019) 负责，不表示保留的 publication 数据过期。 |
 

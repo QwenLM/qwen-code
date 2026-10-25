@@ -9,6 +9,7 @@ import {
   deserializeSnapshots,
   serializeSnapshot,
   type SerializedFileHistorySnapshot,
+  type RetainedFileHistoryStorage,
 } from '../services/fileHistoryService.js';
 
 export interface ManagedToolFileHistoryState {
@@ -55,9 +56,14 @@ export class ManagedToolFileHistory {
     private readonly ownerSessionId: string,
     cwd: string,
     serializedSnapshots: SerializedFileHistorySnapshot[],
+    retainedStorage?: RetainedFileHistoryStorage,
   ) {
-    this.service = new FileHistoryService(ownerSessionId, true, cwd, () =>
-      this.capture(),
+    this.service = new FileHistoryService(
+      ownerSessionId,
+      true,
+      cwd,
+      () => this.capture(),
+      retainedStorage,
     );
     this.service.restoreFromSnapshots(
       deserializeSnapshots(copySnapshots(serializedSnapshots)),

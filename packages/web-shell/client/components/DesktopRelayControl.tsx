@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { MonitorIcon } from 'lucide-react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import {
@@ -448,6 +449,7 @@ export function DesktopRelayPanel({
 interface DesktopRelayControlProps {
   /** Class for the trigger, supplied by the sidebar so it matches its neighbours. */
   triggerClassName: string;
+  portalContainer?: HTMLElement | null;
   workspaces?: readonly DaemonWorkspaceCapability[];
   showWhenIdle?: boolean;
 }
@@ -458,6 +460,7 @@ interface DesktopRelayControlProps {
  */
 export function DesktopRelayControl({
   triggerClassName,
+  portalContainer,
   workspaces,
   showWhenIdle = true,
 }: DesktopRelayControlProps) {
@@ -465,6 +468,9 @@ export function DesktopRelayControl({
   const { baseUrl, token, capabilities } = useWorkspace();
   const { sessionId, workspaceCwd } = useConnection();
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (portalContainer === null) setOpen(false);
+  }, [portalContainer]);
   const [probe, setProbe] = useState<DesktopRelayObservation | undefined>(
     undefined,
   );
@@ -612,7 +618,7 @@ export function DesktopRelayControl({
 
   if (!showWhenIdle && !watching) return null;
 
-  return (
+  const control = (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
@@ -635,7 +641,11 @@ export function DesktopRelayControl({
           ) : null}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80">
+      <PopoverContent
+        align="end"
+        className="w-80"
+        data-web-shell-desktop-relay-panel
+      >
         <DesktopRelayPanel
           status={status}
           installCommand={DESKTOP_RELAY_INSTALL_COMMAND}
@@ -651,4 +661,9 @@ export function DesktopRelayControl({
       </PopoverContent>
     </Popover>
   );
+  return portalContainer === undefined
+    ? control
+    : portalContainer
+      ? createPortal(control, portalContainer)
+      : null;
 }

@@ -10,7 +10,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
+import {
+  maybeOpenWebShellBrowser,
+  serveCommand,
+  validateManagedLocalFlags,
+} from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
@@ -54,12 +58,59 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('refuses flags whose ordinary-daemon behavior is unavailable in Managed mode', () => {
+    expect(() =>
+      validateManagedLocalFlags(['--managed', '--port=0', '--no-open']),
+    ).not.toThrow();
+    for (const flag of [
+      '--workspace',
+      '--max-sessions=2',
+      '--profile=hosted-harness',
+      '--token=secret',
+      '--no-require-auth',
+    ]) {
+      expect(() => validateManagedLocalFlags(['--managed', flag])).toThrow(
+        'not supported with --managed',
+      );
+    }
+  });
+  it('parses the isolated Managed mode and private data directory', () => {
+    const parsed = buildParser().parseSync(
+      '--managed --managed-data-dir /private/data --port 0',
+    );
+    expect(parsed['managed']).toBe(true);
+    expect(parsed['managed-data-dir']).toBe('/private/data');
+    expect(parsed['port']).toBe(0);
+    expect(buildParser().parseSync('')['managed']).toBe(false);
+    expect(() => buildParser().parseSync('--managed-data-dir')).toThrow(
+      /Not enough arguments/u,
+    );
+  });
   it('documents the complete IPv4 loopback range', async () => {
     // Remove whitespace before checking so a long option name forcing yargs
     // to wrap the description does not split the CIDR literal across lines.
     expect((await buildParser().getHelp()).replace(/\s/g, '')).toContain(
       '127.0.0.0/8',
     );
+  });
+
+  it('documents Hosted Runtime Broker options and does not declare them unimplemented', async () => {
+    // yargs hard-wraps the description column mid-word at its 80-column
+    // default, so compare with whitespace and type hints removed. The next
+    // row starts with "--", so stale text appended to a row cannot hide.
+    const squash = (text: string) => text.replace(/\[string\]|\s+/g, '');
+    const help = squash(await buildParser().getHelp());
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-url Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_URL. --',
+      ),
+    );
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN. --',
+      ),
+    );
+    expect(help).not.toContain('ReservedBroker');
   });
 
   it('defaults authenticated open to disabled', () => {
@@ -89,9 +140,14 @@ describe('serve command args', () => {
     expect(parsed['enable-session-shell']).toBe(false);
   });
 
-  it('defaults max sessions to 32', () => {
+  it('leaves max sessions unset when the flag is omitted', () => {
     const parsed = buildParser().parseSync('');
-    expect(parsed['max-sessions']).toBe(32);
+    expect(parsed['max-sessions']).toBeUndefined();
+  });
+
+  it('parses --max-sessions as a number', () => {
+    const parsed = buildParser().parseSync('--max-sessions 64');
+    expect(parsed['max-sessions']).toBe(64);
   });
 
   it('accepts --experimental-lsp in strict parser mode', () => {

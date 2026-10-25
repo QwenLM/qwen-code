@@ -288,6 +288,84 @@ describe('UiTelemetryService', () => {
     });
   });
 
+  describe('Per-event billable output', () => {
+    it.each([
+      { auth: 'openai', output: 150_000 },
+      { auth: 'openai-responses', output: 150_000 },
+      { auth: 'qwen-oauth', output: 150_000 },
+      { auth: 'gemini', output: 270_000 },
+      { auth: undefined, output: 270_000 },
+    ])(
+      'uses the $auth convention when total is missing',
+      ({ auth, output }) => {
+        service.addEvent(
+          apiResponse('model', 1, [100_000, 150_000, 0, 0, 120_000], {
+            auth_type: auth,
+            subagent_name: 'researcher',
+          }),
+          'session-a',
+        );
+        for (const metrics of [
+          service.getMetrics(),
+          service.getMetricsForSession('session-a'),
+        ]) {
+          expect(metrics.billableOutputTokens?.['model']).toEqual({
+            total: output,
+            bySource: { researcher: output },
+          });
+          expect(metrics.models['model'].tokens).toEqual({
+            prompt: 100_000,
+            candidates: 150_000,
+            total: 0,
+            cached: 0,
+            thoughts: 120_000,
+          });
+        }
+      },
+    );
+
+    it('clones billing on rollback, isolates sessions, and resets it with usage', () => {
+      const response = apiResponse('model', 1, [10, 20, 30, 0, 5], {
+        auth_type: 'openai',
+        subagent_name: '__proto__',
+      });
+      service.addEvent(response, 'session-a');
+      const snapshot = service.snapshotForReplay('session-a');
+      service.addEvent(response, 'session-a');
+      service.addEvent(response, 'session-b');
+      expect(snapshot.metrics.billableOutputTokens?.['model'].total).toBe(20);
+      service.restoreFromReplaySnapshot(snapshot);
+      service.addEvent(response, 'session-a');
+      const billable =
+        service.getMetricsForSession('session-a').billableOutputTokens?.[
+          'model'
+        ];
+      expect(billable?.total).toBe(40);
+      expect(billable?.bySource['__proto__']).toBe(40);
+      expect(Object.getPrototypeOf(billable!.bySource)).toBeNull();
+      expect(
+        service.getMetricsForSession('session-b').billableOutputTokens?.[
+          'model'
+        ].total,
+      ).toBe(20);
+      expect(
+        snapshot.sessionMetrics?.billableOutputTokens?.['model'].total,
+      ).toBe(20);
+      service.resetSession('session-a');
+      expect(
+        service.getMetricsForSession('session-a').billableOutputTokens,
+      ).toBeUndefined();
+      service.addEvent(response, 'session-a');
+      expect(
+        service.getMetricsForSession('session-a').billableOutputTokens?.[
+          'model'
+        ].total,
+      ).toBe(20);
+      service.reset();
+      expect(service.getMetrics().billableOutputTokens).toBeUndefined();
+    });
+  });
+
   describe('Generation Timing Metrics', () => {
     const timedResponse = (overrides: Partial<ApiResponseEvent> = {}) =>
       apiResponse('qwen3-coder', 500, [10, 20, 30, 0, 0], {
@@ -326,6 +404,48 @@ describe('UiTelemetryService', () => {
       service.addEvent(timedResponse({ prompt_id: 'prompt_suggestion' }));
 
       expect(service.getMetrics().generation).toBeUndefined();
+    });
+
+    it('measures generation time from generation_ms when the event has it', () => {
+      service.addEvent(timedResponse({ generation_ms: 300 }));
+      service.addEvent(timedResponse({ generation_ms: 0 }));
+
+      expect(service.getMetrics().generation).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 200,
+        totalGenerationDurationMs: 300,
+        totalThroughputOutputTokens: 20,
+        last: {
+          model: 'qwen3-coder',
+          ttftMs: 100,
+          generationDurationMs: 0,
+          outputTokens: 20,
+        },
+      });
+    });
+
+    it('aggregates generation per model for the stats route only', () => {
+      const add = (overrides: Partial<ApiResponseEvent>) =>
+        service.addEvent(timedResponse(overrides), 'session-a');
+      add({ generation_ms: 200 });
+      add({ ttft_ms: 50, generation_ms: 100, output_token_count: 10 });
+      add({ model: 'qwen-plus', ttft_ms: 300, generation_ms: 0 });
+      add({ model: 'qwen-plus', prompt_id: 'prompt_suggestion' });
+
+      const metrics = service.getMetricsForSession('session-a');
+      expect(metrics.statsModels?.['qwen3-coder'].generation).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 150,
+        totalGenerationDurationMs: 300,
+        totalThroughputOutputTokens: 30,
+      });
+      expect(metrics.statsModels?.['qwen-plus'].generation).toEqual({
+        timedRequests: 1,
+        totalTtftMs: 300,
+        totalGenerationDurationMs: 0,
+        totalThroughputOutputTokens: 0,
+      });
+      expect(metrics.models['qwen3-coder']).not.toHaveProperty('generation');
     });
 
     it('clamps sampling time when TTFT exceeds request duration', () => {
@@ -1340,6 +1460,15 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
     service.addEvent(response('hook', 20), 'session-a');
     service.restoreSessionModelMetrics('session-a', saved);
     expect(service.getTotalOutputTokens('session-a')).toBe(170);
+    expect(
+      service.getMetricsForSession('session-a').billableOutputTokens,
+    ).toBeUndefined();
+    service.addEvent(response('new-model', 7), 'session-a');
+    expect(
+      service.getMetricsForSession('session-a').billableOutputTokens,
+    ).toEqual({
+      'new-model': { total: 7, bySource: { main: 7 } },
+    });
     expect(service.getTotalOutputTokens('session-b')).toBe(9);
   });
 

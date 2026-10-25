@@ -1379,6 +1379,38 @@ describe('AcpBridge', () => {
     expect(responseBoundary).toHaveBeenCalledOnce();
   });
 
+  it('does not reset known tools or create orphan lifecycle cards', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const toolCall = vi.fn();
+    bridge.on('toolCall', toolCall);
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'known',
+        kind: 'execute',
+        status: 'in_progress',
+      },
+    });
+    toolCall.mockClear();
+    for (const toolCallId of ['known', 'orphan'])
+      bridge.handleSessionUpdate({
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId,
+          _meta: { toolLifecycle: { v: 1, phase: 'ended' } },
+        },
+      });
+    expect(toolCall).not.toHaveBeenCalled();
+    expect(bridge.toolCallKindsBySession.get('session-1')?.get('known')).toBe(
+      'execute',
+    );
+  });
+
   it('restores the initial kind on a kindless terminal tool update', () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

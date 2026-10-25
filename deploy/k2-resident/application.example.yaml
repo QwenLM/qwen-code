@@ -1,0 +1,51 @@
+# Supply reviewed identities and merge this with the server's normal configuration.
+# This file is a template, not an applied deployment or an ACK acceptance result.
+qwen:
+  managed-agent:
+    harness:
+      workspace-files-enabled: true
+      workspace-shell-enabled: false
+    session-store:
+      workspace-id: 'resident-default'
+    runtime-broker:
+      enabled: true
+      provisioner: 'kubernetes-workspace'
+      isolation-class: 'workspace'
+      trusted-local-reboot-recovery: false
+      verified-workspace-recovery-enabled: false
+      child-workspaces-enabled: false
+      workspace-mounts: []
+      workspace-id: 'resident-default'
+      workspace-cwd: '/workspace'
+      resident-kubernetes-api-url: '${RESIDENT_KUBERNETES_API_URL}'
+      resident-kubernetes-token-file: '${RESIDENT_KUBERNETES_TOKEN_FILE}'
+      resident-kubernetes-ca-file: '${RESIDENT_KUBERNETES_CA_FILE}'
+      resident-workspaces:
+        - workspace-id: '${RESIDENT_WORKSPACE_ID}'
+          workspace-generation: 1
+          registration:
+            tenant-id: '${RESIDENT_TENANT_ID}'
+            storage-id: '${RESIDENT_STORAGE_ID}'
+            cluster-domain: '${RESIDENT_CLUSTER_DOMAIN}'
+            namespace: '${RESIDENT_NAMESPACE}'
+            pvc-name: '${RESIDENT_PVC_NAME}'
+            pvc-uid: '${RESIDENT_PVC_UID}'
+            pv-name: '${RESIDENT_PV_NAME}'
+            pv-uid: '${RESIDENT_PV_UID}'
+            driver: '${RESIDENT_CSI_DRIVER}'
+            volume-handle: '${RESIDENT_VOLUME_HANDLE}'
+            backend-domain: '${RESIDENT_BACKEND_DOMAIN}'
+            disk-serial: '${RESIDENT_DISK_SERIAL}'
+            mount-root: '/workspace'
+            revision: 1
+          protection:
+            namespace-uid: '${RESIDENT_NAMESPACE_UID}'
+            policy-name: '${RESIDENT_POLICY_NAME}'
+            policy-uid: '${RESIDENT_POLICY_UID}'
+            policy-generation: 1
+            binding-name: '${RESIDENT_POLICY_BINDING_NAME}'
+            binding-uid: '${RESIDENT_POLICY_BINDING_UID}'
+            binding-generation: 1
+          image: '${RESIDENT_WORKER_IMAGE_DIGEST}'
+          command: ['node', '/opt/qwen/dist/cli.js']
+          artifacts: []

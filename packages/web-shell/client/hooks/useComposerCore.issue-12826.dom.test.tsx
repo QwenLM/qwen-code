@@ -31,7 +31,10 @@
 //    itself (ChatEditor's handleAddMenuInsertReference and file-reference
 //    paths, both placement:'inline') and gets its React root from the
 //    built-in preview-icon branch in toDOM(), never from a host
-//    renderContent. The last test below covers that branch.
+//    renderContent. The 'does not re-enter the editor for a chip built by the
+//    built-in file-icon branch' test below covers that branch; the two 'defers
+//    a failed inline tag ...' tests cover the host-renderer catch paths, which
+//    that host never reaches.
 //  - NOT resolved: the specific commit-phase frame that dispatched into the
 //    editor in the reporter's minified stack (webview.js:680:8046). The
 //    panel has no useLayoutEffect and web-shell exposes no onSubmit prop
@@ -46,7 +49,7 @@
 //  - A layout effect stands in for the unresolved frame above, recording the
 //    editor's update phase when it runs and optionally dispatching into it.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, useEffect, useLayoutEffect, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Transaction } from '@codemirror/state';
@@ -87,6 +90,24 @@ function ChipProbe() {
   return <span data-testid="chip-content">chip</span>;
 }
 
+// Same trick for the tooltip root, which is the one the tooltip-catch
+// deferral releases. Opt-in per test: the renderer has to keep returning a
+// string for the others, because tooltipText is derived only from a
+// string/number tooltip and the sibling suite pins the chip.title fallback
+// that depends on it.
+let tooltipRendersProbe = false;
+let tooltipUnmounts = 0;
+
+function TooltipProbe() {
+  useEffect(
+    () => () => {
+      tooltipUnmounts += 1;
+    },
+    [],
+  );
+  return null;
+}
+
 function CompanionLikeHarness() {
   const [messages, setMessages] = useState<string[]>([]);
   const composer = useComposerCore({
@@ -101,7 +122,8 @@ function CompanionLikeHarness() {
     ...(hostPassesTagRenderProps
       ? {
           renderComposerTag: () => <ChipProbe />,
-          renderComposerTagTooltip: () => 'a file reference',
+          renderComposerTagTooltip: () =>
+            tooltipRendersProbe ? <TooltipProbe /> : 'a file reference',
         }
       : {}),
   });
@@ -170,6 +192,26 @@ function pressEnter() {
   });
 }
 
+// Root.unmount() flushes sync work across ALL roots, so an unmount that runs
+// while CodeMirror is mid-update is exactly the #12826 hazard. Record the
+// editor's update phase at every unmount so a test can assert the call left
+// the cycle, instead of asserting its ordering against some nearby statement.
+function spyRootUnmountStates() {
+  const proto = Object.getPrototypeOf(root!) as Root;
+  const realUnmount = proto.unmount;
+  const states: number[] = [];
+  const spy = vi.spyOn(proto, 'unmount').mockImplementation(function (
+    this: Root,
+  ) {
+    const view = latest?.viewRef.current;
+    if (view) {
+      states.push((view as unknown as ViewWithUpdateState).updateState);
+    }
+    return realUnmount.call(this);
+  });
+  return { states, restore: () => spy.mockRestore() };
+}
+
 afterEach(async () => {
   if (root) {
     await act(async () => {
@@ -185,6 +227,8 @@ afterEach(async () => {
   hostSyncsIntoEditor = false;
   hostPassesTagRenderProps = true;
   chipUnmounts = 0;
+  tooltipRendersProbe = false;
+  tooltipUnmounts = 0;
   document.body.innerHTML = '';
 });
 
@@ -306,5 +350,121 @@ describe('useComposerCore issue #12826 re-entrant update', () => {
     );
     expect(hostDispatchErrors).toEqual([]);
     expect(view.state.doc.toString()).toBe('');
+  });
+
+  it('defers a failed inline tag content root out of the update cycle', async () => {
+    await mount();
+    const view = latest!.viewRef.current!;
+    const { states, restore } = spyRootUnmountStates();
+    const contentAppendError = new Error('content append failed');
+    const appendChild = HTMLElement.prototype.appendChild;
+    // Narrow probe: toDOM()'s custom-content span is the only element carrying
+    // display:inline-flex together with a min-width (the built-in file-icon
+    // span has no min-width, the tooltip span is display:none). React DOM
+    // itself calls appendChild during commit, so a blanket throw would break
+    // the harness's own render.
+    const appendChildSpy = vi
+      .spyOn(HTMLElement.prototype, 'appendChild')
+      .mockImplementation(function (child) {
+        if (
+          child instanceof HTMLElement &&
+          child.style.display === 'inline-flex' &&
+          child.style.minWidth !== ''
+        ) {
+          throw contentAppendError;
+        }
+        return appendChild.call(this, child);
+      });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Captured before the chip is added: chipUnmounts is a module-level counter
+    // reset per test, so the release can only be read as a before/after delta.
+    const unmountsBefore = chipUnmounts;
+
+    try {
+      addFileChip('notes.txt');
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // Self-guard: the throw landed in toDOM()'s renderContent catch rather
+      // than in the earlier root-less one, because only the former runs after
+      // renderContent() has returned a node. Both emit the same message, so
+      // the error identity is what pins the site.
+      expect(warn).toHaveBeenCalledWith(
+        '[WebShell] inline tag renderContent failed',
+        contentAppendError,
+      );
+      // The failed content root was released (deferred, not skipped). Only that
+      // root renders <ChipProbe/>, so its cleanup counter is root-scoped, while
+      // the shared unmount spy sees every root alive in the window ...
+      expect(chipUnmounts).toBeGreaterThan(unmountsBefore);
+      expect(states.length).toBeGreaterThan(0);
+      // ... and each observed unmount ran only once CodeMirror had left its
+      // update cycle.
+      expect(states).toEqual(states.map(() => CM_IDLE));
+      // That catch re-assigns this.contentRoot for the built-in file icon, so
+      // the deferred unmount has to release the root it captured, not the
+      // fresh one — otherwise the icon's subtree is torn down with it.
+      expect(
+        view.contentDOM.querySelector('span[aria-hidden="true"] svg'),
+      ).not.toBeNull();
+    } finally {
+      warn.mockRestore();
+      appendChildSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it('defers a failed inline tag tooltip root out of the update cycle', async () => {
+    tooltipRendersProbe = true;
+    await mount();
+    const view = latest!.viewRef.current!;
+    const { states, restore } = spyRootUnmountStates();
+    const tooltipAppendError = new Error('tooltip append failed');
+    const appendChild = HTMLElement.prototype.appendChild;
+    const appendChildSpy = vi
+      .spyOn(HTMLElement.prototype, 'appendChild')
+      .mockImplementation(function (child) {
+        if (
+          child instanceof HTMLElement &&
+          child.getAttribute('role') === 'tooltip'
+        ) {
+          throw tooltipAppendError;
+        }
+        return appendChild.call(this, child);
+      });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Captured before the chip is added: tooltipUnmounts is a module-level
+    // counter reset per test, so the release reads as a before/after delta.
+    const unmountsBefore = tooltipUnmounts;
+
+    try {
+      addFileChip('notes.txt');
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        '[WebShell] inline tag tooltip render failed',
+        tooltipAppendError,
+      );
+      expect(view.contentDOM.querySelector('[role="tooltip"]')).toBeNull();
+      // Twin of the icon guard above: only the tooltip root is released here.
+      // Custom content rendered fine, so the live content root must survive.
+      expect(
+        view.contentDOM.querySelector('[data-testid="chip-content"]'),
+      ).not.toBeNull();
+      // Only the failed tooltip root renders <TooltipProbe/>, so this delta
+      // cannot be satisfied by an unrelated root unmounting inside the window
+      // -- which is what makes dropping the deferral observable right here.
+      expect(tooltipUnmounts).toBeGreaterThan(unmountsBefore);
+      // That unmount went through the spied prototype, so states is non-empty
+      // and this comparison cannot pass vacuously.
+      expect(states).toEqual(states.map(() => CM_IDLE));
+    } finally {
+      warn.mockRestore();
+      appendChildSpy.mockRestore();
+      restore();
+    }
   });
 });
