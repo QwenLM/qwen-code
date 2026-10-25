@@ -329,6 +329,16 @@ describe('settings locations in a given environment', () => {
       expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
     });
 
+    it('ignores a relative XDG_CONFIG_HOME, as core does', () => {
+      const xdgDir = path.join(userHome, '.config', 'qwen');
+      expect(getGlobalQwenDirLite({ XDG_CONFIG_HOME: 'relative-config' })).toBe(
+        xdgDir,
+      );
+      vi.stubEnv('XDG_CONFIG_HOME', 'relative-config');
+      expect(getGlobalQwenDirLite()).toBe(xdgDir);
+      expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
+    });
+
     it('reads XDG_CONFIG_HOME from the given environment', () => {
       const configHome = path.join(userHome, 'xdg-config');
       vi.stubEnv('XDG_CONFIG_HOME', path.join(userHome, 'ambient'));

@@ -89,9 +89,14 @@ function getHomeDir() {
 
 // Mirrors Storage.getGlobalQwenDir() in packages/core when QWEN_HOME is unset.
 function getDefaultQwenHome() {
-  const home = getHomeDir();
-  const legacy = join(home, '.qwen');
-  if (process.platform === 'win32' || process.platform === 'darwin') {
+  let home = '';
+  try {
+    home = homedir();
+  } catch {
+    // Same as an empty home directory, as in getHomeDir().
+  }
+  const legacy = join(home || tmpdir(), '.qwen');
+  if (!home || process.platform === 'win32' || process.platform === 'darwin') {
     return legacy;
   }
   const xdgConfigHome = process.env['XDG_CONFIG_HOME'];

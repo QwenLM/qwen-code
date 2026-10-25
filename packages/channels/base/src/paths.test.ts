@@ -52,6 +52,13 @@ describe('channels/base paths – getGlobalQwenDir', () => {
       expect(getGlobalQwenDir()).toBe(xdgDir);
     });
 
+    it('uses an absolute XDG_CONFIG_HOME and ignores a relative one', () => {
+      vi.stubEnv('XDG_CONFIG_HOME', path.join(home, 'xdg'));
+      expect(getGlobalQwenDir()).toBe(path.join(home, 'xdg', 'qwen'));
+      vi.stubEnv('XDG_CONFIG_HOME', 'relative-config');
+      expect(getGlobalQwenDir()).toBe(path.join(home, '.config', 'qwen'));
+    });
+
     it.each(['darwin', 'win32'])('keeps ~/.qwen on %s', (value) => {
       Object.defineProperty(process, 'platform', { value });
       expect(getGlobalQwenDir()).toBe(path.join(home, '.qwen'));

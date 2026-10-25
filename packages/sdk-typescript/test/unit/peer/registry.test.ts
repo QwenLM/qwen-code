@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   readLocalBootId,
   readPidNamespaceId,
@@ -23,6 +23,14 @@ import {
   writeOwnRecord,
 } from '../../../src/peer/registry.js';
 import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
+
+// This package's workers do not pass a stubbed HOME on to os.homedir(), so the
+// resolver tests below point it at a temporary home directly.
+const fakeHome = vi.hoisted(() => ({ dir: undefined as string | undefined }));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, homedir: () => fakeHome.dir ?? actual.homedir() };
+});
 
 const isPosix = process.platform !== 'win32';
 const isLinux = process.platform === 'linux';
@@ -241,31 +249,48 @@ describe('resolveQwenHome', () => {
   describe('without QWEN_HOME', () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
     const savedXdg = process.env['XDG_CONFIG_HOME'];
-    let configHome: string;
+    let home: string;
+    const legacyDir = () => path.join(home, '.qwen');
+    const xdgDir = () => path.join(home, '.config', 'qwen');
 
     beforeEach(() => {
-      configHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sdk-xdg-'));
-      fs.mkdirSync(path.join(configHome, 'qwen'));
-      fs.writeFileSync(path.join(configHome, 'qwen', '.qwen-global-dir'), '');
+      home = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sdk-home-'));
+      fakeHome.dir = home;
       delete process.env['QWEN_HOME'];
-      process.env['XDG_CONFIG_HOME'] = configHome;
+      delete process.env['XDG_CONFIG_HOME'];
       Object.defineProperty(process, 'platform', { value: 'linux' });
     });
 
     afterEach(() => {
       Object.defineProperty(process, 'platform', platform);
+      fakeHome.dir = undefined;
       if (savedXdg === undefined) delete process.env['XDG_CONFIG_HOME'];
       else process.env['XDG_CONFIG_HOME'] = savedXdg;
-      fs.rmSync(configHome, { recursive: true, force: true });
+      fs.rmSync(home, { recursive: true, force: true });
     });
 
-    it('uses the XDG config directory on Linux once it holds the marker, like the CLI', () => {
-      expect(resolveQwenHome()).toBe(path.join(configHome, 'qwen'));
+    it('uses ~/.config/qwen for a new install on Linux, like the CLI', () => {
+      expect(resolveQwenHome()).toBe(xdgDir());
+    });
+
+    it('keeps an existing ~/.qwen until the XDG directory holds the marker', () => {
+      fs.mkdirSync(legacyDir());
+      fs.mkdirSync(xdgDir(), { recursive: true });
+      expect(resolveQwenHome()).toBe(legacyDir());
+      fs.writeFileSync(path.join(xdgDir(), '.qwen-global-dir'), '');
+      expect(resolveQwenHome()).toBe(xdgDir());
+    });
+
+    it('uses an absolute XDG_CONFIG_HOME and ignores a relative one', () => {
+      process.env['XDG_CONFIG_HOME'] = path.join(home, 'xdg');
+      expect(resolveQwenHome()).toBe(path.join(home, 'xdg', 'qwen'));
+      process.env['XDG_CONFIG_HOME'] = 'relative-config';
+      expect(resolveQwenHome()).toBe(xdgDir());
     });
 
     it.each(['darwin', 'win32'])('keeps ~/.qwen on %s', (value) => {
       Object.defineProperty(process, 'platform', { value });
-      expect(resolveQwenHome()).toBe(path.join(os.homedir(), '.qwen'));
+      expect(resolveQwenHome()).toBe(legacyDir());
     });
   });
 

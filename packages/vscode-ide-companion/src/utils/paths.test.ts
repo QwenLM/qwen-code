@@ -103,6 +103,18 @@ describe('vscode-ide-companion paths – getGlobalQwenDir', () => {
       expect(getGlobalQwenDir()).toBe(path.join(configHome, 'qwen'));
     });
 
+    it('ignores a relative XDG_CONFIG_HOME', () => {
+      process.env['XDG_CONFIG_HOME'] = 'relative-config';
+      expect(getGlobalQwenDir()).toBe(xdgDir());
+    });
+
+    it('reads QWEN_HOME from the .env in ~/.config/qwen', () => {
+      const configDir = path.resolve('/tmp/from-xdg-dotenv');
+      fs.mkdirSync(xdgDir(), { recursive: true });
+      fs.writeFileSync(path.join(xdgDir(), '.env'), `QWEN_HOME=${configDir}\n`);
+      expect(getGlobalQwenDir()).toBe(configDir);
+    });
+
     it.each(['darwin', 'win32'])('keeps ~/.qwen on %s', (value) => {
       Object.defineProperty(process, 'platform', { value });
       fs.mkdirSync(xdgDir(), { recursive: true });
