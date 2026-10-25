@@ -147,6 +147,10 @@ import {
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
+import {
   type ChatCompressionInfo,
   CompressionStatus,
   isCompressionFailureStatus,
@@ -715,6 +719,12 @@ export interface LlmChatSendOptions {
    * public transcript (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * A `UserPromptSubmit` block suppressed as already delivered. Compression
+   * can drop the history entry holding its only copy inside this same send,
+   * so it is re-appended when the send compacts.
+   */
+  suppressedHookContext?: string;
 }
 
 export type ChatCompressionObserver = (
@@ -3665,6 +3675,23 @@ export class LlmChat {
             },
           );
         }
+        if (
+          options?.suppressedHookContext &&
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
+          // One owner per send: the caller may already have appended the
+          // block after a compaction of its own.
+          !hasUserPromptSubmitContext(
+            userContent,
+            options.suppressedHookContext,
+          )
+        ) {
+          // Compaction replaced the history holding the block's only copy, so
+          // the model would otherwise not see it on this turn at all.
+          userContent.parts = [
+            ...(userContent.parts ?? []),
+            createUserPromptSubmitContextPart(options.suppressedHookContext),
+          ];
+        }
         const localPromptTokensAfterCompression = shouldForceFromHard
           ? estimatePendingPromptTokens()
           : 0;
@@ -4759,6 +4786,23 @@ export class LlmChat {
                         self.history.push(
                           createUserContent([{ text: noticeText }]),
                         );
+                      }
+                    }
+
+                    // Same one-copy problem for a suppressed hook block: the
+                    // compaction replaced the history entry that held it.
+                    if (options?.suppressedHookContext) {
+                      const lastContent = self.history.at(-1);
+                      const hookContextPart = createUserPromptSubmitContextPart(
+                        options.suppressedHookContext,
+                      );
+                      if (lastContent?.role === 'user') {
+                        lastContent.parts = [
+                          ...(lastContent.parts ?? []),
+                          hookContextPart,
+                        ];
+                      } else {
+                        self.history.push(createUserContent([hookContextPart]));
                       }
                     }
                     requestContents = self.getRequestHistoryForRoute(
@@ -5898,6 +5942,25 @@ export class LlmChat {
   }
 
   /**
+   * Base history for a `curated` projection.
+   *
+   * Marked catalog snapshots are request-only data. While legacy memory is
+   * enabled they stay visible, because the next request sends them; while it is
+   * suppressed they are dropped, so a curated read matches what the next
+   * request will actually send. Raw reads (`curated = false`) keep their
+   * serialization, writeback and index contract and must not use this base.
+   *
+   * Every curated projection goes through here so a reader cannot silently
+   * keep a suppressed catalog; that omission is the defect this helper exists
+   * to prevent.
+   */
+  private curatedBaseHistory(): Content[] {
+    return this.config.getAutoMemoryContext?.()
+      ? this.history
+      : withoutAutoMemorySnapshots(this.history);
+  }
+
+  /**
    * Returns the chat history.
    *
    * @remarks
@@ -5921,13 +5984,9 @@ export class LlmChat {
    * chat session.
    */
   getHistory(curated: boolean = false): Content[] {
-    const visibleHistory =
-      curated && !this.config.getAutoMemoryContext?.()
-        ? withoutAutoMemorySnapshots(this.history)
-        : this.history;
     const history = curated
-      ? extractCuratedHistory(visibleHistory)
-      : visibleHistory;
+      ? extractCuratedHistory(this.curatedBaseHistory())
+      : this.history;
     // Deep copy the history to avoid mutating the history outside of the
     // chat session.
     return cloneApiHistory(history);
@@ -5939,13 +5998,9 @@ export class LlmChat {
    */
   getHistoryTail(count: number, curated: boolean = false): Content[] {
     if (count <= 0) return [];
-    const visibleHistory =
-      curated && !this.config.getAutoMemoryContext?.()
-        ? withoutAutoMemorySnapshots(this.history)
-        : this.history;
     const history = curated
-      ? extractCuratedHistory(visibleHistory)
-      : visibleHistory;
+      ? extractCuratedHistory(this.curatedBaseHistory())
+      : this.history;
     return cloneApiHistory(history.slice(-count));
   }
 
@@ -5955,13 +6010,9 @@ export class LlmChat {
    * payload objects.
    */
   getHistoryShallow(curated: boolean = false): Content[] {
-    const visibleHistory =
-      curated && !this.config.getAutoMemoryContext?.()
-        ? withoutAutoMemorySnapshots(this.history)
-        : this.history;
     const history = curated
-      ? extractCuratedHistory(visibleHistory)
-      : visibleHistory;
+      ? extractCuratedHistory(this.curatedBaseHistory())
+      : this.history;
     return history.map((content) => {
       const copied = copyContentContainer(content);
       // Startup restoration and microcompaction reinstall these defensive copies.
@@ -5990,13 +6041,9 @@ export class LlmChat {
    */
   getHistoryTailShallow(count: number, curated: boolean = false): Content[] {
     if (count <= 0) return [];
-    const visibleHistory =
-      curated && !this.config.getAutoMemoryContext?.()
-        ? withoutAutoMemorySnapshots(this.history)
-        : this.history;
     const history = curated
-      ? extractCuratedHistory(visibleHistory)
-      : visibleHistory;
+      ? extractCuratedHistory(this.curatedBaseHistory())
+      : this.history;
     return history.slice(-count).map(copyContentContainer);
   }
 

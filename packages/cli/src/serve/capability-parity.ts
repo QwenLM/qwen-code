@@ -462,6 +462,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_runtime_removal: NO_MANAGED_EQUIVALENT(
     'no Managed Workspace removal route',
   ),
+  workspace_directories: NO_MANAGED_EQUIVALENT(
+    'a Managed Workspace exposes one root; there is no extra-directory list',
+  ),
   native_directory_picker: LEGACY_ONLY(
     'a daemon-host dialog; Managed has none',
   ),
@@ -578,6 +581,8 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'AUTOMATION_UPDATE',
   'CHANNEL_DELIVERY_LIST',
   'RUNTIME_NODE_LIST',
+  // Loopback operator registration has no client capability.
+  'EXTERNAL_STORAGE_REGISTER',
   // Internal writer and publication routes: between the control plane and its
   // own stores, behind writer credentials, never a client capability.
   'PUB_ADMISSION_PREPARE',

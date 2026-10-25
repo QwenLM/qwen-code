@@ -108,6 +108,8 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
   expect(commands).toEqual({
     tools: false,
     commands: [{ name: 'hello', description: 'Bundled', plugin: 'fixture' }],
+    turnStart: false,
+    turnComplete: [],
   });
   expect(
     await dispatch({ type: 'command', command: 'hello', args: '' }),
