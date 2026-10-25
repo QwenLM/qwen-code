@@ -5968,20 +5968,28 @@ async function runQwenServeImpl(
         const exact = skillsByName.get(normalized);
         if (exact) {
           if (exact.level !== 'extension' || !exact.extensionName) {
-            return { name: skillName };
+            return {
+              name: skillName,
+              registryName: exact.name,
+              resolved: true,
+            };
           }
           return {
             name: skillName,
             authoredName: exact.name.slice(exact.extensionName.length + 1),
+            registryName: exact.name,
+            resolved: true,
           };
         }
         const authoredMatch = skillsByAuthoredName.get(normalized);
         if (authoredMatch?.extensionName) {
           return {
-            name: authoredMatch.name,
+            name: skillName,
             authoredName: authoredMatch.name.slice(
               authoredMatch.extensionName.length + 1,
             ),
+            registryName: authoredMatch.name,
+            resolved: true,
           };
         }
         const prefixEnd = skillName.indexOf(':');
@@ -5990,6 +5998,7 @@ async function runQwenServeImpl(
           ...(prefixEnd > 0
             ? { authoredName: skillName.slice(prefixEnd + 1) }
             : {}),
+          resolved: false,
         };
       });
     };
@@ -6224,13 +6233,25 @@ async function runQwenServeImpl(
           ),
           enabled: skillSettingStrings(fresh, USER_SETTING_SCOPE, 'enabled'),
         };
-        const skillIdentities = enabled
-          ? await resolveSkillToggleIdentities(workspace, skillNames)
-          : skillNames.map((name) => ({ name }));
+        const skillIdentities = await resolveSkillToggleIdentities(
+          workspace,
+          skillNames,
+        );
+        const writtenName = (index: number) =>
+          skillIdentities[index]!.registryName ?? skillIdentities[index]!.name;
+        const blockIdentity = (index: number) => {
+          const identity = skillIdentities[index]!;
+          return {
+            name: identity.registryName ?? identity.name,
+            ...(identity.authoredName
+              ? { authoredName: identity.authoredName }
+              : {}),
+          };
+        };
         let next = initial;
         const outcomes: PersistUserSkillActivationResult['outcomes'] =
-          skillIdentities.map((identity) => ({
-            skillName: identity.name,
+          skillNames.map((_, index) => ({
+            skillName: writtenName(index),
             changed: false,
           }));
         // A grant a standing entry still forbids is not a write: the merged
@@ -6241,7 +6262,7 @@ async function runQwenServeImpl(
         const stillBlocked = (index: number) => {
           const block = skillToggleBlockForName(
             fresh,
-            skillIdentities[index]!,
+            blockIdentity(index),
             USER_SETTING_SCOPE,
           );
           if (!block || block.scope !== 'User') return block;
@@ -6255,7 +6276,15 @@ async function runQwenServeImpl(
           const refused: number[] = [];
           let listChanged = false;
           for (const index of pending) {
-            const skillName = skillIdentities[index]!.name;
+            const skillName = writtenName(index);
+            if (enabled && !skillIdentities[index]!.resolved) {
+              outcomes[index] = {
+                skillName,
+                changed: false,
+                reason: 'unresolved_skill_name',
+              };
+              continue;
+            }
             const block = enabled ? stillBlocked(index) : null;
             if (block) {
               outcomes[index] = { skillName, changed: false, block };

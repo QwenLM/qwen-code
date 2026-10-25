@@ -4080,7 +4080,7 @@ Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_na
 
 Capability tag: `user_skill_activation`. There is no workspace-qualified form: the route writes the user settings file, which every workspace merges, so it is selected by no workspace — like `PUT /extensions/activation`.
 
-Enable or disable a Skill in the user settings scope. A disable writes the trimmed path name verbatim. An enable resolves it against the workspace skill catalog: an exact registry-name match wins, and a bare authored spelling (`pdf`) is written as its registry spelling (`rust:pdf`) when exactly one Extension Skill claims it, so grants match; an ambiguous or unknown name is written verbatim. The response reports the spelling that was written. Each request leaves that spelling in exactly one user list:
+Enable or disable a Skill in the user settings scope. Both states resolve the name against the workspace skill catalog: an exact registry-name match wins, and a bare authored spelling (`pdf`) is written as its registry spelling (`rust:pdf`) when exactly one Extension Skill claims it, so grants and disables use the same identity. A disable that does not resolve — an ambiguous or unknown name — writes the trimmed path name verbatim. An enable that does not resolve is refused without writing (`changed: false` with `reason: "unresolved_skill_name"`), because a bare `skills.enabled` entry grants nothing once the Skill is registered under an extension prefix. The response reports the spelling that was written. Each request leaves that spelling in exactly one user list:
 
 | `state`    | `mode`           | User settings change                                                                |
 | ---------- | ---------------- | ----------------------------------------------------------------------------------- |
@@ -4090,7 +4090,7 @@ Enable or disable a Skill in the user settings scope. A disable writes the trimm
 
 A `hard` disable cannot be lifted by any other scope, so workspace toggles for that name report it as locked by `User`. A `default` disable can be cancelled per workspace by an identically spelled workspace `skills.enabled` entry. Only the resolved spelling is edited; entries in other spellings and unrelated names are preserved.
 
-An enable is refused, without writing, when a standing entry would keep the Skill disabled: a `skills.disabled` entry in System or SystemDefaults settings under either spelling, a User `skills.disabled` entry in the other spelling, or a `skills.defaultDisabled` entry in the other spelling that no identically spelled `skills.enabled` entry in System, SystemDefaults, or User settings cancels. An entry in the registry spelling never refuses the enable: the write removes it and records `skills.enabled` in its place. Workspace entries never refuse a user write; they keep gating only their own workspace. The route does not require the primary workspace to be trusted.
+An enable is refused, without writing, when a standing entry would keep the Skill disabled: a `skills.disabled` entry in System or SystemDefaults settings under either spelling, a User `skills.disabled` entry in the other spelling, or a `skills.defaultDisabled` entry in the other spelling that no identically spelled `skills.enabled` entry in System, SystemDefaults, or User settings cancels. A User entry in the registry spelling never refuses the enable: the write removes it and records `skills.enabled` in its place. System and SystemDefaults entries refuse under either spelling, because a user-scope write cannot remove them. Workspace entries never refuse a user write; they keep gating only their own workspace. The route does not require the primary workspace to be trusted.
 
 Request:
 
@@ -4111,13 +4111,14 @@ Response (200):
 }
 ```
 
-`mode` is echoed only for `state: "disabled"`. A refused enable answers `200` with `changed: false` and `block: { reason, list, entry, scope }` naming the entry to edit. When nothing changed, `activation` is `applied` and no event is emitted. Otherwise every managed workspace runtime is reconciled: `reconciling` means at least one trusted runtime that supports runtime lifecycle is live and is re-reading workspace and user settings in its ACP child and active sessions; `deferred` means no such runtime was reconciled — none was live, the live one is draining, or it lacks lifecycle support — and the next child start reads the committed file. An untrusted runtime is never reconciled and keeps its previously read user settings until it restarts. Each changed key (`skills.disabled`, `skills.defaultDisabled`, `skills.enabled`) emits `settings_changed` with `scope: "user"` and the `skill_toggle` `mutation` object on every managed workspace's event stream.
+`mode` is echoed only for `state: "disabled"`. A refused enable answers `200` with `changed: false` and either `block: { reason, list, entry, scope }` naming the entry to edit, or `reason: "unresolved_skill_name"` when the name matched no catalog identity. When nothing changed, `activation` is `applied` and no event is emitted. Otherwise every managed workspace runtime is reconciled: `reconciling` means at least one runtime that supports runtime lifecycle is live and is re-reading workspace and user settings in its ACP child and active sessions; `deferred` means no such runtime was reconciled — none was live, the live one is draining, or it lacks lifecycle support — and the next child start reads the committed file. User-scope changes reconcile untrusted runtimes too: the child's own merge drops the workspace scope while untrusted, so the refresh cannot widen what it loads. Each changed key (`skills.disabled`, `skills.defaultDisabled`, `skills.enabled`) emits `settings_changed` with `scope: "user"` and the `skill_toggle` `mutation` object on every managed workspace's event stream.
 
 Errors:
 
 - `400 {code: 'invalid_skill_name'}` — empty path parameter, or more than 256 characters.
 - `400 {code: 'invalid_skill_activation_state'}` — `state` missing or not `enabled` / `disabled`.
 - `400 {code: 'invalid_skill_activation_mode'}` — `mode` present but not `hard` / `default`.
+- `400 {code: 'invalid_client_id'}` — the `X-Qwen-Client-Id` header names a client known to no managed runtime.
 - `501 {code: 'user_skill_activation_unsupported'}` — the host has no user settings persistence.
 
 #### `PUT /skills/activation`
@@ -4155,7 +4156,7 @@ Response (200):
 }
 ```
 
-Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, `invalid_skill_activation_state`, or `invalid_skill_activation_mode`. Activation and events follow the single-Skill route; one `mutation.id` covers every event from the request.
+Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, `invalid_skill_activation_state`, or `invalid_skill_activation_mode`; a client id unknown to every managed runtime fails the batch with `400 {code: 'invalid_client_id'}`. Activation and events follow the single-Skill route; one `mutation.id` covers every event from the request. For these two routes the `mutation` object's `skills[].name` is the resolved spelling that was written, which an enable may report differently from the name in the request.
 
 #### `POST /workspace/init`
 

@@ -474,6 +474,8 @@ export interface PersistUserSkillActivationOutcome {
   changed: boolean;
   /** Set with `changed: false` when a standing entry refused an enable. */
   block?: SkillToggleBlock;
+  /** Set with `changed: false` when the name matched no catalog identity. */
+  reason?: 'unresolved_skill_name';
 }
 
 export interface PersistUserSkillActivationResult {

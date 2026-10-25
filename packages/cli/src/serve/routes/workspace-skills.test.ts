@@ -8,10 +8,12 @@ import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { BridgeChannelClosedError } from '@qwen-code/acp-bridge/status';
 import { describe, expect, it, vi } from 'vitest';
 import { sendBridgeError } from '../server/error-response.js';
+import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 import { WorkspaceSkillManagementError } from '../workspace-skill-management.js';
 import {
   WorkspaceSkillNotFoundError,
@@ -180,7 +182,14 @@ function createHarness(
       installWorkspaceSkill(workspaceCwd, request),
     deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
       deleteWorkspaceSkill(workspaceCwd, scope, skillName, installedPath),
-    parseAndValidateClientId: () => 'client-1',
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+    parseAndValidateProcessGlobalClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        workspaceRegistry.list().map((candidate) => candidate.bridge),
+      ),
     ...(options.persistUserSkillActivation
       ? { persistUserSkillActivation: options.persistUserSkillActivation }
       : {}),
@@ -764,6 +773,7 @@ describe('workspace Skill management routes', () => {
 
     const response = await request(harness.app)
       .post('/workspace/skills/install')
+      .set('X-Qwen-Client-Id', 'client-1')
       .send(body);
 
     expect(response.status).toBe(200);
@@ -811,9 +821,9 @@ describe('workspace Skill management routes', () => {
   it('forwards delete scope and rejects invalid scopes', async () => {
     const harness = createHarness();
 
-    const response = await request(harness.app).delete(
-      '/workspace/skills/demo-skill?scope=global',
-    );
+    const response = await request(harness.app)
+      .delete('/workspace/skills/demo-skill?scope=global')
+      .set('X-Qwen-Client-Id', 'client-1');
     const invalid = await request(harness.app).delete(
       '/workspace/skills/demo-skill?scope=extension',
     );
@@ -898,6 +908,7 @@ describe('workspace Skill management routes', () => {
 
     const response = await request(harness.app)
       .post('/workspace/skills/enable')
+      .set('X-Qwen-Client-Id', 'client-1')
       .send({
         skillNames: [' Review ', 'review', 'missing', 'locked'],
         enabled: false,
@@ -1118,6 +1129,7 @@ describe('user Skill activation routes', () => {
 
     const response = await request(h.app)
       .put(`/skills/${encodeURIComponent('rust:pdf')}/activation`)
+      .set('X-Qwen-Client-Id', 'client-1')
       .send({ state: 'disabled' });
 
     expect(response.status).toBe(200);
@@ -1149,7 +1161,10 @@ describe('user Skill activation routes', () => {
       ...event,
       originatorClientId: 'client-1',
     });
-    expect(secondaryPublish).toHaveBeenCalledWith(event);
+    expect(secondaryPublish).toHaveBeenCalledWith({
+      ...event,
+      originatorClientId: 'client-1',
+    });
   });
 
   it('publishes to a draining workspace that is no longer active', async () => {
@@ -1271,5 +1286,87 @@ describe('user Skill activation routes', () => {
       .send({ skillNames: ['pdf'], state: 'disabled' });
     expect(response.status).toBe(500);
     expect(h.invalidateSkillsConfigStatus).toHaveBeenCalled();
+  });
+
+  it('accepts a client known only to another managed runtime', async () => {
+    const persist = vi
+      .fn()
+      .mockResolvedValue(
+        persistResult(
+          [{ skillName: 'pdf', changed: true }],
+          [{ key: 'skills.disabled', value: ['pdf'] }],
+        ),
+      );
+    const h = createHarness(true, false, {
+      persistUserSkillActivation: persist,
+    });
+    const secondaryPublish = vi.fn();
+    h.workspaceRegistry.add({
+      ...h.runtime,
+      workspaceId: 'workspace-2',
+      workspaceCwd: '/secondary',
+      primary: false,
+      bridge: {
+        ...h.runtime.bridge,
+        knownClientIds: () => new Set(['secondary-client']),
+        publishWorkspaceEvent: secondaryPublish,
+      },
+    } as WorkspaceRuntime);
+
+    const response = await request(h.app)
+      .put('/skills/activation')
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ skillNames: ['pdf'], state: 'disabled' });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      results: [{ skillName: 'pdf', changed: true }],
+    });
+    expect(secondaryPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ originatorClientId: 'secondary-client' }),
+    );
+  });
+
+  it('reconciles an untrusted runtime for a user-scope change', async () => {
+    const persist = vi
+      .fn()
+      .mockResolvedValue(
+        persistResult(
+          [{ skillName: 'pdf', changed: true }],
+          [{ key: 'skills.disabled', value: ['pdf'] }],
+        ),
+      );
+    const h = createHarness(true, false, {
+      persistUserSkillActivation: persist,
+    });
+    const secondary = {
+      ...h.runtime,
+      workspaceId: 'workspace-2',
+      workspaceCwd: '/secondary',
+      primary: false,
+      trusted: false,
+      bridge: { ...h.runtime.bridge, publishWorkspaceEvent: vi.fn() },
+    } as WorkspaceRuntime;
+    h.workspaceRegistry.add(secondary);
+    const primaryReconcile = vi
+      .spyOn(
+        getWorkspaceRuntimeCoordinator(h.runtime),
+        'reconcileSkillsConfiguration',
+      )
+      .mockReturnValue('deferred');
+    const secondaryReconcile = vi
+      .spyOn(
+        getWorkspaceRuntimeCoordinator(secondary),
+        'reconcileSkillsConfiguration',
+      )
+      .mockReturnValue('deferred');
+
+    const response = await request(h.app)
+      .put('/skills/pdf/activation')
+      .send({ state: 'disabled' });
+
+    expect(response.status).toBe(200);
+    expect(primaryReconcile).toHaveBeenCalledWith({ userSettings: true });
+    expect(secondaryReconcile).toHaveBeenCalledWith({ userSettings: true });
   });
 });

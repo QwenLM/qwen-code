@@ -4046,6 +4046,8 @@ export interface DaemonUserSkillActivationItem {
   changed: boolean;
   /** Present with `changed: false` when a standing entry refused an enable. */
   block?: DaemonSkillToggleBlock;
+  /** Present with `changed: false` when the name matched no catalog identity. */
+  reason?: 'unresolved_skill_name';
 }
 
 export interface DaemonUserSkillActivationResult

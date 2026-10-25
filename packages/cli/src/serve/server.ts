@@ -3693,6 +3693,11 @@ export function createServeApp(
     sendBridgeError,
     getSkillsConfigStatus,
     invalidateSkillsConfigStatus,
+    parseAndValidateProcessGlobalClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, [
+        primaryBridge,
+        ...workspaceRegistry.list().map((runtime) => runtime.bridge),
+      ]),
     installSkillConfig: (workspaceCwd, request) =>
       installWorkspaceSkill(
         workspaceCwd,

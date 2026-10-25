@@ -28913,6 +28913,58 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('PUT /skills/activation', () => {
+    it('accepts a client id known only to a secondary runtime', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        knownClientIds: ['secondary-client'],
+      });
+      const workspaceService = {
+        invalidateWorkspaceSkillsStatus: vi.fn(),
+      } as unknown as DaemonWorkspaceService;
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+          workspaceService,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: secondaryBridge,
+          workspaceService,
+        }),
+      ]);
+      const persistUserSkillActivation = vi.fn().mockResolvedValue({
+        outcomes: [{ skillName: 'pdf', changed: true }],
+        settingsChanges: [{ key: 'skills.disabled', value: ['pdf'] }],
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry,
+        persistUserSkillActivation,
+      });
+
+      const res = await request(app)
+        .put('/skills/activation')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ skillNames: ['pdf'], state: 'disabled' });
+
+      expect(res.status).toBe(200);
+      expect(persistUserSkillActivation).toHaveBeenCalledWith(
+        expect.any(String),
+        ['pdf'],
+        false,
+        'hard',
+        expect.any(Function),
+      );
+    });
+  });
+
   describe('POST /workspace/init (#4175 Wave 4 PR 17)', () => {
     const auth = (req: request.Test, port: number): request.Test =>
       req

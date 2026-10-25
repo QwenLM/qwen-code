@@ -51,6 +51,15 @@ interface RegisterWorkspaceSkillsRoutesDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  /**
+   * Validates `X-Qwen-Client-Id` against every managed runtime. The user
+   * activation routes are process-global, so a client known to any
+   * workspace may call them.
+   */
+  parseAndValidateProcessGlobalClientId: (
+    req: Request,
+    res: Response,
+  ) => string | undefined | null;
   getSkillsSnapshot?: (workspaceCwd: string) => Promise<unknown>;
   getSkillsConfigStatus: (
     workspaceCwd: string,
@@ -87,7 +96,7 @@ function reconcileSkills(
   let reconciling = false;
   for (const runtime of runtimes) {
     runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-    if (!runtime.trusted) continue;
+    if (!runtime.trusted && !options.userSettings) continue;
     const coordinator = getWorkspaceRuntimeCoordinatorIfSupported(runtime);
     if (coordinator?.reconcileSkillsConfiguration(options) === 'reconciling') {
       reconciling = true;
@@ -724,9 +733,7 @@ export function registerWorkspaceSkillsRoutes(
           runtime.bridge.publishWorkspaceEvent({
             type: 'settings_changed',
             data: { ...change, scope: 'user', mutation },
-            ...(clientId && runtime.bridge === deps.workspaceRuntime.bridge
-              ? { originatorClientId: clientId }
-              : {}),
+            ...(clientId ? { originatorClientId: clientId } : {}),
           });
         } catch {
           // Durable configuration is already committed.
@@ -755,7 +762,7 @@ export function registerWorkspaceSkillsRoutes(
       if (!skillNames) return;
       const input = parseUserSkillActivation(body, res);
       if (!input) return;
-      const clientId = deps.parseAndValidateClientId(req, res);
+      const clientId = deps.parseAndValidateProcessGlobalClientId(req, res);
       if (clientId === null) return;
       try {
         const { persisted, activation } = await applyUserSkillActivation(
@@ -785,7 +792,7 @@ export function registerWorkspaceSkillsRoutes(
       if (!skillName) return;
       const input = parseUserSkillActivation(deps.safeBody(req), res);
       if (!input) return;
-      const clientId = deps.parseAndValidateClientId(req, res);
+      const clientId = deps.parseAndValidateProcessGlobalClientId(req, res);
       if (clientId === null) return;
       try {
         const { persisted, activation } = await applyUserSkillActivation(
