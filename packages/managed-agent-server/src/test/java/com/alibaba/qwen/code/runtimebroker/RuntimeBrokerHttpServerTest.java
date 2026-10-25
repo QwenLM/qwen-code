@@ -39,6 +39,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RuntimeBrokerHttpServerTest {
     @Test
+    void mcpInventoryReadsTheSelectedBindingWithoutAcquiringOrReplacingAnOwner() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String path = "/harness-sessions/harness/mcp-definitions";
+            var body = new HashMap<String, Object>(Map.of("protocolVersion", 1, "requestId", "inventory", "harnessSessionId", "harness"));
+            var first = fixture.post(path, body);
+            assertEquals(200, first.statusCode(), first.body());
+            assertEquals(0, fixture.transport.acquisitions.get());
+            assertEquals(0, fixture.transport.executions.get());
+            assertEquals("docs", JSON.parseObject(first.body()).getJSONArray("servers").getJSONObject(0).getString("serverId"));
+            assertEquals("no-store", first.headers().firstValue("Cache-Control").orElse(null));
+            var owner = fixture.service.acquire("harness", "original-mcp", "bootstrap").toCompletableFuture().join();
+            body.put("runtimeSessionId", "original-mcp");
+            assertEquals(200, fixture.post(path, body).statusCode());
+            assertEquals(owner.getBindingId(), fixture.transport.inventoryBinding.get());
+            assertEquals(1, fixture.transport.acquisitions.get());
+            body.put("runtimeSessionId", "missing-owner");
+            assertEquals(409, fixture.post(path, body).statusCode());
+            fixture.service.requestHarnessDrain("tenant", "harness");
+            body.put("runtimeSessionId", "original-mcp");
+            assertEquals(409, fixture.post(path, body).statusCode());
+            assertEquals(1, fixture.transport.acquisitions.get());
+        }
+    }
+
+    @Test
     void privateRecoveryReadRejectsIncompleteOrNonIntegralInstalledOwner() throws Exception {
         try (Fixture fixture = new Fixture()) {
             Map<String, Object> body = new HashMap<>(Map.of("protocolVersion", 1, "requestId", "read",
@@ -1711,6 +1736,15 @@ class RuntimeBrokerHttpServerTest {
     }
 
     private static final class FailingTransport implements RuntimeTransport {
+        private final AtomicInteger acquisitions = new AtomicInteger();
+        private final AtomicReference<String> inventoryBinding = new AtomicReference<>();
+
+        @Override
+        public CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
+            inventoryBinding.set(runtime.getBindingId());
+            return CompletableFuture.completedFuture(List.of(Map.of("serverId", "docs", "serverRevision", 1,
+                    "definitionDigest", "a".repeat(64), "transport", "stdio")));
+        }
         private static final Map<String, Object> MANIFEST = Map.of(
                 "tools", java.util.List.of(Map.of("name", "read_file")),
                 "capabilityDigest", "a".repeat(64), "policyRevision", "policy");
@@ -1755,6 +1789,7 @@ class RuntimeBrokerHttpServerTest {
 
         @Override
         public CompletionStage<Void> acquire(RuntimeLease lease, RuntimeSession session) {
+            acquisitions.incrementAndGet();
             return CompletableFuture.completedFuture(null);
         }
 

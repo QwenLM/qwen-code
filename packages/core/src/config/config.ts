@@ -113,6 +113,7 @@ import {
   DEFAULT_RECURRING_MAX_AGE_DAYS,
   normalizeRecurringMaxAge,
 } from '../services/cronScheduler.js';
+import { createCronGateRunner } from '../services/cron-gate.js';
 import {
   MemoryPressureMonitor,
   DEFAULT_PRESSURE_CONFIG,
@@ -1416,6 +1417,8 @@ export interface ConfigParameters {
   /** Opt-in flag for the built-in `todo_write` tool. */
   todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
+  /** Experimental: run migrated surfaces on the shared agent loop. */
+  unifiedAgentLoopEnabled?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -2430,11 +2433,16 @@ export interface CurrentSessionScheduledTaskCreateRequest {
   prompt: string;
   recurring: boolean;
   promptId: string;
+  /** Shell command run at each fire outside the model; see cron-gate.ts. */
+  gate?: string;
 }
 
 export interface CurrentSessionScheduledTaskCreateResult {
   id: string;
   cron: string;
+  /** The gate the daemon stored, or null for none; absent from a daemon that
+   * predates gated tasks and would have dropped a requested gate. */
+  gate?: string | null;
 }
 
 /** Daemon-only capability used by `cron_create` to bind a durable task to the
@@ -3155,6 +3163,7 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
+  private readonly unifiedAgentLoopEnabled: boolean = false;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private artifactSnapshotsEnabled = false;
@@ -3609,6 +3618,7 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
+    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
@@ -10339,6 +10349,9 @@ export class Config {
       this.cronScheduler = new CronScheduler(
         this.getProjectRoot(),
         this.getCronRecurringMaxAgeDays() * 24 * 60 * 60 * 1000,
+        // Gates run with this session's cwd, environment and permission
+        // state — in the daemon that is the ACP child's, not the daemon's.
+        { runGate: createCronGateRunner(this) },
       );
     }
     return this.cronScheduler;
@@ -10389,6 +10402,11 @@ export class Config {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
     return this.agentTeamEnabled;
+  }
+
+  isUnifiedAgentLoopEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
+    return this.unifiedAgentLoopEnabled;
   }
 
   /**

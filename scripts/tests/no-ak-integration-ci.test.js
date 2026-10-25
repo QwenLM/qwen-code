@@ -211,6 +211,7 @@ describe('no-AK integration CI wiring', () => {
       './qwen-live-m2-permission.test.ts',
       './qwen-live-m2-steering.test.ts',
       './cli/_prompt-latency-policy.test.ts',
+      './cli/agent-loop-parity.test.ts',
       './cli/hosted-harness-process.test.ts',
       './cli/daemon-invocation-context.test.ts',
       './cli/headless-workflow-skill.test.ts',
@@ -362,7 +363,10 @@ describe('no-AK integration CI wiring', () => {
       'interactive/mixed-input-crash.test.ts': 'Runtime budget',
       'interactive/protocol-tags-interactive.test.ts': 'Runtime budget',
       'interactive/submitted-prompt-provenance.test.ts': 'Runtime budget',
+      'interactive/tui-checkpoint-restore.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-dual-output.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-migration.test.ts': 'Runtime budget',
+      'interactive/tui-session-recovery.test.ts': 'Dedicated TUI parity gate',
       'renderer-matrix.test.ts': 'Runtime budget',
       'scratch-dir.test.ts': 'Runtime budget',
       'sdk-typescript/configuration-options.test.ts': 'Real model required',
@@ -1041,8 +1045,11 @@ describe('no-AK integration CI wiring', () => {
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    expect(webShellJob).toContain(
-      "runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''[\"ubuntu-latest\"]'') }}'",
+    // The lane still takes its runner from the classifier, so an untrusted
+    // fork PR cannot reach a self-hosted host; the architecture override it
+    // applies on top is pinned in scripts/tests/ci-platform-lanes.test.js.
+    expect(webShellJob).toMatch(
+      /runs-on: .*needs\.classify_pr\.outputs\.ubuntu_runner/,
     );
     const hostedInstall = getWorkflowStep(
       webShellJob,
@@ -1208,4 +1215,47 @@ describe('Windows temp short-alias guard', () => {
     // beats realpathSync(undefined)'s TypeError.
     expect(() => runGuard({ TEMP: '', TMP: '' })).toThrow(/TEMP is not set/);
   });
+
+  it('annotates an unset temp so the failure reaches the check UI', () => {
+    // A bare console.error leaves the run reporting only "Process completed
+    // with exit code 1". The `::error::` prefix is what GitHub turns into an
+    // annotation attached to the check — the same channel the
+    // hosted-process-suite step in this workflow already uses.
+    let err;
+    try {
+      runGuard({ TEMP: '', TMP: '' });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.stderr).toContain('::error::');
+    expect(err.stderr).toContain('TEMP is not set');
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'annotates a short alias so the failure reaches the check UI',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+
+        let err;
+        try {
+          runGuard({ TEMP: alias, TMP: alias });
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeDefined();
+        expect(err.stderr).toContain('::error::');
+        expect(err.stderr).toContain('TEMP carries a short alias');
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
 });
