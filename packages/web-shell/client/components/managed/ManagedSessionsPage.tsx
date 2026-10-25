@@ -2482,7 +2482,7 @@ function ManagedSessionsContent({
               {interactive &&
                 approvalChange.options?.permissionRulesSupported && (
                   <ManagedPermissionRulesDialog
-                    key={`${provider.storageKey}:${sessionId}`}
+                    key={`permission-rules:${provider.storageKey}:${sessionId}`}
                     rules={approvalChange.options.permissionRules}
                     revision={approvalChange.options.approvalRevision}
                     busy={approvalChange.busy}

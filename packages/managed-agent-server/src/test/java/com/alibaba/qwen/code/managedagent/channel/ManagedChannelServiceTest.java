@@ -48,6 +48,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * H5b/H5c: the control plane's channel service against the real stores on
@@ -603,21 +604,24 @@ class ManagedChannelServiceTest {
                         null, "alice@example.com", "thread-1",
                         instances.databaseNow()));
             } catch (InterruptedException error) {
-                throw new RuntimeException(error);
+                Thread.currentThread().interrupt();
             } finally {
                 bound.countDown();
             }
         });
         binder.start();
-        assertThatThrownBy(() -> racingStore.register(
-                        new ChannelInstanceStore.ChannelInstance(TENANT,
-                                channel, "email", "agent@example.com", 1,
-                                "connected", "other-actor", WORKSPACE, ".",
-                                snapshot.policyJson(), 0, 0)))
-                .isInstanceOfSatisfying(IllegalStateException.class, error ->
-                        assertThat(error.getMessage()).isEqualTo(
-                                "channel_ownership_conflict"));
-        binder.join(10_000);
+        try {
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> racingStore.register(
+                            new ChannelInstanceStore.ChannelInstance(TENANT,
+                                    channel, "email", "agent@example.com", 1,
+                                    "connected", "other-actor", WORKSPACE, ".",
+                                    snapshot.policyJson(), 0, 0)));
+            assertThat(error.getMessage()).isEqualTo("channel_ownership_conflict");
+        } finally {
+            binder.interrupt();
+            binder.join(10_000);
+        }
         // The bind raced in mid-check, and the stored connection still
         // names its original owner.
         assertThat(instances.findInstance(TENANT, channel)).get()
