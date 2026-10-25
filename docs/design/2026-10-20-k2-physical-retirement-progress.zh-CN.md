@@ -12,6 +12,8 @@
 其 node-source coordinator、inventory 扩展和配套迁移已撤出。#14761 已关闭，
 不是依赖。既有私有 Session 退役和恢复保留原语义。
 
+[2026-10-24 范围决定](2026-10-23-csi-evidence-source.zh-CN.md)将完整 CSI 审计移出首版前置条件。本维护契约仍为保留归属的有界 DELETE 尝试；平台托管回收与跨 Workspace 复用另行设计。
+
 ## 问题与可信边界
 
 正常 Session 关闭结算工作、撤销逻辑上下文并释放其 Runtime Session。binding

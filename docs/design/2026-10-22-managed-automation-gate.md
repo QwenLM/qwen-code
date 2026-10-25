@@ -767,4 +767,7 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   that a Harness has already served (after a control-plane or Harness restart,
   for example). And a tick longer than the 60 s `lease` hands out leases that
   have already expired, since they run from the tick's start, so another node
-  can take those rows (#15418).
+  can take those rows (#15418). Resolved by the
+  [automation scanner row pool](2026-10-24-automation-scanner-row-pool.md)
+  (#15442) through the bounded-pool route, lease fix included; the
+  asynchronous fire answer stays open there.
