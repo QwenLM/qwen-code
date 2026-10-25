@@ -3753,8 +3753,13 @@ export function createServeApp(
   // native per-session todo store and attributes each session to its project
   // cwd (live session registry, then the per-project chat runtime records).
   // The update path flips exactly one todo status through the non-strict
-  // mutate gate — the same capability class as scheduled-task edits.
-  registerTodosRoutes(app, { mutate, safeBody });
+  // mutate gate — the same capability class as scheduled-task edits. Both
+  // routes refuse when the workspace is untrusted, matching /goals.
+  registerTodosRoutes(app, {
+    mutate,
+    safeBody,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+  });
 
   // Being joined as a runtime (`hosts/service`, `hosts/connect`) needs only
   // the bearer gate, a trusted workspace and the mutation gate — not the

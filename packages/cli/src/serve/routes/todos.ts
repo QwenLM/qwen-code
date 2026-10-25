@@ -63,6 +63,8 @@ interface TodoPlanFile {
 export interface RegisterTodosRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
+  /** When provided and false, both routes refuse (untrusted workspace). */
+  isWorkspaceTrusted?: () => boolean;
 }
 
 /** One session's todos, as shown on the Todos page. */
@@ -110,22 +112,35 @@ function getDueDatesPath(): string {
 }
 
 /**
- * Serializes read-modify-write cycles on the due-dates overlay. Without
- * this, two concurrent `POST /todos/update` requests both read the same
- * overlay snapshot, each applies its own edit, and the second write
- * silently discards the first — both return 200 while only one edit
- * survives. The chain swallows rejections so one failed write does not
- * wedge the queue for subsequent requests.
+ * Serializes ALL write operations on the native todo files and the due-date
+ * overlay. The previous `withOverlayLock` only covered the overlay; the
+ * native-file status flip ran unlocked, so a concurrent status flip and a
+ * due-date edit could interleave: both read the same snapshot, each applied
+ * its own edit, and the second write silently discarded the first. The lock
+ * covers the entire read-modify-write cycle — file read, status flip, overlay
+ * update, and both writes. The chain swallows rejections so one failed write
+ * does not wedge the queue for subsequent requests.
  */
-let overlayWriteChain: Promise<void> = Promise.resolve();
+let todoWriteChain: Promise<void> = Promise.resolve();
 
-function withOverlayLock<T>(fn: () => Promise<T>): Promise<T> {
-  const result = overlayWriteChain.then(fn, fn);
-  overlayWriteChain = result.then(
+function withTodoWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  const result = todoWriteChain.then(fn, fn);
+  todoWriteChain = result.then(
     () => undefined,
     () => undefined,
   );
   return result;
+}
+
+/**
+ * Atomic file write: writes to a sibling temp file then renames over the
+ * target, so a crash mid-write never leaves a truncated JSON file (which
+ * `todo_write` would then drop on its next read, silently losing the list).
+ */
+async function atomicWriteJson(filePath: string, data: string): Promise<void> {
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  await fs.writeFile(tmp, data, 'utf-8');
+  await fs.rename(tmp, filePath);
 }
 
 async function readDueDates(): Promise<Record<string, string>> {
@@ -147,7 +162,7 @@ async function readDueDates(): Promise<Record<string, string>> {
 
 async function writeDueDates(map: Record<string, string>): Promise<void> {
   await fs.mkdir(getTodoDir(), { recursive: true });
-  await fs.writeFile(getDueDatesPath(), JSON.stringify(map, null, 2), 'utf-8');
+  await atomicWriteJson(getDueDatesPath(), JSON.stringify(map, null, 2));
 }
 
 async function readTodoPlan(
@@ -245,9 +260,16 @@ export function registerTodosRoutes(
   app: Application,
   deps: RegisterTodosRoutesDeps,
 ): void {
-  const { mutate, safeBody } = deps;
+  const { mutate, safeBody, isWorkspaceTrusted } = deps;
 
   app.get('/todos', async (req, res) => {
+    if (isWorkspaceTrusted?.() === false) {
+      res.status(403).json({
+        error: 'Workspace is not trusted',
+        code: 'workspace_untrusted',
+      });
+      return;
+    }
     try {
       const includeAll = req.query['all'] === '1';
       const todoDir = getTodoDir();
@@ -370,6 +392,13 @@ export function registerTodosRoutes(
   });
 
   app.post('/todos/update', mutate(), (req, res) => {
+    if (isWorkspaceTrusted?.() === false) {
+      res.status(403).json({
+        error: 'Workspace is not trusted',
+        code: 'workspace_untrusted',
+      });
+      return;
+    }
     const body = safeBody(req);
     const sessionId = body['sessionId'];
     const todoId = body['todoId'];
@@ -437,12 +466,15 @@ export function registerTodosRoutes(
         : String(dueDate)
       : undefined;
 
-    void (async () => {
+    void withTodoWriteLock(async () => {
       const todoDir = getTodoDir();
       const filePath = path.join(todoDir, `${sessionId}.json`);
       try {
-        // Always read the plan file: the overlay key needs the planId, and
-        // the todo must exist before either edit is applied.
+        // Read the plan file inside the lock: the overlay key needs the
+        // planId, the todo must exist before either edit is applied, and
+        // a concurrent writer may have changed the file since the lock
+        // was acquired — so the read must happen under the same lock that
+        // guards the write.
         const content = await fs.readFile(filePath, 'utf-8');
         const data = JSON.parse(content) as Record<string, unknown>;
         if (!data || !Array.isArray(data['todos'])) {
@@ -466,22 +498,23 @@ export function registerTodosRoutes(
           before = typeof todo['status'] === 'string' ? todo['status'] : null;
           todo['status'] = validatedStatus;
           await fs.mkdir(todoDir, { recursive: true });
-          await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+          await atomicWriteJson(filePath, JSON.stringify(data, null, 2));
         }
 
+        // The overlay update runs under the same lock as the native file
+        // write — no inner lock needed, the outer withTodoWriteLock already
+        // serializes the entire read-modify-write cycle.
         let appliedDueDate: string | null = null;
         if (validatedDueDate !== undefined) {
-          appliedDueDate = await withOverlayLock(async () => {
-            const map = await readDueDates();
-            const key = `${sessionId}:${planId}:${todoId}`;
-            if (validatedDueDate === null) {
-              delete map[key];
-            } else {
-              map[key] = validatedDueDate;
-            }
-            await writeDueDates(map);
-            return validatedDueDate;
-          });
+          const map = await readDueDates();
+          const key = `${sessionId}:${planId}:${todoId}`;
+          if (validatedDueDate === null) {
+            delete map[key];
+          } else {
+            map[key] = validatedDueDate;
+          }
+          await writeDueDates(map);
+          appliedDueDate = validatedDueDate;
         }
 
         res.status(200).json({
@@ -508,6 +541,6 @@ export function registerTodosRoutes(
             code: (err as { code?: string }).code ?? 'todos_update_failed',
           });
       }
-    })();
+    });
   });
 }
