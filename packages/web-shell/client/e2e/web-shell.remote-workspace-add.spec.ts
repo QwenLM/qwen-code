@@ -503,3 +503,49 @@ test('with no connected computer the folder browser opens directly @smoke', asyn
       request.path === '/workspace-path-suggestions',
   );
 });
+
+test('keeps the folder browser and actions visible on a phone viewport @smoke', async ({
+  page,
+}, testInfo) => {
+  await installHost(
+    page,
+    hostScenario(LOCAL_CWD, { '/srv': [LOCAL_FOLDER] }),
+    testInfo,
+  );
+  await page.route('**/workspace/models', (route) =>
+    route.fulfill({ json: { models: [] } }),
+  );
+
+  await gotoSourceShell(page);
+  await openFolderBrowser(page);
+  await page.setViewportSize({ width: 393, height: 852 });
+  const dialog = addWorkspaceDialog(page);
+  await expect(
+    dialog.getByRole('option', { name: LOCAL_FOLDER }),
+  ).toBeVisible();
+
+  const folderList = dialog.getByRole('listbox');
+  const pathInput = dialog.getByRole('combobox', { name: 'Directory path' });
+  const cancel = dialog.getByRole('button', { name: 'Cancel', exact: true });
+  const add = dialog.getByRole('button', { name: 'Add this folder' });
+  const screenshot = testInfo.outputPath('mobile-add-workspace.png');
+  await page.screenshot({ path: screenshot });
+
+  const [listBox, pathBox, cancelBox, addBox] = await Promise.all([
+    folderList.boundingBox(),
+    pathInput.boundingBox(),
+    cancel.boundingBox(),
+    add.boundingBox(),
+  ]);
+  expect(listBox).not.toBeNull();
+  expect(pathBox).not.toBeNull();
+  expect(cancelBox).not.toBeNull();
+  expect(addBox).not.toBeNull();
+
+  const viewportHeight = await page.evaluate(() => window.innerHeight);
+  expect(listBox!.height).toBeGreaterThanOrEqual(112);
+  expect(pathBox!.width).toBeGreaterThan(280);
+  expect(cancelBox!.y + cancelBox!.height).toBeLessThanOrEqual(viewportHeight);
+  expect(addBox!.y + addBox!.height).toBeLessThanOrEqual(viewportHeight);
+  expect(listBox!.y + listBox!.height).toBeLessThanOrEqual(cancelBox!.y);
+});

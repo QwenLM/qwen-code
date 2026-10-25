@@ -76,6 +76,7 @@ const HINT_ID = 'add-workspace-hint';
 const DISPLAY_NAME_HINT_ID = 'add-workspace-display-name-hint';
 const ERROR_ID = 'add-workspace-error';
 const LISTBOX_ID = 'add-workspace-suggestions';
+const FORM_ID = 'add-workspace-form';
 const SUGGEST_DEBOUNCE_MS = 150;
 
 function isAbsoluteLike(value: string): boolean {
@@ -400,9 +401,40 @@ export function AddWorkspaceDialog({
       size="md"
       dismissible={!submitting}
       onClose={onClose}
+      footer={
+        <div className="flex w-full justify-end gap-2 border-t px-4 py-3">
+          <Button
+            type="button"
+            variant="outline"
+            className="flex-1 sm:flex-none"
+            onClick={onClose}
+            disabled={submitting}
+          >
+            {t('sidebar.addWorkspaceCancel')}
+          </Button>
+          <Button
+            type="submit"
+            form={FORM_ID}
+            className="flex-1 sm:flex-none"
+            disabled={submitting || !path.trim()}
+          >
+            {submitting
+              ? t('sidebar.addWorkspaceAdding')
+              : t(
+                  browseDirectories
+                    ? 'workspaceHost.addFolder'
+                    : 'sidebar.addWorkspaceRegister',
+                )}
+          </Button>
+        </div>
+      }
     >
-      <form className="flex flex-col gap-6" onSubmit={handleSubmit}>
-        <FieldGroup>
+      <form
+        id={FORM_ID}
+        className="flex flex-col gap-6"
+        onSubmit={handleSubmit}
+      >
+        <FieldGroup className="gap-4 sm:gap-5">
           {executionMode && onExecutionModeChange && (
             <WorkspaceExecutionSelect
               value={executionMode}
@@ -457,10 +489,11 @@ export function AddWorkspaceDialog({
               {t('sidebar.addWorkspacePath')}
             </FieldLabel>
             <div className="relative">
-              <div className="flex gap-2">
+              <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
                 <Input
                   ref={inputRef}
                   id="add-workspace-path"
+                  className="min-w-0"
                   type="text"
                   placeholder={pathPlaceholder}
                   value={path}
@@ -503,45 +536,47 @@ export function AddWorkspaceDialog({
                   aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
                   aria-invalid={error ? true : undefined}
                 />
-                {browseDirectories && !path.trim().startsWith('ssh://') && (
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="outline"
-                    title={t('workspaceHost.parent')}
-                    aria-label={t('workspaceHost.parent')}
-                    disabled={submitting}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      const trimmed = path.replace(/[\\/]+$/, '');
-                      if (/^[A-Za-z]:$/.test(trimmed)) {
-                        setPath(`${trimmed}\\`);
-                        return;
-                      }
-                      const index = Math.max(
-                        trimmed.lastIndexOf('/'),
-                        trimmed.lastIndexOf('\\'),
-                      );
-                      setPath(
-                        index >= 0 ? trimmed.slice(0, index + 1) : hostSep,
-                      );
-                    }}
-                  >
-                    <CornerLeftUpIcon aria-hidden="true" />
-                  </Button>
-                )}
-                {onPick && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => void pickDirectory()}
-                    disabled={submitting || browsing}
-                  >
-                    <FolderOpenIcon aria-hidden="true" />
-                    {t('sidebar.addWorkspaceBrowse')}
-                  </Button>
-                )}
+                <div className="flex gap-2">
+                  {browseDirectories && !path.trim().startsWith('ssh://') && (
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="outline"
+                      title={t('workspaceHost.parent')}
+                      aria-label={t('workspaceHost.parent')}
+                      disabled={submitting}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        const trimmed = path.replace(/[\\/]+$/, '');
+                        if (/^[A-Za-z]:$/.test(trimmed)) {
+                          setPath(`${trimmed}\\`);
+                          return;
+                        }
+                        const index = Math.max(
+                          trimmed.lastIndexOf('/'),
+                          trimmed.lastIndexOf('\\'),
+                        );
+                        setPath(
+                          index >= 0 ? trimmed.slice(0, index + 1) : hostSep,
+                        );
+                      }}
+                    >
+                      <CornerLeftUpIcon aria-hidden="true" />
+                    </Button>
+                  )}
+                  {onPick && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => void pickDirectory()}
+                      disabled={submitting || browsing}
+                    >
+                      <FolderOpenIcon aria-hidden="true" />
+                      {t('sidebar.addWorkspaceBrowse')}
+                    </Button>
+                  )}
+                </div>
               </div>
               {browseDirectories && (
                 // Above the list, because it points at it. A plain paragraph
@@ -559,7 +594,7 @@ export function AddWorkspaceDialog({
                   id={LISTBOX_ID}
                   role="listbox"
                   aria-label={t('sidebar.addWorkspaceSuggestions')}
-                  className={`${browseDirectories ? 'relative' : 'absolute inset-x-0 top-full z-50'} mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md`}
+                  className={`${browseDirectories ? 'relative min-h-28' : 'absolute inset-x-0 top-full z-50'} mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md`}
                 >
                   {suggestions.map((suggestion, index) => (
                     <li
@@ -595,7 +630,7 @@ export function AddWorkspaceDialog({
               {browseDirectories && suggestionsLoaded && !showList && (
                 <div
                   role={suggestionsError ? 'alert' : 'status'}
-                  className="mt-1 rounded-md border px-3 py-3 text-sm text-muted-foreground"
+                  className="mt-1 flex min-h-28 items-center rounded-md border px-3 py-3 text-sm text-muted-foreground"
                 >
                   {t(
                     suggestionsError
@@ -605,7 +640,10 @@ export function AddWorkspaceDialog({
                 </div>
               )}
             </div>
-            <FieldDescription id={browseDirectories ? undefined : HINT_ID}>
+            <FieldDescription
+              id={browseDirectories ? undefined : HINT_ID}
+              className={browseDirectories ? 'hidden sm:block' : undefined}
+            >
               {pathHint ?? t('sidebar.addWorkspaceHint')}
             </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
@@ -654,30 +692,6 @@ export function AddWorkspaceDialog({
             </Field>
           )}
         </FieldGroup>
-        <div className="flex w-full justify-end gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            className="flex-1 sm:flex-none"
-            onClick={onClose}
-            disabled={submitting}
-          >
-            {t('sidebar.addWorkspaceCancel')}
-          </Button>
-          <Button
-            type="submit"
-            className="flex-1 sm:flex-none"
-            disabled={submitting || !path.trim()}
-          >
-            {submitting
-              ? t('sidebar.addWorkspaceAdding')
-              : t(
-                  browseDirectories
-                    ? 'workspaceHost.addFolder'
-                    : 'sidebar.addWorkspaceRegister',
-                )}
-          </Button>
-        </div>
       </form>
     </DialogShell>
   );

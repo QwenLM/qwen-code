@@ -30,6 +30,7 @@ interface DialogShellProps {
   dismissible?: boolean;
   onClose: () => void;
   children: ReactNode;
+  footer?: ReactNode;
 }
 
 const sizeClass: Record<DialogSize, string> = {
@@ -84,6 +85,7 @@ export function DialogShell({
   dismissible = true,
   onClose,
   children,
+  footer,
 }: DialogShellProps) {
   const { t } = useI18n();
   const theme = useTheme();
@@ -268,6 +270,7 @@ export function DialogShell({
           >
             {children}
           </div>
+          {footer}
         </DialogContent>
       </DialogShellIdContext.Provider>
     </Dialog>

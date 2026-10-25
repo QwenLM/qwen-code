@@ -6,6 +6,7 @@ import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+const originalInnerWidth = window.innerWidth;
 
 const { AddWorkspaceDialog } = await import('./AddWorkspaceDialog');
 
@@ -22,6 +23,11 @@ function mount(node: React.ReactNode) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    value: originalInnerWidth,
+  });
   act(() => root?.unmount());
   container?.remove();
   root = null;
@@ -140,6 +146,76 @@ describe('AddWorkspaceDialog', () => {
     );
 
     expect(browseButton()).toBeDefined();
+  });
+
+  it('keeps browse controls usable on a narrow viewport', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 393,
+    });
+    mount(
+      <AddWorkspaceDialog
+        browseDirectories
+        initialPath="/Users/example/"
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        onPick={vi.fn()}
+        onSuggest={vi.fn().mockResolvedValue({
+          dir: '/Users/example/',
+          sep: '/',
+          suggestions: [{ name: 'Project', path: '/Users/example/Project' }],
+          truncated: false,
+        })}
+      />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+
+    const pathRow = input().parentElement!;
+    const shellBody = input().closest('form')!.parentElement!;
+    const folderList = document.querySelector<HTMLElement>('[role="listbox"]')!;
+    const footerButton = submitButton();
+    expect(window.innerWidth).toBe(393);
+    expect(pathRow.className).toContain('flex-col');
+    expect(pathRow.className).toContain('sm:flex-row');
+    expect(pathRow.contains(input())).toBe(true);
+    expect(pathRow.children[1].className).toContain('flex');
+    expect(folderList.className).toContain('min-h-28');
+    expect(folderList.className).toContain('overflow-y-auto');
+    expect(footerButton.getAttribute('form')).toBe('add-workspace-form');
+    expect(shellBody.contains(footerButton)).toBe(false);
+    expect(
+      input()
+        .closest('[data-slot="field"]')!
+        .querySelector('[data-slot="field-description"]')!.className,
+    ).toContain('hidden sm:block');
+  });
+
+  it('preserves browse space when the current folder has no subfolders', async () => {
+    vi.useFakeTimers();
+    mount(
+      <AddWorkspaceDialog
+        browseDirectories
+        initialPath="/Users/example/"
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        onSuggest={vi.fn().mockResolvedValue({
+          dir: '/Users/example/',
+          sep: '/',
+          suggestions: [],
+          truncated: false,
+        })}
+      />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+
+    const emptyState = document.querySelector<HTMLElement>('[role="status"]')!;
+    expect(emptyState.className).toContain('min-h-28');
+    expect(emptyState.className).toContain('items-center');
   });
 
   it('hides the display name field unless the daemon supports it', () => {
