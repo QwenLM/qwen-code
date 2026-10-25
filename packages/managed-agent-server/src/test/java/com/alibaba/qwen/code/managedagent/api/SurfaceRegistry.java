@@ -23,6 +23,16 @@ import java.util.Set;
  * exactly one rule class.
  */
 public enum SurfaceRegistry {
+    PUBLIC_USER_MESSAGES_QUERY(Method.GET, "/v1/agents/sessions/{sessionId}/user-messages",
+            Surface.PUBLIC, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_QUERY)),
+    PUBLIC_USER_MESSAGES_COMMAND(Method.POST, "/v1/agents/sessions/{sessionId}/user-messages",
+            Surface.PUBLIC, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_COMMAND)),
+    WEBSHELL_USER_MESSAGES_QUERY(Method.POST, "/api/agent/web-shell/v1/user-messages/query",
+            Surface.WEBSHELL, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_QUERY)),
+    WEBSHELL_USER_MESSAGES_COMMAND(Method.POST, "/api/agent/web-shell/v1/user-messages/command",
+            Surface.WEBSHELL, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_COMMAND)),
+    INTERNAL_USER_MESSAGES_CLAIM(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/user-messages:claim",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_USER_MESSAGE_CLAIM)),
     // PublicAgentController: public Session surfaces.
     PUBLIC_SESSION_CREATE(Method.POST, "/v1/agents/sessions",
             Surface.PUBLIC, RuleClass.WORKSPACE_CREATE,
@@ -601,6 +611,7 @@ public enum SurfaceRegistry {
      * carries both {@link #TURN_SUBMIT} and {@link #TURN_CANCEL}.
      */
     public enum Capability {
+        USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
         SESSION_CREATE,
         SESSION_LIST,
         SESSION_GET,

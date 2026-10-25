@@ -1,3 +1,5 @@
+import { ManagedUserMessageQueue } from './ManagedUserMessageQueue';
+import { useManagedUserMessages } from './use-managed-user-messages';
 import {
   useCallback,
   useEffect,
@@ -108,6 +110,7 @@ interface PendingPrompt {
   idempotencyKey: string;
   text: string;
   draftText?: string;
+  queued?: boolean;
   sessionId?: string;
   input?: ManagedInputBlock[];
 }
@@ -143,6 +146,8 @@ function readPending(
     if (
       typeof pending['idempotencyKey'] !== 'string' ||
       typeof pending['text'] !== 'string' ||
+      (pending['queued'] !== undefined &&
+        typeof pending['queued'] !== 'boolean') ||
       (pending['input'] !== undefined && !isManagedInput(pending['input']))
     )
       return undefined;
@@ -358,6 +363,8 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const summary = detail.summary;
+  const active = summary && isManagedSessionRunning(summary.phase);
   const recovery = useManagedRecovery(
     provider,
     clientId,
@@ -517,6 +524,10 @@ function ManagedSessionsContent({
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(true);
+  const userMessages = useManagedUserMessages(
+    provider,
+    interactive ? sessionId : undefined,
+  );
   const [pendingRestoreFailed, setPendingRestoreFailed] = useState(false);
   const [outputTarget, setOutputTarget] = useState<{
     sessionId: string;
@@ -1012,7 +1023,8 @@ function ManagedSessionsContent({
         (!submittedText.trim() && !images?.length && !files?.length) ||
         (sessionId &&
           (!detail.summary?.capabilities.canSend ||
-            recovery.value?.nextTurnAllowed === false))
+            recovery.value?.nextTurnAllowed === false) &&
+          !userMessages.supported)
       )
         return;
       let input: ManagedInputBlock[];
@@ -1024,6 +1036,14 @@ function ManagedSessionsContent({
           files,
           metadata,
         );
+        if (
+          userMessages.supported &&
+          images?.length &&
+          (active ||
+            userMessages.snapshot?.messages.length ||
+            userMessages.snapshot?.paused)
+        )
+          throw new Error(t('managed.queue.imagesIdleOnly'));
         input = await encodeManagedInput(prepared.text, images, prepared.files);
         fileReferences.assertCurrent();
       } catch (failure) {
@@ -1036,6 +1056,12 @@ function ManagedSessionsContent({
       if (abort.signal.aborted || selection.current !== sessionId) return;
       attempt = {
         idempotencyKey: managedRequestId(),
+        queued:
+          !!sessionId &&
+          userMessages.supported &&
+          (!!active ||
+            !!userMessages.snapshot?.messages.length ||
+            !!userMessages.snapshot?.paused),
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
@@ -1073,23 +1099,43 @@ function ManagedSessionsContent({
         idempotencyKey: attempt.idempotencyKey,
         signal: abort.signal,
       };
-      const admission = attempt.sessionId
-        ? await provider.submitPrompt(
-            attempt.sessionId,
-            {
-              text: attempt.text,
-              ...(attempt.input ? { input: attempt.input } : {}),
-            },
-            opts,
-          )
-        : await provider.createSession(
-            {
-              text: attempt.text,
-              ...(attempt.input ? { input: attempt.input } : {}),
-            },
-            opts,
-          );
+      if (attempt.queued && !provider.userMessages)
+        throw new Error('User message queue unavailable');
+      const admission =
+        attempt.sessionId && attempt.queued
+          ? await provider
+              .userMessages!.command(
+                attempt.sessionId,
+                {
+                  action: 'submit',
+                  input: attempt.input ?? [
+                    { type: 'input_text', text: attempt.text },
+                  ],
+                },
+                {
+                  idempotencyKey: attempt.idempotencyKey,
+                  signal: abort.signal,
+                },
+              )
+              .then(() => ({ sessionId: attempt.sessionId! }))
+          : attempt.sessionId
+            ? await provider.submitPrompt(
+                attempt.sessionId,
+                {
+                  text: attempt.text,
+                  ...(attempt.input ? { input: attempt.input } : {}),
+                },
+                opts,
+              )
+            : await provider.createSession(
+                {
+                  text: attempt.text,
+                  ...(attempt.input ? { input: attempt.input } : {}),
+                },
+                opts,
+              );
       if (abort.signal.aborted) return;
+      if (attempt.queued) void userMessages.refresh();
       pendingRef.current = undefined;
       setPending(undefined);
       await persistPending(pendingKey, undefined);
@@ -1136,7 +1182,6 @@ function ManagedSessionsContent({
     }
   }
 
-  const summary = detail.summary;
   const attachmentCapability = useRef({ sessionId, enabled: false });
   if (attachmentCapability.current.sessionId !== sessionId)
     attachmentCapability.current = { sessionId, enabled: false };
@@ -1218,9 +1263,6 @@ function ManagedSessionsContent({
     modelContext.contextWindowSize !== undefined &&
     Number.isSafeInteger(modelContext.contextWindowSize) &&
     modelContext.contextWindowSize > 0;
-  const active =
-    summary &&
-    !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
   useEffect(() => {
     if (
       !home ||
@@ -2195,7 +2237,9 @@ function ManagedSessionsContent({
                 workspaceFeaturesEnabled={false}
                 fileReferenceActions={referenceActions}
                 persistFileReferences
-                attachmentsEnabled={attachmentCapability.current.enabled}
+                attachmentsEnabled={
+                  attachmentCapability.current.enabled && !active
+                }
                 visibleToolbarActions={
                   interactive
                     ? [
@@ -2392,11 +2436,23 @@ function ManagedSessionsContent({
                   Boolean(
                     sessionId &&
                       (!summary?.capabilities.canSend ||
-                        recovery.value?.nextTurnAllowed === false),
+                        recovery.value?.nextTurnAllowed === false) &&
+                      !userMessages.supported,
                   )
                 }
-                placeholderText={t('managed.prompt')}
+                placeholderText={t(
+                  active && userMessages.supported
+                    ? 'managed.queue.placeholder'
+                    : 'managed.prompt',
+                )}
               />
+              {userMessages.snapshot && (
+                <ManagedUserMessageQueue
+                  key={sessionId}
+                  snapshot={userMessages.snapshot}
+                  command={userMessages.command}
+                />
+              )}
               {interactive && compression.blocked && (
                 <div
                   className="flex items-center gap-2 text-xs text-muted-foreground"
@@ -2506,7 +2562,7 @@ function ManagedSessionsContent({
               {interactive &&
                 approvalChange.options?.permissionRulesSupported && (
                   <ManagedPermissionRulesDialog
-                    key={`${provider.storageKey}:${sessionId}`}
+                    key={`permission-rules:${provider.storageKey}:${sessionId}`}
                     rules={approvalChange.options.permissionRules}
                     revision={approvalChange.options.approvalRevision}
                     busy={approvalChange.busy}

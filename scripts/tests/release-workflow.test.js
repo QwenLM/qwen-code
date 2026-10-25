@@ -3121,6 +3121,121 @@ exit 0`,
     expect(publishSetupNode?.with['package-manager-cache']).toBe(false);
   });
 
+  it('keeps the standalone runtime spawn inside the quality_scripts budget', () => {
+    const source = readFileSync('scripts/test-standalone-runtimes.mjs', 'utf8');
+    const worker = /^const WORKER_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
+    const setup = /^const SETUP_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
+    const derived =
+      /^const CI_TIMEOUT_MS = 2 \* WORKER_TIMEOUT_MS \+ SETUP_TIMEOUT_MS;$/m.exec(
+        source,
+      );
+    expect(
+      worker,
+      'WORKER_TIMEOUT_MS must stay a plain constant',
+    ).not.toBeNull();
+    expect(setup, 'SETUP_TIMEOUT_MS must stay a plain constant').not.toBeNull();
+    expect(
+      derived,
+      'CI_TIMEOUT_MS must derive from the worker and setup caps',
+    ).not.toBeNull();
+    // Pin the wiring, not just the declarations: these constants exist to
+    // bound exactly two spawnSync options, and every setup phase must spend
+    // the shared setup budget instead of inheriting the 300 s run() default.
+    expect(source.match(/timeout: WORKER_TIMEOUT_MS,/g)).toHaveLength(1);
+    expect(source.match(/timeout: CI_TIMEOUT_MS,/g)).toHaveLength(1);
+    // spawnSync treats timeout 0 as "no timeout", so a spent setup budget
+    // must fail the next phase at 1 ms rather than disarm its cap.
+    expect(
+      source.match(/Math\.max\(1, deadline - Date\.now\(\)\)/g),
+    ).toHaveLength(1);
+    // Both entry points must take their setup I/O from the one factory, and
+    // that factory must close both wrappers over the shared deadline.
+    expect(
+      source.match(/^ {2}const setup = makeSetupBudget\(\);$/gm),
+    ).toHaveLength(2);
+    expect(source).toMatch(
+      /run: \(bin, args\) =>\s*run\(bin, args, \{ timeout: remaining\(\) \}\),/,
+    );
+    expect(source).toMatch(
+      /fetch: \(url, init\) =>\s*fetch\(url, \{ \.\.\.init, signal: AbortSignal\.timeout\(remaining\(\)\) \}\),/,
+    );
+    const setupSlices = [];
+    let from = 0;
+    while (true) {
+      const start = source.indexOf('const setup = makeSetupBudget();', from);
+      if (start < 0) break;
+      const end = source.indexOf('const result = spawnSync(', start);
+      expect(end, 'setup must be followed by its spawn').toBeGreaterThan(start);
+      setupSlices.push(source.slice(start, end));
+      from = end;
+    }
+    expect(setupSlices).toHaveLength(2);
+    for (const slice of setupSlices) {
+      // A phase that reaches past the budget factory inherits run()'s 300 s
+      // default or escapes the deadline entirely. Naming the escape hatches
+      // avoids enumerating call spellings: budgeted calls are setup.run() /
+      // setup.fetch(), which the leading-dot exclusion leaves alone.
+      expect(
+        slice,
+        'every setup phase must go through the budget wrapper',
+      ).not.toMatch(/(?<![\w.])(?:spawnSync|run|fetch)\s*\(/);
+    }
+    // The slice's fetch must be the implementation the archive fetch uses,
+    // not a helper left behind after the wiring was removed.
+    expect(setupSlices[0]).toMatch(
+      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir,\s*fetchImpl: setup\.fetch,?\s*\}\)/,
+    );
+    const workerMs = Number(worker[1].replaceAll('_', ''));
+    const setupMs = Number(setup[1].replaceAll('_', ''));
+    const spawnMs = 2 * workerMs + setupMs;
+    // The child spends the same setup budget on its five pre-worker probes
+    // and keygen, so the outer cap must cover setup before either worker
+    // starts. A near-zero margin would let the outer cap fire first and lose
+    // the host-naming diagnostic.
+    expect(
+      spawnMs - 2 * workerMs,
+      'outer cap must leave room for pre-worker probes and keygen',
+    ).toBeGreaterThanOrEqual(60_000);
+    // That margin only matters while a worker killed at its cap still names
+    // the host, so the diagnostic must precede the bare asserts that throw
+    // first on the failure path.
+    const workerLoop = source.slice(
+      source.indexOf('for (const [host, bin] of ['),
+    );
+    const diagnosticAt = workerLoop.indexOf('actualExitCode');
+    expect(
+      diagnosticAt,
+      'worker loop must print the host diagnostic',
+    ).toBeGreaterThanOrEqual(0);
+    expect(workerLoop.indexOf('assert.equal(result.status, 0')).toBeGreaterThan(
+      diagnosticAt,
+    );
+    // package.json is the only link that places this spawn inside the
+    // quality_scripts job, and the budget counts vitest as running after it.
+    const rootScripts = JSON.parse(
+      readFileSync('package.json', 'utf8'),
+    ).scripts;
+    expect(rootScripts['test:scripts']).toMatch(
+      /^npm run test:standalone:runtimes:ci && npm run test:scripts:unit /,
+    );
+    expect(rootScripts['test:scripts:unit']).toMatch(/^vitest run /);
+    expect(rootScripts['test:standalone:runtimes:ci']).toBe(
+      'node scripts/test-standalone-runtimes.mjs --ci',
+    );
+    // Reserve the slow-pool measurements outside the spawn: ~295 s of job
+    // setup and the ~288 s scripts suite, rounded up to 600 s. Re-measure
+    // when scripts/tests/** gains a suite; 600 s is only valid for the suite
+    // as of this commit.
+    const aroundTheSpawnSeconds = 600;
+    // Parent setup and the child spawn are separate caps; both plus the
+    // reserve must fit the job's declared 30-minute budget.
+    expect(
+      setupMs / 1000 + spawnMs / 1000 + aroundTheSpawnSeconds,
+    ).toBeLessThanOrEqual(
+      releaseYaml.jobs.quality_scripts['timeout-minutes'] * 60,
+    );
+  });
+
   it('stages every integration package manifest after versioning', () => {
     expect(releaseStepScript).toContain(
       'git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',

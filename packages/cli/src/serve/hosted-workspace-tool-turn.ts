@@ -2056,6 +2056,22 @@ export class HostedWorkspaceToolTurn {
     );
   }
 
+  private backgroundShellAdmitted(): boolean {
+    return (
+      this.publication !== undefined &&
+      this.childRuns !== undefined &&
+      childRunAdmissionsEnabled()
+    );
+  }
+
+  private monitorsAdmitted(): boolean {
+    return (
+      this.monitors !== undefined &&
+      this.publication !== undefined &&
+      monitorRunAdmissionsEnabled()
+    );
+  }
+
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
     this.planning =
@@ -2085,9 +2101,12 @@ export class HostedWorkspaceToolTurn {
         ...(search ? [HOSTED_GLOB_TOOL] : []),
         ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
       ]
-        .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
+        .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((tool) => {
-          if (this.foregroundOnly && tool.name === 'run_shell_command') {
+          if (
+            tool.name === 'run_shell_command' &&
+            !this.backgroundShellAdmitted()
+          ) {
             const schema = structuredClone(tool.parametersJsonSchema) as {
               properties?: Record<string, unknown>;
             };
@@ -2095,7 +2114,7 @@ export class HostedWorkspaceToolTurn {
             return {
               ...tool,
               description:
-                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms.',
+                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
               parametersJsonSchema: schema,
             };
           }
@@ -3776,9 +3795,7 @@ export class HostedWorkspaceToolTurn {
             // The admitted family runs v3 only: a shell-mode turn has no
             // publication to drive it, so admitting there would only re-
             // send the request into the background-refusing v2 path.
-            this.publication !== undefined &&
-            this.childRuns !== undefined &&
-            childRunAdmissionsEnabled();
+            this.backgroundShellAdmitted();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Shell requires a nonempty command.';
           } else if (unsupportedKey !== undefined) {
@@ -3914,10 +3931,7 @@ export class HostedWorkspaceToolTurn {
           // owns its monitor_run orchestrator and the detached family has
           // its v3 flow — publication — without it the request refuses at
           // admission rather than travelling v2 and never landing.
-          monitorAdmitted =
-            this.monitors !== undefined &&
-            this.publication !== undefined &&
-            monitorRunAdmissionsEnabled();
+          monitorAdmitted = this.monitorsAdmitted();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Monitor requires a nonempty command.';
           } else if (unsupportedKey !== undefined) {
