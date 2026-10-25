@@ -103,10 +103,6 @@ export interface ModelMetricsCore {
     total: number;
     cached: number;
     thoughts: number;
-    /** Count of events whose total was not reported, so the accumulated
-     *  `total` may lag `prompt`/`candidates`. Consumer guards subtract
-     *  only when this is zero. */
-    totalMissing: number;
   };
 }
 
@@ -178,7 +174,6 @@ const createInitialModelMetricsCore = (): ModelMetricsCore => ({
     total: 0,
     cached: 0,
     thoughts: 0,
-    totalMissing: 0,
   },
 });
 
@@ -695,13 +690,6 @@ export class UiTelemetryService extends EventEmitter {
     };
     accumulate(modelMetrics, event.input_token_count, event.total_token_count);
     accumulate(sourceMetrics, event.input_token_count, event.total_token_count);
-    // When the raw total_token_count is ≤ 0 the event did not contribute a
-    // usable total, so the bucket's `total` lags `prompt`/`candidates`. A
-    // later derivation that trusts the subtraction must check this counter.
-    if (event.total_token_count <= 0) {
-      modelMetrics.tokens.totalMissing++;
-      sourceMetrics.tokens.totalMissing++;
-    }
     if (statsModelMetrics) {
       accumulate(
         statsModelMetrics,

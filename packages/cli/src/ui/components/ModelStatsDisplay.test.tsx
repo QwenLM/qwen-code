@@ -483,6 +483,24 @@ describe('<ModelStatsDisplay />', () => {
         },
       );
 
+      it('omits Cost when only reasoning is reported and billable usage is zero', () => {
+        const core = makeCore(0, 0, 50_000);
+        core.tokens.total = 0;
+        const { lastFrame } = renderWithMockedStats(
+          {
+            models: { model: mainOnly(core) },
+            tools: baseTools,
+            files: baseFiles,
+            billableOutputTokens: {
+              model: { total: 0, bySource: { main: 0 } },
+            },
+          },
+          { model: { outputPerMillionTokens: 1 } },
+        );
+        expect(lastFrame()).not.toContain('Cost');
+        expect(lastFrame()).not.toContain('Estimated');
+      });
+
       it('should not display Cost section when no pricing and no thoughts', () => {
         const { lastFrame } = renderCostTest(
           { 'gemini-2.5-pro': mainOnly(makeCore(10, 20, 0)) },

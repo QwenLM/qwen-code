@@ -59,32 +59,22 @@ export function calculateCost(args: {
  *
  * `total - prompt` is the output under both usage conventions (reasoning
  * folded into `candidates`, or `thoughts` disjoint from it). Trust it only
- * inside the band those conventions allow AND only when every event that
- * contributed to this bucket reported a usable total: a single total-less
- * event leaves the cumulative `total` lagging `prompt`/`candidates`, and the
- * band's upper edge can still admit the understated value — turning a
- * monotone quantity (more usage ⇒ higher bill) non-monotone.
- *
- * Outside the band an operand did not survive the provider; the fallback sums
- * instead of guessing whether `thoughts` is folded into `candidates`: that
- * depends on the provider's auth_type, which an accumulated bucket no longer
- * carries, and guessing wrong would drop a disjoint provider's reasoning from
- * the bill entirely (#15444).
+ * inside the band those conventions allow: outside it an operand did not
+ * survive the provider, and the subtraction would bill input as output. The
+ * fallback sums instead of guessing whether `thoughts` is folded into
+ * `candidates`: that depends on the provider's auth_type, which an
+ * accumulated bucket no longer carries, and guessing wrong would drop a
+ * disjoint provider's reasoning from the bill entirely (#15444).
  */
 export function billableOutputTokens(tokens: {
   prompt: number;
   candidates: number;
   thoughts: number;
   total: number;
-  totalMissing?: number;
 }): number {
-  const { prompt, candidates, thoughts, total, totalMissing } = tokens;
+  const { prompt, candidates, thoughts, total } = tokens;
   const derived = total - prompt;
-  if (
-    !totalMissing &&
-    derived >= candidates &&
-    derived <= candidates + thoughts
-  ) {
+  if (derived >= candidates && derived <= candidates + thoughts) {
     return derived;
   }
   return candidates + thoughts;
