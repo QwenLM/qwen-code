@@ -9,13 +9,14 @@
 // preview in the shell tool's output.
 
 import type { CommandModule } from 'yargs';
-import { writeFileSync } from 'node:fs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from '../review/lib/gh.js';
 import {
   assertWatching,
+  NO_FOLLOW,
   TASK_OPTION,
   taskArg,
   assertPositiveInteger,
@@ -146,7 +147,7 @@ export function runCiLog(
     'tmp',
     `autofix-pr-${prNumber}-ci-${runId}.log`,
   );
-  writeFileSync(path, text);
+  atomicWriteFileSync(path, text, NO_FOLLOW);
   writeStdoutLine(JSON.stringify({ path, jobs }));
 }
 

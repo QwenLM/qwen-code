@@ -9,7 +9,13 @@
 // work the PR does not have; then all three stay so the user can pick it up.
 
 import type { CommandModule } from 'yargs';
-import { existsSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { isWithinRoot } from '../../config/path-comparison.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -19,6 +25,7 @@ import {
   autofixPrPaths,
   currentSessionId,
   historyPrefix,
+  isRegularFile,
   keepHistory,
   readState,
   repoRoot,
@@ -196,49 +203,62 @@ export function runCleanup(
     }
   }
 
-  // Taken over while the checks above asked the remote: the watch is the
-  // new owner's, and what it recorded since goes into the history too.
-  if (state && !force) {
-    state = withWatchLock(paths, prNumber, () => {
-      const current = requireState(paths.statePath, prNumber);
-      assertOwnedBySession(current);
-      return current;
-    });
-  }
-  const released = releaseWorktree(paths.worktreePath);
-  if (released.existed && !released.freed) {
-    throw new Error(
-      `could not remove ${paths.worktreePath}: ${released.reason ?? 'unknown'}`,
-    );
-  }
-  // `git`, not `gitOpt`: a branch that survives must keep its state file, or
-  // the next `prepare` finds a leftover branch with nothing to compare it to.
-  if (refExists(`refs/heads/${paths.branch}`)) {
-    git('branch', '-D', paths.branch);
-  }
-  // What the watch posted and handled outlives it, so a later watch of the
-  // PR does not answer the same comments again.
-  const history = state ? keepHistory(paths, state) : null;
-  // A lock a killed helper left behind would otherwise outlive the watch.
+  const remove = (watch: AutofixPrState | null): string | null => {
+    const released = releaseWorktree(paths.worktreePath);
+    if (released.existed && !released.freed) {
+      throw new Error(
+        `could not remove ${paths.worktreePath}: ${released.reason ?? 'unknown'}`,
+      );
+    }
+    // `git`, not `gitOpt`: a branch that survives must keep its state file,
+    // or the next `prepare` finds a leftover branch with nothing to compare
+    // it to.
+    if (refExists(`refs/heads/${paths.branch}`)) {
+      git('branch', '-D', paths.branch);
+    }
+    // What the watch posted and handled outlives it, so a later watch of
+    // the PR does not answer the same comments again.
+    const kept = watch ? keepHistory(paths, watch) : null;
+    // The state file and everything else this PR's watch wrote beside it
+    // (CI logs, briefs). The gate cursor belongs to the scheduled task,
+    // which outlives a watch and would report everything again without it.
+    const tmp = dirname(paths.statePath);
+    const prefix = `autofix-pr-${prNumber}-`;
+    for (const name of existsSync(tmp) ? readdirSync(tmp) : []) {
+      const path = join(tmp, name);
+      if (
+        name.startsWith(prefix) &&
+        path !== paths.gatePath &&
+        !name.startsWith(historyPrefix(paths))
+      ) {
+        // Recursive: a directory planted under one of these names would
+        // otherwise outlive the --force meant to discard it.
+        rmSync(path, { force: true, recursive: true });
+      }
+    }
+    return kept;
+  };
+  // Under the lock, the ownership checked again: taken over while the
+  // checks above asked the remote, the watch is the new owner's, and no
+  // helper of it can start between the check and the removal.
+  const history =
+    state && !force
+      ? withWatchLock(paths, prNumber, () => {
+          const current = requireState(paths.statePath, prNumber);
+          assertOwnedBySession(current);
+          return remove(current);
+        })
+      : remove(state);
   if (force) {
+    // A lock a killed helper left behind would otherwise outlive the watch.
     rmSync(paths.lockPath, { force: true, recursive: true });
     rmSync(`${paths.lockPath}.break`, { force: true, recursive: true });
-  }
-  // The state file and everything else this PR's watch wrote beside it (CI
-  // logs, briefs). The gate cursor belongs to the scheduled task, which
-  // outlives a watch and would report everything again without it.
-  const tmp = dirname(paths.statePath);
-  const prefix = `autofix-pr-${prNumber}-`;
-  for (const name of existsSync(tmp) ? readdirSync(tmp) : []) {
-    const path = join(tmp, name);
+    // So would a cursor that is no regular file, which fails every gate.
     if (
-      name.startsWith(prefix) &&
-      path !== paths.gatePath &&
-      !name.startsWith(historyPrefix(paths))
+      lstatSync(paths.gatePath, { throwIfNoEntry: false }) &&
+      !isRegularFile(paths.gatePath)
     ) {
-      // Recursive: a directory planted under one of these names would
-      // otherwise outlive the --force meant to discard it.
-      rmSync(path, { force: true, recursive: true });
+      rmSync(paths.gatePath, { force: true, recursive: true });
     }
   }
   // Named, so a later watch of another repository's PR of this number

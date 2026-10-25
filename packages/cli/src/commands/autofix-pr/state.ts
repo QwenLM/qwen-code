@@ -299,7 +299,9 @@ export function writeGateCursor(
   gatePath: string,
   cursor: AutofixPrGateCursor,
 ): void {
-  atomicWriteFileSync(gatePath, `${JSON.stringify(cursor, null, 2)}\n`);
+  atomicWriteFileSync(gatePath, `${JSON.stringify(cursor, null, 2)}\n`, {
+    noFollow: true,
+  });
 }
 
 /**
@@ -525,7 +527,9 @@ export function readState(statePath: string): AutofixPrState | null {
   const entry = lstatSync(statePath, { throwIfNoEntry: false });
   if (entry === undefined) return null;
   if (!entry.isFile()) {
-    throw new Error(`${statePath} is not a regular file`);
+    throw new Error(
+      `${statePath} is not a regular file; \`qwen autofix-pr cleanup <pr> --force\` discards it.`,
+    );
   }
   const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as AutofixPrState;
   if (parsed.version !== 1) {
@@ -567,8 +571,19 @@ export function readState(statePath: string): AutofixPrState | null {
   };
 }
 
+/**
+ * Writes of a watch's files replace a link rather than follow it: the code
+ * a round runs could plant one there to have a helper write outside
+ * `.qwen/tmp`.
+ */
+export const NO_FOLLOW = { noFollow: true } as const;
+
 export function writeState(statePath: string, state: AutofixPrState): void {
-  atomicWriteFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+  atomicWriteFileSync(
+    statePath,
+    `${JSON.stringify(state, null, 2)}\n`,
+    NO_FOLLOW,
+  );
 }
 
 /**
@@ -672,7 +687,12 @@ export function keepHistory(
     deferredRuns: state.deferredRuns ?? earlier?.deferredRuns ?? [],
     heldChecks: state.heldChecks ?? earlier?.heldChecks ?? [],
   };
-  atomicWriteFileSync(path, `${JSON.stringify(history, null, 2)}\n`);
+  // A directory planted under the name would refuse the write forever.
+  const entry = lstatSync(path, { throwIfNoEntry: false });
+  if (entry && !entry.isFile() && !entry.isSymbolicLink()) {
+    rmSync(path, { recursive: true, force: true });
+  }
+  atomicWriteFileSync(path, `${JSON.stringify(history, null, 2)}\n`, NO_FOLLOW);
   return path;
 }
 

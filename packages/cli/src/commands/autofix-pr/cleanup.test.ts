@@ -455,6 +455,19 @@ describe('runCleanup (real git)', () => {
     expect(readHistory(history)).toMatchObject({ prNumber: 7 });
   });
 
+  it('replaces a directory planted at the history, and with --force one at the cursor', () => {
+    const history = historyPath(paths, readState(paths.statePath)!);
+    mkdirSync(history);
+    mkdirSync(paths.gatePath);
+    runCleanup(7, false);
+    expect(lastReport()).toMatchObject({ removed: true });
+    expect(readHistory(history)).toMatchObject({ prNumber: 7 });
+    // The cursor stays without --force: it belongs to the scheduled task.
+    expect(existsSync(paths.gatePath)).toBe(true);
+    runCleanup(7, true);
+    expect(existsSync(paths.gatePath)).toBe(false);
+  });
+
   it('discards an unreadable state file only with --force', () => {
     writeFileSync(paths.statePath, '{');
     expect(() => runCleanup(7, false)).toThrow(SyntaxError);

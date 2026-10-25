@@ -571,6 +571,11 @@ describe('runReply', () => {
     ]);
   });
 
+  it('never blocks on a snapshot that is not a regular file', () => {
+    execFileSync('mkfifo', [paths.snapshotPath]);
+    expect(reply({ handled: [] })).toMatchObject({ posted: [], skipped: 0 });
+  });
+
   it('posts nothing for a round its task no longer drives', () => {
     writeState(paths.statePath, {
       ...state(),

@@ -463,6 +463,47 @@ describe('runPrepare (real git)', () => {
     expect(lastReport()).toMatchObject({ resumed: true, headSha });
   });
 
+  it('leaves nothing behind when it cannot ask GitHub who may push', () => {
+    const paths = autofixPrPaths(clone, 7);
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        return JSON.stringify(
+          prView({ headRefOid: headSha, author: { login: 'collab' } }),
+        );
+      }
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      throw Object.assign(new Error('Command failed: gh api'), {
+        stderr: 'gh: API rate limit exceeded (HTTP 403)',
+      });
+    });
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      /could not ask GitHub whether collab can push/,
+    );
+    expect(existsSync(paths.worktreePath)).toBe(false);
+    expect(existsSync(paths.statePath)).toBe(false);
+    expect(run(clone, 'branch', '--list', paths.branch)).toBe('');
+  });
+
+  it('resumes no watch of a PR whose head repository is gone', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const answer = mocks.gh.getMockImplementation()!;
+    mocks.gh.mockImplementation((...args: string[]) =>
+      args[0] === 'pr'
+        ? JSON.stringify(
+            prView({
+              headRefOid: headSha,
+              headRepository: null,
+              headRepositoryOwner: null,
+            }),
+          )
+        : answer(...args),
+    );
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      /head repository no longer exists/,
+    );
+  });
+
   it("derives a resumed watch's remotes from the clone, not from its state file", () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const paths = autofixPrPaths(clone, 7);

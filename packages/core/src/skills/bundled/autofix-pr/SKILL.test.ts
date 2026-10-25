@@ -163,6 +163,19 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain(
       "adding `--take-over` for a PR the user's `stop` named",
     );
+    // A PR whose author cannot push is never watched: its tasks go, and a
+    // cancelled or --once start ends the watch.
+    expect(body).toContain('Such a PR is never watched: first delete');
+    expect(body).toContain(
+      'or `authorCanPush` is false (such a PR is never watched',
+    );
+    expect(body).toContain('or `wasEnded`, or `authorCanPush: false`, run');
+    // A start that cannot record the user's instructions does not run on.
+    expect(body).toContain(
+      'if that write is refused or fails, the watch cannot carry them',
+    );
+    // The start reports a watch only when its task exists.
+    expect(body).toContain('When step 8 created the task, tell the user');
     // Whether another session still runs a watch is the helper's to say.
     expect(body).toContain('`checkedRecently` true and no task of the PR');
     // The scheduled task — its gate the probe, run outside the model — is

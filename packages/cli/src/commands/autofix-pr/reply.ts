@@ -34,6 +34,7 @@ import {
   MAX_NEEDS_HUMAN,
   REPLY_MARKER,
   assertWatching,
+  isRegularFile,
   TASK_OPTION,
   taskArg,
   autofixPrPaths,
@@ -226,6 +227,8 @@ function keyHead(key: string): string | null {
  * the head carries.
  */
 function snapshotChecks(path: string): Set<string> {
+  // A FIFO in its place would block, the lock held.
+  if (!isRegularFile(path)) return new Set();
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));

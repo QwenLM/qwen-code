@@ -28,6 +28,7 @@ import {
   readHistory,
   readState,
   stateDefect,
+  writeState,
   assertOwnedBySession,
   withWatchLock,
   type AutofixPrState,
@@ -140,6 +141,21 @@ describe('stateDefect', () => {
       });
       expect(read.ended).toEqual({ at: 'a', reason: 'b' });
       expect(read.needsHuman).toEqual([{ sha: 's', at: 'a', text: 't' }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces a link at a state path rather than writing through it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-state-'));
+    try {
+      const outside = join(dir, 'outside.txt');
+      writeFileSync(outside, 'keep me');
+      const path = join(dir, 'state.json');
+      symlinkSync(outside, path);
+      writeState(path, valid);
+      expect(readFileSync(outside, 'utf8')).toBe('keep me');
+      expect(readState(path)).toMatchObject({ prNumber: 7 });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

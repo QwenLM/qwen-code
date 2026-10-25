@@ -315,6 +315,11 @@ export function runPrepare(args: PrepareArgs): void {
           'author,headRepository,headRepositoryOwner',
         ),
       ) as Pick<PrView, 'author' | 'headRepository' | 'headRepositoryOwner'>;
+      if (!live.headRepository || !live.headRepositoryOwner) {
+        throw new Error(
+          `PR #${args.pr}'s head repository no longer exists; nothing can be pushed to it.`,
+        );
+      }
       const canPush = authorCanPush(
         args.repo,
         live.author?.login ?? '',
@@ -326,35 +331,29 @@ export function runPrepare(args: PrepareArgs): void {
         host,
         owner,
         repoName,
-        live.headRepositoryOwner?.login ?? '',
-        live.headRepository?.name ?? '',
+        live.headRepositoryOwner.login,
+        live.headRepository.name,
       );
-      // A start resumes a watch `cleanup` ended keeping its worktree: the
-      // user asked for it, and the start's confirmation said what the
-      // worktree holds.
-      wasEnded = existing.ended;
-      if (
-        takesOver(existing) ||
-        wasEnded ||
-        canPush !== existing.authorCanPush ||
-        remotes.remote !== existing.remote ||
-        remotes.pushTarget !== existing.pushTarget
-      ) {
-        existing = withWatchLock(paths, args.pr, () => {
-          const current = requireState(paths.statePath, args.pr);
-          if (takesOver(current)) tookOver = true;
-          else assertOwnedBySession(current);
-          const { ended: _resumed, ...rest } = current;
-          const next = {
-            ...rest,
-            sessionId: currentSessionId(),
-            authorCanPush: canPush,
-            ...remotes,
-          };
+      existing = withWatchLock(paths, args.pr, () => {
+        const current = requireState(paths.statePath, args.pr);
+        if (takesOver(current)) tookOver = true;
+        else assertOwnedBySession(current);
+        // A start resumes a watch `cleanup` ended keeping its worktree: the
+        // user asked for it, and the start's confirmation said what the
+        // worktree holds. Read here, under the lock that also clears it.
+        wasEnded = current.ended;
+        const { ended: _resumed, ...rest } = current;
+        const next = {
+          ...rest,
+          sessionId: currentSessionId(),
+          authorCanPush: canPush,
+          ...remotes,
+        };
+        if (JSON.stringify(next) !== JSON.stringify(current)) {
           writeState(paths.statePath, next);
-          return next;
-        });
-      }
+        }
+        return next;
+      });
       report(
         { ...existing, worktreePath: paths.worktreePath },
         {
@@ -389,6 +388,9 @@ export function runPrepare(args: PrepareArgs): void {
   if (refusal) throw new Error(refusal);
   const headOwner = pr.headRepositoryOwner!.login;
   const headName = pr.headRepository!.name;
+  // Asked before anything is fetched or made: a refusal leaves nothing
+  // behind.
+  const canPush = authorCanPush(args.repo, pr.author?.login ?? '', viewer);
 
   const { remote, pushTarget } = remotesFor(
     host,
@@ -512,7 +514,7 @@ export function runPrepare(args: PrepareArgs): void {
       worktreePath: paths.worktreePath,
       viewer,
       prAuthor: pr.author?.login ?? '',
-      authorCanPush: authorCanPush(args.repo, pr.author?.login ?? '', viewer),
+      authorCanPush: canPush,
       lastKnownHeadSha: headSha,
       preparedAt: new Date().toISOString(),
       // A watch whose worktree was removed keeps its history, so it does not

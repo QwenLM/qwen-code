@@ -193,9 +193,13 @@ worktree included:
    refusal. Only a 404 from the permission API means the author cannot
    push; any other failure (a rate limit, the network) is a refusal that
    changes nothing, and a take-over is written only once these answers are
-   in. Every file of a watch — state, cursor, history, reply cache — is read
-   only when it is a regular file, so a FIFO planted under its name cannot
-   block a helper or the gate. If the
+   in. A PR whose head repository is gone is a refusal too. On a new watch,
+   whether the author can push is asked before anything is fetched or made,
+   so a refusal leaves nothing behind. Every file of a watch — state,
+   cursor, history, reply cache, snapshot — is read only when it is a
+   regular file, so a FIFO planted under its name cannot block a helper or
+   the gate, and each is written replacing a link rather than following it,
+   so no helper writes outside `.qwen/tmp`. If the
    worktree was removed (also with `rm -rf`, which `git worktree prune`
    clears), it is recreated and the recorded `pushedShas`,
    `handledCommentIds` and `postedCommentIds` are kept, with the budgets,

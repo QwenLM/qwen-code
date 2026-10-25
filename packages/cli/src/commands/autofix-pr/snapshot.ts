@@ -45,6 +45,7 @@ import {
   autofixPrPaths,
   checkAttemptKey,
   isRegularFile,
+  NO_FOLLOW,
   readGateCursor,
   readState,
   repoRoot,
@@ -1524,6 +1525,7 @@ function markOrphanReplies(
     atomicWriteFileSync(
       check.cachePath,
       `${JSON.stringify({ ...readReplyCache(check.cachePath), [id]: parent })}\n`,
+      NO_FOLLOW,
     );
   };
   const deadline = check.strict
@@ -1985,6 +1987,7 @@ export function runSnapshot(args: SnapshotArgs): void {
         key === 'body' && typeof value === 'string' ? bodyLines(value) : value,
       2,
     )}\n`,
+    NO_FOLLOW,
   );
   const { events, ...rest } = snapshot;
   writeStdoutLine(
