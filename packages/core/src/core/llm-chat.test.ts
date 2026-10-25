@@ -4960,6 +4960,42 @@ describe('LlmChat', async () => {
       expectRolledBack(target, recordChatCompression, 175_500, originalHistory);
     });
 
+    it('counts a pending catalog in the post-compression estimate that decides the abort', async () => {
+      // The compressed history alone (176K) sits below the 177K hard tier, and
+      // the tiny pending message adds almost nothing: only the pending legacy
+      // catalog's tokens cross the limit. Without them the same send proceeds,
+      // so both the gate's force decision and the post-compression abort rest
+      // on the snapshot-aware estimate.
+      const catalog = 'c'.repeat(8_000);
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const snapshot = getAutoMemorySnapshot([], catalog)!;
+      const originalHistory = oversizedHistory();
+      const { target, recordChatCompression } = recordingChat();
+      target.setHistory(originalHistory);
+      target.setLastPromptTokenCount(175_500);
+
+      const compressSpy = mockCompressOnce(compressed(180_000, 176_000));
+      mockStream(textStream('should not send'));
+
+      const message = 'hi';
+      const pendingTokens = estimateContentTokens([
+        content('user', { text: message }, snapshot),
+      ]);
+      await expect(
+        send(message, 'prompt-id-hard-rescue-pending-catalog', target),
+      ).rejects.toThrow(
+        new RegExp(
+          `Estimated prompt tokens: ${176_000 + pendingTokens}; hard limit: 177000`,
+        ),
+      );
+
+      expect(compressSpy.mock.calls[0]![1].force).toBe(true);
+      expect(compressSpy.mock.calls[0]![1].precomputedEffectiveTokens).toBe(
+        175_500 + pendingTokens,
+      );
+      expectRolledBack(target, recordChatCompression, 175_500, originalHistory);
+    });
+
     it('does not treat the image token estimate as output tokens after hard-rescue compression', async () => {
       const { target, recordChatCompression } = recordingChat();
       target.setHistory(oversizedHistory());
@@ -12731,6 +12767,20 @@ describe('LlmChat', async () => {
         'catalog A',
       );
       expect(JSON.stringify(target.getHistory())).not.toContain('catalog B');
+      // The provider payload for the recovery iteration carries the current
+      // catalog exactly once, as bare text, and none of the stale marked
+      // snapshot the durable request sent.
+      const recoveryPayload = JSON.stringify(requestAt(2).contents);
+      expect(recoveryPayload.split('catalog B')).toHaveLength(2);
+      expect(recoveryPayload).not.toContain('catalog A');
+      expect(
+        (requestAt(2).contents as Content[])
+          .flatMap((entry) => entry.parts ?? [])
+          .filter(
+            (part) =>
+              part.partMetadata?.['qwen-code:memory-catalog-snapshot'] === true,
+          ),
+      ).toEqual([]);
     });
 
     it('escalates an empty MAX_TOKENS response instead of retrying it as an empty stream', async () => {
