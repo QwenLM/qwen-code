@@ -1499,9 +1499,15 @@ export class ChatCompressionService {
       // cancelled) lets no shrink guard observe it — the flush would replay
       // the stale snapshot into a cursor no live history matches. Drop it
       // here, at the point the shrink is decided.
-      config
-        .getMemoryManager?.()
-        ?.invalidatePendingExtract(config.getSessionId());
+      // Only the session's own chat may: `compress()` runs per chat, while a
+      // forked chat shares this Config instance and a subagent's derived
+      // Config shares the session id and manager — neither history is the one
+      // the parked snapshot was cut from.
+      if (!chat.isForkedChat) {
+        config
+          .getMemoryManager?.()
+          ?.invalidatePendingExtract(config.getSessionId(), config);
+      }
 
       return { newHistory: candidate.newHistory, info: candidate.info };
     }

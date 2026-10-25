@@ -2734,6 +2734,42 @@ describe('MemoryManager', () => {
       ).toContain(4);
     });
 
+    // Regression (#13004 R18-1): the supplement is spliced at schedule time, so
+    // a request that waits in `extractQueued` can outlive the parked snapshot
+    // that justified it — the covering run's `recordCadenceOutcome` deletes that
+    // snapshot before `startQueuedExtract` re-enters `runExtract`, and nothing
+    // re-derives the slice. Replaying it re-feeds turns the covering run
+    // already extracted.
+    it('drops a queued supplement whose parked snapshot a concurrent run consumed', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4);
+      expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+
+      // Run A holds the project slot; turn B queues behind it and picks the
+      // parked slice up at schedule time (50 - 4 evicts it from B's own tail).
+      const hung = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(hung.promise);
+      const running = turn(mgr, 10);
+      await vi.waitFor(() =>
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
+      );
+      expect((await turn(mgr, 50)).skippedReason).toBe('queued');
+
+      // A settles with coverage of the parked snapshot (it forked, and its
+      // offset reaches the snapshot's length), so the coverage delete removes
+      // the state that justified B's supplement before B starts.
+      hung.resolve(engagedNoop('sess', 10));
+      await running;
+      await mgr.drain({ timeoutMs: 5_000 });
+
+      const queuedCall = vi
+        .mocked(runAutoMemoryExtract)
+        .mock.calls.find((call) => call[0].history.length === 50);
+      expect(queuedCall).toBeDefined();
+      expect(queuedCall?.[0].skippedHistory).toBeUndefined();
+    });
+
     it('extracts a snapshot that replaced the parked run it did not join', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
       const mgr = new MemoryManager();
@@ -3093,6 +3129,51 @@ describe('MemoryManager', () => {
           .mock.calls.map((call) => call[0].history.length),
       ).not.toContain(13);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    // Regression (#13004 R18-3): `ChatCompressionService.compress()` runs per
+    // chat while the cadence entry is per session, and a subagent's derived
+    // Config shares both this manager and the base Config's session id. Only
+    // the Config that scheduled the snapshot may drop it.
+    it('refuses an invalidation from a Config that does not own the snapshot', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const sessionConfig = () =>
+        makeMockConfig({
+          getSessionId: vi.fn().mockReturnValue('sess'),
+          getProjectRoot: vi.fn().mockReturnValue(tmp.projectRoot),
+        } as Partial<Config>);
+      const owner = sessionConfig();
+      const parkOwed = async (mgr: MemoryManager) => {
+        const schedule = (length: number) =>
+          mgr.scheduleExtract({
+            ...extractParams(tmp.projectRoot, 'sess', turns(length), owner),
+            belowCompactionWarn: true,
+          });
+        await schedule(2);
+        expect((await schedule(4)).skippedReason).toBe('cadence');
+      };
+      const replaysOfSnapshot = () =>
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.filter((call) => call[0].history.length === 4).length;
+
+      // A foreign Config asking for the same session id is refused, so the
+      // snapshot survives and the flush still replays the turns it owes.
+      const foreign = new MemoryManager();
+      await parkOwed(foreign);
+      foreign.invalidatePendingExtract('sess', sessionConfig());
+      await expect(foreign.flushPendingExtract('sess', 1_000)).resolves.toBe(
+        true,
+      );
+      expect(replaysOfSnapshot()).toBe(1);
+
+      // The owning Config still drops its own snapshot, so the flush has
+      // nothing left to replay.
+      const own = new MemoryManager();
+      await parkOwed(own);
+      own.invalidatePendingExtract('sess', owner);
+      await expect(own.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(replaysOfSnapshot()).toBe(1);
     });
 
     it('refuses a parked flush whose snapshot a shrink dropped', async () => {

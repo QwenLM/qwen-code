@@ -136,6 +136,10 @@ export async function runAutoMemoryExtract(params: {
   // Only the close-time cadence flush (#13004) sets this: an abandoned flush
   // run aborts here instead of keeping a fork alive past its boundary.
   abortSignal?: AbortSignal;
+  // Only the close-time cadence flush (#13004) sets this: the replayed
+  // snapshot's history can be shorter than the cursor a later run already
+  // persisted, so this run's write must not move that cursor backwards.
+  flushReplay?: boolean;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
   if (!params.config) {
@@ -260,7 +264,15 @@ export async function runAutoMemoryExtract(params: {
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
-    processedOffset: madeGenuineProgress ? params.history.length : startOffset,
+    // A flush replay runs a parked snapshot whose history a later non-forking
+    // run may have already advanced the cursor past, so writing the snapshot's
+    // own offset would move that project cursor backwards and make the next run
+    // re-scan everything after it. Only the replay is floored: a genuine
+    // post-compaction run must still be able to move the cursor down.
+    processedOffset: Math.max(
+      params.flushReplay ? rawOffset : 0,
+      madeGenuineProgress ? params.history.length : startOffset,
+    ),
     updatedAt: now.toISOString(),
   };
   await writeExtractCursor(params.projectRoot, cursor);

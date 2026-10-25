@@ -184,6 +184,15 @@ export interface ScheduleExtractParams {
    */
   skippedFrom?: number;
   /**
+   * Internal, #13004 only: the parked snapshot a spliced `skippedHistory` was
+   * cut from. A request that waits in `extractQueued` re-checks this before
+   * running, because a concurrent run can consume that snapshot while it
+   * waits and replaying the orphaned slice would re-feed turns already
+   * extracted. Never set on a parked snapshot itself, so a flush replay is
+   * exempt by construction.
+   */
+  supplementedFrom?: ScheduleExtractParams;
+  /**
    * Whether the turn's prompt stayed below the compaction warning threshold.
    * Cadence skips (#13004) need `true`; near compaction every turn extracts.
    */
@@ -194,6 +203,12 @@ export interface ScheduleExtractParams {
    * Callers scheduling per-turn extractions never set this.
    */
   abortSignal?: AbortSignal;
+  /**
+   * Internal, #13004 flush only: this run replays a parked snapshot, whose
+   * history can be shorter than the cursor a later run already persisted, so
+   * its cursor write must not move that project cursor backwards.
+   */
+  flushReplay?: boolean;
 }
 
 export interface ScheduleSkillReviewParams {
@@ -1302,6 +1317,7 @@ export class MemoryManager {
       params = {
         ...params,
         skippedHistory: cadenceNow.pending.skippedHistory,
+        supplementedFrom: cadenceNow.pending,
       };
     }
 
@@ -1609,9 +1625,21 @@ export class MemoryManager {
    * {@link discardExtractCadence} this does not bump the discard epoch, so
    * other sessions' in-flight cadence outcomes in this manager survive it.
    */
-  invalidatePendingExtract(sessionId: string): void {
+  invalidatePendingExtract(sessionId: string, owner?: Config): void {
     const state = this.extractCadence.get(sessionId);
-    if (state) delete state.pending;
+    if (!state) return;
+    // Ownership: the snapshot was cut from the history of the Config that
+    // scheduled it. A subagent's derived Config shares this manager and the
+    // base Config's session id while compacting a chat of its own, so its
+    // shrink says nothing about that history and must not drop the snapshot.
+    if (
+      owner !== undefined &&
+      state.pending?.config !== undefined &&
+      state.pending.config !== owner
+    ) {
+      return;
+    }
+    delete state.pending;
   }
 
   /**
@@ -1717,7 +1745,10 @@ export class MemoryManager {
         return false;
       }
       const result = await this.scheduleExtract(
-        this.cloneExtractParams(pending, { abortSignal: controller.signal }),
+        this.cloneExtractParams(pending, {
+          abortSignal: controller.signal,
+          flushReplay: true,
+        }),
         {
           bypassCadence: true,
         },
@@ -1792,6 +1823,23 @@ export class MemoryManager {
     queuedEpoch?: number,
   ): Promise<Awaited<ReturnType<typeof runAutoMemoryExtract>>> {
     const record = this.tasks.get(taskId)!;
+
+    // A request that waited in `extractQueued` can outlive the parked snapshot
+    // its supplement was cut from: `recordCadenceOutcome` deletes that snapshot
+    // once a concurrent run covers it, and `startQueuedExtract` re-enters here
+    // without re-deriving anything. Replaying the orphaned slice would re-feed
+    // turns the covering run already extracted. A flush replay carries no
+    // stamp, so the slice the flush exists to extract survives this check.
+    const supplementedFrom = params.supplementedFrom;
+    if (
+      supplementedFrom !== undefined &&
+      this.extractCadence.get(params.sessionId)?.pending !== supplementedFrom
+    ) {
+      params = this.cloneExtractParams(params, {
+        skippedHistory: undefined,
+        supplementedFrom: undefined,
+      });
+    }
 
     this.extractCurrentTaskId.set(params.projectRoot, taskId);
     this.extractRunning.add(params.projectRoot);

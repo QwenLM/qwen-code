@@ -366,7 +366,25 @@ describe('ChatCompressionService', () => {
     });
     arrangeAuto();
     expectCompressed(await run());
-    expect(invalidatePendingExtract).toHaveBeenCalledWith('sess-compact');
+    expect(invalidatePendingExtract).toHaveBeenCalledWith(
+      'sess-compact',
+      mockConfig,
+    );
+  });
+
+  // Regression (#13004 R18-3): `compress()` runs per chat, while the cadence
+  // entry is per session. A forked chat shares the session's Config instance,
+  // so its own shrink must not drop a snapshot cut from the session's history.
+  it('#13004: keeps the parked snapshot when a forked chat compacts', async () => {
+    const invalidatePendingExtract = vi.fn();
+    Object.assign(mockConfig, {
+      getMemoryManager: () => ({ invalidatePendingExtract }),
+      getSessionId: () => 'sess-compact',
+    });
+    mockChat.isForkedChat = true;
+    arrangeAuto();
+    expectCompressed(await run());
+    expect(invalidatePendingExtract).not.toHaveBeenCalled();
   });
 
   it('#13004: keeps the parked memory-extraction snapshot when nothing shrinks', async () => {
