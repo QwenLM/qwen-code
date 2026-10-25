@@ -463,6 +463,7 @@ describe('validateTranscriptRecord', () => {
   // host reads as unprovable ownership and refuses to restore.
   const RECORDED_SUBTYPES: Record<NonNullable<ChatRecord['subtype']>, true> = {
     chat_compression: true,
+    memory_catalog_snapshot: true,
     slash_command: true,
     ui_telemetry: true,
     at_command: true,
