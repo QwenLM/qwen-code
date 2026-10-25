@@ -8,6 +8,10 @@ import { readFileSync } from 'node:fs';
 import { DaemonClient } from '@qwen-code/sdk/daemon';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  DaemonAvailability,
+  registerDaemonAvailability,
+} from '../daemon/availability.js';
+import {
   DESKTOP_RELAY_INSTALL_COMMAND,
   connectDesktopRelay,
   disconnectDesktopRelay,
@@ -271,6 +275,39 @@ describe('connectDesktopRelay', () => {
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it('connects without inheriting the page daemon availability gate', async () => {
+    const availability = new DaemonAvailability(
+      'https://devbox:4170',
+      't',
+      async () => {
+        throw new TypeError('offline');
+      },
+    );
+    const unregister = registerDaemonAvailability(
+      'https://devbox:4170/',
+      't',
+      availability,
+    );
+    try {
+      await availability.check(true);
+      expect(availability.getSnapshot()).toBe('unavailable');
+      const fetchImpl = vi.fn<FetchLike>(async (input) =>
+        input.includes('/desktop-relay/credential')
+          ? new Response(JSON.stringify({ credential: 'scoped' }), {
+              status: 200,
+            })
+          : new Response(JSON.stringify({ ok: true }), { status: 202 }),
+      );
+      await expect(connectDesktopRelay(request, fetchImpl)).resolves.toEqual({
+        ok: true,
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+    } finally {
+      unregister();
+      availability.dispose();
+    }
   });
 
   it('reports an unreachable relay', async () => {

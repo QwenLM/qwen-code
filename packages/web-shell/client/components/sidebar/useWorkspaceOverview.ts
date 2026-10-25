@@ -210,7 +210,14 @@ export function useWorkspaceOverview(
       setOverview(undefined);
       return;
     }
-    if (!available) return;
+    if (!available) {
+      // A paused poll cannot book a miss, so a facet the daemon can no longer
+      // answer would otherwise keep rendering its pre-outage count.
+      setOverview(
+        (previous) => previous && dropExpiredFacets(previous, requested),
+      );
+      return;
+    }
     void reload();
     const onFocus = () => void reload();
     window.addEventListener('focus', onFocus);
@@ -221,7 +228,7 @@ export function useWorkspaceOverview(
       window.removeEventListener('focus', onFocus);
       window.clearInterval(timer);
     };
-  }, [active, available, pollIntervalMs, reload, reloadToken]);
+  }, [active, available, pollIntervalMs, reload, reloadToken, requested]);
 
   return { overview };
 }

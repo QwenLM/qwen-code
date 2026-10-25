@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import { useDaemonAvailabilityController } from '../availability-context.js';
+import { SessionCatalogStore } from '../../session-catalog/session-catalog-store.js';
 import {
   findDaemonAvailability,
   type DaemonAvailability,
@@ -72,6 +73,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -292,6 +294,18 @@ it('keeps the offline gate available to child detach cleanup during provider unm
   expect(findDaemonAvailability('https://daemon.example')).toBeUndefined();
 });
 
+it('pauses the workspace catalog while the daemon is unavailable', async () => {
+  const setPaused = vi.spyOn(SessionCatalogStore.prototype, 'setPaused');
+  await act(async () => root.render(provider('paused')));
+  const { availability } = connections.get('paused')!;
+  offline = true;
+  await act(async () => availability.check(true));
+  expect(setPaused).toHaveBeenLastCalledWith(true);
+  offline = false;
+  await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  expect(setPaused).toHaveBeenLastCalledWith(false);
+});
+
 it('creates a fresh usable controller when autoConnect is disabled then enabled', async () => {
   const renderEnabled = (autoConnect: boolean) =>
     root.render(provider('toggle', { autoConnect }));
@@ -326,4 +340,19 @@ it('retains the active registry entry after deferred StrictMode cleanup', async 
   expect(
     findDaemonAvailability('https://daemon.example', 'secret')?.getSnapshot(),
   ).toBe('unavailable');
+});
+
+it('probes on foreground after auth-required can be fixed externally', async () => {
+  await act(async () => root.render(provider('auth')));
+  const { availability } = connections.get('auth')!;
+  fetchMock.mockImplementation(async () => new Response(null, { status: 401 }));
+  await act(async () => availability.check(true));
+  expect(availability.getSnapshot()).toBe('auth-required');
+  const before = fetchMock.mock.calls.length;
+  await act(async () => {
+    document.dispatchEvent(new Event('visibilitychange'));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(fetchMock.mock.calls.length).toBeGreaterThan(before);
 });

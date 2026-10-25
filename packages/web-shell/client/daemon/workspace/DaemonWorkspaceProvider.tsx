@@ -432,9 +432,10 @@ export function DaemonWorkspaceProvider({
     const unsubscribe = availability.subscribe(update);
     update();
     const foreground = () => {
+      const snapshot = availability.getSnapshot();
       if (
         document.visibilityState === 'visible' &&
-        availability.getSnapshot() === 'unavailable'
+        (snapshot === 'unavailable' || snapshot === 'auth-required')
       ) {
         void availability.check(true);
       }

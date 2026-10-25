@@ -12950,7 +12950,11 @@ export function App({
           previous.includes(retry) ? previous : [...previous, retry],
         );
       }
-      if (notice.category === 'connection' && !daemonAvailable) {
+      if (
+        notice.category === 'connection' &&
+        notice.operation === 'stream' &&
+        !daemonAvailable
+      ) {
         dismissNotice(notice.id);
         continue;
       }

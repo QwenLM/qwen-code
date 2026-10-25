@@ -104,6 +104,19 @@ describe('DaemonClient.requestRest', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it('rejects dot segments that escape the configured base path', async () => {
+    const fetch = vi.fn();
+    const client = new DaemonClient({
+      baseUrl: 'https://daemon.example/prefix',
+      token: 'secret',
+      fetch,
+    });
+    for (const path of ['/../admin', '/a/../../admin']) {
+      await expect(client.requestRest(path)).rejects.toThrow('base path');
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('times out a stalled connection but leaves an accepted streaming body alive', async () => {
     vi.useFakeTimers();
     const fetch = vi.fn<typeof globalThis.fetch>().mockImplementationOnce(

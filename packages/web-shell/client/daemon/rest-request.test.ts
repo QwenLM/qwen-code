@@ -189,5 +189,8 @@ it('retains older peer SDK native REST support without using ACP fetch', async (
   ]) {
     await expect(request(path)).rejects.toThrow('absolute route path');
   }
+  for (const path of ['/../admin', '/a/../../admin']) {
+    await expect(request(path)).rejects.toThrow('base path');
+  }
   expect(restFetch).toHaveBeenCalledTimes(1);
 });

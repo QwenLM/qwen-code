@@ -4,10 +4,14 @@ const availabilityMock = vi.hoisted(() => ({
   enabled: false,
   available: true,
   resume: undefined as (() => void) | undefined,
+  listeners: new Set<() => void>(),
   controller: {
     getSnapshot: () =>
       availabilityMock.available ? 'available' : 'unavailable',
-    subscribe: () => () => {},
+    subscribe: (listener: () => void) => {
+      availabilityMock.listeners.add(listener);
+      return () => availabilityMock.listeners.delete(listener);
+    },
     check: vi.fn(async () => {
       availabilityMock.available = false;
     }),
@@ -31,6 +35,7 @@ afterEach(() => {
   availabilityMock.enabled = false;
   availabilityMock.available = true;
   availabilityMock.resume = undefined;
+  availabilityMock.listeners.clear();
 });
 
 import {
@@ -675,6 +680,20 @@ describe('LocalFilesBridge reconnection', () => {
     availabilityMock.resume?.();
     await flush();
     expect(h.sockets).toHaveLength(2);
+    h.bridge.stop();
+    await h.running;
+  });
+
+  it('closes the live socket when the daemon becomes unavailable', async () => {
+    availabilityMock.enabled = true;
+    const h = harness();
+    const first = await connect(h);
+    availabilityMock.available = false;
+    for (const listener of availabilityMock.listeners) listener();
+    await flush();
+    expect(first.closeCount).toBe(1);
+    expect(lastPhase(h)).toBe('reconnecting');
+    expect(h.delays).toEqual([]);
     h.bridge.stop();
     await h.running;
   });

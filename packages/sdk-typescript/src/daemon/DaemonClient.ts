@@ -1288,6 +1288,15 @@ export class DaemonClient {
     ) {
       throw new Error('Daemon REST requests require an absolute route path');
     }
+    const base = new URL(`${this.baseUrl}/`, 'http://daemon.invalid');
+    if (
+      !new URL(
+        `${this.baseUrl}${path}`,
+        'http://daemon.invalid',
+      ).pathname.startsWith(base.pathname)
+    ) {
+      throw new Error('Daemon REST requests must stay within the base path');
+    }
     const headers = new Headers(this.headers());
     new Headers(init.headers).forEach((value, name) =>
       headers.set(name, value),

@@ -158,6 +158,7 @@ export async function connectDesktopRelay(
     request.daemonUrl,
     request.token,
     daemon,
+    true,
   );
   try {
     // Runtime ensure allows 60 seconds; leave time for its response to arrive.

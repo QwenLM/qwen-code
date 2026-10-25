@@ -14,10 +14,14 @@ const availabilityMock = vi.hoisted(() => ({
   enabled: false,
   available: true,
   resumes: new Set<() => void>(),
+  listeners: new Set<() => void>(),
   controller: {
     getSnapshot: () =>
       availabilityMock.available ? 'available' : 'unavailable',
-    subscribe: () => () => {},
+    subscribe: (listener: () => void) => {
+      availabilityMock.listeners.add(listener);
+      return () => availabilityMock.listeners.delete(listener);
+    },
     check: vi.fn(async () => {}),
     waitUntilAvailable: vi.fn(
       () =>
@@ -156,6 +160,7 @@ describe('TerminalPanel', () => {
     availabilityMock.enabled = false;
     availabilityMock.available = true;
     availabilityMock.resumes.clear();
+    availabilityMock.listeners.clear();
     terminalInstances.length = 0;
     workspace.baseUrl = 'http://localhost';
     FakeWebSocket.instances.length = 0;
@@ -220,6 +225,18 @@ describe('TerminalPanel', () => {
     ).toBe('1');
     expect(terminalInstances).toHaveLength(1);
     expect(terminal.dispose).not.toHaveBeenCalled();
+  });
+
+  it('closes a live socket when the shared daemon becomes unavailable', () => {
+    availabilityMock.enabled = true;
+    const ws = render();
+    ws.open();
+    act(() => {
+      availabilityMock.available = false;
+      for (const listener of availabilityMock.listeners) listener();
+    });
+    expect(ws.close).toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
   it('checks an unexpected close once and parks websocket retries until shared recovery', async () => {

@@ -54,6 +54,15 @@ export function createDaemonRestRequest(
     ) {
       throw new Error('Daemon REST requests require an absolute route path');
     }
+    const root = baseUrl.replace(/\/+$/, '');
+    const base = new URL(`${root}/`, 'http://daemon.invalid');
+    if (
+      !new URL(`${root}${path}`, 'http://daemon.invalid').pathname.startsWith(
+        base.pathname,
+      )
+    ) {
+      throw new Error('Daemon REST requests must stay within the base path');
+    }
     const headers = new Headers(
       token ? { Authorization: `Bearer ${token}` } : {},
     );
@@ -71,7 +80,7 @@ export function createDaemonRestRequest(
       : undefined;
     try {
       return await (availability?.wrapFetch(fetchImpl) ?? fetchImpl)(
-        `${baseUrl.replace(/\/+$/, '')}${path}`,
+        `${root}${path}`,
         { ...init, headers, signal: init.signal ?? controller?.signal },
       );
     } finally {
