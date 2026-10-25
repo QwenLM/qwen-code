@@ -5987,13 +5987,19 @@ async function runQwenServeImpl(
           assertGenerationOpen,
         );
       });
-    const persistDisabledSkillsFn = (
+    const persistDisabledSkillsFn = async (
       workspace: string,
       skillName: string,
       enabled: boolean,
       assertGenerationOpen?: () => void,
-    ) =>
-      withSettingsLock(workspace, async () => {
+    ) => {
+      // Resolving a catalog identity can block on ACP. Do it before taking
+      // the settings write lock so an enable does not serialize every other
+      // settings write for this workspace behind a cold read.
+      const [skillIdentity] = enabled
+        ? await resolveSkillToggleIdentities(workspace, [skillName])
+        : [{ name: skillName }];
+      return withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
         const {
           skillSettingStrings,
@@ -6015,10 +6021,6 @@ async function runQwenServeImpl(
         // locks such rows, and a route that persists anyway reports an
         // enable the merged config still denies.
         if (enabled) {
-          const [skillIdentity] = await resolveSkillToggleIdentities(
-            workspace,
-            [skillName],
-          );
           const block = skillToggleBlockForName(fresh, skillIdentity);
           if (block) {
             return { changed: false, disabled: workspaceDisabled, block };
@@ -6066,13 +6068,19 @@ async function runQwenServeImpl(
           settingsChanges,
         };
       });
-    const persistDisabledSkillsBatchFn = (
+    };
+    const persistDisabledSkillsBatchFn = async (
       workspace: string,
       skillNames: readonly string[],
       enabled: boolean,
       assertGenerationOpen?: () => void,
-    ): Promise<PersistDisabledSkillsBatchResult> =>
-      withSettingsLock(workspace, async () => {
+    ): Promise<PersistDisabledSkillsBatchResult> => {
+      // Resolve catalog identities before the lock for the same reason as
+      // the single toggle above.
+      const skillIdentities = enabled
+        ? await resolveSkillToggleIdentities(workspace, skillNames)
+        : skillNames.map((name) => ({ name }));
+      return withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
         const {
           skillSettingStrings,
@@ -6090,9 +6098,6 @@ async function runQwenServeImpl(
           WORKSPACE_SETTING_SCOPE,
           'enabled',
         );
-        const skillIdentities = enabled
-          ? await resolveSkillToggleIdentities(workspace, skillNames)
-          : skillNames.map((name) => ({ name }));
         let next = { disabled: initialDisabled, enabled: initialEnabled };
         const outcomes: PersistDisabledSkillsBatchResult['outcomes'] =
           skillNames.map((skillName) => ({ skillName, changed: false }));
@@ -6166,6 +6171,7 @@ async function runQwenServeImpl(
         }
         return { outcomes, settingsChanges };
       });
+    };
     const persistSettingFn = (
       workspace: string,
       scope: import('../config/settings.js').SettingScope,

@@ -3852,6 +3852,75 @@ describe('createDaemonWorkspaceService', () => {
       },
     );
 
+    it('keeps the daemon-local cache across a preheat and drops it on refresh', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(
+        vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          skills: [],
+        }),
+        { invalidate },
+      );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          workspaceSkillsStatusProvider,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(svc.preheatAcpChild(makeCtx())).resolves.toMatchObject({
+        ready: true,
+      });
+      expect(invalidate).not.toHaveBeenCalled();
+
+      await svc.refreshWorkspaceSkills(makeCtx());
+      expect(invalidate).toHaveBeenCalledWith('/workspace');
+    });
+
+    it('retains the inventory when preheat times out but the channel comes up', async () => {
+      let live = false;
+      const query = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'retained-review',
+            description: 'Retained',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: query,
+          isChannelLive: () => live,
+          preheatAcpChild: vi.fn(() => new Promise<void>(() => undefined)),
+        }),
+      );
+      expect((await svc.getWorkspaceSkillsStatus(makeCtx())).skills).toEqual([
+        expect.objectContaining({ name: 'retained-review' }),
+      ]);
+
+      const preheat = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
+      live = true;
+
+      await expect(preheat).resolves.toMatchObject({
+        ready: true,
+        channelLive: true,
+      });
+      const retained = await svc.getWorkspaceSkillsStatus(makeCtx());
+      expect(retained.skills).toEqual([
+        expect.objectContaining({ name: 'retained-review' }),
+      ]);
+      expect(query).toHaveBeenCalledOnce();
+    });
+
     it('returns the current ACP channel status', async () => {
       const svc = createDaemonWorkspaceService(
         makeDeps({ isChannelLive: () => true }),

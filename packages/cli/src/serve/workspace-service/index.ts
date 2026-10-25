@@ -135,8 +135,10 @@ export {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Also defines the wire-visible age at which snapshot.stale becomes true.
+// Start throttle for background revalidation, measured from task start.
 const WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS = 1_000;
+// Wire-visible age at which snapshot.stale becomes true.
+const WORKSPACE_SKILLS_STALE_AFTER_MS = 1_000;
 const WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS = 5_000;
 
 function createSkillToggleMutation(input: {
@@ -313,6 +315,12 @@ export function createDaemonWorkspaceService(
     lastWorkspaceSkillsStatusAt = 0;
     lastWorkspaceSkillsReadStartedAt = undefined;
     inFlightWorkspaceSkillsStatus = undefined;
+  };
+
+  // Dropping the daemon-local enumerator's cached managers is only required
+  // when the underlying inventory may have changed; a preheat leaves it valid.
+  const invalidateWorkspaceSkillsInventory = () => {
+    invalidateWorkspaceSkillsSnapshot();
     workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
   };
 
@@ -410,7 +418,7 @@ export function createDaemonWorkspaceService(
       snapshot: {
         observedAt: lastWorkspaceSkillsStatusAt,
         ageMs,
-        stale: ageMs >= WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS,
+        stale: ageMs >= WORKSPACE_SKILLS_STALE_AFTER_MS,
         refreshing: inFlightWorkspaceSkillsStatus !== undefined,
       },
     };
@@ -500,7 +508,7 @@ export function createDaemonWorkspaceService(
   };
 
   const refreshWorkspaceSkillsAfterMutation = async (): Promise<void> => {
-    invalidateWorkspaceSkillsSnapshot();
+    invalidateWorkspaceSkillsInventory();
     if (!(isChannelLive?.() ?? false)) return;
     try {
       const refreshed =
@@ -526,7 +534,7 @@ export function createDaemonWorkspaceService(
         );
       }
     } finally {
-      invalidateWorkspaceSkillsSnapshot();
+      invalidateWorkspaceSkillsInventory();
     }
   };
 
@@ -596,8 +604,9 @@ export function createDaemonWorkspaceService(
       const channelLive = () => isChannelLive?.() ?? false;
       const finish = (
         result: Omit<WorkspaceAcpPreheatResult, 'durationMs'>,
+        invalidateInventory = true,
       ): WorkspaceAcpPreheatResult => {
-        if (result.ready) {
+        if (result.ready && invalidateInventory) {
           assertActiveGeneration();
           invalidateWorkspaceSkillsSnapshot();
         }
@@ -631,7 +640,9 @@ export function createDaemonWorkspaceService(
         }
         const live = channelLive();
         if (live) {
-          return finish({ ready: true, channelLive: true });
+          // The channel came up after the timeout, so startup may still be
+          // incomplete; keep the retained inventory until a read revalidates.
+          return finish({ ready: true, channelLive: true }, false);
         }
         return finish({
           ready: false,
@@ -1018,7 +1029,7 @@ export function createDaemonWorkspaceService(
       let sessionsFailed = 0;
 
       if (persisted.changed) {
-        invalidateWorkspaceSkillsSnapshot();
+        invalidateWorkspaceSkillsInventory();
         if (channelLive && refreshRuntime) {
           try {
             const refreshed =
@@ -1047,7 +1058,7 @@ export function createDaemonWorkspaceService(
               );
             }
           }
-          invalidateWorkspaceSkillsSnapshot();
+          invalidateWorkspaceSkillsInventory();
         }
 
         assertActiveGeneration();
@@ -1134,7 +1145,7 @@ export function createDaemonWorkspaceService(
       let sessionsRefreshed = 0;
       let sessionsFailed = 0;
       if (changed) {
-        invalidateWorkspaceSkillsSnapshot();
+        invalidateWorkspaceSkillsInventory();
         if (channelLive) {
           try {
             const refreshed =
@@ -1163,7 +1174,7 @@ export function createDaemonWorkspaceService(
               );
             }
           }
-          invalidateWorkspaceSkillsSnapshot();
+          invalidateWorkspaceSkillsInventory();
         }
         assertActiveGeneration();
         const mutation = createSkillToggleMutation({
@@ -1209,7 +1220,7 @@ export function createDaemonWorkspaceService(
         assertGenerationOpen,
       );
       assertActiveGeneration();
-      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsSnapshot();
+      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsInventory();
       else await refreshWorkspaceSkillsAfterMutation();
       assertActiveGeneration();
       return result;
@@ -1224,7 +1235,7 @@ export function createDaemonWorkspaceService(
       assertActiveGeneration();
       const normalizedName = requestedSkillName.trim().toLowerCase();
       const exactName = requestedSkillName.trim();
-      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsSnapshot();
+      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsInventory();
       const status =
         opts?.refreshRuntime === false
           ? await getWorkspaceSkillsConfigStatus()
@@ -1273,7 +1284,7 @@ export function createDaemonWorkspaceService(
         throw error;
       }
       assertActiveGeneration();
-      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsSnapshot();
+      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsInventory();
       else await refreshWorkspaceSkillsAfterMutation();
       assertActiveGeneration();
       return result;
@@ -1698,7 +1709,7 @@ export function createDaemonWorkspaceService(
     },
 
     invalidateWorkspaceSkillsStatus() {
-      invalidateWorkspaceSkillsSnapshot();
+      invalidateWorkspaceSkillsInventory();
     },
 
     async refreshWorkspaceSkills(_ctx, sessionIds) {
@@ -1716,7 +1727,7 @@ export function createDaemonWorkspaceService(
         assertActiveGeneration();
         return result;
       } finally {
-        invalidateWorkspaceSkillsSnapshot();
+        invalidateWorkspaceSkillsInventory();
       }
     },
 
@@ -1734,7 +1745,7 @@ export function createDaemonWorkspaceService(
         );
         return { refreshed: 0, failed: 1 };
       } finally {
-        invalidateWorkspaceSkillsSnapshot();
+        invalidateWorkspaceSkillsInventory();
       }
     },
   };

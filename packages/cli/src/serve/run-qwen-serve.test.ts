@@ -1470,6 +1470,64 @@ describe('workspace skill settings persistence', () => {
     },
   );
 
+  it.each(['single', 'batch'] as const)(
+    'does not read the catalog for a %s disable',
+    async (mode) => {
+      writeSkillSettings([]);
+      const query = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:chat', 'project')],
+      });
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({ ...deps, queryWorkspaceStatus: query }),
+      );
+      const { persistDisabledSkills, persistDisabledSkillsBatch } =
+        await captureSkillPersistence([]);
+
+      await (mode === 'single'
+        ? persistDisabledSkills!(workspace, 'rust:chat', false)
+        : persistDisabledSkillsBatch!(workspace, ['rust:chat'], false));
+
+      expect(query).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not hold the settings write lock across a cold catalog read', async () => {
+    writeSkillSettings([]);
+    const never = new Promise<never>(() => undefined);
+    const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+    vi.spyOn(
+      workspaceServiceRuntime,
+      'createDaemonWorkspaceService',
+    ).mockImplementation((deps) =>
+      original({
+        ...deps,
+        queryWorkspaceStatus: vi.fn(() => never),
+        workspaceSkillsStatusProvider: undefined,
+      }),
+    );
+    const { persistDisabledSkills, persistDisabledTools } =
+      await captureSkillPersistence([]);
+
+    void persistDisabledSkills!(workspace, 'rust:chat', true).catch(
+      () => undefined,
+    );
+    const outcome = await Promise.race([
+      persistDisabledTools!(workspace, 'Bash', false).then(() => 'written'),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('blocked'), 1_000),
+      ),
+    ]);
+
+    expect(outcome).toBe('written');
+  });
+
   it('preserves the legacy bare-name block for extensions and uncatalogued skills', async () => {
     writeSkillSettings([], ['pdf', 'legacy']);
     const { persistDisabledSkills } = await captureSkillPersistence([

@@ -526,6 +526,19 @@ describe('Skill snapshot correctness regressions', () => {
     },
   );
 
+  it('fails closed when the runtime Skill catalog cannot be enumerated', async () => {
+    const svc = service({
+      queryWorkspaceStatus: vi.fn().mockRejectedValue(new Error('unavailable')),
+    });
+
+    await expect(
+      svc.deleteWorkspaceSkill(ctx, 'review', 'workspace'),
+    ).rejects.toMatchObject({
+      code: 'skills_config_unavailable',
+      statusCode: 503,
+    });
+  });
+
   it('deletes different skills concurrently after both inventory reads succeed', async () => {
     await withInstalledSkills(['review', 'plan'], async (status) => {
       const workspace = status.workspaceCwd;
