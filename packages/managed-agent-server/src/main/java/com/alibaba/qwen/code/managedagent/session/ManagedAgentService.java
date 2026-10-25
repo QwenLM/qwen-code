@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.HostedPermissionRules;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -285,11 +286,14 @@ public class ManagedAgentService {
                     "unsupported_feature", "Approval selection requires a Workspace Session");
         }
         boolean supported = Boolean.TRUE.equals(summary.capabilities().approvalModeChange());
-        return new WebShellSessionApproval(summary.approvalMode(),
-                summary.approvalRevision() == null ? 0 : summary.approvalRevision(),
-                supported ? List.of("default", "auto-edit", "yolo")
-                        : summary.approvalMode() == null ? List.of() : List.of(summary.approvalMode()), supported,
-                summary.planMode(), summary.planModeSupported(), supported && harness.supportsLiveApprovalSelection());
+        var selected = store.findApprovalSelections(tenantId, List.of(sessionId)).getOrDefault(sessionId,
+                new WebShellApprovalSelection(summary.approvalMode(), summary.approvalRevision() == null ? 0 : summary.approvalRevision(), summary.planMode()));
+        return new WebShellSessionApproval(selected.mode(), selected.revision(),
+                supported ? harness.supportsAutoApproval() || "auto".equals(selected.mode())
+                        ? List.of("default", "auto", "auto-edit", "yolo") : List.of("default", "auto-edit", "yolo")
+                        : selected.mode() == null ? List.of() : List.of(selected.mode()), supported,
+                selected.planMode(), summary.planModeSupported(), supported && harness.supportsLiveApprovalSelection(),
+                supported && harness.supportsPermissionRules(), selected.permissionRules());
     }
 
     public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
@@ -299,17 +303,32 @@ public class ManagedAgentService {
 
     public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String mode, long expectedRevision, Boolean planMode) {
+        return changeWebShellSessionApproval(tenantId, actorId, sessionId, key, mode, expectedRevision, planMode, null);
+    }
+
+    public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String mode, long expectedRevision, Boolean planMode, Map<?, ?> requestedRules) {
         requireModelActor(actorId);
+        Map<String, List<String>> rules;
+        try {
+            rules = HostedPermissionRules.copyOf(requestedRules);
+        } catch (IllegalArgumentException invalid) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_permission_rules", invalid.getMessage());
+        }
         validateIdempotencyKey(key);
         Map<String, Object> semantic = new LinkedHashMap<>(Map.of("sessionId", sessionId,
                 "mode", mode, "expectedRevision", expectedRevision));
         if (planMode != null) {
             semantic.put("planMode", planMode);
         }
+        if (rules != null) {
+            semantic.put("permissionRules", rules);
+        }
         String digest = digests.digest(semantic);
         return store.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode,
                 expectedRevision, harness.supportsApprovalSelection(), harness.supportsAgentDefinitionApprovalSelection(),
-                planMode, harness.supportsPlanMode(), harness.supportsLiveApprovalSelection());
+                planMode, harness.supportsPlanMode(), harness.supportsLiveApprovalSelection(), rules,
+                harness.supportsPermissionRules(), harness.supportsAutoApproval());
     }
 
     private static void requireModelActor(String actorId) {
@@ -1368,6 +1387,9 @@ public class ManagedAgentService {
                 || supportsApprovalSelection(session);
         approvalExecutable = approvalExecutable && (approvalSelection == null
                 || !approvalSelection.planMode() || harness.supportsPlanMode());
+        approvalExecutable = approvalExecutable && (approvalSelection == null
+                || (!"auto".equals(approvalSelection.mode()) || harness.supportsAutoApproval())
+                && (approvalSelection.permissionRules() == null || harness.supportsPermissionRules()));
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -1574,8 +1596,15 @@ public class ManagedAgentService {
         // sweep is the spender, not the rescuer.
         if (admission.turnId() != null && harness.isAvailable()
                 && (!workspaceBound || harness.isWorkspaceFilesAvailable())) {
-            coordinator.dispatch(tenantId, admission.sessionId(),
-                    admission.turnId());
+            if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+                org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                        new org.springframework.transaction.support.TransactionSynchronization() {
+                            @Override
+                            public void afterCommit() { coordinator.dispatch(tenantId, admission.sessionId(), admission.turnId()); }
+                        });
+            } else {
+                coordinator.dispatch(tenantId, admission.sessionId(), admission.turnId());
+            }
         }
     }
 
@@ -1955,6 +1984,35 @@ public class ManagedAgentService {
                     "hosted_harness_disabled",
                     "Hosted Harness is not configured.");
         }
+    }
+
+    public boolean supportsUserMessageQueue() { return harness.supportsUserMessageQueue(); }
+
+    public SessionRecord authorizeUserMessageActor(String tenantId, String actorId, String sessionId) {
+        if (actorId == null || actorId.isBlank()) {
+            throw new ManagedAgentException(HttpStatus.UNAUTHORIZED, "actor_required", "An authenticated actor is required.");
+        }
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        requireSubmitterRole(session, actorId);
+        return session;
+    }
+
+    public SessionRecord authorizeUserMessages(String tenantId, String actorId, String sessionId) {
+        SessionRecord session = authorizeUserMessageActor(tenantId, actorId, sessionId);
+        requireVisibleSession(session);
+        requireSubmitterFacts(session, actorId);
+        if (!"ACTIVE".equals(session.status())) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "session_not_active", "The Session does not accept messages.");
+        }
+        return session;
+    }
+
+    public List<Map<String, Object>> userMessageInput(List<InputBlock> blocks) {
+        List<Map<String, Object>> normalized = input(blocks, true);
+        if (normalized.stream().anyMatch(block -> "image".equals(block.get("type")))) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_input", "Images require an idle Turn.");
+        }
+        return normalized;
     }
 
     private List<Map<String, Object>> input(List<InputBlock> blocks,

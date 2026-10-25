@@ -482,6 +482,24 @@ class ManagedActionStoreTest {
         return options;
     }
 
+    @ParameterizedTest
+    @CsvSource({"1,true", "2,true", "3,true", "1,false", "2,false", "3,false"})
+    void actionOptionsPreserveOnlyAnExplicitHumanDecisionRequirement(int version, boolean required) {
+        ObjectNode options = planExitOptions().put("v", version).put("requiresHumanDecision", required);
+        if (version < 3) {
+            options.remove("continuationRef");
+        }
+        if (version < 2) {
+            options.remove("inputRef");
+        }
+        if (required) {
+            project("requested", null, 1, options);
+            assertThat(actions.find(TENANT, SESSION, ACTION).orElseThrow().options().path("requiresHumanDecision").booleanValue()).isTrue();
+        } else {
+            assertThatThrownBy(() -> project("requested", null, 1, options)).isInstanceOf(ManagedAgentException.class);
+        }
+    }
+
     private OperationAdmission admitAs(String actor, String key, String digest, JsonNode body, long now) {
         return transactions.execute(status -> actions.admit(TENANT, SESSION, actor,
                 actor == null ? "anonymous" : actor + "-digest", key, digest, ACTION, body, now));

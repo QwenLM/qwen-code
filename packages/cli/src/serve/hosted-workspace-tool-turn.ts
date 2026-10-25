@@ -10,6 +10,7 @@ import {
   confirmReplacedHostedTurnOwner,
 } from './hosted-turn-cleanup.js';
 import { probeNeverStarted } from './hosted-never-started-reconcile.js';
+import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 
 import {
   readHostedFileHistory,
@@ -26,9 +27,21 @@ import {
   HOSTED_GLOB_TOO_COMPLEX,
 } from './hosted-glob-pattern.js';
 import {
+  HostedTodoInputError,
+  hostedTodoInstructions,
+  writeHostedTodos,
+} from './hosted-todo-session.js';
+import {
+  checkHostedTodoWriteInput,
+  HOSTED_TODO_CONTENT_MAX_CHARS,
+  HOSTED_TODO_MAX_DEPENDENCIES,
+  HOSTED_TODO_MAX_ITEMS,
+} from './hosted-workspace-tool-input.js';
+import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_FILE_PROFILE_V3,
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
@@ -46,6 +59,8 @@ import {
 } from './hosted-plan-mode.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import { DEFAULT_TOOL_OUTPUT_BATCH_BUDGET } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ClassifierResult } from '@qwen-code/qwen-code-core/permissions/classifier.js';
+import { evaluateHostedPermissionRules } from './hosted-permission-policy.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -208,6 +223,7 @@ import {
 } from './hosted-hook-session.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { waitForTurn } from './hosted-turn-wait.js';
+import { rewriteGitHubBlobUrl } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
 import {
   HOSTED_SKILL_APPROVAL_REFUSAL,
@@ -602,8 +618,28 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+const HOSTED_WEB_FETCH_TOOL: FunctionDeclaration = {
+  name: 'web_fetch',
+  description:
+    'Fetch a public HTTPS web page from the Session Runtime. Returns bounded text and HTTP metadata; HTML is converted to Markdown. Use prompt to describe what to extract and answer using the returned content. Private networks, authenticated URLs and binary downloads are unavailable. Cross-host redirects require a new call. Outbound requests require approval in default and auto-edit modes.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      url: { type: 'string', description: 'The public HTTPS URL to fetch.' },
+      prompt: {
+        type: 'string',
+        description: 'Information to extract from the page.',
+      },
+      format: { type: 'string', enum: ['auto', 'markdown', 'html', 'text'] },
+    },
+    required: ['url', 'prompt'],
+    additionalProperties: false,
+  },
+};
+
 export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_FILE_TOOLS,
+  HOSTED_WEB_FETCH_TOOL,
   {
     name: 'run_shell_command',
     description:
@@ -656,6 +692,53 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
+// #15076: `todo_write`, declared only on `files/3`. The Harness persists
+// the Session list without writing a Workspace file. `web_fetch` is not part
+// of this declaration: `main` adds it to the same files lane under its own argument
+// and destination checks, so this array appends only the todo tool.
+export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
+  name: 'todo_write',
+  description:
+    'Create or replace the task list of this Session for complex or multi-step work. Send the whole list each time: the call replaces the stored list, and while the plan has unfinished items an omitted `blockedBy` is preserved for an id that already exists.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      todos: {
+        type: 'array',
+        description:
+          'The complete updated task list. Keep the whole list under about 16,000 bytes of JSON; prefer fewer, shorter items.',
+        maxItems: HOSTED_TODO_MAX_ITEMS,
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', minLength: 1, maxLength: 500 },
+            content: {
+              type: 'string',
+              minLength: 1,
+              maxLength: HOSTED_TODO_CONTENT_MAX_CHARS,
+            },
+            status: {
+              type: 'string',
+              enum: ['pending', 'in_progress', 'completed'],
+            },
+            blockedBy: {
+              type: 'array',
+              items: { type: 'string', maxLength: 500 },
+              uniqueItems: true,
+              maxItems: HOSTED_TODO_MAX_DEPENDENCIES,
+              description:
+                'Task IDs that must finish before this item. While the plan has unfinished items, omitted dependencies are preserved for existing ids; send [] to remove them.',
+            },
+          },
+          required: ['id', 'content', 'status'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['todos'],
+    additionalProperties: false,
+  },
+};
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
 // call it does not declare. A missing read_file stops the module loading:
@@ -682,10 +765,12 @@ export const HOSTED_WORKSPACE_READ_TOOLS: FunctionDeclaration[] = [
 // no preview. Both degrade silently into the card's "Tool arguments are
 // unavailable for this approval." fallback, so a test enumerates the set.
 export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
+  'web_fetch',
   'read_file',
   'write_file',
   'edit',
   'run_shell_command',
+  'todo_write',
   'agent',
   'send_message',
   'team_create',
@@ -1693,11 +1778,22 @@ interface HostedPreparedRequest {
   command: boolean;
   skill: boolean;
   planExit?: boolean;
+  todo?: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
+  setPermissionClassifier(
+    classify: (
+      call: ToolCallRequestInfo,
+      signal: AbortSignal,
+    ) => Promise<ClassifierResult>,
+  ): void {
+    this.permissionClassifier = classify;
+  }
+
   private readonly publicPlanMode: boolean;
   private planning: boolean;
+  private residentWorkspace = false;
   private logicalRound = 0;
   private nativeBatch?: {
     messageId: string;
@@ -1734,6 +1830,10 @@ export class HostedWorkspaceToolTurn {
   // Once an approval expires nobody is answering, so the Turn asks no more.
   private unanswered = false;
   private promptHookRunner?: HostedPromptHookRunner;
+  private permissionClassifier?: (
+    call: ToolCallRequestInfo,
+    signal: AbortSignal,
+  ) => Promise<ClassifierResult>;
   // Calls a PermissionRequest Hook allowed, which the mode then never asks.
   private readonly hookAllowed = new Set<string>();
   private readonly mcp?: HostedMcpSession;
@@ -1917,6 +2017,15 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
+   * #15076: whether this Session's profile declares `todo_write`. Only the
+   * `/3` profiles do; every earlier profile keeps its exact vocabulary, so
+   * the turn refuses the name there.
+   */
+  private declaresTodoTool(): boolean {
+    return this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3;
+  }
+
+  /**
    * H4b: an Agent call is admitted exactly when this Shell-laned Session
    * owns its child orchestrator (a child Session's own turn does not),
    * behind the kind gate.
@@ -1949,11 +2058,61 @@ export class HostedWorkspaceToolTurn {
     );
   }
 
+  private backgroundShellAdmitted(): boolean {
+    return (
+      this.publication !== undefined &&
+      this.childRuns !== undefined &&
+      childRunAdmissionsEnabled()
+    );
+  }
+
+  private monitorsAdmitted(): boolean {
+    return (
+      this.monitors !== undefined &&
+      this.publication !== undefined &&
+      monitorRunAdmissionsEnabled()
+    );
+  }
+
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    if (
+      this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+      (this.profile === undefined &&
+        !this.mcp &&
+        !this.hooks &&
+        !this.shell &&
+        !this.publication)
+    ) {
+      try {
+        await waitForTurn(this.broker.resolveCapabilities(), signal);
+      } catch (cause) {
+        if (
+          !(cause instanceof HostedWorkspaceBrokerRejection) ||
+          cause.status !== 404
+        )
+          throw cause;
+        await waitForTurn(this.warmed, signal);
+      }
+      this.residentWorkspace =
+        this.broker.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    }
     this.planning =
       this.publicPlanMode &&
       (await hostedPublicPlanActive(this.session, this.promptId));
+    if (this.residentWorkspace) {
+      this.advertised = hostedWorkspaceDeclarations(
+        HOSTED_WORKSPACE_FILE_TOOLS,
+        !this.fileBackupsEnabled,
+      );
+      if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
+      return this.planning
+        ? this.advertised.filter(
+            (tool) =>
+              tool.name === 'read_file' || tool.name === 'exit_plan_mode',
+          )
+        : this.advertised;
+    }
     // #13753 I3: a snapshot child's read profile declares its two read
     // tools and nothing else, whatever lanes, orchestration or MCP the
     // Session has; the refusal of every other call rests on this alone.
@@ -1967,16 +2126,23 @@ export class HostedWorkspaceToolTurn {
     // board commands — resolved once, both declarations follow it.
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
+    // #15076: only a `/3` profile declares `todo_write`, so every earlier
+    // profile keeps the exact array it has always declared.
+    const todoTool = this.declaresTodoTool();
     this.advertised = [
       ...[
         ...(this.publication || this.shell
           ? HOSTED_WORKSPACE_SHELL_TOOLS
-          : HOSTED_WORKSPACE_FILE_TOOLS),
+          : [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_WEB_FETCH_TOOL]),
         ...(search ? [HOSTED_GLOB_TOOL] : []),
+        ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
       ]
-        .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
+        .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((tool) => {
-          if (this.foregroundOnly && tool.name === 'run_shell_command') {
+          if (
+            tool.name === 'run_shell_command' &&
+            !this.backgroundShellAdmitted()
+          ) {
             const schema = structuredClone(tool.parametersJsonSchema) as {
               properties?: Record<string, unknown>;
             };
@@ -1984,7 +2150,7 @@ export class HostedWorkspaceToolTurn {
             return {
               ...tool,
               description:
-                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms.',
+                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
               parametersJsonSchema: schema,
             };
           }
@@ -2091,6 +2257,14 @@ export class HostedWorkspaceToolTurn {
             HOSTED_PUBLIC_PLAN_READS.has(tool.name ?? ''),
         )
       : this.advertised;
+  }
+
+  async todoInstructions(): Promise<string> {
+    // A planning round withholds `todo_write` from `declarations()`, so it must
+    // not inject an instruction to keep the list current with it.
+    return this.declaresTodoTool() && !this.planning
+      ? hostedTodoInstructions(this.session)
+      : '';
   }
 
   planModeInstructions(): string {
@@ -2399,13 +2573,19 @@ export class HostedWorkspaceToolTurn {
           items.every(
             (item) =>
               item.state === 'settled' &&
-              ['read_file', 'write_file', 'edit', 'glob'].includes(
+              ['read_file', 'write_file', 'edit', 'glob', 'web_fetch'].includes(
                 item.toolName,
               ),
           ) &&
           (saved ||
             items.every((item) =>
-              ['read_file', 'glob'].includes(item.toolName),
+              [
+                'read_file',
+                'glob',
+                ...(isHostedWorkspaceReadProfile(this.profile)
+                  ? []
+                  : ['web_fetch']),
+              ].includes(item.toolName),
             )) &&
           (await canSettleHostedFileHistory(this.session, {
             pendingUndo: null,
@@ -2848,6 +3028,7 @@ export class HostedWorkspaceToolTurn {
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
+          (call.name === 'todo_write' && this.declaresTodoTool()) ||
           HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
             this.commands?.command(
@@ -3344,6 +3525,7 @@ export class HostedWorkspaceToolTurn {
     if (
       !batch ||
       batch.uncaptured ||
+      batch.requests.some((request) => request.todo) ||
       !runtime ||
       (isHostedWorkspaceShellProfile(this.profile) &&
         !singlePlanExit &&
@@ -3356,9 +3538,14 @@ export class HostedWorkspaceToolTurn {
             singlePlanExit ||
             (this.publicChildren &&
               ['agent', 'run_shell_command'].includes(request.call.name)) ||
-            ['read_file', 'write_file', 'edit', 'glob'].includes(
-              request.call.name,
-            )
+            [
+              'read_file',
+              'write_file',
+              'edit',
+              'glob',
+              'todo_write',
+              'web_fetch',
+            ].includes(request.call.name)
           ) ||
           // A call refused at the canonical-digest ceiling (#13803 D1) has
           // no argument digest a restore could re-verify, and one refused
@@ -3644,9 +3831,7 @@ export class HostedWorkspaceToolTurn {
             // The admitted family runs v3 only: a shell-mode turn has no
             // publication to drive it, so admitting there would only re-
             // send the request into the background-refusing v2 path.
-            this.publication !== undefined &&
-            this.childRuns !== undefined &&
-            childRunAdmissionsEnabled();
+            this.backgroundShellAdmitted();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Shell requires a nonempty command.';
           } else if (unsupportedKey !== undefined) {
@@ -3685,6 +3870,37 @@ export class HostedWorkspaceToolTurn {
             : this.publication
               ? { ...args }
               : { ...args, is_background: false };
+        } else if (call.name === 'web_fetch') {
+          input = { ...call.args };
+          const args = call.args;
+          try {
+            const url =
+              typeof args['url'] === 'string'
+                ? new URL(args['url'])
+                : undefined;
+            if (
+              !url ||
+              url.protocol !== 'https:' ||
+              url.username ||
+              url.password ||
+              typeof args['url'] !== 'string' ||
+              !/^https:\/\//i.test(args['url']) ||
+              typeof args['prompt'] !== 'string' ||
+              !args['prompt'].trim() ||
+              (args['format'] !== undefined &&
+                !['auto', 'markdown', 'html', 'text'].includes(
+                  args['format'] as string,
+                )) ||
+              Object.keys(args).some(
+                (key) => !['url', 'prompt', 'format'].includes(key),
+              )
+            )
+              throw new Error('Invalid web_fetch arguments.');
+            input['url'] = rewriteGitHubBlobUrl(url.toString());
+          } catch {
+            validationError =
+              'Hosted web_fetch requires a public HTTPS URL without credentials, a nonempty prompt, and optional format auto, markdown, html or text. Correct the arguments and retry.';
+          }
         } else if (call.name === 'glob') {
           input = { ...call.args };
           const globError =
@@ -3732,6 +3948,10 @@ export class HostedWorkspaceToolTurn {
               }
             }
           }
+        } else if (call.name === 'todo_write') {
+          const check = checkHostedTodoWriteInput(call.args);
+          input = check.input;
+          if (check.error) validationError = check.error;
         } else if (call.name === 'monitor') {
           const args = call.args;
           const unsupportedKey = Object.keys(args).find(
@@ -3747,10 +3967,7 @@ export class HostedWorkspaceToolTurn {
           // owns its monitor_run orchestrator and the detached family has
           // its v3 flow — publication — without it the request refuses at
           // admission rather than travelling v2 and never landing.
-          monitorAdmitted =
-            this.monitors !== undefined &&
-            this.publication !== undefined &&
-            monitorRunAdmissionsEnabled();
+          monitorAdmitted = this.monitorsAdmitted();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Monitor requires a nonempty command.';
           } else if (unsupportedKey !== undefined) {
@@ -4213,6 +4430,7 @@ export class HostedWorkspaceToolTurn {
           command,
           skill,
           planExit,
+          todo: call.name === 'todo_write',
         };
       });
     };
@@ -4228,6 +4446,29 @@ export class HostedWorkspaceToolTurn {
     const unicodeErrors = calls.map((call) =>
       hostedShellInputError(call.name, call.args),
     );
+    if (
+      !restored &&
+      this.residentWorkspace &&
+      calls.some(
+        (call) =>
+          !HOSTED_WORKSPACE_FILE_TOOLS.some(
+            (tool) => tool.name === call.name,
+          ) && !(this.publicPlanMode && call.name === 'exit_plan_mode'),
+      )
+    ) {
+      return this.refuseBatch(
+        calls,
+        calls.map((call) =>
+          HOSTED_WORKSPACE_FILE_TOOLS.some((tool) => tool.name === call.name) ||
+          (this.publicPlanMode && call.name === 'exit_plan_mode')
+            ? undefined
+            : 'Resident Workspace supports only read_file, write_file and edit.',
+        ),
+        parts,
+        model,
+        skillOrigin,
+      );
+    }
     if (unicodeErrors.some((error) => error !== undefined)) {
       // Profile, duplicate-id and truncated-input hard refusals still win.
       const requests = prepareRequests(calls);
@@ -4274,7 +4515,11 @@ export class HostedWorkspaceToolTurn {
         skillOrigin,
       );
     }
-    if (this.hooks || this.mcp || requests.some((request) => !request.skill))
+    if (
+      this.hooks ||
+      this.mcp ||
+      requests.some((request) => !request.skill && !request.todo)
+    )
       await waitForTurn(this.warmed, signal);
     // H4b: an agent-only batch runs entirely inside its own Sessions and
     // needs no Runtime at all — holding the parent's mount across the
@@ -4294,7 +4539,8 @@ export class HostedWorkspaceToolTurn {
           request.message !== true &&
           !request.team &&
           request.command !== true &&
-          !request.skill,
+          !request.skill &&
+          !request.todo,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -4549,6 +4795,7 @@ export class HostedWorkspaceToolTurn {
           request.command ||
           request.planExit ||
           request.skill ||
+          request.todo ||
           request.workflow
         )
           continue;
@@ -5026,6 +5273,44 @@ export class HostedWorkspaceToolTurn {
             );
           await this.commit('tool_result', converted, model);
           this.planning = false;
+          responses.push(...converted);
+          continue;
+        }
+        if (request.todo) {
+          let converted: Part[];
+          try {
+            const todos = await writeHostedTodos(
+              this.session,
+              this.promptId,
+              request.call.callId,
+              request.input,
+            );
+            converted = convertToFunctionResponse(
+              request.call.name,
+              request.call.callId,
+              [{ text: 'Todo list updated.' }],
+            );
+            const response = converted[0]?.functionResponse;
+            if (!response) throw new Error('Hosted Todo result is missing.');
+            response.response = {
+              ...response.response,
+              todos,
+              executionStatus: 'success',
+            };
+          } catch (cause) {
+            if (!(cause instanceof HostedTodoInputError)) throw cause;
+            converted = convertToFunctionErrorResponse(
+              request.call.name,
+              request.call.callId,
+              [],
+              cause.message,
+            );
+          }
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted Todo result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
           responses.push(...converted);
           continue;
         }
@@ -7903,6 +8188,7 @@ export class HostedWorkspaceToolTurn {
         refusals[index] !== undefined ||
         !this.approval ||
         request.skill ||
+        (await this.permissionDecision(request)) !== 'default' ||
         !hostedApprovalAsks(
           await this.readApprovalSettings(),
           request.call.name,
@@ -7948,7 +8234,7 @@ export class HostedWorkspaceToolTurn {
    * is asked about whatever the mode or a PermissionRequest Hook decided.
    */
   private async approve(
-    requests: ReadonlyArray<{ call: ToolCallRequestInfo; inputBytes: Buffer }>,
+    requests: readonly HostedPreparedRequest[],
     messageId: string,
     inputRefs: Map<number, ManagedSessionDurableRef>,
     signal: AbortSignal,
@@ -7964,23 +8250,46 @@ export class HostedWorkspaceToolTurn {
     let asked = false;
     for (const [index, request] of requests.entries()) {
       if (index < nextOrdinal) continue;
-      if (
-        refusals[index] ||
-        (request.call.name === 'skill' && this.skills !== undefined) ||
-        (!asks.has(index) &&
-          !(
-            this.publicPlanMode &&
-            this.planning &&
-            request.call.name === 'exit_plan_mode'
-          ) &&
-          (this.hookAllowed.has(request.call.callId) ||
-            !hostedApprovalAsks(
-              await this.readApprovalSettings(),
-              request.call.name,
-              globProfile,
-            )))
-      )
+      if (refusals[index]) continue;
+      const settings = await this.readApprovalSettings();
+      const decision = await this.permissionDecision(request, settings);
+      if (decision === 'deny') {
+        refusals[index] =
+          'The Session permission rules denied this tool call, so it was not run.';
         continue;
+      }
+      const humanOnly =
+        asks.has(index) ||
+        decision === 'ask' ||
+        (this.publicPlanMode &&
+          this.planning &&
+          request.call.name === 'exit_plan_mode');
+      if (!humanOnly) {
+        if (
+          decision === 'allow' ||
+          (request.call.name === 'skill' && this.skills !== undefined) ||
+          this.hookAllowed.has(request.call.callId) ||
+          !hostedApprovalAsks(settings, request.call.name, globProfile)
+        )
+          continue;
+        if (
+          settings.mode === 'auto' &&
+          !request.call.name.startsWith('mcp_') &&
+          this.permissionClassifier
+        ) {
+          const result = await this.permissionClassifier(
+            { ...request.call, args: request.input },
+            signal,
+          );
+          signal.throwIfAborted();
+          if (!result.unavailable) {
+            if (result.shouldBlock)
+              refusals[index] =
+                `Auto approval blocked this tool call: ${result.reason}`;
+            continue;
+          }
+        }
+      }
       asked = true;
       if (signal.aborted) break;
       if (this.unanswered) {
@@ -7998,7 +8307,8 @@ export class HostedWorkspaceToolTurn {
         inputRef,
         messageId,
         signal,
-        !asks.has(index) && request.call.name !== 'exit_plan_mode',
+        !humanOnly && request.call.name !== 'exit_plan_mode',
+        humanOnly,
       );
     }
     return asked && signal.aborted
@@ -8013,6 +8323,7 @@ export class HostedWorkspaceToolTurn {
     messageId: string,
     signal: AbortSignal,
     liveApproval: boolean,
+    requiresHumanDecision = false,
   ): Promise<string | undefined> {
     const authority = this.session.authority;
     const requestId = `tool_approval_${randomBytes(16).toString('hex')}`;
@@ -8048,6 +8359,9 @@ export class HostedWorkspaceToolTurn {
       createdAt,
       expiresAt: createdAt + approval.settings.timeoutMs,
       options: HOSTED_APPROVAL_OPTIONS,
+      ...(requiresHumanDecision
+        ? { requiresHumanDecision: true as const }
+        : {}),
     };
     const optionsRef = await this.session.resources.publish(
       'managed-action-options',
@@ -8101,6 +8415,40 @@ export class HostedWorkspaceToolTurn {
     if (action.state !== 'expired') return APPROVAL_REFUSALS.cancelled;
     this.unanswered = true;
     return APPROVAL_REFUSALS.expired;
+  }
+
+  private async permissionDecision(
+    request: HostedPreparedRequest,
+    settings?: HostedApprovalSettings,
+  ) {
+    const selected = settings ?? (await this.readApprovalSettings());
+    if (!selected.permissionRules) return 'default';
+    const input = request.mcp
+      ? (request.input as unknown as import('@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js').ManagedMcpInvoke)
+      : undefined;
+    const identity =
+      input?.request.kind === 'tool_call'
+        ? { serverName: input.serverId, serverToolName: input.request.name }
+        : undefined;
+    const identities =
+      this.mcp?.getCatalogs().flatMap((catalog) =>
+        catalog.tools.map((tool) => ({
+          serverName: catalog.serverId,
+          serverToolName: tool.name,
+        })),
+      ) ?? [];
+    return evaluateHostedPermissionRules(
+      selected.permissionRules,
+      {
+        ...request.call,
+        args:
+          input?.request.kind === 'tool_call'
+            ? input.request.arguments
+            : request.input,
+      },
+      identity,
+      identities,
+    );
   }
 
   private async readApprovalSettings(): Promise<HostedApprovalSettings> {
