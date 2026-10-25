@@ -1212,7 +1212,7 @@ describe('WebShellSidebar workspace removal', () => {
     await expandWorkspace('other');
 
     // Current-session delete is allowed while the session is idle (#12619);
-    // archive keeps its current-session restriction.
+    // archive allows the idle current session now too (#15480).
     expect(inlineSessionAction('Locked current', 'Delete')?.disabled).toBe(
       false,
     );
@@ -1220,7 +1220,7 @@ describe('WebShellSidebar workspace removal', () => {
       (await openSessionMenuItem('Locked current', 'Archive')).getAttribute(
         'aria-disabled',
       ),
-    ).toBe('true');
+    ).toBeNull();
     expect(inlineSessionAction('Locked other', 'Rename')?.disabled).toBe(false);
     expect(inlineSessionAction('Locked current', 'Rename')?.disabled).toBe(
       false,
@@ -2595,16 +2595,12 @@ describe('WebShellSidebar workspace removal', () => {
     expect(rename?.disabled).toBe(false);
     // Current-session delete is allowed while the session is idle (#12619).
     expect(remove?.disabled).toBe(false);
+    // The idle current row is archivable now too (#15480).
     const archive = await openSessionMenuItem(
       'Current no-cwd primary',
       'Archive',
     );
-    expect(archive.getAttribute('aria-disabled')).toBe('true');
-
-    await act(async () => {
-      click(archive);
-      await Promise.resolve();
-    });
+    expect(archive.getAttribute('aria-disabled')).toBeNull();
     expect(
       (await openSessionMenuItem('Equal-id secondary', 'Archive')).hasAttribute(
         'data-disabled',
@@ -4554,7 +4550,7 @@ describe('WebShellSidebar non-primary archive', () => {
       (
         await openSessionMenuItem('Legacy primary shared', 'Archive')
       ).getAttribute('aria-disabled'),
-    ).toBe('true');
+    ).toBeNull();
     await selectSessionMenuItem('Secondary shared', 'Archive');
     await act(async () => {
       await archiveSessionsData.mock.results.at(-1)?.value;

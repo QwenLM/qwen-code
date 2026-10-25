@@ -2772,10 +2772,12 @@ describe('Recent sessions shared rows', () => {
       await flushSidebar();
       expect(copy.hasAttribute('aria-current')).toBe(false);
       expect(original.hasAttribute('aria-current')).toBe(false);
+      // The idle recent row stays archivable even while it is the current
+      // session (issue #15480).
       expect(
         copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!
           .disabled,
-      ).toBe(true);
+      ).toBe(false);
       renderSidebar(false, { currentSessionActive: true });
       await flushSidebar();
       expect(copy.getAttribute('aria-current')).toBe('page');
@@ -2787,7 +2789,7 @@ describe('Recent sessions shared rows', () => {
       expect(
         copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!
           .disabled,
-      ).toBe(true);
+      ).toBe(false);
       expect(loadSession).not.toHaveBeenCalled();
     },
   );
@@ -3072,7 +3074,7 @@ describe('Recent sessions shared rows', () => {
     expect(active.archiveSession).not.toHaveBeenCalled();
   });
 
-  it('disables archive for current and running sessions and provides the standard hover details', async () => {
+  it('keeps archive enabled for the idle current recent row and disabled for a running one', async () => {
     enableRecentSessions();
     connection.sessionId = 'session-a';
     workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
@@ -3088,7 +3090,17 @@ describe('Recent sessions shared rows', () => {
       ...recent.querySelectorAll<HTMLButtonElement>('[aria-label="Archive"]'),
     ];
     expect(archiveButtons).toHaveLength(2);
-    expect(archiveButtons.every((button) => button.disabled)).toBe(true);
+    // The idle current row is archivable now (#15480); the running one is not.
+    expect(archiveButtons.filter((button) => button.disabled)).toHaveLength(1);
+    const runningRow = [
+      ...recent.querySelectorAll<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      ),
+    ].find((element) => element.textContent?.includes('running-chat'))!;
+    expect(
+      runningRow.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!
+        .disabled,
+    ).toBe(true);
     const row = [
       ...recent.querySelectorAll<HTMLElement>(
         `div.${sidebarStyles.sessionRow}`,
