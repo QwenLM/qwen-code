@@ -228,6 +228,7 @@ describe('continue analysis from the trusted App', () => {
         ),
       );
       expect(text('continuation-status')).toContain('could duplicate');
+      expect(text('continuation-status')).toContain('cancelled or rejected');
       expect(text('continue-analysis')).toContain('checking the session');
       present({});
       expect(bridge.sendMessage).toHaveBeenCalledTimes(1);
@@ -278,6 +279,7 @@ describe('continue analysis from the trusted App', () => {
     expect(
       document.getElementById('continuation-status')!.dataset['state'],
     ).toBe('terminal');
+    expect(text('continuation-status')).not.toContain('already sent');
   });
 
   it('preserves accepted semantics when the card subsequently stops', async () => {

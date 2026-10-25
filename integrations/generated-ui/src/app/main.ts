@@ -72,7 +72,8 @@ function renderContinuation(): void {
 function endContinuation(): void {
   const attempt = pendingAttempt;
   pendingAttempt = undefined;
-  if (continuationState === 'pending')
+  // Only a built message can have reached the host; a capture failure sent nothing.
+  if (continuationState === 'pending' && attempt?.text)
     continuationMessage =
       'Stopped waiting for confirmation. Check the original session; a request already sent may still be accepted. Stopping this card does not withdraw a session request.';
   continuationState = 'terminal';
@@ -129,7 +130,7 @@ async function continueWithParameters(): Promise<void> {
   continuationMessage =
     continuationState === 'accepted'
       ? 'The session accepted the request. Analysis may still be running; follow it in the original session.'
-      : 'Acceptance could not be confirmed. Check the host review and original session before reviewing again; another submission could duplicate the request. Nothing is retried automatically.';
+      : 'Acceptance could not be confirmed. The review may have been cancelled or rejected, or the request may still be in flight. Check the original session before reviewing again; another submission could duplicate a request. Nothing is retried automatically.';
   renderContinuation();
 }
 
