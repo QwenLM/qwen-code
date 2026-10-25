@@ -251,6 +251,13 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
     .fill('Independent');
   await expect(row).toBeVisible();
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  expect(
+    await page.evaluate(() =>
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.workspace-expanded:standalone:active',
+      ),
+    ),
+  ).toBe('false');
   await row.click();
   await expect(page).toHaveURL(
     new URL(

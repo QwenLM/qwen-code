@@ -26,6 +26,17 @@ Search continues to show matching rows even if the saved group state is
 collapsed, without overwriting that preference. Pagination resets on collapse
 as before. Archived sessions stay inside Archived.
 
+An explicit collapse remains authoritative when opening a session from Recent,
+a deep link, or the group's New task action. These actions do not automatically
+expand the group or overwrite its preference. This follows the ordinary workspace
+section convention and preserves the existing creation behavior; the header and
+search remain available to reveal rows.
+
+Recent intentionally continues to aggregate no-workspace sessions, so one session
+can appear in both its source group and Recent, as ordinary workspace sessions
+already do. Main's source-aware selection tracks the clicked copy. Moving the
+group does not change Recent membership or assign a new session owner.
+
 ## Constraints and risks
 
 Preserve creation, opening, selection, search, pagination, lifecycle actions,
@@ -53,6 +64,10 @@ Run the repository build, typecheck, bundle, relevant component and browser test
 formatting and lint checks, then audit the full diff.
 
 ## Decisions and related work
+
+This design supersedes the nested-placement descriptions in the historical
+[standalone daemon design](standalone-daemon-sessions.md) and
+[sidebar session scope design](web-shell-sidebar-session-scope.md).
 
 The name is settled: retain “No-workspace sessions / 无工作区会话”. This PR
 addresses peer placement and persistence and closes #15309. Recent-session aggregation (#14904), creation refresh

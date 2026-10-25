@@ -7071,6 +7071,10 @@ describe('WebShellSidebar standalone grouping', () => {
     };
     connection.capabilities = standaloneCapabilities;
     workspace.capabilities = standaloneCapabilities;
+    window.localStorage.setItem(
+      'qwen.web-shell.sidebar.workspace-expanded:projects',
+      'false',
+    );
     renderSidebar({
       onLoadStandaloneSession: vi.fn(),
       onStandaloneNotice: vi.fn(),
