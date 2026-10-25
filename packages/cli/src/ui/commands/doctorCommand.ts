@@ -18,6 +18,7 @@ import {
   writeMemoryHeapSnapshot,
 } from '../../utils/memoryDiagnostics.js';
 import {
+  getCpuProfileOutputDir,
   isCpuProfileRecording,
   startCpuProfile,
   stopCpuProfile,
@@ -735,13 +736,16 @@ async function cpuProfileDoctorAction(
   if (!stopResult.ok) {
     const alreadyStopped = stopResult.error.includes('not recording');
     if (alreadyStopped) {
+      const dir = getCpuProfileOutputDir();
       const infoMsg =
         process.platform === 'win32'
           ? t(
-              'CPU profile was stopped externally. Check ~/.qwen/cpu-profiles/ for the output.',
+              'CPU profile was stopped externally. Check {{dir}} for the output.',
+              { dir },
             )
           : t(
-              'CPU profile was stopped externally (e.g., via SIGUSR1). Check ~/.qwen/cpu-profiles/ for the output.',
+              'CPU profile was stopped externally (e.g., via SIGUSR1). Check {{dir}} for the output.',
+              { dir },
             );
       if (executionMode === 'interactive') {
         context.ui.addItem({ type: 'info', text: infoMsg }, Date.now());

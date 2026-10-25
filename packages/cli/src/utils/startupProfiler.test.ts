@@ -1,5 +1,6 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   initStartupProfiler,
   profileCheckpoint,
@@ -117,6 +118,26 @@ describe('startupProfiler', () => {
       for (const phase of report!.phases) {
         expect(phase.durationMs).toBeGreaterThanOrEqual(0);
         expect(phase.startMs).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it('writes the report under the global Qwen dir', () => {
+      vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
+      vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const qwenHome = path.join(path.sep, 'custom', 'qwen-home');
+      vi.stubEnv('QWEN_HOME', qwenHome);
+      try {
+        initStartupProfiler();
+        profileCheckpoint('main_entry');
+        finalizeStartupProfile('s1');
+
+        expect(fs.mkdirSync).toHaveBeenCalledWith(
+          path.join(qwenHome, 'startup-perf'),
+          { recursive: true },
+        );
+      } finally {
+        vi.unstubAllEnvs();
       }
     });
 
