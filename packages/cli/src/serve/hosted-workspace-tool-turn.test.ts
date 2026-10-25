@@ -1659,7 +1659,7 @@ it('offers glob under the unified Shell, file-search and read profiles', async (
       ).declarations(signal)
     ).map((tool) => tool.name);
   const file = ['read_file', 'write_file', 'edit', 'web_fetch'];
-  const shellTools = [...file, 'run_shell_command', 'monitor'];
+  const shellTools = [...file, 'run_shell_command'];
   await expect(advertised()).resolves.toEqual(file);
   await expect(advertised('hosted-workspace-files/1')).resolves.toEqual(file);
   await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual([
@@ -10307,16 +10307,11 @@ describe('hosted Monitor admission arm', () => {
       undefined,
       undefined,
     );
-    const result = await bare.execute(
-      [call],
-      parts,
-      'model',
-      new AbortController().signal,
-    );
-    expect(result[0]?.functionResponse?.response).toMatchObject({
-      error:
-        'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.',
-    });
+    await expect(
+      bare.execute([call], parts, 'model', new AbortController().signal),
+    ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepareV3).not.toHaveBeenCalled();
   });
 
   it('refuses a Monitor on a Session that owns monitors but no v3 lane', async () => {
@@ -10337,18 +10332,13 @@ describe('hosted Monitor admission arm', () => {
       undefined,
       { monitors: { record: () => undefined } as never },
     );
-    const result = await bare.execute(
-      [call],
-      parts,
-      'model',
-      new AbortController().signal,
-    );
+    await expect(
+      bare.execute([call], parts, 'model', new AbortController().signal),
+    ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
     // Owning monitors without a v3 lane must never send the Monitor
     // travelling v2 to the Runtime: it refuses at admission, accurately.
-    expect(result[0]?.functionResponse?.response).toMatchObject({
-      error:
-        'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.',
-    });
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepareV3).not.toHaveBeenCalled();
   });
 });
 
@@ -10370,6 +10360,61 @@ function backgroundCall() {
   ];
   return { call, parts };
 }
+
+it('only advertises foreground Shell on a Session without publication', async () => {
+  turn = createTurn(true);
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).not.toContain('monitor');
+  const shell = declarations.find((tool) => tool.name === 'run_shell_command');
+  expect(shell?.parametersJsonSchema).not.toHaveProperty(
+    'properties.is_background',
+  );
+  expect(shell?.description).not.toContain('detached');
+  expect(shell?.description).toContain(
+    'Shell file mutations are not backed up',
+  );
+});
+
+it.each([true, false])(
+  'advertises background Shell only while its kind is enabled (%s)',
+  async (enabled) => {
+    const rig = backgroundTurnRig({
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+    });
+    turn = rig.turn;
+    enablement.childRun = enabled;
+    const declarations = await turn.declarations(new AbortController().signal);
+    const shell = declarations.find(
+      (tool) => tool.name === 'run_shell_command',
+    );
+    if (enabled)
+      expect(shell?.parametersJsonSchema).toHaveProperty(
+        'properties.is_background',
+      );
+    else
+      expect(shell?.parametersJsonSchema).not.toHaveProperty(
+        'properties.is_background',
+      );
+    expect(declarations.map((tool) => tool.name)).not.toContain('monitor');
+  },
+);
+
+it.each([true, false])(
+  'advertises Monitor only while its domain is enabled (%s)',
+  async (enabled) => {
+    const rig = monitorTurnRig({
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+    });
+    turn = rig.turn;
+    enablement.monitorRun = enabled;
+    const declarations = await turn.declarations(new AbortController().signal);
+    expect(declarations.some((tool) => tool.name === 'monitor')).toBe(enabled);
+  },
+);
 
 it('keeps the SSH foreground-only declaration and admission free of detached tools', async () => {
   const outcome: ToolResultEnvelope = {
