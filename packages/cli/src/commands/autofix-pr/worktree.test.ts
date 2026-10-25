@@ -200,6 +200,68 @@ describe('untrustedGitfile (real git)', () => {
     );
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'reads a submodule path with a CR and an LF in it as git does',
+    () => {
+      const head = git(worktree, 'rev-parse', 'HEAD');
+      const name = 'line\r\nbreak';
+      git(
+        worktree,
+        'update-index',
+        '--add',
+        '--cacheinfo',
+        `160000,${head},${name}`,
+      );
+      // Checked out, with its git directory embedded where the tree writes.
+      mkdirSync(join(worktree, name, '.git'), { recursive: true });
+      expect(untrustedSubmodules(worktree, root)).toMatch(
+        /is not the gitfile of a submodule the clone keeps/,
+      );
+    },
+  );
+
+  it('refuses a submodule it cannot read, and skips only one not checked out', () => {
+    const head = git(worktree, 'rev-parse', 'HEAD');
+    git(
+      worktree,
+      'update-index',
+      '--add',
+      '--cacheinfo',
+      `160000,${head},gone`,
+    );
+    expect(untrustedSubmodules(worktree, root)).toBeNull();
+    // A file where the submodule should be: its `.git` cannot be read.
+    git(worktree, 'update-index', '--add', '--cacheinfo', `160000,${head},odd`);
+    writeFileSync(join(worktree, 'odd'), '');
+    expect(untrustedSubmodules(worktree, root)).toMatch(/cannot be read/);
+  });
+
+  it('reads an index whose listing runs past 1 MiB', () => {
+    const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], {
+      cwd: worktree,
+      input: '',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
+    })
+      .toString()
+      .trim();
+    const entries = Array.from(
+      { length: 30_000 },
+      (_, i) => `100644 ${blob}\tdir/a-fairly-long-file-name-${i}.txt`,
+    ).join('\n');
+    execFileSync('git', ['update-index', '--index-info'], {
+      cwd: worktree,
+      input: `${entries}\n`,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
+    });
+    expect(
+      execFileSync('git', ['ls-files', '--stage', '-z'], {
+        cwd: worktree,
+        maxBuffer: 64 * 1024 * 1024,
+      }).length,
+    ).toBeGreaterThan(1024 * 1024);
+    expect(untrustedSubmodules(worktree, root)).toBeNull();
+  });
+
   it('refuses a .git directory, and the entry of another worktree', () => {
     const other = join(root, '.qwen', 'tmp', 'other');
     git(root, 'worktree', 'add', '-q', '-b', 'other', other);

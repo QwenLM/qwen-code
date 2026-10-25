@@ -9,7 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { GIT_TIMEOUT_MS, gitOpt, gitProbe } from '../review/lib/git.js';
+import { GIT_TIMEOUT_MS, gitOpt, gitProbe, gitRaw } from '../review/lib/git.js';
 import { redirectedAncestor, sanitizedGitEnv } from '../review/lib/worktree.js';
 import type { AutofixPrPaths } from './state.js';
 
@@ -119,6 +119,9 @@ function asGitNames(base: string, named: string): string {
   );
 }
 
+/** Refuses a path that is not UTF-8, which a lossy read would rename. */
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
+
 /** Deep enough for any real nesting; deeper is refused, not trusted. */
 const MAX_SUBMODULE_DEPTH = 8;
 
@@ -134,26 +137,45 @@ function untrustedSubmodulesIn(
   common: string,
   depth: number,
 ): string | null {
-  const listed = gitOpt('-C', dir, 'ls-files', '--stage', '-z');
-  if (listed === null) return `git cannot list the files of ${dir}`;
+  // The bytes as git wrote them, however many: a path may hold a CR or an
+  // LF, which a line-normalising read would turn into another path, and an
+  // index runs past the default 1 MiB of output in a large repository.
+  let listed: string;
+  try {
+    listed = STRICT_UTF8.decode(gitRaw('-C', dir, 'ls-files', '--stage', '-z'));
+  } catch {
+    return `git cannot list the files of ${dir} as paths this check reads exactly`;
+  }
   for (const record of listed.split('\0')) {
     // `<mode> <object> <stage>\t<path>`; 160000 is a submodule.
     if (!record.startsWith('160000 ')) continue;
     const path = record.slice(record.indexOf('\t') + 1);
     const sub = join(dir, path);
     const dotGit = join(sub, '.git');
+    const kind = (file: string) => {
+      try {
+        return lstatSync(file);
+      } catch (error) {
+        // Absent — not checked out — is the one answer git also skips.
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      }
+    };
     let text: string;
     try {
-      if (lstatSync(sub).isSymbolicLink()) {
+      const subStat = kind(sub);
+      if (subStat === null) continue;
+      if (subStat.isSymbolicLink()) {
         return `the submodule ${sub} is a symlink`;
       }
-      if (!lstatSync(dotGit).isFile()) {
+      const gitStat = kind(dotGit);
+      if (gitStat === null) continue;
+      if (!gitStat.isFile()) {
         return `${dotGit} is not the gitfile of a submodule the clone keeps`;
       }
       text = readFileSync(dotGit, 'utf8');
     } catch {
-      // Not checked out: git leaves it alone.
-      continue;
+      return `the submodule ${sub} cannot be read`;
     }
     const pointer = gitfilePointer(text);
     if (typeof pointer !== 'string') return `${dotGit} ${pointer.refused}`;
