@@ -40,8 +40,8 @@ jobs:
         run: |
           npm run build
           node scripts/bundle-cli.js
-      - name: 'Reproduce one session ID query without retries'
-        timeout-minutes: 7
+      - name: 'Reproduce the session ID suite without retries'
+        timeout-minutes: 12
         env:
           QWEN_SANDBOX: 'false'
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
@@ -50,4 +50,4 @@ jobs:
         run: >-
           ./node_modules/.bin/vitest run --root ./integration-tests
           --poolOptions.forks.maxForks 2 sdk-typescript/session-id.test.ts
-          --retry 0 -t 'should accept a valid UUID as sessionId'
+          --retry 0 --bail 1

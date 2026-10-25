@@ -20,7 +20,10 @@ import {
   assertSuccessfulCompletion,
 } from './test-helper.js';
 
-const SHARED_TEST_OPTIONS = createSharedTestOptions();
+const SHARED_TEST_OPTIONS = createSharedTestOptions({
+  logLevel: 'debug',
+  stderr: (message: string) => console.error(message),
+});
 
 describe('Session ID Support (E2E)', () => {
   let helper: SDKTestHelper;
@@ -48,8 +51,6 @@ describe('Session ID Support (E2E)', () => {
           cwd: testDir,
           sessionId: customSessionId,
           debug: false,
-          logLevel: 'debug',
-          stderr: (message) => console.error(message),
         },
       });
 
@@ -115,6 +116,7 @@ describe('Session ID Support (E2E)', () => {
           logLevel: 'debug',
           stderr: (msg: string) => {
             stderrMessages.push(msg);
+            console.error(msg);
           },
         },
       });
