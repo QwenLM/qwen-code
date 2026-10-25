@@ -614,6 +614,24 @@ class ManagedAgentPreflightTest {
         assertEquals(ManagedAgentPreflight.Status.FAIL, outside.status());
         assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
                 + " http://127.0.0.1:4182", outside.fix());
+        // The IPv4 wildcard takes IPv6 only from a dual-stack JVM, which
+        // preflight cannot confirm; the IPv4 URL reaches it either way.
+        ManagedAgentPreflight.Check ipv6 = urlCheck("http://[::1]:4182", broker);
+        assertEquals(ManagedAgentPreflight.Status.WARN, ipv6.status());
+        assertEquals("the Hosted Harness dials http://[::1]:4182 over IPv6, but"
+                + " the Broker binds 0.0.0.0, which takes IPv6 only when its"
+                + " JVM listens on both families, unlike under"
+                + " -Djava.net.preferIPv4Stack=true", ipv6.detail());
+        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
+                + " http://127.0.0.1:4182", ipv6.fix());
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                urlCheck("https://[::1]:4182", broker).status());
+        // The JDK binds :: only on a dual-stack socket, which takes IPv4 too.
+        broker.setHost("::");
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlCheck("http://127.0.0.1:4182", broker).status());
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlCheck("http://[::1]:4182", broker).status());
         broker.setAllowNonLoopback(false);
         broker.setHost("127.0.0.1");
         assertEquals(ManagedAgentPreflight.Status.PASS,

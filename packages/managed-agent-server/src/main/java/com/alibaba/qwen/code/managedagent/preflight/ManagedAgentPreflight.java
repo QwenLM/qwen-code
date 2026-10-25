@@ -21,6 +21,7 @@ import org.springframework.core.io.Resource;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -703,14 +704,23 @@ public final class ManagedAgentPreflight {
                     "check that the Hosted Harness starts and reaches "
                             + address);
         }
+        // The URL names the Broker's own socket, which speaks plain HTTP.
+        Check tls = new Check("broker-url", Status.FAIL, "the Hosted Harness"
+                + " dials " + url + ", but the Broker serves plain HTTP there,"
+                + " so TLS cannot connect", fix);
         if (read.port() == broker.getPort()
                 && served(read.hostname(), broker.getHost())) {
-            // The URL names the Broker's own socket, which speaks plain HTTP.
-            return read.https()
-                    ? new Check("broker-url", Status.FAIL, "the Hosted Harness"
-                            + " dials " + url + ", but the Broker serves plain"
-                            + " HTTP there, so TLS cannot connect", fix)
+            return read.https() ? tls
                     : new Check("broker-url", Status.PASS, url, null);
+        }
+        if (read.port() == broker.getPort()
+                && servedOnlyDualStack(read.hostname(), broker.getHost())) {
+            return read.https() ? tls : new Check("broker-url", Status.WARN,
+                    "the Hosted Harness dials " + url + " over IPv6, but the"
+                            + " Broker binds " + broker.getHost() + ", which"
+                            + " takes IPv6 only when its JVM listens on both"
+                            + " families, unlike under"
+                            + " -Djava.net.preferIPv4Stack=true", fix);
         }
         return new Check("broker-url", Status.WARN, "the Hosted Harness dials "
                 + url + ", not the Broker's listener at " + address
@@ -764,12 +774,29 @@ public final class ManagedAgentPreflight {
 
     // Whether the Broker's socket accepts connections to this host: a
     // specific bind serves only its own address, and a wildcard bind every
-    // address of this machine.
+    // address of this machine in its family. The JDK binds :: only on a
+    // dual-stack socket, which takes IPv4 as well, but binds 0.0.0.0 to IPv4
+    // alone under -Djava.net.preferIPv4Stack=true, a JVM option the server
+    // may get from an environment preflight does not share.
     private static boolean served(String host, String bindHost) {
+        return servedBy(host, bindHost, false);
+    }
+
+    // Whether only a dual-stack listener would serve this host: an IPv6
+    // address of this machine against the IPv4 wildcard.
+    private static boolean servedOnlyDualStack(String host, String bindHost) {
+        return !served(host, bindHost) && servedBy(host, bindHost, true);
+    }
+
+    private static boolean servedBy(String host, String bindHost,
+            boolean dualStack) {
         try {
             InetAddress bind = InetAddress.getByName(bindHost);
             for (InetAddress address : InetAddress.getAllByName(host)) {
-                if (bind.isAnyLocalAddress() ? isLocal(address)
+                if (bind.isAnyLocalAddress()
+                        ? isLocal(address) && (dualStack
+                                || bind instanceof Inet6Address
+                                || address instanceof Inet4Address)
                         : address.equals(bind)) {
                     return true;
                 }
