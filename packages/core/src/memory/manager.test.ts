@@ -2091,6 +2091,7 @@ describe('MemoryManager', () => {
     const engagedNoop = (sessionId = 'sess', processedOffset = 2) => ({
       ...extractResult(sessionId, [], processedOffset),
       extractorEngaged: true,
+      madeGenuineProgress: true,
     });
 
     beforeEach(() => {
@@ -4345,6 +4346,7 @@ describe('MemoryManager', () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({
         ...extractResult('sess', [], 2),
         extractorEngaged: true,
+        madeGenuineProgress: true,
       });
 
       // No suite in this repo shares one manager across cases today (the
@@ -4387,6 +4389,7 @@ describe('MemoryManager', () => {
       inFlight.resolve({
         ...extractResult('other', [], 2),
         extractorEngaged: true,
+        madeGenuineProgress: true,
       });
       await running;
       await mgr.drain();

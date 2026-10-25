@@ -47,6 +47,8 @@ export interface AutoMemoryExtractResult {
   cursor: AutoMemoryExtractCursor;
   /** The extractor ran and used a tool (read or wrote memory files). */
   extractorEngaged?: boolean;
+  /** Tool activity or a saved topic, independent of the replay cursor floor. */
+  madeGenuineProgress?: boolean;
 }
 
 function getSessionMismatchResult(
@@ -287,5 +289,6 @@ export async function runAutoMemoryExtract(params: {
     cursor,
     systemMessage: agentResult.systemMessage,
     extractorEngaged: agentResult.extractorEngaged === true,
+    madeGenuineProgress,
   };
 }

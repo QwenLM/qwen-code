@@ -1462,11 +1462,10 @@ export class MemoryManager {
     // `processedOffset` counts entries in its own (possibly pre-compaction)
     // index space, so it must never delete that snapshot.
     const runSeq = this.seqOfExtractParams(params);
-    // Only a run that forked read turns. `runAutoMemoryExtract`'s early
-    // returns (no new user text, session mismatch, memory pressure) still
-    // advance the cursor, so none of them is coverage for a parked snapshot.
-    const forked = result?.extractorEngaged !== undefined;
-    if (forked && result && !result.skippedReason) {
+    // A replay can preserve a cursor ahead of its snapshot without consuming
+    // any turns. Only actual extraction progress establishes coverage.
+    const madeProgress = result?.madeGenuineProgress === true;
+    if (madeProgress && result && !result.skippedReason) {
       const covered = this.extractCadence.get(params.sessionId);
       if (
         covered?.pending !== undefined &&
@@ -1498,7 +1497,7 @@ export class MemoryManager {
     // skipped history.
     if (
       !result ||
-      !forked ||
+      !madeProgress ||
       (!result.skippedReason &&
         (result.cursor.processedOffset ?? 0) < params.history.length)
     ) {
@@ -1758,6 +1757,7 @@ export class MemoryManager {
       // the same turns instead of a no-op consuming them.
       if (
         !result ||
+        result.madeGenuineProgress !== true ||
         result.skippedReason ||
         (result.cursor.processedOffset ?? 0) < pending.history.length
       ) {
