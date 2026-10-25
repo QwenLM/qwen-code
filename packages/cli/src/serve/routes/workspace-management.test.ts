@@ -3963,6 +3963,44 @@ describe('git clone target reservations', () => {
     }
   });
 
+  it('resolves a relative dangling symlink from its physical parent', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-relative-link-'));
+    const storage = join(root, 'storage');
+    const userHome = join(storage, 'user');
+    await mkdir(userHome, { recursive: true });
+    const logicalHome = join(root, 'logical-home');
+    await symlink(userHome, logicalHome);
+    await symlink('../documents-storage', join(userHome, 'Documents'));
+    const target = join(storage, 'documents-storage');
+    const conversations = join(
+      logicalHome,
+      'Documents',
+      'Qwen Code',
+      'Conversations',
+    );
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [conversations],
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(stat(target)).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the Live runtime outside an active clone target', async () => {
     const root = await mkdtemp(join(REAL_DIR, 'qwen-live-clone-'));
     const target = join(root, 'Qwen Code');

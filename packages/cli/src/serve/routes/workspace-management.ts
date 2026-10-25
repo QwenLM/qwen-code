@@ -292,9 +292,10 @@ export function registerWorkspaceManagementRoutes(
         try {
           if (!seen.has(current) && lstatSync(current).isSymbolicLink()) {
             const link = readlinkSync(current);
+            const parent = dirname(current);
             const destination = isAbsolute(link)
               ? link
-              : resolve(dirname(current), link);
+              : join(canonicalizeIfPresent(parent, seen), link);
             return canonicalizeIfPresent(
               join(destination, ...missing.reverse()),
               new Set([...seen, current]),

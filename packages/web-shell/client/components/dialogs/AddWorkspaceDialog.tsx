@@ -451,7 +451,6 @@ export function AddWorkspaceDialog({
           // register the repository the user asked to abort; fall through to
           // the completed-clone form so Register stays an explicit action.
           if (cloneCancelRequestedRef.current === jobId) {
-            cloneCancelRequestedRef.current = undefined;
             setClonedCwd(job.cwd);
             setSubmitting(false);
             return;
@@ -537,6 +536,7 @@ export function AddWorkspaceDialog({
 
   const backToForm = useCallback(() => {
     if (submitting) return;
+    cloneCancelRequestedRef.current = undefined;
     cloneJobIdRef.current = undefined;
     setCloneJob(undefined);
     setCloneUnknown(false);
