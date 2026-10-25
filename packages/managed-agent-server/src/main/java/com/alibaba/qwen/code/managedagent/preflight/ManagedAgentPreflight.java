@@ -715,7 +715,19 @@ public final class ManagedAgentPreflight {
         }
         if (read.port() == broker.getPort()
                 && servedOnlyDualStack(read.hostname(), broker.getHost())) {
-            return read.https() ? tls : new Check("broker-url", Status.WARN,
+            // Whether the Broker's socket takes this address depends on a JVM
+            // option preflight cannot see; when it does not, another listener,
+            // such as a TLS proxy, may hold it.
+            if (read.https()) {
+                return new Check("broker-url", Status.WARN, "the Hosted Harness"
+                        + " dials " + url + " over IPv6: a Broker JVM that"
+                        + " listens on both families takes it on the plain-HTTP"
+                        + " socket at " + address + ", where TLS cannot"
+                        + " connect, while under -Djava.net.preferIPv4Stack=true"
+                        + " another listener, such as a TLS proxy, may hold it",
+                        fix + ", unless a proxy forwards " + url + " there");
+            }
+            return new Check("broker-url", Status.WARN,
                     "the Hosted Harness dials " + url + " over IPv6, but the"
                             + " Broker binds " + broker.getHost() + ", which"
                             + " takes IPv6 only when its JVM listens on both"

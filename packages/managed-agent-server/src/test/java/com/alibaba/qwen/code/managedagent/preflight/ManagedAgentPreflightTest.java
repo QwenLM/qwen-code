@@ -624,8 +624,25 @@ class ManagedAgentPreflightTest {
                 + " -Djava.net.preferIPv4Stack=true", ipv6.detail());
         assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
                 + " http://127.0.0.1:4182", ipv6.fix());
+        // Over https, a dual-stack JVM's plain socket would break TLS, but an
+        // IPv4-only one leaves [::1]:4182 to another listener, such as a TLS
+        // proxy, so this stays a warning too.
+        ManagedAgentPreflight.Check tlsIpv6 =
+                urlCheck("https://[::1]:4182", broker);
+        assertEquals(ManagedAgentPreflight.Status.WARN, tlsIpv6.status());
+        assertEquals("the Hosted Harness dials https://[::1]:4182 over IPv6:"
+                + " a Broker JVM that listens on both families takes it on the"
+                + " plain-HTTP socket at 0.0.0.0:4182, where TLS cannot"
+                + " connect, while under -Djava.net.preferIPv4Stack=true"
+                + " another listener, such as a TLS proxy, may hold it",
+                tlsIpv6.detail());
+        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
+                + " http://127.0.0.1:4182, unless a proxy forwards"
+                + " https://[::1]:4182 there", tlsIpv6.fix());
+        // A URL the Broker's own socket takes in either mode still fails over
+        // https.
         assertEquals(ManagedAgentPreflight.Status.FAIL,
-                urlCheck("https://[::1]:4182", broker).status());
+                urlCheck("https://127.0.0.1:4182", broker).status());
         // The JDK binds :: only on a dual-stack socket, which takes IPv4 too.
         broker.setHost("::");
         assertEquals(ManagedAgentPreflight.Status.PASS,
