@@ -42,7 +42,7 @@ public final class WorkspaceToolProfiles {
     }
 
     public static boolean supportsApprovalMode(String mode) {
-        return "default".equals(mode) || "auto-edit".equals(mode) || "yolo".equals(mode);
+        return "default".equals(mode) || "auto".equals(mode) || "auto-edit".equals(mode) || "yolo".equals(mode);
     }
 
     public static boolean supportsApprovalSelection(StoreModels.SessionRecord session) {
@@ -55,6 +55,6 @@ public final class WorkspaceToolProfiles {
     }
 
     public static boolean requiresApproval(String mode) {
-        return "default".equals(mode) || "auto-edit".equals(mode);
+        return "default".equals(mode) || "auto".equals(mode) || "auto-edit".equals(mode);
     }
 }

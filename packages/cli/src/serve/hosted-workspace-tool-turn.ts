@@ -53,6 +53,8 @@ import {
 } from './hosted-plan-mode.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import { DEFAULT_TOOL_OUTPUT_BATCH_BUDGET } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ClassifierResult } from '@qwen-code/qwen-code-core/permissions/classifier.js';
+import { evaluateHostedPermissionRules } from './hosted-permission-policy.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -1773,6 +1775,15 @@ interface HostedPreparedRequest {
 }
 
 export class HostedWorkspaceToolTurn {
+  setPermissionClassifier(
+    classify: (
+      call: ToolCallRequestInfo,
+      signal: AbortSignal,
+    ) => Promise<ClassifierResult>,
+  ): void {
+    this.permissionClassifier = classify;
+  }
+
   private readonly publicPlanMode: boolean;
   private planning: boolean;
   private logicalRound = 0;
@@ -1811,6 +1822,10 @@ export class HostedWorkspaceToolTurn {
   // Once an approval expires nobody is answering, so the Turn asks no more.
   private unanswered = false;
   private promptHookRunner?: HostedPromptHookRunner;
+  private permissionClassifier?: (
+    call: ToolCallRequestInfo,
+    signal: AbortSignal,
+  ) => Promise<ClassifierResult>;
   // Calls a PermissionRequest Hook allowed, which the mode then never asks.
   private readonly hookAllowed = new Set<string>();
   private readonly mcp?: HostedMcpSession;
@@ -8039,6 +8054,7 @@ export class HostedWorkspaceToolTurn {
         refusals[index] !== undefined ||
         !this.approval ||
         request.skill ||
+        (await this.permissionDecision(request)) !== 'default' ||
         !hostedApprovalAsks(
           await this.readApprovalSettings(),
           request.call.name,
@@ -8084,7 +8100,7 @@ export class HostedWorkspaceToolTurn {
    * is asked about whatever the mode or a PermissionRequest Hook decided.
    */
   private async approve(
-    requests: ReadonlyArray<{ call: ToolCallRequestInfo; inputBytes: Buffer }>,
+    requests: readonly HostedPreparedRequest[],
     messageId: string,
     inputRefs: Map<number, ManagedSessionDurableRef>,
     signal: AbortSignal,
@@ -8100,23 +8116,46 @@ export class HostedWorkspaceToolTurn {
     let asked = false;
     for (const [index, request] of requests.entries()) {
       if (index < nextOrdinal) continue;
-      if (
-        refusals[index] ||
-        (request.call.name === 'skill' && this.skills !== undefined) ||
-        (!asks.has(index) &&
-          !(
-            this.publicPlanMode &&
-            this.planning &&
-            request.call.name === 'exit_plan_mode'
-          ) &&
-          (this.hookAllowed.has(request.call.callId) ||
-            !hostedApprovalAsks(
-              await this.readApprovalSettings(),
-              request.call.name,
-              globProfile,
-            )))
-      )
+      if (refusals[index]) continue;
+      const settings = await this.readApprovalSettings();
+      const decision = await this.permissionDecision(request, settings);
+      if (decision === 'deny') {
+        refusals[index] =
+          'The Session permission rules denied this tool call, so it was not run.';
         continue;
+      }
+      const humanOnly =
+        asks.has(index) ||
+        decision === 'ask' ||
+        (this.publicPlanMode &&
+          this.planning &&
+          request.call.name === 'exit_plan_mode');
+      if (!humanOnly) {
+        if (
+          decision === 'allow' ||
+          (request.call.name === 'skill' && this.skills !== undefined) ||
+          this.hookAllowed.has(request.call.callId) ||
+          !hostedApprovalAsks(settings, request.call.name, globProfile)
+        )
+          continue;
+        if (
+          settings.mode === 'auto' &&
+          !request.call.name.startsWith('mcp_') &&
+          this.permissionClassifier
+        ) {
+          const result = await this.permissionClassifier(
+            { ...request.call, args: request.input },
+            signal,
+          );
+          signal.throwIfAborted();
+          if (!result.unavailable) {
+            if (result.shouldBlock)
+              refusals[index] =
+                `Auto approval blocked this tool call: ${result.reason}`;
+            continue;
+          }
+        }
+      }
       asked = true;
       if (signal.aborted) break;
       if (this.unanswered) {
@@ -8134,7 +8173,8 @@ export class HostedWorkspaceToolTurn {
         inputRef,
         messageId,
         signal,
-        !asks.has(index) && request.call.name !== 'exit_plan_mode',
+        !humanOnly && request.call.name !== 'exit_plan_mode',
+        humanOnly,
       );
     }
     return asked && signal.aborted
@@ -8149,6 +8189,7 @@ export class HostedWorkspaceToolTurn {
     messageId: string,
     signal: AbortSignal,
     liveApproval: boolean,
+    requiresHumanDecision = false,
   ): Promise<string | undefined> {
     const authority = this.session.authority;
     const requestId = `tool_approval_${randomBytes(16).toString('hex')}`;
@@ -8184,6 +8225,9 @@ export class HostedWorkspaceToolTurn {
       createdAt,
       expiresAt: createdAt + approval.settings.timeoutMs,
       options: HOSTED_APPROVAL_OPTIONS,
+      ...(requiresHumanDecision
+        ? { requiresHumanDecision: true as const }
+        : {}),
     };
     const optionsRef = await this.session.resources.publish(
       'managed-action-options',
@@ -8237,6 +8281,40 @@ export class HostedWorkspaceToolTurn {
     if (action.state !== 'expired') return APPROVAL_REFUSALS.cancelled;
     this.unanswered = true;
     return APPROVAL_REFUSALS.expired;
+  }
+
+  private async permissionDecision(
+    request: HostedPreparedRequest,
+    settings?: HostedApprovalSettings,
+  ) {
+    const selected = settings ?? (await this.readApprovalSettings());
+    if (!selected.permissionRules) return 'default';
+    const input = request.mcp
+      ? (request.input as unknown as import('@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js').ManagedMcpInvoke)
+      : undefined;
+    const identity =
+      input?.request.kind === 'tool_call'
+        ? { serverName: input.serverId, serverToolName: input.request.name }
+        : undefined;
+    const identities =
+      this.mcp?.getCatalogs().flatMap((catalog) =>
+        catalog.tools.map((tool) => ({
+          serverName: catalog.serverId,
+          serverToolName: tool.name,
+        })),
+      ) ?? [];
+    return evaluateHostedPermissionRules(
+      selected.permissionRules,
+      {
+        ...request.call,
+        args:
+          input?.request.kind === 'tool_call'
+            ? input.request.arguments
+            : request.input,
+      },
+      identity,
+      identities,
+    );
   }
 
   private async readApprovalSettings(): Promise<HostedApprovalSettings> {
