@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTask;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskPage;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
@@ -64,15 +65,16 @@ public class ManagedTaskService {
                 viewed.sessionActive());
     }
 
-    public WebShellPage<WebShellTask> queryWebShellTasks(String tenantId,
+    public WebShellTaskPage queryWebShellTasks(String tenantId,
             String actorId, String sessionId, String cursor, int limit) {
         Viewed<TaskPage> viewed = page(tenantId, actorId, sessionId, cursor,
                 limit);
         TaskPage page = viewed.value();
-        return new WebShellPage<>(page.tasks().stream()
+        return new WebShellTaskPage(page.tasks().stream()
                 .map(task -> webShellTask(tenantId, sessionId, task,
                         viewed.sessionActive()))
-                .toList(), nextCursor(page), page.hasMore());
+                .toList(), nextCursor(page), page.hasMore(),
+                records.activeChildCount(tenantId, sessionId));
     }
 
     public WebShellTask getWebShellTask(String tenantId, String actorId,
@@ -223,13 +225,14 @@ public class ManagedTaskService {
         TaskProjection view = task.projection();
         CursorPositions positions = events.positions(tenantId, sessionId,
                 task.taskId());
+        var child = records.childTaskDetails(tenantId, sessionId, task);
         return new PublicTask(task.taskId(), "agent.task", sessionId,
                 task.kind(), view.state(), view.definitionRevision(),
                 view.runtimeState(), view.createdAt(), view.startedAt(),
                 view.settledAt(), outputCursor(tenantId, sessionId, task.taskId(), positions),
                 positions.artifactRefs(),
                 actions(task, view, sessionActive),
-                records.childSessionId(tenantId, sessionId, task));
+                child.sessionId(), child.stopRequested(), child.approvalMode());
     }
 
     private WebShellTask webShellTask(String tenantId, String sessionId,
@@ -237,13 +240,14 @@ public class ManagedTaskService {
         TaskProjection view = task.projection();
         CursorPositions positions = events.positions(tenantId, sessionId,
                 task.taskId());
+        var child = records.childTaskDetails(tenantId, sessionId, task);
         return new WebShellTask(task.taskId(), sessionId, task.kind(),
                 view.state(), view.definitionRevision(), view.runtimeState(),
                 view.createdAt(), view.startedAt(), view.settledAt(),
                 outputCursor(tenantId, sessionId, task.taskId(), positions),
                 positions.artifactRefs(),
                 actions(task, view, sessionActive),
-                records.childSessionId(tenantId, sessionId, task));
+                child.sessionId(), child.stopRequested(), child.approvalMode());
     }
 
     /** The task's own actions, and none in a Session that is not active:

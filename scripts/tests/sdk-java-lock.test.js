@@ -52,7 +52,7 @@ const freeFlock = '#!/bin/sh\nexit 0';
 // at once, the blocking wait stays parked until the test kills the child.
 const blockingFlock = `#!/bin/sh
 case "$*" in
-  *"--wait"*) sleep 5; exit 1 ;;
+  *"--wait"*) echo 'STUB_FLOCK_WAIT_ENTERED'; sleep 5; exit 1 ;;
   *" 9") exit 1 ;;
   *) exit 0 ;;
 esac
@@ -228,10 +228,12 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       // budget — the exact state the cancelled pool run left in its log.
       const stub = flockStub(blockingFlock);
       const { child, state, done } = startAcquire(home, 60, stub);
-      await new Promise((r) => setTimeout(r, 1500));
-      const announced = state.out.includes(
-        'Waiting for the sdk-java host lock as queue ticket 1',
+      await waitFor('the blocking flock was not reached', () =>
+        state.out.includes('STUB_FLOCK_WAIT_ENTERED'),
       );
+      const announced = state.out
+        .split('STUB_FLOCK_WAIT_ENTERED')[0]
+        .includes('Waiting for the sdk-java host lock as queue ticket 1');
       const ticket = headTicket(home);
       const before = statSync(ticket).mtimeMs;
       child.kill('SIGKILL');
@@ -609,9 +611,13 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       // of reach and the timeout has to name what blocked it.
       const name = `1-0000000001-${process.pid}`;
       writeFileSync(join(queue, name), '');
+      // A real publisher advances the counter with its ticket. Without it,
+      // both tickets get sequence 1 and PID sorting can move the waiter ahead.
+      writeFileSync(join(queue, '.seq'), '1\n');
       const stub = flockStub(freeFlock);
       const result = await acquire(home, 3, stub);
       expect(result.code).toBe(1);
+      expect(result.out).toContain('as queue ticket 2');
       expect(result.out).toContain(`head of queue is ${name}`);
       expect(readdirSync(queue).filter((f) => f !== '.seq')).toEqual([name]);
     },
