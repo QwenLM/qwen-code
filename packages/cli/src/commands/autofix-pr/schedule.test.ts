@@ -107,26 +107,24 @@ describe('runSchedule', () => {
   });
 
   it('schedules a durable task bound to the conversation in a daemon session', () => {
-    const saved = process.env['QWEN_CODE_SERVE'];
     process.env['QWEN_CODE_SERVE'] = '1';
-    try {
-      const task = runSchedule({ pr: 7 });
-      expect(task).toEqual({
-        cron: '*/2 * * * *',
-        recurring: true,
-        gate: `${GATE}${task.task}`,
-        prompt: `Run /autofix-pr tick o/r#7 --task ${task.task}`,
-        durable: true,
-        sessionMode: 'current',
-        every: 2,
-        reply: true,
-        instructions: '',
-        task: expect.stringMatching(TASK),
-      });
-    } finally {
-      if (saved === undefined) delete process.env['QWEN_CODE_SERVE'];
-      else process.env['QWEN_CODE_SERVE'] = saved;
-    }
+    const task = runSchedule({ pr: 7 });
+    expect(task).toEqual({
+      cron: '*/2 * * * *',
+      recurring: true,
+      gate: `${GATE}${task.task}`,
+      prompt: `Run /autofix-pr tick o/r#7 --task ${task.task}`,
+      durable: true,
+      sessionMode: 'current',
+      every: 2,
+      reply: true,
+      instructions: '',
+      task: expect.stringMatching(TASK),
+    });
+    // A resume in a daemon session prints the same pair: the task it replaces
+    // is still bound there.
+    const again = runSchedule({ pr: 7, again: true });
+    expect(again).toMatchObject({ durable: true, sessionMode: 'current' });
   });
 
   it("puts --no-reply and the user's instructions, on one line, into the prompt", () => {
