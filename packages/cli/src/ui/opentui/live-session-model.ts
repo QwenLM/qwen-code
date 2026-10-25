@@ -20,13 +20,16 @@ import type {
 } from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { GoalLegacyCardData } from '../utils/goal-card-view.js';
+import { MAX_INLINE_IMAGES_PER_ITEM } from '../utils/inline-image-parts.js';
 import { stripSuppressOnRestore } from '../utils/resumeHistoryUtils.js';
 import { isSyntheticHistoryItem } from '../utils/historyUtils.js';
+import { ToolCallStatus } from '../types.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type {
   ArenaAgentCardData,
   CompressionProps,
   HistoryItem as CanonicalHistoryItem,
+  HistoryItemWithoutId as CanonicalHistoryItemWithoutId,
 } from '../types.js';
 
 export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
@@ -227,6 +230,8 @@ export type LiveHistoryItem = LiveHistoryItemData & {
   historyId?: number;
   canonicalHistoryItem?: CanonicalHistoryItem;
   canonicalOnly?: true;
+  canonicalPending?: boolean;
+  canonicalResponseEnded?: true;
   display?: CanonicalHistoryItem['display'];
 };
 
@@ -765,6 +770,22 @@ export function foldLiveEvent(
   prev: readonly LiveHistoryItem[],
   event: OpenTuiStreamEvent,
 ): readonly LiveHistoryItem[] {
+  if (event.type === 'tool-history') {
+    const callIds = new Set(event.item.tools.map((tool) => tool.callId));
+    return prev.map((item) =>
+      item.kind === 'tool' &&
+      callIds.has(item.id) &&
+      (!item.canonicalHistoryItem ||
+        item.canonicalHistoryItem.id === event.item.id)
+        ? {
+            ...item,
+            historyId: event.item.id,
+            canonicalHistoryItem: event.item,
+            canonicalPending: event.pending,
+          }
+        : item,
+    );
+  }
   if (event.type === 'canonical-history-replace') {
     const first = prev.findIndex(
       (item) => item.canonicalHistoryItem?.id === event.item.id,
@@ -794,6 +815,7 @@ export function foldLiveEvent(
   }
   const source = event.canonicalHistoryItem;
   if (source) {
+    if (source.id <= nextCanonicalId) nextCanonicalId = source.id - 1;
     const previous =
       prev.at(-1)?.canonicalHistoryItem?.id === source.id
         ? prev
@@ -837,7 +859,11 @@ export function foldLiveEvent(
     const index = first < 0 ? retained.length : first;
     return [...retained.slice(0, index), ...captured, ...retained.slice(index)];
   }
-  const next = foldLiveEventData(prev, event);
+  const next = retainNativeCanonicalHistory(
+    prev,
+    foldLiveEventData(prev, event),
+    event,
+  );
   if (event.type === 'history-expanded')
     return next.map((item) => {
       const source = item.canonicalHistoryItem;
@@ -859,4 +885,270 @@ export function foldLiveEvent(
         }
       : item,
   );
+}
+
+export function snapshotCanonicalHistory(
+  items: readonly LiveHistoryItem[],
+): CanonicalHistoryItem[] {
+  const seen = new Set<number>();
+  const history: CanonicalHistoryItem[] = [];
+  for (const item of items) {
+    // Countdown and running background-task cards are not committed history.
+    if (item.kind === 'retry' || item.kind === 'task') continue;
+    const source = item.canonicalHistoryItem;
+    if (!source)
+      throw new Error(`Checkpoint history missing canonical ${item.kind}`);
+    if (seen.has(source.id)) continue;
+    seen.add(source.id);
+    history.push(source);
+  }
+  return history;
+}
+
+let nextCanonicalId = 0;
+
+export function allocateCanonicalHistoryId(
+  items: readonly LiveHistoryItem[] = [],
+): number {
+  for (const item of items) {
+    const id = item.canonicalHistoryItem?.id ?? item.historyId;
+    if (id !== undefined && id <= nextCanonicalId) nextCanonicalId = id - 1;
+  }
+  return --nextCanonicalId;
+}
+
+function retainNativeCanonicalHistory(
+  prev: readonly LiveHistoryItem[],
+  next: readonly LiveHistoryItem[],
+  event: OpenTuiStreamEvent,
+): readonly LiveHistoryItem[] {
+  if (next === prev) return prev;
+  const targetIndex = next.findLastIndex((item, index) => item !== prev[index]);
+  let source: CanonicalHistoryItem | undefined;
+  let pending = false;
+  const target = next[targetIndex];
+  const existing = target?.canonicalHistoryItem;
+  const stamp = (
+    item: CanonicalHistoryItemWithoutId,
+  ): CanonicalHistoryItem => ({
+    ...item,
+    id: existing?.id ?? event.historyId ?? allocateCanonicalHistoryId(next),
+  });
+  const turnStart = prev.findLastIndex((item) => item.kind === 'user');
+  const responseEnd = prev.findLastIndex((item) => item.canonicalResponseEnded);
+  const turn = prev.slice(Math.max(0, turnStart, responseEnd + 1));
+  const continuation = turn.some((item) => {
+    const source = item.canonicalHistoryItem;
+    return (
+      (source?.type === 'gemini' || source?.type === 'gemini_content') &&
+      Boolean(
+        source.text.trim() || source.images?.length || source.omittedImageCount,
+      )
+    );
+  });
+  switch (event.type) {
+    case 'user':
+      source = stamp({
+        type: 'user',
+        text: event.text,
+        promptId: event.promptId,
+        sentToModel: event.sentToModel,
+      });
+      break;
+    case 'text': {
+      if (target?.kind !== 'assistant') break;
+      const previousText =
+        existing?.type === 'gemini' || existing?.type === 'gemini_content'
+          ? existing.text
+          : '';
+      const text = (previousText + event.delta).replace(
+        /^(?:[ \t]*\r?\n)+/,
+        '',
+      );
+      const type =
+        existing?.type === 'gemini' || existing?.type === 'gemini_content'
+          ? existing.type
+          : continuation
+            ? 'gemini_content'
+            : 'gemini';
+      source = stamp(
+        type === 'gemini'
+          ? {
+              type,
+              text,
+              timestamp:
+                existing?.type === 'gemini'
+                  ? existing.timestamp
+                  : target.timestamp,
+            }
+          : { type, text },
+      );
+      pending = true;
+      break;
+    }
+    case 'thinking': {
+      if (target?.kind !== 'thinking') break;
+      const text = (
+        (existing?.type === 'gemini_thought' ? existing.text : '') + event.delta
+      ).replace(/^(?:[ \t]*\r?\n)+/, '');
+      source = stamp({ type: 'gemini_thought', text, durationMs: 0 });
+      pending = true;
+      break;
+    }
+    case 'thinking-end':
+      if (target?.kind === 'thinking' && existing?.type === 'gemini_thought') {
+        source = { ...existing, durationMs: target.durationMs };
+      }
+      break;
+    case 'tool-end': {
+      if (
+        target?.kind !== 'tool' ||
+        !target.canonicalPending ||
+        existing?.type !== 'tool_group'
+      )
+        break;
+      const terminal = [
+        ToolCallStatus.Success,
+        ToolCallStatus.Error,
+        ToolCallStatus.Canceled,
+      ];
+      const tools = existing.tools.map((tool) =>
+        tool.callId !== event.id || terminal.includes(tool.status)
+          ? tool
+          : {
+              ...tool,
+              status: event.success
+                ? ToolCallStatus.Success
+                : event.summary === 'cancelled'
+                  ? ToolCallStatus.Canceled
+                  : ToolCallStatus.Error,
+            },
+      );
+      source = { ...existing, tools };
+      pending = tools.some((tool) => !terminal.includes(tool.status));
+      break;
+    }
+    case 'image': {
+      const seen = new Set<number>();
+      let displayed = 0;
+      for (const item of turn) {
+        const source = item.canonicalHistoryItem;
+        if (!source || seen.has(source.id)) continue;
+        seen.add(source.id);
+        if (source.type === 'gemini' || source.type === 'gemini_content')
+          displayed += source.images?.length ?? 0;
+      }
+      const previous = prev.at(-1)?.canonicalHistoryItem;
+      if (
+        displayed >= MAX_INLINE_IMAGES_PER_ITEM &&
+        (previous?.type === 'gemini' || previous?.type === 'gemini_content') &&
+        previous.omittedImageCount &&
+        !previous.text &&
+        !previous.images?.length
+      ) {
+        source = {
+          ...previous,
+          omittedImageCount: previous.omittedImageCount + 1,
+        };
+      } else {
+        const body =
+          displayed < MAX_INLINE_IMAGES_PER_ITEM
+            ? { images: [{ mimeType: event.mimeType, data: event.data }] }
+            : { omittedImageCount: 1 };
+        source = stamp(
+          continuation
+            ? { type: 'gemini_content', text: '', ...body }
+            : { type: 'gemini', text: '', timestamp: Date.now(), ...body },
+        );
+      }
+      pending = true;
+      break;
+    }
+    case 'info':
+      source = stamp({ type: 'info', text: event.text });
+      break;
+    case 'error':
+      source = stamp({ type: 'error', text: event.text, hint: event.hint });
+      break;
+    case 'warning':
+      source = stamp({ type: 'warning', text: event.text });
+      break;
+    case 'compaction':
+      source = stamp({ type: 'compression', compression: event.compression });
+      break;
+    case 'stop-hook-message':
+      source = stamp({
+        type: 'stop_hook_system_message',
+        message: event.message,
+      });
+      break;
+    case 'away-recap':
+      source = stamp({ type: 'away_recap', text: event.text });
+      break;
+    case 'user-shell':
+      source = stamp({ type: 'user_shell', text: event.text });
+      break;
+    case 'advisor':
+      source = stamp({ type: 'advisor', text: event.text, model: event.model });
+      break;
+    case 'arena-agent':
+      source = stamp({ type: 'arena_agent_complete', agent: event.agent });
+      break;
+    case 'arena-session':
+      source = stamp({
+        type: 'arena_session_complete',
+        sessionStatus: event.sessionStatus,
+        task: event.task,
+        totalDurationMs: event.totalDurationMs,
+        agents: event.agents,
+      });
+      break;
+    default:
+      break;
+  }
+  const retained = next.map((item, index) => {
+    const sameSource = source && item.canonicalHistoryItem?.id === source.id;
+    if (source && (index === targetIndex || sameSource)) {
+      return {
+        ...item,
+        canonicalHistoryItem: source,
+        canonicalPending: pending,
+      };
+    }
+    const canonical = item.canonicalHistoryItem;
+    if (
+      item.canonicalPending &&
+      (canonical?.type === 'gemini' || canonical?.type === 'gemini_content') &&
+      !canonical.text.trim() &&
+      !canonical.images?.length &&
+      !canonical.omittedImageCount
+    )
+      return { ...item, canonicalPending: true };
+    if (
+      item.canonicalPending &&
+      item.kind === 'thinking' &&
+      item.done &&
+      canonical?.type === 'gemini_thought'
+    )
+      return {
+        ...item,
+        canonicalHistoryItem: { ...canonical, durationMs: item.durationMs },
+        canonicalPending: false,
+      };
+    if (
+      item.canonicalPending &&
+      ((item.kind === 'assistant' && !item.streaming) ||
+        (item.kind === 'thinking' && item.done) ||
+        (item.kind === 'image' && event.type !== 'image'))
+    )
+      return { ...item, canonicalPending: false };
+    return item;
+  });
+  if (event.type === 'segment-end' && retained.length > 0)
+    return retained.map((item, index) =>
+      index === retained.length - 1
+        ? { ...item, canonicalResponseEnded: true }
+        : item,
+    );
+  return retained;
 }
