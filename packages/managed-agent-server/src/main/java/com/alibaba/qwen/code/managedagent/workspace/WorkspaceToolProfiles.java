@@ -6,6 +6,8 @@ public final class WorkspaceToolProfiles {
     public static final String FILES = "hosted-workspace-files/1";
     public static final String MCP = "hosted-workspace-mcp/1";
     public static final String SHELL = "hosted-workspace-shell/1";
+    /** #15076: `files/3` adds `todo_write`; enabling it is a rollout decision. */
+    public static final String FILES_V3 = "hosted-workspace-files/3";
     public static final String INTERNAL_TEAM_LEAD = "hosted-workspace-team-lead/1";
     /**
      * The profile of a child bound to a snapshot child Workspace (#13753 I3):
@@ -40,7 +42,7 @@ public final class WorkspaceToolProfiles {
     }
 
     public static boolean supportsApprovalMode(String mode) {
-        return "default".equals(mode) || "auto-edit".equals(mode) || "yolo".equals(mode);
+        return "default".equals(mode) || "auto".equals(mode) || "auto-edit".equals(mode) || "yolo".equals(mode);
     }
 
     public static boolean supportsApprovalSelection(StoreModels.SessionRecord session) {
@@ -48,10 +50,11 @@ public final class WorkspaceToolProfiles {
                 && ("qwen-code".equals(session.agentId())
                         ? session.agentDefinitionDigest() == null
                         : session.agentDefinitionDigest() != null)
-                && (FILES.equals(session.toolProfile()) || isPublicShell(session.toolProfile()));
+                && (FILES.equals(session.toolProfile()) || FILES_V3.equals(session.toolProfile())
+                        || isPublicShell(session.toolProfile()));
     }
 
     public static boolean requiresApproval(String mode) {
-        return "default".equals(mode) || "auto-edit".equals(mode);
+        return "default".equals(mode) || "auto".equals(mode) || "auto-edit".equals(mode);
     }
 }

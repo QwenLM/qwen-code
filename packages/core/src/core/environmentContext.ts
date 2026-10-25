@@ -23,6 +23,9 @@ import {
 
 const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 
+export const AUTO_MEMORY_SNAPSHOT_METADATA =
+  'qwen-code:memory-catalog-snapshot';
+
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
 const MAX_DEFERRED_TOOL_DESC_LEN = 160;
@@ -768,9 +771,17 @@ function isModelFunctionCallEntry(content: Content | undefined): boolean {
   );
 }
 
+export function isWrappedSystemReminderPart(part: Part): boolean {
+  return (
+    typeof part.text === 'string' &&
+    part.text.startsWith(SYSTEM_REMINDER_OPEN) &&
+    part.text.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE)
+  );
+}
+
 /**
- * True when `content` is a *pure* system-reminder entry: it has parts and
- * EVERY part is a text part wrapped in `<system-reminder>…</system-reminder>`.
+ * True when `content` is a structural system-reminder entry: it has parts and
+ * EVERY part is wrapped reminder text or a marked memory catalog snapshot.
  *
  * These are structural history entries — the startup-context prelude
  * (history[0]) and the mid-history MCP added-tool reminders injected by
@@ -785,7 +796,8 @@ function isModelFunctionCallEntry(content: Content | undefined): boolean {
  * prompt as structural (e.g. dropping it from rewind truncation, or
  * preserving an orphaned failed turn whose prompt then leaks via coalescing).
  *
- * Each part must END with the close tag, not merely contain it. IDE mode is
+ * Retained catalog snapshots are structural by their trusted part metadata.
+ * Text-wrapped reminders must END with the close tag, not merely contain it. IDE mode is
  * the case "every part" alone misses: the editor reminder is concatenated into
  * the prompt's text part (not a separate part), so that part trails the real
  * prompt after the close tag. `wrapSystemReminder`/`wrapIdeContext` emit the
@@ -798,8 +810,8 @@ export function isSystemReminderContent(content: Content): boolean {
   return parts.every(
     (part) =>
       typeof part.text === 'string' &&
-      part.text.startsWith(SYSTEM_REMINDER_OPEN) &&
-      part.text.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE),
+      (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true ||
+        isWrappedSystemReminderPart(part)),
   );
 }
 
