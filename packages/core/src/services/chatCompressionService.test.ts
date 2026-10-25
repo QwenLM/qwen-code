@@ -38,6 +38,8 @@ import * as postCompactModule from './postCompactAttachments.js';
 import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { estimateContentTokens } from './tokenEstimation.js';
+import { getAutoMemorySnapshot } from '../memory/request-context.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   content,
   fnCall,
@@ -1597,6 +1599,75 @@ describe('ChatCompressionService.compress cache sharing', () => {
       });
       const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
       expect(request.promptCacheSharing).toBe(true);
+    },
+  );
+
+  it.each([
+    { cacheSharing: false, visible: false },
+    { cacheSharing: true, visible: false },
+    { cacheSharing: false, visible: true },
+    { cacheSharing: true, visible: true },
+  ])(
+    'projects replayed tool-result catalogs for compression: $cacheSharing / $visible',
+    async ({ cacheSharing, visible }) => {
+      const history = [
+        userText('read the file ' + 'earlier conversation '.repeat(2_000)),
+        content('model', fnCall('read_file', { path: 'README.md' }, 'call-1')),
+      ];
+      const snapshot = getAutoMemorySnapshot(
+        [],
+        'retained catalog '.repeat(100),
+      )!;
+      const response = fnResponse(
+        'read_file',
+        { output: 'contents' },
+        'call-1',
+      );
+      const quoted = { text: snapshot.text! };
+      const raw = content('user', response, quoted, snapshot);
+      const interruption = detectTurnInterruption([...history, raw]);
+      if (interruption.kind !== 'interrupted_prompt')
+        throw new Error('missing replay parts');
+      const pendingUserMessage = content('user', ...interruption.parts);
+      const before = structuredClone(pendingUserMessage);
+      const { config, generateText, run } = makeFixture({
+        history,
+        enableCacheControl: cacheSharing,
+      });
+      config.getAutoMemoryContext = () => (visible ? 'current catalog' : '');
+      const coldSpy = cacheSharing
+        ? vi.spyOn(sideQueryModule, 'runSideQuery')
+        : spyCold();
+      const result = await run({ trigger: 'auto', pendingUserMessage });
+      expectCompressed(result);
+      expectCacheLog(config, cacheSharing, cacheSharing);
+      expect(generateText).toHaveBeenCalledTimes(cacheSharing ? 1 : 0);
+      expect(coldSpy).toHaveBeenCalledTimes(cacheSharing ? 0 : 1);
+      const request = (
+        cacheSharing
+          ? generateText.mock.calls[0]![0]
+          : coldSpy.mock.calls[0]![1]
+      ) as { contents: Content[] };
+      const expectedPending = content(
+        'user',
+        response,
+        quoted,
+        ...(visible ? [snapshot] : []),
+      );
+      expect(request.contents.slice(0, -1)).toEqual([
+        ...history,
+        expectedPending,
+      ]);
+      expect(pendingUserMessage).toEqual(before);
+      expect(raw.parts).toEqual([response, quoted, snapshot]);
+      expect(result.newHistory?.at(-1)?.parts).toContainEqual(
+        history[1].parts![0],
+      );
+      if (!cacheSharing) {
+        expect(result.info.newTokenCount).toBe(
+          11_500 + estimateContentTokens([expectedPending]),
+        );
+      }
     },
   );
 
