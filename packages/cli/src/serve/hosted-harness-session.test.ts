@@ -1692,7 +1692,7 @@ describe('Hosted Harness no-tool session', () => {
       })
       .expect(202);
     // 15 s, not the 1 s default: this suite shares a 64-core host with ~100
-    // concurrent vite processes, and this poll flipped at load 130 on #15528's
+    // concurrent vite processes; this poll flipped at load ~90 on #15528's
     // post-merge run while the recovery-blocked state was still on its way.
     await vi.waitFor(
       async () => {
