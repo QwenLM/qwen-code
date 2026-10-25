@@ -16,6 +16,16 @@ type SettingsMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
+  'settings.label.general.outputLanguage': 'Language: Model output',
+  'settings.description.general.outputLanguage':
+    'Language the model replies in. Leave empty to follow your input language (auto). Changes rewrite the session’s output-language.md and apply to the running session.',
+  'settings.placeholder.general.outputLanguage': 'auto (follow input)',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `Use "${v?.value ?? ''}"`,
+  'settings.label.ui.accessibility.enableLoadingPhrases':
+    'Enable Loading Phrases',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    'Show rotating loading phrases. Turn off to hide both built-in and host-provided phrases.',
   'settings.label.experimental.generatedUi': 'Generated UI',
   'settings.description.experimental.generatedUi':
     'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
@@ -230,6 +240,12 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.general.language': '语言：界面',
   'settings.description.general.language':
     '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
+  'settings.label.general.outputLanguage': '语言：模型输出',
+  'settings.description.general.outputLanguage':
+    '模型回复使用的语言。留空表示自动跟随你的输入语言（auto）。修改会重写当前会话读取的 output-language.md，并立即作用于当前会话。',
+  'settings.placeholder.general.outputLanguage': '自动（跟随输入）',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `使用“${v?.value ?? ''}”`,
   'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
   'settings.description.general.preventSystemSleep':
     '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
@@ -296,6 +312,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.description.ui.showStatusInTitle':
     '在终端窗口标题中显示 Qwen Code 会话名称和状态。',
   'settings.label.ui.showResponseTokensPerSecond': '显示回复 Tokens/秒',
+  'settings.label.ui.accessibility.enableLoadingPhrases': '启用加载文案',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    '显示轮换加载文案。关闭后隐藏内置及宿主提供的文案。',
   'settings.description.ui.showResponseTokensPerSecond':
     '模型流式输出时，在回复 token 计数旁显示实时的 tokens/秒估值。下个会话生效。',
   'settings.label.ui.showToolCallDetails': '显示工具调用详情',
@@ -389,6 +408,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.option.policy.permissionStrategy.designated': '指定发起方',
   'settings.option.policy.permissionStrategy.consensus': '共识法定人数',
   'settings.option.policy.permissionStrategy.local-only': '仅本机',
+  'settings.label.serve.maxSessions': '最大并发会话数',
+  'settings.description.serve.maxSessions':
+    '单个工作区同时存活的会话数上限；超出的新会话请求返回 503，接入已有会话不受影响。设为 0 表示不限制。仅在用户、系统、系统默认作用域生效；传入 qwen serve --max-sessions 时以命令行参数为准。修改后需要重启 daemon。',
   'settings.label.experimental.cron': '启用 Cron/Loop 工具',
   'settings.description.experimental.cron':
     '启用会话内 cron/loop 工具。启用后，模型可以用 cron_create、cron_list 和 cron_delete 创建周期性提示。也可通过 QWEN_CODE_DISABLE_CRON=1 环境变量禁用。',
