@@ -132,6 +132,8 @@ import {
 } from '../routes/workspace-setup-github.js';
 import { parseWorkspaceVoiceUpdateParams } from '../routes/workspace-voice.js';
 import {
+  redactWorkflowModeFromConfigOptions,
+  redactWorkflowModeFromSessionState,
   redactWorkflowsFromAvailableCommandsEvent,
   redactWorkflowsFromSupportedCommands,
 } from '../workflow-session-gate.js';
@@ -1630,8 +1632,8 @@ export class AcpDispatcher {
    * `session/load`/`session/resume`, `session/fork`, and the
    * `session/set_config_option` result) is gated to the ids the transport
    * can route. Raw-state surfaces (context status, REST load/resume state)
-   * intentionally carry the child's full unfiltered set — they report session
-   * state. Best-effort — `undefined` on error.
+   * retain other child options but omit Workflow mode for untrusted workspaces.
+   * Best-effort — `undefined` on error.
    */
   private async configOptionsFor(
     sessionId: string,
@@ -1656,7 +1658,10 @@ export class AcpDispatcher {
           (option) =>
             isObject(option) &&
             HTTP_ACP_CONFIG_OPTION_IDS.includes(option['id'] as string) &&
-            !(this.fsFactory?.sshWorkspace && option['id'] === 'workflow_mode'),
+            !(
+              option['id'] === 'workflow_mode' &&
+              (this.fsFactory?.sshWorkspace || !this.isWorkspaceTrusted())
+            ),
         )
       : undefined;
   }
@@ -2511,7 +2516,9 @@ export class AcpDispatcher {
               );
               const loadModels = this.extractModelState(loadConfigOptions);
               const loadModes = this.extractModeState(loadConfigOptions);
-              const loadState = restored.state ?? {};
+              const loadState = this.isWorkspaceTrusted()
+                ? (restored.state ?? {})
+                : redactWorkflowModeFromConfigOptions(restored.state ?? {});
               const loadMeta = isObject(loadState._meta)
                 ? loadState._meta
                 : undefined;
@@ -3281,6 +3288,21 @@ export class AcpDispatcher {
                 }
                 return;
               }
+              if (!this.isWorkspaceTrusted()) {
+                if (id !== undefined) {
+                  this.replySession(
+                    conn,
+                    sessionId,
+                    id,
+                    undefined,
+                    error(id, -32003, 'Workspace is not trusted.', {
+                      errorKind: 'untrusted_workspace',
+                      httpStatus: 403,
+                    }),
+                  );
+                }
+                return;
+              }
               await this.bridge.setSessionConfigOption(
                 sessionId,
                 { sessionId, configId, value: rawValue },
@@ -3405,10 +3427,13 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/context`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          const status = await this.bridge.getSessionContextStatus(sessionId);
           this.replyConn(
             conn,
             id,
-            await this.bridge.getSessionContextStatus(sessionId),
+            this.isWorkspaceTrusted()
+              ? status
+              : redactWorkflowModeFromSessionState(status),
           );
           return;
         }

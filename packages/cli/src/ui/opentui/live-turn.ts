@@ -24,7 +24,9 @@
  * queue instead of dropping them.
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
+import { stripSuppressOnRestore } from '../utils/resumeHistoryUtils.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
   useCallback,
@@ -50,6 +52,8 @@ import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import {
   foldLiveEvent,
   settleOpenTools,
+  snapshotCanonicalHistory,
+  allocateCanonicalHistoryId,
   type LiveHistoryItem,
 } from './live-session-model.js';
 import {
@@ -121,6 +125,11 @@ export interface UseOpenTuiLiveTurnOptions {
  */
 export interface OpenTuiSubmitOptions {
   promptId?: string;
+  toolCall?: {
+    name: string;
+    args: Record<string, unknown>;
+    restoreResponseBinding?: RestoreToolResponseBinding;
+  };
   deferUntilIdle?: boolean;
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
@@ -175,6 +184,13 @@ export interface OpenTuiLiveTurn {
   interrupt(onSettled?: OpenTuiCancelSettled): void;
   retryLastPrompt(): void;
   notifyInputProcessed(): void;
+  scheduleTool(
+    name: string,
+    args: Record<string, unknown>,
+    restoreResponseBinding?: RestoreToolResponseBinding,
+  ): boolean;
+  isCurrentHistory(snapshot: readonly LiveHistoryItem[]): boolean;
+  rewindTranscript(userId: string): readonly LiveHistoryItem[] | undefined;
   /** Replaces the transcript from a replay batch (session switch/resume). */
   resetTranscript(events: readonly OpenTuiStreamEvent[]): void;
   /** Folds one externally produced event (update notices, startup warnings). */
@@ -319,7 +335,7 @@ export function useOpenTuiLiveTurn(
       const active: NonNullable<typeof activeTurnRef.current> = {
         seq,
         prompt: editablePrompt,
-        toolStarted: false,
+        toolStarted: turnOptions?.toolCall !== undefined,
         meaningfulContent: false,
         canUndoLog: Boolean(editablePrompt && logger),
       };
@@ -347,8 +363,22 @@ export function useOpenTuiLiveTurn(
         if (seq !== turnSeqRef.current || abort.signal.aborted) return;
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
+          checkpointHistory: {
+            allocateId: () => allocateCanonicalHistoryId(itemsRef.current),
+            snapshot: () =>
+              snapshotCanonicalHistory(
+                itemsRef.current.filter(
+                  (item) =>
+                    item.canonicalPending !== true &&
+                    !(item.kind === 'assistant' && item.streaming) &&
+                    !(item.kind === 'thinking' && !item.done) &&
+                    !(item.kind === 'tool' && !item.done),
+                ),
+              ),
+          },
           dualOutput,
           modelOverride: turnOptions?.modelOverride,
+          toolCall: turnOptions?.toolCall,
           retry,
           onAcceptedSteering: (messages) => {
             if (seq !== turnSeqRef.current) return;
@@ -719,6 +749,25 @@ export function useOpenTuiLiveTurn(
     }
   }, []);
 
+  const scheduleTool = useCallback(
+    (
+      name: string,
+      args: Record<string, unknown>,
+      restoreResponseBinding?: RestoreToolResponseBinding,
+    ) => {
+      if (!mountedRef.current || streamingRef.current) return false;
+      void runTurn([], nextLivePromptId(config), {
+        toolCall: {
+          name,
+          args,
+          ...(restoreResponseBinding ? { restoreResponseBinding } : {}),
+        },
+      });
+      return true;
+    },
+    [config, runTurn],
+  );
+
   const notifyInputProcessed = useCallback(() => {
     if (activeTurnRef.current) activeTurnRef.current.canUndoLog = false;
   }, []);
@@ -794,6 +843,30 @@ export function useOpenTuiLiveTurn(
     [dualOutput, setBusy, syncQueue],
   );
 
+  const rewindTranscript = useCallback(
+    (userId: string) => {
+      const index = itemsRef.current.findIndex((item) => item.id === userId);
+      if (index < 0) return;
+      const retained = itemsRef.current
+        .slice(0, index)
+        .filter((item) => item.display?.kind !== 'collapse-summary')
+        .map(stripSuppressOnRestore);
+      resetTranscript([]);
+      itemsRef.current = retained;
+      setItems(retained);
+      return retained;
+    },
+    [resetTranscript],
+  );
+
+  const isCurrentHistory = useCallback(
+    (snapshot: readonly LiveHistoryItem[]) =>
+      mountedRef.current &&
+      !streamingRef.current &&
+      itemsRef.current === snapshot,
+    [],
+  );
+
   const settleWaitingCall = useCallback((callId: string) => {
     setWaitingCalls((prev) => prev.filter((c) => c.callId !== callId));
   }, []);
@@ -824,6 +897,9 @@ export function useOpenTuiLiveTurn(
     interrupt,
     retryLastPrompt,
     notifyInputProcessed,
+    scheduleTool,
+    isCurrentHistory,
+    rewindTranscript,
     resetTranscript,
     applyEvent: apply,
     settleWaitingCall,

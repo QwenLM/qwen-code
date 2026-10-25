@@ -27011,6 +27011,211 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/config-option', () => {
+    it('uses the trusted live owner for Workflow mode when the primary is untrusted', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: (sessionId) => {
+          if (sessionId !== 's-secondary')
+            throw new SessionNotFoundError(sessionId);
+          return {
+            sessionId,
+            workspaceCwd: WS_DIFFERENT,
+            createdAt: '2026-10-25T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'primary-id',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              trusted: false,
+              bridge: primaryBridge,
+            }),
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'secondary-id',
+              workspaceCwd: WS_DIFFERENT,
+              primary: false,
+              trusted: true,
+              bridge: secondaryBridge,
+            }),
+          ]),
+        },
+      );
+      const res = await request(app)
+        .post('/session/s-secondary/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ configId: 'workflow_mode', value: 'on' });
+      expect(res.status).toBe(200);
+      expect(res.body.persisted).toBe(true);
+      expect(primaryBridge.setConfigOptionCalls).toHaveLength(0);
+      expect(secondaryBridge.setConfigOptionCalls).toEqual([
+        {
+          sessionId: 's-secondary',
+          req: {
+            sessionId: 's-secondary',
+            configId: 'workflow_mode',
+            value: 'on',
+          },
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it.each([false, true])(
+      'shapes Workflow mode state and pushes for owner trust %s without blocking reasoning',
+      async (trusted) => {
+        const configOptions = [
+          { id: 'model', currentValue: 'qwen' },
+          {
+            id: 'workflow_mode',
+            currentValue: 'off',
+            _meta: {
+              'qwen.workflowMode': { available: false, effective: false },
+            },
+          },
+          { id: 'reasoning_effort', currentValue: 'high' },
+        ];
+        const update = {
+          sessionUpdate: 'config_option_update',
+          configOptions,
+          _meta: { marker: 'preserved' },
+        };
+        const event: BridgeEvent = {
+          v: 1,
+          type: 'session_update',
+          data: { sessionId: 'session-A', update },
+        };
+        const bridge = fakeBridge({
+          sessionContextImpl: async (sessionId) => ({
+            v: 1,
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            state: { configOptions },
+          }),
+          loadImpl: async (req) => ({
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: true,
+            clientId: 'client-load',
+            state: { configOptions },
+            compactedReplay: [event],
+            lifecycleReplay: [event],
+            liveJournal: [event],
+          }),
+          setConfigOptionImpl: async () => ({ configOptions }),
+          async *subscribeImpl() {
+            yield event;
+          },
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          {
+            bridge,
+            workspaceRegistry: createWorkspaceRegistry([
+              makeWorkspaceRuntimeForTest({
+                workspaceId: 'primary-id',
+                workspaceCwd: WS_BOUND,
+                primary: true,
+                trusted,
+                bridge,
+              }),
+            ]),
+          },
+        );
+        const expected = trusted
+          ? configOptions
+          : [configOptions[0], configOptions[2]];
+        const context = await request(app)
+          .get('/session/session-A/context')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(context.status).toBe(200);
+        expect(context.body.state.configOptions).toEqual(expected);
+
+        const loaded = await request(app)
+          .post('/session/session-A/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+        expect(loaded.status).toBe(200);
+        expect(loaded.body.state.configOptions).toEqual(expected);
+        for (const lane of [
+          'compactedReplay',
+          'lifecycleReplay',
+          'liveJournal',
+        ]) {
+          expect(loaded.body[lane][0].data.update).toEqual({
+            ...update,
+            configOptions: expected,
+          });
+        }
+
+        const changed = await request(app)
+          .post('/session/session-A/config-option')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ configId: 'reasoning_effort', value: 'high' });
+        expect(changed.status).toBe(200);
+        expect(changed.body.configOptions).toEqual(expected);
+        expect(bridge.setConfigOptionCalls).toHaveLength(1);
+
+        const events = await request(app)
+          .get('/session/session-A/events')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(events.status).toBe(200);
+        const frame = events.text
+          .split('\n')
+          .filter((line) => line.startsWith('data: '))
+          .map((line) => JSON.parse(line.slice('data: '.length)) as BridgeEvent)
+          .find((candidate) => candidate.type === 'session_update');
+        expect(frame?.data).toEqual({
+          sessionId: 'session-A',
+          update: { ...update, configOptions: expected },
+        });
+        expect(configOptions).toHaveLength(3);
+        expect(update.configOptions).toBe(configOptions);
+      },
+    );
+
+    it.each(['on', 'off'])(
+      'rejects Workflow mode %s for an untrusted primary owner',
+      async (value) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          {
+            bridge,
+            workspaceRegistry: createWorkspaceRegistry([
+              makeWorkspaceRuntimeForTest({
+                workspaceId: 'primary-id',
+                workspaceCwd: WS_BOUND,
+                primary: true,
+                trusted: false,
+                bridge,
+              }),
+            ]),
+          },
+        );
+        const res = await request(app)
+          .post('/session/session-A/config-option')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ configId: 'workflow_mode', value });
+
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('untrusted_workspace');
+        expect(bridge.setConfigOptionCalls).toHaveLength(0);
+      },
+    );
+
     it('writes session Workflow mode with the bound client and confirms durable session persistence', async () => {
       const bridge = fakeBridge({
         setConfigOptionImpl: async () => ({
@@ -27021,11 +27226,17 @@ describe('createServeApp', () => {
               type: 'select',
               currentValue: 'off',
               options: [],
+              _meta: {
+                'qwen.workflowMode': { available: false, effective: false },
+              },
             },
           ],
         }),
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
       const res = await request(app)
         .post('/session/session-A/config-option')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
@@ -27037,6 +27248,13 @@ describe('createServeApp', () => {
         });
       expect(res.status).toBe(200);
       expect(res.body.persisted).toBe(true);
+      expect(res.body.configOptions[0]).toMatchObject({
+        id: 'workflow_mode',
+        currentValue: 'off',
+        _meta: {
+          'qwen.workflowMode': { available: false, effective: false },
+        },
+      });
       expect(bridge.setConfigOptionCalls).toEqual([
         {
           sessionId: 'session-A',

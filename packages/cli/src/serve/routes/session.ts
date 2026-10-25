@@ -230,6 +230,8 @@ import {
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
 import {
+  redactWorkflowModeFromConfigOptions,
+  redactWorkflowModeFromSessionState,
   redactWorkflowsFromAvailableCommandsEvent,
   redactWorkflowsFromReplayArrays,
   redactWorkflowsFromSupportedCommands,
@@ -6958,9 +6960,14 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/context',
       async (_req, res, sessionId, runtime) => {
+        const status = await runtime.bridge.getSessionContextStatus(sessionId);
         res
           .status(200)
-          .json(await runtime.bridge.getSessionContextStatus(sessionId));
+          .json(
+            runtime.trusted
+              ? status
+              : redactWorkflowModeFromSessionState(status),
+          );
       },
     ),
   );
@@ -9982,6 +9989,15 @@ export function registerSessionRoutes(
             });
             return;
           }
+          if (!runtime.trusted) {
+            sendUntrustedSessionOwner(
+              res,
+              'POST /session/:id/config-option',
+              sessionId,
+              runtime,
+            );
+            return;
+          }
           if (runtime.routeFileSystemFactory.sshWorkspace) {
             res.status(501).json({
               code: 'ssh_workspace_operation_unsupported',
@@ -10018,7 +10034,9 @@ export function registerSessionRoutes(
         );
         assertOpen?.();
         res.status(200).json({
-          configOptions: response.configOptions,
+          configOptions: runtime.trusted
+            ? response.configOptions
+            : redactWorkflowModeFromConfigOptions(response).configOptions,
           persisted:
             configId === 'workflow_mode' ||
             response._meta?.[REASONING_SELECTION_PERSISTED_META_KEY] === true,

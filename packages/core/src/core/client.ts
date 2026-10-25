@@ -4905,7 +4905,35 @@ export class LlmClient {
             : undefined;
         onModelRequestDispatched = preparedWorkflow?.onModelRequestDispatched;
         const reminder = preparedWorkflow?.reminder ?? workflowIntent?.reminder;
-        if (reminder) {
+        const reminders = new Set(reminder ? [reminder] : []);
+        // Retry replaces the failed user entry after its dispatch token was
+        // consumed. Preserve its mode envelope without preparing another turn.
+        for (const entry of strippedRetryEntries) {
+          for (const { text } of entry.parts ?? []) {
+            if (
+              text &&
+              /^<system-reminder>\nWorkflow mode (?:is enabled for this session|remains enabled for this session|is off for this session|is temporarily unavailable)\. [\s\S]*\n<\/system-reminder>$/.test(
+                text,
+              ) &&
+              text.indexOf('</system-reminder>') ===
+                text.length - '</system-reminder>'.length &&
+              text.indexOf('<system-reminder>', 1) === -1
+            ) {
+              // Keep the last occurrence so mode transitions stay ordered.
+              reminders.delete(text);
+              reminders.add(text);
+            }
+          }
+        }
+        const missingReminders = [...reminders].filter(
+          (text) =>
+            !requestToSend.some(
+              (part) =>
+                part === text ||
+                (typeof part === 'object' && part?.text === text),
+            ),
+        );
+        if (missingReminders.length > 0) {
           const insertAt = requestToSend.findIndex(
             (part) =>
               typeof part !== 'object' ||
@@ -4915,9 +4943,7 @@ export class LlmClient {
           requestToSend.splice(
             insertAt < 0 ? requestToSend.length : insertAt,
             0,
-            {
-              text: reminder,
-            },
+            ...missingReminders.map((text) => ({ text })),
           );
         }
         if (workflowIntent) {

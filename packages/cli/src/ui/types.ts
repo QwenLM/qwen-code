@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { RestoreToolResponseBinding } from './utils/restore-tool-response.js';
 import type {
   CompactionThresholds,
   CompressionStatus,
@@ -999,6 +1000,7 @@ export type SlashCommandProcessorResult =
       type: 'schedule_tool';
       toolName: string;
       toolArgs: Record<string, unknown>;
+      restoreResponseBinding?: RestoreToolResponseBinding;
     }
   | {
       type: 'handled'; // Indicates the command was processed and no further action is needed.
@@ -1014,6 +1016,8 @@ export interface ShellConfirmationRequest {
 }
 
 export interface ConfirmationRequest {
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
   prompt: ReactNode;
   onConfirm: (confirm: boolean) => void;
 }

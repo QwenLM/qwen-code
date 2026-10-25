@@ -49,6 +49,7 @@ import { BaseLlmClient } from './baseLlmClient.js';
 import { MemoryManager } from '../memory/manager.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
+import { WorkflowModeContext } from './workflow-mode.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -11345,6 +11346,216 @@ Other open files:
       });
       const retryMe = (promptId: string) =>
         run([{ text: 'retry me' }], promptId, { type: SendMessageType.Retry });
+
+      it.each(['full', 'refresh', 'off', 'unavailable'] as const)(
+        'preserves the dispatched %s Workflow mode envelope on repeated Retry without counting another turn',
+        async (kind) => {
+          const mode = new WorkflowModeContext();
+          const context = {
+            surface: 'pointer' as const,
+            bridgeWorkflowTool: false,
+            nameOnly: false,
+          };
+          mode.setRequested(true);
+          if (kind !== 'full') {
+            mode.prepare(context, null).onModelRequestDispatched?.();
+          }
+          if (kind === 'refresh') {
+            for (let index = 0; index < 9; index++) {
+              mode.prepare(context, null).onModelRequestDispatched?.();
+            }
+          }
+          if (kind === 'off') mode.setRequested(false);
+          const currentContext = kind === 'unavailable' ? null : context;
+          const prepared = mode.prepare(currentContext, null);
+          expect(prepared.reminder).toBeDefined();
+          prepared.onModelRequestDispatched?.();
+          const snapshot = mode.snapshot();
+          const orphan = content(
+            'user',
+            { text: prepared.reminder },
+            { text: 'retry me' },
+          );
+          let pushes = 1;
+          const chat = retryChat({
+            ...strippingPrompt(orphan),
+            getUserContentPushCount: vi.fn(() => pushes),
+          });
+          mockTurnRunFn.mockImplementation((_model, request) => {
+            publishPushSnapshot(request, pushes++);
+            return textTurn('retry response');
+          });
+
+          for (let attempt = 0; attempt < 2; attempt++) {
+            await retryMe('mode-retry');
+            const request = mockTurnRunFn.mock.lastCall?.[1];
+            expect(Array.from(request!)).toEqual([
+              { text: prepared.reminder },
+              'retry me',
+            ]);
+            expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+            expect(mode.snapshot()).toEqual(snapshot);
+            expect(chat.addHistory).not.toHaveBeenCalled();
+          }
+          expect(mode.prepare(currentContext, null).reminder).toBeUndefined();
+        },
+      );
+
+      it.each([true, false])(
+        'preserves final mode %s when stripped Retry entries repeat an earlier envelope',
+        async (enabled) => {
+          const mode = new WorkflowModeContext();
+          const context = {
+            surface: 'pointer' as const,
+            bridgeWorkflowTool: false,
+            nameOnly: false,
+          };
+          mode.setRequested(true);
+          const on = mode.prepare(context, null).reminder!;
+          mode.setRequested(false);
+          const off = mode.prepare(context, null).reminder!;
+          const final = enabled ? on : off;
+          const previous = enabled ? off : on;
+          retryChat({
+            stripOrphanedUserEntriesFromHistory: vi
+              .fn()
+              .mockReturnValue([
+                content(
+                  'user',
+                  { text: final },
+                  { text: 'first failed prompt' },
+                ),
+                content(
+                  'user',
+                  { text: previous },
+                  { text: 'second failed prompt' },
+                ),
+                content('user', { text: final }, { text: 'retry me' }),
+              ]),
+          });
+          mockTurnRunFn.mockReturnValue(textTurn('retry response'));
+          await retryMe('mode-retry-transitions');
+          expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
+            { text: previous },
+            { text: final },
+            'retry me',
+          ]);
+          expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+        },
+      );
+
+      it('does not duplicate a Workflow mode envelope already present in the Retry request', async () => {
+        const reminder =
+          '<system-reminder>\nWorkflow mode is off for this session. Do not apply the persistent workflow preference.\n</system-reminder>';
+        retryChat(
+          strippingPrompt(
+            content('user', { text: reminder }, { text: 'retry me' }),
+          ),
+        );
+        mockTurnRunFn.mockReturnValue(textTurn('retry response'));
+
+        await run(
+          [
+            fnResponse('read_file', { output: 'done' }),
+            { text: reminder },
+            { text: 'retry me' },
+          ],
+          'mode-retry-present',
+          {
+            type: SendMessageType.Retry,
+          },
+        );
+
+        expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
+          fnResponse('read_file', { output: 'done' }),
+          reminder,
+          'retry me',
+        ]);
+        expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+      });
+
+      it('does not replay a Workflow mode envelope when no history entry was stripped', async () => {
+        const reminder =
+          '<system-reminder>\nWorkflow mode is enabled for this session.\n</system-reminder>';
+        retryChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              content('user', { text: reminder }, { text: 'retry me' }),
+              modelText('partial'),
+            ]),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockReturnValue(textTurn('retry response'));
+        await retryMe('mode-retry-retained');
+        expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual(['retry me']);
+        expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+      });
+
+      it('restores the Workflow mode envelope after leading function responses without restoring the old prompt', async () => {
+        const reminder =
+          '<system-reminder>\nWorkflow mode is off for this session. Do not apply the persistent workflow preference.\n</system-reminder>';
+        const response = fnResponse('read_file', { output: 'done' });
+        retryChat(
+          strippingPrompt(
+            content('user', { text: reminder }, { text: 'old prompt' }),
+          ),
+        );
+        mockTurnRunFn.mockReturnValue(textTurn('retry response'));
+        await run([response, { text: 'retry me' }], 'mode-retry-tools', {
+          type: SendMessageType.Retry,
+        });
+        expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
+          response,
+          { text: reminder },
+          'retry me',
+        ]);
+      });
+
+      it.each([
+        '<system-reminder>\nWorkflow mode is off for this session. Do not apply the persistent workflow preference.\n</system-reminder>original user text',
+        '<system-reminder>\nWorkflow mode is off for this session. <system-reminder>nested</system-reminder>\n</system-reminder>',
+        '<system-reminder>\nWorkflow mode is off for this session. Do not apply the persistent workflow preference.\n</system-reminder><system-reminder>\noriginal user text\n</system-reminder>',
+      ])(
+        'does not restore user text attached to a Workflow mode envelope: %s',
+        async (text) => {
+          retryChat(
+            strippingPrompt(content('user', { text }, { text: 'old prompt' })),
+          );
+          mockTurnRunFn.mockReturnValue(textTurn('retry response'));
+          await retryMe('mode-retry-invalid-envelope');
+          expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual(['retry me']);
+        },
+      );
+
+      it('restores the unmodified stripped entry when a Workflow mode Retry fails before pushing', async () => {
+        const reminder =
+          '<system-reminder>\nWorkflow mode is off for this session. Do not apply the persistent workflow preference.\n</system-reminder>';
+        const orphan = content(
+          'user',
+          { text: reminder },
+          { text: 'retry me' },
+        );
+        const chat = retryChat({
+          ...strippingPrompt(orphan),
+          getUserContentPushCount: vi.fn().mockReturnValue(1),
+        });
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield* [] as ServerLlmStreamEvent[];
+            throw new Error('setup failed before push');
+          })(),
+        );
+        await expect(retryMe('mode-retry-setup-failure')).rejects.toThrow(
+          'setup failed before push',
+        );
+        expect(chat.addHistory).toHaveBeenCalledExactlyOnceWith(orphan);
+        expect(orphan.parts).toEqual([
+          { text: reminder },
+          { text: 'retry me' },
+        ]);
+        expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+      });
 
       it('should call stripOrphanedUserEntriesFromHistory before executing', async () => {
         const mockChat = retryChat({
