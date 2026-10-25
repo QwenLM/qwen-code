@@ -15,7 +15,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
-  assertOwnedBySession,
+  assertWatching,
   autofixPrPaths,
   MAX_INSTRUCTIONS_CHARS,
   repoRoot,
@@ -64,8 +64,11 @@ export function scheduledTask(
       `"\${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot ${state.prNumber} --gate ` +
       `--repo ${repo} --host ${state.host} --session ${state.sessionId}` +
       (watch.task ? ` --task ${watch.task}` : ''),
+    // The round checks with its first helper that its task still drives
+    // the watch: a fire queued before a later schedule is not acted on.
     prompt:
       `Run /autofix-pr tick ${repo}#${state.prNumber}` +
+      (watch.task ? ` --task ${watch.task}` : '') +
       (watch.reply ? '' : ' --no-reply') +
       (watch.instructions ? ` -- ${watch.instructions}` : ''),
   };
@@ -121,7 +124,8 @@ export function runSchedule(
   }
   return withWatchLock(paths, args.pr, () => {
     const state = requireState(paths.statePath, args.pr);
-    assertOwnedBySession(state);
+    // A watch `cleanup` ended is started again by a start, not here.
+    assertWatching(state);
     // Running someone else's code with the user's credentials in reach is
     // confirmed for one round at a time (`--once`), never for a watch.
     if (state.authorCanPush === false) {
@@ -136,8 +140,12 @@ export function runSchedule(
           `PR #${args.pr} has no scheduled task recorded; start the watch again with /autofix-pr ${args.pr}.`,
         );
       }
-      const { task: _replaced, ...recorded } = state.watch;
-      options = recorded;
+      // Field by field: nothing else the file holds reaches the task.
+      options = {
+        every: state.watch.every,
+        reply: state.watch.reply,
+        instructions: state.watch.instructions,
+      };
     } else {
       options = {
         every,
@@ -149,12 +157,15 @@ export function runSchedule(
     }
     // A new id each time: the task made from this output is the watch's
     // only one, and any other's gate answers stop.
-    const watch = { ...options, task: randomBytes(6).toString('hex') };
+    const watch: AutofixPrWatchOptions = {
+      ...options,
+      task: randomBytes(6).toString('hex'),
+    };
     // Checked before anything is recorded: a task that cannot be made is
     // not one to start again.
-    const task = scheduledTask(state, watch);
+    const { cron, recurring, gate, prompt } = scheduledTask(state, watch);
     writeState(paths.statePath, { ...state, watch });
-    return { ...task, ...watch };
+    return { cron, recurring, gate, prompt, ...watch };
   });
 }
 

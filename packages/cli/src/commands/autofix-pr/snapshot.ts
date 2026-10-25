@@ -17,7 +17,13 @@
 //   so the session is woken only for them.
 
 import type { CommandModule } from 'yargs';
-import { lstatSync, mkdirSync, readFileSync, utimesSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -35,7 +41,7 @@ import {
 import { normalizeSegment } from '../review/lib/remote-match.js';
 import {
   REPLY_MARKER,
-  assertOwnedBySession,
+  assertWatching,
   autofixPrPaths,
   checkAttemptKey,
   readGateCursor,
@@ -1748,6 +1754,20 @@ export interface SnapshotArgs {
   task?: string;
 }
 
+/** Creates or touches `path`; a link is not followed. */
+function markChecked(path: string): void {
+  try {
+    const now = new Date();
+    if (lstatSync(path, { throwIfNoEntry: false }) === undefined) {
+      writeFileSync(path, '', { flag: 'wx' });
+    } else if (lstatSync(path).isFile()) {
+      utimesSync(path, now, now);
+    }
+  } catch {
+    // A check that ran is not undone by a time that did not move.
+  }
+}
+
 /**
  * Why a CLI watch's task no longer drives the watch, or null. Its gate names
  * the session and the task it was made for. A take-over moves the watch to
@@ -1766,10 +1786,23 @@ function staleTask(
 ): Record<string, string> | null {
   if (session === '') return null;
   const named = { gateSession: session, ...(task ? { gateTask: task } : {}) };
-  if (!state || !sameRepository(state, target)) {
+  // Gone, stopped by a cleanup that kept its worktree, or — for a task made
+  // by `schedule` — no task recorded at all.
+  if (
+    !state ||
+    !sameRepository(state, target) ||
+    state.ended ||
+    (task && !state.watch)
+  ) {
     return { type: 'watch_ended', ...named };
   }
-  if (state.sessionId !== session || (task && state.watch?.task !== task)) {
+  // A task with no id predates task ids: once one is recorded, it is not
+  // the one recorded either.
+  const recorded = state.watch?.task;
+  if (
+    state.sessionId !== session ||
+    (recorded !== undefined && recorded !== task)
+  ) {
     return { type: 'watched_elsewhere', session: state.sessionId, ...named };
   }
   return null;
@@ -1843,6 +1876,9 @@ function runGate(args: SnapshotArgs): void {
   // task names its session: the environment cannot, as a Managed
   // automation runs its gate as a session of its own.
   const session = args.session ?? '';
+  if (args.task !== undefined && session === '') {
+    throw new TypeError('--task names a task of a watch; pass its --session');
+  }
   const stale = staleTask(state, target, session, args.task);
   if (stale) {
     writeStdoutLine(JSON.stringify({ action: 'stop', events: [stale] }));
@@ -1902,18 +1938,11 @@ function runGate(args: SnapshotArgs): void {
   if (JSON.stringify(result.cursor) !== JSON.stringify(existing)) {
     mkdirSync(dirname(paths.gatePath), { recursive: true });
     writeGateCursor(paths.gatePath, result.cursor);
-  } else {
-    // `status` reads the last check from the cursor's time; a link is not
-    // followed to touch whatever it points at.
-    try {
-      if (lstatSync(paths.gatePath).isFile()) {
-        const now = new Date();
-        utimesSync(paths.gatePath, now, now);
-      }
-    } catch {
-      // A check that ran is not undone by a time that did not move.
-    }
   }
+  // `status` reads when the watch's own task last checked the PR from this
+  // file, which `cleanup` removes with the watch; a gate with no session is
+  // no watch's, and shares only the cursor.
+  if (session !== '') markChecked(paths.checkedPath);
   if (result.snapshot) writeStdoutLine(JSON.stringify(result.snapshot));
 }
 
@@ -1926,7 +1955,7 @@ export function runSnapshot(args: SnapshotArgs): void {
     autofixPrPaths(repoRoot(), args.pr).statePath,
     args.pr,
   );
-  assertOwnedBySession(state);
+  assertWatching(state);
   setGhHost(state.host);
   ensureAuthenticated();
   const { pr } = fetchPrData(state, roundReplyCheck(state));

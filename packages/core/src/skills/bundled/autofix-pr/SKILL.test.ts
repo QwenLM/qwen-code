@@ -152,12 +152,15 @@ describe('bundled autofix-pr skill', () => {
       '`"${QWEN_CODE_CLI:-qwen}" autofix-pr schedule <n> --again`',
     );
     expect(body).toContain('`--task <gateTask>`');
+    // Resume stops every other task of the watch before its round.
     expect(body).toContain(
-      'delete (`cron_delete`) every task of the PR in `cron_list`, and create the task',
+      'autofix-pr schedule <pr> --again` before the round',
     );
-    // Stopping a watch another session left behind keeps its work.
+    // A round starts by checking that its task still drives the watch.
+    expect(body).toContain('adding `--task <id>` when the tick has one');
+    // Only the user's own stop takes a watch from another session.
     expect(body).toContain(
-      '`"${QWEN_CODE_CLI:-qwen}" autofix-pr cleanup <n> --take-over` for each PR',
+      "adding `--take-over` for a PR the user's `stop` named",
     );
     // Whether another session still runs a watch is the helper's to say.
     expect(body).toContain('`checkedRecently` true and no task of the PR');

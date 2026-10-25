@@ -121,6 +121,9 @@ describe('stateDefect', () => {
       ['watch', { every: 2, reply: true, instructions: 'a\u0085b' }],
       ['watch', { every: 2, reply: true, instructions: 'a\u202eb' }],
       ['watch', { every: 2, reply: true, instructions: '', task: 'x; id' }],
+      ['watch', { every: 2, reply: true, instructions: '', gate: 'sh' }],
+      ['ended', { at: 'x' }],
+      ['preparedAt', 3],
       ['watch', { every: 2, reply: true, instructions: 'x'.repeat(2001) }],
       ['needsHuman', [{ sha: 'a', at: 'b' }]],
     ] as const) {

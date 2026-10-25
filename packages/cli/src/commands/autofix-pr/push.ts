@@ -17,7 +17,7 @@ import { git } from '../review/lib/git.js';
 import { pushTargetFor } from './prepare.js';
 import {
   MAX_PUSHES,
-  assertOwnedBySession,
+  assertWatching,
   autofixPrPaths,
   isBranchName,
   isCommandSafeName,
@@ -223,7 +223,7 @@ function pushLocked(
   root: string,
 ): PushOutcome {
   const state = requireState(paths.statePath, prNumber);
-  assertOwnedBySession(state);
+  assertWatching(state);
   const worktree = paths.worktreePath;
   requireWorktree(paths, prNumber, root);
   if (hasUncommittedChanges(worktree)) {

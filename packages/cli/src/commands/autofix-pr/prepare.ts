@@ -268,9 +268,27 @@ export function runPrepare(args: PrepareArgs): void {
         tookOver = true;
       }
       assertOwnedBySession(existing);
+      // A start resumes a watch `cleanup` ended keeping its worktree: the
+      // user asked for it, and the start's confirmation said what the
+      // worktree holds.
+      const wasEnded = existing.ended;
+      if (wasEnded) {
+        existing = withWatchLock(paths, args.pr, () => {
+          const { ended: _resumed, ...rest } = requireState(
+            paths.statePath,
+            args.pr,
+          );
+          writeState(paths.statePath, rest);
+          return rest;
+        });
+      }
       report(
         { ...existing, worktreePath: paths.worktreePath },
-        { resumed: true, ...(tookOver ? { tookOver } : {}) },
+        {
+          resumed: true,
+          ...(tookOver ? { tookOver } : {}),
+          ...(wasEnded ? { wasEnded } : {}),
+        },
       );
       return;
     }
@@ -426,6 +444,7 @@ export function runPrepare(args: PrepareArgs): void {
       prAuthor: pr.author?.login ?? '',
       authorCanPush: authorCanPush(args.repo, pr.author?.login ?? '', viewer),
       lastKnownHeadSha: headSha,
+      preparedAt: new Date().toISOString(),
       // A watch whose worktree was removed keeps its history, so it does not
       // answer the same comments again, and keeps its budgets. A new watch of
       // a PR watched before starts from what that one posted and handled.

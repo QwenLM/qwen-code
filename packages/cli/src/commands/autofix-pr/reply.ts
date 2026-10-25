@@ -33,7 +33,7 @@ import {
 import {
   MAX_NEEDS_HUMAN,
   REPLY_MARKER,
-  assertOwnedBySession,
+  assertWatching,
   autofixPrPaths,
   repoRoot,
   requireState,
@@ -335,7 +335,7 @@ function replyLocked(
   paths: AutofixPrPaths,
 ): ReplyOutcome {
   let state = requireState(paths.statePath, args.pr);
-  assertOwnedBySession(state);
+  assertWatching(state);
   setGhHost(state.host);
   ensureAuthenticated();
   // Every bot thread the plan may name was asked about by the round's

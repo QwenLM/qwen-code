@@ -782,6 +782,18 @@ describe('runPrepare (real git)', () => {
     );
   });
 
+  it('dates a new state, and resumes a watch cleanup ended when started again', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    const state = readState(paths.statePath)!;
+    expect(Date.parse(state.preparedAt!)).not.toBeNaN();
+    const ended = { at: '2026-10-25T00:00:00.000Z', reason: 'kept' };
+    writeState(paths.statePath, { ...state, ended });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ resumed: true, wasEnded: ended });
+    expect(readState(paths.statePath)!.ended).toBeUndefined();
+  });
+
   it('takes over a watch whose worktree was removed only once the PR passed its checks', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const paths = autofixPrPaths(clone, 7);

@@ -15,7 +15,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from '../review/lib/gh.js';
 import {
-  assertOwnedBySession,
+  assertWatching,
   assertPositiveInteger,
   autofixPrPaths,
   repoRoot,
@@ -79,7 +79,7 @@ export function runCiLog(prNumber: number, runId: number, limit: number): void {
   const root = repoRoot();
   const paths = autofixPrPaths(root, prNumber);
   const state = requireState(paths.statePath, prNumber);
-  assertOwnedBySession(state);
+  assertWatching(state);
   setGhHost(state.host);
   ensureAuthenticated();
   // From the start: listing the jobs of a large run takes its time too.

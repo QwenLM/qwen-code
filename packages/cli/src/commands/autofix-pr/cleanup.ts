@@ -162,17 +162,20 @@ export function runCleanup(
       () => (state ? livePrHead(state, prNumber) : null),
     );
     if (reason) {
-      // The watch has ended all the same: `resume` must not start its task
-      // again, or its first round would discard what is kept.
-      if (state?.watch) {
+      // The watch has ended all the same. A round of it that still runs —
+      // a fire queued before its task was deleted, a second process of the
+      // session — is refused by its helpers, or it would discard what is
+      // kept; and `resume` does not start its task again. A start does.
+      if (state) {
         withWatchLock(paths, prNumber, () => {
           const current = readState(paths.statePath);
           // Taken over meanwhile: the watch is the new owner's.
-          if (!current?.watch || current.sessionId !== currentSessionId()) {
-            return;
-          }
+          if (!current || current.sessionId !== currentSessionId()) return;
           const { watch: _ended, ...rest } = current;
-          writeState(paths.statePath, rest);
+          writeState(paths.statePath, {
+            ...rest,
+            ended: { at: new Date().toISOString(), reason },
+          });
         });
       }
       writeStdoutLine(

@@ -86,6 +86,12 @@ export interface AutofixPrState {
   watch?: AutofixPrWatchOptions;
   /** What rounds left for a person, newest last, for `status`. */
   needsHuman?: NeedsHumanItem[];
+  /** When `prepare` made this state (ISO 8601): a gate cursor older than
+   * it is a former watch's, which `status` does not report. */
+  preparedAt?: string;
+  /** Set by a `cleanup` that kept the worktree: the watch is over, and the
+   * helpers of its rounds refuse until a start (`prepare`) resumes it. */
+  ended?: { at: string; reason: string };
 }
 
 export interface AutofixPrWatchOptions {
@@ -216,6 +222,8 @@ export interface AutofixPrPaths {
   statePath: string;
   /** `snapshot --gate` cursor; separate from the state file on purpose. */
   gatePath: string;
+  /** Touched by every run of the watch's own gate that read the PR. */
+  checkedPath: string;
   /** The last prepared snapshot, whole: too long for a line of output. */
   snapshotPath: string;
   /** What GitHub said of bot comments: whether each answers another. */
@@ -250,6 +258,7 @@ export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
     worktreePath: join(tmp, `autofix-pr-${prNumber}`),
     statePath: join(tmp, `autofix-pr-${prNumber}-state.json`),
     gatePath: join(tmp, `autofix-pr-${prNumber}-gate.json`),
+    checkedPath: join(tmp, `autofix-pr-${prNumber}-gate.checked`),
     snapshotPath: join(tmp, `autofix-pr-${prNumber}-snapshot.json`),
     repliesPath: join(tmp, `autofix-pr-${prNumber}-replies.json`),
     // Not `autofix-pr-<n>-…`: cleanup's sweep of the watch's files must not
@@ -453,14 +462,32 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'needsHuman';
   }
+  if (state.preparedAt !== undefined && typeof state.preparedAt !== 'string') {
+    return 'preparedAt';
+  }
+  if (
+    state.ended !== undefined &&
+    !(
+      typeof state.ended === 'object' &&
+      state.ended !== null &&
+      typeof state.ended.at === 'string' &&
+      typeof state.ended.reason === 'string'
+    )
+  ) {
+    return 'ended';
+  }
   return null;
 }
+
+const WATCH_KEYS = new Set(['every', 'reply', 'instructions', 'task']);
 
 function isWatchOptions(value: unknown): value is AutofixPrWatchOptions {
   const watch = value as AutofixPrWatchOptions | null;
   return (
     typeof watch === 'object' &&
     watch !== null &&
+    // `schedule` prints a task from these and nothing else.
+    Object.keys(watch).every((key) => WATCH_KEYS.has(key)) &&
     WATCH_INTERVALS.includes(watch.every) &&
     typeof watch.reply === 'boolean' &&
     typeof watch.instructions === 'string' &&
@@ -815,6 +842,30 @@ export function requireState(
     );
   }
   return state;
+}
+
+/**
+ * The checks of a round's helpers: the session owns the watch, a `cleanup`
+ * that kept the worktree has not ended it, and — given the task that woke
+ * the round — that task still drives it. A fire queued before a later
+ * `schedule` replaced its task, or before the watch was stopped, is refused
+ * here rather than act on the PR with options the user has since changed.
+ */
+export function assertWatching(state: AutofixPrState, task?: string): void {
+  assertOwnedBySession(state);
+  if (state.ended) {
+    throw new Error(
+      `PR #${state.prNumber}'s watch was stopped (${state.ended.reason}); ` +
+        `its worktree was kept. Start it again with /autofix-pr ${state.prNumber}.`,
+    );
+  }
+  if (task !== undefined && state.watch?.task !== task) {
+    throw new Error(
+      `task ${task} no longer drives PR #${state.prNumber}'s watch` +
+        (state.watch?.task ? ` (task ${state.watch.task} does)` : '') +
+        '; delete it.',
+    );
+  }
 }
 
 export function assertOwnedBySession(state: AutofixPrState): void {

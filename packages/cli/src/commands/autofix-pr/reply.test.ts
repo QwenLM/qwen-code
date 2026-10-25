@@ -571,6 +571,17 @@ describe('runReply', () => {
     ]);
   });
 
+  it('posts nothing for a watch cleanup ended', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      ended: { at: '2026-10-25T00:00:00.000Z', reason: 'kept' },
+    });
+    expect(() =>
+      reply({ replies: [{ replyTo: 101, body: 'x', handled: ['PRRC_101'] }] }),
+    ).toThrow(/watch was stopped/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
   it('keeps only the newest items a person has to look at', () => {
     reply({
       needsHuman: Array.from({ length: 25 }, (_, i) => `item ${i}`),

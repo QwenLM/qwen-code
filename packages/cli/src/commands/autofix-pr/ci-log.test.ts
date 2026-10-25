@@ -32,6 +32,7 @@ vi.mock('./state.js', async (importOriginal) => ({
   repoRoot: () => mocks.root,
   requireState: () => ({ host: 'github.com', owner: 'o', repo: 'r' }),
   assertOwnedBySession: () => {},
+  assertWatching: () => {},
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({

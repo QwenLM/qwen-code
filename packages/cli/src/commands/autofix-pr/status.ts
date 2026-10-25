@@ -41,7 +41,8 @@ export interface WatchStatus {
   /** The session that owns the watch; '' when prepared outside one. */
   session: string;
   thisSession: boolean;
-  /** The last gate run that read the PR, or null before the first. */
+  /** The last run of the watch's own gate (one with its session) that read
+   * the PR, or null before the first. */
   lastCheck: string | null;
   /** `lastCheck` is within two of the watch's intervals: a gate, of this
    * session or another, is likely still running. */
@@ -53,6 +54,8 @@ export interface WatchStatus {
   stopped: 'merged' | 'closed' | null;
   /** The scheduled task `schedule` recorded; null for `--once`. */
   watch: AutofixPrWatchOptions | null;
+  /** A `cleanup` that kept the worktree ended the watch: when and why. */
+  ended: { at: string; reason: string } | null;
   needsHuman: NeedsHumanItem[];
   worktreePath: string;
   worktreeExists: boolean;
@@ -73,16 +76,25 @@ export interface StatusOutcome {
 // The name `autofixPrPaths` gives it: no leading zero.
 const STATE_FILE_RE = /^autofix-pr-([1-9]\d*)-state\.json$/;
 
-/** The gate cursor of this watch's repository, or null. The cursor outlives
- * a watch (`cleanup` keeps it), so it may be another repository's PR of the
- * same number; one that cannot be read says nothing about the watch. */
+/** The gate cursor of this watch, or null. The cursor outlives a watch
+ * (`cleanup` keeps it), so it may be another repository's PR of the same
+ * number, or what the gate saw before this watch was prepared — a PR
+ * closed then, and reopened since; one that cannot be read says nothing
+ * about the watch. */
 function cursorOf(
   path: string,
-  state: { host: string; owner: string; repo: string },
+  state: { host: string; owner: string; repo: string; preparedAt?: string },
 ): AutofixPrGateCursor | null {
   try {
     const cursor = isPlainFile(path) ? readGateCursor(path) : null;
-    return cursor && sameRepository(cursor, state) ? cursor : null;
+    if (!cursor || !sameRepository(cursor, state)) return null;
+    if (
+      state.preparedAt !== undefined &&
+      statSync(path).mtimeMs < Date.parse(state.preparedAt)
+    ) {
+      return null;
+    }
+    return cursor;
   } catch {
     return null;
   }
@@ -137,7 +149,9 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         );
       }
       const cursor = cursorOf(paths.gatePath, state);
-      const lastCheck = cursor ? modifiedAt(paths.gatePath) : null;
+      const lastCheck = isPlainFile(paths.checkedPath)
+        ? modifiedAt(paths.checkedPath)
+        : null;
       const every = state.watch?.every ?? DEFAULT_EVERY;
       outcome.watches.push({
         pr,
@@ -151,7 +165,6 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         maxPushes: MAX_PUSHES,
         session: state.sessionId,
         thisSession: state.sessionId === session,
-        // The gate touches its cursor on every run that read the PR.
         lastCheck,
         checkedRecently:
           lastCheck !== null &&
@@ -159,6 +172,7 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         lastRound: modifiedAt(paths.snapshotPath),
         stopped: cursor?.stopped ?? null,
         watch: state.watch ?? null,
+        ended: state.ended ?? null,
         needsHuman: state.needsHuman ?? [],
         // The recorded path goes stale when the clone moves; this one does not.
         worktreePath: paths.worktreePath,

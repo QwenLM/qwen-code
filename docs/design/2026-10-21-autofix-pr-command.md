@@ -148,6 +148,7 @@ worktree included:
 - worktree: `.qwen/tmp/autofix-pr-<n>/`
 - state: `.qwen/tmp/autofix-pr-<n>-state.json`
 - gate cursor: `.qwen/tmp/autofix-pr-<n>-gate.json`
+- when the watch's own gate last checked: `.qwen/tmp/autofix-pr-<n>-gate.checked`
 - latest prepared snapshot: `.qwen/tmp/autofix-pr-<n>-snapshot.json`
 - what GitHub said of bot comments: `.qwen/tmp/autofix-pr-<n>-replies.json`
 - logs, briefs and reply plans: `.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
@@ -654,9 +655,12 @@ submodules included, whatever `status.showUntrackedFiles` or a submodule's
 `ignore` setting says), or the worktree (or the branch, once the
 worktree was deleted) has commits that no PR head the watch knows of
 contains, all three are kept and the report says why. The watch ends all the
-same: its recorded task (`watch`, Section 6.11) is dropped, so
-`/autofix-pr resume` does not start it again, whose first round would
-discard what was kept. The heads it knows of
+same: its recorded task (`watch`, Section 6.11) is dropped and the state
+records `ended` (when, and the reason), so `/autofix-pr resume` does not
+start it again, the helpers of a round still under way refuse it (a fire
+queued before its task was deleted, a second process of the session), and
+its gate answers `watch_ended`: any of them would discard what was kept. A
+start (`prepare`, reporting `wasEnded`) resumes it. The heads it knows of
 are `lastKnownHeadSha` and `pushedShas`, and — asked only when those leave
 commits over — the PR head on the remote (`refs/pull/<n>/head`), so work
 pushed by hand is not held back. A directory at the worktree path that is
@@ -732,7 +736,14 @@ do not fit are left out and counted in `deferred`; their PRs keep their old
 head in the cursor, so the next run reports them. The skill that uses it decides what each event means:
 run `/qreview <number>`, or a verification pass, per PR.
 
-### 6.8 `sync <pr> [--discard]`
+### 6.8 `sync <pr> [--discard] [--task <id>]`
+
+A round starts with `sync`, so it also checks that the round may run: the
+watch is this session's and not ended (Section 6.6), and — with `--task`,
+the task the round's prompt names — that this task still drives it. A fire
+queued before a later `schedule` replaced its task, or before `stop` ended
+the watch, is refused here and the round deletes the task. `snapshot`,
+`ci-log`, `push`, `reply` and `rerun` refuse an ended watch the same way.
 
 Adopts a head someone else pushed. It fetches the PR branch from the push
 target — the ref the push lease protects, which moves at once, unlike
@@ -882,9 +893,12 @@ the reason for a state file that could not be read. Each watch carries:
   head the watch knows (`headSha`);
 - `pushes` and `maxPushes`;
 - `session`, the session that owns it, and `thisSession`;
-- `lastCheck`, the last gate run that read the PR — the gate touches its
-  cursor on every such run, changed or not — and `lastRound`, the time of
-  the last prepared snapshot; both null before the first;
+- `lastCheck`, the last run of the watch's own gate (one with a
+  `--session`) that read the PR — it touches
+  `.qwen/tmp/autofix-pr-<n>-gate.checked` on every such run, which
+  `cleanup` removes with the watch, while a gate with no session, which
+  shares the cursor, leaves it — and `lastRound`, the time of the last
+  prepared snapshot; both null before the first;
 - `checkedRecently`, whether `lastCheck` is within two of the watch's
   intervals: a gate, of this session or another, is likely still running.
   The helper says it, not the model, which knows the date but not the time;
@@ -892,6 +906,7 @@ the reason for a state file that could not be read. Each watch carries:
   was not cleaned up — as of `lastCheck`: the PR may have been reopened
   since, so the skill acts on it only through a round, which reads GitHub;
 - `watch`, the task `schedule` recorded, or null for `--once`;
+- `ended`, when and why a `cleanup` that kept the worktree ended the watch;
 - `needsHuman` (Section 6.5);
 - the worktree's path and whether it exists, and `worktreeWork`: what the
   worktree or its branch holds that the PR does not, judged as `cleanup`
@@ -899,8 +914,10 @@ the reason for a state file that could not be read. Each watch carries:
   discards it, so a take-over or a resume says so before it asks.
 
 The gate cursor outlives a watch (Section 6.6), so it is read only when it
-names the watch's repository, and one that cannot be read leaves
-`lastCheck` and `stopped` null instead of hiding the watch. A state file is
+names the watch's repository and is no older than the watch (`preparedAt`,
+written by `prepare`: a cursor that saw the PR closed before it was
+reopened and watched again is a former watch's), and one that cannot be
+read leaves `stopped` null instead of hiding the watch. A state file is
 read under the name the helpers give it (no leading zero) and must name its
 own PR, and neither it nor the cursor is read unless it is a regular file
 (a FIFO under that name would block); anything else is `unreadable`.
@@ -912,9 +929,11 @@ this session runs.
 ### 6.11 `schedule <pr> [--every <minutes>] [--no-reply] [--instructions] | --again`
 
 Records the watch's scheduled task in the state file
-(`watch: { every, reply, instructions, task }`) and prints it as
-`cron_create` takes it: `cron`, `recurring`, `gate` and `prompt`, with the
-options. The skill creates the task from these exactly as printed, so the
+(`watch: { every, reply, instructions, task }`, and nothing else: the state
+check refuses any other field) and prints it as `cron_create` takes it:
+`cron`, `recurring`, `gate` and `prompt`, with the options. Both the gate
+and the prompt carry the task id (`tick <owner>/<repo>#<n> --task <id>`),
+so a round woken by a replaced task stops at its first `sync`. The skill creates the task from these exactly as printed, so the
 gate and the prompt are not composed in a prompt.
 
 - Every run mints a new task id, which the gate carries (`--task`). The task
@@ -1099,8 +1118,10 @@ Replies are on by default; `--no-reply` turns them off.
   does not run, after one confirmation, and creates the task `schedule`
   recorded at the start (`schedule --again`), so the watch goes on with the
   same interval, `--no-reply` and instructions. A task that expired is
-  resumed the same way. It deletes the PR's tasks left in this session,
-  made for the session the watch was taken from, before the round; it
+  resumed the same way. Before the round it runs `schedule --again`, whose
+  new task id stops every other task of the watch — one in a second
+  process of the same session included — and deletes the PR's tasks left
+  in this session; it
   leaves out, unless the PR is named, a watch another session's gate
   checked within two of its intervals; and a watch `stop` ended while
   keeping its worktree has no task recorded, so it is not resumed.

@@ -244,6 +244,11 @@ describe('runCleanup (real git)', () => {
     expect(lastReport()).toMatchObject({ removed: false });
     const kept = readState(paths.statePath)!;
     expect(kept.watch).toBeUndefined();
+    // The rounds' helpers refuse it until a start resumes it.
+    expect(kept.ended).toEqual({
+      at: expect.any(String),
+      reason: expect.stringMatching(/uncommitted changes/),
+    });
     expect(kept.lastKnownHeadSha).toBe(headSha);
   });
 

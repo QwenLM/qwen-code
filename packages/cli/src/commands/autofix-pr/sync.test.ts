@@ -191,6 +191,25 @@ describe('runSync (real git, bare remote)', () => {
     expect(known()).toBe(featSha);
   });
 
+  it('starts a round only for the task that drives the watch, and none of a watch cleanup ended', () => {
+    const state = readState(paths.statePath)!;
+    writeState(paths.statePath, {
+      ...state,
+      watch: { every: 2, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    expect(runSync(7, false, 'aaaaaaaaaaaa')).toMatchObject({ synced: true });
+    // A fire its task queued before a later schedule replaced it.
+    expect(() => runSync(7, false, 'bbbbbbbbbbbb')).toThrow(
+      /task bbbbbbbbbbbb no longer drives PR #7's watch \(task aaaaaaaaaaaa does\)/,
+    );
+    // Its kept work is not discarded by a round still under way.
+    writeState(paths.statePath, {
+      ...state,
+      ended: { at: '2026-10-25T00:00:00.000Z', reason: 'kept' },
+    });
+    expect(() => runSync(7, true)).toThrow(/watch was stopped/);
+  });
+
   it('fast-forwards the worktree to a head someone else pushed and records it', () => {
     const theirs = pushFromElsewhere('theirs.txt');
     expect(runSync(7)).toEqual({ synced: true, headSha: theirs, moved: true });

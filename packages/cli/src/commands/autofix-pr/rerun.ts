@@ -22,7 +22,7 @@ import {
   rerunFrom,
 } from './snapshot.js';
 import {
-  assertOwnedBySession,
+  assertWatching,
   assertPositiveInteger,
   autofixPrPaths,
   checkAttemptKey,
@@ -59,7 +59,7 @@ function rerunLocked(
   runId: number,
 ): RerunOutcome {
   const state = requireState(paths.statePath, prNumber);
-  assertOwnedBySession(state);
+  assertWatching(state);
   setGhHost(state.host);
   ensureAuthenticated();
   const { pr } = fetchPrData(state);

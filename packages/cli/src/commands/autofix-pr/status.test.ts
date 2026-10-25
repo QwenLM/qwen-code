@@ -113,7 +113,9 @@ describe('runStatus', () => {
       reportedTruncated: [],
     });
     const checked = new Date('2026-10-01T02:00:00.000Z');
-    utimesSync(seven.gatePath, checked, checked);
+    // The watch's own gate marks every check it made.
+    writeFileSync(seven.checkedPath, '');
+    utimesSync(seven.checkedPath, checked, checked);
     writeFileSync(seven.snapshotPath, '{}\n');
     const round = new Date('2026-10-01T01:30:00.000Z');
     utimesSync(seven.snapshotPath, round, round);
@@ -137,6 +139,7 @@ describe('runStatus', () => {
         lastRound: round.toISOString(),
         stopped: null,
         watch: { every: 5, reply: false, instructions: 'keep the API' },
+        ended: null,
         needsHuman: [item],
         worktreePath: seven.worktreePath,
         worktreeExists: true,
@@ -178,9 +181,10 @@ describe('runStatus', () => {
       stopped: null,
       reportedTruncated: [],
     });
+    writeFileSync(paths.checkedPath, '');
     const at = (minutesAgo: number) => {
       const time = new Date(Date.now() - minutesAgo * 60_000);
-      utimesSync(paths.gatePath, time, time);
+      utimesSync(paths.checkedPath, time, time);
       return runStatus({}).watches[0]!.checkedRecently;
     };
     expect(at(9)).toBe(true);
@@ -200,6 +204,38 @@ describe('runStatus', () => {
     expect(outcome.unreadable).toEqual([
       { pr: 8, error: expect.stringMatching(/not a regular file/) },
     ]);
+  });
+
+  it("takes nothing from a cursor older than the watch, a former watch's", () => {
+    const paths = write(7, { preparedAt: '2026-10-20T00:00:00.000Z' });
+    writeGateCursor(paths.gatePath, {
+      version: 1,
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      viewer: 'me',
+      prAuthor: 'me',
+      headSha: HEAD,
+      reportedCommentIds: [],
+      reportedChecks: [],
+      conflictSha: null,
+      stopped: 'closed',
+      reportedTruncated: [],
+    });
+    // Closed then, before the PR was reopened and watched again.
+    const then = new Date('2026-10-19T00:00:00.000Z');
+    utimesSync(paths.gatePath, then, then);
+    expect(runStatus({}).watches[0]).toMatchObject({ stopped: null });
+    const later = new Date('2026-10-21T00:00:00.000Z');
+    utimesSync(paths.gatePath, later, later);
+    expect(runStatus({}).watches[0]).toMatchObject({ stopped: 'closed' });
+  });
+
+  it('says a watch cleanup ended while keeping its worktree', () => {
+    const ended = { at: '2026-10-25T00:00:00.000Z', reason: 'kept' };
+    write(7, { ended });
+    expect(runStatus({}).watches[0]).toMatchObject({ ended, watch: null });
   });
 
   it('says a watch the gate saw end was not cleaned up', () => {
