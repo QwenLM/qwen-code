@@ -177,9 +177,9 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(match.index, locked.name).toBeLessThan(lockAt);
         expect(match[0].trim(), locked.name).not.toMatch(/ 9>&-$/);
       }
-      expect(locked.run, locked.name).toContain(
-        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
-      );
+      const seedAt = locked.run.indexOf('cp -aln "${HOME}/.m2/repository"');
+      expect(seedAt, locked.name).toBeGreaterThan(-1);
+      expect(seedAt, locked.name).toBeLessThan(lockAt);
       // The write-back must run under the lock: this is the property the
       // whole design exists to guarantee.
       expect(
@@ -203,6 +203,95 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(locked.run, locked.name).toContain(
           'Maven cache write-back skipped',
         );
+      }
+    }
+  });
+
+  it('keeps the seeded coordinate drops and write-back prunes in step', () => {
+    // The in-house coordinate set is spelled by hand at every seed site and
+    // at both write-back prunes. A set that drifts on one side leaves a
+    // seeded hardlink alive, so the unlocked Maven run rewrites the host
+    // cache through it; compare every spelling instead of one pinned pair.
+    const parsed = parse(workflow);
+    const drops = [];
+    const prunes = [];
+    for (const [jobName, job] of Object.entries(parsed.jobs)) {
+      for (const candidate of job.steps ?? []) {
+        const run = candidate.run;
+        // Hosted runners seed a job-local ~/.m2; only the pool steps share
+        // the host cache the containment is for.
+        if (
+          typeof run !== 'string' ||
+          candidate.if?.includes("'github-hosted'")
+        ) {
+          continue;
+        }
+        const seedAt = run.indexOf('cp -aln "${HOME}/.m2/repository"');
+        if (seedAt !== -1) {
+          const seedEnd = run.indexOf('\nmvn --batch-mode', seedAt);
+          expect(seedEnd, jobName).toBeGreaterThan(seedAt);
+          drops.push([
+            jobName,
+            [
+              ...run
+                .slice(seedAt, seedEnd)
+                .matchAll(
+                  /"\$\{RUNNER_TEMP\}\/m2-repo\/com\/alibaba\/([^"]+)"/g,
+                ),
+            ]
+              .map((match) => match[1])
+              .sort(),
+          ]);
+        }
+        const pruneAt = run.indexOf('timeout 300 find .');
+        if (pruneAt === -1) continue;
+        const prune = run.slice(pruneAt, run.indexOf('\n', pruneAt));
+        prunes.push([
+          jobName,
+          [...prune.matchAll(/-path \.\/com\/alibaba\/([^\s)]+)/g)]
+            .map((match) => match[1])
+            .sort(),
+        ]);
+      }
+    }
+    const expected = ['qwen-managed-agent-server', 'qwencode-sdk'];
+    expect(drops.length).toBeGreaterThan(0);
+    expect(prunes.length).toBeGreaterThan(0);
+    for (const [jobName, set] of [...drops, ...prunes]) {
+      expect(set, jobName).toEqual(expected);
+    }
+  });
+
+  it('binds the lock and queue probes to the helper paths', () => {
+    // Both call sites spell the helper's lock path by hand. Read it from the
+    // helper so a rename cannot leave a probe watching a path the helper
+    // never creates.
+    const helper = readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8');
+    const lockPath = helper.match(/local lock="\$\{HOME\}\/([^"]+)"/)?.[1];
+    expect(lockPath).toBeDefined();
+    expect(helper).toContain('local queue="${lock}.queue"');
+    const separator = lockPath.lastIndexOf('/');
+    const cacheDir = lockPath.slice(0, separator);
+    const lockName = lockPath.slice(separator + 1);
+    const runs = Object.values(parse(workflow).jobs)
+      .flatMap((job) => (job.steps ?? []).map((step) => step.run))
+      .filter(
+        (run) => typeof run === 'string' && run.includes('sdk-java-tests.lock'),
+      );
+    expect(runs).toHaveLength(2);
+    const cache = `\${HOME}/${cacheDir}`;
+    for (const run of runs) {
+      // The MariaDB site names the cache directory once; the test job spells
+      // its two probes inline. Either spelling must come from the helper.
+      if (run.includes('cache_dir=')) {
+        expect(run).toContain(`cache_dir="${cache}"`);
+        expect(run).toContain(`queue_dir="\${cache_dir}/${lockName}.queue"`);
+        expect(run).toContain(`[ ! -d "\${cache_dir}/${lockName}" ]`);
+        expect(run).toContain(`exec 9>"\${cache_dir}/${lockName}"`);
+      } else {
+        expect(run).toContain(`mkdir -p "${cache}"`);
+        expect(run).toContain(`: >>"${cache}/${lockName}"`);
+        expect(run).toContain(`exec 9>"${cache}/${lockName}"`);
       }
     }
   });
