@@ -66,6 +66,7 @@ import {
 import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   consumesContextAnnouncementLatch,
+  isContextFilesAnnouncement,
 } from '../utils/commandUtils.js';
 import type { OpenTuiRuntime } from './opentui-runtime.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
@@ -83,8 +84,18 @@ import {
   type OpenTuiCancelSettled,
   type OpenTuiComposerHandle,
 } from './input-submission.js';
+import { rewindSession } from '../utils/session-rewind.js';
+import { isRewindableUserTurn } from '../utils/historyMapping.js';
+import { expandCollapsedHistory } from '../utils/resumeHistoryUtils.js';
+import { projectItemToStreamEvent } from './item-projection.js';
+import {
+  rewindBoundaryHistory,
+  type LiveHistoryItem,
+} from './live-session-model.js';
+import type { RestoreOption } from './session-rewind.js';
 import { realUserPromptTexts } from '../utils/historyUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { t } from '../../i18n/index.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
@@ -127,6 +138,7 @@ export interface OpenTuiAppProps {
   config: Config;
   settings: LoadedSettings;
   logger: Logger | null;
+  startupHistory?: HistoryItem[];
   /** Preloaded slash registry; when omitted the shell loads it on mount. */
   commands?: readonly SlashCommand[];
   /** Owned by a Batch-6 stats provider; commands read it through the host. */
@@ -149,6 +161,11 @@ export interface OpenTuiAppProps {
   renderMain?: () => ReactNode;
   /** Current live prompts; the shell combines persisted input history. */
   userMessages?: readonly string[];
+  historyItems?: readonly LiveHistoryItem[];
+  isCurrentHistory?: (snapshot: readonly LiveHistoryItem[]) => boolean;
+  onRewindTranscript?: (
+    userId: string,
+  ) => readonly LiveHistoryItem[] | undefined;
   /**
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
@@ -171,7 +188,9 @@ export interface OpenTuiAppProps {
    * Folds one projected host-history event into the live transcript
    * (U-28 project-on-write); wired to the live turn's `applyEvent`.
    */
-  onTranscriptEvent?: (event: OpenTuiStreamEvent) => void;
+  onTranscriptEvent?: (
+    event: OpenTuiStreamEvent,
+  ) => readonly LiveHistoryItem[] | void;
   /**
    * Re-keys UI-side session state (chat id + stats) after core rotates the
    * session. `/resume` and `/branch` treat this call as their commit point, so
@@ -261,6 +280,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onTranscriptReset,
     onTranscriptEvent,
     onInputProcessed,
+    onRewindTranscript,
+    isCurrentHistory,
     onStartNewSession,
     onToggleVim,
     updateNotice,
@@ -397,7 +418,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   }, []);
   const runShellCommand = useCallback(
     (command: string) => {
-      const emit = props.onTranscriptEvent;
+      const emit = onTranscriptEvent;
       if (!emit) return;
       const controller = new AbortController();
       shellControllersRef.current.add(controller);
@@ -444,7 +465,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       config,
       logger,
       onInputProcessed,
-      props.onTranscriptEvent,
+      onTranscriptEvent,
       terminalWidth,
       terminalHeight,
     ],
@@ -566,17 +587,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   // ink AppContainer's contextFilesAnnouncedRef: the context-file set is
   // announced once per session, on the first submission that reaches a model.
-  const contextFilesAnnouncedRef = useRef(false);
+  const contextFilesAnnouncedRef = useRef(
+    props.startupHistory?.some(isContextFilesAnnouncement) ?? false,
+  );
 
   const transcript = useMemo(() => {
-    // ink re-arms that latch in three places and reconciles its history-
-    // replacement site against the restored rows. One place suffices here:
-    // every route that takes the emitted row off screen — /clear, resume,
-    // branch — funnels through a transcript reset, and the replay a reset
-    // installs carries no info rows, so re-arming unconditionally cannot
-    // announce a second time.
     const reset = (events: OpenTuiStreamEvent[]) => {
-      contextFilesAnnouncedRef.current = false;
+      contextFilesAnnouncedRef.current = events.some(
+        isContextFilesAnnouncement,
+      );
       onTranscriptReset?.(events);
     };
     return {
@@ -590,11 +609,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const loggerRef = useRef(logger);
   loggerRef.current = logger;
+  const historyItemsRef = useRef(props.historyItems);
+  historyItemsRef.current = props.historyItems;
+  const rewindIdleRef = useRef(!streaming);
+  rewindIdleRef.current = !streaming;
+  const rewindInjectionRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => rewindInjectionRef.current?.(), []);
   const host = useMemo(
     () =>
       new OpenTuiAppHost({
         config,
         settings,
+        startupHistory: props.startupHistory,
         get logger() {
           return loggerRef.current;
         },
@@ -612,6 +638,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     [
       config,
       settings,
+      props.startupHistory,
       transcript,
       confirmations,
       onStartNewSession,
@@ -625,6 +652,122 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   useSyncExternalStore(
     useCallback((cb) => host.subscribe(cb), [host]),
     useCallback(() => host.getVersion(), [host]),
+  );
+
+  const rewind = useCallback(
+    async (userId: string, option: RestoreOption) => {
+      const snapshot = historyItemsRef.current;
+      const index = snapshot?.findIndex((item) => item.id === userId) ?? -1;
+      if (
+        !snapshot ||
+        index < 0 ||
+        !rewindIdleRef.current ||
+        !onRewindTranscript ||
+        !onTranscriptEvent ||
+        !isCurrentHistory?.(snapshot)
+      )
+        return;
+      const sessionId = config.getSessionId();
+      const request = dialogRef.current;
+      let committedHost: readonly HistoryItem[] | undefined;
+      let committedItems: readonly LiveHistoryItem[] | undefined;
+      let rewoundDraft: string | undefined;
+      const boundary = rewindBoundaryHistory(snapshot);
+      const target = boundary.find((item) => item.id === index);
+      if (!target) return;
+      const current = () =>
+        config.getSessionId() === sessionId &&
+        isCurrentHistory!(committedItems ?? snapshot) &&
+        (!committedHost || host.getHistory() === committedHost);
+      try {
+        const outcome = await rewindSession(
+          config,
+          boundary,
+          target,
+          option,
+          (_truncated, draft) => {
+            committedItems = onRewindTranscript!(userId);
+            contextFilesAnnouncedRef.current =
+              committedItems?.some(
+                (item) =>
+                  item.kind === 'info' &&
+                  isContextFilesAnnouncement({ type: 'info', text: item.text }),
+              ) ?? false;
+            const hostHistory = host.getHistory();
+            const firstRemovedHost = hostHistory.findIndex((item) =>
+              snapshot.slice(index).some((live) => live.historyId === item.id),
+            );
+            const retainedHost = expandCollapsedHistory(
+              hostHistory.slice(
+                0,
+                firstRemovedHost < 0 ? hostHistory.length : firstRemovedHost,
+              ),
+            );
+            host.loadHistory(retainedHost);
+            committedHost = retainedHost;
+            rewoundDraft = draft;
+            return (
+              snapshot.filter(
+                (item) => item.display?.kind !== 'collapse-summary',
+              ).length - (committedItems?.length ?? 0)
+            );
+          },
+          current,
+        );
+        if (!outcome.stale && current()) {
+          if (committedItems)
+            committedItems =
+              onTranscriptEvent({
+                type: 'info',
+                text: t(
+                  'Conversation rewound. Edit your prompt and press Enter to continue.',
+                ),
+              }) ?? committedItems;
+          for (const message of outcome.messages) {
+            const event = projectItemToStreamEvent(message, {});
+            if (event) {
+              const next = onTranscriptEvent(event);
+              if (committedItems && next) committedItems = next;
+            }
+          }
+          if (rewoundDraft !== undefined && current()) {
+            rewindInjectionRef.current?.();
+            rewindInjectionRef.current = injectCapturedInput(() => {
+              const handle = props.composerHandle?.current;
+              if (!handle) return null;
+              return {
+                setText: (text: string) => {
+                  if (!current() || handle.getText()) return;
+                  handle.invalidateImportedInput?.();
+                  handle.setText(text);
+                },
+              };
+            }, rewoundDraft);
+          }
+        }
+      } catch (error) {
+        if (current())
+          host.addItem(
+            {
+              type: 'error',
+              text: t('Rewind failed: {{error}}', {
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            },
+            Date.now(),
+          );
+      } finally {
+        setDialog((active) => (active === request ? null : active));
+      }
+    },
+    [
+      config,
+      host,
+      onRewindTranscript,
+      isCurrentHistory,
+      props.composerHandle,
+      onTranscriptEvent,
+    ],
   );
 
   const worktree = useWorktreeSession(config);
@@ -793,6 +936,20 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         case 'handled':
           return true;
         case 'open_dialog':
+          if (outcome.request.dialog === 'rewind') {
+            if (
+              streaming ||
+              !props.historyItems?.some((item) => item.kind === 'user')
+            )
+              return true;
+            if (config.getIdeMode()) {
+              host.addItem(
+                { type: 'info', text: 'Rewind is disabled in IDE mode.' },
+                Date.now(),
+              );
+              return true;
+            }
+          }
           setDialog(outcome.request);
           return true;
         case 'submit_prompt':
@@ -832,7 +989,17 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         }
       }
     },
-    [onSubmitPrompt, onQuit, onInterrupt, onPopQueue, notify],
+    [
+      onSubmitPrompt,
+      onQuit,
+      onInterrupt,
+      onPopQueue,
+      notify,
+      props.historyItems,
+      streaming,
+      config,
+      host,
+    ],
   );
 
   const onSubmit = useCallback(
@@ -1265,6 +1432,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 onApprovalModeChanged={adoptApprovalMode}
                 availableTerminalHeight={dialogRegionHeight}
                 statusLineState={statusLineState}
+                rewindTurns={rewindBoundaryHistory(
+                  props.historyItems ?? [],
+                ).flatMap((boundary) => {
+                  const item = props.historyItems?.[boundary.id];
+                  return item?.kind === 'user' && isRewindableUserTurn(boundary)
+                    ? [item]
+                    : [];
+                })}
+                onRewind={(turn, option) => rewind(turn.id, option)}
               />
             </box>
           ) : (
@@ -1298,6 +1474,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                       }
                     : undefined
                 }
+                onRewind={() => {
+                  if (
+                    !config.getIdeMode() &&
+                    props.historyItems?.some((item) => item.kind === 'user')
+                  )
+                    setDialog({ dialog: 'rewind' });
+                }}
                 onCancelCommand={() => {
                   if (!gateway.isBusy()) return false;
                   gateway.cancel();
