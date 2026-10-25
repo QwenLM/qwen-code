@@ -323,9 +323,10 @@ can name the Harness's own environment file. The server then reads
 configuration, never into its process environment, and refuses to start when
 either direct value is also set. Write each credential as `KEY=value` on one
 line, with no whitespace around the `=` and only letters, digits and `._:/+=-`
-in the value. The server refuses, by file and line, any line it might read
-differently from systemd or a shell, such as a continuation, a carriage return
-from CRLF line endings, an unterminated quote or text after a closing quote.
+in the value, and start comments with `#`. The server refuses, by file and
+line, any line it might read differently from systemd or a shell, such as a
+continuation, a carriage return from CRLF line endings, a `;` comment, an
+unterminated quote or text after a closing quote.
 
 Create a Session:
 
@@ -566,6 +567,31 @@ the tenant and writer headers are scope and fencing inputs, not a substitute
 for transport identity. Responses under the private prefix use
 `Cache-Control: no-store`.
 
+### Web fetch in Workspace Sessions
+
+The main Hosted files, shell, search and team lead profiles provide `web_fetch`
+with `url`, `prompt` and optional `format` (`auto`, `markdown`, `html` or `text`).
+The bound Runtime fetches public HTTPS content and returns normalized text and
+HTTP metadata to the conversation model. `default` and `auto-edit` require
+approval with the actual destination URL; `yolo` retains its approval bypass.
+Plan mode, snapshot read profiles and the dedicated CSI files profile do not
+admit this tool.
+
+The Runtime worker must use Node.js; other JavaScript runtimes are refused
+because they may ignore the pinned connection dispatcher.
+Every request, retry and same-host redirect checks and pins public DNS
+addresses, verifies TLS and uses a dedicated connection agent. Private and
+metadata addresses, URL credentials, plain HTTP and binary downloads are
+refused. The request does not inherit the process-wide proxy dispatcher.
+Cross-host, scheme or port redirects are returned for a new call and approval.
+Text is bounded to 16 KiB after JSON encoding with a truncation notice; no
+download or overflow file is written on the worker host. The worker does not
+make a separate model call or retain a web cache.
+
+Upgrade Runtime workers together with the Harness before relying on its
+`web-fetch/1` capability. See the [English design](../../docs/design/2026-10-23-managed-web-fetch.md)
+and [Chinese design](../../docs/design/2026-10-23-managed-web-fetch.zh-CN.md).
+
 ### Wake recovery after Harness loss
 
 With the Session Store enabled, an independent control-plane scan discovers
@@ -617,15 +643,16 @@ land. Design:
 
 All settings below use the `qwen.managed-agent.automation` prefix:
 
-| Setting              | Default | Meaning                                                                                                                                                                                            |
-| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                        |
-| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                 |
-| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                           |
-| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                |
-| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                             |
-| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged. |
-| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                 |
+| Setting              | Default | Meaning                                                                                                                                                                                                              |
+| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                                          |
+| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                                   |
+| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                                             |
+| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                                  |
+| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                                               |
+| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged.                   |
+| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                                   |
+| `scanner-threads`    | `4`     | Definition rows one tick works at once on its bounded pool; the tick joins them before returning. A row leases from its claim time, never from the tick's start, so a long tick hands out no already-expired leases. |
 
 ## Full WebShell dual-path development entry
 
@@ -774,8 +801,7 @@ admission: fresh sending also requires `foregroundShell=true`. Controlled W2 cwd
 changes do not execute Shell and retain their own files, actor, path and
 context-revision admission; the Shell flag is not a general Session freeze.
 
-Shell close/archive/unarchive/delete remain unavailable, and are refused before
-creating a lifecycle operation. Existing G3 recovery refusals remain in force;
+Shell close and active delete use lifecycle v2 with reliable original-Worker stop support. Archive and unarchive require completed close proof; unarchive restores CLOSED. A live or cancelling foreground Turn and a pending approval return `turn_active`. Shell lifecycle is advertised by default; an explicit empty lifecycle profile list disables it. Existing G3 recovery refusals remain in force;
 no dispatched Shell is automatically replayed. Keep the opt-in off until the
 deployment passes #12904, #13010 and public FG6f physical failure gates. See
 [the complete design](../../docs/design/public-hosted-shell-admission.md).
@@ -866,7 +892,9 @@ For new Workspace-bound WebShell Sessions, the shared composer queries `POST /ap
 
 The WebShell create request may include `approvalMode` only with a Workspace binding. Omission preserves the existing default and request digest; explicit selection is persisted in the Session and joins its idempotency digest. Retrying the same key reads the original pin even if deployment defaults, the AgentDefinition, or a later Session selection changed. Workspace-bound and definition-pinned Session summaries expose the current `approvalMode`, immutable `initialApprovalMode`, and `approvalRevision`. Legacy unbound built-in Sessions omit this metadata because their execution policy is supplied by the deployment. The public REST create contract is unchanged.
 
-Eligible Workspace Sessions can change their execution approval policy. With the Harness feature `live-approval-selection/1`, a selection affects subsequent permission checks in the current Turn, and ordinary pending tools are durably allowed when the selected mode permits them. Already dispatched tools and explicit Hook or Plan-exit approvals retain their existing decisions. Built-in `qwen-code` Sessions require the Harness feature `approval-selection/1`. Stored AgentDefinition Sessions using exactly `hosted-workspace-files/1`, `hosted-workspace-shell/1`, or `hosted-workspace-shell/2` additionally require `agent-definition-approval-selection/1`; both features must remain available for execution after any override, including a return to the initial mode. `POST /api/agent/web-shell/v1/session-approval/query` returns the current mode, revision, available modes, and support. `POST /api/agent/web-shell/v1/session-approval/change` accepts `sessionId`, `approvalMode`, `expectedRevision`, `idempotencyKey`, and `requestId`. Only the recorded Session owner with current Workspace OPERATOR or OWNER access may change it or replay a receipt. Without live support, the Session must be idle, with no pending approval or retained Runtime. Context/lifecycle and recovery barriers always apply; Plan changes remain idle-only. The options response advertises live behavior with `liveSupported`. Upgrade the control plane and Harness together in a maintenance window, fencing old Java writers before reopening execution; new Harness tool Turns refuse a missing live-policy endpoint. See the [live approval design](../../docs/design/2026-10-20-managed-live-approval.md) ([简体中文](../../docs/design/2026-10-20-managed-live-approval.zh-CN.md)). Identical retries return the original result without another revision; different content under the same key and stale revisions conflict. The definition pin and initial creation policy remain immutable; later user Turns freeze the selected mode and revision. Creation options still expose only the compiled initial policy. Files/2, MCP, read-only child, team-lead, CSI, unknown profiles, and unbound text Sessions do not gain policy selection. There is no public REST mutation endpoint. See the [stored-definition approval design](../../docs/design/2026-10-17-managed-definition-approval-selection.md) ([简体中文](../../docs/design/2026-10-17-managed-definition-approval-selection.zh-CN.md)).
+The only ordinary Shell profile is `hosted-workspace-shell/1`, including native `glob` alongside Read/Write/Edit, Shell and Monitor. The unshipped `/2` Shell profile was removed; development Sessions using it must be recreated. See the [consolidation design](../../docs/design/2026-10-23-managed-shell-profile.md) ([简体中文](../../docs/design/2026-10-23-managed-shell-profile.zh-CN.md)).
+
+Eligible Workspace Sessions can change their execution approval policy. With the Harness feature `live-approval-selection/1`, a selection affects subsequent permission checks in the current Turn, and ordinary pending tools are durably allowed when the selected mode permits them. Already dispatched tools and explicit Hook or Plan-exit approvals retain their existing decisions. Built-in `qwen-code` Sessions require the Harness feature `approval-selection/1`. Stored AgentDefinition Sessions using exactly `hosted-workspace-files/1`, `hosted-workspace-files/3` or `hosted-workspace-shell/1` additionally require `agent-definition-approval-selection/1`; both features must remain available for execution after any override, including a return to the initial mode. `POST /api/agent/web-shell/v1/session-approval/query` returns the current mode, revision, available modes, and support. `POST /api/agent/web-shell/v1/session-approval/change` accepts `sessionId`, `approvalMode`, `expectedRevision`, `idempotencyKey`, and `requestId`. Only the recorded Session owner with current Workspace OPERATOR or OWNER access may change it or replay a receipt. Without live support, the Session must be idle, with no pending approval or retained Runtime. Context/lifecycle and recovery barriers always apply; Plan changes remain idle-only. The options response advertises live behavior with `liveSupported`. Upgrade the control plane and Harness together in a maintenance window, fencing old Java writers before reopening execution; new Harness tool Turns refuse a missing live-policy endpoint. See the [live approval design](../../docs/design/2026-10-20-managed-live-approval.md) ([简体中文](../../docs/design/2026-10-20-managed-live-approval.zh-CN.md)). Identical retries return the original result without another revision; different content under the same key and stale revisions conflict. The definition pin and initial creation policy remain immutable; later user Turns freeze the selected mode and revision. Creation options still expose only the compiled initial policy. Files/2, MCP, read-only child, team-lead, CSI, unknown profiles, and unbound text Sessions do not gain policy selection; `hosted-workspace-files/3` does. There is no public REST mutation endpoint. See the [stored-definition approval design](../../docs/design/2026-10-17-managed-definition-approval-selection.md) ([简体中文](../../docs/design/2026-10-17-managed-definition-approval-selection.zh-CN.md)).
 
 The stored-definition extension needs no schema migration, but old Java readers and writers ignore custom overrides. For live approval, use the coordinated control-plane/Harness upgrade described above and stop or fence every old Java/Broker process sharing the catalog before permitting changes. After a custom override, rollback must use a compatible build or keep affected Sessions blocked while applying a forward fix. Do not mix old Java binaries, clear revisions, or rewrite definition/history to roll back. Custom initial-yolo definitions retain the existing ten-minute approval timeout fallback after an override; custom initial-default/auto-edit definitions retain their stored timeout.
 
@@ -911,9 +939,7 @@ the Session's running Turns and rename the Session — a readable actor below
 OPERATOR gets `403 session_operation_forbidden`, and an admitted OPERATOR
 blocked by the shape or fact gates gets `409 workspace_unavailable`.
 Workspace close follows its separate close capability and lifecycle admission.
-Public Shell close, archive, unarchive and delete stay unavailable, including
-protocol-0. Archive, delete and unarchive of non-Shell Sessions follow their
-separate retention capabilities after reliable Workspace close. Controlled cwd
+Public Shell close and active delete use the existing lifecycle v2 path when the Runtime can reliably stop the original Worker. Shell lifecycle is advertised by default; explicitly setting `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` replaces the list, and an empty value disables it. Archive and unarchive require completed close proof; unarchive restores CLOSED. Active or cancelling foreground Turns and pending approvals return `turn_active`: cancel the original Turn, wait for settlement, then close. Background Shell, Monitor and child Sessions use the existing resource drain and cascade. Uncertain execution, output or stop evidence remains blocked for recovery. Controlled cwd
 changes ship below (W2); broad Workspace capability advertisement remains
 gated. Qualified new public Shell Sessions expose `agent` under the public-child admission above; public Session messaging remains unavailable.
 Background Shell, Monitor and complete in-flight recovery remain separate slices.
@@ -1037,6 +1063,44 @@ export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
+For the external scratch provisioner, set these instead of the node executable,
+worker entry and state directory (the Broker token and credential key pair are
+still required). External scratch also requires an explicit Workspace ID: the
+worker-side cwd cannot be hashed on the Broker host, so no ID can be derived
+for this kind.
+
+```bash
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN="$QWEN_EXTERNAL_BROKER_TOKEN"
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID='external-dev-v1'
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY="$QWEN_EXTERNAL_CREDENTIAL_KEY_BASE64"
+export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST="$QWEN_EXTERNAL_CAPABILITY_DIGEST"
+export QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER='external-scratch'
+export QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY='false'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL='https://provider.example/'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_TOKEN="$QWEN_EXTERNAL_PROVIDER_TOKEN"
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID='external'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT='30s'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT='2m'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID="$QWEN_EXTERNAL_WORKSPACE_ID"
+export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/workspace'
+```
+
+Keep Workspace files and Shell disabled. Fill the `$QWEN_EXTERNAL_*` variables
+with your own values from a secret store and pick a stable Workspace ID; they
+are placeholders for operator-supplied values, not usable defaults. Set the
+capability digest (`sha256:` plus 64 lowercase hexadecimal characters) even
+with Harness disabled; the embedded Broker requires it. The provider URL must
+be HTTP(S) without credentials, query or fragment, and the cwd is the
+worker-side path. The provider implements authenticated `provision`
+and `observe` routes and must persist its mapping from the Broker's logical
+handle to one immutable physical resource across restarts. There is no release
+route, so a closed Session's worker is not stopped and its provider TTL must be
+budgeted. This increment has no tool consumer yet: Session Turns warm the worker
+but the model receives no tools until the Workspace extension lands. See the
+[Broker guide](docs/runtime-broker.md#external-scratch-runtime-opt-in) and the
+[bilingual design](../../docs/design/2026-10-23-external-runtime-provider.md).
+
 Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
 `QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
@@ -1123,10 +1187,13 @@ warns. Cadences bound through `@Scheduled` placeholders —
 and the startup warning cannot see them, so always write the suffix
 there.
 
-When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
+For the local-process and Kubernetes provisioners, when
+`QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical
 workspace path. An explicitly configured ID must match that value or startup
-fails before traffic is accepted.
+fails before traffic is accepted. The derivation does not apply to
+`external-scratch`, which requires an explicit ID because its worker-side cwd
+cannot be hashed on the Broker host.
 
 The Hosted file profile connects through the private Broker endpoint, which
 defaults to `http://127.0.0.1:4182`. When enabled, the embedded
@@ -1313,9 +1380,7 @@ Later Turns run under the creator's Workspace grants, so an actor without a read
 grant keeps the existing `session_not_found` invisibility, a readable actor below
 OPERATOR is refused `session_operation_forbidden`, and an admitted OPERATOR whose
 Session lost the creator-keyed facts meets the family's domain
-`workspace_unavailable`. Public Shell close, archive, unarchive and delete stay
-unavailable, including protocol-0. Public close follows its separate close
-capability and lifecycle admission. Archive, delete and unarchive follow their
+`workspace_unavailable`. Public Shell close and active delete require lifecycle v2 and reliable original-Worker stop support. The canonical Shell profile advertises v2 by default; explicit lifecycle environment values override that list. Public close follows its separate close capability and lifecycle admission. Archive, delete and unarchive follow their
 separate retention capabilities after reliable Workspace close;
 the Shell profile reaches public creation only through the deployment Shell
 opt-in described above; callers cannot select it.
@@ -1775,7 +1840,7 @@ Sessions pin a stored AgentDefinition revision and digest at admission. `permiss
 
 Set `QWEN_MANAGED_AGENT_DEFINITION_MODELS` to comma-separated IDs configured in the Harness's deployment `modelProviders`; it defaults to empty. Each ID must resolve to one configured provider route with deployment credentials. An absent or ambiguous route or unresolved credentials fails the Turn with `model_unavailable` before inference. Credentials never belong in definitions. Enable and configure the Managed Session Store for stored-definition execution; instructions are delivered as digest-addressed resource references and verified on load.
 
-`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` defaults to `hosted-workspace-files/1`. Before opting into `hosted-workspace-files/2`, drain old workers and upgrade every provisioner according to #13166. Empty permission policies inherit the deployment approval mode (default `yolo`); use `default` for deployments that require approval.
+`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` defaults to `hosted-workspace-files/1`. Before opting into `hosted-workspace-files/2`, drain old workers and upgrade every provisioner according to #13166. Opting into `hosted-workspace-files/3` needs the same drain and upgrade before its approval selection is enabled. Empty permission policies inherit the deployment approval mode (default `yolo`); use `default` for deployments that require approval.
 
 `skills` accepts up to 16 static `{ "name": "review", "description": "Review changes", "body": "Read the diff and report concrete defects.", "base_directory": ".qwen/skills/review" }` entries for a Workspace-bound tool profile. `base_directory` is optional and defaults to `.`; it is a canonical POSIX path relative to the Session's working directory, matching Runtime `read_file` and `glob`, never the Harness host. Absolute paths, traversal, empty or dot components, colons, backslashes and control characters are rejected. Names are unique and use letters, numbers, `_`, `:`, `.`, or `-` (at most 128 UTF-8 bytes); descriptions are nonblank and at most 4096 UTF-8 bytes, bodies are nonblank and at most 32768 bytes, directories are at most 4096 bytes, and the compact JSON catalog is at most 48 KiB. Invalid Unicode and extra Skill fields are rejected. Bodies grant no tool permissions and cannot register Hooks, override the model, or discover host-installed skills. The connector publishes the catalog as a digest-addressed `managed-agent-skills` resource; a replacement Harness validates and reads the original reference.
 
@@ -1798,3 +1863,7 @@ The original AgentDefinition and Skills stay pinned. Explicit management command
 Public routes are `GET /v1/agents/sessions/{sessionId}/mcp-management`, `POST /v1/agents/sessions/{sessionId}/mcp-management/commands` with `Idempotency-Key`, and `GET /v1/agents/sessions/{sessionId}/mcp-management/commands/{operationId}`. WebShell has corresponding POST query, submit and operation-query routes under `/api/agent/web-shell/v1/session-mcp/management/`. Commands include `action`, `serverId` and `expectedRevision`; add/edit also include the exact selected `server` pin. Management requires Workspace execution permission and a public active Session. The settings commit rechecks idle/Plan/lifecycle admission atomically; a static settings revision or catalog is not proof of a healthy connection.
 
 An unconfirmed operation keeps its original identity. Status queries are read-only; explicit retry first queries that original operation, then resumes the saved original command only while it remains unsettled. The UI can retain unconfirmed public command metadata across a tab reload when the provider has an explicit tenant-and-actor `productScope`; otherwise it retains it only in memory. Neither mode stores executable recipes or credentials. Unknown physical outcomes block replacement rather than replaying on another Runtime. See the complete [English design](../../docs/design/2026-10-22-managed-session-mcp-management.md) and [Chinese design](../../docs/design/2026-10-22-managed-session-mcp-management.zh-CN.md) for ownership, authorization and qualification boundaries.
+
+### Shell lifecycle handoff
+
+Initial v2 close/delete admission preserves an already-live writer for one configured Session Store writer-lease duration, measured using database time. Ordinary renewal and writes remain fenced; idempotent replay, failed resubmission and claim retries never refresh the allowance. Effects still requires a valid lease. A delivery or child cascade beyond this finite handoff can still require recovery; expired writers are not revived. See the [lifecycle design](../../docs/design/2026-10-23-managed-shell-lifecycle.md) ([简体中文](../../docs/design/2026-10-23-managed-shell-lifecycle.zh-CN.md)).

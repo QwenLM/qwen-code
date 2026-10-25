@@ -5,6 +5,8 @@
  */
 import { App, applyDocumentTheme } from '@modelcontextprotocol/ext-apps';
 import { ViewController } from './controller.js';
+import type { CaptureResult, ViewState } from './controller.js';
+import { buildContinuationText } from './continuation.js';
 import { ViewSurface } from './surface.js';
 import './styles.css';
 
@@ -22,6 +24,116 @@ const status = doc.getElementById('status')!;
 const notice = doc.getElementById('notice')!;
 const stop = doc.getElementById('stop') as HTMLButtonElement;
 const frame = doc.getElementById('view') as HTMLIFrameElement;
+const continueAnalysis = doc.getElementById(
+  'continue-analysis',
+) as HTMLButtonElement;
+const continuationStatus = doc.getElementById('continuation-status')!;
+const continuationHelp = doc.getElementById('continuation-help')!;
+let documentTitle = '';
+let phase: ViewState['phase'] = 'waiting';
+let canReview = false;
+let continuationState:
+  | 'idle'
+  | 'pending'
+  | 'accepted'
+  | 'unconfirmed'
+  | 'terminal' = 'idle';
+let continuationMessage = '';
+interface ContinuationAttempt {
+  abort: AbortController;
+  capture?: Extract<CaptureResult, { ok: true }>;
+  text?: string;
+}
+let pendingAttempt: ContinuationAttempt | undefined;
+
+function renderContinuation(): void {
+  continueAnalysis.disabled =
+    !canReview ||
+    phase !== 'ready' ||
+    continuationState === 'pending' ||
+    continuationState === 'terminal';
+  const label =
+    continuationState === 'unconfirmed'
+      ? 'Review again after checking the session'
+      : 'Continue analysis with current parameters';
+  if (continueAnalysis.textContent !== label)
+    continueAnalysis.textContent = label;
+  const help = canReview
+    ? 'Apply your changes, then review the complete captured parameters before sending to this session. Later edits are not included.'
+    : 'Continuing analysis requires a connected Qwen Code host with message review. Local interactions remain available.';
+  if (continuationHelp.textContent !== help)
+    continuationHelp.textContent = help;
+  if (continuationStatus.textContent !== continuationMessage)
+    continuationStatus.textContent = continuationMessage;
+  continuationStatus.hidden = !continuationMessage;
+  continuationStatus.dataset['state'] = continuationState;
+}
+
+function endContinuation(): void {
+  const attempt = pendingAttempt;
+  pendingAttempt = undefined;
+  // Only a built message can have reached the host; a capture failure sent nothing.
+  if (continuationState === 'pending' && attempt?.text)
+    continuationMessage =
+      'Stopped waiting for confirmation. Check the original session; a request already sent may still be accepted. Stopping this card does not withdraw a session request.';
+  continuationState = 'terminal';
+  attempt?.abort.abort();
+}
+
+async function continueWithParameters(): Promise<void> {
+  if (continueAnalysis.disabled || pendingAttempt) return;
+  // Lock before capture: capture publishes synchronously and re-reads the DOM.
+  const attempt: ContinuationAttempt = {
+    abort: new AbortController(),
+  };
+  pendingAttempt = attempt;
+  const previousState = continuationState;
+  continuationState = 'pending';
+  renderContinuation();
+  const capture = controller.captureSnapshot();
+  if (pendingAttempt !== attempt) return;
+  if (!capture.ok) {
+    pendingAttempt = undefined;
+    continuationState = previousState;
+    continuationMessage =
+      'Parameters are not ready. Wait for the view’s update, then apply any changed parameters before reviewing.';
+    renderContinuation();
+    return;
+  }
+  const message = buildContinuationText(documentTitle, capture);
+  if (!message.ok) {
+    pendingAttempt = undefined;
+    continuationState = previousState;
+    continuationMessage =
+      'The complete parameter message exceeds 16 KiB. Reduce parameter content and apply the update before reviewing. Nothing was sent for this attempt.';
+    renderContinuation();
+    return;
+  }
+  attempt.capture = capture;
+  attempt.text = message.text;
+  continuationMessage =
+    'Waiting for session confirmation… Review the captured parameters in the host. Later edits do not change this message.';
+  renderContinuation();
+  try {
+    const result = await app.sendMessage(
+      { role: 'user', content: [{ type: 'text', text: attempt.text }] },
+      // Cover the host’s 90 s review + 90 s admission windows and transport.
+      { signal: attempt.abort.signal, timeout: 210_000 },
+    );
+    if (pendingAttempt !== attempt) return;
+    continuationState = result.isError ? 'unconfirmed' : 'accepted';
+  } catch {
+    if (pendingAttempt !== attempt) return;
+    continuationState = 'unconfirmed';
+  }
+  pendingAttempt = undefined;
+  continuationMessage =
+    continuationState === 'accepted'
+      ? 'The session accepted the request. Analysis may still be running; follow it in the original session.'
+      : 'Acceptance could not be confirmed. The review may have been cancelled or rejected, or the request may still be in flight. Check the original session before reviewing again; another submission could duplicate a request. Nothing is retried automatically.';
+  renderContinuation();
+}
+
 const surface = new ViewSurface(
   frame,
   (event) => controller.event(event),
@@ -55,11 +167,12 @@ const controller = new ViewController(
     }
   },
   (document) => {
+    documentTitle = document.title;
     title.textContent = document.title;
     summary.textContent = document.summary;
   },
   (state) => {
-    const { phase } = state;
+    phase = state.phase;
     const messages = {
       waiting: 'Waiting for the completed view…',
       starting: 'Starting the interactive view…',
@@ -73,6 +186,8 @@ const controller = new ViewController(
       status.textContent = messages[phase];
     status.dataset['state'] = phase;
     const terminal = phase === 'stopped' || phase === 'error';
+    if (terminal) endContinuation();
+    renderContinuation();
     stop.disabled = terminal;
     frame.hidden = !state.viewAvailable;
     frame.setAttribute(
@@ -111,11 +226,16 @@ app.onteardown = async () => {
   return {};
 };
 stop.addEventListener('click', () => controller.stop());
+continueAnalysis.addEventListener('click', () => void continueWithParameters());
 globalThis.addEventListener('pagehide', () => controller.stop(), {
   once: true,
 });
 app.connect().then(
   () => {
+    canReview =
+      app.getHostVersion()?.name === 'qwen-code-web-shell' &&
+      !!app.getHostCapabilities()?.message?.text;
+    renderContinuation();
     const theme = app.getHostContext()?.theme;
     if (theme) applyDocumentTheme(theme);
   },

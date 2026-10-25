@@ -1159,6 +1159,39 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async startGitWorkspaceClone(input) {
+      const client = requireClient(
+        getClient,
+        'Start git workspace clone failed',
+      );
+      return withActionTimeout(
+        client.startGitWorkspaceClone(input),
+        'Start git workspace clone timed out',
+      );
+    },
+
+    async getGitWorkspaceCloneJob(jobId) {
+      const client = requireClient(
+        getClient,
+        'Read git workspace clone failed',
+      );
+      return withActionTimeout(
+        client.getGitWorkspaceCloneJob(jobId),
+        'Read git workspace clone timed out',
+      );
+    },
+
+    async cancelGitWorkspaceClone(jobId) {
+      const client = requireClient(
+        getClient,
+        'Cancel git workspace clone failed',
+      );
+      return withActionTimeout(
+        client.cancelGitWorkspaceClone(jobId),
+        'Cancel git workspace clone timed out',
+      );
+    },
+
     async suggestWorkspacePaths(prefix) {
       const client = requireClient(getClient, 'Suggest workspace paths failed');
       const result = await withActionTimeout(

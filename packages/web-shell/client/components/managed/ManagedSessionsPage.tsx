@@ -1,3 +1,5 @@
+import { ManagedUserMessageQueue } from './ManagedUserMessageQueue';
+import { useManagedUserMessages } from './use-managed-user-messages';
 import {
   useCallback,
   useEffect,
@@ -63,6 +65,7 @@ import { useManagedCwdChange } from './use-managed-cwd-change';
 import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
+import { ManagedPermissionRulesDialog } from './ManagedPermissionRulesDialog';
 import { useManagedSkills } from './use-managed-skills';
 import { useManagedMcp } from './use-managed-mcp';
 import { ManagedMcpManagerPage } from './ManagedMcpManagerPage';
@@ -73,6 +76,11 @@ import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import type { ManagedCreationSkillsSource } from './managed-creation-skills';
 import { ManagedWorkspaceNavigation } from './ManagedWorkspaceNavigation';
+import { ManagedSessionNavigationRow } from './ManagedSessionNavigationRow';
+import {
+  ManagedArchivedSessions,
+  type ManagedArchivedSessionsStatus,
+} from './ManagedArchivedSessions';
 import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
@@ -100,6 +108,7 @@ interface PendingPrompt {
   idempotencyKey: string;
   text: string;
   draftText?: string;
+  queued?: boolean;
   sessionId?: string;
   input?: ManagedInputBlock[];
 }
@@ -135,6 +144,8 @@ function readPending(
     if (
       typeof pending['idempotencyKey'] !== 'string' ||
       typeof pending['text'] !== 'string' ||
+      (pending['queued'] !== undefined &&
+        typeof pending['queued'] !== 'boolean') ||
       (pending['input'] !== undefined && !isManagedInput(pending['input']))
     )
       return undefined;
@@ -177,6 +188,8 @@ export function ManagedSessionsPage({
   onSessionWorkspaceChange,
   managedAgentProvider,
   navigationTarget,
+  archivedNavigationTarget,
+  onArchivedSessionsStatusChange,
   interactive = true,
   creationSkills,
   onManageSkills,
@@ -202,6 +215,10 @@ export function ManagedSessionsPage({
   managedAgentProvider?: ManagedAgentProvider;
   /** Null keeps home layout while its sidebar slot is temporarily unmounted. */
   navigationTarget?: HTMLElement | null;
+  archivedNavigationTarget?: HTMLElement | null;
+  onArchivedSessionsStatusChange?: (
+    status: ManagedArchivedSessionsStatus,
+  ) => void;
   interactive?: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   onManageSkills?: () => void;
@@ -229,6 +246,8 @@ export function ManagedSessionsPage({
         provider={managedAgentProvider}
         cancellationEnabled={managedAgentProvider.canCancel}
         navigationTarget={navigationTarget}
+        archivedNavigationTarget={archivedNavigationTarget}
+        onArchivedSessionsStatusChange={onArchivedSessionsStatusChange}
         interactive={interactive}
         creationSkills={creationSkills}
         onManageSkills={onManageSkills}
@@ -296,6 +315,8 @@ function ManagedSessionsContent({
   provider,
   cancellationEnabled,
   navigationTarget,
+  archivedNavigationTarget,
+  onArchivedSessionsStatusChange,
   interactive,
   creationSkills,
   onManageSkills,
@@ -321,6 +342,10 @@ function ManagedSessionsContent({
   provider: ManagedAgentProvider;
   cancellationEnabled: boolean;
   navigationTarget?: HTMLElement | null;
+  archivedNavigationTarget?: HTMLElement | null;
+  onArchivedSessionsStatusChange?: (
+    status: ManagedArchivedSessionsStatus,
+  ) => void;
   interactive: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   onManageSkills?: () => void;
@@ -336,6 +361,8 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const summary = detail.summary;
+  const active = summary && isManagedSessionRunning(summary.phase);
   const recovery = useManagedRecovery(
     provider,
     clientId,
@@ -445,9 +472,13 @@ function ManagedSessionsContent({
   }, []);
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
-  const [archiveState, setArchiveState] = useState<'unarchived' | 'archived'>(
-    'unarchived',
-  );
+  const [archivedSummaries, setArchivedSummaries] = useState<
+    ManagedAgentSessionSummary[]
+  >([]);
+  const [standaloneArchiveState, setArchiveState] = useState<
+    'unarchived' | 'archived'
+  >('unarchived');
+  const archiveState = home ? 'unarchived' : standaloneArchiveState;
   const [titleQuery, setTitleQuery] = useState('');
   const [confirmation, setConfirmation] = useState<{
     session: ManagedAgentSessionSummary;
@@ -491,6 +522,10 @@ function ManagedSessionsContent({
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(true);
+  const userMessages = useManagedUserMessages(
+    provider,
+    interactive ? sessionId : undefined,
+  );
   const [pendingRestoreFailed, setPendingRestoreFailed] = useState(false);
   const [outputTarget, setOutputTarget] = useState<{
     sessionId: string;
@@ -542,7 +577,7 @@ function ManagedSessionsContent({
   const listBusy = useRef(false);
   const selection = useRef(sessionId);
   selection.current = sessionId;
-  const lifecycleSummaries = useMemo(
+  const navigationSummaries = useMemo(
     () => [
       ...new Map(
         [...sessions, ...(detail.summary ? [detail.summary] : [])].map(
@@ -551,6 +586,17 @@ function ManagedSessionsContent({
       ).values(),
     ],
     [sessions, detail.summary],
+  );
+  const lifecycleSummaries = useMemo(
+    () => [
+      ...new Map(
+        [...archivedSummaries, ...navigationSummaries].map((session) => [
+          session.sessionId,
+          session,
+        ]),
+      ).values(),
+    ],
+    [archivedSummaries, navigationSummaries],
   );
   const lifecycle = useManagedSessionLifecycle(
     provider,
@@ -618,9 +664,13 @@ function ManagedSessionsContent({
       }
     }
   }
-  const sessionActions = (session: ManagedAgentSessionSummary) => (
+  const sessionActions = (
+    session: ManagedAgentSessionSummary,
+    sidebar = false,
+  ) => (
     <ManagedSessionActions
       session={session}
+      sidebar={sidebar}
       lifecycle={Boolean(provider.lifecycle)}
       state={lifecycle.states[session.sessionId]}
       exporting={exporting[session.sessionId]}
@@ -784,8 +834,12 @@ function ManagedSessionsContent({
     // disablement by delivering a new summary without touching the record.
   }, [pending, sessionId, detail.summary, interactive]);
 
-  const listTitleQuery = provider.titleSearch ? titleQuery : '';
-  const navigationSessions = listTitleQuery ? sessions : lifecycleSummaries;
+  const listTitleQuery = provider.titleSearch
+    ? home
+      ? navigationSearch
+      : titleQuery
+    : '';
+  const navigationSessions = listTitleQuery ? sessions : navigationSummaries;
   useEffect(() => {
     const abort = new AbortController();
     listLifetime.current = abort;
@@ -963,7 +1017,8 @@ function ManagedSessionsContent({
         (!submittedText.trim() && !images?.length && !files?.length) ||
         (sessionId &&
           (!detail.summary?.capabilities.canSend ||
-            recovery.value?.nextTurnAllowed === false))
+            recovery.value?.nextTurnAllowed === false) &&
+          !userMessages.supported)
       )
         return;
       let input: ManagedInputBlock[];
@@ -975,6 +1030,14 @@ function ManagedSessionsContent({
           files,
           metadata,
         );
+        if (
+          userMessages.supported &&
+          images?.length &&
+          (active ||
+            userMessages.snapshot?.messages.length ||
+            userMessages.snapshot?.paused)
+        )
+          throw new Error(t('managed.queue.imagesIdleOnly'));
         input = await encodeManagedInput(prepared.text, images, prepared.files);
         fileReferences.assertCurrent();
       } catch (failure) {
@@ -987,6 +1050,12 @@ function ManagedSessionsContent({
       if (abort.signal.aborted || selection.current !== sessionId) return;
       attempt = {
         idempotencyKey: managedRequestId(),
+        queued:
+          !!sessionId &&
+          userMessages.supported &&
+          (!!active ||
+            !!userMessages.snapshot?.messages.length ||
+            !!userMessages.snapshot?.paused),
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
@@ -1024,23 +1093,43 @@ function ManagedSessionsContent({
         idempotencyKey: attempt.idempotencyKey,
         signal: abort.signal,
       };
-      const admission = attempt.sessionId
-        ? await provider.submitPrompt(
-            attempt.sessionId,
-            {
-              text: attempt.text,
-              ...(attempt.input ? { input: attempt.input } : {}),
-            },
-            opts,
-          )
-        : await provider.createSession(
-            {
-              text: attempt.text,
-              ...(attempt.input ? { input: attempt.input } : {}),
-            },
-            opts,
-          );
+      if (attempt.queued && !provider.userMessages)
+        throw new Error('User message queue unavailable');
+      const admission =
+        attempt.sessionId && attempt.queued
+          ? await provider
+              .userMessages!.command(
+                attempt.sessionId,
+                {
+                  action: 'submit',
+                  input: attempt.input ?? [
+                    { type: 'input_text', text: attempt.text },
+                  ],
+                },
+                {
+                  idempotencyKey: attempt.idempotencyKey,
+                  signal: abort.signal,
+                },
+              )
+              .then(() => ({ sessionId: attempt.sessionId! }))
+          : attempt.sessionId
+            ? await provider.submitPrompt(
+                attempt.sessionId,
+                {
+                  text: attempt.text,
+                  ...(attempt.input ? { input: attempt.input } : {}),
+                },
+                opts,
+              )
+            : await provider.createSession(
+                {
+                  text: attempt.text,
+                  ...(attempt.input ? { input: attempt.input } : {}),
+                },
+                opts,
+              );
       if (abort.signal.aborted) return;
+      if (attempt.queued) void userMessages.refresh();
       pendingRef.current = undefined;
       setPending(undefined);
       await persistPending(pendingKey, undefined);
@@ -1087,7 +1176,12 @@ function ManagedSessionsContent({
     }
   }
 
-  const summary = detail.summary;
+  const attachmentCapability = useRef({ sessionId, enabled: false });
+  if (attachmentCapability.current.sessionId !== sessionId)
+    attachmentCapability.current = { sessionId, enabled: false };
+  if (summary)
+    attachmentCapability.current.enabled =
+      summary.capabilities.inputAttachments === true;
   const mcpManagerAvailable = Boolean(
     interactive &&
       provider.mcpManagement &&
@@ -1163,9 +1257,6 @@ function ManagedSessionsContent({
     modelContext.contextWindowSize !== undefined &&
     Number.isSafeInteger(modelContext.contextWindowSize) &&
     modelContext.contextWindowSize > 0;
-  const active =
-    summary &&
-    !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
   useEffect(() => {
     if (
       !home ||
@@ -1236,16 +1327,8 @@ function ManagedSessionsContent({
       ref={sessionsNavRef}
       tabIndex={-1}
       aria-label={t('managed.sessions')}
-      className={`flex min-h-0 flex-col gap-1 overflow-y-auto ${home ? 'p-2' : 'max-h-48 md:max-h-none'}`}
+      className={`flex min-h-0 flex-col gap-1 overflow-y-auto ${home ? '' : 'max-h-48 md:max-h-none'}`}
     >
-      {home && (
-        <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs text-muted-foreground">
-          <span>{t('managed.sessions')}</span>
-          <Button variant="ghost" size="sm" onClick={refresh}>
-            {t('managed.refresh')}
-          </Button>
-        </div>
-      )}
       {!interactive && error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
@@ -1323,7 +1406,7 @@ function ManagedSessionsContent({
             )}
         </div>
       ))}
-      {provider.lifecycle && (
+      {!home && provider.lifecycle && (
         <div className="flex gap-1" aria-label={t('managed.historyFilter')}>
           {(['unarchived', 'archived'] as const).map((state) => (
             <Button
@@ -1338,7 +1421,7 @@ function ManagedSessionsContent({
           ))}
         </div>
       )}
-      {provider.titleSearch && (
+      {!home && provider.titleSearch && (
         <label className="px-2 py-1">
           <span className="sr-only">{t('managed.titleSearch')}</span>
           <Input
@@ -1362,7 +1445,7 @@ function ManagedSessionsContent({
                 ? session.lifecycleStatus === 'archived'
                 : session.lifecycleStatus !== 'archived'),
           )}
-          renderSessionActions={sessionActions}
+          renderSessionActions={(session) => sessionActions(session, true)}
           sessionId={sessionId}
           workspaceId={workspaceId}
           active={navigationActive}
@@ -1382,6 +1465,22 @@ function ManagedSessionsContent({
           .map((session) => {
             const current =
               summary?.sessionId === session.sessionId ? summary : session;
+            if (home) {
+              return (
+                <ManagedSessionNavigationRow
+                  key={session.sessionId}
+                  session={current}
+                  active={navigationActive && sessionId === session.sessionId}
+                  onSelect={() =>
+                    openSession(
+                      session.sessionId,
+                      session.workspace?.workspaceId,
+                    )
+                  }
+                  actions={sessionActions(current, true)}
+                />
+              );
+            }
             return (
               <div
                 key={session.sessionId}
@@ -1478,6 +1577,23 @@ function ManagedSessionsContent({
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
       </p>
+      {home &&
+        provider.lifecycle &&
+        archivedNavigationTarget &&
+        createPortal(
+          <ManagedArchivedSessions
+            key={listRevision}
+            provider={provider}
+            clientId={clientId}
+            sessionId={sessionId}
+            active={navigationActive}
+            onSelectSession={openSession}
+            renderSessionActions={sessionActions}
+            onSessionsChange={setArchivedSummaries}
+            onStatusChange={onArchivedSessionsStatusChange}
+          />,
+          archivedNavigationTarget,
+        )}
       {confirmation && (
         <ManagedLifecycleConfirmation
           {...confirmation}
@@ -2098,7 +2214,7 @@ function ManagedSessionsContent({
                 fileReferenceActions={referenceActions}
                 persistFileReferences
                 attachmentsEnabled={
-                  summary?.capabilities.inputAttachments === true
+                  attachmentCapability.current.enabled && !active
                 }
                 visibleToolbarActions={
                   interactive
@@ -2257,6 +2373,7 @@ function ManagedSessionsContent({
                         if (
                           mode === 'default' ||
                           mode === 'auto-edit' ||
+                          mode === 'auto' ||
                           mode === 'yolo'
                         )
                           void approvalChange.submit(mode);
@@ -2295,11 +2412,23 @@ function ManagedSessionsContent({
                   Boolean(
                     sessionId &&
                       (!summary?.capabilities.canSend ||
-                        recovery.value?.nextTurnAllowed === false),
+                        recovery.value?.nextTurnAllowed === false) &&
+                      !userMessages.supported,
                   )
                 }
-                placeholderText={t('managed.prompt')}
+                placeholderText={t(
+                  active && userMessages.supported
+                    ? 'managed.queue.placeholder'
+                    : 'managed.prompt',
+                )}
               />
+              {userMessages.snapshot && (
+                <ManagedUserMessageQueue
+                  key={sessionId}
+                  snapshot={userMessages.snapshot}
+                  command={userMessages.command}
+                />
+              )}
               {interactive && compression.blocked && (
                 <div
                   className="flex items-center gap-2 text-xs text-muted-foreground"
@@ -2405,6 +2534,39 @@ function ManagedSessionsContent({
                             : 'managed.model.failed',
                     )}
                   </p>
+                )}
+              {interactive &&
+                approvalChange.options?.permissionRulesSupported && (
+                  <ManagedPermissionRulesDialog
+                    key={`permission-rules:${provider.storageKey}:${sessionId}`}
+                    rules={approvalChange.options.permissionRules}
+                    revision={approvalChange.options.approvalRevision}
+                    busy={approvalChange.busy}
+                    errorCode={approvalChange.errorCode}
+                    disabled={
+                      !approvalChange.options.supported ||
+                      approvalChange.optionsLoading ||
+                      approvalChange.isBlocked() ||
+                      compression.isBlocked() ||
+                      modelChange.isBlocked() ||
+                      cwd.isBlocked() ||
+                      busy ||
+                      Boolean(active) ||
+                      Boolean(pendingApproval) ||
+                      Boolean(pending) ||
+                      approvalChange.options.approvalRevision !==
+                        (summary?.approvalRevision ?? 0)
+                    }
+                    onSave={(rules) =>
+                      summary?.approvalMode
+                        ? approvalChange.submit(
+                            summary.approvalMode,
+                            undefined,
+                            rules,
+                          )
+                        : Promise.resolve(undefined)
+                    }
+                  />
                 )}
               {interactive &&
                 (approvalChange.busy ||

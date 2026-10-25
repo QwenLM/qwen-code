@@ -11,7 +11,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.lang.reflect.Constructor;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -64,6 +66,22 @@ public final class AutomationHarnessFake {
     /** The definition summary each committed mutation operation answered. */
     private final Map<String, Map<String, Object>> mutations =
             new LinkedHashMap<>();
+    /**
+     * A test seam: how the next fires of gated definitions decide, in order
+     * (`quiet`, `delivered`, `failed`, `blocked` or `unknown`, optionally
+     * `outcome:detail`); an empty queue delivers.
+     */
+    public final Deque<String> gateAnswers = new ArrayDeque<>();
+    /** Runs after a probe and before its answer: a revision landing then. */
+    public Runnable beforeGateAnswer;
+    /** The gate probes the fake ran, as `scheduleId|occurrenceKey`. */
+    public final List<String> probes = new ArrayList<>();
+
+    /**
+     * A test seam: the Session cannot run gates (no Shell, or a pinned Hook
+     * catalog), so a definition naming one is refused before it commits.
+     */
+    public volatile boolean gateUnsupported;
     /** A test seam: thrown once by the next fire_run, then cleared. */
     public volatile RuntimeException failNextFire;
     /** A test seam: the next fire_run commits its run, then loses its answer. */
@@ -106,6 +124,16 @@ public final class AutomationHarnessFake {
                         + body.get("operationId");
                 Map<String, Object> prior = mutations.get(mutationKey);
                 Map<?, ?> definition = (Map<?, ?>) body.get("definition");
+                // The Harness's shell checks refuse a backgrounded gate before
+                // anything commits.
+                if (definition != null && definition.get("gate") instanceof String gate
+                        && gate.trim().endsWith("&")) {
+                    throw refusal(400, "automation_gate_invalid");
+                }
+                if (gateUnsupported && definition != null
+                        && definition.get("gate") instanceof String) {
+                    throw refusal(409, "automation_gate_unsupported");
+                }
                 if (prior != null) {
                     replayCheck(prior, scheduleId, definition);
                     result.put("schedule", new LinkedHashMap<>(prior));
@@ -132,6 +160,8 @@ public final class AutomationHarnessFake {
                     schedule.put("catchUp", "none");
                     schedule.put("catchUpLimit", null);
                     schedule.put("enabled", true);
+                    // The complete shape, as the Harness writes it.
+                    schedule.put("gate", null);
                     schedule.put("state", "admitted");
                     apply(schedule, definition);
                     if (!"persistent".equals(schedule.get("sessionMode"))) {
@@ -223,10 +253,17 @@ public final class AutomationHarnessFake {
                 Map<String, Object> existing = runs.get(sessionId + "|"
                         + runId);
                 if (existing != null) {
-                    result.put("run", new LinkedHashMap<>(existing));
+                    Map<String, Object> answered = new LinkedHashMap<>(existing);
+                    // Like the funnel, a run a gate admitted answers its
+                    // delivery again.
+                    boolean gated = Boolean.TRUE.equals(answered.remove("gated"));
+                    result.put("run", answered);
                     result.put("inputId", AutomationLedgerStore
                             .automationInputId(runId));
                     result.put("replayed", true);
+                    if (gated) {
+                        result.put("gate", Map.of("outcome", "delivered"));
+                    }
                     break;
                 }
                 Map<String, Object> schedule = schedules.get(key);
@@ -241,9 +278,38 @@ public final class AutomationHarnessFake {
                 if (offered != (Long) schedule.get("definitionRevision")) {
                     throw refusal(409, "automation_revision_stale");
                 }
+                Map<String, Object> gate = null;
+                if (schedule.get("gate") instanceof String) {
+                    // The probe runs before any claim, under identities
+                    // derived from the occurrence; only a delivery claims.
+                    probes.add(scheduleId + "|" + occurrenceKey);
+                    String scripted = gateAnswers.pollFirst();
+                    Runnable hook = beforeGateAnswer;
+                    if (hook != null) {
+                        beforeGateAnswer = null;
+                        hook.run();
+                    }
+                    String outcome = scripted == null ? "delivered"
+                            : scripted.split(":", 2)[0];
+                    gate = new LinkedHashMap<>();
+                    gate.put("outcome", outcome);
+                    if (scripted != null && scripted.contains(":")) {
+                        gate.put("detail", scripted.split(":", 2)[1]);
+                    }
+                    if (!"delivered".equals(outcome)) {
+                        result.put("run", null);
+                        result.put("replayed", false);
+                        result.put("gate", gate);
+                        break;
+                    }
+                }
+                boolean gated = gate != null;
                 Map<String, Object> run = runs.computeIfAbsent(
                         sessionId + "|" + runId, ignored -> {
                             Map<String, Object> created = new LinkedHashMap<>();
+                            if (gated) {
+                                created.put("gated", true);
+                            }
                             created.put("automationRunId", runId);
                             created.put("scheduleId", scheduleId);
                             created.put("definitionRevision", offered);
@@ -257,10 +323,15 @@ public final class AutomationHarnessFake {
                     failAfterNextFireCommit = null;
                     throw lost;
                 }
-                result.put("run", new LinkedHashMap<>(run));
+                Map<String, Object> answered = new LinkedHashMap<>(run);
+                answered.remove("gated");
+                result.put("run", answered);
                 result.put("inputId", AutomationLedgerStore
                         .automationInputId(runId));
                 result.put("replayed", false);
+                if (gate != null) {
+                    result.put("gate", gate);
+                }
             }
             case "reconcile_run" -> {
                 RuntimeException failure = failNextReconcile;
@@ -297,6 +368,13 @@ public final class AutomationHarnessFake {
                 .count();
     }
 
+    /** The runs the funnel carries for a Session: a replayed fire never mints a second. */
+    public synchronized int runCount(String sessionId) {
+        return (int) runs.keySet().stream()
+                .filter(key -> key.startsWith(sessionId + "|"))
+                .count();
+    }
+
     /** The committed definition summary, or null when none committed. */
     public synchronized Map<String, Object> scheduleOf(String sessionId,
             String scheduleId) {
@@ -315,7 +393,7 @@ public final class AutomationHarnessFake {
     /** The definition's field set, shared by apply, replayCheck and digest. */
     private static final List<String> DEFINITION_FIELDS = List.of("goal",
             "cron", "timezone", "sessionMode", "overlap", "catchUp",
-            "catchUpLimit", "enabled", "prompt");
+            "catchUpLimit", "enabled", "prompt", "gate");
 
     private static void apply(Map<String, Object> schedule,
             Map<?, ?> definition) {

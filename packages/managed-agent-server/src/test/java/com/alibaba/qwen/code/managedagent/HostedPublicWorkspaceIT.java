@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -57,6 +56,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -537,7 +537,7 @@ class HostedPublicWorkspaceIT {
         }
         assertThat(answered).hasSize(2);
         assertThat(modelFailure.get()).isNull();
-        assertThat(modelRequests).hasSize(shellLifecycleV2 ? 4 : 8);
+        assertThat(modelRequests).hasSize(4);
     }
 
     private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
@@ -642,9 +642,8 @@ class HostedPublicWorkspaceIT {
                         String.class, session)).containsExactly("UNKNOWN");
             });
             var connector = spring.getBean(HarnessConnector.class);
-            var attachments = (Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments");
-            var attached = attachments.values().stream().map(HarnessSessionRef.class::cast)
-                    .filter(ref -> session.equals(ref.getHarnessSessionId())).findFirst().orElseThrow();
+            var attached = attachment(connector, session);
+            assertThat(attached).as("Spring's attachment to %s", session).isNotNull();
             var client = (HostedHarnessClient) ReflectionTestUtils.getField(connector, "client");
             // The third request is counted before its handler finishes; wait for the
             // producer's prompt and all receipt handlers before taking final evidence.
@@ -1075,7 +1074,18 @@ class HostedPublicWorkspaceIT {
         residentPublicHandoff(true);
     }
 
+    @Test
+    @EnabledOnOs(OS.MAC)
+    @Timeout(180)
+    void residentUnsupportedToolRefusalAllowsCloseAndAnotherFileSession() throws Exception {
+        residentPublicHandoff(false, true);
+    }
+
     private void residentPublicHandoff(boolean reconstruct) throws Exception {
+        residentPublicHandoff(reconstruct, false);
+    }
+
+    private void residentPublicHandoff(boolean reconstruct, boolean unsupportedTool) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("ordinary H2 scope only").isNull();
         resident = true;
         residentRestart = reconstruct;
@@ -1157,6 +1167,21 @@ class HostedPublicWorkspaceIT {
             assertThat(fixture.workerAlive()).isTrue();
             assertThat(fixture.starts).hasValue(1);
             saveResidentOwnership("after-application-reconstruction");
+        }
+        if (unsupportedTool) {
+            String refused = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code",
+                    "input", List.of(Map.of("type", "input_text", "text", "G0_RESIDENT_UNSUPPORTED")),
+                    "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                    "resident-unsupported", "actor", 202).path("id").asText();
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
+                assertThat(modelFailure.get()).isNull();
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
+                        String.class, refused)).isEqualTo("COMPLETED");
+            });
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
+                    Long.class, refused)).isZero();
+            assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-first-" + tenant);
+            closeResidentSession(refused, "resident-unsupported-close");
         }
         String second = residentSession("G0_RESIDENT_SECOND", "resident-second");
         saveResidentOwnership("after-second-turn");
@@ -1827,7 +1852,9 @@ class HostedPublicWorkspaceIT {
                 "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
         if (shellLifecycleV2) {
-            environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "hosted-workspace-shell/1");
+            environment.remove("QWEN_HOSTED_LIFECYCLE_V2_PROFILES");
+        } else {
+            environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "");
         }
         environment.put("TMPDIR", temporary.toString());
         environment.put("TMP", temporary.toString());
@@ -1866,9 +1893,16 @@ class HostedPublicWorkspaceIT {
                 assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
                 assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
             } else if (shell) {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor");
-            } else {
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob");
+                body.path("tools").forEach(tool -> {
+                    if ("run_shell_command".equals(tool.at("/function/name").asText())) {
+                        assertThat(tool.at("/function/parameters/properties").has("is_background")).isFalse();
+                    }
+                });
+            } else if (resident) {
                 assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
+            } else {
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch");
             }
             // Count only this Turn's tool results, after the latest fixture prompt, so a later
             // Turn in the same Session runs the same write, edit and read sequence. Other user
@@ -1894,22 +1928,19 @@ class HostedPublicWorkspaceIT {
             int step = results.size();
             boolean definitionTurn = prompt.get().contains("G0_DEFINITION_APPROVAL_");
             boolean runShell = shell && prompt.get().contains("G0_SHELL");
-            boolean foregroundOnly = runShell && shellLifecycleV2;
             if (!runShell && step == 3) {
                 assertThat(results.get(2).toString()).contains("after");
             }
             boolean residentSecond = resident && prompt.get().contains("G0_RESIDENT_SECOND");
+            boolean residentUnsupported = resident && prompt.get().contains("G0_RESIDENT_UNSUPPORTED");
+            if (residentUnsupported && step >= 1) {
+                assertThat(results.getFirst().toString()).contains("Resident Workspace supports only");
+            }
             if (residentSecond && step >= 1) {
                 assertThat(results.getFirst().toString()).contains("after-first-" + tenant);
             }
-            if (runShell && shellFault == null && !foregroundOnly && step >= 1) {
-                assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
-            }
-            if (runShell && shellFault == null && !foregroundOnly && step >= 2) {
-                assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
-            }
-            if (runShell && shellFault == null && step >= (foregroundOnly ? 1 : 3) && "allow".equals(shellDecision)) {
-                assertThat(results.get(foregroundOnly ? 0 : 2).toString()).contains("G0_SHELL_STDOUT");
+            if (runShell && shellFault == null && step >= 1 && "allow".equals(shellDecision)) {
+                assertThat(results.getFirst().toString()).contains("G0_SHELL_STDOUT");
             }
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "g0-fixture");
@@ -1917,16 +1948,14 @@ class HostedPublicWorkspaceIT {
             var delta = choice.putObject("delta").put("role", "assistant");
             boolean publicParent = publicChildren && tools.contains("agent");
             boolean toolCall = publicChildren ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
-                    : step < (definitionTurn ? 2 : shellFault != null || foregroundOnly ? 1 : 3);
+                    : step < (residentUnsupported ? 1 : definitionTurn ? 2 : runShell ? 1 : 3);
             if (toolCall) {
-                String name = runShell ? (!foregroundOnly && shellFault == null && step == 0 ? "monitor" : "run_shell_command")
+                String name = runShell ? "run_shell_command"
                         : (residentSecond ? List.of("read_file", "edit", "read_file")
                                 : List.of("write_file", "edit", "read_file")).get(step);
-                Map<String, Object> args = runShell ? switch (foregroundOnly ? 2 : step) {
-                    case 0 -> Map.of("command", "printf 'monitor\\n' >> monitor-proof.txt");
-                    case 1 -> Map.of("command", "printf 'background\\n' >> background-proof.txt", "is_background", true);
-                    default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof");
-                } : switch (step) {
+                Map<String, Object> args = runShell
+                        ? Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof")
+                        : switch (step) {
                     case 0 -> Map.of("file_path", "proof.txt", "content", "before");
                     case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", resident ? "after-first-" + tenant : "after");
                     default -> Map.of("file_path", "proof.txt");
@@ -1935,6 +1964,10 @@ class HostedPublicWorkspaceIT {
                     args = step == 1
                             ? Map.of("file_path", "proof.txt", "old_string", "after-first-" + tenant, "new_string", "after-second-" + tenant)
                             : Map.of("file_path", "proof.txt");
+                }
+                if (residentUnsupported) {
+                    name = "web_fetch";
+                    args = Map.of("url", "https://resident.invalid/never-requested", "prompt", "Unsupported resident tool");
                 }
                 if (definitionTurn) {
                     String marker = prompt.get().split("[^A-Z0-9_]", 2)[0];

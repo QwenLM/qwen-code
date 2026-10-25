@@ -1656,6 +1656,7 @@ vi.mock('./components/messages/SettingsMessage', async () => {
         language: string,
         scope: 'user' | 'workspace',
       ) => void;
+      onOutputLanguageChange?: (language: string) => void;
       presentation?: WebShellSettingsOptions;
       modelManagementSectionProps?: {
         busy?: boolean;
@@ -1743,6 +1744,24 @@ vi.mock('./components/messages/SettingsMessage', async () => {
             onClick: () => props.onLanguageChange?.('en', 'workspace'),
           },
           'language (workspace)',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'change-output-language',
+            type: 'button',
+            onClick: () => props.onOutputLanguageChange?.('English'),
+          },
+          'output language',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'change-output-language-auto',
+            type: 'button',
+            onClick: () => props.onOutputLanguageChange?.(''),
+          },
+          'output language (auto)',
         ),
       );
     },
@@ -1879,7 +1898,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onOpenWorkspacesOverview?: () => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
-      onLoadStandaloneSession?: (sessionId: string) => Promise<void> | void;
+      onLoadStandaloneSession?: (
+        sessionId: string,
+        displayName?: string,
+      ) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (
         sessionIds: string[],
@@ -2041,7 +2063,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             type: 'button',
             onClick: () => {
               void Promise.resolve(
-                props.onLoadStandaloneSession?.('standalone-session-2'),
+                props.onLoadStandaloneSession?.(
+                  'standalone-session-2',
+                  'Standalone sidebar title',
+                ),
               ).catch(() => undefined);
             },
           },
@@ -2277,14 +2302,17 @@ vi.doMock('./components/StreamingStatus', async () => {
     StreamingStatus: ({
       startedAt,
       hasActivePrompt,
+      showPhrase,
     }: {
       startedAt?: number;
       hasActivePrompt?: boolean;
+      showPhrase?: boolean;
     }) =>
       React.createElement('div', {
         'data-testid': 'streaming-status',
         'data-started-at': startedAt,
         'data-has-active-prompt': String(hasActivePrompt === true),
+        'data-show-phrase': String(showPhrase !== false),
       }),
   };
 });
@@ -13942,6 +13970,51 @@ describe('App conversation indicator keep-alive (#9487)', () => {
     );
   });
 
+  it.each([false, true, undefined])(
+    'applies loading phrase visibility (%s) before host customization',
+    async (enabled) => {
+      testState.sessionHasActivePrompt = true;
+      testState.settings =
+        enabled === undefined
+          ? []
+          : [
+              {
+                key: 'ui.accessibility.enableLoadingPhrases',
+                type: 'boolean',
+                label: 'Enable Loading Phrases',
+                category: 'UI',
+                requiresRestart: true,
+                default: true,
+                values: { effective: enabled },
+              },
+            ];
+      const loadingPhrases = () => ['Custom loading phrase'];
+      const { container, rerender } = renderApp({ loadingPhrases });
+      await flush();
+      const status = () =>
+        container.querySelector('[data-testid="streaming-status"]');
+      expect(status()?.getAttribute('data-show-phrase')).toBe(
+        String(enabled !== false),
+      );
+      testState.settings = [
+        {
+          key: 'ui.accessibility.enableLoadingPhrases',
+          type: 'boolean',
+          label: 'Enable Loading Phrases',
+          category: 'UI',
+          requiresRestart: true,
+          default: true,
+          values: { effective: enabled === false },
+        },
+      ];
+      rerender({ loadingPhrases });
+      await flush();
+      expect(status()?.getAttribute('data-show-phrase')).toBe(
+        String(enabled === false),
+      );
+    },
+  );
+
   it('keeps the indicator mounted and composer running through a silent gap', async () => {
     const composerFooterProps: WebShellComposerToolbarRenderInfo[] = [];
     const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
@@ -16644,6 +16717,57 @@ describe('App session callbacks', () => {
         'session-1',
       );
     });
+  });
+
+  it('refreshes a new standalone title after its first turn completes', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.displayName = undefined;
+    const { container, rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender();
+    });
+    mockWorkspace.client.getStandaloneSession.mockResolvedValue({
+      sessionId: 'session-1',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: false,
+      displayName: 'First standalone prompt',
+    });
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]')
+        ?.textContent,
+    ).toContain('First standalone prompt');
+  });
+
+  it('seeds a standalone sidebar title while the transcript is loading', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-standalone-session"]',
+        )!
+        .click();
+    });
+    mockConnection.sessionId = 'standalone-session-2';
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.loadingTranscript = true;
+    rerender();
+    const header = container.querySelector(
+      '[data-testid="chat-context-header"]',
+    )?.textContent;
+    expect(header).toContain('Standalone sidebar title');
+    expect(header).not.toContain('New session');
   });
 
   it('seeds the catalog title before the session finishes loading', async () => {
@@ -27045,6 +27169,9 @@ describe('App session callbacks', () => {
           source: 'mcp-app',
         }),
       );
+      const options = mockSessionActions.sendPrompt.mock.calls[0][1];
+      expect(options).not.toHaveProperty('submittedPrompt');
+      expect(options).not.toHaveProperty('humanInput');
       expect(testState.prompt).toBe('hello');
       expect(editorClear).not.toHaveBeenCalled();
       expect(editorCommit).not.toHaveBeenCalled();
@@ -27063,6 +27190,7 @@ describe('App session callbacks', () => {
       'recovery',
       'client',
       'session',
+      'workspace',
       'write-block',
     ] as const)(
       'does not dispatch after %s invalidates an asynchronous preparation',
@@ -27088,6 +27216,8 @@ describe('App session callbacks', () => {
           if (change === 'recovery') testState.recoveryVersion += 1;
           if (change === 'client') mockConnection.clientId = 'client-2';
           if (change === 'session') mockConnection.sessionId = 'session-2';
+          if (change === 'workspace')
+            mockConnection.workspaceCwd = '/tmp/other';
           if (change === 'write-block') mockConnection.loadingTranscript = true;
           rerender({ prepareSubmit, onSubmitBefore });
         });
@@ -27266,12 +27396,14 @@ describe('App session callbacks', () => {
       });
     });
 
-    it.each(['streaming', 'active', 'goal'] as const)(
+    it.each(['streaming', 'active', 'goal', 'queued'] as const)(
       'refuses a known %s session without enqueuing the App text',
       async (busy) => {
         if (busy === 'streaming') testState.streamingState = 'responding';
         if (busy === 'active') testState.sessionHasActivePrompt = true;
         if (busy === 'goal') mockConnection.goalState = activeGoalSnapshot();
+        if (busy === 'queued')
+          testState.queuedPrompts = [{ id: 1, text: 'follow up' }];
         const prepareSubmit = vi.fn();
         renderApp({ prepareSubmit });
         await flush();
@@ -27284,6 +27416,40 @@ describe('App session callbacks', () => {
         expect(testState.prompt).toBe('hello');
       },
     );
+
+    it('refuses App text while shell commands are draining', async () => {
+      const running = deferred<void>();
+      mockSessionActions.sendShellCommand.mockReturnValueOnce(running.promise);
+      const { rerender } = renderApp();
+      await flush();
+      act(() => {
+        testState.streamingState = 'responding';
+        rerender();
+      });
+      await act(async () => {
+        testState.latestChatEditorProps!.onSubmit('!first');
+        testState.latestChatEditorProps!.onSubmit('!second');
+      });
+      act(() => {
+        testState.streamingState = 'idle';
+        rerender();
+      });
+      await flush();
+      expect(mockSessionActions.sendShellCommand).toHaveBeenCalledOnce();
+      await expect(
+        mcpAppMessageHost.current!.submit('App parameters', submission()),
+      ).rejects.toThrow();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        running.resolve();
+      });
+      await flush();
+      expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+        2,
+        'second',
+      );
+    });
 
     it('leaves dispatch without a receipt distinguishable from admission', async () => {
       mockSessionActions.sendPrompt.mockImplementationOnce(
@@ -42598,6 +42764,54 @@ describe('App session callbacks', () => {
       ),
     ).toBe(true);
     expect(onLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('sends /language output for a model output language change from Settings', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-output-language"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language output English',
+      ),
+    ).toBe(true);
+  });
+
+  it('sends auto when the model output language is cleared in Settings', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-output-language-auto"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language output auto',
+      ),
+    ).toBe(true);
   });
 
   it('resynchronizes the catalog when a settings prompt admission is ambiguous', async () => {
