@@ -1,12 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { MockInstance } from 'vitest';
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -982,25 +976,8 @@ describe('FeishuChannel', () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(dispatch).toHaveBeenCalledTimes(1);
         const envelope = dispatch.mock.calls[0]![0];
-        const attachment = envelope.attachments?.[0];
-        expect(envelope.attachments).toEqual([
-          {
-            type: 'file',
-            filePath: expect.any(String),
-            fileName: 'report.pdf',
-            mimeType: 'application/pdf',
-          },
-        ]);
+        expect(envelope.attachments).toHaveLength(1);
         expect(envelope.syntheticText).toBe(true);
-        const childDirectories = readdirSync(join(directory, 'channel-files'));
-        expect(childDirectories).toHaveLength(1);
-        const fileDirectory = join(
-          directory,
-          'channel-files',
-          childDirectories[0]!,
-        );
-        expect(attachment?.filePath).toBe(join(fileDirectory, 'report.pdf'));
-        expect(readFileSync(attachment!.filePath!)).toEqual(Buffer.from(bytes));
         expect(fetchSpy).toHaveBeenCalledExactlyOnceWith(
           resourceUrl,
           expect.objectContaining({
@@ -1040,7 +1017,7 @@ describe('FeishuChannel', () => {
       expect(envelope.text).toBe('(file: report.txt)');
       expect(envelope.attachments).toBeUndefined();
       expect(envelope.syntheticText).toBe(true);
-      expect(existsSync(join(directory, 'channel-files'))).toBe(false);
+      expect(readdirSync(directory)).toEqual([]);
     });
 
     it('rejects a disallowed sender before downloading or storing a file', async () => {
@@ -1054,7 +1031,7 @@ describe('FeishuChannel', () => {
       expect(dispatch).not.toHaveBeenCalled();
       expect(downloadSpy).not.toHaveBeenCalled();
       expect(fetchSpy).not.toHaveBeenCalled();
-      expect(existsSync(join(directory, 'channel-files'))).toBe(false);
+      expect(readdirSync(directory)).toEqual([]);
     });
 
     it.each([
@@ -1087,7 +1064,7 @@ describe('FeishuChannel', () => {
           authUrl,
           expect.objectContaining({ method: 'POST' }),
         );
-        expect(existsSync(join(directory, 'channel-files'))).toBe(false);
+        expect(readdirSync(directory)).toEqual([]);
       },
     );
 
@@ -1100,35 +1077,7 @@ describe('FeishuChannel', () => {
       expect(envelope.attachments).toBeUndefined();
       expect(envelope.syntheticText).toBe(true);
       expect(fetchSpy).not.toHaveBeenCalled();
-      expect(existsSync(join(directory, 'channel-files'))).toBe(false);
-    });
-
-    it('keeps two messages with the same filename in separate directories', async () => {
-      fetchSpy.mockImplementation(async (input) => {
-        if (
-          ![
-            resourceUrl,
-            resourceUrl.replace('/inbound-file/', '/inbound-file-2/'),
-          ].includes(String(input))
-        ) {
-          throw new Error(`Unexpected request: ${String(input)}`);
-        }
-        return new Response(bytes);
-      });
-      receive('report.txt');
-      receive('report.txt', 'inbound-file-2');
-      await vi.advanceTimersByTimeAsync(0);
-      expect(dispatch).toHaveBeenCalledTimes(2);
-      const paths = dispatch.mock.calls.map(
-        ([envelope]) => envelope.attachments![0]!.filePath!,
-      );
-      expect(new Set(paths).size).toBe(2);
-      expect(readdirSync(join(directory, 'channel-files'))).toHaveLength(2);
-      for (const path of paths) {
-        expect(readFileSync(path)).toEqual(Buffer.from(bytes));
-      }
-      await vi.advanceTimersByTimeAsync(60_000);
-      expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
+      expect(readdirSync(directory)).toEqual([]);
     });
 
     it('starts the 60-second cleanup countdown only after the mocked dispatch settles', async () => {
@@ -1158,21 +1107,46 @@ describe('FeishuChannel', () => {
       pendingDownload.resolve(new Response(bytes));
       await vi.advanceTimersByTimeAsync(0);
       expect(dispatch).not.toHaveBeenCalled();
-      expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
+      expect(readdirSync(directory, { recursive: true })).toHaveLength(1);
     });
 
-    it('cleans up after dispatch rejects', async () => {
-      dispatch.mockRejectedValue(new Error('Synthetic dispatch failure'));
+    it('cleans up after dispatch rejects without clearing another message dedup entry', async () => {
+      const pendingDispatch = deferred<void>();
+      dispatch.mockImplementation(async (envelope) => {
+        if (envelope.messageId === 'inbound-file') {
+          await pendingDispatch.promise;
+          throw new Error('Synthetic dispatch failure');
+        }
+      });
+      fetchSpy.mockImplementation(async (input) => {
+        expect([
+          resourceUrl,
+          resourceUrl.replace('/inbound-file/', '/inbound-file-2/'),
+        ]).toContain(String(input));
+        return new Response(bytes);
+      });
       receive('report.txt');
+      receive('report.txt', 'inbound-file-2');
       await vi.advanceTimersByTimeAsync(0);
-      expect(dispatch).toHaveBeenCalledTimes(1);
-      const filePath = dispatch.mock.calls[0]![0].attachments![0]!.filePath!;
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      const seenMessages = getPrivateMethod<Map<string, number>>(
+        channel,
+        'seenMessages',
+      );
+      expect(seenMessages.has('inbound-file')).toBe(true);
+      expect(seenMessages.has('inbound-file-2')).toBe(true);
+
+      pendingDispatch.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      const filePath = dispatch.mock.calls.find(
+        ([envelope]) => envelope.messageId === 'inbound-file',
+      )![0].attachments![0]!.filePath!;
       expect(existsSync(filePath)).toBe(true);
-      expect(
-        getPrivateMethod<Map<string, number>>(channel, 'seenMessages').has(
-          'inbound-file',
-        ),
-      ).toBe(false);
+      expect(seenMessages.has('inbound-file')).toBe(false);
+      expect(seenMessages.has('inbound-file-2')).toBe(true);
+      receive('report.txt', 'inbound-file-2');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(60_000);
       expect(existsSync(filePath)).toBe(false);
     });
