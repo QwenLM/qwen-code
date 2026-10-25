@@ -303,6 +303,7 @@ export type {
   PublishArtifactInput,
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
+export type { AutofixPrTool, AutofixPrParams } from './tools/autofix-pr.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type {
   CurrentSessionScheduledTaskCreateRequest,

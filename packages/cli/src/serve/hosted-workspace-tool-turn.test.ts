@@ -36,6 +36,7 @@ import {
   type HostedFileHistorySettleBlocker,
 } from './hosted-file-history.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
+import type { HostedExtensionToolConfig } from './hosted-extension-tool-context.js';
 import {
   HOSTED_TOOL_INPUT_ORDER,
   HostedHookSession,
@@ -84,6 +85,7 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import { writeHostedTodos } from './hosted-todo-session.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
@@ -2090,7 +2092,10 @@ it('refuses a glob call the files/1 profile never advertised', async () => {
 });
 
 // #15076: `todo_write` ships only with the `/3` profiles.
-function createV3Turn(profile = 'hosted-workspace-files/3') {
+function createV3Turn(
+  profile = 'hosted-workspace-files/3',
+  hooks?: HostedHookSession,
+) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -2101,7 +2106,7 @@ function createV3Turn(profile = 'hosted-workspace-files/3') {
     undefined,
     undefined,
     undefined,
-    { profile },
+    { profile, hooks },
   );
 }
 
@@ -2229,25 +2234,106 @@ it.each([
   },
 );
 
-it('dispatches an admitted todo_write with its argument payload', async () => {
+it('persists Todo without a Worker and restores the latest state after reopen', async () => {
   turn = createV3Turn();
-  const args = { todos: [{ id: 'a', content: 'audit', status: 'pending' }] };
-  const call = { ...calls[0], name: 'todo_write', args };
+  const first = { todos: [{ id: 'a', content: 'first', status: 'pending' }] };
+  const call = { ...calls[0], name: 'todo_write', args: first };
   const responses = await turn.execute(
     [call],
-    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    [{ functionCall: { id: call.callId, name: call.name, args: first } }],
     'model',
     new AbortController().signal,
   );
-  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
-  expect(broker.acquire).toHaveBeenCalled();
-  expect(
-    broker.execute.mock.calls.map((entry: unknown[]) =>
-      JSON.parse(entry[1] as string),
-    ),
-  ).toEqual([{ toolName: 'todo_write', input: args }]);
-  await turn.consumeResults();
-  await turn.finish();
+  expect(responses[0].functionResponse?.response?.['todos']).toEqual(
+    first.todos,
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  const latest = {
+    todos: [{ id: 'a', content: 'first', status: 'completed' }],
+  };
+  await writeHostedTodos(session, 'prompt', 'next-call', latest);
+  expect(await writeHostedTodos(session, 'prompt', call.callId, first)).toEqual(
+    first.todos,
+  );
+  await expect(
+    writeHostedTodos(session, 'prompt', call.callId, latest),
+  ).rejects.toThrow();
+  const key = session.authority.sessionHeader.sessionKey;
+  await turn.close();
+  await session.close();
+  session = await openManagedSession({
+    runtimeBaseDir: root,
+    cwd: root,
+    transcriptPath: path.join(root, 'transcript.jsonl'),
+    sessionId: key.sessionId,
+    sessionKey: key,
+    version: 'test',
+    workerId: 'reopened-worker',
+    activationLeaseDurationMs: 60_000,
+  });
+  harness = createManagedHarnessHandle(session);
+  await harness.ensureRunnable();
+  turn = createV3Turn();
+  expect(await turn.todoInstructions()).toContain(JSON.stringify(latest.todos));
+});
+
+it.each(['default', 'auto-edit', 'yolo'] as const)(
+  'pre-approves todo_write under %s',
+  (mode) => {
+    expect(hostedApprovalAsks({ mode, timeoutMs: 60_000 }, 'todo_write')).toBe(
+      false,
+    );
+  },
+);
+
+it('fires the success hook for journal-only Todo writes', async () => {
+  const fire = vi.fn<HostedHookSession['fire']>(async () => undefined);
+  turn = createV3Turn('hosted-workspace-files/3', hookSession(fire));
+  const args = { todos: [{ id: 'a', content: 'first', status: 'pending' }] };
+  const call = { ...calls[0], name: 'todo_write', args };
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const events = fire.mock.calls.map(([event]) => event);
+  expect(events).toContain(HookEventName.PostToolUse);
+  expect(events).not.toContain(HookEventName.PostToolUseFailure);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('preserves omitted dependencies and replays the original committed list', async () => {
+  const first = {
+    todos: [
+      { id: 'a', content: 'first', status: 'pending' },
+      { id: 'b', content: 'second', status: 'pending', blockedBy: ['a'] },
+    ],
+  };
+  await writeHostedTodos(session, 'prompt', 'first', first);
+  const next = {
+    todos: [
+      { id: 'a', content: 'first', status: 'completed' },
+      { id: 'b', content: 'second', status: 'in_progress' },
+    ],
+  };
+  const stored = await writeHostedTodos(session, 'prompt', 'next', next);
+  expect(stored[1].blockedBy).toEqual(['a']);
+  await writeHostedTodos(session, 'prompt', 'clear', { todos: [] });
+  expect(await writeHostedTodos(session, 'prompt', 'next', next)).toEqual(
+    stored,
+  );
+  await expect(
+    writeHostedTodos(session, 'prompt', 'cycle', {
+      todos: [
+        { id: 'a', content: 'a', status: 'pending', blockedBy: ['b'] },
+        { id: 'b', content: 'b', status: 'pending', blockedBy: ['a'] },
+      ],
+    }),
+  ).rejects.toThrow('cycle');
 });
 
 it('declares the preservation rule for omitted dependencies', async () => {
@@ -2268,18 +2354,6 @@ it('declares the preservation rule for omitted dependencies', async () => {
     schema?.properties?.todos?.items?.properties?.['blockedBy']?.description;
   expect(description).toContain('preserved');
   expect(description).toContain('[]');
-});
-
-it('pre-approves todo_write under default and auto-edit, and yolo never asks', () => {
-  expect(
-    hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'todo_write'),
-  ).toBe(false);
-  expect(
-    hostedApprovalAsks({ mode: 'auto-edit', timeoutMs: 60_000 }, 'todo_write'),
-  ).toBe(false);
-  expect(
-    hostedApprovalAsks({ mode: 'yolo', timeoutMs: 60_000 }, 'todo_write'),
-  ).toBe(false);
 });
 
 it.each([
@@ -5254,7 +5328,7 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
   ]);
 });
 
-it('admits exactly the declared native tools to the version 2 input preview', () => {
+it('admits exactly the declared native tools to the version 3 input preview', () => {
   // The Java reader admits a closed set. A name missing on either side degrades
   // to "Tool arguments are unavailable for this approval." with no error, so the
   // set is pinned here and each name must still be a declared native tool —
@@ -9736,6 +9810,7 @@ function backgroundTurnRig(
     fitsInline?: (type: string) => boolean;
     publicationMissing?: boolean;
     foregroundOnly?: boolean;
+    extensionConfig?: HostedExtensionToolConfig;
     closeResults?: ReadonlyArray<'NOT_STARTED' | 'MISSING'>;
     executionCallIds?: readonly string[];
     hooks?: HostedHookSession;
@@ -9893,6 +9968,7 @@ function backgroundTurnRig(
       childRuns: orchestrator as never,
       backgroundLane: options.lane,
       foregroundOnly: options.foregroundOnly,
+      extensionConfig: options.extensionConfig,
     },
   );
   return {
@@ -10649,6 +10725,59 @@ it.each([true, false])(
       expect(shell?.parametersJsonSchema).not.toHaveProperty(
         'properties.is_background',
       );
+    expect(declarations.map((tool) => tool.name)).not.toContain('monitor');
+  },
+);
+
+it.each([true, false])(
+  'preserves extension Shell pins with background admission enabled (%s)',
+  async (enabled) => {
+    const pin = {
+      extensionId: 'ext_11111111-1111-4111-8111-111111111111',
+      packageRevision: 1,
+      packageDigest: 'a'.repeat(64),
+    };
+    const rig = backgroundTurnRig(
+      { executionStatus: 'not_started', responseParts: [], capture: null },
+      {
+        extensionConfig: {
+          revision: 1,
+          packages: [{ pin, assetRoot: path.join(root, 'extension-assets') }],
+        },
+      },
+    );
+    turn = rig.turn;
+    enablement.childRun = enabled;
+    const declarations = await turn.declarations(new AbortController().signal);
+    const shell = declarations.find(
+      (tool) => tool.name === 'run_shell_command',
+    );
+    expect(shell?.parametersJsonSchema).toHaveProperty(
+      'properties.extension_context.oneOf',
+      [
+        {
+          properties: Object.fromEntries(
+            Object.entries(pin).map(([key, value]) => [key, { const: value }]),
+          ),
+        },
+      ],
+    );
+    expect(shell?.description).toContain('$QWEN_EXTENSION_ROOT');
+    expect(shell?.description).toContain(
+      'cwd stays the Session working directory',
+    );
+    if (enabled)
+      expect(shell?.parametersJsonSchema).toHaveProperty(
+        'properties.is_background',
+      );
+    else {
+      expect(shell?.parametersJsonSchema).not.toHaveProperty(
+        'properties.is_background',
+      );
+      expect(shell?.description).toContain(
+        'Shell file mutations are not backed up',
+      );
+    }
     expect(declarations.map((tool) => tool.name)).not.toContain('monitor');
   },
 );
@@ -12483,4 +12612,64 @@ it('refuses a malformed permission rewrite on an admitted background Shell', asy
   expect(broker.prepareV3).not.toHaveBeenCalled();
   expect(broker.executeV3).not.toHaveBeenCalled();
   expect(broker.acquire).toHaveBeenCalledOnce();
+});
+
+it.each(['auto', 'yolo'] as const)(
+  'enforces Session deny rules on extension command steps in %s mode',
+  async (mode) => {
+    turn = createTurn(true, {
+      mode,
+      permissionRules: { allow: [], ask: [], deny: ['Bash'] },
+    });
+    const signal = new AbortController().signal;
+    await turn.declarations(signal);
+    const permission = await (
+      turn as unknown as {
+        commandPermission(
+          id: string,
+          toolName: 'shell',
+          input: Record<string, unknown>,
+          signal: AbortSignal,
+          outerCallId: string,
+        ): Promise<{ allowed: boolean; approvalMode: string }>;
+      }
+    ).commandPermission(
+      'command-step',
+      'shell',
+      { command: 'printf denied' },
+      signal,
+      'outer-command',
+    );
+    expect(permission).toMatchObject({ allowed: false, approvalMode: mode });
+    expect(actionIds()).toEqual([]);
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it('honors an explicit Session allow rule for an extension command step', async () => {
+  turn = createTurn(true, {
+    mode: 'default',
+    permissionRules: { allow: ['Bash'], ask: [], deny: [] },
+  });
+  const signal = new AbortController().signal;
+  await turn.declarations(signal);
+  const permission = await (
+    turn as unknown as {
+      commandPermission(
+        id: string,
+        toolName: 'shell',
+        input: Record<string, unknown>,
+        signal: AbortSignal,
+        outerCallId: string,
+      ): Promise<{ allowed: boolean }>;
+    }
+  ).commandPermission(
+    'command-step',
+    'shell',
+    { command: 'printf allowed' },
+    signal,
+    'outer-command',
+  );
+  expect(permission.allowed).toBe(true);
+  expect(actionIds()).toEqual([]);
 });

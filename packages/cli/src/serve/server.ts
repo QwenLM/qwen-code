@@ -219,6 +219,7 @@ import {
   registerWorkspaceSettingsRoutes,
   withSessionWorkflowWriteLock,
 } from './routes/workspace-settings.js';
+import { registerWorkspaceDirectoriesRoutes } from './routes/workspace-directories.js';
 import { registerUserLanguageRoutes } from './routes/user-language.js';
 import {
   getActiveSseCount,
@@ -1254,6 +1255,9 @@ export function createServeApp(
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
+      workspaceDirectoriesAvailable:
+        deps.persistSetting !== undefined &&
+        opts.experimentalPairedEngines !== true,
       nativeDirectoryPickerAvailable:
         deps.nativeDirectoryPickerAvailable ??
         isNativeDirectoryPickerAvailable(),
@@ -3381,6 +3385,16 @@ export function createServeApp(
       },
       invalidateServeFeaturesCache,
     });
+    // Experimental paired engines put managed sessions on a second ACP child
+    // this workspace-scoped mutation cannot reach; omit the route (and the
+    // capability below) rather than apply it to one engine only.
+    if (!opts.experimentalPairedEngines) {
+      registerWorkspaceDirectoriesRoutes(app, {
+        workspaceRegistry,
+        mutate,
+        sendBridgeError,
+      });
+    }
     // Process-global user-level language sync (issue #10234). Registered
     // under the same `persistSetting` availability gate as the workspace
     // settings routes and advertised as the conditional

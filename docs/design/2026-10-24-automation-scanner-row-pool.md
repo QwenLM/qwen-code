@@ -42,15 +42,21 @@ lease_until < ?`) with fence-checked ledger writes, so working different
    `managedAutomationScheduler`. The tick holds the scheduler's thread while
    joining, so scanning on its own scheduler deadlocks at pool size 1 and
    parks one thread per pending join otherwise.
-5. Finish in-flight work at shutdown; never interrupt it, never park the
-   context close behind the relay's timeouts. Claims are durable: an
-   interrupted answer is re-driven by a later tick.
+5. Finish in-flight work at shutdown; never interrupt it. The pool's
+   `destroy()` returns immediately (`awaitTerminationSeconds(0)`), so the pool
+   adds no shutdown wait of its own. A tick caught mid-join is still bounded by
+   the scheduler that invokes it (`managedAutomationScheduler`, itself a
+   `SmartLifecycle`): the lifecycle processor caps that bean's stop at
+   `spring.lifecycle.timeout-per-shutdown-phase` (30 s here). That is an upper
+   bound on the close rather than a fixed wait, and it predates this change.
+   Claims are durable: an interrupted answer is re-driven by a later tick.
 
 The asynchronous fire answer is rejected for this change: today's `firing`
 means "answer pending inside this call", and persisting a pending state means
 a wire change (no event envelope carries gate verdicts to the control plane),
 new settle semantics, and a moved manual-run contract. It stays the right
-follow-up if probe durations keep saturating `SCAN_LIMIT × scanner-threads`.
+follow-up if probe durations keep saturating
+`2 × SCAN_LIMIT × scanner-threads`.
 
 ## Configuration
 
@@ -80,7 +86,9 @@ follow-up if probe durations keep saturating `SCAN_LIMIT × scanner-threads`.
   the occurrence stays `firing`, and a later tick re-drives it idempotently on
   the derived run id. No renewal run is added in this change.
 - In one row, slots, re-drives and reconcile calls stay serial; the pool
-  parallelizes rows. `SCAN_LIMIT` (100) stays the per-tick row bound.
+  parallelizes rows. `SCAN_LIMIT` (100) bounds each of the tick's two row
+  queries, so one tick submits at most 2 × `SCAN_LIMIT` (200) tasks; a row
+  both queries return is submitted once.
 - At context close the pool also runs its **queued** rows, not only the
   in-flight one, on its non-daemon threads: `destroy()` still returns
   immediately, but process exit waits for queued work. Every queued row
@@ -99,6 +107,8 @@ follow-up if probe durations keep saturating `SCAN_LIMIT × scanner-threads`.
   `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`,
   `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`,
   `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`,
+  `aRowBothQueriesReturnIsSubmittedOnce`,
+  `anInterruptedJoinReportsTheInterruptAndLeavesTheRowItsClaim`,
   plus binding/startup validation of the new property. The pre-existing lease
   and fence suite runs unchanged through a direct executor, pinning the serial
   shape of the same fan-out and join. `aTickJoinsEveryRowBeforeItReportsOneFailure`
