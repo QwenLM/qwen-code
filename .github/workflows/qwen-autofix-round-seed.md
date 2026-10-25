@@ -162,7 +162,7 @@ spent are therefore counted per engagement: a command opens one, that automatic
 re-arm does not, so the audit rebases while the remaining budget still applies.
 
 **A queued round from the same window is discarded once the budget is spent.** A
-no-op leaves the round number at 0 and the window key unchanged, so neither the
+no-op leaves the round number UNCHANGED and the window key unchanged, so neither the
 superseded-window nor the round-cap check would catch a round that was queued
 before it; the address leg recounts the window's attempts and drops it.
 

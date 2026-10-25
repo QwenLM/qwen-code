@@ -4592,9 +4592,10 @@ rather than a field on the ack literal for the same reason the seed is
 The budget is enforced in two steps, and the second is why spend is
 counted in eval markers rather than in ROUND:
 
-- The scan lowers EFF_MAX_ROUNDS to N for the window that carries the
-  marker, so the existing cap gate bounds DISPATCH exactly as it always
-  did; nothing else has to know about budgets.
+- The scan lowers EFF_MAX_ROUNDS to N for the ENGAGEMENT that carries
+  the marker, so the existing cap gate bounds DISPATCH exactly as it
+  always did. The effective cap's other readers are prepare's attempt
+  recount and the report script's budget carry.
 - Spend is the number of eval markers in the window, not ROUND. A
   no-op round writes its marker with the round UNCHANGED — that is why
   a no-op never advanced the cap — but it is still an attempt, and a
@@ -4621,13 +4622,13 @@ window.
 
 Two automatic paths need the same care. A growth audit appends
 `<!-- autofix-rearm -->` to rebase the round window for its own account-
-ing, and a window opened that way carries no budget marker — so the
-report script skips that automatic re-arm while the current window is
-budgeted, and the audit round stays inside the budget it was given.
-And a queued round can outlive the sibling that spent the last attempt:
-a no-op leaves ROUND at 0 and the window key unchanged, so neither the
-superseded-window check nor the round cap sees it — prepare recounts the
-window's eval markers and discards on a spent budget too.
+ing — it is the only automatic mover of the growth baseline, so it must
+keep firing; budget and spend are read per ENGAGEMENT, so the rebase
+cannot unbound a bounded engagement. And a queued round can outlive the
+sibling that spent the last attempt: a no-op leaves ROUND UNCHANGED and
+the window key unchanged, so neither the superseded-window check nor the
+round cap sees it — prepare and the scan both recount the engagement's
+eval markers.
 
 What happens at the boundary differs by authorship, and that difference
 is the point. A HUMAN-authored PR is simply released: nothing is stuck,
