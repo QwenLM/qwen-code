@@ -145,6 +145,8 @@ describe('runStatus', () => {
         needsHuman: [item],
         worktreePath: seven.worktreePath,
         worktreeExists: true,
+        // A plain directory, with no gitfile: not a git directory to trust.
+        gitTrusted: false,
         // A plain directory: git cannot tell what it holds.
         worktreeWork: expect.stringMatching(/not a git worktree/),
       },

@@ -13,6 +13,7 @@ import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { matchesRule, parseRule } from '../permissions/rule-parser.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import { evaluatePermissionFlow } from '../core/permissionFlow.js';
 import {
   AutofixPrTool,
   autofixPrArgs,
@@ -80,6 +81,7 @@ function status(watch: Record<string, unknown> = {}): string {
         ended: null,
         worktreePath: worktree,
         worktreeExists: true,
+        gitTrusted: true,
         ...watch,
       },
     ],
@@ -473,6 +475,57 @@ describe('permission rules', () => {
     expect((await presented({ command: 'sync', pr: 12 }))['watch']).toBe(
       'unconfirmed',
     );
+  });
+
+  it('treats a watch whose worktree hands git a config the tree controls as unconfirmed', async () => {
+    await prepare();
+    vi.stubEnv('FAKE_STATUS', status({ gitTrusted: false }));
+    expect((await presented({ command: 'sync', pr: 12 }))['watch']).toBe(
+      'unconfirmed',
+    );
+  });
+
+  it('asks, through the whole permission flow, where an ask rule names the shell command, past an allow rule for the tool', async () => {
+    await prepare();
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => ['AutofixPr(command:push)', 'AutofixPr'],
+      getPermissionsAsk: () => ['Bash(qwen autofix-pr *)'],
+      getPermissionsDeny: () => undefined,
+      getProjectRoot: () => dir,
+      getCwd: () => dir,
+    });
+    pm.initialize();
+    for (const mode of [ApprovalMode.DEFAULT, ApprovalMode.AUTO]) {
+      const config = makeConfig({
+        getPermissionManager: () => pm,
+        getApprovalMode: () => mode,
+      });
+      for (const params of [
+        { command: 'push', pr: 12 },
+        { command: 'status' },
+      ] as AutofixPrParams[]) {
+        const inv = invocation(params, config);
+        const flow = await evaluatePermissionFlow(
+          config,
+          inv,
+          'autofix_pr',
+          params as unknown as Record<string, unknown>,
+          signal(),
+        );
+        expect(flow.finalPermission).toBe('ask');
+        expect(flow.requiresUserInteraction).toBe(true);
+      }
+    }
+    // YOLO ignores ask rules, for the shell as here.
+    const yolo = invocation(
+      { command: 'push', pr: 12 },
+      makeConfig({
+        getPermissionManager: () => pm,
+        getApprovalMode: () => ApprovalMode.YOLO,
+      }),
+    );
+    await yolo.getDefaultPermission(signal());
+    expect(yolo.requiresUserInteraction!()).toBe(false);
   });
 
   it('keeps asking where an ask rule names the shell command', async () => {

@@ -508,6 +508,7 @@ interface WatchStatusLike {
   ended?: unknown;
   worktreePath?: unknown;
   worktreeExists?: unknown;
+  gitTrusted?: unknown;
 }
 
 /** Whether `status` lists `watch` as the one `prepared` recorded. */
@@ -572,12 +573,18 @@ async function stillPrepared(
     watch === undefined ||
     !listsPrepared(prepared, watch) ||
     watch.thisSession !== true ||
-    watch.ended !== null
+    watch.ended !== null ||
+    // A git directory the tree can write — a submodule's embedded one, say
+    // — hands the helper's git commands a config the PR controls.
+    watch.gitTrusted !== true
   ) {
     return 'unconfirmed';
   }
   // These run git hooks in the worktree. When a hook may run what the PR's
-  // tree holds, a watch whose fixes ask must ask for them too.
+  // tree holds, a watch whose fixes ask must ask for them too. A grant of
+  // unattended fixes answers for the hooks as well: its fix agent already
+  // runs the PR's code without asking, so asking for its hooks protects
+  // nothing — the one flag means both.
   return !HOOK_COMMANDS.has(command) ||
     unattendedFixGranted(config.getSessionId(), prepared.worktree) ||
     !(await hooksMayRunPrCode(prepared.worktree, signal))
@@ -877,6 +884,10 @@ class AutofixPrInvocation extends BaseToolInvocation<
    * no rule, no classifier and no host decision stands in for that answer.
    */
   override requiresUserInteraction(): boolean {
+    // An ask rule for the shell route asks here too, past any allow rule
+    // for the tool and the auto-mode classifier; YOLO ignores ask rules,
+    // as it does for the shell.
+    if (this.shellAsks && !this.yolo()) return true;
     // A start lets the watch's rounds push and reply without asking, so in
     // auto mode the classifier does not stand in for the user there — where
     // a user can answer: a headless run keeps its rules, as in default mode.
@@ -928,6 +939,7 @@ class AutofixPrInvocation extends BaseToolInvocation<
     // started here are asked each time: a saved rule would let any later
     // one through.
     const askedEachTime =
+      this.shellAsks ||
       this.params.command === 'prepare' ||
       this.params.command === 'schedule' ||
       watch === 'take-over' ||
@@ -953,6 +965,9 @@ class AutofixPrInvocation extends BaseToolInvocation<
 
   private startsWatchWarning(watch: AutofixPrWatchMatch): string {
     const pr = this.params.pr;
+    if (this.shellAsks) {
+      return `An ask rule for \`qwen ${this.getDescription()}\` as a shell command asks for it here too.`;
+    }
     if (this.params.command === 'prepare') {
       return this.params.take_over
         ? `Takes the watch of PR #${pr} over from any other session that holds it: from now on its rounds push to the PR branch and reply on the PR without asking.`

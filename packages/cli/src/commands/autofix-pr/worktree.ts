@@ -8,7 +8,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { GIT_TIMEOUT_MS, gitOpt, gitProbe } from '../review/lib/git.js';
 import { redirectedAncestor, sanitizedGitEnv } from '../review/lib/worktree.js';
 import type { AutofixPrPaths } from './state.js';
@@ -39,24 +39,10 @@ export function untrustedGitfile(
     // planted beside the worktree, naming it as its `core.worktree`.
     return `${worktreePath} is not a git worktree: it has no gitfile of its own`;
   }
-  // Read as git reads it (setup.c, read_gitfile_gently): the file starts
-  // with `gitdir: `, one space, and the path is the rest of it, less the
-  // line breaks that end it — spaces and all. Any other reading could pass
-  // a path git resolves elsewhere, inside the worktree.
-  if (!text.startsWith('gitdir: ')) {
-    return `${dotGit} is not a gitfile git reads`;
-  }
-  const pointer = text.slice('gitdir: '.length).replace(/[\r\n]+$/, '');
-  if (pointer === '' || pointer.includes('\0') || /[\r\n]/.test(pointer)) {
-    return `${dotGit} names no git directory git and this check read alike`;
-  }
+  const pointer = gitfilePointer(text);
+  if (typeof pointer !== 'string') return `${dotGit} ${pointer.refused}`;
   const common = gitOpt('-C', root, 'rev-parse', '--git-common-dir');
   if (common === null) return `git cannot find the git directory of ${root}`;
-  // Resolved as the kernel resolves what git hands it: symlinks first, a
-  // `..` after the link it follows. A lexical resolve() reads `link/..`
-  // differently, so the joined string goes to the native realpath as is.
-  const asGitNames = (base: string, named: string) =>
-    realpathSync.native(isAbsolute(named) ? named : `${base}${sep}${named}`);
   try {
     const entry = asGitNames(worktreePath, pointer);
     const entries = realpathSync.native(
@@ -74,6 +60,123 @@ export function untrustedGitfile(
     }
   } catch {
     return `${dotGit} points to ${pointer}, which is not this clone's entry for it`;
+  }
+  return null;
+}
+
+/**
+ * Why a checked-out submodule of the worktree could hand git a config the
+ * tree controls, or null: `git status --ignore-submodules=none` goes into
+ * every submodule with that submodule's own config. Each `.git` there must
+ * be a gitfile naming a git directory inside the clone's own, where `git
+ * submodule` keeps them — one embedded in the submodule, or anywhere else
+ * a round's code can write, is not. Call it once `untrustedGitfile` passed:
+ * it lists the submodules with git, in the worktree.
+ */
+export function untrustedSubmodules(
+  worktreePath: string,
+  root: string,
+): string | null {
+  const common = gitOpt('-C', root, 'rev-parse', '--git-common-dir');
+  if (common === null) return `git cannot find the git directory of ${root}`;
+  try {
+    return untrustedSubmodulesIn(
+      worktreePath,
+      realpathSync.native(resolve(root, common)),
+      0,
+    );
+  } catch {
+    return `the submodules of ${worktreePath} cannot be checked`;
+  }
+}
+
+/**
+ * The path a gitfile names, read as git reads it (setup.c,
+ * read_gitfile_gently): the file starts with `gitdir: `, one space, and the
+ * path is the rest of it, less the line breaks that end it — spaces and
+ * all. Any other reading could pass a path git resolves elsewhere, inside
+ * the worktree.
+ */
+function gitfilePointer(text: string): string | { refused: string } {
+  if (!text.startsWith('gitdir: ')) {
+    return { refused: 'is not a gitfile git reads' };
+  }
+  const pointer = text.slice('gitdir: '.length).replace(/[\r\n]+$/, '');
+  if (pointer === '' || pointer.includes('\0') || /[\r\n]/.test(pointer)) {
+    return { refused: 'names no git directory git and this check read alike' };
+  }
+  return pointer;
+}
+
+/**
+ * Resolved as the kernel resolves what git hands it: symlinks first, a `..`
+ * after the link it follows. A lexical resolve() reads `link/..`
+ * differently, so the joined string goes to the native realpath as is.
+ */
+function asGitNames(base: string, named: string): string {
+  return realpathSync.native(
+    isAbsolute(named) ? named : `${base}${sep}${named}`,
+  );
+}
+
+/** Deep enough for any real nesting; deeper is refused, not trusted. */
+const MAX_SUBMODULE_DEPTH = 8;
+
+/**
+ * Why a checked-out submodule under `dir` could hand git a config the tree
+ * controls, or null. Each one's `.git` must be a gitfile naming a git
+ * directory inside the clone's own (`common`), where `git submodule` keeps
+ * them — never one inside the worktree, which a round's code can build —
+ * and so on for the submodules of each.
+ */
+function untrustedSubmodulesIn(
+  dir: string,
+  common: string,
+  depth: number,
+): string | null {
+  const listed = gitOpt('-C', dir, 'ls-files', '--stage', '-z');
+  if (listed === null) return `git cannot list the files of ${dir}`;
+  for (const record of listed.split('\0')) {
+    // `<mode> <object> <stage>\t<path>`; 160000 is a submodule.
+    if (!record.startsWith('160000 ')) continue;
+    const path = record.slice(record.indexOf('\t') + 1);
+    const sub = join(dir, path);
+    const dotGit = join(sub, '.git');
+    let text: string;
+    try {
+      if (lstatSync(sub).isSymbolicLink()) {
+        return `the submodule ${sub} is a symlink`;
+      }
+      if (!lstatSync(dotGit).isFile()) {
+        return `${dotGit} is not the gitfile of a submodule the clone keeps`;
+      }
+      text = readFileSync(dotGit, 'utf8');
+    } catch {
+      // Not checked out: git leaves it alone.
+      continue;
+    }
+    const pointer = gitfilePointer(text);
+    if (typeof pointer !== 'string') return `${dotGit} ${pointer.refused}`;
+    let entry: string;
+    try {
+      entry = asGitNames(sub, pointer);
+    } catch {
+      return `${dotGit} points to ${pointer}, which does not exist`;
+    }
+    const inside = relative(common, entry);
+    if (
+      inside === '' ||
+      inside.startsWith(`..${sep}`) ||
+      inside === '..' ||
+      isAbsolute(inside)
+    ) {
+      return `${dotGit} points to ${pointer}, outside the clone's own git directory`;
+    }
+    if (depth + 1 >= MAX_SUBMODULE_DEPTH) {
+      return `the submodules under ${dir} nest too deep to check`;
+    }
+    const nested = untrustedSubmodulesIn(sub, common, depth + 1);
+    if (nested !== null) return nested;
   }
   return null;
 }

@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { unsavedWork } from './cleanup.js';
+import { untrustedGitfile, untrustedSubmodules } from './worktree.js';
 import { DEFAULT_EVERY } from './schedule.js';
 import {
   assertPositiveInteger,
@@ -62,6 +63,10 @@ export interface WatchStatus {
   needsHuman: NeedsHumanItem[];
   worktreePath: string;
   worktreeExists: boolean;
+  /** Every git directory a command in the worktree reads — its own and
+   * each checked-out submodule's — is one the clone keeps, outside the
+   * worktree; read from the files (Section 6.12 of the design). */
+  gitTrusted: boolean;
   /** What the worktree (or its branch) holds that the PR does not, as
    * `cleanup` judges it without asking the remote, or null. A round that
    * starts on it discards it. */
@@ -176,6 +181,10 @@ export function runStatus(args: {
         // The recorded path goes stale when the clone moves; this one does not.
         worktreePath: paths.worktreePath,
         worktreeExists: existsSync(paths.worktreePath),
+        gitTrusted:
+          existsSync(paths.worktreePath) &&
+          (untrustedGitfile(paths.worktreePath, root) ??
+            untrustedSubmodules(paths.worktreePath, root)) === null,
         worktreeWork:
           args.work === false
             ? null

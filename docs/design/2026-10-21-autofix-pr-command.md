@@ -936,6 +936,8 @@ the reason for a state file that could not be read. Each watch carries:
 - `watch`, the task `schedule` recorded, or null for `--once`;
 - `ended`, when and why a `cleanup` that kept the worktree ended the watch;
 - `needsHuman` (Section 6.5);
+- `gitTrusted`: the worktree's gitfile and every checked-out submodule's
+  name git directories the clone keeps, read from the files (Section 6.12);
 - the worktree's path and whether it exists, and `worktreeWork`: what the
   worktree or its branch holds that the PR does not, judged as `cleanup`
   judges it without asking the remote or taking the index lock, or null.
@@ -1069,8 +1071,16 @@ command does — in auto mode the classifier decides. Rules match on
   `core.hooksPath` (husky's `.husky`) resolves inside the worktree, where the
   PR's own tree supplies the hooks, and a hook in the clone's own hooks
   directory may be a dispatcher (pre-commit, lefthook, husky 4) that runs
-  what a config file in the tree says. The dialog of such a call says so. An ask rule for the shell command
-  (`Bash(qwen autofix-pr push *)`) keeps the call `unconfirmed` too. The
+  what a config file in the tree says. The dialog of such a call says so. Nor is
+  a call `confirmed` unless `status` reports `gitTrusted`: every git
+  directory a command in the worktree reads — its own and each checked-out
+  submodule's — is one the clone keeps, not one embedded in a submodule or
+  anywhere else the tree can write, which would hand git a config the PR
+  controls; `status` and `cleanup` do not scan such a worktree with git at
+  all. An ask rule for the shell command (`Bash(qwen autofix-pr push *)`)
+  asks for the tool's call too, past any allow rule for the tool and the
+  auto-mode classifier, as it would for the shell (YOLO ignores ask rules
+  for both). The
   state file the helper reads sits in reach of
   the code a round runs, so it can only make a call `unconfirmed`; none of
   the record is read back from it. Any other helper call is

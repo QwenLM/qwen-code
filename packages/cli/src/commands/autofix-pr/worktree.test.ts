@@ -20,7 +20,11 @@ import { dirname, join, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { unsavedWork } from './cleanup.js';
 import { autofixPrPaths } from './state.js';
-import { requireWorktree, untrustedGitfile } from './worktree.js';
+import {
+  requireWorktree,
+  untrustedGitfile,
+  untrustedSubmodules,
+} from './worktree.js';
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, {
@@ -133,6 +137,67 @@ describe('untrustedGitfile (real git)', () => {
       /no git command runs in/,
     );
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it('trusts a submodule whose git directory the clone keeps, and refuses one it does not', () => {
+    // A submodule the clone keeps, as `git submodule` checks it out.
+    const lib = join(root, 'lib');
+    git(root, 'init', '-q', '-b', 'main', lib);
+    git(
+      lib,
+      '-c',
+      'user.email=a@b',
+      '-c',
+      'user.name=a',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'lib',
+    );
+    git(
+      root,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      lib,
+      'vendor/lib',
+    );
+    git(
+      root,
+      '-c',
+      'user.email=a@b',
+      '-c',
+      'user.name=a',
+      'commit',
+      '-q',
+      '-m',
+      'sub',
+    );
+    git(worktree, 'reset', '-q', '--hard', git(root, 'rev-parse', 'HEAD'));
+    git(
+      worktree,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'update',
+      '-q',
+      '--init',
+    );
+    expect(untrustedGitfile(worktree, root)).toBeNull();
+    expect(untrustedSubmodules(worktree, root)).toBeNull();
+    // Its git directory embedded in the submodule, where the tree can write.
+    const sub = join(worktree, 'vendor', 'lib');
+    rmSync(join(sub, '.git'));
+    mkdirSync(join(sub, '.git'));
+    expect(untrustedSubmodules(worktree, root)).toMatch(
+      /is not the gitfile of a submodule the clone keeps/,
+    );
+    expect(unsavedWork(autofixPrPaths(root, 7), [])).toMatch(
+      /is not the gitfile of a submodule the clone keeps/,
+    );
   });
 
   it('refuses a .git directory, and the entry of another worktree', () => {
