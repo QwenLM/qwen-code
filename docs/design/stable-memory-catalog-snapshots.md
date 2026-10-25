@@ -96,6 +96,13 @@ a mixed real user prompt plus snapshot still counts as a user turn. Delivered
 notification classification also ignores marked snapshots while still requiring a
 notification envelope and no real user text, preserving ACP rewind ordinals.
 
+A snapshot record belongs to the turn whose durable request appended it. Deleting
+that turn through message-group deletion removes the record with it, so a restore
+cannot reattach a deleted turn's catalog to an earlier turn; the next durable
+request appends the current catalog again when the surviving history no longer
+matches it. Snapshots embedded in a compaction payload stay part of that
+compressed history and are pruned only by the compression-aware deletion path.
+
 Context usage attributes all supplied marked snapshots to memory tokens once,
 excluding them from conversation tokens. Request-only one-shot attribution remains
 supported. UI user-message projections do not gain fabricated user records.

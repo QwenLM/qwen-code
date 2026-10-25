@@ -64,6 +64,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
+import { createUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import {
@@ -866,6 +867,9 @@ describe('Session', () => {
       // `mockChat.getHistory` outright instead of re-mocking getHistoryMock.
       peekLastHistoryEntry: vi.fn(() =>
         (mockChat.getHistory() as Content[]).at(-1),
+      ),
+      findLastHistoryEntry: vi.fn((predicate: (entry: Content) => boolean) =>
+        [...(mockChat.getHistory() as Content[])].reverse().find(predicate),
       ),
       getHistoryShallow: vi.fn().mockReturnValue([]),
       getHistoryToolCallFingerprints: vi
@@ -41772,6 +41776,193 @@ describe('Session', () => {
           expect(
             mockLlmClient.beginManagedAutoMemoryRecall,
           ).toHaveBeenCalledWith('hello', expect.any(AbortSignal));
+        });
+
+        it('does not re-append an unchanged UserPromptSubmit context block already delivered in history', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: 'UserPromptSubmit',
+                  additionalContext: 'extra hook context',
+                },
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+          mockChat.getHistory = vi.fn().mockReturnValue([
+            {
+              role: 'user',
+              parts: [
+                { text: 'an earlier prompt' },
+                createUserPromptSubmitContextPart('extra hook context'),
+              ],
+            },
+          ]);
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(textParts(firstSentMessage())).toEqual(['hello']);
+        });
+
+        it('re-appends a suppressed hook block when pre-send compaction replaces history', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: 'UserPromptSubmit',
+                  additionalContext: 'extra hook context',
+                },
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockChat.getHistory = vi.fn().mockReturnValue([
+            {
+              role: 'user',
+              parts: [
+                { text: 'an earlier prompt' },
+                createUserPromptSubmitContextPart('extra hook context'),
+              ],
+            },
+          ]);
+          mockLlmClient.tryCompressChat.mockResolvedValue({
+            originalTokenCount: 1000,
+            newTokenCount: 200,
+            compressionStatus: core.CompressionStatus.COMPRESSED,
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const sentText = textParts(firstSentMessage());
+          expect(
+            sentText.filter((text) => text.includes('extra hook context')),
+          ).toHaveLength(1);
+          expect(sentText.at(-1)).toBe(
+            core.wrapUserPromptSubmitContext('extra hook context'),
+          );
+          // Still forwarded: a second compaction inside this send destroys the
+          // copy just appended, and LlmChat's already-present scan is what
+          // keeps the forwarding from becoming a duplicate.
+          expect(
+            vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[4],
+          ).toEqual(
+            expect.objectContaining({
+              suppressedHookContext: 'extra hook context',
+            }),
+          );
+        });
+
+        it('forwards a suppressed hook block to the send when Session does not compact', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: 'UserPromptSubmit',
+                  additionalContext: 'extra hook context',
+                },
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockChat.getHistory = vi.fn().mockReturnValue([
+            {
+              role: 'user',
+              parts: [
+                { text: 'an earlier prompt' },
+                createUserPromptSubmitContextPart('extra hook context'),
+              ],
+            },
+          ]);
+          // No pre-send compaction here: a compaction inside the send (LlmChat's
+          // hard-tier rescue or reactive overflow) is what would drop the
+          // block, and only the forwarded option lets LlmChat re-append it.
+          mockLlmClient.tryCompressChat.mockResolvedValue({
+            originalTokenCount: 1000,
+            newTokenCount: 1000,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(
+            vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[4],
+          ).toEqual(
+            expect.objectContaining({
+              suppressedHookContext: 'extra hook context',
+            }),
+          );
+        });
+
+        it('still appends when an ACP prompt block reproduces the injection shape', async () => {
+          // A client can submit two text blocks whose persisted entry looks
+          // exactly like a hook delivery. Without injector-owned provenance
+          // that shape is not a receipt, so the fresh hook context is sent.
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: 'UserPromptSubmit',
+                  additionalContext: 'extra hook context',
+                },
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+          mockChat.getHistory = vi.fn().mockReturnValue([
+            {
+              role: 'user',
+              parts: [
+                { text: 'an earlier prompt' },
+                {
+                  text: core.wrapUserPromptSubmitContext('extra hook context'),
+                },
+              ],
+            },
+          ]);
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(textParts(firstSentMessage())).toEqual([
+            'hello',
+            core.wrapUserPromptSubmitContext('extra hook context'),
+          ]);
         });
       });
 
