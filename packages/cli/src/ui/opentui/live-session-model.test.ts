@@ -10,17 +10,21 @@
  * in flight; only `done` settles open tools.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   describeGoalCard,
   describeLegacyGoalCard,
   foldLiveEvent,
+  snapshotCanonicalHistory,
+  allocateCanonicalHistoryId,
   type LiveAssistantItem,
   type LiveHistoryItem,
   type LiveToolItem,
 } from './live-session-model.js';
-import type { GoalSnapshotLike } from './event-adapter.js';
+import type { OpenTuiStreamEvent, GoalSnapshotLike } from './event-adapter.js';
 import { ICON } from '../constants.js';
+import { AgentStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
+import { ToolCallStatus } from '../types.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
 import type { HistoryItem as CanonicalHistoryItem } from '../types.js';
 
@@ -43,6 +47,61 @@ const runningTool = (id = 'tool1'): LiveToolItem => ({
 const waitingTool = (id = 'tool1'): LiveToolItem => ({
   ...runningTool(id),
   confirm: 'pending',
+});
+
+describe('identified user history', () => {
+  it('updates an invocation in place even after its command output', () => {
+    let items = foldLiveEvent([], {
+      type: 'user',
+      text: '/x',
+      historyId: 7,
+      sentToModel: false,
+    });
+    const id = items[0].id;
+    items = foldLiveEvent(items, { type: 'info', text: 'Preparing' });
+    items = foldLiveEvent(items, {
+      type: 'user',
+      text: '/x',
+      historyId: 7,
+      promptId: 'p1',
+      sentToModel: true,
+    });
+    expect(items).toHaveLength(2);
+    expect(items[0]).toEqual({
+      kind: 'user',
+      id,
+      historyId: 7,
+      text: '/x',
+      promptId: 'p1',
+      sentToModel: true,
+      canonicalHistoryItem: {
+        id: 7,
+        type: 'user',
+        text: '/x',
+        promptId: 'p1',
+        sentToModel: true,
+      },
+      canonicalPending: false,
+    });
+    expect(items[1]).toMatchObject({ kind: 'info', text: 'Preparing' });
+  });
+
+  it('retains equal text from distinct turns but deduplicates a repeated echo', () => {
+    let items = foldLiveEvent([], {
+      type: 'user',
+      text: 'again',
+      promptId: 'p1',
+    });
+    items = foldLiveEvent(items, {
+      type: 'user',
+      text: 'again',
+      promptId: 'p2',
+    });
+    expect(items).toHaveLength(2);
+    expect(
+      foldLiveEvent(items, { type: 'user', text: 'again', promptId: 'p2' }),
+    ).toBe(items);
+  });
 });
 
 describe('foldLiveEvent segment-end (finished parity)', () => {
@@ -482,6 +541,42 @@ describe('foldLiveEvent compaction', () => {
 });
 
 describe('foldLiveEvent info (chat_compressed parity)', () => {
+  it('preserves meaningful classification without a canonical history id', () => {
+    expect(
+      foldLiveEvent([], {
+        type: 'info',
+        text: 'Status',
+        historyIsSynthetic: false,
+      }),
+    ).toEqual([
+      {
+        kind: 'info',
+        id: expect.any(String),
+        text: 'Status',
+        historyIsSynthetic: false,
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'info',
+          text: 'Status',
+        },
+        canonicalPending: false,
+      },
+    ]);
+    expect(foldLiveEvent([], { type: 'info', text: 'Preparing' })).toEqual([
+      {
+        kind: 'info',
+        id: expect.any(String),
+        text: 'Preparing',
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'info',
+          text: 'Preparing',
+        },
+        canonicalPending: false,
+      },
+    ]);
+  });
+
   it('pushes the info row and settles a streaming assistant block', () => {
     const items = foldLiveEvent([assistant('partial')], {
       type: 'info',
@@ -525,7 +620,17 @@ describe('foldLiveEvent status rows (ink StatusMessage parity)', () => {
       message: 'rate limited',
     });
     expect(items).toEqual([
-      { kind: 'warning', id: expect.any(String), text: '✕ blocked' },
+      {
+        kind: 'warning',
+        id: expect.any(String),
+        text: '✕ blocked',
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'warning',
+          text: '✕ blocked',
+        },
+        canonicalPending: false,
+      },
       {
         kind: 'retry',
         id: expect.any(String),
@@ -1146,5 +1251,554 @@ describe('replayed canonical source ownership', () => {
       next,
     ]);
     expect(replaced[1]).toBe(items[1]);
+  });
+});
+
+describe('canonical source retention for checkpoints', () => {
+  const replay = (history: CanonicalHistoryItem[]) =>
+    projectHistoryToStreamEvents(history, {}).reduce<
+      readonly LiveHistoryItem[]
+    >((items, event) => foldLiveEvent(items, event), []);
+
+  it('retains one exact source across assistant text and image fanout', () => {
+    const source: CanonicalHistoryItem = {
+      id: 101,
+      type: 'gemini',
+      text: 'answer',
+      timestamp: 123,
+      images: [{ mimeType: 'image/png', data: 'aGVsbG8=' }],
+    };
+    const items = replay([source]);
+    expect(items.filter((item) => !item.canonicalOnly)).toHaveLength(2);
+    expect(snapshotCanonicalHistory(items)).toEqual([source]);
+    expect(snapshotCanonicalHistory(items)[0]).toBe(source);
+  });
+
+  it('does not merge adjacent streaming text from distinct canonical sources', () => {
+    const first: CanonicalHistoryItem = {
+      id: 102,
+      type: 'gemini_content',
+      text: 'first',
+    };
+    const second: CanonicalHistoryItem = {
+      id: 103,
+      type: 'gemini_content',
+      text: 'second',
+    };
+    const items = replay([first, second]);
+    expect(
+      items
+        .filter((item) => item.kind === 'assistant')
+        .map((item) => item.text),
+    ).toEqual(['first', 'second']);
+    expect(
+      items
+        .filter((item) => item.kind === 'assistant')
+        .every((item) => !item.streaming),
+    ).toBe(true);
+    expect(snapshotCanonicalHistory(items)).toEqual([first, second]);
+  });
+
+  it('retains zero-render source without a visible row', () => {
+    const source: CanonicalHistoryItem = {
+      id: 104,
+      type: 'gemini_content',
+      text: '',
+    };
+    const items = replay([source]);
+    expect(items.filter((item) => !item.canonicalOnly)).toEqual([]);
+    expect(snapshotCanonicalHistory(items)).toEqual([source]);
+    expect(items[0]).toMatchObject({
+      kind: 'info',
+      canonicalOnly: true,
+      historyIsSynthetic: false,
+    });
+    // The existing live-turn rollback scans info.historyIsSynthetic.
+    const synthetic = foldLiveEvent([], {
+      type: 'canonical-history',
+      canonicalHistoryItem: { id: 109, type: 'info', text: '' },
+    });
+    expect(
+      synthetic.every(
+        (item) => item.kind === 'info' && (item.historyIsSynthetic ?? true),
+      ),
+    ).toBe(true);
+    expect(
+      items.every(
+        (item) => item.kind === 'info' && (item.historyIsSynthetic ?? true),
+      ),
+    ).toBe(false);
+  });
+
+  it('replaces all old fanout on host update while retaining transcript position', () => {
+    const before: CanonicalHistoryItem = {
+      id: 105,
+      type: 'gemini',
+      text: 'old',
+      images: [{ mimeType: 'image/png', data: 'aGVsbG8=' }],
+    };
+    const following: CanonicalHistoryItem = {
+      id: 106,
+      type: 'info',
+      text: 'later',
+    };
+    const replacement: CanonicalHistoryItem = {
+      id: 105,
+      type: 'gemini',
+      text: 'updated',
+    };
+    const items = foldLiveEvent(replay([before, following]), {
+      type: 'canonical-history-replace',
+      item: replacement,
+      events: projectHistoryToStreamEvents([replacement], {}).filter(
+        (event) => event.type !== 'done',
+      ),
+    });
+    expect(snapshotCanonicalHistory(items)).toEqual([replacement, following]);
+    expect(items.some((item) => item.kind === 'image')).toBe(false);
+    expect(
+      items
+        .filter((item) => item.kind === 'assistant')
+        .map((item) => item.text),
+    ).toEqual(['updated']);
+  });
+
+  it('keeps reset and rollback snapshots local to their actual item arrays', () => {
+    const original: CanonicalHistoryItem = {
+      id: 107,
+      type: 'gemini_content',
+      text: '',
+    };
+    const saved = replay([original]);
+    const next = replay([{ id: 108, type: 'info', text: 'new session' }]);
+    expect(snapshotCanonicalHistory([])).toEqual([]);
+    expect(snapshotCanonicalHistory(next).map((item) => item.id)).toEqual([
+      108,
+    ]);
+    expect(snapshotCanonicalHistory(saved)).toEqual([original]);
+  });
+
+  it('fails closed on a committed row whose native source has not been wired', () => {
+    expect(() => snapshotCanonicalHistory([assistant('unowned')])).toThrow(
+      'missing canonical assistant',
+    );
+  });
+
+  it('captures expanded history without restoring its old suppression flag', () => {
+    const source: CanonicalHistoryItem = {
+      id: 109,
+      type: 'gemini',
+      text: 'restored answer',
+      display: { suppressOnRestore: true },
+    };
+    const items = foldLiveEvent(replay([source]), { type: 'history-expanded' });
+    expect(items.every((item) => !item.display?.suppressOnRestore)).toBe(true);
+    expect(snapshotCanonicalHistory(items)).toEqual([
+      { ...source, display: undefined },
+    ]);
+    expect(source.display?.suppressOnRestore).toBe(true);
+  });
+});
+
+describe('native canonical checkpoint source', () => {
+  const committed = (items: readonly LiveHistoryItem[]) =>
+    snapshotCanonicalHistory(items.filter((item) => !item.canonicalPending));
+
+  it('keeps raw text, image bytes, continuation types and the first timestamp', () => {
+    let items = foldLiveEvent([], {
+      type: 'user',
+      text: 'typed',
+      promptId: 'actual#0',
+      sentToModel: true,
+    });
+    items = foldLiveEvent(items, {
+      type: 'text',
+      delta: '\nfirst',
+      timestamp: 11,
+    });
+    items = foldLiveEvent(items, { type: 'text', delta: ' answer' });
+    expect(committed(items)).toHaveLength(1);
+    items = foldLiveEvent(items, {
+      type: 'image',
+      mimeType: 'image/png',
+      data: 'raw-base64',
+    });
+    items = foldLiveEvent(items, { type: 'text', delta: 'after image' });
+    items = foldLiveEvent(items, { type: 'segment-end' });
+    expect(committed(items)).toEqual([
+      {
+        id: expect.any(Number),
+        type: 'user',
+        text: 'typed',
+        promptId: 'actual#0',
+        sentToModel: true,
+      },
+      {
+        id: expect.any(Number),
+        type: 'gemini',
+        text: 'first answer',
+        timestamp: 11,
+      },
+      {
+        id: expect.any(Number),
+        type: 'gemini_content',
+        text: '',
+        images: [{ mimeType: 'image/png', data: 'raw-base64' }],
+      },
+      { id: expect.any(Number), type: 'gemini_content', text: 'after image' },
+    ]);
+  });
+
+  it('retains image overflow count once per canonical source', () => {
+    let items = foldLiveEvent([], { type: 'user', text: 'images' });
+    for (let i = 0; i < 6; i++)
+      items = foldLiveEvent(items, {
+        type: 'image',
+        mimeType: 'image/png',
+        data: `raw-${i}`,
+      });
+    items = foldLiveEvent(items, { type: 'done' });
+    const history = committed(items);
+    expect(history).toHaveLength(6);
+    expect(history.at(-1)).toEqual({
+      id: expect.any(Number),
+      type: 'gemini_content',
+      text: '',
+      omittedImageCount: 2,
+    });
+    expect(
+      history
+        .slice(1, 5)
+        .map((item) => ('images' in item ? item.images?.[0]?.data : undefined)),
+    ).toEqual(['raw-0', 'raw-1', 'raw-2', 'raw-3']);
+  });
+
+  it('keeps completed thought duration and does not mutate the pending source', () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    try {
+      const pending = foldLiveEvent([], {
+        type: 'thinking',
+        delta: 'raw reasoning',
+      });
+      expect(committed(pending)).toEqual([]);
+      clock.mockReturnValue(1250);
+      const complete = foldLiveEvent(pending, { type: 'thinking-end' });
+      expect(committed(complete)).toEqual([
+        {
+          id: expect.any(Number),
+          type: 'gemini_thought',
+          text: 'raw reasoning',
+          durationMs: 250,
+        },
+      ]);
+      expect(pending[0].canonicalPending).toBe(true);
+      expect(pending[0].canonicalHistoryItem).toMatchObject({ durationMs: 0 });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('preserves native structural fields instead of reconstructing display strings', () => {
+    const agent = {
+      label: 'left',
+      status: AgentStatus.COMPLETED,
+      durationMs: 10,
+      totalTokens: 8,
+      inputTokens: 3,
+      outputTokens: 5,
+      toolCalls: 2,
+      successfulToolCalls: 1,
+      failedToolCalls: 1,
+      rounds: 2,
+      error: 'raw error',
+      diff: 'raw diff',
+      modifiedFiles: ['a'],
+      approachSummary: 'raw approach',
+    };
+    const compression = {
+      isPending: false,
+      originalTokenCount: 1000,
+      newTokenCount: 200,
+      compressionStatus: 1,
+    };
+    const entries: Array<[OpenTuiStreamEvent, object]> = [
+      [
+        { type: 'info', text: 'raw info' },
+        { type: 'info', text: 'raw info' },
+      ],
+      [
+        { type: 'error', text: 'raw error', hint: 'raw hint' },
+        { type: 'error', text: 'raw error', hint: 'raw hint' },
+      ],
+      [
+        { type: 'warning', text: 'raw warning' },
+        { type: 'warning', text: 'raw warning' },
+      ],
+      [
+        { type: 'compaction', compression },
+        { type: 'compression', compression },
+      ],
+      [
+        { type: 'stop-hook-message', message: 'raw hook' },
+        { type: 'stop_hook_system_message', message: 'raw hook' },
+      ],
+      [
+        { type: 'away-recap', text: 'raw recap' },
+        { type: 'away_recap', text: 'raw recap' },
+      ],
+      [
+        { type: 'user-shell', text: 'raw shell' },
+        { type: 'user_shell', text: 'raw shell' },
+      ],
+      [
+        { type: 'advisor', text: 'raw advice', model: 'model-id' },
+        { type: 'advisor', text: 'raw advice', model: 'model-id' },
+      ],
+      [
+        { type: 'arena-agent', agent },
+        { type: 'arena_agent_complete', agent },
+      ],
+      [
+        {
+          type: 'arena-session',
+          sessionStatus: 'completed',
+          task: 'raw task',
+          totalDurationMs: 12,
+          agents: [agent],
+        },
+        {
+          type: 'arena_session_complete',
+          sessionStatus: 'completed',
+          task: 'raw task',
+          totalDurationMs: 12,
+          agents: [agent],
+        },
+      ],
+    ];
+    for (const [event, original] of entries)
+      expect(committed(foldLiveEvent([], event))).toEqual([
+        { ...original, id: expect.any(Number) },
+      ]);
+  });
+
+  it('allocates negative IDs below restored native IDs without host collisions', () => {
+    expect(
+      allocateCanonicalHistoryId([
+        { kind: 'info', id: 'old', text: '', historyId: -10000 },
+      ]),
+    ).toBeLessThan(-10000);
+    const items = foldLiveEvent([], { type: 'info', text: 'native' });
+    expect(items[0].canonicalHistoryItem!.id).toBeLessThan(-10000);
+  });
+});
+
+describe('canonical response and terminal boundaries', () => {
+  const committed = (items: readonly LiveHistoryItem[]) =>
+    snapshotCanonicalHistory(items.filter((item) => !item.canonicalPending));
+
+  it('starts a new gemini after actual finished without requiring another user', () => {
+    let items = foldLiveEvent([], { type: 'user', text: 'one user' });
+    items = foldLiveEvent(items, {
+      type: 'text',
+      delta: 'first',
+      timestamp: 10,
+    });
+    items = foldLiveEvent(items, { type: 'segment-end' });
+    items = foldLiveEvent(items, {
+      type: 'text',
+      delta: 'second',
+      timestamp: 20,
+    });
+    items = foldLiveEvent(items, { type: 'segment-end' });
+    expect(committed(items).filter((item) => item.type === 'gemini')).toEqual([
+      { id: expect.any(Number), type: 'gemini', text: 'first', timestamp: 10 },
+      { id: expect.any(Number), type: 'gemini', text: 'second', timestamp: 20 },
+    ]);
+  });
+
+  it('resets the image cap after actual finished and preserves the next raw image', () => {
+    let items = foldLiveEvent([], { type: 'user', text: 'one user' });
+    for (let i = 0; i < 4; i++)
+      items = foldLiveEvent(items, {
+        type: 'image',
+        mimeType: 'image/png',
+        data: `first-${i}`,
+      });
+    items = foldLiveEvent(items, { type: 'segment-end' });
+    items = foldLiveEvent(items, {
+      type: 'image',
+      mimeType: 'image/png',
+      data: 'next-response-raw',
+    });
+    items = foldLiveEvent(items, { type: 'segment-end' });
+    expect(committed(items).at(-1)).toEqual({
+      id: expect.any(Number),
+      type: 'gemini',
+      text: '',
+      timestamp: expect.any(Number),
+      images: [{ mimeType: 'image/png', data: 'next-response-raw' }],
+    });
+    expect(
+      committed(items).some(
+        (item) => 'omittedImageCount' in item && item.omittedImageCount,
+      ),
+    ).toBe(false);
+  });
+
+  it('settles native thought duration after a canonical-source branch, preserving replay duration', () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    try {
+      let items = foldLiveEvent([], {
+        type: 'thinking',
+        delta: 'native pending',
+      });
+      clock.mockReturnValue(1250);
+      items = foldLiveEvent(items, {
+        type: 'info',
+        text: 'source branch',
+        canonicalHistoryItem: { id: 1701, type: 'info', text: 'source branch' },
+      });
+      items = foldLiveEvent(items, {
+        type: 'confirm',
+        id: 'approval',
+        tool: 'edit',
+        title: 'approve',
+      });
+      const thought = items.find((item) => item.kind === 'thinking');
+      expect(thought?.canonicalPending).toBe(false);
+      expect(thought?.canonicalHistoryItem).toMatchObject({
+        type: 'gemini_thought',
+        text: 'native pending',
+        durationMs: 250,
+      });
+      const replayed: CanonicalHistoryItem = {
+        id: 1702,
+        type: 'gemini_thought',
+        text: 'saved',
+        durationMs: 789,
+      };
+      let replay = projectHistoryToStreamEvents([replayed], {}).reduce<
+        readonly LiveHistoryItem[]
+      >((items, event) => foldLiveEvent(items, event), []);
+      replay = foldLiveEvent(replay, {
+        type: 'confirm',
+        id: 'later',
+        tool: 'edit',
+        title: 'approve',
+      });
+      expect(
+        replay.find((item) => item.kind === 'thinking')?.canonicalHistoryItem,
+      ).toBe(replayed);
+      expect(replayed.durationMs).toBe(789);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  const rawGroup = (): Extract<
+    CanonicalHistoryItem,
+    { type: 'tool_group' }
+  > => ({
+    id: 1801,
+    type: 'tool_group',
+    batchId: 'original-batch',
+    memoryReadCount: 2,
+    tools: ['first', 'second'].map((callId) => ({
+      callId,
+      name: 'read_file',
+      description: `raw ${callId}`,
+      args: { file_path: `${callId}.txt`, nested: { preserve: true } },
+      status: ToolCallStatus.Pending,
+      resultDisplay: 'original display',
+      confirmationDetails: undefined,
+      images: [{ mimeType: 'image/png', data: 'original-tool-image' }],
+    })),
+  });
+  const pendingCards = (
+    group: Extract<CanonicalHistoryItem, { type: 'tool_group' }>,
+  ) => {
+    let items = foldLiveEvent([], {
+      type: 'tool-start',
+      id: 'first',
+      tool: 'read_file',
+      title: 'first',
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-start',
+      id: 'second',
+      tool: 'read_file',
+      title: 'second',
+    });
+    return foldLiveEvent(items, {
+      type: 'tool-history',
+      item: group,
+      pending: true,
+    });
+  };
+
+  it('settles a pre-published group when rejection supplies only tool-end events', () => {
+    const group = rawGroup();
+    let items = pendingCards(group);
+    items = foldLiveEvent(items, {
+      type: 'tool-end',
+      id: 'first',
+      success: false,
+      summary: 'cancelled',
+    });
+    expect(items.every((item) => item.canonicalPending)).toBe(true);
+    expect(items[0].canonicalHistoryItem).toMatchObject({
+      tools: [
+        { status: ToolCallStatus.Canceled },
+        { status: ToolCallStatus.Pending },
+      ],
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-end',
+      id: 'second',
+      success: false,
+      summary: 'error',
+    });
+    expect(items.every((item) => item.canonicalPending === false)).toBe(true);
+    const expected = {
+      ...group,
+      tools: [
+        { ...group.tools[0], status: ToolCallStatus.Canceled },
+        { ...group.tools[1], status: ToolCallStatus.Error },
+      ],
+    };
+    expect(committed(items)).toEqual([expected]);
+    expect(items[0].canonicalHistoryItem).toBe(items[1].canonicalHistoryItem);
+    expect(
+      group.tools.every((tool) => tool.status === ToolCallStatus.Pending),
+    ).toBe(true);
+    expect(expected.tools[0].args).toBe(group.tools[0].args);
+    expect(expected.tools[0].images).toBe(group.tools[0].images);
+  });
+
+  it('does not replace an already-terminal real scheduler source with fallback metadata', () => {
+    const group = rawGroup();
+    const terminal = {
+      ...group,
+      tools: group.tools.map((tool) => ({
+        ...tool,
+        status: ToolCallStatus.Success,
+      })),
+    };
+    let items = pendingCards(group);
+    items = foldLiveEvent(items, {
+      type: 'tool-history',
+      item: terminal,
+      pending: false,
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-end',
+      id: 'first',
+      success: false,
+      summary: 'cancelled',
+    });
+    expect(committed(items)).toEqual([terminal]);
+    expect(items.every((item) => item.canonicalHistoryItem === terminal)).toBe(
+      true,
+    );
   });
 });

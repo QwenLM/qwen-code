@@ -1,6 +1,4 @@
 import type { components } from './generated/managed-agent-api';
-import type { ManagedPermissionRules } from '@qwen-code/qwen-code-core/managed-runtime/managed-permission-rules.js';
-export type { ManagedPermissionRules } from '@qwen-code/qwen-code-core/managed-runtime/managed-permission-rules.js';
 import type {
   ManagedMcpManagementCommand,
   ManagedMcpManagementSnapshot,
@@ -30,6 +28,12 @@ export type ManagedAgentRuntimeState =
   | 'starting'
   | 'ready'
   | 'failed';
+
+export interface ManagedPermissionRules {
+  readonly allow: readonly string[];
+  readonly ask: readonly string[];
+  readonly deny: readonly string[];
+}
 
 export type ManagedApprovalMode = 'default' | 'auto-edit' | 'auto' | 'yolo';
 export type ManagedInputBlock = components['schemas']['InputBlock'];

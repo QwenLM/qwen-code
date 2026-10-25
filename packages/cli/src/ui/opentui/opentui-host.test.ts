@@ -27,6 +27,7 @@ import { OpenTuiAppHost, type OpenTuiAppHostDeps } from './opentui-host.js';
 import {
   foldLiveEvent,
   rewindBoundaryHistory,
+  snapshotCanonicalHistory,
   type LiveHistoryItem,
 } from './live-session-model.js';
 
@@ -298,6 +299,24 @@ describe('OpenTuiAppHost — forwarded shell actions', () => {
     expect(h.presentAction).toHaveBeenCalledWith('install this extension?');
   });
 
+  it('forwards owned confirmation lifetime options unchanged', async () => {
+    const h = makeHost();
+    const signal = new AbortController().signal;
+    const isCurrent = () => true;
+    const onConfirm = vi.fn();
+    h.host.addConfirmUpdateExtensionRequest({
+      prompt: 'owned',
+      signal,
+      isCurrent,
+      onConfirm,
+    });
+    expect(h.presentAction).toHaveBeenCalledWith('owned', {
+      signal,
+      isCurrent,
+    });
+    await vi.waitFor(() => expect(onConfirm.mock.calls).toEqual([[true]]));
+  });
+
   it('a rejected consent bridge still settles as a denial', async () => {
     const h = makeHost();
     h.presentAction.mockRejectedValueOnce(new Error('renderer blew up'));
@@ -386,9 +405,7 @@ describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
       sentToModel: true,
       promptId: 'turn-1',
     });
-    expect(updated.map((item) => item.canonicalHistoryItem)).toEqual(
-      host.getHistory(),
-    );
+    expect(snapshotCanonicalHistory(updated)).toEqual(host.getHistory());
     expect(host.getHistory()).toHaveLength(1);
   });
 
@@ -506,9 +523,7 @@ describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
       [],
     );
     expect(items.filter((item) => !item.canonicalOnly)).toEqual([]);
-    expect(items.map((item) => item.canonicalHistoryItem)).toEqual(
-      host.getHistory(),
-    );
+    expect(snapshotCanonicalHistory(items)).toEqual(host.getHistory());
   });
 });
 
@@ -583,10 +598,8 @@ it('keeps coalesced previous findings and the committed new group in canonical s
   const first = host.addItem(group('first'), 1000);
   const second = host.addItem(group('second'), 1000);
   expect(host.getHistory().map((item) => item.id)).toEqual([first, second]);
-  expect(live.map((item) => item.canonicalHistoryItem)).toEqual(
-    host.getHistory(),
-  );
-  const old = live[0].canonicalHistoryItem!;
+  expect(snapshotCanonicalHistory(live)).toEqual(host.getHistory());
+  const old = snapshotCanonicalHistory(live)[0];
   expect(old.type === 'tool_group' && old.tools[0].resultDisplay).toBe(
     SUPERSEDED_FINDINGS_MESSAGE,
   );
