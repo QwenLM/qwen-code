@@ -1024,8 +1024,9 @@ the PR.
   call would.
 - A call may take ten minutes, the longest a helper needs (`push` gives
   pre-push hooks nine), and is stopped when the turn is cancelled. Calls in
-  one working directory run one at a time; the helpers' lock covers other
-  processes.
+  one working directory run one at a time — but `status`, which takes no
+  lock, waits for none, and a call cancelled while it waits returns at once;
+  the helpers' lock covers other processes.
 - The result is the helper's JSON line. A non-zero exit is the helper's
   refusal, returned with its message.
 - `snapshot --gate` and `cleanup --force` are not offered: the gate runs
@@ -1036,35 +1037,47 @@ the PR.
   past the dialog plan mode would block, and each of them writes.
 
 `status` only reads and needs no approval. Every other call asks, as a shell
-command does — in auto mode the classifier decides — and rules match on
-`command`: `autofix_pr(command:push)`. Three things change what is matched:
+command does — in auto mode the classifier decides. Rules match on
+`command` and on `watch`, which the tool derives and the model cannot set:
 
-- **A watch this session prepared.** When `prepare` succeeds through the
-  tool, the session records, in memory, the watch it reported: the PR, its
-  repository, the directory it was prepared from, the worktree, its
-  `preparedAt`, and whether GitHub said just then that the author can push.
-  A helper of any other watch — one this session did not prepare, or one of
-  that number in another clone after `/cd` — is matched as `unconfirmed
-<command>`, so a rule for `push` covers only the watches the user started
-  or resumed in this session. The state file sits in reach of
-  the code a round runs; none of this is read back from it. The record ends
-  with `cleanup` of the PR through the tool and with the session.
-- **A take-over** is matched as `take-over prepare` or `take-over cleanup`,
-  so no rule for `prepare` or `cleanup` covers taking a watch from another
-  session.
-- **A start, a new schedule, a take-over and a helper of an unconfirmed
-  watch** offer no "always allow": a saved rule would let every later one
-  through. The `prepare` dialog says that the watch's rounds then push and
-  reply without asking.
+- **`watch:confirmed`, a watch this session prepared.** When `prepare`
+  succeeds through the tool, the session records, in memory, the watch it
+  reported: the PR, its repository, the directory it was prepared from, the
+  worktree, its `preparedAt`, and whether GitHub said just then that the
+  author can push. A helper call is `confirmed` when that record exists for
+  this clone and `status`, asked when the permission is, still lists the
+  watch as that one — same repository, `preparedAt` and worktree — of this
+  session and not ended. The state file the helper reads sits in reach of
+  the code a round runs, so it can only make a call `unconfirmed`; none of
+  the record is read back from it. Any other helper call is
+  `watch:unconfirmed`. `status` through the tool marks each watch with
+  `preparedHere`, and a round starts by checking it: a task left running
+  after `/clear` or `/resume` ends there, asking nothing, instead of at a
+  helper that would ask. The record ends with `cleanup` of the PR through
+  the tool and with the session.
+- **`watch:take-over`**, for `prepare --take-over` and `cleanup
+--take-over` (which `/autofix-pr stop <n>` runs, and so asks). `prepare`
+  and `status` have `watch:none`.
+- **A rule that names `command` alone covers every call of it**, whatever
+  its `watch`: `deny: ["AutofixPr(command:push)"]` stops every push. So
+  does a rule that denies the shell route of the call — `Bash`, or
+  `Bash(qwen autofix-pr *)` — since the tool runs the same program, with the
+  repository's git hooks.
+- **A start, a new schedule, a take-over and an unconfirmed helper** offer
+  no "always allow": a saved rule would let every later one through. The
+  `prepare` dialog says that the watch's rounds then push and reply without
+  asking. Elsewhere the rule saved names `watch:confirmed`.
 
-The skill's `allowedTools` grant the commands a round runs — `snapshot`,
-`ci-log`, `sync`, `push`, `reply`, `rerun`, `status` and `cleanup` — and not
-`prepare`, which starts or resumes a watch, nor `schedule`, which a round
-never runs and which would replace the watch's task and options. What these
-rules let through is bounded by the helpers as well: each refuses a watch
-that another task drives (Section 6.1, step 5; Section 6.8), `push` checks
-where it pushes and counts the pushes, and `reply` answers only threads with
-a new comment from a trusted author.
+The skill's `allowedTools` grant the commands a round runs with
+`watch:confirmed` — `snapshot`, `ci-log`, `sync`, `push`, `reply`,
+`rerun` and `cleanup` — plus `status`, and neither `prepare`, which starts
+or resumes a watch, nor `schedule`, which a round never runs and which
+would replace the watch's task and options. What these rules let through is
+bounded by the helpers as well: each refuses a watch that another task
+drives (Section 6.1, step 5; Section 6.8), `push` checks where it pushes and
+counts the pushes, and `reply` answers only threads with a new comment from
+a trusted author. The CLI the tool runs is found once per process, so a
+later change of the environment (a reloaded `.env`) does not move it.
 
 Where the tool is not registered — a tool allowlist in the settings
 (`autofix_pr` is one of the core tools it lists), or the per-command
@@ -1111,8 +1124,8 @@ dialog of its own and records it for this session.
   executor that no deny rule of this session reaches — when the session
   itself, not a subagent of it, launches it with `working_dir` at the
   granted worktree. Before the launch it checks again: the folder still trusted, the
-  watch still as above. Then the agent runs in YOLO mode, and so do the
-  agents it starts. Plan mode stays plan mode; an agent of another executor
+  watch still as above. Then the agent runs in YOLO mode (a subagent starts
+  no agents of its own). Plan mode stays plan mode; an agent of another executor
   (Codex), a teammate and a workflow agent are not affected.
 - The grant ends with `cleanup` of the PR through the tool, with the next
   `prepare` of the PR (a start or a resume asks again), with a check at

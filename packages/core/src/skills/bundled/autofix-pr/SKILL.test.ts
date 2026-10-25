@@ -15,7 +15,7 @@ import {
 import { PermissionManager } from '../../../permissions/permission-manager.js';
 import { applySkillAllowedTools } from '../../../tools/skill-utils.js';
 import {
-  autofixPrRuleCommand,
+  autofixPrWatchMatch,
   type AutofixPrParams,
 } from '../../../tools/autofix-pr.js';
 import { parseSkillContent } from '../../skill-load.js';
@@ -84,11 +84,11 @@ describe('bundled autofix-pr skill', () => {
   it("lets a round's helpers run through autofix_pr, and keeps a start, a take-over and unattended asking", async () => {
     const pm = grantedManager();
     // As the tool presents a call: `confirmed` when this session prepared
-    // the PR's watch through it.
+    // the PR's watch through it and status still lists it so.
     const helper = (params: AutofixPrParams, confirmed = true) =>
       decide(pm, 'autofix_pr', {
         ...params,
-        command: autofixPrRuleCommand(params, confirmed),
+        watch: autofixPrWatchMatch(params, confirmed),
       });
     for (const command of [
       'snapshot',
@@ -224,6 +224,15 @@ describe('bundled autofix-pr skill', () => {
     );
     expect(body).toContain(
       '`--yes` skips the question and so never makes this choice.',
+    );
+    // A round of a watch not prepared here (a task left after /clear or
+    // /resume) ends at the status that never asks, not at a helper that would.
+    expect(body).toContain(
+      'Unless it lists the watch with `preparedHere` true, `thisSession` true and `ended` null, delete (`cron_delete`) this task and end',
+    );
+    // A round's push goes through the tool, never the shell, when it can.
+    expect(body).toContain(
+      'when it has to run through the shell, with no `autofix_pr` tool, set the shell tool',
     );
     // The start reports a watch only when its task exists.
     expect(body).toContain('When step 8 created the task, tell the user');

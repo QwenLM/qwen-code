@@ -11,9 +11,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { matchesRule, parseRule } from '../permissions/rule-parser.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import {
   AutofixPrTool,
   autofixPrArgs,
+  resetAutofixPrLaunchForTests,
   resolveAutofixPrLaunch,
   runAutofixPrHelper,
   validateAutofixPrParams,
@@ -99,6 +101,7 @@ beforeEach(() => {
   const cli = path.join(dir, 'fake-cli.mjs');
   fs.writeFileSync(cli, FAKE_CLI);
   vi.stubEnv('QWEN_CODE_CLI', cli);
+  resetAutofixPrLaunchForTests();
   vi.stubEnv('FAKE_STATUS', status());
   vi.stubEnv('FAKE_WORKTREE', worktree);
   vi.stubEnv('FAKE_CAN_PUSH', '1');
@@ -164,6 +167,15 @@ describe('validateAutofixPrParams', () => {
     expect(validateAutofixPrParams(params)).toMatch(error);
   });
 
+  it('ignores a boolean option left false, whichever command it is', () => {
+    expect(
+      validateAutofixPrParams({ command: 'push', pr: 1, take_over: false }),
+    ).toBeNull();
+    expect(
+      validateAutofixPrParams({ command: 'push', pr: 1, take_over: true }),
+    ).toMatch(/does not take "take_over"/);
+  });
+
   it('accepts what the skill runs', () => {
     for (const params of [
       { command: 'prepare', pr: 1, repo: 'o/r', host: 'github.com' },
@@ -220,7 +232,17 @@ describe('autofixPrArgs', () => {
 });
 
 describe('permission rules', () => {
-  const matches = (rule: string, params: AutofixPrParams) =>
+  /** The params rules see, once the permission check ran. */
+  const presented = async (params: AutofixPrParams, config = makeConfig()) => {
+    const inv = invocation(params, config);
+    await inv.getDefaultPermission(signal());
+    return inv.getPermissionMatchParams!();
+  };
+  const matches = async (
+    rule: string,
+    params: AutofixPrParams,
+    config = makeConfig(),
+  ) =>
     matchesRule(
       parseRule(rule),
       'autofix_pr',
@@ -229,55 +251,93 @@ describe('permission rules', () => {
       undefined,
       undefined,
       undefined,
-      invocation(params).getPermissionMatchParams!(),
+      await presented(params, config),
     );
+  const confirmedPush = 'AutofixPr(command:push,watch:confirmed)';
 
-  it('name one command of a watch this session prepared, and a take-over only as its own', async () => {
+  it('let a rule name the helpers of a watch this session prepared, and a take-over only as its own', async () => {
     const push: AutofixPrParams = { command: 'push', pr: 12 };
-    // Not prepared here: no rule for `push` covers it.
-    expect(matches('AutofixPr(command:push)', push)).toBe(false);
-    expect(matches('AutofixPr(command:push*)', push)).toBe(false);
+    // Not prepared here: the skill's rule does not cover it.
+    expect(await matches(confirmedPush, push)).toBe(false);
     await prepare();
-    expect(matches('AutofixPr(command:push)', push)).toBe(true);
+    expect(await matches(confirmedPush, push)).toBe(true);
     expect(
-      matches('autofix_pr(command:push)', { command: 'sync', pr: 12 }),
+      await matches('AutofixPr(command:push,watch:confirmed)', {
+        command: 'sync',
+        pr: 12,
+      }),
     ).toBe(false);
     const takeOver: AutofixPrParams = {
       command: 'cleanup',
       pr: 12,
       take_over: true,
     };
-    expect(matches('AutofixPr(command:cleanup)', takeOver)).toBe(false);
-    expect(matches('AutofixPr(command:cleanup*)', takeOver)).toBe(false);
-    expect(matches('AutofixPr(command:take-over cleanup)', takeOver)).toBe(
-      true,
-    );
     expect(
-      matches('AutofixPr(command:prepare*)', {
+      await matches('AutofixPr(command:cleanup,watch:confirmed)', takeOver),
+    ).toBe(false);
+    expect(
+      await matches('AutofixPr(command:cleanup,watch:take-over)', takeOver),
+    ).toBe(true);
+  });
+
+  it('let a rule naming the command alone, a deny above all, cover every call of it', async () => {
+    const deny = 'AutofixPr(command:push)';
+    expect(await matches(deny, { command: 'push', pr: 12 })).toBe(true);
+    await prepare();
+    expect(await matches(deny, { command: 'push', pr: 12 })).toBe(true);
+    expect(
+      await matches('AutofixPr(command:prepare)', {
         command: 'prepare',
         pr: 12,
         repo: 'o/r',
         take_over: true,
       }),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it('treat a prepared watch the state file now names otherwise as unconfirmed', async () => {
+    await prepare();
+    for (const watch of [
+      { repo: 'fork/r' },
+      { preparedAt: '2026-10-25T11:00:00.000Z' },
+      { thisSession: false },
+      { ended: { at: 'x', reason: 'stop' } },
+      { worktreePath: path.join(os.tmpdir(), 'elsewhere') },
+    ]) {
+      vi.stubEnv('FAKE_STATUS', status(watch));
+      expect(
+        (
+          await presented({
+            command: 'reply',
+            pr: 12,
+            plan: '/x/.qwen/tmp/autofix-pr-12-plan.json',
+          })
+        )['watch'],
+      ).toBe('unconfirmed');
+    }
   });
 
   it('asks for every command but status, offering a rule only for a helper of a watch prepared here', async () => {
-    const push = () => invocation({ command: 'push', pr: 12, task: 't1' });
-    expect(await push().getDefaultPermission()).toBe('ask');
-    expect(push().requiresUserInteraction!()).toBe(false);
-    expect(await push().getConfirmationDetails(signal())).toMatchObject({
+    const asked = async () => {
+      const inv = invocation({ command: 'push', pr: 12, task: 't1' });
+      const permission = await inv.getDefaultPermission(signal());
+      return {
+        permission,
+        details: await inv.getConfirmationDetails(signal()),
+      };
+    };
+    const before = await asked();
+    expect(before.permission).toBe('ask');
+    expect(before.details).toMatchObject({
       type: 'exec',
       command: 'qwen autofix-pr push 12 --task=t1',
-      permissionRules: ['AutofixPr(command:unconfirmed push)'],
+      permissionRules: ['AutofixPr(command:push,watch:unconfirmed)'],
       hideAlwaysAllow: true,
     });
     await prepare();
-    const confirmed = await push().getConfirmationDetails(signal());
-    expect(confirmed).toMatchObject({
-      permissionRules: ['AutofixPr(command:push)'],
-    });
-    expect(confirmed).not.toHaveProperty('hideAlwaysAllow');
+    const after = (await asked()).details;
+    expect(after).toMatchObject({ permissionRules: [confirmedPush] });
+    expect(after).not.toHaveProperty('hideAlwaysAllow');
     expect(await invocation({ command: 'status' }).getDefaultPermission()).toBe(
       'allow',
     );
@@ -287,9 +347,25 @@ describe('permission rules', () => {
     await prepare();
     const elsewhere = makeConfig({ getTargetDir: () => os.tmpdir() });
     expect(
-      invocation({ command: 'push', pr: 12 }, elsewhere)
-        .getPermissionMatchParams!()['command'],
-    ).toBe('unconfirmed push');
+      (await presented({ command: 'push', pr: 12 }, elsewhere))['watch'],
+    ).toBe('unconfirmed');
+  });
+
+  it('refuses what a rule denies as the shell command it stands for', async () => {
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => undefined,
+      getPermissionsAsk: () => undefined,
+      getPermissionsDeny: () => ['Bash(qwen autofix-pr *)'],
+      getProjectRoot: () => dir,
+      getCwd: () => dir,
+    });
+    pm.initialize();
+    const config = makeConfig({ getPermissionManager: () => pm });
+    const inv = invocation({ command: 'status' }, config);
+    expect(await inv.getDefaultPermission(signal())).toBe('allow');
+    expect((await inv.execute(signal())).error?.message).toMatch(
+      /denies `qwen autofix-pr status` as a shell command/,
+    );
   });
 
   it('runs no helper but status in plan mode, whatever a rule allows', async () => {
@@ -319,6 +395,26 @@ describe('permission rules', () => {
         again: true,
       }).getConfirmationDetails(signal()),
     ).toMatchObject({ hideAlwaysAllow: true });
+  });
+
+  it('says what a take-over does', async () => {
+    const warning = async (params: AutofixPrParams) =>
+      (
+        (await invocation(params).getConfirmationDetails(signal())) as {
+          warnings?: string[];
+        }
+      ).warnings?.join(' ');
+    expect(
+      await warning({ command: 'cleanup', pr: 12, take_over: true }),
+    ).toMatch(/Stops the watch of PR #12, taking it from any other session/);
+    expect(
+      await warning({
+        command: 'prepare',
+        pr: 12,
+        repo: 'o/r',
+        take_over: true,
+      }),
+    ).toMatch(/Takes the watch of PR #12 over/);
   });
 
   it('asks for a start each time, saying what it lets through', async () => {
@@ -460,6 +556,26 @@ describe('running a helper', () => {
     ).toEqual(['rerun', '12', '99']);
   });
 
+  it('keeps to the CLI it found first when the environment changes later', async () => {
+    await runAutofixPrHelper(makeConfig(), ['push', '12'], signal());
+    const other = path.join(dir, 'other-cli.mjs');
+    fs.writeFileSync(other, "process.stdout.write('other\\n');");
+    vi.stubEnv('QWEN_CODE_CLI', other);
+    const again = await runAutofixPrHelper(
+      makeConfig(),
+      ['push', '12'],
+      signal(),
+    );
+    expect(JSON.parse(again.stdout).command).toBe('push');
+    resetAutofixPrLaunchForTests();
+    const moved = await runAutofixPrHelper(
+      makeConfig(),
+      ['push', '12'],
+      signal(),
+    );
+    expect(moved.stdout.trim()).toBe('other');
+  });
+
   it("returns a refusal with the helper's message", async () => {
     vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
     const result = await invocation({ command: 'sync', pr: 12 }).execute(
@@ -504,6 +620,45 @@ describe('running a helper', () => {
     expect(confirmedWatch('session-a', 12)).toBeUndefined();
   });
 
+  it('marks in status the watches this session prepared here', async () => {
+    const listed = async (config = makeConfig()) =>
+      JSON.parse(
+        String(
+          (await invocation({ command: 'status' }, config).execute(signal()))
+            .llmContent,
+        ),
+      ).watches[0].preparedHere;
+    expect(await listed()).toBe(false);
+    await prepare();
+    expect(await listed()).toBe(true);
+    expect(await listed(makeConfig({ getSessionId: () => 'session-b' }))).toBe(
+      false,
+    );
+  });
+
+  it('lets status and a cancelled call past a helper still running', async () => {
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'hang');
+    const running = new AbortController();
+    const first = runAutofixPrHelper(
+      makeConfig(),
+      ['push', '12'],
+      running.signal,
+    );
+    const waiting = new AbortController();
+    const second = runAutofixPrHelper(
+      makeConfig(),
+      ['sync', '12'],
+      waiting.signal,
+    );
+    setTimeout(() => waiting.abort(), 100);
+    expect((await second).failure).toBe('cancelled');
+    vi.stubEnv('FAKE_AUTOFIX_MODE', '');
+    const status = await runAutofixPrHelper(makeConfig(), ['status'], signal());
+    expect(status.exitCode).toBe(0);
+    running.abort();
+    expect((await first).failure).toBe('cancelled');
+  }, 20_000);
+
   it('records nothing from a refused prepare', async () => {
     vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
     await invocation(
@@ -538,6 +693,12 @@ describe('unattended', () => {
     expect(await granted()).toBe(false);
     vi.stubEnv('FAKE_STATUS', status());
     expect(await granted()).toBe(false);
+  });
+
+  it('compares the repository without case', async () => {
+    await prepare();
+    vi.stubEnv('FAKE_STATUS', status({ repo: 'O/R' }));
+    expect((await confirmAndRun()).error).toBeUndefined();
   });
 
   it('names the watch it grants in the dialog', async () => {
@@ -624,7 +785,7 @@ describe('unattended', () => {
     expect(result.error?.message).toMatch(/cannot push/);
   });
 
-  it.each<[string, Record<string, unknown>, RegExp | null]>([
+  it.each<[string, Record<string, unknown>, RegExp]>([
     ['another session owns it', { thisSession: false }, /another session/],
     ['it was ended', { ended: { at: 'x', reason: 'stop' } }, /was ended/],
     ['its worktree is gone', { worktreeExists: false }, /not the one prepared/],
@@ -635,15 +796,10 @@ describe('unattended', () => {
     ],
     ['it is another PR', { pr: 13 }, /has no watch/],
     ['it is a PR of another repository', { repo: 'fork/r' }, /has no watch/],
-    ['the repository differs only in case', { repo: 'O/R' }, null],
   ])('refuses when %s', async (_, watch, reason) => {
     await prepare();
     vi.stubEnv('FAKE_STATUS', status(watch));
     const result = await confirmAndRun();
-    if (reason === null) {
-      expect(result.error).toBeUndefined();
-      return;
-    }
     expect(result.error?.message).toMatch(reason);
     expect(await granted()).toBe(false);
   });

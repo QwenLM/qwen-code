@@ -16,6 +16,10 @@ import { accessSync, constants, statSync } from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
+import {
+  buildPermissionCheckContext,
+  evaluatePermissionRules,
+} from '../core/permission-helpers.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import {
@@ -170,6 +174,8 @@ export function validateAutofixPrParams(
   for (const [key, value] of Object.entries(params)) {
     if (key === 'command' || key === 'pr' || value === undefined) continue;
     const option = key as OptionName;
+    // An option left at its default says nothing, whichever command it is.
+    if (value === false && BOOLEAN_OPTIONS.has(option)) continue;
     if (!allowed.includes(option)) {
       return allowed.length === 0
         ? `"${command}" takes no option but "pr"; got "${key}".`
@@ -243,23 +249,28 @@ const WATCH_COMMANDS = new Set<AutofixPrCommand>([
   'cleanup',
 ]);
 
+export type AutofixPrWatchMatch =
+  | 'take-over'
+  | 'confirmed'
+  | 'unconfirmed'
+  | 'none';
+
 /**
- * What rules match `command` against. A take-over is a command of its own
- * (`take-over prepare`, `take-over cleanup`), so no rule for `prepare` or
- * `cleanup` covers taking a watch from another session; and a helper of a
- * watch this session did not prepare through the tool is `unconfirmed
- * <command>`, so the skill's rules let through only the watches the user
- * started or resumed here.
+ * The `watch` rules match besides `command`, derived, never the model's: a
+ * take-over is `take-over`; a helper of a watch this session prepared
+ * through the tool, from this clone, and `status` still lists as that one
+ * is `confirmed`, of any other `unconfirmed`. The skill's rules name
+ * `watch:confirmed`, so they let through only the watches the user started
+ * or resumed here, while a rule naming `command` alone — a deny rule above
+ * all — covers every call of that helper.
  */
-export function autofixPrRuleCommand(
+export function autofixPrWatchMatch(
   params: AutofixPrParams,
   watchConfirmed: boolean,
-): string {
-  if (params.take_over === true) return `take-over ${params.command}`;
-  if (WATCH_COMMANDS.has(params.command) && !watchConfirmed) {
-    return `unconfirmed ${params.command}`;
-  }
-  return params.command;
+): AutofixPrWatchMatch {
+  if (params.take_over === true) return 'take-over';
+  if (!WATCH_COMMANDS.has(params.command)) return 'none';
+  return watchConfirmed ? 'confirmed' : 'unconfirmed';
 }
 
 const SCRIPT_ENTRY = /\.(?:mjs|cjs|js)$/i;
@@ -309,6 +320,21 @@ export function resolveAutofixPrLaunch(
   );
 }
 
+let launch: { executable: string; args: string[] } | undefined;
+
+/**
+ * The CLI to run, found once per process: a later change of the
+ * environment (a reloaded `.env`) does not move it.
+ */
+function autofixPrLaunch(): { executable: string; args: string[] } {
+  return (launch ??= resolveAutofixPrLaunch());
+}
+
+/** Test-only: finds the CLI again on the next call. */
+export function resetAutofixPrLaunchForTests(): void {
+  launch = undefined;
+}
+
 export interface AutofixPrRun {
   exitCode: number | null;
   stdout: string;
@@ -323,13 +349,26 @@ export interface AutofixPrRun {
 // for it did nothing.
 const queues = new Map<string, Promise<unknown>>();
 
-function serialized<T>(key: string, run: () => Promise<T>): Promise<T> {
+function serialized<T>(
+  key: string,
+  signal: AbortSignal,
+  run: () => Promise<T>,
+): Promise<T> {
   const previous = queues.get(key) ?? Promise.resolve();
-  const next = previous.then(run, run);
-  const settled = next.then(
-    () => undefined,
-    () => undefined,
-  );
+  // A call cancelled while it waits returns at once; `run` sees the signal.
+  const turn = new Promise<void>((resolve) => {
+    const go = () => {
+      signal.removeEventListener('abort', go);
+      resolve();
+    };
+    if (signal.aborted) return go();
+    signal.addEventListener('abort', go, { once: true });
+    previous.then(go, go);
+  });
+  const next = turn.then(run);
+  // The next call waits for this one and, if this one was cancelled while
+  // it waited, for the one still running before it.
+  const settled = Promise.allSettled([previous, next]).then(() => undefined);
   queues.set(key, settled);
   void settled.then(() => {
     if (queues.get(key) === settled) queues.delete(key);
@@ -344,7 +383,13 @@ export async function runAutofixPrHelper(
   timeoutMs: number = AUTOFIX_PR_TIMEOUT_MS,
 ): Promise<AutofixPrRun> {
   const cwd = config.getTargetDir();
-  return serialized(cwd, async () => {
+  // `status` takes no lock and writes nothing, so it waits for no one: the
+  // check before a fix agent starts is not held up by a push.
+  const queue =
+    args[0] === 'status'
+      ? (run: () => Promise<AutofixPrRun>) => run()
+      : (run: () => Promise<AutofixPrRun>) => serialized(cwd, signal, run);
+  return queue(async () => {
     if (signal.aborted) {
       return { exitCode: null, stdout: '', stderr: '', failure: 'cancelled' };
     }
@@ -379,11 +424,11 @@ export async function runAutofixPrHelper(
       stdout += event.chunk;
     };
     try {
-      const launch = resolveAutofixPrLaunch();
+      const cli = autofixPrLaunch();
       const handle = await ShellExecutionService.executeLaunch(
         {
-          executable: launch.executable,
-          args: [...launch.args, 'autofix-pr', ...args],
+          executable: cli.executable,
+          args: [...cli.args, 'autofix-pr', ...args],
           cwd,
           env,
         },
@@ -458,6 +503,63 @@ interface WatchStatusLike {
   worktreeExists?: unknown;
 }
 
+/** Whether `status` lists `watch` as the one `prepared` recorded. */
+function listsPrepared(
+  prepared: ConfirmedWatch,
+  watch: WatchStatusLike,
+): boolean {
+  return (
+    watch.pr === prepared.pr &&
+    typeof watch.repo === 'string' &&
+    watch.repo.toLowerCase() === prepared.repo.toLowerCase() &&
+    (watch.preparedAt ?? null) === prepared.preparedAt &&
+    typeof watch.worktreePath === 'string' &&
+    canonicalWorktreePath(watch.worktreePath) === prepared.worktree
+  );
+}
+
+async function listedWatches(
+  config: Config,
+  pr: number,
+  signal: AbortSignal,
+): Promise<WatchStatusLike[] | { refused: string }> {
+  const run = await runAutofixPrHelper(config, ['status', String(pr)], signal);
+  if (run.failure || run.exitCode !== 0) {
+    return {
+      refused: `\`autofix-pr status ${pr}\` failed: ${run.failure ?? (run.stderr.trim() || `exit ${run.exitCode}`)}`,
+    };
+  }
+  const parsed = lastJsonLine(run.stdout) as { watches?: unknown } | undefined;
+  if (!parsed || !Array.isArray(parsed.watches)) {
+    return { refused: `\`autofix-pr status ${pr}\` printed no status` };
+  }
+  return parsed.watches as WatchStatusLike[];
+}
+
+/**
+ * Whether a helper call acts on the watch this session prepared: the state
+ * file the helper reads sits in reach of a round's code, so it must still
+ * name that watch — the repository, `preparedAt`, the worktree — and this
+ * session, not ended.
+ */
+async function stillPrepared(
+  config: Config,
+  pr: number,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const prepared = preparedWatch(config, pr);
+  if (!prepared) return false;
+  const watches = await listedWatches(config, pr, signal);
+  if (!Array.isArray(watches)) return false;
+  const watch = watches.find((w) => w.pr === pr);
+  return (
+    watch !== undefined &&
+    listsPrepared(prepared, watch) &&
+    watch.thisSession === true &&
+    watch.ended === null
+  );
+}
+
 /**
  * Whether the fixes of a watch may run unattended: this session prepared
  * it through the tool, GitHub then said its author can push, and `status`
@@ -481,17 +583,8 @@ export async function checkUnattendedWatch(
       refused: `the author of PR #${pr} cannot push to the repository, so its code is never run unattended`,
     };
   }
-  const run = await runAutofixPrHelper(config, ['status', String(pr)], signal);
-  if (run.failure || run.exitCode !== 0) {
-    return {
-      refused: `\`autofix-pr status ${pr}\` failed: ${run.failure ?? (run.stderr.trim() || `exit ${run.exitCode}`)}`,
-    };
-  }
-  const parsed = lastJsonLine(run.stdout) as { watches?: unknown } | undefined;
-  if (!parsed || !Array.isArray(parsed.watches)) {
-    return { refused: `\`autofix-pr status ${pr}\` printed no status` };
-  }
-  const watches = parsed.watches as WatchStatusLike[];
+  const watches = await listedWatches(config, pr, signal);
+  if (!Array.isArray(watches)) return watches;
   const watch = watches.find(
     (w) =>
       w.pr === pr &&
@@ -546,6 +639,10 @@ class AutofixPrInvocation extends BaseToolInvocation<
   private confirmed = false;
   /** The watch that dialog named; the grant is made for it alone. */
   private shownWatch: ConfirmedWatch | undefined;
+  /** Found when the permission was: the call acts on a watch prepared here. */
+  private watchConfirmed = false;
+  /** Found when the permission was: the shell route's rules deny it. */
+  private shellDenial: string | null = null;
 
   constructor(
     private readonly config: Config,
@@ -596,11 +693,46 @@ class AutofixPrInvocation extends BaseToolInvocation<
     return null;
   }
 
-  override async getDefaultPermission(): Promise<PermissionDecision> {
+  /**
+   * A rule that denies the shell route of this helper — `Bash`, or one
+   * naming `qwen autofix-pr` — denies this call too: it runs the same
+   * program, with the repository's git hooks.
+   */
+  private async deniedAsShell(): Promise<string | null> {
+    const pm = this.config.getPermissionManager?.();
+    if (!pm) return null;
+    const command = `qwen ${this.getDescription()}`;
+    const ctx = buildPermissionCheckContext(
+      ToolNames.SHELL,
+      { command },
+      this.config.getTargetDir(),
+    );
+    const { finalPermission } = await evaluatePermissionRules(pm, 'ask', ctx);
+    return finalPermission === 'deny'
+      ? `a permission rule denies \`${command}\` as a shell command, so the tool does not run it either`
+      : null;
+  }
+
+  override async getDefaultPermission(
+    signal?: AbortSignal,
+  ): Promise<PermissionDecision> {
+    this.shellDenial = this.isUnattended ? null : await this.deniedAsShell();
+    // Nothing to ask: execute() gives the refusal.
+    if (this.shellDenial) return 'allow';
     if (this.params.command === 'status') return 'allow';
     // Nothing to ask: YOLO needs no grant, and a refusal needs no answer.
     if (this.isUnattended && (this.yolo() || this.unattendedBlocker())) {
       return 'allow';
+    }
+    if (
+      WATCH_COMMANDS.has(this.params.command) &&
+      this.params.take_over !== true
+    ) {
+      this.watchConfirmed = await stillPrepared(
+        this.config,
+        this.params.pr!,
+        signal ?? new AbortController().signal,
+      );
     }
     return 'ask';
   }
@@ -613,17 +745,10 @@ class AutofixPrInvocation extends BaseToolInvocation<
     return this.isUnattended && !this.yolo() && !this.unattendedBlocker();
   }
 
-  private watchConfirmed(): boolean {
-    return (
-      this.params.pr !== undefined &&
-      preparedWatch(this.config, this.params.pr) !== undefined
-    );
-  }
-
   getPermissionMatchParams(): Record<string, unknown> {
     return {
       ...this.params,
-      command: autofixPrRuleCommand(this.params, this.watchConfirmed()),
+      watch: autofixPrWatchMatch(this.params, this.watchConfirmed),
     };
   }
 
@@ -653,35 +778,27 @@ class AutofixPrInvocation extends BaseToolInvocation<
       };
       return details;
     }
-    const ruleCommand = autofixPrRuleCommand(
-      this.params,
-      this.watchConfirmed(),
-    );
-    // A start, a take-over and a helper of a watch not started here are
-    // asked each time: a saved rule would let any later one through.
-    const startsWatch =
+    const watch = autofixPrWatchMatch(this.params, this.watchConfirmed);
+    // A start, a new schedule, a take-over and a helper of a watch not
+    // started here are asked each time: a saved rule would let any later
+    // one through.
+    const askedEachTime =
       this.params.command === 'prepare' ||
       this.params.command === 'schedule' ||
-      ruleCommand !== this.params.command;
+      watch === 'take-over' ||
+      watch === 'unconfirmed';
     const details: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: `Run autofix-pr ${this.params.command}`,
       command: `qwen ${this.getDescription()}`,
       rootCommand: 'autofix-pr',
       permissionRules: [
-        `${ToolDisplayNames.AUTOFIX_PR}(command:${ruleCommand})`,
+        `${ToolDisplayNames.AUTOFIX_PR}(command:${this.params.command}${watch === 'none' ? '' : `,watch:${watch}`})`,
       ],
-      ...(startsWatch
+      ...(askedEachTime
         ? {
             hideAlwaysAllow: true,
-            warnings: [
-              this.params.command === 'prepare'
-                ? `Starts or resumes this session's watch of PR #${this.params.pr}: from now on its rounds push to the PR branch and reply on the PR without asking.`
-                : this.params.command === 'schedule' &&
-                    ruleCommand === this.params.command
-                  ? `Gives the watch of PR #${this.params.pr} a new scheduled task, replacing the one it has.`
-                  : `PR #${this.params.pr} is not a watch this session started or resumed.`,
-            ],
+            warnings: [this.startsWatchWarning(watch)],
           }
         : {}),
       onConfirm: async () => {},
@@ -689,8 +806,52 @@ class AutofixPrInvocation extends BaseToolInvocation<
     return details;
   }
 
+  private startsWatchWarning(watch: AutofixPrWatchMatch): string {
+    const pr = this.params.pr;
+    if (this.params.command === 'prepare') {
+      return this.params.take_over
+        ? `Takes the watch of PR #${pr} over from any other session that holds it: from now on its rounds push to the PR branch and reply on the PR without asking.`
+        : `Starts or resumes this session's watch of PR #${pr}: from now on its rounds push to the PR branch and reply on the PR without asking.`;
+    }
+    if (this.params.command === 'cleanup' && this.params.take_over) {
+      return `Stops the watch of PR #${pr}, taking it from any other session that holds it.`;
+    }
+    if (this.params.command === 'schedule' && watch === 'confirmed') {
+      return `Gives the watch of PR #${pr} a new scheduled task, replacing the one it has.`;
+    }
+    return `PR #${pr} is not a watch this session started or resumed.`;
+  }
+
+  /**
+   * `status` as the helper printed it, each watch with `preparedHere`:
+   * whether this session prepared it through the tool, from this clone, so
+   * a round's helpers run on it without asking.
+   */
+  private annotateStatus(out: string): string {
+    const parsed = lastJsonLine(out) as { watches?: unknown } | undefined;
+    if (!parsed || !Array.isArray(parsed.watches)) return out;
+    for (const watch of parsed.watches as Array<Record<string, unknown>>) {
+      if (watch === null || typeof watch !== 'object') continue;
+      const prepared =
+        typeof watch['pr'] === 'number'
+          ? preparedWatch(this.config, watch['pr'])
+          : undefined;
+      watch['preparedHere'] =
+        prepared !== undefined && listsPrepared(prepared, watch);
+    }
+    return JSON.stringify(parsed);
+  }
+
   async execute(signal: AbortSignal): Promise<ToolResult> {
     if (this.isUnattended) return this.grant(signal);
+    const denial = this.shellDenial ?? (await this.deniedAsShell());
+    if (denial) {
+      return {
+        llmContent: denial,
+        returnDisplay: denial,
+        error: { message: denial, type: ToolErrorType.EXECUTION_DENIED },
+      };
+    }
     if (
       this.params.command !== 'status' &&
       this.config.getApprovalMode() === ApprovalMode.PLAN
@@ -745,6 +906,10 @@ class AutofixPrInvocation extends BaseToolInvocation<
       };
     }
     if (this.params.command === 'prepare') this.recordPrepared(sessionId, out);
+    if (this.params.command === 'status' && !run.truncated) {
+      const annotated = this.annotateStatus(out);
+      return { llmContent: annotated, returnDisplay: annotated };
+    }
     if (this.params.command === 'cleanup') {
       forgetConfirmedWatch(sessionId, this.params.pr!);
     }
