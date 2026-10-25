@@ -4374,6 +4374,278 @@ describe('Session', () => {
     });
   });
 
+  describe('shared agent loop round (experimental.unifiedAgentLoop)', () => {
+    type RoundEvent = core.ServerLlmStreamEvent;
+
+    /** Streams each round's events from LlmClient, then empty rounds. */
+    function useSharedRounds(...rounds: RoundEvent[][]) {
+      mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+      Object.assign(mockLlmClient, {
+        admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
+      });
+      const send = vi.fn();
+      for (const events of rounds) {
+        send.mockImplementationOnce(() =>
+          (async function* () {
+            for (const event of events) yield event;
+          })(),
+        );
+      }
+      send.mockImplementation(() => createEmptyStream());
+      Object.assign(mockLlmClient, { sendMessageStream: send });
+      return send;
+    }
+
+    const text = (value: string): RoundEvent => ({
+      type: core.LlmEventType.Content,
+      value,
+    });
+    const finished = (
+      reason = FinishReason.STOP,
+      usageMetadata?: object,
+    ): RoundEvent => ({
+      type: core.LlmEventType.Finished,
+      value: { reason, usageMetadata },
+    });
+    const toolCall = (functionCall: FunctionCall): RoundEvent => ({
+      type: core.LlmEventType.ToolCallRequest,
+      value: {
+        callId: functionCall.id!,
+        name: functionCall.name!,
+        args: functionCall.args ?? {},
+        isClientInitiated: false,
+        prompt_id: 'test-session-id########1',
+      },
+      functionCall,
+    });
+
+    function useTool(kind: core.Kind, name: string) {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'done',
+        returnDisplay: 'done',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name,
+        kind,
+        build: vi.fn().mockReturnValue({
+          params: {},
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(name),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute,
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      return execute;
+    }
+
+    const prompt = (extra: object = {}) =>
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+        ...extra,
+      });
+
+    const updates = () =>
+      vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update);
+    const agentText = () =>
+      updates()
+        .filter((update) => update.sessionUpdate === 'agent_message_chunk')
+        .map((update) =>
+          update.content?.type === 'text' ? update.content.text : '',
+        )
+        .filter((value) => value.length > 0);
+
+    it('sends a fresh prompt as a UserQuery whose user turn it recorded', async () => {
+      const send = useSharedRounds([text('Hello'), finished()]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(send).toHaveBeenCalledOnce();
+      expect(send.mock.calls[0][3]).toMatchObject({
+        type: core.SendMessageType.UserQuery,
+        userTurnRecordedByHost: true,
+        promptAdmission: { blocked: false },
+      });
+      expect(agentText()).toContain('Hello');
+    });
+
+    it("runs the requested tools with the session's executor and sends their results", async () => {
+      const execute = useTool(core.Kind.Read, 'read_file');
+      const send = useSharedRounds(
+        [
+          toolCall({
+            id: 'call-read',
+            name: 'read_file',
+            args: { file_path: '/tmp/a.txt' },
+          }),
+          finished(),
+        ],
+        [text('Read it.'), finished()],
+      );
+
+      await prompt();
+
+      expect(execute).toHaveBeenCalledOnce();
+      expect(send).toHaveBeenCalledTimes(2);
+      const [parts, , , options] = send.mock.calls[1];
+      expect(options).toMatchObject({ type: core.SendMessageType.ToolResult });
+      expect(
+        (parts as Part[]).map((part) => part.functionResponse?.id),
+      ).toContain('call-read');
+    });
+
+    it('refuses an edit from a response the output limit cut off', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      const send = useSharedRounds([
+        toolCall({
+          id: 'call-cut',
+          name: 'write_file',
+          args: { file_path: '/tmp/notes.txt', content: 'p' },
+        }),
+        finished(FinishReason.MAX_TOKENS),
+      ]);
+
+      await prompt();
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(JSON.stringify(send.mock.calls[1][0])).toContain(
+        'truncated due to max_tokens limit',
+      );
+    });
+
+    it('reports a UserPromptSubmit block without sending the prompt', async () => {
+      const send = useSharedRounds([
+        {
+          type: core.LlmEventType.UserPromptSubmitBlocked,
+          value: { reason: 'not today', originalPrompt: 'hello' },
+        },
+      ]);
+      Object.assign(mockLlmClient, {
+        admitUserPrompt: vi.fn().mockResolvedValue({ blocked: true }),
+      });
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(send).toHaveBeenCalledOnce();
+      expect(send.mock.calls[0][3]).toMatchObject({
+        promptAdmission: { blocked: true },
+      });
+      expect(agentText()).toContain(
+        '✗ **UserPromptSubmit blocked**: not today',
+      );
+      expect(mockConfig.getFileHistoryService).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        'the session token limit',
+        {
+          type: core.LlmEventType.SessionTokenLimitExceeded,
+          value: { currentTokens: 120, limit: 100, message: 'over' },
+        },
+        'max_tokens',
+      ],
+      [
+        'the session turn limit',
+        { type: core.LlmEventType.MaxSessionTurns },
+        'max_turn_requests',
+      ],
+    ] as const)('ends the prompt at %s', async (_name, event, stopReason) => {
+      useSharedRounds([event as RoundEvent]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe(stopReason);
+    });
+
+    it('rejects a prompt whose model round the client stopped as a loop', async () => {
+      useSharedRounds([
+        {
+          type: core.LlmEventType.LoopDetected,
+          value: {
+            loopType: core.LoopType.CHANTING_IDENTICAL_SENTENCES,
+          },
+        },
+      ]);
+
+      await expect(prompt()).rejects.toMatchObject({
+        code: -32603,
+        data: expect.objectContaining({
+          code: 'LOOP_DETECTED',
+          loopType: core.LoopType.CHANTING_IDENTICAL_SENTENCES,
+        }),
+      });
+    });
+
+    it('reports the usage of a request a Stop hook continued before the hook output', async () => {
+      useSharedRounds([
+        text('one'),
+        finished(FinishReason.STOP, {
+          promptTokenCount: 8,
+          totalTokenCount: 10,
+        }),
+        { type: core.LlmEventType.HookSystemMessage, value: 'noted' },
+        {
+          type: core.LlmEventType.StopHookLoop,
+          value: { iterationCount: 1, reasons: ['more'], stopHookCount: 1 },
+        },
+        text('two'),
+        finished(FinishReason.STOP, {
+          promptTokenCount: 18,
+          totalTokenCount: 20,
+        }),
+      ]);
+
+      await prompt();
+
+      const order = updates()
+        .map((update) =>
+          update._meta?.['usage'] !== undefined
+            ? 'usage'
+            : update.content?.type === 'text'
+              ? update.content.text
+              : '',
+        )
+        .filter((entry) => ['one', 'two', 'noted', 'usage'].includes(entry));
+      expect(order).toEqual(['one', 'usage', 'noted', 'two', 'usage']);
+    });
+
+    it('leaves the Stop hook to the client', async () => {
+      useSharedRounds([text('done'), finished()]);
+      const request = vi.fn().mockResolvedValue({ success: true, output: {} });
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((eventName: string) => eventName === 'Stop');
+
+      await prompt();
+
+      expect(request).not.toHaveBeenCalledWith(
+        expect.objectContaining({ eventName: 'Stop' }),
+        expect.anything(),
+      );
+    });
+
+    it('keeps a retry on the current path', async () => {
+      const send = useSharedRounds([text('unused'), finished()]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await prompt({ retry: true });
+
+      expect(send).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).toHaveBeenCalled();
+    });
+  });
+
   describe('Managed Runtime batch close', () => {
     function driveToolTurn() {
       const execute = vi.fn().mockResolvedValue({
@@ -27380,6 +27652,80 @@ describe('Session', () => {
           expect(calls[1]?.[1].message).toEqual([
             { text: `${interruptPrefix}use plan B instead` },
           ]);
+        });
+
+        describe('on the shared agent loop round', () => {
+          /** Streams `plan A`, then holds the response until it is cut. */
+          function openSharedResponse(endsWithError = false) {
+            let markStreaming!: () => void;
+            const streaming = new Promise<void>((resolve) => {
+              markStreaming = resolve;
+            });
+            const sends: Array<
+              [Part[], AbortSignal, string, Record<string, unknown>]
+            > = [];
+            mockConfig.isUnifiedAgentLoopEnabled = vi
+              .fn()
+              .mockReturnValue(true);
+            Object.assign(mockLlmClient, {
+              admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
+              sendMessageStream: vi.fn(
+                (
+                  parts: Part[],
+                  signal: AbortSignal,
+                  promptId: string,
+                  options: Record<string, unknown>,
+                ) => {
+                  sends.push([parts, signal, promptId, options]);
+                  if (sends.length > 1) return createEmptyStream();
+                  return (async function* () {
+                    yield { type: core.LlmEventType.Content, value: 'plan A' };
+                    markStreaming();
+                    await new Promise<void>((resolve) =>
+                      signal.addEventListener('abort', () => resolve(), {
+                        once: true,
+                      }),
+                    );
+                    if (endsWithError) {
+                      throw Object.assign(new Error('upstream 429'), {
+                        status: 429,
+                      });
+                    }
+                    yield { type: core.LlmEventType.UserCancelled };
+                  })();
+                },
+              ),
+            });
+            return { streaming, sends };
+          }
+
+          it.each([
+            ['', false],
+            [' when the cut response ends with an error', true],
+          ])(
+            'cuts the response short and answers the input in the same turn%s',
+            async (_label, endsWithError) => {
+              mockClient.extMethod = vi
+                .fn()
+                .mockResolvedValueOnce({ messages: ['use plan B instead'] })
+                .mockResolvedValue({ messages: [] });
+              const { streaming, sends } = openSharedResponse(endsWithError);
+
+              const done = startPrompt();
+              await streaming;
+              session.sendMidTurnInputNow();
+
+              await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+              expect(sends[0][1].aborted).toBe(true);
+              expect(sends).toHaveLength(2);
+              expect(sends[1][0]).toEqual([
+                { text: `${interruptPrefix}use plan B instead` },
+              ]);
+              expect(sends[1][3]).toMatchObject({
+                type: core.SendMessageType.Steer,
+              });
+            },
+          );
         });
 
         it('cuts a response that has not streamed anything yet', async () => {
