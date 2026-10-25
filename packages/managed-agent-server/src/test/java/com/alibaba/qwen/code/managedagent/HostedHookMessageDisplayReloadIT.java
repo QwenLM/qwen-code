@@ -143,22 +143,13 @@ class HostedHookMessageDisplayReloadIT {
                 + json.writeValueAsString(cli.toString())
                 + "; await import("
                 + json.writeValueAsString(cli.toUri().toString()) + ");\n");
-        try (var control = new ServerSocket(0, 1,
-                InetAddress.getByName("127.0.0.1"));
-                var hosted = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"));
-                var runtime = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"))) {
-            port = control.getLocalPort();
-            harnessPort = hosted.getLocalPort();
-            brokerPort = runtime.getLocalPort();
-        }
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
-        spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
+        spring = (ServletWebServerApplicationContext) HostedGateTestSupport
+                .bootWithFreshPorts(this::probePorts, () -> new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class).run(
                         "--server.address=127.0.0.1",
                         "--server.port=" + port,
@@ -205,7 +196,7 @@ class HostedHookMessageDisplayReloadIT {
                                 + tenant,
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root="
-                                + workspace.getParent());
+                                + workspace.getParent()));
         jdbc = spring.getBean(JdbcTemplate.class);
         spring.getBean(WorkspaceStorageGuard.class).register(tenant, "storage",
                 UUID.randomUUID().toString());
@@ -522,6 +513,24 @@ class HostedHookMessageDisplayReloadIT {
             }
         } catch (IOException ignored) {
             // Evidence is best effort; the assertions already reported.
+        }
+    }
+
+    // The advertised ports are probed and then rebound by the application; a
+    // bind conflict there is retried with fresh ports (see
+    // HostedGateTestSupport#bootWithFreshPorts).
+    private void probePorts() {
+        try (var control = new ServerSocket(0, 1,
+                InetAddress.getByName("127.0.0.1"));
+                var hosted = new ServerSocket(0, 1,
+                        InetAddress.getByName("127.0.0.1"));
+                var runtime = new ServerSocket(0, 1,
+                        InetAddress.getByName("127.0.0.1"))) {
+            port = control.getLocalPort();
+            harnessPort = hosted.getLocalPort();
+            brokerPort = runtime.getLocalPort();
+        } catch (java.io.IOException error) {
+            throw new java.io.UncheckedIOException(error);
         }
     }
 }

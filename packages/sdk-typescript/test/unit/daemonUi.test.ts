@@ -2714,10 +2714,23 @@ describe('daemon UI normalizer and transcript reducer', () => {
           data: { queueSize: 200, maxQueued: 256 },
         }),
       ).toEqual([]);
-      expect(warn).toHaveBeenCalledWith('[daemon-ui] SSE stream is lagging', {
-        queueSize: 200,
-        maxQueued: 256,
-      });
+      expect(warn).toHaveBeenCalledWith(
+        '[daemon-ui] SSE stream is lagging',
+        '{\n  "queueSize": 200,\n  "maxQueued": 256\n}',
+      );
+      warn.mockClear();
+      expect(
+        normalizeDaemonEvent({
+          id: 54,
+          v: 1,
+          type: 'slow_client_warning',
+          data: '\x1b[2J\x1b]52;c;SGVsbG8=\x07queue lag',
+        }),
+      ).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(
+        '[daemon-ui] SSE stream is lagging',
+        'queue lag',
+      );
     } finally {
       warn.mockRestore();
     }

@@ -62,10 +62,11 @@ public final class LocalProcessRuntimeProvisioner
             Pattern.compile("sha256:[0-9a-f]{64}");
     private static final SecureRandom RANDOM = new SecureRandom();
     // Workers run model-directed tools. The control plane's own settings,
-    // its credentials among them, stay out of their environment; Spring also
-    // binds lower-case variable names.
-    private static final List<String> CONTROL_PLANE_ENV_PREFIXES =
-            List.of("QWEN_MANAGED_AGENT_", "QWEN_MANAGEDAGENT_", "SPRING_", "OSS_");
+    // its credentials among them, stay out of their environment, and so does
+    // the Hosted Harness's Broker URL and token; Spring also binds lower-case
+    // variable names.
+    private static final List<String> CONTROL_PLANE_ENV_PREFIXES = List.of("QWEN_MANAGED_AGENT_",
+            "QWEN_MANAGEDAGENT_", "QWEN_MANAGED_RUNTIME_BROKER_", "SPRING_", "OSS_");
 
     private final String ownerDomain = UUID.randomUUID().toString();
     private final List<String> command;
@@ -727,12 +728,12 @@ public final class LocalProcessRuntimeProvisioner
     private RuntimeLease adoptDurable(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             Map<String, Object> document, LocalRuntimeStore.Resource resource,
             LocalRuntimeStore.Registration registration) throws IOException {
+        if (registration.processAbsent()) {
+            resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+            throw LocalRuntimeStore.blocked();
+        }
         ProcessHandle process = registration.process();
         if (process == null) {
-            if (registration.processAbsent()) {
-                resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
-                throw LocalRuntimeStore.blocked();
-            }
             return null;
         }
         RuntimeLease lease;

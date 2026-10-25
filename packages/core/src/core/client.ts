@@ -170,6 +170,7 @@ import {
 
 // Utilities
 import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
   formatDateForContext,
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
@@ -196,10 +197,7 @@ import {
   UnauthorizedError,
 } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
-import {
-  flatMapTextParts,
-  prependToFirstTextPart,
-} from '../utils/partUtils.js';
+import { prependToFirstTextPart } from '../utils/partUtils.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
@@ -1143,6 +1141,23 @@ export class LlmClient {
   }
 
   /**
+   * Ids answered by a synthesized orphan-repair placeholder. See
+   * `LlmChat.getSynthesizedRepairCallIds`; called per tool-completion
+   * batch alongside {@link getHistoryFunctionResponseIds}.
+   */
+  getSynthesizedRepairCallIds(): Set<string> {
+    return this.getChat().getSynthesizedRepairCallIds();
+  }
+
+  /**
+   * Swap a synthesized orphan-repair placeholder for the tool's real
+   * response parts. See `LlmChat.replaceSynthesizedToolResponse`.
+   */
+  replaceSynthesizedToolResponse(callId: string, realParts: Part[]): boolean {
+    return this.getChat().replaceSynthesizedToolResponse(callId, realParts);
+  }
+
+  /**
    * Walk-only accessor for the handled tool-call id → (name, args)
    * fingerprint map used by duplicate provider-id replay detection. Same
    * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
@@ -1226,6 +1241,9 @@ export class LlmClient {
    * the live history before submitting its own `tool_result` — otherwise a
    * late real result lands as a second `user[tool_result]` block (orphan
    * because the synthetic already consumed the matching `tool_use`).
+   * When the late result's placeholder is one of these synthesized
+   * responses the scheduler instead replaces it in place
+   * (`replaceSynthesizedToolResponse`) so the model sees the real output.
    */
   repairOrphanedToolUseTurnsInHistory(
     reason?: string,
@@ -4722,11 +4740,18 @@ export class LlmClient {
       // user prompt's first text part, then on UserQuery / Cron turns
       // the system reminders block is prepended in front of everything
       // so the final shape is: [systemReminders..., ideContext + user prompt].
-      let requestToSend = await flatMapTextParts(request, async (text) => [
-        text,
-      ]);
+      // Replay Parts carry snapshot metadata needed by history deduplication.
+      let requestToSend = Array.isArray(request) ? [...request] : [request];
       if (ideContextText) {
-        requestToSend = prependToFirstTextPart(requestToSend, ideContextText);
+        const firstText = requestToSend.find(
+          (part) => typeof part === 'string' || 'text' in part,
+        );
+        // A marked catalog snapshot must keep its exact text for deduplication.
+        requestToSend =
+          typeof firstText === 'object' &&
+          firstText.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true
+            ? [{ text: ideContextText }, ...requestToSend]
+            : prependToFirstTextPart(requestToSend, ideContextText);
       }
       if (
         messageType === SendMessageType.UserQuery ||
