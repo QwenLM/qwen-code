@@ -107,7 +107,21 @@ it('names a missing Broker URL', async () => {
 
   expect(state.process.exitCode).toBe(1);
   expect(state.spawned).toHaveLength(0);
-  expect(state.errors).toEqual(['The pool requires a Broker URL.']);
+  expect(state.errors).toEqual([
+    'The pool requires a Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+  ]);
+});
+
+it('names a Broker URL that does not parse', async () => {
+  state.process.env.QWEN_MANAGED_RUNTIME_BROKER_URL =
+    'runtime-broker.example.internal';
+  await launch();
+
+  expect(state.process.exitCode).toBe(1);
+  expect(state.spawned).toHaveLength(0);
+  expect(state.errors).toEqual([
+    'The pool requires a valid Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+  ]);
 });
 
 it('refuses a plaintext Broker URL', async () => {
@@ -117,7 +131,9 @@ it('refuses a plaintext Broker URL', async () => {
 
   expect(state.process.exitCode).toBe(1);
   expect(state.spawned).toHaveLength(0);
-  expect(state.errors).toEqual(['The pool requires an HTTPS Broker URL.']);
+  expect(state.errors).toEqual([
+    'The pool requires an HTTPS Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+  ]);
 });
 
 it('sets every variable the launcher reads in the Harness container', () => {

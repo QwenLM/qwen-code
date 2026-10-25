@@ -33,9 +33,21 @@ try {
     )
   )
     throw new Error('A verified capability digest is required.');
-  if (!process.env.QWEN_MANAGED_RUNTIME_BROKER_URL)
-    throw new Error('The pool requires a Broker URL.');
-  const brokerUrl = new URL(process.env.QWEN_MANAGED_RUNTIME_BROKER_URL);
+  // Name the variable, never its value: the name changed, and an older
+  // manifest still sets QWEN_HOSTED_HARNESS_BROKER_URL.
+  const brokerUrlText = process.env.QWEN_MANAGED_RUNTIME_BROKER_URL;
+  if (!brokerUrlText)
+    throw new Error(
+      'The pool requires a Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+    );
+  let brokerUrl;
+  try {
+    brokerUrl = new URL(brokerUrlText);
+  } catch {
+    throw new Error(
+      'The pool requires a valid Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+    );
+  }
   if (
     brokerUrl.protocol !== 'https:' ||
     brokerUrl.username ||
@@ -43,7 +55,9 @@ try {
     brokerUrl.search ||
     brokerUrl.hash
   )
-    throw new Error('The pool requires an HTTPS Broker URL.');
+    throw new Error(
+      'The pool requires an HTTPS Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+    );
   await Promise.all(
     ['home', 'state', 'workspace'].map((name) =>
       mkdir(`${runtime}/${name}`, { recursive: true, mode: 0o700 }),
