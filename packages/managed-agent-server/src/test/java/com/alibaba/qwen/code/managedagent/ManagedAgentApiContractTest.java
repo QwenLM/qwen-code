@@ -1750,6 +1750,16 @@ class ManagedAgentApiContractTest {
         exchangeAgents(drift, tenant, otherTenant);
         exchangeChannels(drift, tenant, otherTenant);
         exchangeWorkspaceRegistration(drift, tenant);
+        exchange(drift, "queryUserMessages", 404,
+                get("/v1/agents/sessions/missing/user-messages").header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(drift, "commandUserMessages", 404,
+                post("/v1/agents/sessions/missing/user-messages").header(TENANT, tenant).principal(actor(tenant)).header(IDEMPOTENCY_KEY, "queue-missing"),
+                "{\"action\":\"resume\"}");
+        exchange(drift, "webShellQueryUserMessages", 404,
+                post(WEB_SHELL + "/user-messages/query").header(TENANT, tenant).principal(actor(tenant)), "{\"sessionId\":\"missing\"}");
+        exchange(drift, "webShellCommandUserMessages", 404,
+                post(WEB_SHELL + "/user-messages/command").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"missing\",\"idempotencyKey\":\"queue-missing\",\"command\":{\"action\":\"resume\"}}");
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(

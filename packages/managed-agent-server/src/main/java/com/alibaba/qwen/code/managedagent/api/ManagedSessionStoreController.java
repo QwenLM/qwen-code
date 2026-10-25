@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import jakarta.validation.Valid;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
@@ -38,9 +39,23 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/internal/managed-session-store/v1/sessions/{sessionId}")
 public class ManagedSessionStoreController {
     private final ManagedSessionStore store;
+    private final ManagedUserMessageStore userMessages;
 
-    public ManagedSessionStoreController(ManagedSessionStore store) {
+    public ManagedSessionStoreController(ManagedSessionStore store, ManagedUserMessageStore userMessages) {
         this.store = store;
+        this.userMessages = userMessages;
+    }
+
+    public record QueueClaim(String workspaceId, String writerId, long writerGeneration, String promptId, boolean initialOnly) { }
+
+    @PostMapping("/user-messages:claim")
+    @org.springframework.transaction.annotation.Transactional
+    public Object claimUserMessages(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestBody QueueClaim request) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(request.workspaceId(), request.writerId(), request.writerGeneration(), null));
+        return userMessages.claim(tenant.tenantId(), sessionId, request.promptId(), request.initialOnly());
     }
 
     @PostMapping("/approval:query")
