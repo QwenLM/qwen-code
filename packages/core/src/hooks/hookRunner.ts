@@ -1623,6 +1623,8 @@ export class HookRunner {
       shellConfig,
       command: this.expandCommand(hookConfig.command, input, shellConfig.shell),
       env: {
+        // Hook commands are child processes launched on the agent's behalf,
+        // so they must not inherit Qwen-internal daemon secrets.
         ...sanitizeChildEnv(environment ?? process.env),
         GEMINI_PROJECT_DIR: input.cwd,
         CLAUDE_PROJECT_DIR: input.cwd,

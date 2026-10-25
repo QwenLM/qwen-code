@@ -1035,7 +1035,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             found = candidate;
                         }
                     }
-                    if (candidates.size() < 100) { break; }
+                    if (candidates.size() < 100) {
+                        break;
+                    }
                     after = candidates.getLast().getBindingId();
                 }
                 if (found == null) {

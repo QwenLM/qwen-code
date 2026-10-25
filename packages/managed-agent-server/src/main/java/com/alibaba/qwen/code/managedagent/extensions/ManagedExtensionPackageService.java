@@ -268,8 +268,12 @@ public class ManagedExtensionPackageService {
     private Map<String, String> settingsValues(String tenant, String workspace, String extensionId, long revision) {
         var rows = jdbc.query("SELECT encryption_key_id, encrypted_values FROM ma_extension_settings WHERE settings_key = ?",
                 (row, index) -> new ProtectedSecret(row.getString(1), row.getString(2)), settingsKey(tenant, workspace, extensionId, revision));
-        if (rows.size() != 1 || secrets == null) {
+        if (rows.size() != 1) {
             throw missing();
+        }
+        if (secrets == null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "extension_settings_unavailable",
+                    "Encrypted extension settings are unavailable.");
         }
         byte[] plaintext = secrets.unprotect(settingsContext(tenant, workspace, extensionId, revision), rows.getFirst());
         try {

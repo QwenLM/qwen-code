@@ -31,7 +31,9 @@ public final class ManagedExtensionProtocol {
     }
 
     public static void requireBoundInput(RuntimeSession session, Object input) {
-        if (!(input instanceof Map<?, ?> fields) || !fields.containsKey("managedExtension")) { return; }
+        if (!(input instanceof Map<?, ?> fields) || !fields.containsKey("managedExtension")) {
+            return;
+        }
         if (!ManagedExtensionExecutionProfile.admits(session.getScope().getCapabilityDigest())
                 || !(fields.get("managedExtension") instanceof Map<?, ?> extension)
                 || !extension.keySet().equals(Set.of("harnessSessionId", "configRevision", "pin"))
@@ -89,7 +91,9 @@ public final class ManagedExtensionProtocol {
                     || !digest(hook.get("definitionDigest")))) {
                 throw invalid();
             }
-            if (command.containsKey("mcpChange")) { mcpChange(command.get("mcpChange")); }
+            if (command.containsKey("mcpChange")) {
+                mcpChange(command.get("mcpChange"));
+            }
         } else if ("extension-activate".equals(kind) || "extension-reconcile".equals(kind)) {
             if (!operation.keySet().equals(Set.of("kind", "operationId", "expectedRevision", "revision"))
                     || !counter(operation.get("expectedRevision"), 0) || !counter(operation.get("revision"), 1)
@@ -97,7 +101,9 @@ public final class ManagedExtensionProtocol {
                 throw invalid();
             }
         } else if ("extension-status".equals(kind)) {
-            if (!operation.keySet().equals(Set.of("kind", "operationId"))) { throw invalid(); }
+            if (!operation.keySet().equals(Set.of("kind", "operationId"))) {
+                throw invalid();
+            }
         } else {
             String field = "extension-asset-read".equals(kind) ? "path" : "pattern";
             if (!operation.keySet().equals(Set.of("kind", "operationId", "revision", "extensionId", field))
@@ -161,7 +167,9 @@ public final class ManagedExtensionProtocol {
                         coverage = true;
                     }
                 }
-                if (!coverage) { throw invalidResponse(); }
+                if (!coverage) {
+                    throw invalidResponse();
+                }
             }
         }
         @SuppressWarnings("unchecked")
@@ -200,7 +208,9 @@ public final class ManagedExtensionProtocol {
                     || selection && !Set.of("enabled", "disabled", "removed").contains(String.valueOf(pin.get("state")))) {
                 throw invalid();
             }
-            if ("enabled".equals(pin.get("state")) && ++enabled > 16) { throw invalid(); }
+            if ("enabled".equals(pin.get("state")) && ++enabled > 16) {
+                throw invalid();
+            }
         }
     }
 

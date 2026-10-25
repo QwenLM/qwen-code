@@ -385,7 +385,9 @@ public final class LocalProcessRuntimeProvisioner
                 String mode = extended ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.mode(binding.getRequest().getScope().getCapabilityDigest()) : null;
                 String proofScope = extended ? ("linux-cgroup".equals(mode) ? "process_tree" : "process_group") : null;
                 if (extended && !neverStarted && !originalBootStopped) {
-                    if (binding.getLease() == null || worker == null) throw LocalRuntimeStore.blocked();
+                    if (binding.getLease() == null || worker == null) {
+                        throw LocalRuntimeStore.blocked();
+                    }
                     String retirementId = UUID.nameUUIDFromBytes(("managed-extension-retire/1:" + binding.getBindingId() + ":" + binding.getGeneration()).getBytes(StandardCharsets.UTF_8)).toString();
                     Map<String, Object> proof = transport.extensionStop(binding.getLease(), retirementId).toCompletableFuture().join();
                     if (!proof.keySet().equals(Set.of("protocolVersion", "retirementId", "executionMode", "scope", "state", "runtimeInstanceId", "runtimeIncarnation", "leaseId", "epoch"))
@@ -393,7 +395,9 @@ public final class LocalProcessRuntimeProvisioner
                             || !retirementId.equals(proof.get("retirementId")) || !mode.equals(proof.get("executionMode")) || !proofScope.equals(proof.get("scope"))
                             || !"stopped".equals(proof.get("state")) || !binding.getLease().getRuntimeInstanceId().equals(proof.get("runtimeInstanceId"))
                             || !binding.getProvisionSeed().getGatewayIncarnation().equals(proof.get("runtimeIncarnation"))
-                            || !binding.getLease().getLeaseId().equals(proof.get("leaseId")) || BrokerValues.exactLong(proof.get("epoch")) != binding.getLease().getEpoch()) throw LocalRuntimeStore.blocked();
+                            || !binding.getLease().getLeaseId().equals(proof.get("leaseId")) || BrokerValues.exactLong(proof.get("epoch")) != binding.getLease().getEpoch()) {
+                        throw LocalRuntimeStore.blocked();
+                    }
                 }
                 resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
                 if (worker != null) {

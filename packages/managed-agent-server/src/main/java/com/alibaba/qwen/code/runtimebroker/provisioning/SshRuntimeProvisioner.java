@@ -215,7 +215,10 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
             RuntimeProvisionSeed seed = binding.getProvisionSeed();
             boolean extended = com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(binding.getRequest().getScope().getCapabilityDigest());
             Set<String> proofFields = new java.util.HashSet<>(PROOF_FIELDS);
-            if (extended) { proofFields.add("executionMode"); proofFields.add("scope"); }
+            if (extended) {
+                proofFields.add("executionMode");
+                proofFields.add("scope");
+            }
             String mode = extended ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.mode(binding.getRequest().getScope().getCapabilityDigest()) : null;
             String proofScope = extended ? ("linux-cgroup".equals(mode) ? "process_tree" : "process_group") : null;
             if (!proof.keySet().equals(proofFields)

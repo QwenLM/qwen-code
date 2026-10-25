@@ -15,8 +15,12 @@ public final class ManagedExtensionExecutionProfile {
     }
 
     public static String mode(String digest) {
-        if (LINUX_CAPABILITY_DIGEST.equals(digest)) return "linux-cgroup";
-        if (DEVELOPER_CAPABILITY_DIGEST.equals(digest)) return "developer-process-group";
+        if (LINUX_CAPABILITY_DIGEST.equals(digest)) {
+            return "linux-cgroup";
+        }
+        if (DEVELOPER_CAPABILITY_DIGEST.equals(digest)) {
+            return "developer-process-group";
+        }
         throw new IllegalArgumentException("Unsupported extension execution capability");
     }
 
@@ -25,10 +29,14 @@ public final class ManagedExtensionExecutionProfile {
             throw new IllegalArgumentException("Managed extension cache directory must be absolute");
         }
         if (LINUX_CAPABILITY_DIGEST.equals(digest)) {
-            if (cgroupRoot == null || !Path.of(cgroupRoot).isAbsolute()) throw new IllegalArgumentException("Linux extensions require a delegated cgroup root");
+            if (cgroupRoot == null || !Path.of(cgroupRoot).isAbsolute()) {
+                throw new IllegalArgumentException("Linux extensions require a delegated cgroup root");
+            }
             return Map.of("enabled", true, "mode", mode(digest), "cacheDirectory", cacheDirectory, "cgroupRoot", cgroupRoot);
         }
-        if (cgroupRoot != null && !cgroupRoot.isBlank()) throw new IllegalArgumentException("Developer process-group mode does not accept a cgroup root");
+        if (cgroupRoot != null && !cgroupRoot.isBlank()) {
+            throw new IllegalArgumentException("Developer process-group mode does not accept a cgroup root");
+        }
         return Map.of("enabled", true, "mode", mode(digest), "cacheDirectory", cacheDirectory);
     }
 }

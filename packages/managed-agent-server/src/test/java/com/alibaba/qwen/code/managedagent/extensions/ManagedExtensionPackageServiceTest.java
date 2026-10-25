@@ -18,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -100,6 +101,37 @@ class ManagedExtensionPackageServiceTest {
         assertThat(json.writeValueAsString(service.settings("tenant", "reader", "workspace", publication.extensionId())))
                 .contains("API_KEY").doesNotContain("private-value");
         assertThat(service.list("tenant", "reader", "workspace").extensions()).hasSize(1);
+    }
+
+    @Test
+    void distinguishesUnavailableEncryptionFromMissingSettingsAfterRestart() throws Exception {
+        String digest = DigestUtils.sha256Hex(bytes);
+        var publication = service.publish("tenant", "operator", "workspace", null, digest,
+                "create", manifest, new ByteArrayInputStream(bytes));
+        var command = new SettingsCommand(0, Map.of("API_KEY", "private-value"));
+        service.saveSettings("tenant", "operator", "workspace", publication.extensionId(), "settings", command);
+        beans.destroySingleton("secrets");
+        service = service();
+        var pin = new Pin(publication.extensionId(), 1, digest, 1L);
+        assertThatThrownBy(() -> service.resolvePin("tenant", "workspace", pin))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode()).isEqualTo("extension_settings_unavailable");
+                });
+        assertThatThrownBy(() -> service.saveSettings("tenant", "operator", "workspace",
+                publication.extensionId(), "settings", command))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode()).isEqualTo("extension_settings_unavailable");
+                });
+        assertThatThrownBy(() -> service.resolvePin("tenant", "workspace",
+                new Pin(publication.extensionId(), 1, digest, 2L)))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(error.getCode()).isEqualTo("extension_package_not_found");
+                });
+        assertThat(service.resolvePin("tenant", "workspace",
+                new Pin(publication.extensionId(), 1, digest, null)).settings()).isEmpty();
     }
 
     @Test
