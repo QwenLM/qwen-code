@@ -3580,7 +3580,7 @@ describe('qwen-autofix workflow', () => {
           'bash',
           [
             '-c',
-            `AUTOFIX_BOT='qwen-code-dev-bot'\nREARM_KEY='${key}'\nWORKDIR='${dir}'\nEFF_MAX_ROUNDS='100'\n${budgetRead.replace(/\n {12}/g, '\n')}\nprintf '%s' "$EFF_MAX_ROUNDS"`,
+            `AUTOFIX_BOT='qwen-code-dev-bot'\nREARM_KEY='${key}'\nWORKDIR='${dir}'\nHAS_TAKEOVER='true'\nEFF_MAX_ROUNDS='100'\n${budgetRead.replace(/\n {12}/g, '\n')}\nprintf '%s' "$EFF_MAX_ROUNDS"`,
           ],
           { encoding: 'utf8' },
         ).trim();
@@ -3883,7 +3883,7 @@ describe('qwen-autofix workflow', () => {
           'bash',
           [
             '-c',
-            `AUTOFIX_BOT='qwen-code-dev-bot'\nWORKDIR='${d}'\n${reads.replace(/\n {12}/g, '\n')}\nprintf '%s' "$ROUND_BUDGET"`,
+            `AUTOFIX_BOT='qwen-code-dev-bot'\nHAS_TAKEOVER='true'\nWORKDIR='${d}'\n${reads.replace(/\n {12}/g, '\n')}\nprintf '%s' "$ROUND_BUDGET"`,
           ],
           { encoding: 'utf8' },
         )

@@ -77,9 +77,9 @@ env:
   BRANCH_PREFIX: 'autofix/issue-'
   # The Qwen PR reviewer: its review counts as actionable feedback without collaborator status.
   REVIEW_BOT: 'qwen-code-ci-bot'
-  # Human reviews/comments only count from a real maintainer — the prompt-injection gate. → qwen-autofix.md#af-160
+  # Human feedback: maintainers only (prompt-injection gate). → af-160
   TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]'
-  # Every lane this loop owns whose check runs attach to the PR head; a test pins the names. → qwen-autofix.md#af-157
+  # Loop-owned lanes excluded from the head-state classifiers. → af-157
   LOOP_OWNED_LANES: '["Qwen Autofix","🧐 Qwen Pull Request Review","Qwen CI Failure Patrol","Qwen Autofix Fork Bridge","Qwen Autofix Fork Signal","Qwen Triage","Qwen Triage Finalize","PR self-report label","Qwen PR Safety Precheck","Comment Attachment Guard","PR Asset Branch Cleanup"]'
   # Shape of the review bot's 'R<id> fixed by' note, which never counts as feedback (#9940). → qwen-autofix.md#af-160
   FIXED_RULING_FILTER: '^R[0-9]+-[0-9]+ fixed(?: by [^\r\n\x{2028}\x{2029}]*)? <!-- qwen-review-fixed-ruling -->[ \t]*(\r?\n[ \t\r\n]*_— ((?! via Qwen Code /review)[^\r\n\x{2028}\x{2029}])* via Qwen Code /review( \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_[ \t]*)?([\r\n][ \t\r\n]*)?$'
@@ -107,7 +107,7 @@ env:
   # Engagement labels (need triage+): TAKEOVER opts in, SKIP opts out and wins. → qwen-autofix.md#af-160
   TAKEOVER_LABEL: 'autofix/takeover'
   SKIP_LABEL: 'autofix/skip'
-  # PENDING marker stamped on a PR head when a scan dispatches. → qwen-autofix.md#af-079
+  # PENDING marker stamped on a PR head when a scan dispatches. → af-079
   DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending'
   DISPATCH_STATUS_TTL_MINUTES: '30'
   # Comment-command sugar: '<cmd>', 'stop', 'from N', 'for N' — exact match only. → qwen-autofix-round-seed.md
@@ -124,7 +124,7 @@ env:
   TIMEOUT_WINDOW_CAP: '3'
   # Consecutive non-convergence rounds before the loop pauses. → qwen-autofix.md#af-151
   CONVERGENCE_BREAK_ROUNDS: '${{ vars.QWEN_AUTOFIX_CONVERGENCE_BREAK_ROUNDS || 3 }}'
-  # Convergence signal codes (jq array). → qwen-autofix.md#af-151
+  # Convergence signal codes. → af-151
   CONVERGENCE_SIGNAL_CODES: '["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'
   # In-round self-review A/B: off (default) | ab (odd PRs armed) | on. → qwen-autofix.md#af-156
   SELF_REVIEW: "${{ vars.QWEN_AUTOFIX_SELF_REVIEW || 'off' }}"
@@ -2869,6 +2869,8 @@ jobs:
             BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
             ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg f "${BUDGET_FLOOR}" '[ .[] | select((.user.login // "") == $ab) | select((.created_at // "") >= $f) | ((.body // "") | [ scan("<!-- autofix-round-budget ([1-9][0-9]?) -->") ] | .[] | .[0]) ] | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
             [[ "${ROUND_BUDGET}" =~ ^[0-9]{1,2}$ ]] || ROUND_BUDGET=0
+            # A release ack (`stop`) or a hand-removed label ends the engagement.
+            [[ "${HAS_TAKEOVER}" == "true" ]] || ROUND_BUDGET=0
             if [[ "${ROUND_BUDGET}" -gt 0 && "${ROUND_BUDGET}" -lt "${EFF_MAX_ROUNDS}" ]]; then
               EFF_MAX_ROUNDS="${ROUND_BUDGET}"
             fi
