@@ -2143,6 +2143,36 @@ const EN: Messages = {
   'sidebar.addWorkspacePersistHint':
     'Persist this workspace registration in the daemon configuration.',
   'sidebar.addWorkspaceAdding': 'Adding…',
+  'sidebar.addWorkspaceSource': 'Source',
+  'sidebar.addWorkspaceSourceDirectory': 'Existing directory',
+  'sidebar.addWorkspaceSourceGit': 'Git repository',
+  'sidebar.gitCloneUrl': 'Repository URL',
+  'sidebar.gitCloneUrlPlaceholder': 'https://github.com/org/repo.git',
+  'sidebar.gitCloneUrlHint':
+    'Public URLs, SSH-agent addresses, and URLs that carry their own token work. The daemon passes the token to Git and never writes it into the cloned repository; Git credentials configured on the host are not used.',
+  'sidebar.gitCloneTarget': 'Clone into',
+  'sidebar.gitCloneTargetPlaceholder': '/absolute/path/for/new/repo',
+  'sidebar.gitCloneTargetHint':
+    'An absolute path that does not exist yet. Its parent directory must already exist.',
+  'sidebar.gitCloneTargetSuggestHint':
+    'Type a parent path to pick from its subfolders.',
+  'sidebar.gitCloneSubmit': 'Clone and add',
+  'sidebar.gitCloneProgress': (vars) => `Cloning… ${vars?.percent}%`,
+  'sidebar.gitCloneProgressLabel': 'Clone progress',
+  'sidebar.gitCloneCancel': 'Cancel clone',
+  'sidebar.gitCloneCancelled': 'Clone cancelled.',
+  'sidebar.gitCloneFailed': 'Clone failed',
+  'sidebar.gitCloneInvalidInput':
+    'Enter a Git URL and an absolute target path.',
+  'sidebar.gitCloneInvalidTarget': 'Enter an absolute target path.',
+  'sidebar.gitCloneUnknown':
+    'Could not confirm the clone result. Check the workspace list before cloning again.',
+  'sidebar.gitCloneJobGone':
+    'This clone job is no longer available, so its result cannot be confirmed. Check the workspace list or whether the target exists before cloning again.',
+  'sidebar.gitCloneRecheck': 'Check again',
+  'sidebar.gitCloneBack': 'Back',
+  'sidebar.gitCloneRegisterRetry': (vars) =>
+    `Cloned to ${vars?.path}. Submit to register it.`,
   'workspaceHost.source': 'Folder source',
   'workspaceHost.thisComputer': 'This computer',
   'workspaceHost.folderOn': (vars) => `Folder on ${vars?.address}`,
@@ -6559,6 +6589,32 @@ const ZH: Messages = {
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
   'sidebar.addWorkspaceAdding': '添加中…',
+  'sidebar.addWorkspaceSource': '来源',
+  'sidebar.addWorkspaceSourceDirectory': '已有目录',
+  'sidebar.addWorkspaceSourceGit': 'Git 仓库',
+  'sidebar.gitCloneUrl': '仓库地址',
+  'sidebar.gitCloneUrlPlaceholder': 'https://github.com/org/repo.git',
+  'sidebar.gitCloneUrlHint':
+    '支持公开地址、SSH agent 地址，以及自带 token 的地址：守护进程把 token 交给 Git，不会写入克隆仓库的配置；宿主上已配置的 Git 凭据不会被使用。',
+  'sidebar.gitCloneTarget': '克隆到',
+  'sidebar.gitCloneTargetPlaceholder': '/绝对路径/新目录',
+  'sidebar.gitCloneTargetHint':
+    '必须是尚不存在的绝对路径，其父目录需要已经存在。',
+  'sidebar.gitCloneTargetSuggestHint': '输入父目录可从中选择子目录。',
+  'sidebar.gitCloneSubmit': '克隆并添加',
+  'sidebar.gitCloneProgress': (vars) => `正在克隆… ${vars?.percent}%`,
+  'sidebar.gitCloneProgressLabel': '克隆进度',
+  'sidebar.gitCloneCancel': '取消克隆',
+  'sidebar.gitCloneCancelled': '克隆已取消。',
+  'sidebar.gitCloneFailed': '克隆失败',
+  'sidebar.gitCloneInvalidInput': '请输入 Git 地址和绝对目标路径。',
+  'sidebar.gitCloneInvalidTarget': '请输入绝对目标路径。',
+  'sidebar.gitCloneUnknown':
+    '无法确认克隆结果。请先检查工作区列表，再决定是否重新克隆。',
+  'sidebar.gitCloneRecheck': '重新检查',
+  'sidebar.gitCloneBack': '返回',
+  'sidebar.gitCloneRegisterRetry': (vars) =>
+    `已克隆到 ${vars?.path}，点击提交完成注册。`,
   'workspaceHost.source': '目录来源',
   'workspaceHost.thisComputer': '这台计算机',
   'workspaceHost.folderOn': (vars) => `${vars?.address} 上的目录`,

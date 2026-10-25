@@ -57,6 +57,7 @@ import {
   goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
+import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { Content, Part } from '@google/genai';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
@@ -2986,42 +2987,70 @@ describe('runNonInteractive', () => {
       );
     });
 
-    it('adds plan mode reminders to an interrupted prompt replay', async () => {
-      setupMetricsMock();
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
-      mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
-      mockLlmClient.getChat = vi.fn(() => ({
-        getDebugResponses: mockGetDebugResponses,
-        getHistoryShallow: vi.fn().mockReturnValue([]),
-        getHistory: vi
-          .fn()
-          .mockReturnValue([
-            { role: 'user', parts: [{ text: 'do the thing' }] },
+    it.each([
+      { name: 'plain prompt', withSnapshot: false, withReminder: false },
+      { name: 'catalog snapshot', withSnapshot: true, withReminder: false },
+      {
+        name: 'catalog and existing reminder',
+        withSnapshot: true,
+        withReminder: true,
+      },
+    ])(
+      'adds or deduplicates plan reminders on interrupted replay: $name',
+      async ({ withSnapshot, withReminder }) => {
+        setupMetricsMock();
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+        mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
+        const parts: Part[] = [{ text: 'do the thing' }];
+        if (withSnapshot) {
+          parts.push(
+            getAutoMemorySnapshot(
+              [],
+              '<system-reminder>CATALOG</system-reminder>',
+            )!,
+          );
+        }
+        if (withReminder) {
+          parts.unshift({
+            text: '<system-reminder>Existing plan reminder</system-reminder>',
+          });
+        }
+        mockLlmClient.getChat = vi.fn(() => ({
+          getDebugResponses: mockGetDebugResponses,
+          getHistoryShallow: vi.fn().mockReturnValue([]),
+          getHistory: vi.fn().mockReturnValue([{ role: 'user', parts }]),
+        }));
+        mockLlmClient.sendMessageStream.mockReturnValue(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 5 },
+              },
+            },
           ]),
-      }));
-      mockLlmClient.sendMessageStream.mockReturnValue(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.Finished,
-            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
-          },
-        ]),
-      );
+        );
 
-      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-plan', {
-        continueInterrupted: true,
-      });
+        await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-plan', {
+          continueInterrupted: true,
+        });
 
-      const [request, , , options] =
-        mockLlmClient.sendMessageStream.mock.calls[0]!;
-      expect(options).toEqual(
-        expect.objectContaining({ type: SendMessageType.Retry }),
-      );
-      expect(request).toEqual([
-        { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
-        { text: 'do the thing' },
-      ]);
-    });
+        const [request, , , options] =
+          mockLlmClient.sendMessageStream.mock.calls[0]!;
+        expect(options).toEqual(
+          expect.objectContaining({ type: SendMessageType.Retry }),
+        );
+        expect(request).toEqual(
+          withReminder
+            ? parts
+            : [
+                { text: expect.stringContaining('Plan mode is active.') },
+                ...parts,
+              ],
+        );
+      },
+    );
 
     it('closes dangling tool calls with synthesized ToolResult parts', async () => {
       setupMetricsMock();
@@ -3137,7 +3166,10 @@ describe('runNonInteractive', () => {
         parts: [{ text: 'do the thing' }],
       };
       markApiHistoryPrompt(content, 'client-A');
-      const historyOwner = { history: [content] } as unknown as LlmChat;
+      const historyOwner = {
+        history: [content],
+        unaccountedMemorySnapshots: new WeakSet(),
+      } as unknown as LlmChat;
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
         getHistory: () => LlmChat.prototype.getHistory.call(historyOwner),
