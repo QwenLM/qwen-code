@@ -3216,8 +3216,9 @@ exit 0`,
       readFileSync('package.json', 'utf8'),
     ).scripts;
     expect(rootScripts['test:scripts']).toMatch(
-      /^npm run test:standalone:runtimes:ci && vitest run /,
+      /^npm run test:standalone:runtimes:ci && npm run test:scripts:unit /,
     );
+    expect(rootScripts['test:scripts:unit']).toMatch(/^vitest run /);
     expect(rootScripts['test:standalone:runtimes:ci']).toBe(
       'node scripts/test-standalone-runtimes.mjs --ci',
     );
