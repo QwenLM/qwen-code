@@ -434,7 +434,11 @@ public final class ApiModels {
         }
     }
 
-    public record WebShellApprovalSelection(String mode, long revision, boolean planMode) {
+    public record WebShellApprovalSelection(String mode, long revision, boolean planMode,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, List<String>> permissionRules) {
+        public WebShellApprovalSelection(String mode, long revision, boolean planMode) {
+            this(mode, revision, planMode, null);
+        }
         public WebShellApprovalSelection(String mode, long revision) {
             this(mode, revision, false);
         }
@@ -442,7 +446,8 @@ public final class ApiModels {
 
     public record WebShellSessionApproval(String approvalMode, long approvalRevision,
             List<String> availableApprovalModes, boolean supported, boolean planMode, boolean planModeSupported,
-            boolean liveSupported) {}
+            boolean liveSupported, boolean permissionRulesSupported,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, List<String>> permissionRules) {}
 
     public record WebShellSessionApprovalRequest(@NotBlank @Size(max = 128) String sessionId) {}
 
@@ -450,10 +455,15 @@ public final class ApiModels {
             @NotBlank @Size(max = 128) String sessionId,
             @NotBlank @Size(max = 128) String idempotencyKey,
             @NotBlank String approvalMode,
-            @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision, Boolean planMode) {}
+            @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision, Boolean planMode,
+            Map<String, Object> permissionRules) {}
 
     public record WebShellApprovalChangeResult(String sessionId, String approvalMode,
-            long approvalRevision, boolean replayed, boolean planMode) {
+            long approvalRevision, boolean replayed, boolean planMode,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, List<String>> permissionRules) {
+        public WebShellApprovalChangeResult(String sessionId, String approvalMode, long approvalRevision, boolean replayed, boolean planMode) {
+            this(sessionId, approvalMode, approvalRevision, replayed, planMode, null);
+        }
         public WebShellApprovalChangeResult(String sessionId, String approvalMode, long approvalRevision, boolean replayed) {
             this(sessionId, approvalMode, approvalRevision, replayed, false);
         }
