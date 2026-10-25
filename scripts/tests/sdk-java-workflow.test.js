@@ -41,6 +41,16 @@ const step = (block, name) => {
   return block.slice(start, next < 0 ? undefined : start + 1 + next);
 };
 
+// Match the nesting-prone spelling too, so a future seed site cannot hide
+// from the behavioural test by omitting the trailing `/.`.
+const SEED_COPY = 'cp -aln "${HOME}/.m2/repository';
+const seedSites = () =>
+  Object.entries(parse(workflow).jobs).flatMap(([name, job]) =>
+    (job.steps ?? [])
+      .filter((candidate) => candidate.run?.includes(SEED_COPY))
+      .map((candidate) => [name, candidate.run]),
+  );
+
 describe('SDK Java self-hosted workflow guards', () => {
   it('builds native producer prerequisites before either Server test lane', () => {
     const jobs = parse(workflow).jobs;
@@ -383,14 +393,7 @@ describe('SDK Java self-hosted workflow guards', () => {
   it.skipIf(process.platform !== 'linux')(
     'drops seeded in-house coordinates so Maven writes fresh inodes',
     () => {
-      const jobs = parse(workflow).jobs;
-      const seeds = Object.entries(jobs).flatMap(([name, job]) =>
-        (job.steps ?? [])
-          .filter((candidate) =>
-            candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
-          )
-          .map((candidate) => [name, candidate.run]),
-      );
+      const seeds = seedSites();
       expect(seeds.map(([name]) => name).sort()).toEqual([
         'event-transport-broker',
         'event-transport-multi-node',
@@ -1100,20 +1103,9 @@ describe('SDK Java self-hosted workflow guards', () => {
   it.skipIf(process.platform !== 'linux')(
     'seeds a pre-existing job-local repository through its contents',
     () => {
-      const jobs = parse(workflow).jobs;
-      const sites = [
-        ['test', 'Run Java SDK tests (self-hosted)'],
-        [
-          'mysql-integration',
-          'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
-        ],
-        ['event-transport-broker', 'Install Managed Agent dependencies'],
-        ['event-transport-multi-node', 'Install Managed Agent dependencies'],
-      ];
-      for (const [jobName, stepName] of sites) {
-        const run = jobs[jobName].steps.find(
-          (candidate) => candidate.name === stepName,
-        ).run;
+      // Derive the list from the workflow so a new seed site is exercised
+      // without a second hand-maintained enumeration.
+      for (const [jobName, run] of seedSites()) {
         const lines = run.split('\n');
         const start = lines.findIndex((line) =>
           line.includes('mkdir -p "${RUNNER_TEMP}/m2-repo"'),
@@ -1725,10 +1717,41 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
-  it.skipIf(process.platform !== 'linux').each(['helper', 'fallback'])(
-    'records a %s lock skip in the step summary',
-    (arm) => {
-      const run = parse(workflow).jobs.test.steps.find((candidate) =>
+  it.skipIf(process.platform !== 'linux').each([
+    {
+      case: 'test helper',
+      jobName: 'test',
+      arm: 'helper',
+      resultStatus: 0,
+      expectedStatus: 0,
+    },
+    {
+      case: 'test fallback',
+      jobName: 'test',
+      arm: 'fallback',
+      resultStatus: 0,
+      expectedStatus: 0,
+    },
+    // A failed suite plus an exhausted bare-flock wait must exit with the
+    // suite result, never a green 0 over a broken build.
+    {
+      case: 'failed test fallback',
+      jobName: 'test',
+      arm: 'fallback',
+      resultStatus: 1,
+      expectedStatus: 1,
+    },
+    {
+      case: 'failed mysql fallback',
+      jobName: 'mysql-integration',
+      arm: 'fallback',
+      resultStatus: 1,
+      expectedStatus: 1,
+    },
+  ])(
+    'records a $case lock skip in the step summary',
+    ({ jobName, arm, resultStatus, expectedStatus }) => {
+      const run = parse(workflow).jobs[jobName].steps.find((candidate) =>
         candidate.run?.includes('sdk-java-tests.lock'),
       ).run;
       const start = run.indexOf('lock_setup_fault() {');
@@ -1758,7 +1781,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       try {
         const result = spawnSync(
           '/bin/bash',
-          ['-e', '-c', `result_status=0\n${run.slice(start)}`],
+          ['-e', '-c', `result_status=${resultStatus}\n${run.slice(start)}`],
           {
             encoding: 'utf8',
             timeout: 5000,
@@ -1778,7 +1801,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           },
         );
         expect(result.error).toBeUndefined();
-        expect(result.status, result.stderr).toBe(0);
+        expect(result.status, result.stderr).toBe(expectedStatus);
         expect(result.stdout).toContain(
           '::warning::Maven cache write-back skipped',
         );
