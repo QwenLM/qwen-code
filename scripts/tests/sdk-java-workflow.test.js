@@ -391,7 +391,12 @@ describe('SDK Java self-hosted workflow guards', () => {
           )
           .map((candidate) => [name, candidate.run]),
       );
-      expect(seeds.length).toBeGreaterThan(0);
+      expect(seeds.map(([name]) => name).sort()).toEqual([
+        'event-transport-broker',
+        'event-transport-multi-node',
+        'mysql-integration',
+        'test',
+      ]);
       for (const [name, seedRun] of seeds) {
         const start = seedRun.indexOf('cp -aln "${HOME}/.m2/repository"');
         const end = seedRun.indexOf('\nmvn --batch-mode', start);
