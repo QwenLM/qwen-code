@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
-import com.alibaba.qwen.code.daemon.HostedPermissionRules;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.HostedPermissionRules;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -1596,8 +1596,15 @@ public class ManagedAgentService {
         // sweep is the spender, not the rescuer.
         if (admission.turnId() != null && harness.isAvailable()
                 && (!workspaceBound || harness.isWorkspaceFilesAvailable())) {
-            coordinator.dispatch(tenantId, admission.sessionId(),
-                    admission.turnId());
+            if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+                org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                        new org.springframework.transaction.support.TransactionSynchronization() {
+                            @Override
+                            public void afterCommit() { coordinator.dispatch(tenantId, admission.sessionId(), admission.turnId()); }
+                        });
+            } else {
+                coordinator.dispatch(tenantId, admission.sessionId(), admission.turnId());
+            }
         }
     }
 
@@ -1977,6 +1984,35 @@ public class ManagedAgentService {
                     "hosted_harness_disabled",
                     "Hosted Harness is not configured.");
         }
+    }
+
+    public boolean supportsUserMessageQueue() { return harness.supportsUserMessageQueue(); }
+
+    public SessionRecord authorizeUserMessageActor(String tenantId, String actorId, String sessionId) {
+        if (actorId == null || actorId.isBlank()) {
+            throw new ManagedAgentException(HttpStatus.UNAUTHORIZED, "actor_required", "An authenticated actor is required.");
+        }
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        requireSubmitterRole(session, actorId);
+        return session;
+    }
+
+    public SessionRecord authorizeUserMessages(String tenantId, String actorId, String sessionId) {
+        SessionRecord session = authorizeUserMessageActor(tenantId, actorId, sessionId);
+        requireVisibleSession(session);
+        requireSubmitterFacts(session, actorId);
+        if (!"ACTIVE".equals(session.status())) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "session_not_active", "The Session does not accept messages.");
+        }
+        return session;
+    }
+
+    public List<Map<String, Object>> userMessageInput(List<InputBlock> blocks) {
+        List<Map<String, Object>> normalized = input(blocks, true);
+        if (normalized.stream().anyMatch(block -> "image".equals(block.get("type")))) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_input", "Images require an idle Turn.");
+        }
+        return normalized;
     }
 
     private List<Map<String, Object>> input(List<InputBlock> blocks,

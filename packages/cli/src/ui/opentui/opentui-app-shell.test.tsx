@@ -40,7 +40,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { act, render, renderHook, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
 import {
   getDialogMaxHeight,
@@ -64,13 +67,32 @@ import { createOpenTuiCommandContext } from './commands-context.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import type { StatusLineState } from '../hooks/useStatusLine.js';
 import { StreamingState } from '../types.js';
-import type { OpenTuiSubmitOptions } from './live-turn.js';
+import type { HistoryItem } from '../types.js';
+import type { LiveHistoryItem } from './live-session-model.js';
+import {
+  markApiHistoryPrompt,
+  getApiHistoryPromptId,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import type { Content } from '@google/genai';
+import { historyCommand } from '../commands/historyCommand.js';
+import { restoreCommand } from '../commands/restoreCommand.js';
+import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
+import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
+import { livePromptEvents } from './live-session.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
+import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
+import {
+  applyCollapsePolicyAndSummary,
+  expandCollapsedHistory,
+} from '../utils/resumeHistoryUtils.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
     handleResult: undefined as unknown,
     handleResults: [] as unknown[],
     loadRejects: false,
+    useRealDispatcher: false,
     deferDuringStreaming: false,
     deferGate: null as null | ((text: string) => boolean | Promise<boolean>),
     handledTexts: [] as string[],
@@ -178,8 +200,10 @@ vi.mock('@opentui/core', () => ({
 // Slash dispatcher: a submission resolves to the next queued handleResults
 // entry, or to handleResult when that queue is empty; the constructor captures
 // the host so history can be driven from a test.
-vi.mock('./commands-dispatch.js', () => ({
-  OpenTuiSlashDispatcher: class {
+vi.mock('./commands-dispatch.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./commands-dispatch.js')>();
+  class StubDispatcher {
     constructor(
       host: unknown,
       _services: unknown,
@@ -230,8 +254,29 @@ vi.mock('./commands-dispatch.js', () => ({
       const queued = mocks.state.handleResults;
       return queued.length > 0 ? queued.shift() : mocks.state.handleResult;
     }
-  },
-}));
+  }
+  return {
+    OpenTuiSlashDispatcher: vi
+      .fn()
+      .mockImplementation(
+        (
+          ...args: ConstructorParameters<typeof actual.OpenTuiSlashDispatcher>
+        ) => {
+          if (!mocks.state.useRealDispatcher)
+            return new StubDispatcher(...args);
+          mocks.state.host = args[0];
+          mocks.state.hosts.push(args[0]);
+          mocks.state.dispatcherConstructions += 1;
+          return new actual.OpenTuiSlashDispatcher(...args);
+        },
+      ),
+  };
+});
+
+vi.mock('./live-session.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./live-session.js')>();
+  return { ...actual, livePromptEvents: vi.fn(actual.livePromptEvents) };
+});
 
 // Child widgets: string markers that also record their props for assertions.
 vi.mock('./shell-mode.js', () => ({
@@ -277,7 +322,14 @@ vi.mock('./dialogs-confirm.js', () => ({
   },
   OpenTuiActionConfirmation: (props: Record<string, unknown>) => {
     mocks.state.actionConfirmProps = props;
-    return 'action-confirm';
+    return (
+      <>
+        <span>action-confirm</span>
+        <span>
+          {typeof props['prompt'] === 'string' ? props['prompt'] : null}
+        </span>
+      </>
+    );
   },
   OpenTuiMcpApprovalDialog: (props: Record<string, unknown>) => {
     mocks.state.mcpApprovalProps = props;
@@ -384,6 +436,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
     mocks.state.loadRejects = false;
+    mocks.state.useRealDispatcher = false;
     mocks.state.deferDuringStreaming = false;
     mocks.state.deferGate = null;
     mocks.state.handledTexts.length = 0;
@@ -413,6 +466,279 @@ describe('OpenTuiApp shell wiring', () => {
   afterEach(() => {
     mocks.state.executeUserShell.mockImplementation(() => Promise.resolve());
   });
+
+  it.each(['control', 'retry', 'image'] as const)(
+    'restores once without admitting a competing %s request',
+    async (kind) => {
+      const originalLive =
+        await vi.importActual<typeof import('./live-session.js')>(
+          './live-session.js',
+        );
+      const scratch = mkdtempSync(join(tmpdir(), 'restore-admission-'));
+      try {
+        let releaseRestore!: () => void;
+        const heldRestore = new Promise<void>((resolve) => {
+          releaseRestore = resolve;
+        });
+        let releaseFirst: (() => void) | undefined;
+        let owner!: ReturnType<typeof useOpenTuiLiveTurn>;
+        let coreHistory: Content[] = [];
+        let turnCount = 0;
+        const completed: number[] = [];
+        const replay = vi.fn(() => true);
+        const rewind = vi.fn(async () => {
+          await heldRestore;
+          return { filesChanged: [], filesFailed: [] };
+        });
+        const config = makeFakeConfig({});
+        config.getFileCheckpointingEnabled = () => true;
+        config.getShellExecutionSandbox = () => undefined;
+        config.getContextFilePaths = () => [];
+        config.storage.getProjectTempCheckpointsDir = () => scratch;
+        config.getChatRecordingService = () =>
+          ({ recordSlashCommand: vi.fn() }) as unknown as ReturnType<
+            Config['getChatRecordingService']
+          >;
+        config.getFileHistoryService = () =>
+          ({ rewind }) as unknown as ReturnType<
+            Config['getFileHistoryService']
+          >;
+        config.getFileReadCache = () =>
+          ({ clear: vi.fn() }) as unknown as ReturnType<
+            Config['getFileReadCache']
+          >;
+        config.getMemoryManager = () =>
+          ({
+            restoreMemoryBodiesPresentInHistory: vi.fn(),
+          }) as unknown as ReturnType<Config['getMemoryManager']>;
+        config.clearActiveTodoReminders = vi.fn();
+        const client = new LlmClient(config);
+        const chat = {
+          setHistory(history: Content[]) {
+            coreHistory = history;
+          },
+          getHistory: () => coreHistory,
+          getHistoryShallow: () => coreHistory,
+        };
+        const getChat = vi
+          .spyOn(client, 'getChat')
+          .mockReturnValue(chat as ReturnType<LlmClient['getChat']>);
+        const setHistory = vi.spyOn(client, 'setHistory');
+        config.getLlmClient = () => client;
+        let view: ReturnType<typeof render> | undefined;
+        let pendingRestore: Promise<boolean> | undefined;
+        try {
+          const checkpointApi: Content[] = [
+            { role: 'user', parts: [{ text: 'checkpoint-model' }] },
+          ];
+          const checkpointUi: HistoryItem[] = [
+            { id: 800, type: 'user', text: 'checkpoint-ui', sentToModel: true },
+          ];
+          const toolArgs = { absolute_path: join(scratch, 'owned.txt') };
+          writeFileSync(
+            join(scratch, 'owned.json'),
+            JSON.stringify({
+              promptId: 'checkpoint-prompt',
+              history: checkpointUi,
+              clientHistory: checkpointApi,
+              promptIds: ['checkpoint-prompt'],
+              toolCall: { name: 'read_file', args: toolArgs },
+            }),
+          );
+          const imagePath = join(scratch, 'image.png');
+          writeFileSync(
+            imagePath,
+            Buffer.from(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF0cAAAAASUVORK5CYII=',
+              'base64',
+            ),
+          );
+          vi.mocked(livePromptEvents).mockImplementation(
+            async function* (
+              _config,
+              prompt,
+              signal,
+              options,
+            ): AsyncGenerator<OpenTuiStreamEvent> {
+              const turn = ++turnCount;
+              options?.onPreparedRequest?.({
+                content: prompt,
+                inlineModelOverride: false,
+              });
+              if (kind === 'image' && turn === 1) {
+                await new Promise<void>((resolve) => {
+                  releaseFirst = resolve;
+                  signal?.addEventListener('abort', () => resolve(), {
+                    once: true,
+                  });
+                });
+              }
+              if (signal?.aborted) return;
+              if (kind === 'retry' && turn === 1) {
+                yield { type: 'error', text: 'failed seed request' };
+              } else {
+                coreHistory.push({
+                  role: 'model',
+                  parts: [{ text: `answer-${turn}` }],
+                });
+                yield { type: 'text', delta: `answer-${turn}` };
+                yield { type: 'done' };
+              }
+              completed.push(turn);
+            },
+          );
+          mocks.state.useRealDispatcher = true;
+          const commands = [restoreCommand(config)!];
+          function Harness() {
+            owner = useOpenTuiLiveTurn({ config });
+            return (
+              <OpenTuiApp
+                config={config}
+                settings={SETTINGS}
+                logger={null}
+                commands={commands}
+                getSessionStats={getSessionStats}
+                historyItems={owner.items}
+                streaming={owner.streaming}
+                onTranscriptEvent={owner.applyEvent}
+                onTranscriptReset={owner.resetTranscript}
+                onInputProcessed={owner.notifyInputProcessed}
+                onRetryPrompt={owner.retryLastPrompt}
+                onSubmitPrompt={owner.submit}
+                onScheduleTool={replay}
+                isCurrentHistory={owner.isCurrentHistory}
+                onInterrupt={owner.interrupt}
+                messageQueue={owner.messageQueue}
+                onPopQueue={owner.popQueue}
+              />
+            );
+          }
+          const input = () =>
+            mocks.state.inputProps!['onSubmit'] as (
+              text: string,
+              images?: string[],
+              options?: OpenTuiSubmitOptions,
+            ) => Promise<boolean>;
+          view = render(<Harness />);
+          await settle();
+          if (kind !== 'control') {
+            await act(async () => {
+              expect(await input()('seed-request')).toBe(true);
+            });
+            await vi.waitFor(() => expect(turnCount).toBe(1));
+            if (kind === 'retry') {
+              await vi.waitFor(() => expect(owner.streaming).toBe(false));
+              expect(owner.items.at(-1)).toMatchObject({
+                kind: 'error',
+                text: 'failed seed request',
+              });
+            } else expect(owner.streaming).toBe(true);
+          }
+          if (kind === 'image') {
+            await act(async () => {
+              expect(await input()('/restore owned')).toBe(true);
+            });
+            expect(rewind).not.toHaveBeenCalled();
+            await act(async () => {
+              releaseFirst!();
+            });
+          } else {
+            act(() => {
+              pendingRestore = input()('/restore owned');
+            });
+          }
+          await vi.waitFor(() =>
+            expect(rewind).toHaveBeenCalledExactlyOnceWith(
+              'checkpoint-prompt',
+              true,
+            ),
+          );
+          const host = mocks.state.host as OpenTuiAppHost;
+          expect(host.isIdle()).toBe(false);
+          expect(owner.streaming).toBe(false);
+          const expectedTurns = kind === 'control' ? 0 : 1;
+          await act(async () => {
+            expect(await input()('ordinary-while-restoring')).toBe(false);
+          });
+          expect(turnCount).toBe(expectedTurns);
+          if (kind === 'retry') {
+            await act(async () => {
+              expect(
+                (mocks.state.inputProps!['onRetry'] as () => void)(),
+              ).toBeUndefined();
+            });
+          } else if (kind === 'image') {
+            await act(async () => {
+              expect(await input()('image-while-restoring', [imagePath])).toBe(
+                false,
+              );
+            });
+          }
+          expect(turnCount).toBe(expectedTurns);
+          expect(owner.streaming).toBe(false);
+          expect(owner.messageQueue).toEqual([]);
+          expect(setHistory).not.toHaveBeenCalled();
+          expect(replay).not.toHaveBeenCalled();
+          await act(async () => {
+            releaseRestore();
+            await pendingRestore;
+          });
+          await vi.waitFor(() =>
+            expect(replay).toHaveBeenCalledExactlyOnceWith(
+              'read_file',
+              toolArgs,
+            ),
+          );
+          expect(host.isIdle()).toBe(true);
+          expect(structuredClone(coreHistory)).toEqual(checkpointApi);
+          expect(getApiHistoryPromptId(coreHistory[0])).toBe(
+            'checkpoint-prompt',
+          );
+          expect(
+            owner.items
+              .filter((item) => item.kind === 'user')
+              .map((item) => item.text),
+          ).toEqual(['checkpoint-ui']);
+          expect(setHistory).toHaveBeenCalledOnce();
+          expect(setHistory.mock.calls[0][0]).toBe(coreHistory);
+          expect(setHistory.mock.results[0].value).toBeUndefined();
+          expect(turnCount).toBe(expectedTurns);
+          expect(completed).toEqual(kind === 'control' ? [] : [1]);
+          expect(owner.messageQueue).toEqual([]);
+          if (kind === 'retry') {
+            await act(async () => {
+              (mocks.state.inputProps!['onRetry'] as () => void)();
+            });
+            expect(turnCount).toBe(1);
+            expect(owner.items.at(-1)).toMatchObject({
+              kind: 'info',
+              text: 'No failed request to retry.',
+            });
+            expect(setHistory).toHaveBeenCalledOnce();
+            expect(replay).toHaveBeenCalledOnce();
+          }
+        } finally {
+          releaseRestore();
+          releaseFirst?.();
+          try {
+            await act(async () => {
+              await pendingRestore;
+            });
+          } finally {
+            view?.unmount();
+            getChat.mockRestore();
+            setHistory.mockRestore();
+            vi.mocked(livePromptEvents).mockImplementation(
+              originalLive.livePromptEvents,
+            );
+            mocks.state.useRealDispatcher = false;
+          }
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('renders the composer inside the error boundary by default', async () => {
     renderApp();
@@ -700,6 +1026,320 @@ describe('OpenTuiApp shell wiring', () => {
     expect(new Set(mocks.state.hosts).size).toBe(1);
     expect((mocks.state.host as OpenTuiAppHost).logger).toBe(logger);
   });
+
+  it.each(['promptId', 'rewindId'] as const)(
+    'rewinds a hidden %s turn from collapsed real host history and cannot expand discarded command rows',
+    async (identityField) => {
+      const targetKey =
+        identityField === 'promptId' ? 'p2' : 'legacy-record:target';
+      const api: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'answer' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+      ];
+      markApiHistoryPrompt(api[0], 'p1');
+      markApiHistoryPrompt(api[2], targetKey);
+      const truncateHistory = vi.fn();
+      const rewindRecording = vi.fn();
+      const getRewindTurnIndex = vi.fn((id: string) =>
+        id === targetKey ? 3 : -1,
+      );
+      const config = {
+        ...CONFIG,
+        getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
+        getChatRecordingService: () => ({
+          rewindRecording,
+          getRewindTurnIndex,
+        }),
+        getFileHistoryService: () => ({ getSnapshots: () => [] }),
+        getContextFilePaths: () => ['/repo/AGENTS.md'],
+      } as unknown as Config;
+      const owner = renderHook(() => useOpenTuiLiveTurn({ config }));
+      const setText = vi.fn();
+      const invalidateImportedInput = vi.fn();
+      const props: AppProps = {
+        config,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        startupHistory: [
+          {
+            id: 0,
+            type: 'info',
+            text: 'hidden retained source',
+            display: { suppressOnRestore: true },
+          },
+        ],
+        getSessionStats,
+        initialDialog: { dialog: 'rewind' },
+        onTranscriptEvent: owner.result.current.applyEvent,
+        onTranscriptReset: owner.result.current.resetTranscript,
+        onRewindTranscript: owner.result.current.rewindTranscript,
+        onSubmitPrompt: vi.fn(() => true),
+        isCurrentHistory: owner.result.current.isCurrentHistory,
+        composerHandle: {
+          current: { getText: () => '', setText, invalidateImportedInput },
+        },
+      };
+      const view = render(
+        <OpenTuiApp {...props} historyItems={owner.result.current.items} />,
+      );
+      await settle();
+      const host = mocks.state.host as OpenTuiAppHost;
+      let kept: readonly HistoryItem[];
+      await act(async () => {
+        host.addItem(
+          { type: 'user', text: 'first', promptId: 'p1', sentToModel: true },
+          1,
+        );
+        host.addItem({ type: 'user', text: '/help', sentToModel: false }, 2);
+        host.addItem({ type: 'info', text: 'kept line one\nkept line two' }, 3);
+        kept = [...host.getHistory()];
+        host.addItem(
+          {
+            type: 'user',
+            text: 'second',
+            [identityField]: targetKey,
+            sentToModel: true,
+          },
+          4,
+        );
+        host.addItem(
+          { type: 'info', text: 'discarded line one\ndiscarded line two' },
+          5,
+        );
+        host.addItem(
+          { type: 'info', text: 'Read context files: /repo/AGENTS.md' },
+          6,
+        );
+        const collapsed = applyCollapsePolicyAndSummary(
+          [...host.getHistory()],
+          true,
+        );
+        host.loadHistory(collapsed);
+        host.resetTranscript(projectHistoryToStreamEvents(collapsed, {}));
+      });
+      view.rerender(
+        <OpenTuiApp {...props} historyItems={owner.result.current.items} />,
+      );
+      const turns = mocks.state.dialogProps![
+        'rewindTurns'
+      ] as LiveHistoryItem[];
+      const target = turns.find(
+        (item) =>
+          item.kind === 'user' &&
+          item.canonicalHistoryItem?.type === 'user' &&
+          (item.canonicalHistoryItem.promptId ??
+            item.canonicalHistoryItem.rewindId) === targetKey,
+      )!;
+      expect(target.display?.suppressOnRestore).toBe(true);
+      expect(turns.filter((item) => item.kind === 'user')).toHaveLength(2);
+      const rewind = mocks.state.dialogProps!['onRewind'] as (
+        turn: { id: string },
+        option: 'conversation',
+      ) => Promise<void>;
+      await act(async () => {
+        await rewind(target, 'conversation');
+      });
+      expect(truncateHistory).toHaveBeenCalledExactlyOnceWith(2);
+      expect(getRewindTurnIndex).toHaveBeenCalledExactlyOnceWith(targetKey);
+      expect(rewindRecording).toHaveBeenCalledExactlyOnceWith(
+        3,
+        { truncatedCount: 3 },
+        [],
+      );
+      expect(host.getHistory()).toEqual(expandCollapsedHistory([...kept!]));
+      expect(owner.result.current.items.at(-1)).toMatchObject({
+        kind: 'info',
+        text: expect.stringContaining('Conversation rewound'),
+      });
+      await vi.waitFor(() =>
+        expect(setText).toHaveBeenCalledExactlyOnceWith('second'),
+      );
+      expect(invalidateImportedInput).toHaveBeenCalledOnce();
+      expect(
+        owner.result.current.items.every(
+          (item) =>
+            !item.display?.suppressOnRestore &&
+            item.display?.kind !== 'collapse-summary',
+        ),
+      ).toBe(true);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('discarded'),
+        ),
+      ).toBe(false);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('kept line two'),
+        ),
+      ).toBe(true);
+      mocks.state.handleResult = false;
+      await submit('continue after rewind');
+      expect(
+        owner.result.current.items.filter(
+          (item) =>
+            item.kind === 'info' &&
+            item.text.startsWith(CONTEXT_FILES_ANNOUNCEMENT_PREFIX),
+        ),
+      ).toHaveLength(1);
+      await act(async () => {
+        owner.result.current.applyEvent({
+          type: 'user',
+          text: 'new prompt after rewind',
+          promptId: 'p3',
+          sentToModel: true,
+        });
+        owner.result.current.applyEvent({ type: 'text', delta: 'new answer' });
+        owner.result.current.applyEvent({ type: 'done' });
+      });
+      const newLiveRows = owner.result.current.items.slice(-2);
+      // The command-only host has no later model rows. Expanding its restored
+      // prefix must preserve the actual newer live rows and their identities.
+      const afterRewind = [...host.getHistory()];
+      const retained = host
+        .getHistory()
+        .map((item) => ({ ...item, display: { suppressOnRestore: true } }));
+      host.loadHistory(retained);
+      const context = createOpenTuiCommandContext(
+        host,
+        { config, settings: SETTINGS, logger: null },
+        { wasIdleBeforeDispatch: true },
+      );
+      await act(async () => {
+        await historyCommand.subCommands!.find(
+          (command) => command.name === 'expand-now',
+        )!.action!(context, '');
+      });
+      expect(context.ui.history.map((item) => item.id)).toEqual(
+        afterRewind.map((item) => item.id),
+      );
+      for (const item of newLiveRows)
+        expect(owner.result.current.items).toContain(item);
+      expect(owner.result.current.items.at(-2)).toMatchObject({
+        kind: 'user',
+        text: 'new prompt after rewind',
+        promptId: 'p3',
+      });
+      expect(owner.result.current.items.at(-1)).toMatchObject({
+        kind: 'assistant',
+        text: 'new answer',
+        streaming: false,
+      });
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text === 'hidden retained source',
+        ),
+      ).toBe(true);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('discarded'),
+        ),
+      ).toBe(false);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('kept line two'),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each(['session', 'same-session-resume', 'new-turn'] as const)(
+    'discards delayed file rewind after %s without touching the successor',
+    async (change) => {
+      let sessionId = 'original';
+      let release!: () => void;
+      const filesRestored = vi.fn();
+      const fileRewind = vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        filesRestored();
+        return { filesChanged: ['owned.txt'], filesFailed: [] };
+      });
+      const api: Content[] = [{ role: 'user', parts: [{ text: 'first' }] }];
+      markApiHistoryPrompt(api[0], 'p1');
+      const truncateHistory = vi.fn();
+      const rewindRecording = vi.fn();
+      const onRewindTranscript = vi.fn();
+      const onTranscriptEvent = vi.fn();
+      const config = {
+        ...CONFIG,
+        getSessionId: () => sessionId,
+        getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
+        getChatRecordingService: () => ({
+          rewindRecording,
+          getRewindTurnIndex: (id: string) => (id === 'p1' ? 0 : -1),
+        }),
+        getFileHistoryService: () => ({
+          rewind: fileRewind,
+          getSnapshots: () => [],
+        }),
+      } as unknown as Config;
+      const initial: readonly LiveHistoryItem[] = [
+        {
+          kind: 'user',
+          id: 'live-first',
+          text: 'first',
+          promptId: 'p1',
+          sentToModel: true,
+        },
+      ];
+      let currentItems = initial;
+      const props: AppProps = {
+        config,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        getSessionStats,
+        initialDialog: { dialog: 'rewind' },
+        onRewindTranscript,
+        isCurrentHistory: (snapshot) => snapshot === currentItems,
+        onTranscriptEvent,
+      };
+      const view = render(<OpenTuiApp {...props} historyItems={initial} />);
+      await settle();
+      const rewind = mocks.state.dialogProps!['onRewind'] as (
+        turn: { id: string },
+        option: 'both',
+      ) => Promise<void>;
+      let pending!: Promise<void>;
+      act(() => {
+        pending = rewind(initial[0], 'both');
+      });
+      expect(fileRewind).toHaveBeenCalledExactlyOnceWith('p1', true);
+      const successor: readonly LiveHistoryItem[] = [
+        {
+          kind: 'user',
+          id: 'successor',
+          text: 'keep me',
+          promptId: 'new',
+          sentToModel: true,
+        },
+      ];
+      currentItems = successor;
+      if (change === 'session') sessionId = 'next';
+      await act(async () => {
+        view.rerender(
+          <OpenTuiApp
+            {...props}
+            historyItems={successor}
+            streaming={change === 'new-turn'}
+          />,
+        );
+      });
+      await act(async () => {
+        release();
+        await pending;
+      });
+      expect(filesRestored).toHaveBeenCalledOnce();
+      expect(truncateHistory).not.toHaveBeenCalled();
+      expect(rewindRecording).not.toHaveBeenCalled();
+      expect(onRewindTranscript).not.toHaveBeenCalled();
+      expect(onTranscriptEvent).not.toHaveBeenCalled();
+      expect((mocks.state.host as OpenTuiAppHost).getHistory()).toEqual([]);
+    },
+  );
 
   it('reserves the update-notification slot, hidden while a dialog is open', async () => {
     renderApp({ updateNotice: 'Update available: v1.2.3' });
@@ -1443,6 +2083,49 @@ describe('OpenTuiApp shell wiring', () => {
     ]);
   });
 
+  it.each(['startup', 'reset'] as const)(
+    'retains the context announcement latch from %s history',
+    async (source) => {
+      const history: HistoryItem[] = [
+        {
+          id: 1,
+          type: 'info',
+          text: 'Read context files: /repo/AGENTS.md',
+          display: { suppressOnRestore: true },
+        },
+      ];
+      const onTranscriptEvent = vi.fn();
+      renderApp({
+        config: {
+          ...CONFIG,
+          getContextFilePaths: () => ['/repo/AGENTS.md'],
+        } as unknown as Config,
+        startupHistory: source === 'startup' ? history : [],
+        onTranscriptEvent,
+        onSubmitPrompt: vi.fn(() => true),
+      });
+      await settle();
+      const host = mocks.state.host as OpenTuiAppHost;
+      if (source === 'reset') {
+        act(() => {
+          host.loadHistory(history);
+          host.resetTranscript(projectHistoryToStreamEvents(history, {}));
+        });
+      }
+      mocks.state.handleResult = false;
+      await submit('after restore');
+      expect(onTranscriptEvent).not.toHaveBeenCalled();
+      act(() => host.clearItems());
+      await submit('after clear');
+      expect(onTranscriptEvent).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Read context files: /repo/AGENTS.md',
+        }),
+      );
+    },
+  );
+
   it('reports a not-wired notice for a plain prompt when no seam is provided', async () => {
     renderApp();
     await settle();
@@ -1562,16 +2245,23 @@ describe('OpenTuiApp shell wiring', () => {
     const onTranscriptEvent = vi.fn();
     renderApp({ onTranscriptEvent });
     await settle();
-    const host = mocks.state.host as {
-      addItem: (item: unknown, ts: number) => void;
-    };
+    const host = mocks.state.host as OpenTuiAppHost;
     await act(async () => {
       host.addItem({ type: 'info', text: 'Report filed.' }, 1000);
     });
-    expect(onTranscriptEvent).toHaveBeenCalledWith({
+    const history = host.getHistory();
+    expect(history).toEqual([
+      { type: 'info', text: 'Report filed.', id: 1001 },
+    ]);
+    expect(onTranscriptEvent).toHaveBeenCalledExactlyOnceWith({
       type: 'info',
       text: 'Report filed.',
+      historyId: history[0].id,
+      canonicalHistoryItem: history[0],
     });
+    expect(onTranscriptEvent.mock.calls[0][0].canonicalHistoryItem).toBe(
+      history[0],
+    );
   });
 
   it('routes a host clear to an empty transcript reset (U-29)', async () => {
@@ -1655,6 +2345,125 @@ describe('OpenTuiApp shell wiring', () => {
       );
     });
     await expect(actionPending).resolves.toBe(true);
+  });
+
+  it.each(['abort', 'current loss'] as const)(
+    'removes only owned A on %s and rejects stale callbacks',
+    async (mode) => {
+      const view = renderApp();
+      await settle();
+      const host = mocks.state.host as OpenTuiAppHost;
+      const controller = new AbortController();
+      let current = true;
+      const a = vi.fn();
+      const b = vi.fn();
+      await act(async () => {
+        host.addConfirmUpdateExtensionRequest({
+          prompt: 'owned A',
+          signal: controller.signal,
+          isCurrent: () => current,
+          onConfirm: a,
+        });
+        host.addConfirmUpdateExtensionRequest({
+          prompt: 'owned B',
+          onConfirm: b,
+        });
+      });
+      expect(screen.getByText('owned A')).toBeTruthy();
+      const lateA = mocks.state.actionConfirmProps!['onResolve'] as (
+        value: boolean,
+      ) => void;
+      if (mode === 'abort') {
+        await act(async () => controller.abort());
+      } else {
+        current = false;
+        view.rerender(
+          <OpenTuiApp
+            config={CONFIG}
+            settings={SETTINGS}
+            logger={null}
+            commands={[]}
+            getSessionStats={getSessionStats}
+          />,
+        );
+        await settle();
+      }
+      expect(a.mock.calls).toEqual([[false]]);
+      expect(screen.queryByText('owned A')).toBeNull();
+      expect(screen.getByText('owned B')).toBeTruthy();
+      await act(async () => {
+        lateA(true);
+        lateA(false);
+      });
+      expect(a.mock.calls).toEqual([[false]]);
+      expect(b).not.toHaveBeenCalled();
+      expect(screen.getByText('owned B')).toBeTruthy();
+      await act(async () =>
+        (
+          mocks.state.actionConfirmProps!['onResolve'] as (
+            value: boolean,
+          ) => void
+        )(true),
+      );
+      expect(b.mock.calls).toEqual([[true]]);
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    },
+  );
+
+  it('denies an owned late yes even before current loss has rendered', async () => {
+    renderApp();
+    await settle();
+    let current = true;
+    const onConfirm = vi.fn();
+    await act(async () =>
+      (mocks.state.host as OpenTuiAppHost).addConfirmUpdateExtensionRequest({
+        prompt: 'owned',
+        isCurrent: () => current,
+        onConfirm,
+      }),
+    );
+    const late = mocks.state.actionConfirmProps!['onResolve'] as (
+      value: boolean,
+    ) => void;
+    current = false;
+    await act(async () => late(true));
+    expect(onConfirm.mock.calls).toEqual([[false]]);
+    expect(screen.queryByText('owned')).toBeNull();
+  });
+
+  it('does not render pre-aborted consent and denies owned consent once on unmount', async () => {
+    const view = renderApp();
+    await settle();
+    const host = mocks.state.host as OpenTuiAppHost;
+    const dead = new AbortController();
+    dead.abort();
+    const live = new AbortController();
+    const a = vi.fn();
+    const b = vi.fn();
+    await act(async () => {
+      host.addConfirmUpdateExtensionRequest({
+        prompt: 'dead',
+        signal: dead.signal,
+        onConfirm: a,
+      });
+      host.addConfirmUpdateExtensionRequest({
+        prompt: 'live',
+        signal: live.signal,
+        onConfirm: b,
+      });
+    });
+    expect(a.mock.calls).toEqual([[false]]);
+    expect(screen.queryByText('dead')).toBeNull();
+    expect(screen.getByText('live')).toBeTruthy();
+    const late = mocks.state.actionConfirmProps!['onResolve'] as (
+      value: boolean,
+    ) => void;
+    view.unmount();
+    await act(async () => {
+      live.abort();
+      late(true);
+    });
+    expect(b.mock.calls).toEqual([[false]]);
   });
 
   it('gives a waiting tool call priority over the composer and settles it', async () => {
@@ -2748,7 +3557,9 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     renderApp({
       config,
       approvalMode: ApprovalMode.DEFAULT,
-      onTranscriptEvent: (event) => events.push(event),
+      onTranscriptEvent: (event) => {
+        events.push(event);
+      },
     });
     await settle();
     await cycleOnce();

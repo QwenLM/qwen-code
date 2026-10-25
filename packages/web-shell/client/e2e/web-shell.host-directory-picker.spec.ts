@@ -15,6 +15,7 @@ async function openHarness(
     native?: boolean;
     host?: boolean;
     interactiveHost?: boolean;
+    gitClone?: boolean;
   } = {},
 ) {
   const origin = options.remote
@@ -28,6 +29,7 @@ async function openHarness(
         'dynamic_workspace_registration',
         'persistent_workspace_registration',
         ...(options.native ? ['native_directory_picker'] : []),
+        ...(options.gitClone ? ['git_workspace_clone'] : []),
       ],
       workspaces: [
         { id: 'primary', cwd: '/srv/primary', primary: true, trusted: true },
@@ -296,4 +298,48 @@ test('retains native selection when no host callback is provided', async ({
       (r) => r.method === 'POST' && r.path === '/workspaces',
     ),
   ).toHaveLength(0);
+});
+
+test('hands Git clone parent selection to the host without starting a clone', async ({
+  page,
+}, testInfo) => {
+  const { daemon, nativeRequests } = await openHarness(page, testInfo, {
+    native: true,
+    interactiveHost: true,
+    gitClone: true,
+  });
+  await openDialog(page);
+  await page.locator('#add-workspace-source').click();
+  await page
+    .getByRole('option', { name: 'Git repository', exact: true })
+    .click();
+  await page
+    .getByLabel('Repository URL', { exact: true })
+    .fill('https://github.com/example/repo.git');
+  await dialog(page).getByRole('button', { name: 'Browse…' }).click();
+  const host = page.getByRole('dialog', { name: 'Host directory browser' });
+  const input = host.getByLabel('Directory on connected daemon');
+  await expect(input).toBeFocused();
+  await input.click();
+  await input.fill('/srv/parent');
+  await expect(
+    dialog(page).getByRole('button', { name: 'Clone and add' }),
+  ).toBeDisabled();
+  await host.getByRole('button', { name: 'Select host directory' }).click();
+  await expect(page.locator('#add-workspace-git-target')).toHaveValue(
+    '/srv/parent/repo',
+  );
+  const browse = dialog(page).getByRole('button', { name: 'Browse…' });
+  await expect(browse).toBeFocused();
+  await browse.click();
+  await page.keyboard.press('Escape');
+  await expect(dialog(page)).toHaveCount(0);
+  await expect(page.getByTestId('host-picker-aborted')).toHaveText('[2]');
+  await completePicker(page, { id: 2, path: '/srv/stale' });
+  expect(nativeRequests()).toBe(0);
+  expect(
+    daemon.requests.filter(
+      (r) => r.method === 'POST' && r.path === '/workspaces',
+    ),
+  ).toEqual([]);
 });

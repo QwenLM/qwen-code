@@ -184,6 +184,7 @@ let container: HTMLDivElement;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  state.actions.addWorkspace.mockReset();
   state.workspace.baseUrl = '';
   state.workspace.status = 'connected';
   state.workspace.capabilities = {
@@ -292,7 +293,7 @@ describe('public host workspace directory picker', () => {
       expect(button('Browse…')?.disabled).toBe(false);
       if (outcome === 'error')
         expect(document.querySelector('[role="alert"]')?.textContent).toContain(
-          'Unable to open',
+          'Unable to open the folder picker',
         );
       else expect(document.querySelector('[role="alert"]')).toBeNull();
     },
@@ -305,6 +306,29 @@ describe('public host workspace directory picker', () => {
     await click('Browse…');
     expect(pathInput().value).toBe('/native');
     expect(state.actions.pickWorkspaceDirectory).toHaveBeenCalledOnce();
+    expect(state.actions.addWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('keeps the public native picker modal while selection is pending', async () => {
+    let resolve!: (value: { selected: boolean; path: string }) => void;
+    state.workspace.capabilities.features.push('native_directory_picker');
+    state.actions.pickWorkspaceDirectory.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    await render();
+    await click('Open existing workspace');
+    expect(document.body.style.pointerEvents).toBe('none');
+    await click('Browse…');
+    expect(document.body.style.pointerEvents).toBe('none');
+    expect(
+      document.querySelector('[data-slot="dialog-overlay"]'),
+    ).not.toBeNull();
+    await act(async () => resolve({ selected: true, path: '/native' }));
+    expect(pathInput().value).toBe('/native');
+    expect(document.body.style.pointerEvents).toBe('none');
     expect(state.actions.addWorkspace).not.toHaveBeenCalled();
   });
 

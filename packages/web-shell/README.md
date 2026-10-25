@@ -19,6 +19,8 @@ Java 新建页直接复用标准 Web Shell 的欢迎标题、输入框、原生�
 
 Java 工作区查询返回 `capabilities.workspaceCreation: true` 时，工作区菜单提供“新建工作区 → 从空目录开始”。输入名称后，服务端创建并登记独立的空目录、授权给当前用户，页面自动选中它并保留任务草稿与模型。创建请求在发送前保存在当前标签页；响应不确定时，关闭弹窗或刷新页面后仍可重试同一请求。该能力默认关闭，需要服务端配置 `qwen.managed-agent.runtime-broker.workspace-creation-root` 及相应的已验证 Workspace 执行依赖；浏览器不选择服务器路径。
 
+本地守护进程通告 `git_workspace_clone` 时，“添加工作区”对话框额外提供“Git 仓库”来源：输入 clone 地址和必须尚不存在的绝对目标路径后，`POST /workspaces { kind: "git", url, target }` 返回 `202` 与任务 id，对话框通过 `/workspace-git-clone-jobs/:id` 轮询进度并可取消。clone 成功后对话框复用现有 `POST /workspaces { cwd }` 注册该目录，因此容量、嵌套、持久化和信任策略与手动添加已有目录一致；clone 本身不授予信任。该来源只对当前连接的守护进程开放；私有仓库可用 SSH agent 认证，或把 token 放进粘贴的 URL（由守护进程转交 Git，不写入克隆仓库的配置）。clone 子进程不读取宿主上已配置的 Git 凭据（`credential.helper`、`url.*.insteadOf`、`http.*` 均不生效）。失败、取消或超时会删除守护进程创建的目标目录。
+
 本地 Vite Java 演示可添加 `managedWorkspace=1`，或设置 `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true`。`VITE_MANAGED_AGENT_MODEL_PRESETS` 为上述预设数组的 JSON；`VITE_MANAGED_AGENT_ACTOR_ID` 可通过 `X-Qwen-Actor-Id` 提供本地用户身份，同时进入存储隔离 scope。Java 列出当前用户已有授权的工作区，创建能力按上述服务端配置开启；本地演示需显式配置 `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`，该配置仅用于可信 loopback 环境。文件工具执行还需要 Java 文档中的 Workspace files、Session Store、Broker mounts 和 Harness Broker 连接配置。
 
 ## Managed 工具结果
@@ -597,16 +599,23 @@ const onPickWorkspaceDirectory: WebShellWorkspaceDirectoryPicker = (opts) =>
 示例中的 `openHostDirectoryPicker` 由宿主实现，并与 `daemonOrigin` 指向同一台
 计算机。配置回调后，现有 Add Workspace 对话框的 Browse 按钮优先调用它；
 headless 或跨源 daemon 无需声明 `native_directory_picker`。
-回调只服务于当前已连接目标，不能用它为 Folder source 中另一台计算机选择路径。
+回调只服务于当前已连接目标，并要求 workspace 的 `status === 'connected'`；
+状态不满足时不显示 Browse，已配置宿主回调时也不会回退到原生选择器。
+不能用它为 Folder source 中另一台计算机选择路径。
 返回路径只回填输入框，不会自动注册；用户仍通过 Add 完成现有注册、刷新和选中流程，
 持久化能力检查和 trust 语义保持不变。选择进行中时 Add 按钮不可用，表单提交也会被
 阻止，避免注册选择前的旧路径。
+
+Git URL 来源的父目录 Browse 操作也使用此回调。宿主仍返回已存在的目录，
+对话框将父目录与 URL 中的仓库名组合为克隆目标；选择本身不会启动克隆或注册，
+仍需用户单独提交。它与本地目录选择共用取消、迟到结果保护、忙碌状态和焦点交接。
 
 宿主选择器进行中时，Add Workspace 临时释放模态限制，允许点击和聚焦 Web Shell
 portal 外的宿主 UI；完成或取消后恢复。宿主负责自己的选择器可访问性、焦点管理和
 层叠顺序。原生选择器保留原来的模态行为；这不增加公开的模态配置选项。
 
 模态切换仍会重新挂载内容，不保证 DOM 节点身份；对话框保存并恢复正文滚动偏移。
+浏览器观测确认重挂会重播入场动画；交接期间的动画抑制暂缓处理。
 已获得焦点的宿主 UI 保持优先，否则经兼容 shadow root 的检查后，将焦点停放在 Add
 面板。完成或取消后，以 `preventScroll` 将焦点返回新的 Browse 按钮；按钮不可用时
 返回面板。选择期间面板设置 `aria-busy`，Browse 显示“正在选择目录…”。
