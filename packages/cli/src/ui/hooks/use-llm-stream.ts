@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  completeRestoreToolResponse,
+  type RestoreToolResponseBinding,
+} from '../utils/restore-tool-response.js';
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 import {
   useState,
@@ -178,6 +182,7 @@ interface TeammateQueueEntry {
 }
 
 interface ToolContinuationOwner {
+  restoreResponseBinding?: RestoreToolResponseBinding;
   promptId: string;
   signal: AbortSignal;
   survivesGenerationChange: boolean;
@@ -584,6 +589,7 @@ export const useLlmStream = (
     overwriteConfirmed?: boolean,
     existingInvocationItemId?: number,
     invocationPromptId?: string,
+    isCurrentSubmission?: () => boolean,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -1299,11 +1305,31 @@ export const useLlmStream = (
 
   useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
 
-  const onExec = useCallback(async (done: Promise<void>) => {
-    setIsResponding(true);
-    await done;
-    setIsResponding(false);
-  }, []);
+  const onExec = useCallback(
+    async (done: Promise<void>) => {
+      const shellAbortController = abortControllerRef.current;
+      if (shellAbortController) {
+        detachedToolContinuationAbortControllersRef.current.add(
+          shellAbortController,
+        );
+      }
+      const releaseShellActivity = retainSubmissionActivity(
+        submissionLeaseGenerationRef.current,
+      );
+      setIsResponding(true);
+      try {
+        await done;
+      } finally {
+        if (shellAbortController) {
+          detachedToolContinuationAbortControllersRef.current.delete(
+            shellAbortController,
+          );
+        }
+        releaseShellActivity();
+      }
+    },
+    [retainSubmissionActivity],
+  );
   const { handleShellCommand, activeShellPtyId } = useShellCommandProcessor(
     addItem,
     setPendingHistoryItem,
@@ -1638,10 +1664,14 @@ export const useLlmStream = (
       humanInput?: HumanPromptInput,
       pasteExpansions?: ReadonlyMap<string, string>,
       hasUnknownInput?: boolean,
+      isCurrentSubmission?: () => boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
-      scheduledToolCallId?: string;
+      scheduledClientTool?: {
+        request: ToolCallRequestInfo;
+        restoreResponseBinding?: RestoreToolResponseBinding;
+      };
     }> => {
       if (turnCancelledRef.current && !preserveTurnOwnership) {
         return { queryToSend: null, shouldProceed: false };
@@ -1704,6 +1734,9 @@ export const useLlmStream = (
           submittedPrompt ??
           (isSlash ? trimmedQuery : stripLeadingSystemReminders(trimmedQuery));
         await logger?.logMessage(MessageSenderType.USER, userText);
+        if (abortSignal.aborted) {
+          return { queryToSend: null, shouldProceed: false };
+        }
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
 
@@ -1714,6 +1747,7 @@ export const useLlmStream = (
               undefined,
               undefined,
               submitType === SendMessageType.UserQuery ? prompt_id : undefined,
+              isCurrentSubmission,
             )
           : false;
 
@@ -1733,12 +1767,18 @@ export const useLlmStream = (
                 // gate as model calls, never to fixed-policy semantics.
                 executionOrigin: { kind: 'client' },
               };
-              registerToolBatch(toolCallRequest);
-              scheduleToolCalls([toolCallRequest], abortSignal);
               return {
                 queryToSend: null,
                 shouldProceed: false,
-                scheduledToolCallId: toolCallRequest.callId,
+                scheduledClientTool: {
+                  request: toolCallRequest,
+                  ...(slashCommandResult.restoreResponseBinding
+                    ? {
+                        restoreResponseBinding:
+                          slashCommandResult.restoreResponseBinding,
+                      }
+                    : {}),
+                },
               };
             }
             case 'submit_prompt': {
@@ -1910,8 +1950,6 @@ export const useLlmStream = (
       handleSlashCommand,
       logger,
       shellModeActive,
-      registerToolBatch,
-      scheduleToolCalls,
       applyVisionBridgeIfNeeded,
     ],
   );
@@ -3945,7 +3983,10 @@ export const useLlmStream = (
         let preparedQuery: {
           queryToSend: PartListUnion | null;
           shouldProceed: boolean;
-          scheduledToolCallId?: string;
+          scheduledClientTool?: {
+            request: ToolCallRequestInfo;
+            restoreResponseBinding?: RestoreToolResponseBinding;
+          };
         };
         try {
           preparedQuery =
@@ -3975,6 +4016,16 @@ export const useLlmStream = (
                     metadata?.humanInput,
                     metadata?.pasteExpansions,
                     metadata?.hasUnknownInput,
+                    () =>
+                      streamingState === StreamingState.Idle &&
+                      workflowConfigRef.current === config &&
+                      !abortSignal.aborted &&
+                      foregroundAbortController !== undefined &&
+                      abortControllerRef.current ===
+                        foregroundAbortController &&
+                      submissionGeneration ===
+                        submissionLeaseGenerationRef.current &&
+                      activeModelStreamsRef.current === 0,
                   );
         } catch (error) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
@@ -3982,17 +4033,35 @@ export const useLlmStream = (
           metadata?.onAdmissionFailed?.();
           throw error;
         }
-        const { queryToSend, shouldProceed, scheduledToolCallId } =
+        const { queryToSend, shouldProceed, scheduledClientTool } =
           preparedQuery;
 
-        if (scheduledToolCallId && foregroundAbortController) {
+        if (scheduledClientTool && foregroundAbortController) {
+          if (scheduledClientTool.restoreResponseBinding) {
+            scheduledClientTool.restoreResponseBinding.executionCallId =
+              scheduledClientTool.request.callId;
+          }
           keepToolContinuationAbortController = true;
-          continuationOwnersByToolCallIdRef.current.set(scheduledToolCallId, {
-            promptId: prompt_id!,
-            signal: abortSignal,
-            survivesGenerationChange: false,
-            foregroundAbortController,
-          });
+          continuationOwnersByToolCallIdRef.current.set(
+            scheduledClientTool.request.callId,
+            {
+              ...(scheduledClientTool.restoreResponseBinding
+                ? {
+                    restoreResponseBinding:
+                      scheduledClientTool.restoreResponseBinding,
+                  }
+                : {}),
+              promptId: prompt_id!,
+              signal: abortSignal,
+              survivesGenerationChange: false,
+              foregroundAbortController,
+            },
+          );
+        }
+
+        if (scheduledClientTool) {
+          registerToolBatch(scheduledClientTool.request);
+          scheduleToolCalls([scheduledClientTool.request], abortSignal);
         }
 
         if (!shouldProceed || queryToSend === null) {
@@ -4547,6 +4616,8 @@ export const useLlmStream = (
       shellModeActive,
       setModelSwitchedFromQuotaError,
       prepareQueryForLlm,
+      registerToolBatch,
+      scheduleToolCalls,
       processLlmStreamEvents,
       pendingHistoryItemRef,
       addItem,
@@ -5271,6 +5342,57 @@ export const useLlmStream = (
           t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      for (const toolCall of clientTools) {
+        const owner = continuationOwnersByToolCallIdRef.current.get(
+          toolCall.request.callId,
+        );
+        if (owner?.restoreResponseBinding) {
+          const [final] = await finalizeToolResponses(
+            config,
+            [
+              {
+                callId: toolCall.request.callId,
+                toolName: toolCall.request.name,
+                responseParts: toolCall.response.responseParts,
+                persistedOutputFiles: toolCall.response.persistedOutputFiles,
+                artifacts: toolCall.response.artifacts,
+              },
+            ],
+            new Map(
+              toolCall.request.prompt_id
+                ? [[toolCall.request.callId, toolCall.request.prompt_id]]
+                : [],
+            ),
+          );
+          await completeRestoreToolResponse(
+            owner.restoreResponseBinding,
+            toolCall.request,
+            final.responseParts,
+            () =>
+              workflowConfigRef.current === config &&
+              !owner.signal.aborted &&
+              isCurrentSession() &&
+              owner.foregroundAbortController !== undefined &&
+              abortControllerRef.current === owner.foregroundAbortController,
+            {
+              toolCallResult: {
+                callId: toolCall.request.callId,
+                status: toolCall.status,
+                resultDisplay: toolCall.response.resultDisplay,
+                error: toolCall.response.error,
+                errorType: toolCall.response.errorType,
+                executionStatus: toolCall.response.executionStatus,
+                persistedOutputFiles: final.persistedOutputFiles,
+                artifacts: final.artifacts,
+              },
+              options: goalToolResultProvenance(
+                toolCall.request,
+                final.responseParts,
+              ),
+            },
+          );
+        }
+      }
       if (clientTools.length > 0) {
         markToolsAsSubmitted(clientTools.map((t) => t.request.callId));
       }
@@ -6433,6 +6555,7 @@ export const useLlmStream = (
                   clientHistory,
                   ...(promptIds?.some(Boolean) ? { promptIds } : {}),
                   toolCall: {
+                    callId: toolCall.request.callId,
                     name: toolCall.request.name,
                     args: toolCall.request.args,
                   },

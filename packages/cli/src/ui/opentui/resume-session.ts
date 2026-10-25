@@ -12,46 +12,25 @@
  * like the original ink resume path feeds `buildResumedHistoryItems`.
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
-import {
-  transcribeSession,
-  type TranscriptResult,
-} from './transcript-adapter.js';
+import type { Config, ResumedSessionData } from '@qwen-code/qwen-code-core';
+import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 
-export interface ResumableSession {
-  conversation: { messages: readonly unknown[] };
-}
-
-function sessionToJsonl(sessionData: ResumableSession): string {
-  return sessionData.conversation.messages
-    .map((record) => JSON.stringify(record))
-    .join('\n');
-}
-
-/** Original resume renders tool registry display names ("Read File"), not raw
- * API names ("read_file"), whenever a registry is available. */
-function transcribe(
-  sessionData: ResumableSession,
-  config?: Config,
-): TranscriptResult {
-  const registry =
-    typeof config?.getToolRegistry === 'function'
-      ? config.getToolRegistry()
-      : undefined;
-  return transcribeSession(sessionToJsonl(sessionData), {
-    toolTitle: registry
-      ? (name) => registry.getTool(name)?.displayName
-      : undefined,
-  });
-}
+export type ResumableSession = Pick<
+  ResumedSessionData,
+  'conversation' | 'historyGaps'
+>;
 
 /** Replays one loaded session as neutral events (ends with `done`). */
 export function resumeEventsFromSession(
   sessionData: ResumableSession,
   config?: Config,
 ): OpenTuiStreamEvent[] {
-  return transcribe(sessionData, config).events;
+  return projectHistoryToStreamEvents(
+    buildResumedHistoryItems(sessionData, config ?? null),
+    { config },
+  );
 }
 
 /** History-eligible user prompts of one loaded session, replay order. */
@@ -59,7 +38,9 @@ export function resumeUserPromptsFromSession(
   sessionData: ResumableSession,
   config?: Config,
 ): string[] {
-  return transcribe(sessionData, config).prompts;
+  return buildResumedHistoryItems(sessionData, config ?? null).flatMap(
+    (item) => (item.type === 'user' ? [item.text] : []),
+  );
 }
 
 /** Neutral resume events for the config's resumed session, if any. */
