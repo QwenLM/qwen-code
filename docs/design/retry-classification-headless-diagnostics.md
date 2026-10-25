@@ -28,8 +28,9 @@ would change interactive behavior.
 
 Add an optional `retryDiagnostics` field to the `RETRY` stream event
 (`llm-chat.ts`) and the passthrough `ServerLlmRetryEvent` (`turn.ts`). Populate
-it where a bare retry is scheduled with a classification in scope — currently
-the transport/stream-replay branch. `turn.ts` passes the field through so the
+it where a bare retry is scheduled with a classification in scope: the
+transport/stream-replay branch and the continuation-recovery branch that asks
+the model to resume a cut answer. `turn.ts` passes the field through so the
 non-interactive CLI and SDK protocol events can read it.
 
 The field carries only allowlisted scalars: `kind` and `reason` are fixed
@@ -53,14 +54,22 @@ Retrying provider attempt (0 buffered tool call(s) discarded) [kind=transport, r
 - No interactive UI changes; the OpenTUI/Ink adapters ignore the new field and
   their retryInfo-based behavior is unchanged.
 - Optional, additive event field; structured output consumers unaffected.
+- Out of scope: the retry-_not-taken_ / exhausted decision emits no stream
+  event today, and adding one would wrongly signal an attempt restart to
+  consumers that reset state on RETRY. Surface it separately once a suitable
+  non-retry diagnostic event exists. The max-tokens truncation recovery loop
+  is a planned continuation (no failed attempt) and stays unannotated.
+  Interactive surfaces stay out of scope (#12020).
 
 ## Validation plan
 
 - Unit: `toRetryDiagnostics` keeps only allowlisted fields, omits undefined
   optionals, and strips `providerCode`/`providerMessage`/`requestId`.
-- Unit: core stream replay attaches the exact classification derived from the
-  mocked socket cut (`llm-chat.test.ts`); turn passes events through
-  (`turn.test.ts`).
+- Unit: core stream replay and continuation recovery attach the exact
+  classification derived from the mocked socket cut (`llm-chat.test.ts`); the
+  retry helper's existing local name for the full classification is
+  disambiguated from the sanitized type (`retry.ts`); turn passes events
+  through (`turn.test.ts`).
 - Unit: headless CLI prints the suffix for both output formats and keeps the
   existing bare message when no diagnostics are present.
 - Evidence from diagnostics: the field values match the classification that the

@@ -7074,7 +7074,15 @@ describe('LlmChat', async () => {
         );
         expectStreamCalls(2);
         expect(eventsOfType(events, StreamEventType.RETRY)).toEqual([
-          { type: StreamEventType.RETRY, isContinuation: true },
+          {
+            type: StreamEventType.RETRY,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+            isContinuation: true,
+          },
         ]);
         expectWarned('Server stream retry not taken', {
           retryDecision: 'skipped_after_content',
