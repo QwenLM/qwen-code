@@ -110,10 +110,10 @@ describe('resolveEndpoint', () => {
     );
   });
 
-  it('threads the operator allowlist into the resolver despite model narrowing (R2-1)', () => {
-    // The batch.model narrowing replaces the whole model object; the
-    // allowlist gate must run on the policy captured before it, or the
-    // batch endpoint is dialed off-list (issue #12805).
+  it('gates the narrowed batch endpoint on the operator allowlist (R2-1)', () => {
+    // The batch.model narrowing replaces the whole model object; the gate
+    // must still run on the policy captured before it, or the batch
+    // endpoint is dialed off-list (issue #12805).
     const provider = {
       id: 'batch-model',
       baseUrl: 'https://off-list.example/v1',
@@ -135,12 +135,55 @@ describe('resolveEndpoint', () => {
       authType: AuthType.USE_OPENAI,
     });
 
-    resolveEndpoint({ BATCH_KEY: 'key' });
+    expect(() => resolveEndpoint({ BATCH_KEY: 'key' })).toThrow(
+      /Batch endpoint 'https:\/\/off-list\.example\/v1' is not in the managed allowlist 'model\.allowedBaseUrls'/,
+    );
+  });
 
+  // No baseUrl in any layer: batch dials its DashScope fallback, so the gate
+  // must judge DashScope — not the resolver's OpenAI protocol default.
+  const noBaseUrl = (allowedBaseUrls: unknown) => {
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        model: { allowedBaseUrls },
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      },
+    });
+    mockResolve.mockReturnValue({
+      apiKey: 'k',
+      baseUrl: '',
+      model: 'm',
+      authType: AuthType.USE_OPENAI,
+    });
+  };
+
+  it('refuses the DashScope fallback when only the OpenAI default is allowed (R2-1)', () => {
+    noBaseUrl(['https://api.openai.com/v1']);
+    expect(() => resolveEndpoint({})).toThrow(
+      /Batch endpoint 'https:\/\/dashscope\.aliyuncs\.com\/compatible-mode\/v1' is not in the managed allowlist/,
+    );
+  });
+
+  it('dials the DashScope fallback when exactly it is allowed (R2-1)', () => {
+    noBaseUrl(['https://dashscope.aliyuncs.com/compatible-mode/v1']);
+    expect(resolveEndpoint({}).baseUrl).toBe(
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    );
+    // The resolver no longer judges an endpoint batch does not dial.
     expect(mockResolve).toHaveBeenCalledWith(
-      expect.objectContaining({
-        allowedBaseUrls: ['https://corp-llm.example/v1'],
-      }),
+      expect.not.objectContaining({ allowedBaseUrls: expect.anything() }),
+    );
+  });
+
+  it('rejects a non-array model.allowedBaseUrls with the startup shape error (R5-9)', () => {
+    noBaseUrl('https://dashscope.aliyuncs.com/compatible-mode/v1');
+    expect(() => resolveEndpoint({})).toThrow(/must be an array/);
+  });
+
+  it('keeps no-policy batch runs ungated', () => {
+    noBaseUrl(undefined);
+    expect(resolveEndpoint({}).baseUrl).toBe(
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
     );
   });
 });
