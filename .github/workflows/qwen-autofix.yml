@@ -2873,10 +2873,9 @@ jobs:
             if [[ "${ROUND_BUDGET}" -gt 0 && "${ROUND_BUDGET}" -lt "${EFF_MAX_ROUNDS}" ]]; then
               EFF_MAX_ROUNDS="${ROUND_BUDGET}"
             fi
-            BUDGET_USED="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.at >= $f) | "\(.ts)|\(.round)" ] | unique | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
+            BUDGET_USED="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.win != "none" and .win >= $f) | "\(.ts)|\(.round)" ] | unique | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
             [[ "${BUDGET_USED}" =~ ^[0-9]+$ ]] || BUDGET_USED=0
-            # A trailing failure streak is a breaker stop, not a spent budget.
-            BUDGET_STREAK="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.at >= $f) ] | reverse | [ .[] | .ts == "9999-12-31T23:59:59Z" ] | (index(false) // length)' <<< "${MARKERS}" 2> /dev/null || echo 0)"
+            BUDGET_STREAK="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.win != "none" and .win >= $f) ] | reverse | [ .[] | .ts == "9999-12-31T23:59:59Z" ] | (index(false) // length)' <<< "${MARKERS}" 2> /dev/null || echo 0)"
             [[ "${BUDGET_STREAK}" =~ ^[0-9]+$ ]] || BUDGET_STREAK=0
             BUDGET_SPENT=false
             [[ "${ROUND_BUDGET}" -gt 0 && "${BUDGET_USED}" -ge "${ROUND_BUDGET}" ]] && BUDGET_SPENT=true
