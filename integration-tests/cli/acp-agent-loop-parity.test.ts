@@ -174,7 +174,12 @@ const allowOnce = () => ({
       await rig?.cleanup();
       rig = new TestRig();
       await rig.setup(`acp-agent-loop-parity ${scenario.name}`, {
-        settings: scenario.settings,
+        // The follow-up suggestion request runs after the prompt returns and
+        // may or may not land before the agent stops, so leave it out.
+        settings: {
+          ...scenario.settings,
+          ui: { enableFollowupSuggestions: false },
+        },
       });
       const dir = rig.testDir!;
       scenario.prepare?.(rig);
