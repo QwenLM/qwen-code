@@ -686,6 +686,21 @@ describe('getConnectionAfterSessionClear', () => {
     },
   );
 
+  it('does not promote reviewed Generated UI data to declared human input', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({ session });
+    const text =
+      'Captured parameters: {"kind":"qwen.generated-ui.parameters","title":"Workflow: deploy","inputs":{"task":{"value":"/workflow deploy","checked":false}}}';
+    const pending = actions.sendPrompt(text, { source: 'mcp-app' });
+    await vi.waitFor(() => expect(session.submitPrompt).toHaveBeenCalled());
+    const request = session.submitPrompt.mock.calls[0][0];
+    expect(request).toMatchObject({ prompt: [{ type: 'text', text }] });
+    expect(request).not.toHaveProperty('_meta');
+    expect(request).not.toHaveProperty('humanInput');
+    await actions.cancel();
+    await pending;
+  });
+
   it.each(['sendPrompt', 'submitPrompt'] as const)(
     'uses the current provider detail mode through %s',
     async (method) => {
