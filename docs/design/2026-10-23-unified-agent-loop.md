@@ -183,7 +183,7 @@ Some surfaces did part of the interaction step themselves before they moved, and
 | `interactionSpanByHost`  | ACP's span is parented to the daemon's trace                                                                                                                                                                                                                 | an input instead: the client joins the span the host started for the prompt; before the default changes for ACP                                                          |
 | `userTurnRecordedByHost` | ACP records the prompt as typed, with its display text, attachments, resource links and daemon prompt id, before slash commands run, and takes the turn's file-history snapshot before its first send, so a prompt cancelled before it is sent still has one | an input instead: the host passes that record and the client writes it; before the default changes for ACP                                                               |
 
-`toolCallPreparations` is not in the table: it asks for an extra event and turns nothing off.
+`toolCallPreparations` and `memoryRecallQuery` are not in the table: one asks for an extra event, the other gives recall the prompt's text, which the host expanded before the send; neither turns anything off.
 
 A new option that turns off part of the client's work for one host needs a row here, and a surface's default does not change while it has an open row.
 
@@ -255,6 +255,7 @@ The core changes of this step are additive and change nothing for a caller that 
 
 - `Turn` gives `Thought` the chunk's raw `text` and `ToolCallRequest` the `functionCall` it was built from, and yields `ToolCallPreparation` for a call the model started streaming when the send asks for it with `toolCallPreparations`;
 - `SendMessageOptions.userTurnRecordedByHost`, `stopHookRunByHost`, `interactionSpanByHost` and `toolLoopGuardsByHost`, and the loop detector's `toolCallPatterns` check option;
+- `SendMessageOptions.memoryRecallQuery`, what a `UserQuery`'s memory recall searches for in place of the request;
 - `getStructuredErrorCause` returns the error a `Turn` `Error` event was built from;
 - `admitUserPrompt` takes the hook's `submitted_prompt` and a signal;
 - `runModelRound` is exported.
@@ -350,10 +351,10 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
 
 - With the setting on, an ACP prompt turn differs from today in these intended ways. Most follow from the client doing for ACP what it does for the other surfaces:
   - a prompt carries the client's date reminder when the date changed since the last one, and its system reminders are the client's, the advisor and paused-Goal reminders included; they come before ACP's one-shot notices instead of after them;
-  - UserPromptSubmit also runs for the turn's tool-result requests, with their text, as on the other surfaces (#9511); a block there ends the turn with the block notice;
+  - UserPromptSubmit also runs for the turn's tool-result requests, with their text, as on the other surfaces (#9511); a block there ends the turn with the block notice and closes the round's tool calls with a result saying the hook blocked it;
   - the session token limit is checked before the client compacts the history instead of after;
   - the client's session turn cap applies to ACP prompts, and so do its content and thought loop heuristics when `model.skipLoopDetection` is false and the next-speaker check when it is enabled (#14114);
-  - memory recall uses the request's text, a tool-result request carries the recall and the queued loop reminder and runs the client's size-only microcompaction, the managed memory tasks are the client's, skill review included, and the prompt counts toward commit attribution;
+  - a tool-result request carries the recall and the queued loop reminder and runs the client's size-only microcompaction, the managed memory tasks are the client's, skill review included, and the prompt counts toward commit attribution;
   - every compaction shows the compaction notice, also one inside a send;
 
   The ACP parity suite covers the common cases unchanged and asserts the date reminder and UserPromptSubmit on tool results.

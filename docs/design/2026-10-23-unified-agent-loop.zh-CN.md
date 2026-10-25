@@ -183,7 +183,7 @@ headless 的主循环以 `maxRounds: 1` 运行。因此它为每一轮做的准�
 | `interactionSpanByHost`  | ACP 的 span 挂在 daemon 的 trace 下                                                                                                                                                                | 改为输入：client 加入宿主为该 prompt 开启的 span；ACP 修改默认值之前完成                                    |
 | `userTurnRecordedByHost` | ACP 在 slash 命令执行前，按用户输入的原样记录 prompt，连同显示文本、附件、resource link 和 daemon prompt id 一起记录，并在首次发送前为这一轮建立文件历史快照，所以发出前就被取消的 prompt 也有快照 | 改为输入：宿主传入这条记录，由 client 写入；ACP 修改默认值之前完成                                          |
 
-`toolCallPreparations` 不在表中：它只是请求一个额外的事件，不关闭任何行为。
+`toolCallPreparations` 和 `memoryRecallQuery` 不在表中：前者只是请求一个额外的事件，后者把宿主在发送前展开的 prompt 原文交给召回；两者都不关闭任何行为。
 
 新增任何为某个宿主关闭 client 部分工作的选项，都必须在这里登记一行。入口在表中还有未关闭的行时，不修改它的默认值。
 
@@ -255,6 +255,7 @@ PR 2 分三步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是
 
 - `Turn` 给 `Thought` 带上 chunk 的原始 `text`，给 `ToolCallRequest` 带上它所依据的 `functionCall`；发送时用 `toolCallPreparations` 要求后，模型开始流式输出一个调用时会产出 `ToolCallPreparation`；
 - `SendMessageOptions.userTurnRecordedByHost`、`stopHookRunByHost`、`interactionSpanByHost` 和 `toolLoopGuardsByHost`，以及循环检测器的检查选项 `toolCallPatterns`；
+- `SendMessageOptions.memoryRecallQuery`：`UserQuery` 的记忆召回用它代替请求作为查询；
 - `getStructuredErrorCause` 返回 `Turn` 的 `Error` 事件所依据的原始错误；
 - `admitUserPrompt` 接受 hook 的 `submitted_prompt` 和取消信号；
 - 导出 `runModelRound`。
@@ -350,10 +351,10 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 
 - 设置开启时，ACP 的 prompt 轮次与现在相比有以下有意的差异。其中大多数源于 client 为 ACP 做了它为其他入口做的事：
   - 日期与上次不同时，prompt 会带上 client 的日期提醒；系统提醒改由 client 生成，包括 advisor 与已暂停 Goal 的提醒，并且排在 ACP 一次性提示的前面，而不是后面；
-  - UserPromptSubmit 也会为这一轮的工具结果请求运行，输入是请求的文本，与其他入口相同（#9511）；在这里被拦截时，轮次结束并显示拦截提示；
+  - UserPromptSubmit 也会为这一轮的工具结果请求运行，输入是请求的文本，与其他入口相同（#9511）；在这里被拦截时，轮次结束并显示拦截提示，这一轮的工具调用以“被 hook 拦截”的结果关闭；
   - session token 限制在 client 压缩历史之前检查，而不是之后；
   - client 的会话轮数上限对 ACP prompt 生效；`model.skipLoopDetection` 为 false 时它的内容和 thought 循环启发式检测也生效，启用时 next-speaker 检查也一样（#14114）；
-  - 记忆召回使用请求的文本，工具结果请求会带上召回结果和排队的循环提醒，并运行 client 只按大小判断的 microcompaction，托管记忆任务（包括 skill review）由 client 执行，prompt 计入提交署名；
+  - 工具结果请求会带上召回结果和排队的循环提醒，并运行 client 只按大小判断的 microcompaction，托管记忆任务（包括 skill review）由 client 执行，prompt 计入提交署名；
   - 每次压缩都会显示压缩提示，发送过程中的压缩也一样；
 
   ACP 对拍测试覆盖了保持不变的常见场景，并对日期提醒和工具结果上的 UserPromptSubmit 做了断言。
