@@ -425,7 +425,7 @@ export function findEnvFiles(
   };
 
   // Home-dir candidates in priority order: globalQwenDir/.env, then legacy
-  // ~/.qwen/.env (only when QWEN_HOME redirects), then ~/.env.
+  // ~/.qwen/.env (when the global dir is elsewhere), then ~/.env.
   const pushCandidate = (filePath: string): boolean => {
     const normalized = path.normalize(filePath);
     if (
@@ -593,6 +593,9 @@ function canApplyParsedEnvKey(
   // hardcoded project tier they are rejected at every scope — a home `.env`
   // must not be able to forge sandbox or Conversations runtime state either.
   if (isPrivateProvenanceEnvKey(key)) return false;
+  // It decides where the global dir is, which is resolved before any .env file
+  // loads; applying it afterwards would split global state across two dirs.
+  if (key === 'XDG_CONFIG_HOME') return false;
   if (options.reload && isReloadExcludedKey(key)) return false;
   if (!envFile.isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
     return false;

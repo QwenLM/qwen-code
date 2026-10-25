@@ -8,13 +8,17 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   buildRuntimeEnvironment,
+  getHomeEnvFallbackVars,
   hasLoadedEnvironmentValues,
   isFileSourcedEnvKey,
   loadEnvironment,
+  preResolveHomeEnvOverrides,
   reloadEnvironment,
   resetEnvironmentTrackingForTesting,
+  resetHomeEnvBootstrapForTesting,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
 import {
@@ -2108,5 +2112,64 @@ describe('hasLoadedEnvironmentValues', () => {
 
     expect(process.env[key]).toBe(value);
     expect(hasLoadedEnvironmentValues()).toBe(true);
+  });
+});
+
+describe('home .env with the global dir in the XDG config directory', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const xdgDir = () => path.join(os.homedir(), '.config', 'qwen');
+
+  beforeEach(() => {
+    // The fake home has no ~/.qwen, so on Linux the global dir is the XDG one.
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    resetHomeEnvBootstrapForTesting();
+    resetEnvironmentTrackingForTesting();
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', platform);
+    resetHomeEnvBootstrapForTesting();
+  });
+
+  it('still pre-resolves QWEN_RUNTIME_DIR from ~/.env', () => {
+    const runtimeDir = makeWorkspace();
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      `QWEN_RUNTIME_DIR=${runtimeDir}\n`,
+    );
+    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+
+    preResolveHomeEnvOverrides();
+
+    expect(process.env['QWEN_RUNTIME_DIR']).toBe(runtimeDir);
+  });
+
+  it('still reads ~/.env, after the global dir .env, for settings placeholders', () => {
+    fs.mkdirSync(xdgDir(), { recursive: true });
+    fs.writeFileSync(path.join(xdgDir(), '.env'), 'DEMO_VAR=from-qwen-dir\n');
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      'DEMO_VAR=from-home\nOPENAI_BASE_URL=https://home.example\n',
+    );
+
+    expect(getHomeEnvFallbackVars()).toMatchObject({
+      DEMO_VAR: 'from-qwen-dir',
+      OPENAI_BASE_URL: 'https://home.example',
+    });
+  });
+
+  it('does not let a home .env move the global dir through XDG_CONFIG_HOME', () => {
+    const configHome = makeWorkspace();
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      `XDG_CONFIG_HOME=${configHome}\nDEMO_VAR=loaded\n`,
+    );
+    const before = Storage.getGlobalQwenDir();
+
+    loadEnvironment(testSettings({}), makeWorkspace());
+
+    expect(process.env['DEMO_VAR']).toBe('loaded');
+    expect(process.env['XDG_CONFIG_HOME']).toBeUndefined();
+    expect(Storage.getGlobalQwenDir()).toBe(before);
   });
 });
