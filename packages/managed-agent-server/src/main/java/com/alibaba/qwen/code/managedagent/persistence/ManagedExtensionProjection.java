@@ -24,6 +24,11 @@ import static java.util.Map.entry;
 public final class ManagedExtensionProjection {
     /** The record bodies defined so far; a slice adds its body here. ofEntries, since Map.of caps ten pairs. */
     public static final Map<String, Body> RECORD_BODIES = Map.ofEntries(
+            entry("tool_stage", new Body(record -> null,
+                    ManagedToolStageRecords::requireStage,
+                    body -> body.get("toolStageId").textValue(),
+                    ManagedToolStageRecords::isStart,
+                    ManagedToolStageRecords::isSuccessor)),
             entry("hosted_harness_release", new Body(record -> null,
                     ManagedHarnessReleaseRecords::require,
                     body -> HarnessPlacementStore.releaseId(body.path("placementEpoch").asLong()),

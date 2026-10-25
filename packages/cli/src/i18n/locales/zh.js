@@ -210,6 +210,7 @@ export default {
   'toolDisplayName.CronCreate': '创建定时任务',
   'toolDisplayName.CronList': '定时任务列表',
   'toolDisplayName.CronDelete': '删除定时任务',
+  'toolDisplayName.AutofixPr': 'PR 自动修复',
   'toolDisplayName.LoopWakeup': '循环唤醒',
   'toolDisplayName.CreateSubSession': '创建子会话',
   'toolDisplayName.ListAgents': '列出 Agent',

@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
+import { outputIncludesThoughts, outputTokenCount } from './gen-ai-usage.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
@@ -257,32 +258,23 @@ const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
     event.input_token_count > 0
       ? event.input_token_count
       : event.cached_content_token_count;
-  const thoughtsIncludedInOutput =
-    event.auth_type === 'openai' || event.auth_type === 'qwen-oauth';
   return (
     input +
     event.output_token_count +
-    (thoughtsIncludedInOutput ? 0 : event.thoughts_token_count)
+    (outputIncludesThoughts(event.auth_type) ? 0 : event.thoughts_token_count)
   );
 };
 
-const getEventBillableOutputTokens = (event: ApiResponseEvent): number => {
-  const candidates = event.output_token_count;
-  const thoughts = event.thoughts_token_count;
-  const derived = event.total_token_count - event.input_token_count;
-  if (
-    event.total_token_count > 0 &&
-    derived >= candidates &&
-    derived <= candidates + thoughts
-  ) {
-    return derived;
-  }
-  return event.auth_type === 'openai' ||
-    event.auth_type === 'openai-responses' ||
-    event.auth_type === 'qwen-oauth'
-    ? candidates
-    : candidates + thoughts;
-};
+const getEventBillableOutputTokens = (event: ApiResponseEvent): number =>
+  outputTokenCount(
+    {
+      input: event.input_token_count,
+      output: event.output_token_count,
+      thoughts: event.thoughts_token_count,
+      total: event.total_token_count,
+    },
+    event.auth_type,
+  );
 
 const getLegacySubagentId = (
   event: { prompt_id?: string; subagent_name?: string },
@@ -400,6 +392,7 @@ export class UiTelemetryService extends EventEmitter {
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      event,
     });
   }
 
