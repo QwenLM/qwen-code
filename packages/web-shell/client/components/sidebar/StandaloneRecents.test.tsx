@@ -255,6 +255,21 @@ describe('StandaloneRecents', () => {
           .querySelector('[aria-expanded]')
           ?.getAttribute('aria-expanded'),
       ).toBe('true');
+
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState, currentSessionId: archiveState });
+      await act(async () => toggle().click());
+      expect(
+        window.localStorage.getItem(
+          `qwen.web-shell.sidebar.workspace-expanded:standalone:${archiveState}`,
+        ),
+      ).toBe('true');
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState, currentSessionId: archiveState });
+      expect(toggle().getAttribute('aria-expanded')).toBe('true');
+      expect(container.textContent).toContain(collapsedTitle);
     },
   );
 
