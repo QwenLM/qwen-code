@@ -114,8 +114,8 @@ export function buildPermissionCheckContext(
  * The input-side check for search tools (grep, glob) evaluates rules against
  * the search root, so a path-scoped `Read(...)` deny rule that targets an
  * individual result file can never match it. Search tools call this with the
- * files they are about to return so the per-file deny decision is the same
- * one `read_file` would get for that file.
+ * files they are about to return, reusing permission-rule evaluation. Only
+ * `deny` removes results: `ask` rules do not prompt per file during execute.
  *
  * Returns the denied subset; empty when `pm` is absent.
  */
@@ -135,7 +135,7 @@ export async function selectPathsDeniedByPermissionRules(
       { file_path: filePath },
       targetDir,
     );
-    if ((await pm.evaluate(ctx)) === 'deny') {
+    if (pm.hasRelevantRules(ctx) && (await pm.evaluate(ctx)) === 'deny') {
       denied.add(filePath);
     }
   }

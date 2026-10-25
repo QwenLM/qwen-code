@@ -6,6 +6,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import type { GrepToolParams } from './grep.js';
 import { GrepTool } from './grep.js';
 import path from 'node:path';
@@ -769,6 +771,9 @@ describe('GrepTool', () => {
       expect(result.llmContent).not.toContain('fileA');
       expect(result.llmContent).not.toContain('hello world');
       expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.returnDisplay).toContain(
+        '1 file omitted by permission rules',
+      );
       expect(result.resultFilePaths).toEqual([
         path.join(tempRootDir, 'fileB.js'),
       ]);
@@ -791,6 +796,44 @@ describe('GrepTool', () => {
 
       expect(result.llmContent).toContain('No matches found');
       expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.returnDisplay).toContain(
+        '1 file omitted by permission rules',
+      );
+    });
+
+    it('filters NUL-framed git grep results from a subdirectory', async () => {
+      await fs.mkdir(path.join(tempRootDir, '.git'));
+      const tool = toolWithPm(denyPm(['Read(./sub/fileC.txt)']));
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+      });
+      vi.mocked(spawn).mockImplementationOnce(() => {
+        setTimeout(() => {
+          child.stdout.emit(
+            'data',
+            Buffer.from(
+              'fileC.txt\x001\x00another world in sub dir\nfileD.md\x002\x00This is a test.\n',
+            ),
+          );
+          child.emit('close', 0);
+        }, 0);
+        return child as unknown as ReturnType<typeof spawn>;
+      });
+
+      const result = await run({ pattern: 'world|test', path: 'sub' }, tool);
+
+      expect(spawn).toHaveBeenLastCalledWith('git', expect.any(Array), {
+        cwd: path.join(tempRootDir, 'sub'),
+        windowsHide: true,
+      });
+      expect(result.llmContent).toContain('File: fileD.md');
+      expect(result.llmContent).not.toContain('fileC');
+      expect(result.llmContent).not.toContain('another world');
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'sub/fileD.md'),
+      ]);
     });
 
     it('keeps results unchanged without a permission manager', async () => {

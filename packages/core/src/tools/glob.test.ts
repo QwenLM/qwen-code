@@ -989,6 +989,9 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain('newer.sortme');
       expect(result.llmContent).not.toContain('older.sortme');
       expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.returnDisplay).toContain(
+        '1 file omitted by permission rules',
+      );
       expect(result.resultFilePaths).toEqual([
         path.join(tempRootDir, 'newer.sortme'),
       ]);
@@ -1011,6 +1014,49 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain(
         '3 files omitted by permission rules',
       );
+      expect(result.returnDisplay).toContain(
+        '3 files omitted by permission rules',
+      );
+    });
+
+    it('preserves the narrowing hint when the collected matches are all denied', async () => {
+      const stream = mockGlobStreamResults('denied-', 1002);
+      const result = await run(
+        { pattern: '*.streamlimit' },
+        toolWith({
+          getPermissionManager: () => denyPm(['Read(./*.streamlimit)']),
+        }),
+      );
+
+      expect(stream.getYielded()).toBe(1001);
+      expect(stream.destroy).toHaveBeenCalled();
+      expect(result.llmContent).toContain('No permitted files found');
+      expect(result.llmContent).toContain('1000 matching files');
+      expect(result.llmContent).toContain('Narrow the pattern or path');
+      expect(result.returnDisplay).toContain('truncated');
+      expect(result.llmContent).toContain(
+        '1000 files omitted by permission rules',
+      );
+      expect(result.resultFilePaths ?? []).toEqual([]);
+      expect(result.collectedFilePaths ?? []).toEqual([]);
+    });
+
+    it('keeps files matched only by ask rules visible', async () => {
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => ['Read(./older.sortme)'],
+        getPermissionsDeny: () => [],
+        getProjectRoot: () => tempRootDir,
+        getCwd: () => tempRootDir,
+      });
+      pm.initialize();
+      const result = await run(
+        { pattern: '*.sortme' },
+        toolWith({ getPermissionManager: () => pm }),
+      );
+
+      expectFound(result, 2, 'older.sortme', 'newer.sortme');
+      expect(result.llmContent).not.toContain('omitted by permission rules');
     });
 
     it('keeps results unchanged without a permission manager', async () => {

@@ -178,6 +178,9 @@ class GrepToolInvocation extends BaseToolInvocation<
       );
       const omittedFileCount = deniedPaths.size;
       if (omittedFileCount > 0) {
+        debugLogger.debug('Files omitted by permission rules:', [
+          ...deniedPaths,
+        ]);
         rawMatches = rawMatches.filter(
           (match) => !deniedPaths.has(match.absoluteFilePath),
         );
@@ -197,7 +200,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
         return {
           llmContent: noMatchMsg + omittedFilesNote,
-          returnDisplay: `No matches found`,
+          returnDisplay: `No matches found${omittedFilesNote}`,
         };
       }
 
@@ -295,6 +298,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       if (truncatedByLineLimit || truncatedByCharLimit) {
         displayMessage += ` (truncated)`;
       }
+      displayMessage += omittedFilesNote;
 
       const resultFilePaths = Array.from(
         new Set(
