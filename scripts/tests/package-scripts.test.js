@@ -1828,7 +1828,7 @@ describe('package scripts', () => {
       'npm publish --provenance "${publish_args[@]}"',
     );
     expect(releaseStepScript).toContain(
-      'corepack pnpm -r publish "${publish_args[@]}"',
+      'corepack pnpm "${retry_flags[@]}" -r publish "${publish_args[@]}"',
     );
   });
 
