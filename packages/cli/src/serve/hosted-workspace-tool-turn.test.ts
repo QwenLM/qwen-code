@@ -84,10 +84,7 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
-import {
-  hostedTodoInstructions,
-  writeHostedTodos,
-} from './hosted-todo-session.js';
+import { writeHostedTodos } from './hosted-todo-session.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 
 const broker = vi.hoisted(() => ({
@@ -2057,7 +2054,9 @@ it('persists Todo without a Worker and restores the latest state after reopen', 
     'model',
     new AbortController().signal,
   );
-  expect(responses[0].functionResponse?.response?.['todos']).toEqual(first.todos);
+  expect(responses[0].functionResponse?.response?.['todos']).toEqual(
+    first.todos,
+  );
   expect(broker.acquire).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(broker.execute).not.toHaveBeenCalled();
@@ -2134,7 +2133,9 @@ it('preserves omitted dependencies and replays the original committed list', asy
   const stored = await writeHostedTodos(session, 'prompt', 'next', next);
   expect(stored[1].blockedBy).toEqual(['a']);
   await writeHostedTodos(session, 'prompt', 'clear', { todos: [] });
-  expect(await writeHostedTodos(session, 'prompt', 'next', next)).toEqual(stored);
+  expect(await writeHostedTodos(session, 'prompt', 'next', next)).toEqual(
+    stored,
+  );
   await expect(
     writeHostedTodos(session, 'prompt', 'cycle', {
       todos: [
