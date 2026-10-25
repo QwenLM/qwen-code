@@ -65,10 +65,13 @@ const mocks = vi.hoisted(() => {
       (key: { name: string; ctrl: boolean; eventType?: string }) => void
     >,
     items: [] as LiveHistoryItem[],
+    isCurrentHistory: vi.fn(),
     appProps: null as {
       userMessages?: readonly string[];
-      onQuit?: (messages: readonly HistoryItem[]) => void;
+      startupHistory?: HistoryItem[];
+      isCurrentHistory?: (snapshot: readonly LiveHistoryItem[]) => boolean;
       renderMain?: () => unknown;
+      onQuit?: (messages: readonly HistoryItem[]) => void;
       onToggleVim?: () => Promise<boolean>;
       vimMode?: string;
       vim?: InputPromptProps['vim'];
@@ -81,7 +84,6 @@ const mocks = vi.hoisted(() => {
         } | null;
       };
     } | null,
-    resumeEvents: null as OpenTuiStreamEvent[] | null,
     seedPromptCount: null as ((count: number) => void) | null,
     transcript: [] as OpenTuiStreamEvent[],
     replayOrder: [] as string[],
@@ -184,6 +186,7 @@ vi.mock('./live-turn.js', async (importOriginal) => ({
     mocks.state.liveOptions = options;
     return {
       items: mocks.state.items,
+      isCurrentHistory: mocks.state.isCurrentHistory,
       streaming: mocks.state.streaming,
       streamingCharsRef: { current: 0 },
       isReceivingContent: false,
@@ -238,14 +241,12 @@ vi.mock('./early-input.js', () => ({
   injectCapturedInput: () => () => {},
   armCapturedInputInjection: () => () => {},
 }));
-vi.mock('./resume-session.js', () => ({
-  resumeEventsFromConfig: () => mocks.state.resumeEvents,
-}));
 
 import type { ReactElement } from 'react';
 import { render, renderHook, screen } from '@testing-library/react';
 import { act, cloneElement } from 'react';
 import { exitSession } from './exit-lifecycle.js';
+import * as sessionSwitch from './session-switch.js';
 import { startOpenTuiUI } from './start-opentui-ui.js';
 import { createCliRenderer } from '@opentui/core';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -255,6 +256,7 @@ import type { InitializationResult } from '../../core/initializer.js';
 function buildConfig(authType: 'qwen-oauth' | 'none' = 'qwen-oauth'): Config {
   return {
     getSessionId: () => 'test-session-id',
+    getResumedSessionData: () => undefined,
     getTargetDir: () => '/tmp/project',
     getApprovalMode: () => 'default',
     isInteractive: () => false,
@@ -295,7 +297,6 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.liveOptions = null;
     mocks.state.keyboard = [];
     vi.mocked(exitSession).mockClear();
-    mocks.state.resumeEvents = null;
     mocks.state.transcript = [];
     mocks.state.replayOrder = [];
     mocks.state.renderer.destroy.mockClear();
@@ -361,6 +362,217 @@ describe('startOpenTuiUI fallback contract', () => {
       write.mockRestore();
     }
   }
+
+  it('starts a fresh command history without a replay reset', async () => {
+    await withEntryApp(() => {
+      expect(mocks.state.appProps?.startupHistory).toEqual([]);
+      expect(mocks.state.appProps?.isCurrentHistory).toBe(
+        mocks.state.isCurrentHistory,
+      );
+      expect(mocks.state.replayOrder).not.toContain('reset');
+    });
+  });
+
+  it.each(['resolve', 'reject'] as const)(
+    'waits for the shared init before resumed tool metadata: %s',
+    async (outcome) => {
+      const config = buildConfig();
+      let release!: () => void;
+      let reject!: (reason: Error) => void;
+      const initialization = new Promise<void>((yes, no) => {
+        release = yes;
+        reject = no;
+      });
+      vi.mocked(config.initialize).mockReturnValue(initialization);
+      let resumed = {
+        filePath: '/tmp/project/transcript.jsonl',
+        lastCompletedUuid: 'result-row',
+        conversation: {
+          sessionId: 'test-session-id',
+          projectHash: 'project',
+          startTime: '2026-10-23T00:00:00Z',
+          lastUpdated: '2026-10-23T00:00:00Z',
+          messages: [
+            {
+              uuid: 'call-row',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-10-23T00:00:00Z',
+              cwd: '/tmp/project',
+              version: 'test',
+              type: 'assistant',
+              provenance: 'assistant_output',
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'resume-call',
+                      name: 'read_file',
+                      args: { file_path: '/tmp/project/owned' },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              uuid: 'result-row',
+              parentUuid: 'call-row',
+              sessionId: 'test-session-id',
+              timestamp: '2026-10-23T00:00:01Z',
+              cwd: '/tmp/project',
+              version: 'test',
+              type: 'tool_result',
+              provenance: 'tool_result',
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'resume-call',
+                      name: 'read_file',
+                      response: { output: 'REAL_RESULT' },
+                    },
+                  },
+                ],
+              },
+              toolCallResult: {
+                callId: 'resume-call',
+                status: 'success',
+                resultDisplay: 'REAL_RESULT',
+              },
+            },
+          ],
+        },
+      } as NonNullable<ReturnType<Config['getResumedSessionData']>>;
+      let ready = false;
+      const getTool = vi.fn(() => ({
+        displayName: 'Ready registry metadata',
+        build: () => ({ getDescription: () => 'actual resumed description' }),
+      }));
+      const registry = vi.fn(() => {
+        if (!ready) throw new Error('tool registry not initialized');
+        return { getTool };
+      });
+      Object.assign(config, {
+        getResumedSessionData: () => resumed,
+        getToolRegistry: registry,
+        getGeminiClient: () => ({ isInitialized: () => false }),
+      });
+      const history = vi.spyOn(sessionSwitch, 'buildUiHistoryItems');
+      mocks.state.runtime.startPressureMonitor.mockClear();
+      const pending = startOpenTuiUI(
+        config,
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      );
+      try {
+        await vi.waitFor(() =>
+          expect(mocks.state.runtime.startPressureMonitor).toHaveBeenCalled(),
+        );
+        expect(config.initialize).toHaveBeenCalledOnce();
+        expect(history).not.toHaveBeenCalled();
+        expect(registry).not.toHaveBeenCalled();
+        expect(mocks.state.root.render).not.toHaveBeenCalled();
+        if (outcome === 'resolve') {
+          // Real initialization can replace sessionData under the writer lease.
+          resumed = structuredClone(resumed);
+          const authoritative = resumed.conversation.messages[1];
+          authoritative.message!.parts![0].functionResponse!.response = {
+            output: 'AUTHORITATIVE_RESULT',
+          };
+          authoritative.toolCallResult!.resultDisplay = 'AUTHORITATIVE_RESULT';
+          ready = true;
+          release();
+          expect(await pending).toBe(true);
+          expect(history).toHaveBeenCalledExactlyOnceWith(resumed, {
+            config,
+            settings,
+          });
+          expect(getTool).toHaveBeenCalledWith('read_file');
+          expect(JSON.stringify(history.mock.results[0].value)).toContain(
+            'Ready registry metadata',
+          );
+          expect(JSON.stringify(history.mock.results[0].value)).toContain(
+            'AUTHORITATIVE_RESULT',
+          );
+          expect(JSON.stringify(history.mock.results[0].value)).not.toContain(
+            'REAL_RESULT',
+          );
+          expect(mocks.state.root.render).toHaveBeenCalledOnce();
+        } else {
+          reject(new Error('owned shared initialization rejected'));
+          expect(await pending).toBe(false);
+          expect(history).not.toHaveBeenCalled();
+          expect(mocks.state.root.render).not.toHaveBeenCalled();
+          expect(mocks.state.root.unmount).toHaveBeenCalledOnce();
+          expect(mocks.state.renderer.destroy).toHaveBeenCalledOnce();
+          expect(mocks.state.runtime.shutdown).toHaveBeenCalledOnce();
+          expect(mocks.state.stderrLines.join('\n')).toContain(
+            'owned shared initialization rejected',
+          );
+        }
+      } finally {
+        release();
+        await pending;
+        history.mockRestore();
+      }
+    },
+  );
+
+  it('still paints a fresh session while shared initialization is held', async () => {
+    const config = buildConfig();
+    let release!: () => void;
+    vi.mocked(config.initialize).mockReturnValue(
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    let settled = false;
+    const pending = startOpenTuiUI(
+      config,
+      settings,
+      [],
+      '/tmp/project',
+      {} as InitializationResult,
+    ).then((value) => {
+      settled = value;
+      return value;
+    });
+    try {
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect(mocks.state.root.render).toHaveBeenCalledOnce();
+      expect(config.initialize).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      await pending;
+    }
+  });
+
+  it('uses the existing startup fallback when resumed history cannot be read', async () => {
+    const config = buildConfig();
+    config.getResumedSessionData = () => {
+      throw new Error('owned resume failure');
+    };
+    expect(
+      await startOpenTuiUI(
+        config,
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      ),
+    ).toBe(false);
+    expect(mocks.state.root.render).not.toHaveBeenCalled();
+    expect(mocks.state.root.unmount).toHaveBeenCalledOnce();
+    expect(mocks.state.renderer.destroy).toHaveBeenCalledOnce();
+    expect(mocks.state.runtime.shutdown).toHaveBeenCalledOnce();
+    expect(mocks.state.stderrLines.join('\n')).toContain(
+      'owned resume failure',
+    );
+  });
 
   it('wires /vim to the real provider, persistence and footer mode', async () => {
     await withEntryApp(async () => {
@@ -896,7 +1108,28 @@ describe('startOpenTuiUI fallback contract', () => {
     const owner = createInteractiveModSession(config, {
       merged: { experimental: { mods: true } },
     } as LoadedSettings)!;
-    mocks.state.resumeEvents = [{ type: 'user', text: 'restored history' }];
+    config.getResumedSessionData = () =>
+      ({
+        conversation: {
+          sessionId: 'test-session-id',
+          projectHash: 'project',
+          startTime: '2026-10-21T00:00:00Z',
+          lastUpdated: '2026-10-21T00:00:00Z',
+          messages: [
+            {
+              uuid: 'restored',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-10-21T00:00:00Z',
+              cwd: '/tmp/project',
+              version: 'test',
+              type: 'user',
+              promptId: 'test-session-id########4',
+              message: { role: 'user', parts: [{ text: 'restored history' }] },
+            },
+          ],
+        },
+      }) as ReturnType<Config['getResumedSessionData']>;
     mocks.state.runtime.writeRuntimeSidecar.mockImplementationOnce(async () => {
       await owner.ready;
     });
@@ -917,8 +1150,28 @@ describe('startOpenTuiUI fallback contract', () => {
       const calls = mocks.state.root.render.mock.calls;
       view = render(calls[calls.length - 1]?.[0] as ReactElement);
       expect(mocks.state.replayOrder).toEqual(['reset', 'info']);
+      expect(mocks.state.appProps?.startupHistory).toEqual([
+        expect.objectContaining({
+          type: 'user',
+          text: 'restored history',
+          promptId: 'test-session-id########4',
+        }),
+      ]);
       expect(mocks.state.transcript).toEqual([
-        { type: 'user', text: 'restored history' },
+        {
+          type: 'user',
+          text: 'restored history',
+          promptId: 'test-session-id########4',
+          sentToModel: undefined,
+          historyId: mocks.state.appProps?.startupHistory?.[0]?.id,
+          canonicalHistoryItem: {
+            id: mocks.state.appProps?.startupHistory?.[0]?.id,
+            type: 'user',
+            text: 'restored history',
+            promptId: 'test-session-id########4',
+          },
+        },
+        { type: 'done' },
         { type: 'info', text: `[Mod fixture] ${warning}` },
       ]);
       view.unmount();
@@ -927,7 +1180,7 @@ describe('startOpenTuiUI fallback contract', () => {
         'fixture',
         config.getSessionId(),
       );
-      expect(mocks.state.transcript).toHaveLength(2);
+      expect(mocks.state.transcript).toHaveLength(3);
     } finally {
       view?.unmount();
       await owner.close();

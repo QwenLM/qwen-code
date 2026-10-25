@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import {
+  existsSync,
+  realpathSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -18,16 +21,25 @@ import { fileURLToPath } from 'node:url';
 import xtermHeadless from '@xterm/headless';
 import unicode11 from '@xterm/addon-unicode11';
 import { expect, it } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
-import { InteractiveSession } from './interactive-session.js';
+import {
+  InteractiveSession,
+  sendAboutUntilRendered,
+} from './interactive-session.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const renderer = pickE2eRenderer();
 const runtime = resolveE2eCliCommand(renderer);
 const json = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
+const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+const png = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
+  'base64',
+);
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 async function until(check: () => boolean | Promise<boolean>, reason: string) {
   const deadline = Date.now() + 15_000;
@@ -77,6 +89,21 @@ function text(message: Message) {
   expect(content.every((part) => part.type === 'text')).toBe(true);
   return content.map((part) => part.text).join('');
 }
+function identity(record: Journal) {
+  expect(record.sessionId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  );
+  expect(record.uuid).toBeTruthy();
+  expect(record.promptId).toBeTruthy();
+  expect(Object.hasOwn(record, 'parentUuid')).toBe(true);
+  return {
+    sessionId: record.sessionId,
+    uuid: record.uuid,
+    promptId: record.promptId,
+    parentUuid: record.parentUuid,
+  };
+}
+
 async function scenario(
   name: string,
   action: (api: Awaited<ReturnType<typeof setup>>) => Promise<void>,
@@ -388,3 +415,493 @@ for (const command of ['/quit', '/exit']) {
       expect(api.sessions).toHaveLength(1);
     }));
 }
+
+function assertImage(message: Message) {
+  expect(Array.isArray(message.content)).toBe(true);
+  const images = (message.content as Part[]).filter(
+    (part) => part.type === 'image_url',
+  );
+  expect(images).toHaveLength(1);
+  const match = /^data:([^;]+);base64,(.*)$/.exec(images[0].image_url!.url);
+  expect(match).not.toBeNull();
+  const bytes = Buffer.from(match![2], 'base64');
+  expect({ mime: match![1], length: bytes.length, hash: sha(bytes) }).toEqual(
+    renderer === 'opentui'
+      ? { mime: 'image/png', length: png.length, hash: sha(png) }
+      : {
+          mime: 'image/jpeg',
+          length: 268,
+          hash: '262e7d0be78165df4afc3c94a821e1ade5d151808908ffa8cc984c2029894246',
+        },
+  );
+}
+
+it(`H02a image caption survives cold resume (${runtime}+${renderer})`, () =>
+  scenario('image', async (api) => {
+    const caption = 'RECOVERY_IMAGE_CAPTION';
+    const followup = 'RECOVERY_IMAGE_FOLLOWUP';
+    const imagePath = join(api.workspace, 'owned image 甲.png');
+    writeFileSync(imagePath, png);
+    await api.start();
+    api.session.pressKey('\x1b[200~' + JSON.stringify(imagePath) + '\x1b[201~');
+    await api.visible('clipboard-', 'image-chip');
+    expect(api.server.requests).toHaveLength(0);
+    const first = (await api.prompt(caption)).filter((m) => m.role === 'user');
+    expect(first).toHaveLength(1);
+    expect(JSON.stringify(first[0])).toContain(caption);
+    assertImage(first[0]);
+    await until(
+      () =>
+        api.users().length === 1 &&
+        api.journals().some((r) => r.type === 'assistant'),
+      'user and assistant persisted',
+    );
+    const original = identity(api.users()[0]);
+    await api.quit();
+    await api.start(original.sessionId);
+    const cold = await api.visible(caption, 'cold-caption');
+    expect(cold).toContain('RECOVERY_image_0_DONE');
+    expect(cold).not.toContain(png.toString('base64'));
+    expect(api.server.requests).toHaveLength(1);
+    expect(api.users()).toHaveLength(1);
+    expect(identity(api.users()[0])).toEqual(original);
+    const messages = await api.prompt(followup);
+    const users = messages.filter((m) => m.role === 'user');
+    expect(users).toHaveLength(2);
+    expect(canonical(users[0])).toEqual(canonical(first[0]));
+    assertImage(users[0]);
+    expect(text(users[1])).toBe(followup);
+    expect(messages.filter((m) => m.role === 'assistant').map(text)).toEqual([
+      'RECOVERY_image_0_DONE',
+    ]);
+    expect(messages.some((m) => m.role === 'tool')).toBe(false);
+    await until(() => api.users().length === 2, 'followup persisted');
+    expect(identity(api.users()[0])).toEqual(original);
+    const next = identity(api.users()[1]);
+    expect(next.sessionId).toBe(original.sessionId);
+    expect(next.uuid).not.toBe(original.uuid);
+    expect(next.promptId).not.toBe(original.promptId);
+    await api.quit();
+    expect(api.logs()).toEqual([caption, followup]);
+    expect(api.sessions).toHaveLength(2);
+  }));
+
+it(`H02b typed file survives mutation and cold resume (${runtime}+${renderer})`, () =>
+  scenario('file', async (api) => {
+    const submitted = '@owned.txt RECOVERY_INSPECT_FILE';
+    const followup = 'RECOVERY_FILE_FOLLOWUP';
+    const old = 'RECOVERY_FILE_OLD_CANARY\n';
+    const changed = 'RECOVERY_FILE_NEW_CANARY\n';
+    const file = join(api.workspace, 'owned.txt');
+    writeFileSync(file, old);
+    await api.start();
+    const first = (await api.prompt(submitted)).filter(
+      (m) => m.role === 'user',
+    );
+    expect(first).toHaveLength(1);
+    expect(JSON.stringify(first[0])).toContain(old.trim());
+    expect(JSON.stringify(first[0])).not.toContain(changed.trim());
+    await until(
+      () =>
+        api.users().length === 1 &&
+        api.atRecords().length === 1 &&
+        api.journals().some((r) => r.type === 'assistant'),
+      'user, at-command and assistant persisted',
+    );
+    const original = identity(api.users()[0]);
+    const at = api.atRecords()[0];
+    expect(at.systemPayload?.userText).toBe(submitted);
+    expect(at.sessionId).toBe(original.sessionId);
+    expect(JSON.stringify(api.users()[0].message)).toContain(old.trim());
+    await api.visible(submitted, 'hot-typed-form');
+    await api.quit();
+    writeFileSync(file, changed);
+    expect(readFileSync(file, 'utf8')).toBe(changed);
+    await api.start(original.sessionId);
+    const cold = await api.visible(submitted, 'cold-typed-form');
+    expect(cold).toContain('RECOVERY_file_0_DONE');
+    expect(cold).not.toContain(changed.trim());
+    expect(api.server.requests).toHaveLength(1);
+    expect(api.users()).toHaveLength(1);
+    expect(api.atRecords()).toEqual([at]);
+    expect(identity(api.users()[0])).toEqual(original);
+    await api.session.idle(150, 750);
+    api.session.pressKey('\x1b[A');
+    await until(
+      async () =>
+        (await api.session.viewport())
+          .split('\n')
+          .filter((line) => /^\s*>/.test(line))
+          .at(-1)
+          ?.trim() === `> ${submitted}`,
+      'Up recalls the exact typed form into the composer',
+    );
+    api.frames['cold-Up'] = await api.session.viewport();
+    await api.session.idle(150, 750);
+    api.session.pressKey('\x01');
+    await api.session.idle(150, 750);
+    api.session.pressKey('\x0b');
+    await api.session.idle(150, 750);
+    expect(api.server.requests).toHaveLength(1);
+    const messages = await api.prompt(followup);
+    const users = messages.filter((m) => m.role === 'user');
+    expect(users).toHaveLength(2);
+    expect(canonical(users[0])).toEqual(canonical(first[0]));
+    expect(JSON.stringify(users[0])).toContain(old.trim());
+    expect(JSON.stringify(messages)).not.toContain(changed.trim());
+    expect(text(users[1])).toBe(followup);
+    expect(messages.filter((m) => m.role === 'assistant').map(text)).toEqual([
+      'RECOVERY_file_0_DONE',
+    ]);
+    await until(() => api.users().length === 2, 'followup persisted');
+    expect(identity(api.users()[0])).toEqual(original);
+    const next = identity(api.users()[1]);
+    expect(next.sessionId).toBe(original.sessionId);
+    expect(next.uuid).not.toBe(original.uuid);
+    expect(next.promptId).not.toBe(original.promptId);
+    expect(api.atRecords()).toEqual([at]);
+    expect(readFileSync(file, 'utf8')).toBe(changed);
+    await api.quit();
+    expect(api.logs()).toEqual([submitted, followup]);
+    expect(api.sessions).toHaveLength(2);
+    // Unknown humanInput provenance is covered by input-prompt.test.tsx's
+    // fresh/known/unknown seam; the HTTP protocol does not expose that field.
+  }));
+
+it(`H11e tool-only restore completes locally and accepts one explicit followup (${runtime}+${renderer})`, () =>
+  scenario('restore-tool-only', async (api) => {
+    const settingsFile = join(api.scratch, 'home', 'settings.json');
+    const settings = JSON.parse(readFileSync(settingsFile, 'utf8'));
+    json(settingsFile, {
+      ...settings,
+      tools: { shell: { enableInteractiveShell: false } },
+    });
+    await api.start(undefined, 'yolo');
+    await sendAboutUntilRendered(api.session);
+    const checkpoint = join(
+      new Storage(
+        realpathSync(api.workspace),
+        api.runtimeDir,
+      ).getProjectTempCheckpointsDir(),
+      'owned-h11e-checkpoint.json',
+    );
+    const counter = join(api.workspace, 'h11e-executions.txt');
+    const value = {
+      toolCall: {
+        name: 'run_shell_command',
+        args: {
+          command:
+            "printf 'H11E_EXECUTION\n' >> h11e-executions.txt; printf 'H11E_TOOL_STDOUT\n'",
+        },
+      },
+    };
+    try {
+      mkdirSync(dirname(checkpoint), { recursive: true });
+      json(checkpoint, value);
+      json(join(api.evidence, 'checkpoint-seed.json'), { checkpoint, value });
+      expect(JSON.parse(readFileSync(checkpoint, 'utf8'))).toEqual(value);
+      expect(api.server.requests).toHaveLength(0);
+      expect(existsSync(counter)).toBe(false);
+      await api.send('/restore');
+      const listing = await api.visible(
+        'Available tool calls to restore:',
+        'restore-list',
+      );
+      expect(listing).toContain('owned-h11e-checkpoint');
+      expect(api.server.requests).toHaveLength(0);
+      expect(existsSync(counter)).toBe(false);
+      await api.send('/restore owned-h11e-checkpoint');
+      // Completion consumes the first Enter; submit after that render settles.
+      await api.session.idle(150, 750);
+      api.session.pressKey('\r');
+      await until(
+        () =>
+          existsSync(counter) &&
+          readFileSync(counter, 'utf8') === 'H11E_EXECUTION\n',
+        'owned checkpoint tool executes exactly once',
+      );
+      await api.visible('H11E_TOOL_STDOUT', 'restore-tool');
+      expect(api.server.requests).toHaveLength(0);
+      expect(readFileSync(counter, 'utf8')).toBe('H11E_EXECUTION\n');
+      const messages = await api.prompt('H11E_HEALTHY_FOLLOWUP');
+      expect(
+        messages.some(
+          (message) =>
+            message.role === 'user' &&
+            JSON.stringify(message.content).includes('H11E_HEALTHY_FOLLOWUP'),
+        ),
+      ).toBe(true);
+      expect(api.server.requests).toHaveLength(1);
+      expect(readFileSync(counter, 'utf8')).toBe('H11E_EXECUTION\n');
+      expect(JSON.parse(readFileSync(checkpoint, 'utf8'))).toEqual(value);
+      await api.quit();
+      expect(api.server.requests).toHaveLength(1);
+      expect(readFileSync(counter, 'utf8')).toBe('H11E_EXECUTION\n');
+    } finally {
+      json(join(api.evidence, 'checkpoint-final.json'), {
+        value: existsSync(checkpoint)
+          ? JSON.parse(readFileSync(checkpoint, 'utf8'))
+          : null,
+        executionCounter: existsSync(counter)
+          ? readFileSync(counter, 'utf8')
+          : null,
+        naturalExit: api.session.exitResult(),
+        scope:
+          'tool-only scheduler/shell pipes; not file rewind, history load or inner PTY',
+      });
+    }
+  }));
+
+it(
+  `H01 actual conversation rewind preserves the retained branch (${runtime}+${renderer})`,
+  () =>
+    scenario('rewind', async (api) => {
+      const a = 'RECOVERY_REWIND_PROMPT_A';
+      const b = 'RECOVERY_REWIND_PROMPT_B';
+      const c = 'RECOVERY_REWIND_PROMPT_C';
+      const answerA = 'RECOVERY_rewind_0_DONE';
+      const answerB = 'RECOVERY_rewind_1_DONE';
+      const recordText = (record: Journal) =>
+        (record.message as { parts?: Array<{ text?: string }> })?.parts
+          ?.map((part) => part.text ?? '')
+          .join('');
+      const frameWhere = async (
+        predicate: (frame: string) => boolean,
+        label: string,
+      ) => {
+        await until(async () => {
+          api.frames[label] = await api.session.viewport();
+          return predicate(api.frames[label]);
+        }, label);
+        await api.session.idle(150, 750);
+        api.frames[label] = await api.session.viewport();
+        return api.frames[label];
+      };
+      const composerValue = (frame: string): string | undefined => {
+        const lines = frame.split('\n');
+        const borders = lines.flatMap((line, index) =>
+          /^\s*─{20,}\s*$/.test(line) ? [index] : [],
+        );
+        if (borders.length < 2) return;
+        const [top, bottom] = borders.slice(-2);
+        const body = lines.slice(top + 1, bottom);
+        if (body.length !== 1) return;
+        const match = /^\s*\* (.*)$/.exec(body[0].trimEnd());
+        if (!match) return;
+        return match[1] === '  Type your message or @path/to/file'
+          ? ''
+          : match[1];
+      };
+      const draftIs = (value: string, label: string) =>
+        frameWhere((frame) => composerValue(frame) === value, label);
+      const selectB = async (label: string) => {
+        for (let step = 0; step < 4; step++) {
+          const frame = await frameWhere(
+            (value) =>
+              value.includes('Rewind Conversation') &&
+              /›\s*#\d+\s+/.test(value),
+            `${label}-${step}`,
+          );
+          const rows = frame.split('\n');
+          const target = rows.findIndex((line) =>
+            /#2\s+RECOVERY_REWIND_PROMPT_B(?:\s|[│┃]|$)/.test(line),
+          );
+          const selected = rows.findIndex((line) => /›\s*#\d+\s+/.test(line));
+          expect(target).toBeGreaterThanOrEqual(0);
+          expect(selected).toBeGreaterThanOrEqual(0);
+          if (target === selected) {
+            expect(rows[selected]).toMatch(/›\s*#2\s+RECOVERY_REWIND_PROMPT_B/);
+            return;
+          }
+          await api.session.idle(150, 750);
+          api.session.pressKey(target > selected ? '\x1b[B' : '\x1b[A');
+          await api.session.idle(150, 750);
+        }
+        throw new Error('Visible B selection did not converge');
+      };
+
+      try {
+        await api.start(undefined, 'yolo');
+        const first = await api.prompt(a);
+        expect(
+          first.filter((message) => message.role === 'user').map(text),
+        ).toEqual([a]);
+        const second = await api.prompt(b);
+        expect(
+          second.filter((message) => message.role === 'user').map(text),
+        ).toEqual([a, b]);
+        expect(
+          second.filter((message) => message.role === 'assistant').map(text),
+        ).toEqual([answerA]);
+        await until(
+          () =>
+            api.users().length === 2 &&
+            api
+              .journals()
+              .some(
+                (record) =>
+                  record.type === 'assistant' && recordText(record) === answerB,
+              ),
+          'two real prompts and B answer recorded',
+        );
+        const before = api.journals();
+        const [originalA, originalB] = before.filter(
+          (record) => record.type === 'user',
+        );
+        const aIdentity = identity(originalA);
+        const bIdentity = identity(originalB);
+        const originalAnswerA = before.find(
+          (record) =>
+            record.type === 'assistant' && recordText(record) === answerA,
+        )!;
+        const originalAnswerB = before.find(
+          (record) =>
+            record.type === 'assistant' && recordText(record) === answerB,
+        )!;
+        expect(originalAnswerA?.uuid).toBeTruthy();
+        expect(originalAnswerB?.uuid).toBeTruthy();
+        expect(bIdentity.sessionId).toBe(aIdentity.sessionId);
+        expect(bIdentity.promptId).not.toBe(aIdentity.promptId);
+        json(join(api.evidence, 'rewind-before-journal.json'), before);
+
+        await api.send('/rollback');
+        await selectB('alias-selected-B');
+        expect(api.server.requests).toHaveLength(2);
+        await api.session.idle(150, 750);
+        api.session.pressKey('\x1b');
+        await frameWhere(
+          (frame) => !frame.includes('Rewind Conversation'),
+          'alias-cancelled',
+        );
+        await draftIs('', 'empty-after-alias-cancel');
+        expect(api.server.requests).toHaveLength(2);
+        const afterAlias = api.journals();
+        expect(
+          afterAlias.filter((record) =>
+            before.some((original) => original.uuid === record.uuid),
+          ),
+        ).toEqual(before);
+        expect(
+          afterAlias.filter(
+            (record) => record.type === 'user' || record.type === 'assistant',
+          ),
+        ).toEqual(
+          before.filter(
+            (record) => record.type === 'user' || record.type === 'assistant',
+          ),
+        );
+        json(join(api.evidence, 'rewind-alias-journal.json'), afterAlias);
+
+        await api.send('/rewind');
+        await selectB('rewind-selected-B');
+        expect(api.server.requests).toHaveLength(2);
+        await api.session.idle(150, 750);
+        api.session.pressKey('\r');
+        const confirmation = await frameWhere(
+          (frame) =>
+            frame.includes('Restore conversation only') &&
+            frame.includes(b) &&
+            !frame.includes('Computing file changes...'),
+          'confirm-real-B',
+        );
+        expect(confirmation).toMatch(/›\s*Restore conversation only/);
+        expect(confirmation).not.toContain('Restore code and conversation');
+        await api.session.idle(150, 750);
+        api.session.pressKey('\r');
+        await api.visible(
+          'Conversation rewound. Edit your prompt and press Enter to continue.',
+          'rewind-committed',
+        );
+        const draft = await draftIs(b, 'exact-restored-B-draft');
+        expect(draft).not.toContain(answerB);
+        expect(draft).toContain(answerA);
+        expect(draft.split(b)).toHaveLength(2);
+        expect(api.server.requests).toHaveLength(2);
+        await until(
+          () =>
+            api
+              .journals()
+              .some(
+                (record) =>
+                  record.type === 'system' && record.subtype === 'rewind',
+              ),
+          'rewind recorded',
+        );
+
+        await api.session.idle(150, 750);
+        api.session.pressKey('\x01');
+        await api.session.idle(150, 750);
+        api.session.pressKey('\x0b');
+        await api.session.idle(150, 750);
+        await draftIs('', 'explicitly-cleared-B');
+        const next = await api.prompt(c);
+        const users = next.filter((message) => message.role === 'user');
+        expect(users.map(text)).toEqual([a, c]);
+        expect(canonical(users[0])).toEqual(
+          canonical(first.find((message) => message.role === 'user')!),
+        );
+        expect(
+          next.filter((message) => message.role === 'assistant').map(text),
+        ).toEqual([answerA]);
+        expect(next.filter((message) => message.role === 'tool')).toHaveLength(
+          0,
+        );
+        for (const discarded of [b, answerB, '/rewind', '/rollback'])
+          expect(JSON.stringify(next)).not.toContain(discarded);
+        await until(
+          () => api.users().some((record) => recordText(record) === c),
+          'explicit C recorded',
+        );
+        const after = api.journals();
+        expect(after.find((record) => record.uuid === originalA.uuid)).toEqual(
+          originalA,
+        );
+        expect(after.find((record) => record.uuid === originalB.uuid)).toEqual(
+          originalB,
+        );
+        const currentC = after.find(
+          (record) => record.type === 'user' && recordText(record) === c,
+        )!;
+        const cIdentity = identity(currentC);
+        expect(cIdentity.sessionId).toBe(aIdentity.sessionId);
+        expect(cIdentity.promptId).not.toBe(bIdentity.promptId);
+        const byUUID = new Map(after.map((record) => [record.uuid, record]));
+        const seen = new Set<string>();
+        const ancestors: Journal[] = [];
+        let current: Journal | undefined = currentC;
+        while (current) {
+          expect(seen.has(current.uuid)).toBe(false);
+          seen.add(current.uuid);
+          ancestors.push(current);
+          if (current.parentUuid === null) break;
+          expect(byUUID.has(current.parentUuid)).toBe(true);
+          current = byUUID.get(current.parentUuid);
+        }
+        expect(seen.has(originalA.uuid)).toBe(true);
+        expect(seen.has(originalAnswerA.uuid)).toBe(true);
+        expect(seen.has(originalB.uuid)).toBe(false);
+        expect(seen.has(originalAnswerB.uuid)).toBe(false);
+        expect(
+          ancestors.filter(
+            (record) => record.type === 'system' && record.subtype === 'rewind',
+          ),
+        ).toHaveLength(1);
+        json(join(api.evidence, 'rewind-facts.json'), {
+          aIdentity,
+          bIdentity,
+          cIdentity,
+          activeAncestorUUIDs: [...seen],
+          nextWire: next,
+        });
+        await api.quit();
+      } catch (error) {
+        json(join(api.evidence, 'rewind-primary-failure.json'), {
+          name: error instanceof Error ? error.name : typeof error,
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        });
+        throw error;
+      }
+    }),
+  120_000,
+);

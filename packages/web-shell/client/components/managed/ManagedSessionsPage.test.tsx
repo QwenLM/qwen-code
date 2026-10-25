@@ -314,38 +314,6 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
-  it('keeps one composer with permission rules across Session updates', async () => {
-    mocks.client.getSession.mockImplementation(async (id: string) =>
-      summary(id, {
-        approvalMode: 'default',
-        approvalRevision: 0,
-        capabilities: {
-          canSend: true,
-          canCancel: false,
-          approvalModeChange: true,
-        },
-      }),
-    );
-    provider.approvalChange = {
-      queryOptions: vi.fn(async () => ({
-        supported: true,
-        approvalMode: 'default',
-        approvalRevision: 0,
-        availableApprovalModes: ['default'],
-        permissionRulesSupported: true,
-        permissionRules: { allow: [], ask: [], deny: [] },
-      })),
-      submit: vi.fn(),
-    };
-    for (const sessionId of ['s1', 's1', 's1', 's2', 's2']) {
-      await render(sessionId);
-      expect(container.textContent).toContain('Permission rules');
-      expect(
-        container.querySelectorAll('[data-managed-composer-scope]'),
-      ).toHaveLength(1);
-    }
-  });
-
   it('opens MCP management for the exact current Session and closes it on a Session switch', async () => {
     const query = vi.fn().mockImplementation(async (id: string) => ({
       sessionId: id,
@@ -1274,6 +1242,48 @@ describe('ManagedSessionsPage', () => {
     });
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     expect(provider.contextCompression.submit).not.toHaveBeenCalled();
+  });
+
+  it('keeps one composer and its draft when permission rules rerender', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        approvalMode: 'default',
+        approvalRevision: 0,
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          approvalModeChange: true,
+        },
+      }),
+    );
+    provider.approvalChange = {
+      queryOptions: vi.fn(async () => ({
+        supported: true,
+        approvalMode: 'default',
+        approvalRevision: 0,
+        availableApprovalModes: ['default'],
+        permissionRulesSupported: true,
+        permissionRules: { allow: ['Read'], ask: [], deny: [] },
+      })),
+      submit: vi.fn(),
+    };
+
+    await render('s1');
+    const composer = container.querySelector('textarea');
+    await input('Keep the permission draft');
+    for (let i = 0; i < 3; i++) await render('s1');
+
+    expect(
+      container.querySelectorAll('[data-managed-composer-scope]'),
+    ).toHaveLength(1);
+    expect(container.querySelector('textarea')).toBe(composer);
+    expect(composer?.value).toBe('Keep the permission draft');
+
+    await render('s2');
+    expect(
+      container.querySelectorAll('[data-managed-composer-scope]'),
+    ).toHaveLength(1);
+    expect(container.querySelector('textarea')).not.toBe(composer);
   });
 
   it.each(['qwen-code', `agent_${'a'.repeat(32)}`])(

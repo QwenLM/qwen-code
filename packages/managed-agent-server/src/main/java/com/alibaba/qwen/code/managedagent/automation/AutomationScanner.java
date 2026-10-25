@@ -10,7 +10,9 @@ import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.Sche
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
 import java.time.ZoneId;
@@ -22,6 +24,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
@@ -31,7 +39,10 @@ import java.util.function.Supplier;
  * fence, derives the slots of the window since the covered watermark on
  * the host tz database, records one decision per slot — fired, skipped or
  * missed, by the overlap and catch-up policies — and fires an occurrence as
- * one idempotent Harness operation whose claim row was durable first. A
+ * one idempotent Harness operation whose claim row was durable first. Rows
+ * are worked on a bounded pool so one slow gated fire never stalls every
+ * definition on the node; each row claims itself at task start and leases
+ * from the claim time (#15418). A
  * claim whose answer was lost is re-driven by later ticks with bounded
  * backoff and, past the bound, recorded unknown — never guessed; a scanner
  * that lost its lease cannot move the ledger. See
@@ -68,24 +79,71 @@ public class AutomationScanner {
     private final ManagedAgentProperties.Automation settings;
     private final Supplier<Long> clock;
     private final String owner;
+    private final ExecutorService pool;
 
     @Autowired
     public AutomationScanner(AutomationLedgerStore store,
-            HarnessConnector harness,
-            ManagedAgentProperties properties) {
+            HarnessConnector harness, ManagedAgentProperties properties,
+            @Qualifier("automationScannerExecutor")
+                    ThreadPoolTaskExecutor pool) {
         this(store, harness, properties.getAutomation(),
-                System::currentTimeMillis, "automation-" + UUID.randomUUID());
+                System::currentTimeMillis, "automation-" + UUID.randomUUID(),
+                pool.getThreadPoolExecutor());
     }
 
     AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
             ManagedAgentProperties.Automation settings,
             Supplier<Long> clock, String owner) {
+        this(store, harness, settings, clock, owner, DIRECT);
+    }
+
+    AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
+            ManagedAgentProperties.Automation settings,
+            Supplier<Long> clock, String owner, ExecutorService pool) {
         this.store = store;
         this.harness = harness;
         this.settings = settings;
         this.clock = clock;
         this.owner = owner;
+        this.pool = pool;
     }
+
+    /**
+     * Runs every submitted task on the submitting thread, in submit order.
+     * Unit tests pin the serial shape of the tick through the same fan-out
+     * and join the production pool takes. It owns no threads, so its
+     * lifecycle surface is inert and never stopped.
+     */
+    private static final ExecutorService DIRECT = new AbstractExecutorService() {
+        @Override
+        public void shutdown() {
+        }
+
+        @Override
+        public List<Runnable> shutdownNow() {
+            return List.of();
+        }
+
+        @Override
+        public boolean isShutdown() {
+            return false;
+        }
+
+        @Override
+        public boolean isTerminated() {
+            return false;
+        }
+
+        @Override
+        public boolean awaitTermination(long timeout, TimeUnit unit) {
+            return true;
+        }
+
+        @Override
+        public void execute(Runnable task) {
+            task.run();
+        }
+    };
 
     @Scheduled(scheduler = "managedAutomationScheduler", fixedDelayString =
             "${qwen.managed-agent.automation.scan-delay:10s}")
@@ -103,22 +161,78 @@ public class AutomationScanner {
 
     /** One tick at {@code now}; answers how many occurrences fired. */
     public int tick(long now) {
-        int fired = 0;
+        // Rows go to a bounded pool, one task per candidate: a gated fire
+        // can hold the Harness relay for tens of seconds and a serial tick
+        // made one slow definition delay every definition on the node
+        // (#15418). Work stays per-row: a row's claim — and the lease it
+        // takes from the claim time — happens inside its own task, so a
+        // queued task never holds an expiring lease, and two tasks racing
+        // one row meet the same atomic claim guard two nodes do. The tick
+        // joins before returning, so fixedDelay still never overlaps ticks.
+        List<Callable<Integer>> tasks = new ArrayList<>();
+        Set<String> submitted = new HashSet<>();
         for (ScheduleRow row : store.findArmed(now, SCAN_LIMIT)) {
-            fired += claimed(row, now, true);
+            tasks.add(() -> claimed(row, now, true));
+            // The same NUL separator the store's composite keys use: no
+            // tenant or schedule id character set has to keep this safe.
+            submitted.add(row.tenantId() + '\0' + row.scheduleId());
         }
         // Claims whose answer was lost belong to live definitions whether
         // or not they are still armed: a disabled definition's manual run
-        // is re-driven here.
+        // is re-driven here. An armed row holding one fires its re-drive in
+        // the same task, so it appears in this loop once.
         for (ScheduleRow row : store.findFiringSchedules(now, SCAN_LIMIT)) {
-            fired += claimed(row, now, false);
+            if (submitted.add(row.tenantId() + '\0' + row.scheduleId())) {
+                tasks.add(() -> claimed(row, now, false));
+            }
+        }
+        List<Future<Integer>> pending = new ArrayList<>();
+        for (Callable<Integer> task : tasks) {
+            pending.add(pool.submit(task));
+        }
+        int fired = 0;
+        Throwable failure = null;
+        for (Future<Integer> task : pending) {
+            try {
+                fired += task.get();
+            } catch (InterruptedException error) {
+                // Context close interrupted the join: the in-flight tasks
+                // still finish under their own leases. Stop joining instead
+                // of parking the shutdown behind the relay's timeouts.
+                Thread.currentThread().interrupt();
+                if (failure == null) {
+                    failure = error;
+                }
+                break;
+            } catch (ExecutionException error) {
+                // Join every task before reporting one failure: the rows
+                // are independent, and a tick must never return with work
+                // still owed to the caller's lease accounting.
+                if (failure == null) {
+                    failure = error.getCause();
+                }
+            }
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        if (failure instanceof RuntimeException error) {
+            throw error;
+        }
+        if (failure != null) {
+            throw new IllegalStateException(failure);
         }
         return fired;
     }
 
     private int claimed(ScheduleRow row, long now, boolean deriveSlots) {
+        // The lease runs from the claim itself, not from the tick's start:
+        // a long tick — up to the pool's depth times the fire's hold —
+        // must never hand out an already-expired lease another node can
+        // take the moment it is written.
+        long claimNow = clock.get();
         long fence = store.claim(row.tenantId(), row.scheduleId(), owner,
-                now + settings.getLease().toMillis(), now);
+                claimNow + settings.getLease().toMillis(), claimNow);
         if (fence < 0) {
             return 0;
         }

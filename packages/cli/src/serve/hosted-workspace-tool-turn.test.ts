@@ -85,6 +85,11 @@ import {
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 import * as hostedPlan from './hosted-plan-mode.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
+import {
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
@@ -93,6 +98,7 @@ const broker = vi.hoisted(() => ({
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
   warm: vi.fn(),
+  resolveCapabilities: vi.fn(),
   acquire: vi.fn(),
   prepare: vi.fn(),
   prepareV3: vi.fn(),
@@ -128,6 +134,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
     warm = broker.warm;
+    resolveCapabilities = broker.resolveCapabilities;
     acquire = (...args: unknown[]) => {
       this.claim = `claim-${broker.acquire.mock.calls.length + 1}`;
       return broker.acquire(...args);
@@ -253,11 +260,13 @@ const parts: Part[] = calls.map((call) => ({
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  broker.capabilityDigest = WORKSPACE_CAPABILITY_DIGEST;
   broker.backgroundProcessStatus.mockResolvedValue({ state: 'unknown' });
   expectWritesStopped = false;
   for (const method of [
     broker.authorizeLifecycle,
     broker.warm,
+    broker.resolveCapabilities,
     broker.acquire,
     broker.cancel,
     broker.release,
@@ -1639,6 +1648,186 @@ it('does not dispatch a denied web_fetch', async () => {
   expect(broker.prepare).not.toHaveBeenCalled();
 });
 
+it('declares only resident file tools without waiting for runtime warmup', async () => {
+  broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  broker.warm.mockReturnValueOnce(new Promise(() => {}));
+  const resident = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+  );
+  expect(
+    (await resident.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    ),
+  ).toEqual(['read_file', 'write_file', 'edit']);
+  expect(broker.resolveCapabilities).toHaveBeenCalledOnce();
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('refuses unresolved capability instead of advertising ordinary tools', async () => {
+  broker.resolveCapabilities.mockRejectedValueOnce(
+    new Error('scope unavailable'),
+  );
+  await expect(turn.declarations(new AbortController().signal)).rejects.toThrow(
+    'scope unavailable',
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it.each([
+  'hosted-workspace-shell/1',
+  'hosted-workspace-files/2',
+  'hosted-workspace-files/3',
+  'hosted-workspace-read/1',
+  'hosted-workspace-mcp/1',
+])(
+  'keeps %s declarations independent of capability lookup and warmup',
+  async (profile) => {
+    broker.warm.mockReturnValueOnce(new Promise(() => {}));
+    broker.resolveCapabilities.mockRejectedValue(new Error('must not query'));
+    const ordinary = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile },
+    );
+    expect(
+      await ordinary.declarations(new AbortController().signal),
+    ).not.toEqual([]);
+    expect(broker.resolveCapabilities).not.toHaveBeenCalled();
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
+
+it.each([WORKSPACE_CAPABILITY_DIGEST, RESIDENT_WORKSPACE_CAPABILITY_DIGEST])(
+  'uses the existing warm capability after a legacy route 404 (%s)',
+  async (digest) => {
+    broker.capabilityDigest = digest;
+    broker.warm.mockClear();
+    turn = createTurn();
+    broker.resolveCapabilities.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(404, 'not_found'),
+    );
+    const names = (await turn.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    );
+    expect(names).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      ...(digest === WORKSPACE_CAPABILITY_DIGEST ? ['web_fetch'] : []),
+    ]);
+    expect(broker.warm).toHaveBeenCalledOnce();
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
+
+it.each([403, 503])(
+  'does not downgrade a capability HTTP %s to completed warm metadata',
+  async (status) => {
+    const refusal = new HostedWorkspaceBrokerRejection(status, 'unavailable');
+    broker.resolveCapabilities.mockRejectedValueOnce(refusal);
+    await expect(turn.declarations(new AbortController().signal)).rejects.toBe(
+      refusal,
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
+
+it('preserves resident public Plan approval before restoring file mutations', async () => {
+  broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  const active = vi
+    .spyOn(hostedPlan, 'hostedPublicPlanActive')
+    .mockResolvedValue(true);
+  turn = createTurn(
+    false,
+    { mode: 'auto-edit' },
+    undefined,
+    undefined,
+    'public',
+  );
+  const signal = new AbortController().signal;
+  expect((await turn.declarations(signal)).map((tool) => tool.name)).toEqual([
+    'read_file',
+    'exit_plan_mode',
+  ]);
+  expect(
+    JSON.stringify(await turn.execute([calls[1]], [parts[1]], 'model', signal)),
+  ).toContain('Plan mode is read-only');
+  const plan = {
+    ...calls[0],
+    name: 'exit_plan_mode',
+    callId: 'plan',
+    args: { plan: 'Read the file, then edit it after approval.' },
+  };
+  const running = turn.execute(
+    [plan],
+    [{ functionCall: { id: plan.callId, name: plan.name, args: plan.args } }],
+    'model',
+    signal,
+  );
+  const requestId = await requested();
+  active.mockResolvedValue(false);
+  await resolveHostedAction(session, waiters, requestId, answer('allow'));
+  expect(JSON.stringify(await running)).toContain('The user approved the plan');
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect((await turn.declarations(signal)).map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'exit_plan_mode',
+  ]);
+  const edit = { ...calls[1], callId: 'approved-edit' };
+  await turn.execute(
+    [edit],
+    [{ functionCall: { id: edit.callId, name: edit.name, args: edit.args } }],
+    'model',
+    signal,
+  );
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it.each(['web_fetch', 'run_shell_command', 'glob', 'todo_write', 'skill'])(
+  'records a resident %s refusal before acquiring or preparing any work',
+  async (name) => {
+    broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    const resident = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+    );
+    const call = { ...calls[0], name, args: {}, isClientInitiated: true };
+    const response = await resident.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(response)).toContain(
+      'Resident Workspace supports only',
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await resident.consumeResults();
+    await resident.finish();
+  },
+);
+
 it('offers glob under the unified Shell, file-search and read profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
@@ -1659,7 +1848,7 @@ it('offers glob under the unified Shell, file-search and read profiles', async (
       ).declarations(signal)
     ).map((tool) => tool.name);
   const file = ['read_file', 'write_file', 'edit', 'web_fetch'];
-  const shellTools = [...file, 'run_shell_command', 'monitor'];
+  const shellTools = [...file, 'run_shell_command'];
   await expect(advertised()).resolves.toEqual(file);
   await expect(advertised('hosted-workspace-files/1')).resolves.toEqual(file);
   await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual([
@@ -3837,11 +4026,67 @@ function actionIds(): string[] {
   ];
 }
 
+// requested() polls the Turn's sequential fsynced durable writes (options
+// publish, action request, durable-wait checkpoint). A fixed budget for that
+// chain flaked on the shared pool (#13397, #15093), so budget it through the
+// slow-host policy. The budget is per wait, so the two tests that call
+// requested() twice need 2 x 20 s < 60 s on the ecs-qwen pool; the other
+// slow-host arm keeps 3 s of headroom under its 15 s ceiling so a hang still
+// fails on the assertion rather than as a bare runner timeout. The autofix
+// verification gate strips RUNNER_NAME and passes --testTimeout=60000, so
+// this lands at 12 s there; closing that needs a gate sentinel, not a local
+// change.
+function requestedWaitBudgetMs(
+  slowHost: boolean,
+  runnerName: string | undefined,
+): number {
+  if (!slowHost) return 10_000;
+  const ceiling = runnerName?.startsWith('ecs-qwen-') ? 60_000 : 15_000;
+  return Math.min(20_000, ceiling - 3_000);
+}
+
+const SLOW_HOST = isSlowTestHost();
+const BUDGET_RUNNER_NAME = process.env['RUNNER_NAME'];
+const REQUESTED_TIMEOUT_MS = requestedWaitBudgetMs(
+  SLOW_HOST,
+  BUDGET_RUNNER_NAME,
+);
+
+it('keeps the requested() wait budget under the per-test ceiling', () => {
+  expect(requestedWaitBudgetMs(true, 'ecs-qwen-64c-01')).toBe(20_000);
+  expect(requestedWaitBudgetMs(true, 'ubuntu-latest')).toBe(12_000);
+  expect(requestedWaitBudgetMs(true, undefined)).toBe(12_000);
+  expect(requestedWaitBudgetMs(false, undefined)).toBe(10_000);
+  expect(requestedWaitBudgetMs(true, 'ecs-qwen-64c-01') * 2).toBeLessThan(
+    60_000,
+  );
+});
+
+it('passes REQUESTED_TIMEOUT_MS to the requested() wait', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const waitFor = vi.spyOn(vi, 'waitFor');
+  try {
+    const requestId = await requested();
+    expect(waitFor.mock.calls.at(-1)?.[1]).toEqual({
+      timeout: requestedWaitBudgetMs(SLOW_HOST, BUDGET_RUNNER_NAME),
+    });
+    await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  } finally {
+    waitFor.mockRestore();
+  }
+  await running;
+});
+
 async function requested(count = 1): Promise<string> {
   let requestId = '';
   // The Action request commits first and its await_action checkpoint after
-  // it, each behind fsynced durable writes; on the coverage-enabled, shared
-  // post-merge CI runners the checkpoint lost vitest's 1s default (#13397).
+  // it, each behind fsynced durable writes.
   await vi.waitFor(
     async () => {
       const ids = actionIds();
@@ -3850,7 +4095,7 @@ async function requested(count = 1): Promise<string> {
       expect(session.authority.action(requestId)?.state).toBe('requested');
       expect((await checkpoint()).continuation.phase).toBe('await_action');
     },
-    { timeout: 10_000 },
+    { timeout: REQUESTED_TIMEOUT_MS },
   );
   return requestId;
 }
@@ -7860,31 +8105,38 @@ it('completes and replays durable Hook results after a live pending approval cha
     readSettings: async () => ({ mode, timeoutMs: 60_000 }),
   };
   turn = createTurn(false, approval, create());
-  const signal = new AbortController().signal;
+  const controller = new AbortController();
+  const { signal } = controller;
   const running = turn.execute([calls[1]], [parts[1]], 'model', signal);
-  const requestId = await requested();
-  mode = 'yolo';
-  const responses = await running;
-  expect(session.authority.action(requestId)?.state).toBe('decided');
-  expect(broker.execute).toHaveBeenCalledOnce();
-  expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(editB);
-  expect(
-    seen.find(({ event }) => event === HookEventName.PreToolUse)?.input,
-  ).toMatchObject({ permission_mode: 'default' });
-  expect(
-    seen.find(({ event }) => event === HookEventName.PostToolUse)?.input,
-  ).toMatchObject({ permission_mode: 'yolo' });
-  const history = await session.sink.project();
-  await expect(
-    createTurn(false, approval, create()).resumeHookResults(
-      responses,
-      'model',
-      signal,
-    ),
-  ).resolves.toEqual(responses);
-  expect(seen).toHaveLength(4);
-  expect(await session.sink.project()).toEqual(history);
-  expect(broker.execute).toHaveBeenCalledOnce();
+  const settled = running.catch(() => undefined);
+  try {
+    const requestId = await requested();
+    mode = 'yolo';
+    const responses = await running;
+    expect(session.authority.action(requestId)?.state).toBe('decided');
+    expect(broker.execute).toHaveBeenCalledOnce();
+    expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(editB);
+    expect(
+      seen.find(({ event }) => event === HookEventName.PreToolUse)?.input,
+    ).toMatchObject({ permission_mode: 'default' });
+    expect(
+      seen.find(({ event }) => event === HookEventName.PostToolUse)?.input,
+    ).toMatchObject({ permission_mode: 'yolo' });
+    const history = await session.sink.project();
+    await expect(
+      createTurn(false, approval, create()).resumeHookResults(
+        responses,
+        'model',
+        signal,
+      ),
+    ).resolves.toEqual(responses);
+    expect(seen).toHaveLength(4);
+    expect(await session.sink.project()).toEqual(history);
+    expect(broker.execute).toHaveBeenCalledOnce();
+  } finally {
+    controller.abort();
+    await settled;
+  }
 });
 
 it('preserves each durable Hook mode when the live selection changes within a batch', async () => {
@@ -10307,16 +10559,11 @@ describe('hosted Monitor admission arm', () => {
       undefined,
       undefined,
     );
-    const result = await bare.execute(
-      [call],
-      parts,
-      'model',
-      new AbortController().signal,
-    );
-    expect(result[0]?.functionResponse?.response).toMatchObject({
-      error:
-        'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.',
-    });
+    await expect(
+      bare.execute([call], parts, 'model', new AbortController().signal),
+    ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepareV3).not.toHaveBeenCalled();
   });
 
   it('refuses a Monitor on a Session that owns monitors but no v3 lane', async () => {
@@ -10337,18 +10584,13 @@ describe('hosted Monitor admission arm', () => {
       undefined,
       { monitors: { record: () => undefined } as never },
     );
-    const result = await bare.execute(
-      [call],
-      parts,
-      'model',
-      new AbortController().signal,
-    );
+    await expect(
+      bare.execute([call], parts, 'model', new AbortController().signal),
+    ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
     // Owning monitors without a v3 lane must never send the Monitor
     // travelling v2 to the Runtime: it refuses at admission, accurately.
-    expect(result[0]?.functionResponse?.response).toMatchObject({
-      error:
-        'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.',
-    });
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepareV3).not.toHaveBeenCalled();
   });
 });
 
@@ -10370,6 +10612,61 @@ function backgroundCall() {
   ];
   return { call, parts };
 }
+
+it('only advertises foreground Shell on a Session without publication', async () => {
+  turn = createTurn(true);
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).not.toContain('monitor');
+  const shell = declarations.find((tool) => tool.name === 'run_shell_command');
+  expect(shell?.parametersJsonSchema).not.toHaveProperty(
+    'properties.is_background',
+  );
+  expect(shell?.description).not.toContain('detached');
+  expect(shell?.description).toContain(
+    'Shell file mutations are not backed up',
+  );
+});
+
+it.each([true, false])(
+  'advertises background Shell only while its kind is enabled (%s)',
+  async (enabled) => {
+    const rig = backgroundTurnRig({
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+    });
+    turn = rig.turn;
+    enablement.childRun = enabled;
+    const declarations = await turn.declarations(new AbortController().signal);
+    const shell = declarations.find(
+      (tool) => tool.name === 'run_shell_command',
+    );
+    if (enabled)
+      expect(shell?.parametersJsonSchema).toHaveProperty(
+        'properties.is_background',
+      );
+    else
+      expect(shell?.parametersJsonSchema).not.toHaveProperty(
+        'properties.is_background',
+      );
+    expect(declarations.map((tool) => tool.name)).not.toContain('monitor');
+  },
+);
+
+it.each([true, false])(
+  'advertises Monitor only while its domain is enabled (%s)',
+  async (enabled) => {
+    const rig = monitorTurnRig({
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+    });
+    turn = rig.turn;
+    enablement.monitorRun = enabled;
+    const declarations = await turn.declarations(new AbortController().signal);
+    expect(declarations.some((tool) => tool.name === 'monitor')).toBe(enabled);
+  },
+);
 
 it('keeps the SSH foreground-only declaration and admission free of detached tools', async () => {
   const outcome: ToolResultEnvelope = {
