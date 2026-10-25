@@ -11,6 +11,7 @@ import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { expandHomeDir } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { readSettingsSnapshot } from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import type { SendBridgeError } from '../server/error-response.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -23,6 +24,15 @@ import type {
 export interface WorkspaceDirectoriesRouteDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
+  /**
+   * Shared bridge-error mapper, used as the fallback for failures this route
+   * does not classify itself. A freshly opened workspace spawns its control
+   * channel on the first mutation, and that spawn can time out, be refused
+   * while the child starts, or hit the child cap; those carry none of this
+   * feature's error kinds, and a flat 500 would hide a retryable state the
+   * shared mapper answers as 503/504 with `Retry-After`.
+   */
+  sendBridgeError?: SendBridgeError;
 }
 
 interface DirectoriesResult {
@@ -31,8 +41,6 @@ interface DirectoriesResult {
   changed: boolean;
   warnings: string[];
 }
-
-const SSH_WORKSPACE_PREFIX = 'ssh://';
 
 /** Resolve a persisted entry the way runtime configuration reads it. */
 function resolveWorkspaceDirectory(
@@ -81,7 +89,12 @@ function readBridgeErrorKind(error: unknown): string | undefined {
   return typeof kind === 'string' ? kind : undefined;
 }
 
-function sendBridgeError(res: Response, error: unknown, route: string): void {
+function sendDirectoriesError(
+  res: Response,
+  error: unknown,
+  route: string,
+  sendBridgeError?: SendBridgeError,
+): void {
   switch (readBridgeErrorKind(error)) {
     case 'untrusted_workspace':
       res.status(403).json({
@@ -128,6 +141,13 @@ function sendBridgeError(res: Response, error: unknown, route: string): void {
       .json({ error: 'Invalid directory request.', code: 'invalid_path' });
     return;
   }
+  if (sendBridgeError) {
+    // Lifecycle and transport failures (a control-channel spawn that times
+    // out, a runtime still starting, the child cap) carry none of the kinds
+    // above; the shared mapper answers them with their retryable semantics.
+    sendBridgeError(res, error, { route });
+    return;
+  }
   writeStderrLine(
     `qwen serve: ${route} error: ${
       error instanceof Error ? error.message : String(error)
@@ -158,8 +178,11 @@ function resolveTarget(
   );
   if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return null;
   // SSH workspaces validate paths on the remote host; the daemon cannot stat
-  // them, and the CLI blocks /directory for them as well.
-  if (runtime.workspaceCwd.startsWith(SSH_WORKSPACE_PREFIX)) {
+  // them, and the CLI blocks /directory for them as well. Registration rewrites
+  // an `ssh://` URL to a local mirror directory, so the cwd never carries that
+  // scheme: the runtime's own SSH marker is the signal the rest of the tree
+  // uses (`capabilities.ts`, `memory-import.ts`).
+  if (runtime.routeFileSystemFactory.sshWorkspace) {
     sendUnsupported(res);
     return null;
   }
@@ -246,7 +269,12 @@ export function registerWorkspaceDirectoriesRoutes(
           );
         res.status(200).json({ v: 1, ...result });
       } catch (error) {
-        sendBridgeError(res, error, 'POST /workspaces/:workspace/directories');
+        sendDirectoriesError(
+          res,
+          error,
+          'POST /workspaces/:workspace/directories',
+          deps.sendBridgeError,
+        );
       }
     },
   );
@@ -273,10 +301,11 @@ export function registerWorkspaceDirectoriesRoutes(
           );
         res.status(200).json({ v: 1, ...result });
       } catch (error) {
-        sendBridgeError(
+        sendDirectoriesError(
           res,
           error,
           'DELETE /workspaces/:workspace/directories',
+          deps.sendBridgeError,
         );
       }
     },

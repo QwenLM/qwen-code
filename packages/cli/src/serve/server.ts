@@ -3383,6 +3383,7 @@ export function createServeApp(
       registerWorkspaceDirectoriesRoutes(app, {
         workspaceRegistry,
         mutate,
+        sendBridgeError,
       });
     }
     // Process-global user-level language sync (issue #10234). Registered

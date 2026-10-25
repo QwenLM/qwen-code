@@ -17,8 +17,6 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
 
-const SSH_WORKSPACE_PREFIX = 'ssh://';
-
 interface DirectoriesState {
   status: 'loading' | 'ready' | 'error';
   primaryDirectory?: string;
@@ -36,11 +34,24 @@ export function WorkspaceDirectoriesSection() {
   const workspace = useWorkspace();
   const actions = useWorkspaceActions();
   const workspaceCwd = workspace.workspaceCwd;
+  // Registration rewrites an `ssh://` URL to a local mirror directory, so the
+  // cwd never carries that scheme; the workspace entry's SSH marker is the
+  // signal the rest of the shell uses.
+  const sshWorkspace =
+    workspace.capabilities?.workspaces?.find(
+      (entry) => entry.cwd === workspaceCwd,
+    )?.ssh !== undefined;
   const supported =
     connection.capabilities?.features?.includes('workspace_directories') ===
       true &&
     workspaceCwd !== undefined &&
-    !workspaceCwd.startsWith(SSH_WORKSPACE_PREFIX);
+    !sshWorkspace;
+  // The picker is an independent, host-probed capability: a headless daemon
+  // still serves this section but answers the picker with 501, so Browse must
+  // stay hidden there instead of failing on every click.
+  const pickerSupported =
+    connection.capabilities?.features?.includes('native_directory_picker') ===
+    true;
   const [state, setState] = useState<DirectoriesState>({
     status: 'loading',
     directories: [],
@@ -48,6 +59,12 @@ export function WorkspaceDirectoriesSection() {
   const [notice, setNotice] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  // The mutation is a read-modify-write of the persisted list, so two
+  // in-flight requests can lose one another: whichever write lands last wins
+  // and the loser's change is silently gone. One gate covers both directions;
+  // the ref makes it effective within the same tick, before state re-renders.
+  const mutatingRef = useRef(false);
   const requestRef = useRef(0);
 
   useEffect(() => {
@@ -77,21 +94,31 @@ export function WorkspaceDirectoriesSection() {
 
   const addDirectory = useCallback(
     async (path: string) => {
-      if (!workspaceCwd) return;
-      const result = await actions.addWorkspaceDirectory(workspaceCwd, path);
-      setState({
-        status: 'ready',
-        primaryDirectory: result.primaryDirectory,
-        directories: result.directories,
-      });
-      setNotice(result.warnings.length > 0 ? result.warnings.join(' ') : null);
+      if (!workspaceCwd || mutatingRef.current) return;
+      mutatingRef.current = true;
+      setAdding(true);
+      try {
+        const result = await actions.addWorkspaceDirectory(workspaceCwd, path);
+        setState({
+          status: 'ready',
+          primaryDirectory: result.primaryDirectory,
+          directories: result.directories,
+        });
+        setNotice(
+          result.warnings.length > 0 ? result.warnings.join(' ') : null,
+        );
+      } finally {
+        mutatingRef.current = false;
+        setAdding(false);
+      }
     },
     [actions, workspaceCwd],
   );
 
   const removeDirectory = useCallback(
     async (path: string) => {
-      if (!workspaceCwd || removing !== null) return;
+      if (!workspaceCwd || removing !== null || mutatingRef.current) return;
+      mutatingRef.current = true;
       setRemoving(path);
       setNotice(null);
       try {
@@ -114,6 +141,7 @@ export function WorkspaceDirectoriesSection() {
           }`,
         );
       } finally {
+        mutatingRef.current = false;
         setRemoving(null);
       }
     },
@@ -178,7 +206,7 @@ export function WorkspaceDirectoriesSection() {
                 variant="ghost"
                 aria-label={t('workspaceDirectories.remove')}
                 title={t('workspaceDirectories.remove')}
-                disabled={removing !== null}
+                disabled={removing !== null || adding}
                 onClick={() => void removeDirectory(directory)}
               >
                 {removing === directory ? <Spinner /> : <Trash2Icon />}
@@ -203,7 +231,7 @@ export function WorkspaceDirectoriesSection() {
         <Button
           size="sm"
           variant="outline"
-          disabled={state.status === 'loading'}
+          disabled={state.status === 'loading' || removing !== null || adding}
           onClick={() => setAddOpen(true)}
         >
           <PlusIcon />
@@ -219,10 +247,14 @@ export function WorkspaceDirectoriesSection() {
           displayNameEnabled={false}
           pathHint={t('workspaceDirectories.pathHint')}
           onSuggest={actions.suggestWorkspacePaths}
-          onPick={async () => {
-            const picked = await actions.pickWorkspaceDirectory();
-            return picked.selected ? picked.path : undefined;
-          }}
+          onPick={
+            pickerSupported
+              ? async () => {
+                  const picked = await actions.pickWorkspaceDirectory();
+                  return picked.selected ? picked.path : undefined;
+                }
+              : undefined
+          }
           onAdd={addDirectory}
           onClose={() => setAddOpen(false)}
         />

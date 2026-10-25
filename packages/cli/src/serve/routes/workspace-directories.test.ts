@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import { sendBridgeError as sendBridgeErrorResponse } from '../server/error-response.js';
 import { registerWorkspaceDirectoriesRoutes } from './workspace-directories.js';
 
 let scratch: string;
@@ -36,6 +37,8 @@ function makeApp(
     invoke?: ReturnType<typeof vi.fn>;
     runtimeEnv?: Readonly<Record<string, string | undefined>>;
     envMode?: 'parent-process' | 'runtime-overlay';
+    sshWorkspace?: { host: string; directory: string };
+    sendBridgeError?: (res: unknown, error: unknown, ctx?: unknown) => void;
   } = {},
 ) {
   const invoke = options.invoke ?? vi.fn();
@@ -44,6 +47,7 @@ function makeApp(
     workspaceCwd,
     trusted: options.trusted ?? true,
     bridge: { invokeWorkspaceCommand: invoke },
+    routeFileSystemFactory: { sshWorkspace: options.sshWorkspace },
     env: {
       mode: options.envMode ?? 'runtime-overlay',
       overlayKeys: Object.keys(options.runtimeEnv ?? {}),
@@ -71,6 +75,9 @@ function makeApp(
   registerWorkspaceDirectoriesRoutes(app, {
     workspaceRegistry: registry as never,
     mutate: () => (_req, _res, next) => next(),
+    ...(options.sendBridgeError
+      ? { sendBridgeError: options.sendBridgeError as never }
+      : {}),
   });
   return { app, invoke };
 }
@@ -147,10 +154,13 @@ describe('GET /workspaces/:workspace/directories', () => {
   });
 
   it('refuses an SSH workspace', async () => {
-    const { app } = makeApp({ workspaceCwd: 'ssh://host/srv/ws' });
-    const res = await request(app).get(
-      '/workspaces/ssh%3A%2F%2Fhost%2Fsrv%2Fws/directories',
-    );
+    // Registration rewrites an `ssh://` URL to a local mirror directory, so a
+    // production SSH workspace reaches this route with a plain local cwd and
+    // only the runtime's own SSH marker distinguishes it.
+    const { app } = makeApp({
+      sshWorkspace: { host: 'host', directory: '/srv/ws' },
+    });
+    const res = await request(app).get('/workspaces/ws-1/directories');
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('directory_management_unsupported');
   });
@@ -229,6 +239,26 @@ describe('POST /workspaces/:workspace/directories', () => {
 
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('directory_not_found');
+  });
+
+  it('delegates unclassified bridge failures to the shared mapper', async () => {
+    // A freshly opened workspace spawns its control channel on the first
+    // mutation; that spawn can time out or be refused while the child starts,
+    // which carries none of this route's error kinds. The shared mapper owns
+    // those retryable semantics (503/504 + Retry-After), so the fallback must
+    // reach it instead of collapsing into a flat 500 runtime_error.
+    const shared = vi.fn(sendBridgeErrorResponse);
+    const invoke = vi
+      .fn()
+      .mockRejectedValue(new Error('AcpSessionBridge spawn timed out'));
+    const { app } = makeApp({ invoke, sendBridgeError: shared });
+
+    const res = await request(app)
+      .post('/workspaces/ws-1/directories')
+      .send({ path: path.join(scratch, 'extra') });
+
+    expect(shared).toHaveBeenCalledOnce();
+    expect(res.status).not.toBe(200);
   });
 
   it('maps restrictive sandbox to 409', async () => {

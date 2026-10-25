@@ -16,7 +16,10 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 const connectionState: {
   capabilities?: { features?: string[] };
 } = {};
-const workspaceState: { workspaceCwd?: string } = {};
+const workspaceState: {
+  workspaceCwd?: string;
+  capabilities?: { workspaces?: Array<Record<string, unknown>> };
+} = {};
 const actions = {
   listWorkspaceDirectories: vi.fn(),
   addWorkspaceDirectory: vi.fn(),
@@ -84,9 +87,57 @@ describe('WorkspaceDirectoriesSection', () => {
   });
 
   it('renders nothing for an SSH workspace', async () => {
-    workspaceState.workspaceCwd = 'ssh://host/srv/ws';
+    // Registration rewrites an `ssh://` URL to a local mirror directory, so a
+    // production SSH workspace reaches the section with a plain local cwd and
+    // only the workspace entry's SSH marker distinguishes it.
+    workspaceState.workspaceCwd = '/mirror/ws';
+    workspaceState.capabilities = {
+      workspaces: [
+        { cwd: '/mirror/ws', ssh: { host: 'host', directory: '/srv/ws' } },
+      ],
+    };
     await render();
     expect(container.textContent).toBe('');
+  });
+
+  it('hides Browse when the daemon does not advertise the native picker', async () => {
+    // The picker is an independent host probe: a headless daemon still serves
+    // this section but answers the picker with 501, so Browse must not render.
+    await render();
+    const browse = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Browse'));
+    expect(browse).toBeUndefined();
+  });
+
+  it('disables Add while a removal is in flight', async () => {
+    // The mutation is a settings read-modify-write, so an add issued while a
+    // remove is pending can overwrite the pending change.
+    let resolveRemove: (value: unknown) => void = () => {};
+    actions.removeWorkspaceDirectory.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRemove = resolve;
+      }),
+    );
+    await render();
+    const remove = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Remove directory"]',
+    )!;
+    await act(async () => remove.click());
+    const add = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Add directory'))!;
+    expect(add.disabled).toBe(true);
+    await act(async () => {
+      resolveRemove({
+        v: 1,
+        primaryDirectory: '/ws',
+        directories: [],
+        changed: true,
+        warnings: [],
+      });
+    });
+    expect(actions.addWorkspaceDirectory).not.toHaveBeenCalled();
   });
 
   it('removes a directory and applies the returned list', async () => {
