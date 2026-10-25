@@ -400,8 +400,8 @@ Event rules:
 Action precedence: `stop` (merged or closed) → `resync` (head moved
 externally) → `fix` (a conflict, a failed check or a trusted comment) →
 `wait`. The loop adds two more inputs: an exhausted budget means `stop`, and a
-fix in flight (`inFlight` in the state file) means `wait`, until the attempt
-ends (Section 7).
+background fix in flight (its attempt marker, Section 6.14) keeps the gate
+quiet and the prepared snapshot refused until the attempt ends.
 
 #### Gate mode (`--gate`)
 
@@ -1189,6 +1189,122 @@ says so, and the trust rule of Section 8 is what keeps someone else's code
 out of it. A watch whose task expired or was deleted keeps the grant until
 one of the above ends it.
 
+### 6.14 Background fixes and `fix-end`
+
+A watch whose fixes run unattended (Section 6.13) runs its fix agent in the
+background, so the session stays usable while it works. Any other fix keeps
+the foreground agent of Section 7 — a background agent cannot ask, and
+every command of such a fix asks — and so do the merge agent of a round,
+every `--once` round (which has no grant), a round restarted within its
+turn, and the fix of a round whose previous attempt was abandoned (below).
+`status`, run through the tool, says which watches this session runs
+unattended (`unattended`).
+
+**The launch.** The `agent` tool refuses `working_dir` with
+`run_in_background` because the caller owns the worktree and could remove it
+under a running agent. It allows the pair for one launch only: the
+top-level, built-in `general-purpose` agent the session starts at a worktree
+it holds an unattended grant for, outside plan mode and in a trusted folder
+— the agent Section 6.13 runs in YOLO mode. Its parameter check sees the
+grant without checking it; the launch checks the whole condition as for a
+foreground fix and fails the launch, rather than run in the background
+without it, when any part fails. The launch itself, not the skill, then opens the fix's
+attempt: the grant runs `fix-start <n> --attempt <id>` (a helper only the
+session runs). It refuses unless this session owns the watch, the watch has
+not ended, no other attempt is fresh, and the round prepared a snapshot at
+the watch's head in the last 30 minutes that no attempt took yet; it takes
+that snapshot (`autofix-pr-<n>-fix-snapshot.json`) and writes the attempt
+marker `autofix-pr-<n>-fix.json` beside the state file: the attempt id, the
+watch's task, the head and when. A refusal refuses the launch, and a launch
+that fails after it ends the attempt. So every background agent at a
+worktree has an attempt tied to the round that prepared it, and while one
+lives no other agent launches there, in the foreground or the background.
+
+A background fix agent is never continued: once it ends, `send_message` to
+it, a revival of its transcript and a resume after a restart are refused,
+the last through the reason its saved record carries, so no later turn
+gives the agent work outside an attempt — or in the session's own
+directory, where a revived agent would run. Its saved record keeps the
+approval mode it would have had without the grant.
+
+**The attempt.** The session keeps the attempt in memory, beside the grant,
+with the watch's `--no-reply` and instructions as the session's own
+`schedule` printed them. That record decides for this session: while the
+agent runs, the `autofix_pr` tool refuses every helper of the PR but
+`status`, and `fix-end` until the agent has ended — its registry entry
+reached a terminal state, which a stopped agent does once its tools settle
+or its cancellation's grace runs out. The marker is for the gate and for
+other sessions and processes: every 30 seconds the session refreshes the
+modification time of the marker (never following a link) while it still
+names the attempt, and stops the agent when it does not, or when a refresh
+comes more than a minute late (the process was suspended, and another
+session may have taken the worktree meanwhile). A helper takes the marker as
+fresh when it was refreshed within the last 90 seconds and its attempt
+started neither ahead of the clock nor more than 45 minutes ago. While it
+is fresh:
+
+- `sync` (with `--discard` too), the prepared `snapshot`, `ci-log`, `push`,
+  `reply`, `rerun`, `schedule`, `cleanup` (with `--force` too) and `prepare`
+  refuse, naming the attempt and when it started: a reset, a push, a reply
+  or a removal now would act on work half made;
+- the gate prints nothing, asks GitHub nothing and keeps its cursor, so a
+  fire costs no turn and what changed meanwhile reaches the round after
+  the attempt;
+- `status` shows it (`fix`), with whether it is fresh; a scheduled round
+  whose `status` shows a fresh one ends without a message.
+
+The session stops the agent when it runs past the attempt time limit
+(Section 10, 30 minutes) and when the grant ends (Section 6.13: `attended`,
+a failed launch check); such an attempt stays the round's to claim, as an
+agent that was stopped. `/autofix-pr stop` in this session — `cleanup`
+through the tool — stops the agent without a notification, waits up to 15
+seconds for it to end (outside the helpers' queue; it refuses when the
+agent has not ended by then), ends the attempt and then cleans up. The session drops the
+attempt, and with it the marker's refreshes, when no claim came within 10
+minutes of the agent's end, and when the session or its process ends.
+Another session cannot stop the agent: its `cleanup`, `prepare --take-over`
+and `resume` refuse while the marker is fresh, saying that a fix of the
+session that owns the watch is running there. A marker no longer fresh is
+one its session left behind: the gate prints an `abandoned_fix` event once
+for it, so a round runs even when nothing else changed; that round's `sync`
+removes it and reports `abandonedFix`, and the round discards what the
+worktree holds, as for any round that never finished, and handles the
+attempt's items again with its fix in the foreground — a session whose
+notifications do not reach the model would otherwise abandon one background
+attempt after another. `cleanup` and `prepare --take-over` remove such a
+marker too.
+
+**The continuation.** The round launches the agent with
+`run_in_background: true` and `description` = `autofix-pr <owner>/<repo>#<n>
+round`. A scheduled round then ends its turn with one line; a start or a
+resume goes back to the step that ran the round, so the watch is scheduled
+before its fix ends. When the agent ends, its completion notification
+carries a `<follow-up>` element the session writes, beside the agent's
+escaped `<result>` and only while the attempt is still the round's to
+claim: invoke the skill with
+`after-fix <owner>/<repo>#<n> --task <task> --attempt <id>`, with
+`--no-reply` and the instructions from the record. That turn enters the
+skill again, whatever the conversation kept of the round, and runs
+`fix-end <n> --task <task> --attempt <id>`, which removes the marker of
+that attempt only and prints the snapshot the attempt took, its brief and
+the head it started from; the tool adds how the agent ended and its report,
+from memory. Then the turn goes on with Section 7's re-runs, push and
+reply, exactly as after a foreground agent. Nothing an agent that failed or
+was stopped made is pushed: the turn runs `sync --discard` and answers the
+brief's items as needing a human, as for a fix that did not verify, so
+they are recorded and not lost to a gate that reported them already. A claim
+the helper refuses — the attempt was dropped, or a round discarded it —
+ends with one line. In plan mode the tool refuses `fix-end`; the turn says
+so, and the attempt ends as an unclaimed one. A notification that never
+comes, or comes too late, leaves the attempt to the `abandoned_fix` round.
+
+`reply` without `--no-post` refuses on a watch started with `--no-reply`, so
+that option holds even when a turn forgets it.
+
+**Not in this step.** The budget of fix attempts per failing check without
+turning green (Section 10) needs a record of which checks passed, which no
+helper keeps yet; it stays a proposal.
+
 ## 7. One check (`tick`)
 
 The gate already ran `snapshot --gate`; a fire that reaches the model carries
@@ -1220,20 +1336,18 @@ snapshot --gate (in the gate)
 
 The fix runs in an `agent` with `working_dir` set to the worktree.
 Its brief is a file listing the events, log paths, the trust rules, the user's
-extra instructions and the verification requirement. In delivery step 3 the
-agent runs in the foreground — the `agent` tool runs a `working_dir` agent
-only so, since the caller owns the worktree — and the main session runs
-`push` and `reply` when it returns; a background fix, with the main session
-usable meanwhile, is delivery step 4. If verification fails, nothing is pushed; the attempt
-counts against the budget and the failure is reported.
+extra instructions and the verification requirement. The agent runs in the
+foreground — the `agent` tool runs a `working_dir` agent only so, since the
+caller owns the worktree — and the main session runs `push` and `reply` when
+it returns, except on a watch whose fixes run unattended: there it runs in
+the background and the round goes on from its completion notification
+(Section 6.14). If verification fails, nothing is pushed and the failure is
+reported.
 
-`inFlight` records the head an attempt started on and when. Every end of an
-attempt clears it, after counting the attempt: a push, a failed
-verification, an agent that errors or is stopped, a push the lease refuses,
-and a resync. A tick that finds one started on a head that is no longer the
-PR's, or longer ago than the attempt time limit (Section 10), counts it as
-failed and clears it, so an attempt whose agent died cannot keep the watch
-waiting.
+A background fix's attempt marker (Section 6.14) keeps the gate quiet and
+the round's helpers refused while its agent works. An attempt whose session
+ended cannot keep the watch waiting: its marker goes stale, and the next
+round removes it and discards what the worktree holds.
 
 A resync whose new head does not contain the worktree's `HEAD` (the author
 rebased or force-pushed) resets the worktree to the new head instead of
@@ -1377,7 +1491,7 @@ Budgets, stored in the state file:
 | Fix attempts per review comment                      | 1       | never offered again            |
 | Pushes per start                                     | 10      | stop the loop                  |
 | Consecutive external head moves                      | 2       | stop the loop                  |
-| Minutes one fix attempt may run                      | 30      | count it failed, clear it      |
+| Minutes one background fix may run                   | 30      | stop its agent, discard it     |
 
 Stop conditions: the PR is merged or closed; `/autofix-pr stop`; a budget in
 the table says stop; the cron job expires. Every stop but the scheduled task's expiry (7 days by default: `experimental.cronRecurringMaxAgeDays`, or `QWEN_CODE_CRON_MAX_AGE_DAYS`), which ends the watch without a round, runs `cleanup` and
@@ -1456,7 +1570,8 @@ Delivery plan:
    (Section 6.8), `reply`, `rerun` (Section 6.9), the bundled skill with
    `--once`, watch mode, `stop` and a minimal `status`. In this step the fix
    agent runs in the foreground: the session waits for it, so no fire can
-   start a second attempt and `inFlight` is not needed yet. The budgets it
+   start a second attempt (the background fix of step 4 adds the attempt
+   marker of Section 6.14). The budgets it
    enforces are the pushes per start (`push`), one re-run per check and head
    (`rerun`), and one attempt per review comment (every comment a round
    handled is recorded, whatever its outcome; the round after the last
@@ -1484,8 +1599,9 @@ Delivery plan:
    The `autofix_pr` tool (Section 6.12) runs the helpers, so the skill's
    `allowedTools` name a round's helpers and those run without asking;
    `unattended` (Section 6.13) lets the fix agent of a confirmed watch run
-   its commands without asking too. Still to come: the fix agent in the background with an `inFlight`
-   record, and the budgets of Section 10 not enforced yet.
+   its commands without asking too, and such a watch's fix agent runs in the
+   background (Section 6.14). Still to come: the budgets of Section 10 not
+   enforced yet.
 5. Follow-ups: a configurable bot allowlist.
 
 Open questions:

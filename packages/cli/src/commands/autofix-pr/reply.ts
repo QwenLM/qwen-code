@@ -46,6 +46,7 @@ import {
   type AutofixPrState,
   type PendingPost,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
 
 /** GitHub refuses a comment body longer than this. */
 const MAX_BODY_CHARS = 65_536;
@@ -343,6 +344,14 @@ function replyLocked(
 ): ReplyOutcome {
   let state = requireState(paths.statePath, args.pr);
   assertWatching(state, args.task);
+  assertNoFixInFlight(paths, args.pr);
+  // The option the watch was started with holds whatever a round's turn
+  // remembers of it.
+  if (args.post && state.watch?.reply === false) {
+    throw new Error(
+      `PR #${args.pr}'s watch was started with --no-reply: run reply with --no-post.`,
+    );
+  }
   setGhHost(state.host);
   ensureAuthenticated();
   // Every bot thread the plan may name was asked about by the round's

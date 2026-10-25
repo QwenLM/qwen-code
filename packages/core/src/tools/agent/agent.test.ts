@@ -15,11 +15,17 @@ import {
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
-import type { ResidentBackgroundAgent } from '../../agents/background-tasks.js';
+import type {
+  AgentTaskRegistration,
+  ResidentBackgroundAgent,
+} from '../../agents/background-tasks.js';
 import { ToolNames } from '../tool-names.js';
 import {
+  backgroundFixAt,
   canonicalWorktreePath,
   grantUnattendedFixes,
+  recordConfirmedWatch,
+  recordWatchTask,
   resetUnattendedFixGrantsForTests,
 } from '../autofix-pr-grants.js';
 import {
@@ -2561,12 +2567,32 @@ describe('AgentTool', () => {
 
     describe('unattended fixes of an autofix-pr watch', () => {
       afterEach(() => resetUnattendedFixGrantsForTests());
+      const open = vi.fn();
+      const close = vi.fn();
       const grant = (wt: string, allowed: boolean) => {
         const check = vi.fn().mockResolvedValue(allowed);
+        open.mockReset().mockResolvedValue({ task: 'feedc0ffee12' });
+        close.mockReset().mockResolvedValue(undefined);
         grantUnattendedFixes('test-session-id', {
           pr: 7,
           worktree: canonicalWorktreePath(wt),
           check,
+          open,
+          close,
+        });
+        recordConfirmedWatch('test-session-id', {
+          pr: 7,
+          repo: 'o/r',
+          host: 'github.com',
+          targetDir: '/test/project',
+          preparedAt: null,
+          worktree: canonicalWorktreePath(wt),
+          authorCanPush: true,
+        });
+        recordWatchTask('test-session-id', 7, {
+          task: 'feedc0ffee12',
+          reply: false,
+          instructions: 'keep the API',
         });
         return check;
       };
@@ -2661,6 +2687,154 @@ describe('AgentTool', () => {
           expect(check).not.toHaveBeenCalled();
         },
       );
+
+      describe('in the background', () => {
+        const bgFix = (wt: string) =>
+          review(wt, {
+            subagent_type: 'general-purpose',
+            run_in_background: true,
+          });
+        const registered = () =>
+          vi
+            .mocked(config.getBackgroundTaskRegistry().register)
+            .mock.calls.at(-1)?.[0] as
+            | (AgentTaskRegistration & {
+                notificationFollowUp?: () => string | undefined;
+              })
+            | undefined;
+
+        it("takes working_dir with run_in_background only for a granted worktree's general-purpose agent", () => {
+          const wt = '/test/project/.qwen/tmp/autofix-pr-7';
+          expect(agentTool.validateToolParams(bgFix(wt))).toMatch(
+            /incompatible/,
+          );
+          grant(wt, true);
+          expect(agentTool.validateToolParams(bgFix(wt))).toBeNull();
+          // Relative, as the session's directory resolves it.
+          expect(
+            agentTool.validateToolParams(
+              bgFix(path.join('.qwen', 'tmp', 'autofix-pr-7')),
+            ),
+          ).toBeNull();
+          expect(
+            agentTool.validateToolParams(
+              review(wt, { run_in_background: true }),
+            ),
+          ).toMatch(/incompatible/);
+        });
+
+        itInRepo(
+          'runs the fix in the background in YOLO mode, its attempt open and never continued',
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            vi.mocked(mockAgent.getCore).mockReturnValue(
+              emitterCore() as never,
+            );
+            Object.assign(mockAgent, messagingHooks());
+            // How its registry entry ends, read once the body settles.
+            vi.mocked(config.getBackgroundTaskRegistry().get).mockReturnValue({
+              status: 'completed',
+              result: 'fixed it',
+            } as never);
+            expect(await llm(bgFix(wt))).toContain('Background agent launched');
+            expect(open).toHaveBeenCalledOnce();
+            expect(childConfig().getApprovalMode()).toBe(YOLO);
+            const entry = registered()!;
+            expect(entry.resumeBlockedReason).toMatch(/never continued/);
+            const live = backgroundFixAt(wt)!;
+            expect(live.attempt).toBe(open.mock.calls[0]![0]);
+            expect(live.agentId).toBe(entry.agentId);
+            expect(
+              config.getBackgroundTaskRegistry().registerResidentAgent,
+            ).not.toHaveBeenCalled();
+            // No other agent works beside it, in either mode.
+            expect(textOf(await run(fix(wt)))).toMatch(
+              /a background fix agent of \/autofix-pr is working/,
+            );
+            expect(
+              mockSubagentManager.createAgentHeadless,
+            ).toHaveBeenCalledOnce();
+            // The notification tells the round to go on, once the agent ended.
+            await live.settled;
+            const followUp = entry.notificationFollowUp!()!;
+            expect(followUp).toContain(
+              `after-fix o/r#7 --task feedc0ffee12 --attempt ${live.attempt} --no-reply -- keep the API`,
+            );
+            expect(live.ended).toEqual({
+              status: 'completed',
+              report: 'fixed it',
+            });
+            live.claim();
+            expect(entry.notificationFollowUp!()).toBeUndefined();
+            expect(backgroundFixAt(wt)).toBeUndefined();
+          },
+        );
+
+        itInRepo(
+          'refuses rather than run in the background when the grant no longer holds',
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, false);
+            expectNotLaunched(
+              await run(bgFix(wt)),
+              /no longer runs without asking/,
+            );
+            expect(open).not.toHaveBeenCalled();
+            expect(backgroundFixAt(wt)).toBeUndefined();
+          },
+        );
+
+        itInRepo(
+          "refuses when the attempt cannot open, with the helper's reason",
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            open.mockRejectedValue(new Error('no round of PR #7 has a fix'));
+            expectNotLaunched(
+              await run(bgFix(wt)),
+              /background fix cannot start: no round of PR #7 has a fix/,
+            );
+            expect(backgroundFixAt(wt)).toBeUndefined();
+          },
+        );
+
+        itInRepo(
+          'ends the attempt when the launch fails after it opened',
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            vi.mocked(
+              config.getBackgroundTaskRegistry().register,
+            ).mockImplementationOnce(() => {
+              throw new Error('registry full');
+            });
+            expect(await llm(bgFix(wt))).toMatch(/registry full/);
+            expect(close).toHaveBeenCalledWith(open.mock.calls[0]![0]);
+            expect(backgroundFixAt(wt)).toBeUndefined();
+          },
+        );
+
+        itInRepo(
+          'refuses an attempt on a watch whose task is not the one this session scheduled',
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            open.mockResolvedValue({ task: 'aaaaaaaaaaaa' });
+            expectNotLaunched(
+              await run(bgFix(wt)),
+              /no longer driven by the task this session scheduled/,
+            );
+            expect(close).toHaveBeenCalledOnce();
+            expect(backgroundFixAt(wt)).toBeUndefined();
+          },
+        );
+      });
 
       itInRepo(
         'grants nothing to another kind of agent, or to one a subagent starts',

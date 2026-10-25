@@ -598,6 +598,27 @@ describe('runReply', () => {
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
+  it('posts nothing on a watch started with --no-reply, whatever the round passes', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      watch: { every: 2, reply: false, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        replies: [{ replyTo: 101, body: 'x', handled: ['PRRC_101'] }],
+      }),
+    );
+    expect(() =>
+      runReply({ pr: 7, planPath, post: true, task: 'aaaaaaaaaaaa' }),
+    ).toThrow(/started with --no-reply: run reply with --no-post/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    expect(() =>
+      runReply({ pr: 7, planPath, post: false, task: 'aaaaaaaaaaaa' }),
+    ).not.toThrow();
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
   it('posts nothing for a watch cleanup ended', () => {
     writeState(paths.statePath, {
       ...state(),

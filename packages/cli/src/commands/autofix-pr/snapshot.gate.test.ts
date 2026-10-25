@@ -14,6 +14,7 @@ import {
   rmSync,
   statSync,
   utimesSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -26,6 +27,7 @@ import {
   checkEvents,
   fetchPrData,
   runSnapshot,
+  withAbandonedFix,
   type PrData,
 } from './snapshot.js';
 import {
@@ -1132,6 +1134,78 @@ describe('buildGateSnapshot', () => {
   });
 });
 
+describe('withAbandonedFix', () => {
+  const cursor: AutofixPrGateCursor = {
+    version: 1,
+    host: 'github.com',
+    owner: 'o',
+    repo: 'r',
+    prNumber: 7,
+    viewer: 'me',
+    prAuthor: 'me',
+    headSha: HEAD,
+    reportedCommentIds: [],
+    reportedChecks: [],
+    conflictSha: null,
+    stopped: null,
+    reportedTruncated: [],
+  };
+  const base = { headSha: HEAD, isDraft: false, url: 'https://x/pull/7' };
+  const marker = {
+    attempt: {
+      version: 1 as const,
+      attempt: '0123456789ab',
+      task: 't',
+      head: HEAD,
+      startedAt: '2026-10-26T00:00:00.000Z',
+    },
+    mtimeMs: 1,
+  };
+
+  it('keeps an action that says more than fix, and wakes a quiet one', () => {
+    const stop = {
+      ...base,
+      action: 'stop' as const,
+      events: [{ type: 'merged' as const }],
+      truncated: [],
+    };
+    expect(
+      withAbandonedFix({ snapshot: stop, cursor }, marker, base).snapshot
+        ?.action,
+    ).toBe('stop');
+    expect(
+      withAbandonedFix(
+        { snapshot: { ...stop, action: 'wait', events: [] }, cursor },
+        marker,
+        base,
+      ).snapshot,
+    ).toMatchObject({ action: 'fix', events: [{ type: 'abandoned_fix' }] });
+  });
+
+  it('reports an unreadable marker once, by its time, and nothing without one', () => {
+    const unreadable = { attempt: null, mtimeMs: 42 };
+    const first = withAbandonedFix(
+      { snapshot: null, cursor },
+      unreadable,
+      base,
+    );
+    expect(first.snapshot).toEqual({
+      ...base,
+      action: 'fix',
+      events: [{ type: 'abandoned_fix', startedAt: null }],
+      truncated: [],
+    });
+    expect(first.cursor.reportedAbandonedFix).toBe('unreadable@42');
+    expect(
+      withAbandonedFix({ snapshot: null, cursor: first.cursor }, unreadable)
+        .snapshot,
+    ).toBeNull();
+    expect(
+      withAbandonedFix({ snapshot: null, cursor }, null).snapshot,
+    ).toBeNull();
+  });
+});
+
 describe('fetchPrData', () => {
   beforeEach(() => {
     mockGh.mockReset();
@@ -1961,6 +2035,93 @@ describe('runSnapshot --gate', () => {
     respond(withComments('I1', 'I2'));
     runSnapshot({ pr: 7, gate: true });
     expect(statSync(paths.checkedPath).mtimeMs).toBe(old.getTime());
+  });
+
+  it('stays quiet while a background fix works, keeping its cursor, and reports one its session left behind once', () => {
+    const paths = autofixPrPaths(mocks.root, 7);
+    mkdirSync(dirname(paths.statePath), { recursive: true });
+    writeState(paths.statePath, {
+      version: 1,
+      sessionId: 'session-a',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: 'qwen-autofix/pr-7',
+      worktreePath: join(dirname(paths.statePath), 'autofix-pr-7'),
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+      watch: { every: 2, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    const own = () =>
+      runSnapshot({
+        pr: 7,
+        gate: true,
+        session: 'session-a',
+        task: 'aaaaaaaaaaaa',
+      });
+    respond(withComments('I1'));
+    own();
+    expect(printedIds()).toEqual([['I1']]);
+    const written = readFileSync(gatePath(), 'utf8');
+    const startedAt = new Date().toISOString();
+    writeFileSync(
+      paths.fixPath,
+      JSON.stringify({
+        version: 1,
+        attempt: '0123456789ab',
+        task: 'aaaaaaaaaaaa',
+        head: HEAD,
+        startedAt,
+      }),
+    );
+    // Fresh: GitHub is not asked, nothing prints, the cursor stays.
+    mockGh.mockClear();
+    own();
+    expect(mockGh).not.toHaveBeenCalled();
+    expect(mocks.stdout).toHaveBeenCalledTimes(1);
+    expect(readFileSync(gatePath(), 'utf8')).toBe(written);
+    // Its session stopped refreshing it: one round, though nothing changed.
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(paths.fixPath, old, old);
+    respond(withComments('I1'));
+    own();
+    expect(JSON.parse(mocks.stdout.mock.calls.at(-1)![0])).toMatchObject({
+      action: 'fix',
+      events: [{ type: 'abandoned_fix', startedAt }],
+    });
+    respond(withComments('I1'));
+    own();
+    expect(mocks.stdout).toHaveBeenCalledTimes(2);
+    // Beside what changed, and a later attempt's again.
+    writeFileSync(
+      paths.fixPath,
+      JSON.stringify({
+        version: 1,
+        attempt: 'ba9876543210',
+        task: 'aaaaaaaaaaaa',
+        head: HEAD,
+        startedAt,
+      }),
+    );
+    utimesSync(paths.fixPath, old, old);
+    respond(withComments('I1', 'I2'));
+    own();
+    expect(JSON.parse(mocks.stdout.mock.calls.at(-1)![0])).toMatchObject({
+      action: 'fix',
+      events: [
+        expect.objectContaining({ id: 'I2' }),
+        { type: 'abandoned_fix', startedAt },
+      ],
+    });
   });
 
   it('stops a task from before task ids once one is recorded, and any task of a watch cleanup ended', () => {

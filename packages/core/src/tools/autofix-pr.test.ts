@@ -24,12 +24,20 @@ import {
   type AutofixPrParams,
 } from './autofix-pr.js';
 import {
+  backgroundFixOf,
   canonicalWorktreePath,
   confirmedWatch,
+  FIX_CLAIM_WINDOW_MS,
+  FIX_HEARTBEAT_MS,
+  FIX_TIME_LIMIT_MS,
+  forgetAutofixPrSession,
   hasUnattendedFixGrant,
   isUnattendedFixConfig,
   markUnattendedFixConfig,
+  openBackgroundFix,
   resetUnattendedFixGrantsForTests,
+  watchTask,
+  type BackgroundFix,
 } from './autofix-pr-grants.js';
 import { ToolConfirmationOutcome } from './tools.js';
 
@@ -45,6 +53,9 @@ if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
 else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, host: process.env.FAKE_HOST || undefined, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1' }) + '\\n');
 else if (command === 'status') process.stdout.write(process.env.FAKE_STATUS + '\\n');
+else if (command === 'fix-start') process.stdout.write(JSON.stringify({ attempt: (rest.find((a) => a.startsWith('--attempt=')) || '').slice(10), task: process.env.FAKE_TASK || 'feedc0ffee12' }) + '\\n');
+else if (command === 'fix-end') process.stdout.write(JSON.stringify({ attempt: (rest.find((a) => a.startsWith('--attempt=')) || '').slice(10), snapshot: 'snap.json', brief: 'brief.md', head: 'abc' }) + '\\n');
+else if (command === 'schedule') process.stdout.write(JSON.stringify({ task: process.env.FAKE_TASK || 'feedc0ffee12', reply: process.env.FAKE_REPLY !== '0', instructions: process.env.FAKE_INSTRUCTIONS || '' }) + '\\n');
 else process.stdout.write(JSON.stringify({ command, rest, session: process.env.QWEN_CODE_SESSION_ID, cwd: process.cwd() }) + '\\n');
 `;
 
@@ -1114,5 +1125,292 @@ describe('unattended', () => {
     expect(result.error).toBeUndefined();
     expect(String(result.llmContent)).toMatch(/Nothing recorded/);
     expect(await granted()).toBe(false);
+  });
+});
+
+describe('background fixes', () => {
+  const log = () =>
+    fs.existsSync(path.join(dir, 'log'))
+      ? fs.readFileSync(path.join(dir, 'log'), 'utf8').trim().split('\n')
+      : [];
+  const cancel = vi.fn();
+  const registryConfig = (overrides: Partial<Record<string, unknown>> = {}) =>
+    makeConfig({
+      getBackgroundTaskRegistry: () => ({ cancel }),
+      ...overrides,
+    });
+  /** A watch this session prepared, granted and scheduled, as a start does. */
+  const granted = async (config = registryConfig()) => {
+    await prepare(config);
+    const inv = invocation({ command: 'unattended', pr: 12 }, config);
+    await (
+      await inv.getConfirmationDetails(signal())
+    ).onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    expect((await inv.execute(signal())).error).toBeUndefined();
+    vi.stubEnv('FAKE_REPLY', '0');
+    vi.stubEnv('FAKE_INSTRUCTIONS', 'keep the API');
+    expect(
+      (
+        await invocation({ command: 'schedule', pr: 12 }, config).execute(
+          signal(),
+        )
+      ).error,
+    ).toBeUndefined();
+  };
+  /** The launch's part: open the attempt, then attach the agent. */
+  const launched = async (agentId = 'agent-1') => {
+    const fix = await openBackgroundFix('session-a', worktree, signal());
+    fix.attach(agentId, () => cancel(agentId));
+    return fix;
+  };
+  const run = (params: AutofixPrParams, config = registryConfig()) =>
+    invocation(params, config).execute(signal());
+
+  beforeEach(() => {
+    cancel.mockReset();
+    vi.stubEnv('FAKE_LOG', path.join(dir, 'log'));
+    vi.useFakeTimers({ toFake: ['setInterval', 'setTimeout', 'Date'] });
+    vi.setSystemTime(new Date('2026-10-26T10:00:00Z'));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("records the task the session's own schedule printed", async () => {
+    await granted();
+    expect(watchTask('session-a', 12)).toEqual({
+      task: 'feedc0ffee12',
+      reply: false,
+      instructions: 'keep the API',
+    });
+  });
+
+  it('opens an attempt through fix-start, once per worktree, on the task this session scheduled', async () => {
+    await granted();
+    const fix = await launched();
+    expect(fix.attempt).toMatch(/^[0-9a-f]{12}$/);
+    expect(log()).toContain(`fix-start 12 --attempt=${fix.attempt}`);
+    await expect(
+      openBackgroundFix('session-a', worktree, signal()),
+    ).rejects.toThrow(/already working/);
+    fix.drop();
+    // A state file naming another task: not the watch this session runs.
+    vi.stubEnv('FAKE_TASK', 'aaaaaaaaaaaa');
+    await expect(
+      openBackgroundFix('session-a', worktree, signal()),
+    ).rejects.toThrow(/no longer driven by the task this session scheduled/);
+    expect(log().at(-1)).toMatch(/^fix-end 12 --attempt=/);
+    expect(backgroundFixOf('session-a', 12)).toBeUndefined();
+  });
+
+  it("refuses with the helper's reason, and with no grant or no task", async () => {
+    await expect(
+      openBackgroundFix('session-a', worktree, signal()),
+    ).rejects.toThrow(/runs without asking/);
+    await granted();
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
+    await expect(
+      openBackgroundFix('session-a', worktree, signal()),
+    ).rejects.toThrow(/fix-start refused: another session watches PR #12/);
+    expect(backgroundFixOf('session-a', 12)).toBeUndefined();
+  });
+
+  it('refuses every helper but status while the agent runs, and lets the round claim it once it ended', async () => {
+    await granted();
+    const fix = await launched();
+    for (const params of [
+      { command: 'push', pr: 12 },
+      { command: 'sync', pr: 12 },
+      { command: 'prepare', pr: 12, repo: 'o/r' },
+    ] as AutofixPrParams[]) {
+      expect((await run(params)).error?.message).toMatch(
+        /A fix agent of PR #12 is working in its worktree/,
+      );
+    }
+    expect((await run({ command: 'status', pr: 12 })).error).toBeUndefined();
+    const claim = { command: 'fix-end', pr: 12, attempt: fix.attempt } as const;
+    expect((await run(claim)).error?.message).toMatch(/still working/);
+    expect(
+      (await run({ ...claim, attempt: 'ba9876543210' })).error?.message,
+    ).toMatch(/not this session's to claim/);
+    fix.end({ status: 'completed', report: 'fixed "Test"' });
+    const claimed = await run({ ...claim, task: 'feedc0ffee12' });
+    expect(JSON.parse(String(claimed.llmContent))).toEqual({
+      attempt: fix.attempt,
+      snapshot: 'snap.json',
+      brief: 'brief.md',
+      head: 'abc',
+      agent: { status: 'completed', report: 'fixed "Test"' },
+    });
+    expect(log().at(-1)).toBe(
+      `fix-end 12 --task=feedc0ffee12 --attempt=${fix.attempt}`,
+    );
+    expect(backgroundFixOf('session-a', 12)).toBeUndefined();
+    expect((await run(claim)).error?.message).toMatch(
+      /not this session's to claim/,
+    );
+  });
+
+  it('claims nothing in plan mode', async () => {
+    await granted();
+    const fix = await launched();
+    fix.end({ status: 'completed', report: '' });
+    const plan = registryConfig({ getApprovalMode: () => ApprovalMode.PLAN });
+    expect(
+      (await run({ command: 'fix-end', pr: 12, attempt: fix.attempt }, plan))
+        .error?.message,
+    ).toMatch(/not in plan mode/);
+    expect(backgroundFixOf('session-a', 12)).toBe(fix);
+  });
+
+  it('stops the agent quietly before a cleanup, ending the attempt first', async () => {
+    await granted();
+    const fix = await launched();
+    cancel.mockImplementation(() =>
+      fix.end({ status: 'cancelled', report: '' }),
+    );
+    const registry = {
+      cancel: vi.fn((id: string, options: unknown) => {
+        expect(options).toEqual({ notify: false });
+        cancel(id);
+      }),
+    };
+    const config = registryConfig({
+      getBackgroundTaskRegistry: () => registry,
+    });
+    const result = await run({ command: 'cleanup', pr: 12 }, config);
+    expect(result.error).toBeUndefined();
+    expect(registry.cancel).toHaveBeenCalledWith('agent-1', { notify: false });
+    expect(log().slice(-2)).toEqual([
+      `fix-end 12 --attempt=${fix.attempt}`,
+      'cleanup 12',
+    ]);
+    expect(backgroundFixOf('session-a', 12)).toBeUndefined();
+  });
+
+  it('refuses the cleanup while the stopped agent has not ended', async () => {
+    await granted();
+    const fix = await launched();
+    const pending = run({ command: 'cleanup', pr: 12 });
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect((await pending).error?.message).toMatch(/has not stopped yet/);
+    expect(log().at(-1)).not.toMatch(/^cleanup/);
+    expect(backgroundFixOf('session-a', 12)).toBe(fix);
+  });
+
+  it("stops the agent when the fixes ask again, its attempt still the round's to claim", async () => {
+    await granted();
+    const fix = await launched();
+    await run({ command: 'attended', pr: 12 });
+    expect(cancel).toHaveBeenCalledWith('agent-1');
+    expect(fix.done).toBe(false);
+    expect(fix.followUp()).toContain(`--attempt ${fix.attempt}`);
+  });
+
+  it('says in status which watches run their fixes unattended', async () => {
+    const unattended = async () =>
+      JSON.parse(String((await run({ command: 'status' })).llmContent))
+        .watches[0].unattended;
+    await prepare(registryConfig());
+    expect(await unattended()).toBe(false);
+    await granted();
+    expect(await unattended()).toBe(true);
+    await run({ command: 'attended', pr: 12 });
+    expect(await unattended()).toBe(false);
+  });
+
+  describe('the attempt', () => {
+    const marker = () =>
+      path.join(dir, '.qwen', 'tmp', 'autofix-pr-12-fix.json');
+    const writeMarker = (attempt: string) =>
+      fs.writeFileSync(marker(), JSON.stringify({ version: 1, attempt }));
+    const mtime = () => fs.lstatSync(marker()).mtimeMs;
+    let fix: BackgroundFix;
+    beforeEach(async () => {
+      await granted();
+      fix = await launched();
+      writeMarker(fix.attempt);
+      const old = new Date('2026-10-26T09:00:00Z');
+      fs.utimesSync(marker(), old, old);
+    });
+
+    it('refreshes its marker every 30 seconds while the marker names it', async () => {
+      await vi.advanceTimersByTimeAsync(FIX_HEARTBEAT_MS);
+      expect(mtime()).toBe(Date.now());
+      expect(fix.done).toBe(false);
+    });
+
+    it('stops the agent and lets go when the marker is another attempt, gone, or a link', async () => {
+      for (const plant of [
+        () => writeMarker('ba9876543210'),
+        () => fs.rmSync(marker()),
+        () => {
+          const target = path.join(dir, 'target');
+          writeMarker(fix.attempt);
+          fs.renameSync(marker(), target);
+          fs.symlinkSync(target, marker());
+        },
+      ]) {
+        resetUnattendedFixGrantsForTests();
+        cancel.mockReset();
+        await granted();
+        fix = await launched();
+        writeMarker(fix.attempt);
+        plant();
+        await vi.advanceTimersByTimeAsync(FIX_HEARTBEAT_MS);
+        expect(fix.done).toBe(true);
+        expect(cancel).toHaveBeenCalledWith('agent-1');
+        expect(fix.followUp()).toBeUndefined();
+        fs.rmSync(marker(), { force: true });
+      }
+    });
+
+    it('lets go when a refresh comes late: the process was suspended', () => {
+      vi.setSystemTime(Date.now() + FIX_HEARTBEAT_MS + 61_000);
+      fix.beat();
+      expect(fix.done).toBe(true);
+      expect(cancel).toHaveBeenCalledWith('agent-1');
+    });
+
+    it('stops the agent at the time limit, its attempt still claimable', async () => {
+      writeMarker(fix.attempt);
+      await vi.advanceTimersByTimeAsync(FIX_TIME_LIMIT_MS - 1000);
+      expect(cancel).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(cancel).toHaveBeenCalledWith('agent-1');
+      expect(fix.done).toBe(false);
+    });
+
+    it('waits for a claim for 10 minutes after the agent ended, and no longer', async () => {
+      fix.end({ status: 'completed', report: 'done' });
+      // Once: a later end changes nothing.
+      fix.end({ status: 'failed', report: 'late' });
+      expect(fix.ended).toEqual({ status: 'completed', report: 'done' });
+      await fix.settled;
+      writeMarker(fix.attempt);
+      await vi.advanceTimersByTimeAsync(FIX_CLAIM_WINDOW_MS - 1000);
+      expect(fix.done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(fix.done).toBe(true);
+      expect(cancel).not.toHaveBeenCalled();
+      expect(backgroundFixOf('session-a', 12)).toBeUndefined();
+    });
+
+    it('ends with its session', () => {
+      forgetAutofixPrSession('session-b');
+      expect(fix.done).toBe(false);
+      forgetAutofixPrSession('session-a');
+      expect(fix.done).toBe(true);
+      expect(cancel).toHaveBeenCalledWith('agent-1');
+    });
+
+    it('tells the round to go on with the options the session scheduled', () => {
+      expect(fix.followUp()).toBe(
+        'Written by Qwen Code, not by the agent: this agent was the background ' +
+          'fix of /autofix-pr for o/r#12. Go on with its round now: invoke the ' +
+          'autofix-pr skill with these arguments:\n' +
+          `after-fix o/r#12 --task feedc0ffee12 --attempt ${fix.attempt} --no-reply -- keep the API`,
+      );
+      fix.claim();
+      expect(fix.followUp()).toBeUndefined();
+    });
   });
 });

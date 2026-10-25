@@ -97,6 +97,7 @@ describe('bundled autofix-pr skill', () => {
       'push',
       'reply',
       'rerun',
+      'fix-end',
       'status',
       'cleanup',
     ] as const) {
@@ -104,7 +105,13 @@ describe('bundled autofix-pr skill', () => {
     }
     // A watch this session did not start or resume asks, as the start, a
     // re-schedule, a take-over and unattended do.
-    for (const command of ['push', 'reply', 'sync', 'cleanup'] as const) {
+    for (const command of [
+      'push',
+      'reply',
+      'sync',
+      'fix-end',
+      'cleanup',
+    ] as const) {
       await expect(helper({ command, pr: 7 }, false)).resolves.toBe('ask');
     }
     for (const params of [

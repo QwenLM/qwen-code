@@ -214,6 +214,9 @@ export interface AutofixPrGateCursor {
    * last read of every check run listed. A read the time cut keeps it, and
    * reports no failure of an earlier run. */
   latestChecks?: string[];
+  /** The background fix attempt whose marker its session left behind,
+   * reported once so a round handles its items again (Section 6.14). */
+  reportedAbandonedFix?: string;
 }
 
 export interface AutofixPrPaths {
@@ -232,6 +235,8 @@ export interface AutofixPrPaths {
   /** The user's instructions for every round, written by the skill for
    * `schedule` to read. */
   instructionsPath: string;
+  /** The attempt of a fix agent running in the background (`fix-start`). */
+  fixPath: string;
   branch: string;
 }
 
@@ -264,6 +269,7 @@ export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
     // take a lock another helper holds.
     lockPath: join(tmp, `autofix-pr-${prNumber}.lock`),
     instructionsPath: join(tmp, `autofix-pr-${prNumber}-instructions.txt`),
+    fixPath: join(tmp, `autofix-pr-${prNumber}-fix.json`),
     branch: `qwen-autofix/pr-${prNumber}`,
   };
 }
