@@ -7478,22 +7478,32 @@ describe('review model canary routing', () => {
     expect(pick('main', '', '100', '12345')).toBe('main');
     expect(pick('main', 'canary', '100', '12345')).toBe('canary');
 
-    // Whole buckets only: PR 12309 (bucket 9) is inside 10%, PR 12310
-    // (bucket 10) is not.
-    expect(pick('main', 'canary', '10', '12309')).toBe('canary');
-    expect(pick('main', 'canary', '10', '12310')).toBe('main');
-    // Sticky per PR — the same number answers the same way on every call,
-    // which is what keeps one PR's review rounds on one model.
-    expect(pick('main', 'canary', '10', '12309')).toBe(
-      pick('main', 'canary', '10', '12309'),
+    // Whole buckets only, measured as an effect: at 10%, sweep the full
+    // bucket range and pin exactly which PRs are selected. This dominates a
+    // single boundary pair, and two identical calls are self-equality.
+    const canaried = execFileSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail\n${fn}\nfor pr in {12300..12399}; do if [ "$(review_model_for_bucket main canary 10 "$pr")" = canary ]; then echo "$pr"; fi; done`,
+      ],
+      { encoding: 'utf8' },
+    )
+      .trim()
+      .split('\n');
+    expect(canaried).toEqual(
+      Array.from({ length: 10 }, (_, i) => String(12300 + i)),
     );
 
-    // Repository-variable typos take the clamp instead of failing the
-    // review: a leading zero is not octal, >100 clamps to 100, and a 4-digit
-    // value is out of range either way.
+    // Repository-variable typos fail toward off, never toward full rollout.
+    // One row per clamp step; deleting that step alone flips its row. The
+    // 20-digit value is the digit bound's: bash wraps it to 50.
     expect(pick('main', 'canary', '08', '12307')).toBe('canary');
-    expect(pick('main', 'canary', '250', '12399')).toBe('canary');
-    expect(pick('main', 'canary', '1000', '12399')).toBe('canary');
+    expect(pick('main', 'canary', '0050', '12325')).toBe('canary');
+    expect(pick('main', 'canary', '250', '12399')).toBe('main');
+    expect(pick('main', 'canary', '18446744073709551666', '12300')).toBe(
+      'main',
+    );
 
     // A PR number that cannot be read keeps the default rather than guessing.
     expect(pick('main', 'canary', '100', '')).toBe('main');

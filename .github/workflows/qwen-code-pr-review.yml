@@ -1635,9 +1635,12 @@ jobs:
           # two rounds of reviews incomparable. Percent empty, non-numeric or
           # zero means off, and an unresolvable PR number keeps the default:
           # the canary must never be the reason a review breaks. Out-of-range
-          # percents take the same clamps as SALVAGE_ELAPSED_PERCENT (strip
-          # leading zeros, bound the digit count, clamp to 100) because they
-          # ride repository variables, where a typo is one keystroke away.
+          # percents take SALVAGE_ELAPSED_PERCENT's shape (strip leading zeros,
+          # bound the digit count) but clamp to the opposite pole: there 100
+          # means cede, here it would mean full rollout, so a typo on a
+          # repository variable must land on off. Keep the digit bound — bash
+          # wraps 20-digit values, and $((10#18446744073709551666)) is 50,
+          # i.e. a silent half rollout rather than off.
           # KEEP THE SHAPE: scripts/tests/qwen-pr-review-workflow.test.js
           # extracts this function and executes the real bash.
           review_model_for_bucket() {
@@ -1648,11 +1651,11 @@ jobs:
             percent="${percent#"${percent%%[!0]*}"}"
             percent="${percent:-0}"
             if [ "${#percent}" -gt 3 ]; then
-              percent=100
+              percent=0
             fi
             percent=$((10#$percent))
             if [ "$percent" -gt 100 ]; then
-              percent=100
+              percent=0
             fi
             case "$pr" in
               ''|*[!0-9]*)
