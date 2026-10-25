@@ -8007,8 +8007,9 @@ export class Session implements SessionContext {
                     streamFailed = true;
                     if (!cutForInput()) {
                       // A round that threw before its request pushed the
-                      // message, such as a cancel during a tool-result round's
-                      // UserPromptSubmit hook, keeps it as the stops below do.
+                      // message, such as on a tool-result round whose
+                      // UserPromptSubmit hook timed out, keeps it as the stops
+                      // below do.
                       if (requestUnsent()) {
                         if (pendingSend.signal.aborted) {
                           markApiHistoryPrompt(message, responseCapture.turnId);

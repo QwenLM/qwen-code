@@ -4708,7 +4708,7 @@ describe('Session', () => {
       );
     });
 
-    it('keeps the results of a tool-result round cancelled before its request went out', async () => {
+    it('keeps the results of a tool-result round that failed before its request went out', async () => {
       useTool(core.Kind.Read, 'read_file');
       let pushes = 0;
       Object.assign(mockChat, {
@@ -4727,21 +4727,21 @@ describe('Session', () => {
             yield finished();
           })(),
         )
-        // The client throws when the turn is cancelled during the
-        // tool-result round's UserPromptSubmit hook, before the push.
-        .mockImplementationOnce((_parts: Part[], signal: AbortSignal) =>
+        // The client throws before the push when the tool-result round's
+        // UserPromptSubmit hook request times out.
+        .mockImplementationOnce(() =>
           (async function* () {
-            await session.cancelPendingPrompt();
-            if (signal.aborted) {
-              throw new DOMException('aborted', 'AbortError');
+            if (pushes > 0) {
+              throw new Error(
+                'Request timed out waiting for hook-execution-response',
+              );
             }
             yield text('never');
           })(),
         );
 
-      const result = await prompt();
+      await expect(prompt()).rejects.toThrow('Request timed out');
 
-      expect(result.stopReason).toBe('cancelled');
       expect(send).toHaveBeenCalledTimes(2);
       // The tools ran, so their results close the calls, not the repair's
       // "retry if needed".
