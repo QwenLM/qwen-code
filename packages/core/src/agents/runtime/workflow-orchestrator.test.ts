@@ -4627,6 +4627,42 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     }
   });
 
+  it("refuses an agent in the session's own directory when it is a background fix's worktree", async () => {
+    const wt = '/fake/repo';
+    grantUnattendedFixes('wf-session', {
+      pr: 7,
+      worktree: wt,
+      check: async () => true,
+      open: async () => ({ task: 't' }),
+      close: async () => {},
+    });
+    recordConfirmedWatch('wf-session', {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      targetDir: '/fake/repo',
+      preparedAt: null,
+      worktree: wt,
+      authorCanPush: true,
+    });
+    recordWatchTask('wf-session', 7, {
+      task: 't',
+      reply: true,
+      instructions: '',
+    });
+    try {
+      await openBackgroundFix('wf-session', wt, new AbortController().signal);
+      await expectRefused(
+        {},
+        'hi',
+        {},
+        /a background fix agent of \/autofix-pr is working/,
+      );
+    } finally {
+      resetUnattendedFixGrantsForTests();
+    }
+  });
+
   // A refused pin must not fall through to an agent in the parent tree.
   it('workingDir surfaces the resolver refusal and dispatches nothing', async () => {
     pinStub.resolve.value = async () => ({

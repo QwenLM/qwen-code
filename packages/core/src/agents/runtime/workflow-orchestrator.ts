@@ -888,6 +888,19 @@ async function runSingleDispatch(
   ctx.set('task_prompt', prompt);
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
+  // In the session's own directory, after a `/cd` into the worktree of a
+  // background fix of /autofix-pr: beside it, on either path below.
+  const ownDir = config.getTargetDir?.();
+  if (
+    opts.workingDir === undefined &&
+    ownDir &&
+    backgroundFixHolding(ownDir, getCurrentAgentId())
+  ) {
+    throw new Error(
+      `agent(): a background fix agent of /autofix-pr is working in ${ownDir}; its round goes on when it ends.`,
+    );
+  }
+
   // The fast path hands `config` to AgentHeadless untouched, so it has no
   // way to honour a directory rebind — `workingDir` MUST route through the
   // override path or it would be silently dropped and the agent would run in
@@ -1394,16 +1407,6 @@ async function runOverridePath(
       'agent({workingDir, isolation}): incompatible options. workingDir ' +
         'pins the agent to a worktree you already own; isolation creates ' +
         'a fresh one and removes it afterwards. Pass one.',
-    );
-  }
-  // In the session's own directory, after a `/cd` into the worktree of a
-  // background fix of /autofix-pr: beside it.
-  if (
-    opts.workingDir === undefined &&
-    backgroundFixHolding(config.getTargetDir(), getCurrentAgentId())
-  ) {
-    throw new Error(
-      `agent(): a background fix agent of /autofix-pr is working in ${config.getTargetDir()}; its round goes on when it ends.`,
     );
   }
   if (opts.isolation === 'worktree') {
