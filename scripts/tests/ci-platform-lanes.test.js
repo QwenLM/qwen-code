@@ -643,6 +643,25 @@ describe('post-merge push lane', () => {
     expect(lintStep('Fetch incremental lint history')).toBeLessThan(
       lintStep('Install linters'),
     );
+    // Blobless is load-bearing, not an optimization: the job may already hold
+    // a blobless merge base from `Report test growth`, and a plain fetch then
+    // dies with `fatal: missing blob object` — silently, because this step is
+    // continue-on-error — leaving every lane on the full scan.
+    const fetchStep = (ci.jobs.lint_and_static.steps ?? []).find(
+      (s) => s.name === 'Fetch incremental lint history',
+    );
+    // Comments stripped: the rationale above the command names the flag too,
+    // and a pin satisfied by prose would go green with the flag deleted.
+    const fetchCode = String(fetchStep?.run)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(fetchCode).toContain(
+      'fetch --no-tags --depth=100 --filter=blob:none',
+    );
+    expect(fetchCode).toContain(
+      'git config --unset remote.origin.partialclonefilter',
+    );
   });
 
   it("pins the disk-pressure collector's upload-artifact revision", () => {
