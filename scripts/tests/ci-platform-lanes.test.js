@@ -645,6 +645,35 @@ describe('post-merge push lane', () => {
     );
   });
 
+  it("pins the disk-pressure collector's upload-artifact revision", () => {
+    // The equality loop above compares the two jobs to EACH OTHER, so it is
+    // structurally blind to both collectors moving together — exempting only
+    // `with.name` put `uses:` back in scope for the one-sided case, but a
+    // coordinated re-pin leaves both serializations equal and reports green.
+    // The SHA-format regex on `Upload Test Results Artifact` is not a witness
+    // either: it accepts any 40-hex revision, on a different step. Pin the
+    // literal revision, resolved per job rather than through a single
+    // name-keyed map, because the step carries the SAME name in both jobs.
+    const PIN =
+      'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a';
+    for (const job of ['test', 'lint_and_static']) {
+      const collector = (ci.jobs[job].steps ?? []).find(
+        (s) => s.name === 'Upload disk-pressure samples',
+      );
+      expect(
+        collector?.uses,
+        `${job}: 'Upload disk-pressure samples' must stay on ${PIN}`,
+      ).toBe(PIN);
+      // Same coordinated-edit blindness, second field: no suite pins the
+      // sample window. Literal 14, not a shared constant — the JUnit
+      // `Upload Test Results Artifact` step deliberately retains 7.
+      expect(
+        collector?.with?.['retention-days'],
+        `${job}: disk-pressure samples must stay retained for 14 days`,
+      ).toBe(14);
+    }
+  });
+
   it('keeps the moved lint/static payload present, gated, and out of test', () => {
     // The shared-prelude equality above only sees the name INTERSECTION; the
     // twenty moved steps — the payload this job exists to run — were pinned
@@ -717,9 +746,76 @@ describe('post-merge push lane', () => {
       'if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt) ]]; then',
     );
     expect(checkNotices.run).toContain('exit 1');
+    // Name, order and gate were pinned, but only the two notices steps had a
+    // command body pinned: emptying `Run ESLint`'s `run:` or repointing it at
+    // `true` left every suite green while the required check stopped running
+    // the tool it is named for. Pin the load-bearing substring of each body —
+    // NOT whitespace-exact text, so reformatting one of the multi-line blocks
+    // stays benign. Totality is asserted below, not left to a missing key:
+    // `toContain` coerces `undefined` to the literal string "undefined", so a
+    // body containing that word would pass with its command unpinned.
+    const LOAD_BEARING_RUN = {
+      'Audit critical runtime dependencies': 'npm run audit:runtime:critical',
+      'Check lockfile': 'npm run check:lockfile',
+      'Check desktop workspace isolation': 'npm run check:desktop-isolation',
+      'Check TUI dependency direction': 'npm run check:tui-dep-direction',
+      'Install linters': 'node scripts/lint.js --setup',
+      'Run ESLint': 'node scripts/lint.js --eslint',
+      'Run actionlint': 'node scripts/lint.js --actionlint',
+      'Run shellcheck': 'node scripts/lint.js --shellcheck',
+      'Run yamllint': 'node scripts/lint.js --yamllint',
+      'Run Prettier': 'node scripts/lint.js --prettier',
+      'Run sensitive keyword linter':
+        'node scripts/lint.js --sensitive-keywords',
+      'Check serve fast-path bundle closure':
+        'npm run check:serve-fast-path-bundle',
+      'Check core subpath exports resolve':
+        'npm run check:core-subpath-exports',
+      'Run i18n check': 'npm run check-i18n',
+      'Generate settings schema': 'npm run generate:settings-schema',
+      'Check settings schema is up-to-date':
+        'git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json',
+      'Generate Web Shell and VS Code companion notices':
+        'npm run generate:notices --workspace=@qwen-code/web-shell',
+      'Check Web Shell and VS Code companion notices are up-to-date':
+        'git status --porcelain packages/vscode-ide-companion/NOTICES.txt',
+      'Run .github/scripts helper tests':
+        'node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}',
+    };
+    expect(
+      Object.keys(LOAD_BEARING_RUN).sort(),
+      'LOAD_BEARING_RUN drifted from FULL_PAYLOAD',
+    ).toEqual([...FULL_PAYLOAD].sort());
+    // Whole literal, not the `ci_profile == 'full'` substring filtered above:
+    // an appended `&&` clause still matches that substring while dropping the
+    // step from the unattended post-merge lane. All 19 gates are identical.
+    const FULL_GATE =
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}";
     for (const n of FULL_PAYLOAD) {
+      const step = stepByName.get(n);
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
+      expect(String(step.if), `${n} gate drifted`).toBe(FULL_GATE);
+      expect(
+        String(step.run ?? ''),
+        `${n} no longer runs its load-bearing command`,
+      ).toContain(LOAD_BEARING_RUN[n]);
+      // Containment says the command is present, not that its failure reaches
+      // the job. The body guard is `|| true`/`|| :`, not a bare `||`: the
+      // helper-tests retry legitimately uses `|| {`. Both stay inside this
+      // loop — two non-payload steps set continue-on-error on purpose.
+      expect(
+        step['continue-on-error'],
+        `${n} must not swallow its own failure`,
+      ).toBeUndefined();
+      expect(
+        String(step.run ?? ''),
+        `${n} swallows its exit status`,
+      ).not.toMatch(/\|\|\s*(true|:)/);
     }
+    expect(
+      String(stepByName.get('Check settings schema is up-to-date').run),
+      'settings-schema gate lost its exit 1',
+    ).toContain('exit 1');
     // The two deliberately-different gates, pinned as they are.
     expect(String(stepByName.get('Check workflow file size').if)).toBe(
       "${{ needs.classify_pr.outputs.skip_ci != 'true' }}",
