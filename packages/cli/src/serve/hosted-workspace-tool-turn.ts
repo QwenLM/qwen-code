@@ -10,6 +10,7 @@ import {
   confirmReplacedHostedTurnOwner,
 } from './hosted-turn-cleanup.js';
 import { probeNeverStarted } from './hosted-never-started-reconcile.js';
+import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 
 import {
   readHostedFileHistory,
@@ -1786,6 +1787,7 @@ export class HostedWorkspaceToolTurn {
 
   private readonly publicPlanMode: boolean;
   private planning: boolean;
+  private residentWorkspace = false;
   private logicalRound = 0;
   private nativeBatch?: {
     messageId: string;
@@ -2050,11 +2052,61 @@ export class HostedWorkspaceToolTurn {
     );
   }
 
+  private backgroundShellAdmitted(): boolean {
+    return (
+      this.publication !== undefined &&
+      this.childRuns !== undefined &&
+      childRunAdmissionsEnabled()
+    );
+  }
+
+  private monitorsAdmitted(): boolean {
+    return (
+      this.monitors !== undefined &&
+      this.publication !== undefined &&
+      monitorRunAdmissionsEnabled()
+    );
+  }
+
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    if (
+      this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+      (this.profile === undefined &&
+        !this.mcp &&
+        !this.hooks &&
+        !this.shell &&
+        !this.publication)
+    ) {
+      try {
+        await waitForTurn(this.broker.resolveCapabilities(), signal);
+      } catch (cause) {
+        if (
+          !(cause instanceof HostedWorkspaceBrokerRejection) ||
+          cause.status !== 404
+        )
+          throw cause;
+        await waitForTurn(this.warmed, signal);
+      }
+      this.residentWorkspace =
+        this.broker.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    }
     this.planning =
       this.publicPlanMode &&
       (await hostedPublicPlanActive(this.session, this.promptId));
+    if (this.residentWorkspace) {
+      this.advertised = hostedWorkspaceDeclarations(
+        HOSTED_WORKSPACE_FILE_TOOLS,
+        !this.fileBackupsEnabled,
+      );
+      if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
+      return this.planning
+        ? this.advertised.filter(
+            (tool) =>
+              tool.name === 'read_file' || tool.name === 'exit_plan_mode',
+          )
+        : this.advertised;
+    }
     // #13753 I3: a snapshot child's read profile declares its two read
     // tools and nothing else, whatever lanes, orchestration or MCP the
     // Session has; the refusal of every other call rests on this alone.
@@ -2079,9 +2131,12 @@ export class HostedWorkspaceToolTurn {
         ...(search ? [HOSTED_GLOB_TOOL] : []),
         ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
       ]
-        .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
+        .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((tool) => {
-          if (this.foregroundOnly && tool.name === 'run_shell_command') {
+          if (
+            tool.name === 'run_shell_command' &&
+            !this.backgroundShellAdmitted()
+          ) {
             const schema = structuredClone(tool.parametersJsonSchema) as {
               properties?: Record<string, unknown>;
             };
@@ -2089,7 +2144,7 @@ export class HostedWorkspaceToolTurn {
             return {
               ...tool,
               description:
-                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms.',
+                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
               parametersJsonSchema: schema,
             };
           }
@@ -3760,9 +3815,7 @@ export class HostedWorkspaceToolTurn {
             // The admitted family runs v3 only: a shell-mode turn has no
             // publication to drive it, so admitting there would only re-
             // send the request into the background-refusing v2 path.
-            this.publication !== undefined &&
-            this.childRuns !== undefined &&
-            childRunAdmissionsEnabled();
+            this.backgroundShellAdmitted();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Shell requires a nonempty command.';
           } else if (unsupportedKey !== undefined) {
@@ -3898,10 +3951,7 @@ export class HostedWorkspaceToolTurn {
           // owns its monitor_run orchestrator and the detached family has
           // its v3 flow — publication — without it the request refuses at
           // admission rather than travelling v2 and never landing.
-          monitorAdmitted =
-            this.monitors !== undefined &&
-            this.publication !== undefined &&
-            monitorRunAdmissionsEnabled();
+          monitorAdmitted = this.monitorsAdmitted();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Monitor requires a nonempty command.';
           } else if (unsupportedKey !== undefined) {
@@ -4379,6 +4429,29 @@ export class HostedWorkspaceToolTurn {
     const unicodeErrors = calls.map((call) =>
       hostedShellInputError(call.name, call.args),
     );
+    if (
+      !restored &&
+      this.residentWorkspace &&
+      calls.some(
+        (call) =>
+          !HOSTED_WORKSPACE_FILE_TOOLS.some(
+            (tool) => tool.name === call.name,
+          ) && !(this.publicPlanMode && call.name === 'exit_plan_mode'),
+      )
+    ) {
+      return this.refuseBatch(
+        calls,
+        calls.map((call) =>
+          HOSTED_WORKSPACE_FILE_TOOLS.some((tool) => tool.name === call.name) ||
+          (this.publicPlanMode && call.name === 'exit_plan_mode')
+            ? undefined
+            : 'Resident Workspace supports only read_file, write_file and edit.',
+        ),
+        parts,
+        model,
+        skillOrigin,
+      );
+    }
     if (unicodeErrors.some((error) => error !== undefined)) {
       // Profile, duplicate-id and truncated-input hard refusals still win.
       const requests = prepareRequests(calls);

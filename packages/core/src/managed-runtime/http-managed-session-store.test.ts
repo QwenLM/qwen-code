@@ -87,6 +87,85 @@ const TOKEN_B = 'b'.repeat(32);
 describe('HTTP Managed Session store', () => {
   const temporaryDirectories: string[] = [];
 
+  it.each([false, true])(
+    'claims user messages with the current writer and initialOnly=%s',
+    async (initialOnly) => {
+      const server = new FakeManagedSessionStore();
+      const messages = [
+        {
+          id: 'umsg_1',
+          revision: 2,
+          input: [{ type: 'text', text: 'guidance' }],
+        },
+      ];
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+        requestUrl(input).endsWith('/user-messages:claim')
+          ? jsonResponse(messages)
+          : server.fetch(input, init),
+      );
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        await expect(
+          stores.claimUserMessages('prompt-a', initialOnly),
+        ).resolves.toEqual(messages);
+        const [, init] = fetchFn.mock.calls.find(([input]) =>
+          requestUrl(input).endsWith('/user-messages:claim'),
+        )!;
+        expect(JSON.parse(String(init?.body))).toEqual({
+          workspaceId: SESSION_KEY.workspaceId,
+          writerId: 'harness-a',
+          writerGeneration: 1,
+          promptId: 'prompt-a',
+          initialOnly,
+        });
+        expect(
+          new Headers(init?.headers).get('X-Qwen-Managed-Writer-Token'),
+        ).toBe(TOKEN_A);
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
+
+  it('keeps old stores compatible without hiding a fenced queue refusal', async () => {
+    const server = new FakeManagedSessionStore();
+    let status = 404;
+    let code = 'not_found';
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+      requestUrl(input).endsWith('/user-messages:claim')
+        ? jsonResponse({ error: { code, message: 'unavailable' } }, status)
+        : server.fetch(input, init),
+    );
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(stores.claimUserMessages('prompt-a')).resolves.toEqual([]);
+      code = 'session_not_found';
+      await expect(stores.claimUserMessages('prompt-a')).rejects.toBeInstanceOf(
+        ManagedSessionStoreHttpError,
+      );
+      status = 409;
+      await expect(stores.claimUserMessages('prompt-a')).rejects.toBeInstanceOf(
+        ManagedSessionStoreHttpError,
+      );
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
   it.each([
     { mode: 'default', revision: 0 },
     { mode: 'auto-edit', revision: 2 },

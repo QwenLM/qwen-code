@@ -19,6 +19,8 @@
 
 ## 构建与配置
 
+可选的[验收工具](qualification/README.zh-CN.md)可构建匹配的 Harness/Java-worker 镜像、生成只匹配既有业务节点的模板，并执行签名公开多用户、工具和 SSE 场景。部署就绪、公开执行、owner/故障验收与容量结果分别记录；生成验收包不会 apply 或购买资源。
+
 在干净的源码 checkout 中从仓库根目录构建。Dockerfile 专用 ignore 文件排除本地设置、凭据、日志与构建产物：
 
 ```sh
