@@ -2982,7 +2982,8 @@ export async function runNonInteractive(
           );
           switch (result.reason) {
             case 'surface_ended':
-              return emitStructuredSuccess();
+              // Awaited, so the run's finally closes the Mods after it.
+              return await emitStructuredSuccess();
             case 'duplicate_provider_call':
               loopDetectedMessage = emitLoopDetectedMessage(
                 config,
@@ -3167,7 +3168,8 @@ export async function runNonInteractive(
               // task_notification events to land, then emits the
               // structured success envelope. Same helper as the drain-turn
               // post-loop branch — see emitStructuredSuccess above.
-              return emitStructuredSuccess();
+              // Awaited, so the run's finally closes the Mods after it.
+              return await emitStructuredSuccess();
             }
             if (
               repeatedDuplicateProviderToolCall &&
@@ -3769,7 +3771,8 @@ export async function runNonInteractive(
           // metrics snapshot after the holdback so any task notifications
           // that landed during shutdown contribute to the totals.
           if (structuredSubmission !== undefined) {
-            return emitStructuredSuccess();
+            // Awaited, so the run's finally closes the Mods after it.
+            return await emitStructuredSuccess();
           }
 
           // --json-schema contract: the model MUST terminate via the

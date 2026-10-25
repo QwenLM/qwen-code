@@ -6669,11 +6669,10 @@ describe('runNonInteractive', () => {
         vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
         setupMetricsMock();
         const mod = installModTurn();
+        const aborts: boolean[] = [];
         admitting(async function* () {
           yield { type: LlmEventType.Content, value: 'Partial' };
-          expect(mod.abort()).toBe(true);
-          // The run is already ending, so a second call ends nothing.
-          expect(mod.abort()).toBe(false);
+          aborts.push(mod.abort(), mod.abort());
           yield { type: LlmEventType.UserCancelled } as ServerLlmStreamEvent;
         });
 
@@ -6685,6 +6684,8 @@ describe('runNonInteractive', () => {
         );
 
         expect(exitCode).toBe(130);
+        // The run is already ending, so a second call ends nothing.
+        expect(aborts).toEqual([true, false]);
         // The run answers with a result rather than exiting as an interrupt.
         expect(process.exit).not.toHaveBeenCalled();
         expect(mod.turn.complete.mock.calls[0]).toEqual(['aborted']);
@@ -6704,6 +6705,86 @@ describe('runNonInteractive', () => {
         }
       },
     );
+
+    it('ends a structured-output run as an answer', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+      });
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      const { order, turn } = installModTurn();
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'ok' }],
+      });
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-structured',
+              name: 'structured_output',
+              args: { summary: 'done' },
+              isClientInitiated: false,
+              prompt_id: 'mod-structured',
+            },
+          },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Emit structured output',
+        'mod-structured',
+      );
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+      expect(turn.complete.mock.calls[0]).toEqual([]);
+      expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);
+    });
+
+    it('hears the continuation of an interrupted turn', async () => {
+      setupMetricsMock();
+      const { order, turn, startTurn } = installModTurn();
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      admitting(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Done.' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'mod-continue', {
+        continueInterrupted: true,
+      });
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+        [{ text: 'do the thing' }],
+        expect.any(AbortSignal),
+        'mod-continue',
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      // A continuation has no typed prompt.
+      expect(startTurn).toHaveBeenCalledExactlyOnceWith(
+        '',
+        expect.any(AbortSignal),
+        expect.any(Function),
+      );
+      expect(turn.complete.mock.calls[0]).toEqual([]);
+      expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);
+    });
 
     it('ends a turn the run budget stops as an error', async () => {
       setupMetricsMock();
