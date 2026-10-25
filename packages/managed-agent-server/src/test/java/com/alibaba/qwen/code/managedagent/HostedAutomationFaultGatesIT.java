@@ -2516,7 +2516,7 @@ class HostedAutomationFaultGatesIT {
         int logOffset = Files.exists(log) ? Files.readString(log).length() : 0;
         ProcessBuilder builder = new ProcessBuilder(node, cli.toString(),
                 "serve", "--profile", "hosted-harness", "--http-bridge", "--hostname", "127.0.0.1", "--port",
-                Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
+                harness == null ? "0" : Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
                 "--managed-runtime-broker-url", "http://127.0.0.1:" + brokerPort,
                 "--managed-runtime-broker-token", TOKEN)
                 .directory(decoy.toFile()).redirectErrorStream(true)
