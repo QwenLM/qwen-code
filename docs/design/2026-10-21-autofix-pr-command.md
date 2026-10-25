@@ -1143,7 +1143,9 @@ Replies are on by default; `--no-reply` turns them off.
   prompt that tells the model how to handle the events in the gate output
   (`Run /autofix-pr tick <owner>/<repo>#<n> --task <task>`). The first
   round runs under that task too. The gate
-  is confirmed once, like a Monitor command, when the task is created.
+  is confirmed once, like a Monitor command, when the task is created. A
+  daemon conversation carries one scheduled task, so a second watch there
+  needs a conversation of its own.
 - Fires that arrive while the session is busy wait in the notification queue;
   the probe runs once when the session is idle and prints everything new
   since its previous run.

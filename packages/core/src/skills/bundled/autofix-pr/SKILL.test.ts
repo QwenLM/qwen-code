@@ -192,6 +192,8 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain(
       'prints `durable: true` with `sessionMode: "current"`',
     );
+    // A daemon conversation binds one task, so a second watch says so.
+    expect(body).toContain('`session_already_bound`');
   });
 
   it("forbids the fix agent's brief every write to GitHub, which only the main session makes", () => {
