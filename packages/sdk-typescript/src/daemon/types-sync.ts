@@ -25,6 +25,10 @@ type MutuallyAssignable<A, B> = A extends B
     ? true
     : false
   : false;
+type Equal<X, Y> =
+  (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2
+    ? true
+    : false;
 
 type PendingInteractionOptionStaysInSync = Assert<
   MutuallyAssignable<
@@ -56,9 +60,26 @@ export const pendingInteractionWireTypesInSync: [
   PendingUserQuestionInteractionStaysInSync,
 ] = [true, true, true, true];
 
-export const skillsSnapshotWireTypesInSync: Assert<
-  MutuallyAssignable<
-    NonNullable<ServeWorkspaceSkillsStatus['snapshot']>,
-    NonNullable<DaemonWorkspaceSkillsStatus['snapshot']>
+type SkillsSnapshotKeysInSync = Assert<
+  Equal<
+    keyof NonNullable<ServeWorkspaceSkillsStatus['snapshot']>,
+    keyof NonNullable<DaemonWorkspaceSkillsStatus['snapshot']>
   >
-> = true;
+>;
+type SkillsSnapshotOptionalityInSync = Assert<
+  Equal<
+    undefined extends ServeWorkspaceSkillsStatus['snapshot'] ? true : false,
+    undefined extends DaemonWorkspaceSkillsStatus['snapshot'] ? true : false
+  >
+>;
+
+export const skillsSnapshotWireTypesInSync: [
+  Assert<
+    MutuallyAssignable<
+      NonNullable<ServeWorkspaceSkillsStatus['snapshot']>,
+      NonNullable<DaemonWorkspaceSkillsStatus['snapshot']>
+    >
+  >,
+  SkillsSnapshotKeysInSync,
+  SkillsSnapshotOptionalityInSync,
+] = [true, true, true];

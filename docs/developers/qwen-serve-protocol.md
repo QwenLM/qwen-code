@@ -1772,10 +1772,15 @@ a retry is pending, but cannot replace an observation started later that has
 already published. Invalidated tasks cannot publish; a successful invalidated
 observation can still answer its original caller.
 Explicit invalidation drops known-invalid inventory and clears the throttle.
-Successful ACP preheat also invalidates retained inventory, including when the
-child was already live, so the subsequent read sees the child. Skill deletion
-and enablement identity reads bypass the snapshot and throttle, awaiting a new
-observation with local fallback.
+A successful ACP preheat that completes before its timeout also invalidates
+retained inventory, including when the child was already live, so the
+subsequent read sees the child. A preheat that times out and then finds the
+channel live also reports `ready: true` — ready always equals `channelLive` —
+but keeps the retained inventory because startup may still be incomplete; the
+next read returns that retained data, and background revalidation replaces it
+once the one-second start throttle allows. Skill deletion and enablement
+identity reads bypass the snapshot and throttle, awaiting a new observation
+with local fallback.
 
 Inventory responses carrying a retained daemon observation additionally include
 optional snapshot metadata. Direct config/runtime status reads, session resource

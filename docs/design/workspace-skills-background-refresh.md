@@ -56,9 +56,13 @@ daemon observation supply this metadata. For example, direct runtime/config
 status, session resource inventories, and older daemons omit it.
 
 Explicit invalidation drops known-invalid inventory, clears the throttle, and
-supersedes prior work. Successful explicit ACP preheat also invalidates the
-retained snapshot, even if the child was already live, allowing the next
-inventory read to see the child.
+supersedes prior work. A successful explicit ACP preheat that completes before
+its timeout also invalidates the retained snapshot, even if the child was
+already live, allowing the next inventory read to see the child. A preheat that
+times out and then finds the channel live reports success but keeps the
+retained snapshot, because startup may still be incomplete; the next read
+serves that retained data and background revalidation replaces it once the
+one-second start throttle allows.
 Destructive Skill deletion and Skill-toggle identity resolution bypass both
 the retained snapshot and read throttling. They await an independent observation
 and try local enumeration if ACP is unavailable, even if a snapshot exists.

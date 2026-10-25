@@ -1117,4 +1117,56 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       { name: 'second:second-skill', status: 'ok' },
     ]);
   });
+
+  it('shares one enumeration between concurrent reads', async () => {
+    const listSpy = vi.spyOn(SkillManager.prototype, 'listSkills');
+    const provider = createWorkspaceSkillsStatusProvider();
+
+    await Promise.all([provider('/ws'), provider('/ws')]);
+
+    expect(listSpy).toHaveBeenCalledOnce();
+  });
+
+  it('rebuilds after an invalidation that lands during an in-flight enumeration', async () => {
+    const workspace = path.join(qwenHome, 'workspace');
+    const skillDir = path.join(workspace, '.qwen', 'skills', 'alpha');
+    await fsp.mkdir(skillDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: alpha\ndescription: Alpha\n---\nInstructions',
+    );
+    await fsp.mkdir(path.join(qwenHome, 'extensions'), { recursive: true });
+
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = ExtensionManager.prototype.refreshCacheWithSnapshot;
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'refreshCacheWithSnapshot',
+    ).mockImplementation(async function (this: ExtensionManager, options) {
+      enter();
+      await gate;
+      return original.call(this, options);
+    });
+
+    const provider = createWorkspaceSkillsStatusProvider();
+    const first = provider(workspace);
+    await entered;
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabledLevels: ['project'] } }),
+    );
+    provider.invalidate?.(workspace);
+    release();
+    await first;
+
+    const status = await provider(workspace);
+    expect(status.skills.some((skill) => skill.name === 'alpha')).toBe(false);
+  });
 });
