@@ -4356,8 +4356,14 @@ export const useLlmStream = (
                     // Each tool round has its own controller; this one
                     // spans the turn.
                     const cancel = new AbortController();
+                    // A retry has no typed prompt. A prompt whose composer
+                    // provenance was lost is heard as it is sent.
                     const turn = mods?.startTurn(
-                      metadata?.humanInput?.text ?? submittedPrompt ?? '',
+                      submitType === SendMessageType.Retry
+                        ? ''
+                        : (metadata?.humanInput?.text ??
+                            submittedPrompt ??
+                            (typeof query === 'string' ? query : '')),
                       AbortSignal.any([abortSignal, cancel.signal]),
                       () => cancelForModRef.current(),
                       prompt_id,

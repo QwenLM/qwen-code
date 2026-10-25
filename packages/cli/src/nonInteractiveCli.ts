@@ -2990,9 +2990,9 @@ export async function runNonInteractive(
                 config,
                 PROVIDER_DUPLICATE_ID_LOOP_STOP,
               );
-              return emitLoopDetectedResult();
+              return await emitLoopDetectedResult();
             case 'loop_detected':
-              return emitLoopDetectedResult();
+              return await emitLoopDetectedResult();
             case 'cancelled':
               // Awaited, so a recoverable interrupt reaches the catch below and
               // ends with its result, as on the current loop.
@@ -3124,7 +3124,7 @@ export async function runNonInteractive(
           totalApiDurationMs += Date.now() - apiStartTime;
 
           if (loopDetected) {
-            return emitLoopDetectedResult();
+            return await emitLoopDetectedResult();
           }
 
           shouldFinalizeTurn = toolCallRequests.length === 0;
@@ -3180,7 +3180,7 @@ export async function runNonInteractive(
                 config,
                 PROVIDER_DUPLICATE_ID_LOOP_STOP,
               );
-              return emitLoopDetectedResult();
+              return await emitLoopDetectedResult();
             }
             if (terminateTurn && activeGoalTurn) {
               await modTurn?.complete();
@@ -3732,7 +3732,7 @@ export async function runNonInteractive(
             // through the model, but later monitor output is SDK-only.
             captureMonitorTurnsInLocalQueue = false;
             await drainLocalQueue();
-            if (loopDetected) return emitLoopDetectedResult();
+            if (loopDetected) return await emitLoopDetectedResult();
             // A drain-turn structured_output captured the terminal
             // contract — bail out of the holdback loop early and let the
             // post-loop code emit the success result.

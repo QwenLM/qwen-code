@@ -14237,6 +14237,27 @@ describe('useLlmStream', () => {
       });
 
       it.each([
+        ['a prompt sent without its composer provenance', undefined, 'Fix it'],
+        ['a retry', SendMessageType.Retry, ''],
+      ])('hears %s as the text it carries', async (_, type, text) => {
+        const { turn, startTurn } = installModTurn();
+        admitted(async function* () {
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        });
+        const { result } = renderTestHook();
+
+        await act(async () => {
+          await result.current.submitQuery('Fix it', type);
+        });
+
+        await waitFor(() => expect(turn.complete).toHaveBeenCalledOnce());
+        expect(startTurn.mock.calls[0][0]).toBe(text);
+      });
+
+      it.each([
         ['$.turn.abort', true],
         ['Esc', false],
       ])(

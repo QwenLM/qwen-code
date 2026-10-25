@@ -130,8 +130,8 @@ These go into the user guide:
   - a turn whose session has ended;
   - a turn still running when the session closes, an end the close overtook, an end already running at the close, every queued end in order, and the budget that bounds them.
 - Host tests:
-  - headless, on the current and the shared agent loop: an answer, a structured-output answer, a blocked prompt, the continuation of an interrupted turn, a Mod abort in JSON and text and from a `tool.call` hook, a Goal turn that a tool ends before a continuation, and a failed request;
-  - Ink: a turn from admission to idle, a Mod abort compared with Esc, a Mod abort after an Esc that leaves a running side question (`?btw`) alone, a cancel without an Esc, a cancel in a later round that ends the `turn.start` hooks, a turn whose tools were cancelled or could not go on, a failed continuation, a slash command that waits for the Mods to start, and no hook without Mods;
+  - headless, on the current and the shared agent loop: an answer, a structured-output answer, a blocked prompt, the continuation of an interrupted turn, a Mod abort in JSON and text and from a `tool.call` hook, a Goal turn that a tool ends before a continuation, a loop-detected turn that ends before the Mods close, and a failed request;
+  - Ink: a turn from admission to idle, a Mod abort compared with Esc, a Mod abort after an Esc that leaves a running side question (`?btw`) alone, a cancel without an Esc, a cancel in a later round that ends the `turn.start` hooks, a turn whose tools were cancelled or could not go on, a failed continuation, a slash command that waits for the Mods to start, a prompt sent without its composer provenance and a retry, and no hook without Mods;
   - OpenTUI: admission and a single end, interrupt and error, a Mod abort that lets the queue run, an Esc before or after a Mod abort, a turn whose tools were all declined, a retry with no typed prompt, and no hooks without Mods.
 - The built CLI against a fixture server, in headless JSON and text and in the Ink and OpenTUI terminals:
   - the `turn.start` text;

@@ -6959,6 +6959,31 @@ describe('runNonInteractive', () => {
       expect(turn.complete.mock.calls[0]).toEqual([]);
     });
 
+    it('ends a loop-detected turn as an error before the Mods close', async () => {
+      setupMetricsMock();
+      const { order, turn } = installModTurn();
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.LoopDetected,
+            value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+          },
+        ]),
+      );
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Fix it',
+        'mod-loop',
+      );
+
+      expect(exitCode).toBe(1);
+      expect(turn.complete.mock.calls[0]).toEqual(['error']);
+      // A close first would end the turn as aborted.
+      expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);
+    });
+
     it('ends the turn as an error when its request fails', async () => {
       setupMetricsMock();
       const { turn } = installModTurn();
