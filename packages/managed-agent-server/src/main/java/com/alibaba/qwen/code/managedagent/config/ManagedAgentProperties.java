@@ -432,6 +432,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 throw new IllegalStateException(
                         "Automation concurrency must be a positive count.");
             }
+            if (automation.getScannerThreads() < 1) {
+                throw new IllegalStateException(
+                        "Automation scanner-threads must be a positive count.");
+            }
             if (!(automation.getScanDelay().toMillis() > 0)
                     || !(automation.getLease().toMillis() > 0)
                     || !(automation.getLateTolerance().toMillis() > 0)
@@ -1738,6 +1742,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private Duration lookback = Duration.ofHours(24);
         private int maxSlotsPerTick = 1000;
         private int concurrency = 4;
+        private int scannerThreads = 4;
 
         public boolean isEnabled() {
             return enabled;
@@ -1793,6 +1798,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setConcurrency(int concurrency) {
             this.concurrency = concurrency;
+        }
+
+        public int getScannerThreads() {
+            return scannerThreads;
+        }
+
+        public void setScannerThreads(int scannerThreads) {
+            this.scannerThreads = scannerThreads;
         }
     }
 
