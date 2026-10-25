@@ -439,21 +439,25 @@ class Session {
 
   /**
    * Direct mode initialization flow
-   * Initializes config and enqueues the first user message
+   * Enqueues the first user message, then initializes config
    */
   private async initializeDirectMode(
     userMessage: CLIUserMessage,
   ): Promise<void> {
     this.ensureInitializationPromise();
     try {
+      // Enqueue the first user message before awaiting initialization. Any
+      // message that arrives while config is still initializing is enqueued by
+      // the read loop, so waiting here would let it overtake this one and run
+      // first. processUserMessage awaits initialization before touching
+      // config, so enqueuing early cannot start work too soon.
+      this.enqueueUserMessage(userMessage);
+
       // Initialize config
       await this.ensureConfigInitialized();
 
       // Initialization complete!
       this.completeInitialization();
-
-      // Enqueue the first user message for processing
-      this.enqueueUserMessage(userMessage);
     } catch (error) {
       debugLogger.error('[Session] Direct mode initialization failed:', error);
       this.failInitialization(

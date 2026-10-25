@@ -81,7 +81,8 @@ public class HarnessEventProjector {
         if ("tool_call".equals(kind)
                 || "tool_call_update".equals(kind)) {
             return new ProjectedEvent("item.tool_call.updated",
-                    safeToolData(update, turnId, event.id()), false, null,
+                    safeToolData(update, turnId, event.id(),
+                            "managed_journal_event".equals(event.type())), false, null,
                     null, null);
         }
         return null;
@@ -101,7 +102,7 @@ public class HarnessEventProjector {
     }
 
     private static Map<String, Object> safeToolData(
-            Map<String, Object> update, String turnId, Long sourceId) {
+            Map<String, Object> update, String turnId, Long sourceId, boolean committed) {
         Map<String, Object> safe = new LinkedHashMap<>();
         safe.put("kind", string(update.get("sessionUpdate")));
         copyScalar(update, safe, "toolCallId");
@@ -109,6 +110,12 @@ public class HarnessEventProjector {
         copyScalar(update, safe, "title");
         copyScalar(update, safe, "status");
         copyScalar(update, safe, "name");
+        if (committed && "todo_write".equals(update.get("name"))
+                && "completed".equals(update.get("status"))
+                && update.get("todoSnapshot") instanceof String snapshot
+                && snapshot.getBytes(StandardCharsets.UTF_8).length <= 16 * 1024) {
+            safe.put("todoSnapshot", snapshot);
+        }
         if (sourceId != null && sourceId > 0) {
             safe.put("sourceSequence", sourceId);
         }

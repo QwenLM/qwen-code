@@ -15,7 +15,7 @@
  *  - a renderer input handler is registered via useLayoutEffect before
  *    paint and removed on unmount;
  *  - legacy DEL/BS and the four valid kitty Backspace forms are consumed
- *    and call TextareaRenderable.deleteCharBackward exactly once each;
+ *    and edit the shared Ink buffer exactly once each;
  *  - release/modified/invalid kitty forms are left unconsumed;
  *  - the printable fallback preserves ASCII/CJK/emoji (plain or
  *    Shift-produced) and rejects modifier/control/editing/navigation keys;
@@ -23,18 +23,32 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, useState } from 'react';
+import { act, useState, useRef, useMemo } from 'react';
+import type { KeyEvent } from '@opentui/core';
+import type { TextBuffer } from '../components/shared/text-buffer.js';
+import type { VimBuffer } from '../hooks/vim.js';
 import { render, screen, waitFor } from '@testing-library/react';
 import { mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { execFile, execFileSync } from 'child_process';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ApprovalMode, Storage, type Config } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import type { LoadedSettings } from '../../config/settings.js';
+import {
+  VimModeProvider,
+  useVimModeActions,
+} from '../contexts/VimModeContext.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
-import type { OpenTuiCancelSettled } from './input-submission.js';
+import { useVim } from '../hooks/vim.js';
+import { createVimBuffer } from './vim-buffer.js';
+import type {
+  OpenTuiCancelSettled,
+  OpenTuiComposerHandle,
+} from './input-submission.js';
 import { useOpenTuiLiveTurn, type OpenTuiLiveTurn } from './live-turn.js';
-import { cpLen, cpSlice } from '../utils/textUtils.js';
+import { cpLen, cpSlice, getCachedStringWidth } from '../utils/textUtils.js';
 import {
   codePointIndexToDisplayCol,
   displayColToCodePointIndex,
@@ -42,7 +56,9 @@ import {
 
 interface FakeEditor {
   plainText: string;
+  width: number;
   cursorOffset: number;
+  handleKeyPress(key: KeyEvent): boolean;
   deleteCharBackwardCalls: number;
   deleteWordBackwardCalls: number;
   newLineCalls: number;
@@ -59,6 +75,9 @@ interface FakeEditor {
   replacements: string[];
   scrollY: number;
   visualCursor: { visualRow: number };
+  editorView: { getTotalVirtualLineCount: () => number };
+  moveCursorUp: () => void;
+  moveCursorDown: () => void;
   newLine(): void;
 }
 
@@ -74,6 +93,8 @@ const mocks = vi.hoisted(() => {
     inputHandlers: [] as Array<(sequence: string) => boolean>,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     editors: [] as unknown[],
+    buffer: null as TextBuffer | null,
+    toggleVim: null as (() => Promise<boolean>) | null,
     pasteHandlers: [] as Array<(event: unknown) => void>,
     slashCommands: [] as unknown[],
     fileSearchResults: [] as string[],
@@ -81,6 +102,10 @@ const mocks = vi.hoisted(() => {
     sessionSuggestions: [] as MockSuggestion[],
     extensionSuggestions: [] as MockSuggestion[],
     textareaProps: null as Record<string, unknown> | null,
+    shellHistory: [] as string[],
+    addShellCommand: vi.fn(),
+    previousShellCommand: vi.fn<() => string | null>(() => null),
+    nextShellCommand: vi.fn<() => string | null>(() => null),
     editExternally:
       vi.fn<
         (
@@ -127,8 +152,23 @@ const mocks = vi.hoisted(() => {
       set cursorOffset(offset: number) {
         setColFromDisplay(offset);
       },
+      width: 78,
+      handleKeyPress: vi.fn<(key: KeyEvent) => boolean>(() => true),
+      getSelection: () => null,
+      clearSelection: vi.fn(),
+      editBuffer: {
+        getTextRange: (start: number, end: number) =>
+          cpSlice(
+            text,
+            displayColToCodePointIndex(text, start),
+            displayColToCodePointIndex(text, end),
+          ),
+      },
       scrollY: 0,
       visualCursor: { visualRow: 0 },
+      editorView: { getTotalVirtualLineCount: () => 1 },
+      moveCursorUp: vi.fn(),
+      moveCursorDown: vi.fn(),
       replacements: [] as string[],
       replaceText(t: string) {
         editor.replacements.push(t);
@@ -217,6 +257,7 @@ const mocks = vi.hoisted(() => {
   }
 
   const renderer = {
+    widthMethod: 'unicode',
     suspend: vi.fn(),
     resume: vi.fn(),
     addInputHandler(handler: (sequence: string) => boolean) {
@@ -284,6 +325,54 @@ const mocks = vi.hoisted(() => {
   return { state, renderer, buildJsxRuntime };
 });
 
+vi.mock('../components/shared/text-buffer.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../components/shared/text-buffer.js')
+    >();
+  return {
+    ...actual,
+    useTextBuffer: (options: Parameters<typeof actual.useTextBuffer>[0]) => {
+      const buffer = actual.useTextBuffer(options);
+      mocks.state.buffer = buffer;
+      return buffer;
+    },
+  };
+});
+vi.mock('@opentui/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@opentui/core')>();
+  return {
+    ...actual,
+    resolveRenderLib: () => ({
+      encodeUnicode: (text: string) => ({
+        data: [{ width: getCachedStringWidth(text) }],
+      }),
+      freeUnicode: vi.fn(),
+    }),
+  };
+});
+
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  const execFile = vi.fn();
+  const execFileSync = vi.fn(() => '');
+  return {
+    ...actual,
+    default: { ...actual, execFile, execFileSync },
+    execFile,
+    execFileSync,
+  };
+});
+
+vi.mock('../hooks/useShellHistory.js', () => ({
+  useShellHistory: () => ({
+    history: mocks.state.shellHistory,
+    addCommandToHistory: mocks.state.addShellCommand,
+    getPreviousCommand: mocks.state.previousShellCommand,
+    getNextCommand: mocks.state.nextShellCommand,
+    resetHistoryPosition: () => {},
+  }),
+}));
 vi.mock('../utils/external-editor.js', () => ({
   editTextInExternalEditor: (
     ...args: Parameters<typeof mocks.state.editExternally>
@@ -357,6 +446,12 @@ vi.mock('../utils/clipboardUtils.js', () => ({
 }));
 
 beforeEach(() => {
+  vi.mocked(execFile).mockReset();
+  vi.mocked(execFileSync).mockReset().mockReturnValue('');
+  mocks.state.shellHistory = [];
+  mocks.state.addShellCommand.mockClear();
+  mocks.state.previousShellCommand.mockReset().mockReturnValue(null);
+  mocks.state.nextShellCommand.mockReset().mockReturnValue(null);
   mocks.state.editExternally.mockReset().mockImplementation((text, options) => {
     options.beforeLaunch();
     return text;
@@ -390,6 +485,11 @@ function lastKeyboardHandler(): (key: unknown) => void {
   const handler = mocks.state.keyboardHandlers.at(-1);
   if (!handler) throw new Error('no keyboard handler registered');
   return handler;
+}
+
+function currentBuffer(): TextBuffer {
+  if (!mocks.state.buffer) throw new Error('no buffer registered');
+  return mocks.state.buffer;
 }
 
 function currentEditor(): FakeEditor {
@@ -614,13 +714,12 @@ describe('OpenTuiInputPrompt queued source restoration', () => {
         }
         expect(currentEditor().plainText).toBe('');
         await act(async () => {
-          currentEditor().insertText(popped);
-          (mocks.state.textareaProps?.['onContentChange'] as () => void)();
+          currentBuffer().insert(popped);
         });
       } else if (action === 'edit' || action === 'repop-edit') {
         await typeText(' append instruction');
       } else if (action === 'recall') {
-        currentEditor().setCursor(0, 0);
+        await act(async () => currentBuffer().moveToOffset(0));
         await press('up', '\x1b[A');
         expect(currentEditor().plainText).toBe(popped);
       }
@@ -690,15 +789,15 @@ describe('OpenTuiInputPrompt raw Backspace wiring', () => {
       expect(await pressRaw(sequence)).toBe(true);
     }
     expect(editor.plainText).toBe('');
-    expect(editor.deleteCharBackwardCalls).toBe(6);
+    expect(editor.deleteCharBackwardCalls).toBe(0);
   });
 
-  it('calls deleteCharBackward exactly once per consumed sequence', async () => {
+  it('deletes once through the owner per consumed sequence', async () => {
     render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await typeText('xy');
     await pressRaw('\x1b[127u');
-    expect(editor.deleteCharBackwardCalls).toBe(1);
+    expect(editor.deleteCharBackwardCalls).toBe(0);
     expect(editor.plainText).toBe('x');
   });
 
@@ -750,7 +849,7 @@ describe('OpenTuiInputPrompt printable fallback', () => {
     const editor = currentEditor();
     await typeText('a中😀');
     expect(editor.plainText).toBe('a中😀');
-    expect([...editor.insertCalls]).toEqual(['a', '中', '😀']);
+    expect(editor.insertCalls).toEqual([]);
   });
 
   it('accepts Shift-produced printable input', async () => {
@@ -781,6 +880,62 @@ describe('OpenTuiInputPrompt printable fallback', () => {
     }
     expect(editor.insertCalls).toEqual([]);
     expect(editor.plainText).toBe('');
+    expect(editor.handleKeyPress).toHaveBeenCalledTimes(2);
+    expect(editor.handleKeyPress).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ name: 'a', super: true }),
+    );
+    expect(editor.handleKeyPress).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ name: 'a', ctrl: true, shift: true }),
+    );
+  });
+
+  it('synchronizes the owner after native selection handles a key without inserting text', async () => {
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
+    await typeText('abcd');
+    const editor = currentEditor();
+    vi.mocked(editor.handleKeyPress).mockImplementationOnce(() => {
+      editor.cursorOffset = 2;
+      return true;
+    });
+    const preventDefault = vi.fn();
+    const key = baseKeyEvent({
+      name: 'left',
+      sequence: '\x1b[1;2D',
+      shift: true,
+      preventDefault,
+    });
+    await act(async () => lastKeyboardHandler()(key));
+    expect(editor.handleKeyPress).toHaveBeenCalledExactlyOnceWith(key);
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(currentBuffer().text).toBe('abcd');
+    expect(currentBuffer().cursor).toEqual([0, 2]);
+    expect(editor.plainText).toBe('abcd');
+    expect(editor.cursorOffset).toBe(2);
+    expect(editor.insertCalls).toEqual([]);
+  });
+
+  it('leaves a native-declined selection key unconsumed without moving the owner', async () => {
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
+    await typeText('abcd');
+    const editor = currentEditor();
+    vi.mocked(editor.handleKeyPress).mockReturnValue(false);
+    const preventDefault = vi.fn();
+    const key = baseKeyEvent({
+      name: 'left',
+      sequence: '\x1b[1;2D',
+      shift: true,
+      preventDefault,
+    });
+    await act(async () => lastKeyboardHandler()(key));
+    expect(editor.handleKeyPress).toHaveBeenCalledWith(key);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(currentBuffer().text).toBe('abcd');
+    expect(currentBuffer().cursor).toEqual([0, 4]);
+    expect(editor.plainText).toBe('abcd');
+    expect(editor.cursorOffset).toBe(4);
+    expect(editor.insertCalls).toEqual([]);
   });
 
   it('rejects release events', async () => {
@@ -932,9 +1087,10 @@ describe('OpenTuiInputPrompt submit guard', () => {
         lastKeyboardHandler()(baseKeyEvent(overrides));
       });
     }
-    expect(editor.newLineCalls).toBe(4);
+    expect(currentBuffer().text).toBe('ab\n\n\n\n');
+    expect(editor.newLineCalls).toBe(0);
     expect(submitted).toEqual([]);
-    expect(editor.plainText).toBe('ab');
+    expect(editor.plainText).toBe('ab\n\n\n\n');
   });
 
   it('Ctrl+V attaches the clipboard image and submits it with the text', async () => {
@@ -1071,8 +1227,9 @@ describe('OpenTuiInputPrompt submit guard', () => {
       });
       await pressKey('escape');
       if (successor) await typeText('successor');
-      await act(async () =>
-        settle({
+      let restored: boolean | void;
+      await act(async () => {
+        restored = settle({
           kind: 'cancelled',
           queued: null,
           prompt: {
@@ -1080,8 +1237,9 @@ describe('OpenTuiInputPrompt submit guard', () => {
             submittedPrompt: 'typed original',
             imagePaths: ['/tmp/original.png'],
           },
-        }),
-      );
+        });
+      });
+      expect(restored!).toBe(successor ? undefined : true);
       expect(currentEditor().plainText).toBe(
         successor ? 'successor' : 'expanded original',
       );
@@ -1412,8 +1570,9 @@ describe('OpenTuiInputPrompt `\\`+Enter continuation (G3)', () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
     expect(submitted).toEqual([]);
-    expect(editor.newLineCalls).toBe(1);
-    expect(editor.plainText).toBe('ab'); // backslash removed
+    expect(currentBuffer().text.endsWith('\n')).toBe(true);
+    expect(editor.newLineCalls).toBe(0);
+    expect(editor.plainText).toBe('ab\n'); // backslash removed
   });
 
   it('submits once the backslash is no longer right before the caret', async () => {
@@ -1461,7 +1620,7 @@ describe('OpenTuiInputPrompt DELETE_WORD_BACKWARD (G9)', () => {
     const editor = currentEditor();
     await typeText('foo bar');
     expect(await pressRaw('\x1f')).toBe(true);
-    expect(editor.deleteWordBackwardCalls).toBe(1);
+    expect(editor.deleteWordBackwardCalls).toBe(0);
     expect(editor.plainText).toBe('foo ');
   });
 
@@ -1478,7 +1637,7 @@ describe('OpenTuiInputPrompt DELETE_WORD_BACKWARD (G9)', () => {
         }),
       );
     });
-    expect(editor.deleteWordBackwardCalls).toBe(1);
+    expect(editor.deleteWordBackwardCalls).toBe(0);
     expect(editor.plainText).toBe('foo ');
   });
 
@@ -1491,7 +1650,8 @@ describe('OpenTuiInputPrompt DELETE_WORD_BACKWARD (G9)', () => {
         baseKeyEvent({ name: 'backspace', sequence: '\x7f', super: true }),
       );
     });
-    expect(editor.deleteWordBackwardCalls).toBe(1);
+    expect(editor.deleteWordBackwardCalls).toBe(0);
+    expect(editor.plainText).toBe('foo ');
   });
 
   it('ignores backspace release events', async () => {
@@ -1552,11 +1712,14 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
     expect(mocks.state.pasteHandlers).toHaveLength(0);
   });
 
-  it('leaves small pastes to the editor (no preventDefault)', async () => {
+  it('inserts small pastes once through the owner and prevents native duplicate input', async () => {
     const handler = registerPasteListener();
     const preventDefault = await emitPaste(handler, 'small paste');
-    expect(preventDefault).not.toHaveBeenCalled();
-    expect(currentEditor().plainText).toBe('');
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(currentEditor().plainText).toBe('small paste');
+    expect(currentEditor().insertCalls).toEqual([]);
+    await act(async () => currentBuffer().undo());
+    expect(currentBuffer().text).toBe('');
   });
 
   it('collapses a char-threshold paste into a placeholder', async () => {
@@ -1868,8 +2031,9 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
     expect(submitted).toEqual([]);
-    expect(editor.newLineCalls).toBe(1);
-    expect(editor.deleteCharBackwardCalls).toBe(1);
+    expect(currentBuffer().text.endsWith('\n')).toBe(true);
+    expect(editor.newLineCalls).toBe(0);
+    expect(editor.deleteCharBackwardCalls).toBe(0);
   });
 });
 
@@ -2017,8 +2181,8 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     await typeText('/');
     // Then move the buffer without a flush — what a render loop busy with a
     // streaming turn does to the last keystrokes before an Enter.
-    editor.setText('/quit');
     await act(async () => {
+      currentBuffer().setText('/quit');
       lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
     // Counterfactual (mutation-checked): trusting the stale row splices it
@@ -2046,8 +2210,8 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     // moves back to a partial. The stale verdict must not submit it as text.
     const editor = currentEditor();
     await typeText('/quit');
-    editor.setText('/cle');
     await act(async () => {
+      currentBuffer().setText('/cle');
       lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
     expect(submitted).toEqual([]);
@@ -3302,6 +3466,38 @@ describe('composer admission and attachment ownership', () => {
     );
   });
 
+  it('routes Ctrl+Y without submitting or replacing the current draft', async () => {
+    const retry = vi.fn();
+    const submit = vi.fn(() => true);
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={submit}
+        userMessages={[]}
+        onRetry={retry}
+      />,
+    );
+    await typeText('successor draft');
+    await press('y', true);
+    expect(retry).toHaveBeenCalledOnce();
+    expect(submit).not.toHaveBeenCalled();
+    expect(currentEditor().plainText).toBe('successor draft');
+  });
+
+  it('opens rewind only after two Escape keys on an empty idle draft', async () => {
+    const rewind = vi.fn();
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => true}
+        userMessages={[]}
+        onRewind={rewind}
+      />,
+    );
+    await press('escape');
+    expect(rewind).not.toHaveBeenCalled();
+    await press('escape');
+    expect(rewind).toHaveBeenCalledOnce();
+  });
+
   it.each([false, true])(
     'Ctrl+Q claims one draft with deferUntilIdle while streaming=%s',
     async (streaming) => {
@@ -3495,7 +3691,7 @@ describe('composer admission and attachment ownership', () => {
   );
 });
 
-describe('OpenTuiInputPrompt external editor ownership', () => {
+describe('OpenTuiInputPrompt editing ownership and recall', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
@@ -3511,6 +3707,565 @@ describe('OpenTuiInputPrompt external editor ownership', () => {
       }),
     );
   };
+
+  const resetCaretOnSetText = () => {
+    const editor = currentEditor();
+    const setText = editor.setText.bind(editor);
+    vi.spyOn(editor, 'setText').mockImplementation((text: string) => {
+      setText(text);
+      editor.cursorOffset = 0;
+    });
+  };
+
+  const searchLabel = (text: string) =>
+    screen.queryByText(
+      (_, element) =>
+        element?.tagName === 'SPAN' && element.textContent === text,
+    );
+
+  it.each([false, true])(
+    'search Enter replaces restored provenance only when accepting a history item: %s',
+    async (hasItem) => {
+      const composerHandle = { current: null as OpenTuiComposerHandle | null };
+      const onSubmit = vi.fn(() => true);
+      renderPrompt({
+        composerHandle,
+        onSubmit,
+        userMessages: hasItem ? ['expanded value'] : [],
+        onInterrupt: (settled) =>
+          settled?.({
+            kind: 'cancelled',
+            queued: null,
+            prompt: { text: 'expanded value', submittedPrompt: '@owned.txt' },
+          }),
+      });
+      await act(async () => composerHandle.current!.cancelTurn!());
+      expect(currentEditor().plainText).toBe('expanded value');
+      await pressKey('r', true);
+      expect(screen.getByText('(r:)')).toBeTruthy();
+      if (hasItem)
+        await waitFor(() => expect(searchLabel('expanded value')).toBeTruthy());
+      else expect(searchLabel('expanded value')).toBeNull();
+      await pressKey('return');
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+        'expanded value',
+        undefined,
+        {
+          submittedPrompt: hasItem ? 'expanded value' : '@owned.txt',
+          deferUntilIdle: false,
+          displayText: 'expanded value',
+          humanInput: undefined,
+          hasUnknownInput: true,
+          pasteExpansions: undefined,
+          restoredDraft: hasItem
+            ? undefined
+            : {
+                modelText: 'expanded value',
+                displayText: 'expanded value',
+                submittedPrompt: '@owned.txt',
+                hasUnknownInput: true,
+              },
+        },
+      );
+    },
+  );
+
+  it.each(['return', 'tab'])(
+    'same-text history %s discards restored source ownership',
+    async (key) => {
+      const composerHandle = { current: null as OpenTuiComposerHandle | null };
+      const onSubmit = vi.fn(() => true);
+      renderPrompt({
+        composerHandle,
+        onSubmit,
+        userMessages: ['identical'],
+        onInterrupt: (settled) =>
+          settled?.({
+            kind: 'cancelled',
+            queued: null,
+            prompt: {
+              text: 'identical',
+              submittedPrompt: '@owned.txt',
+              humanInput: { text: 'identical' },
+            },
+          }),
+      });
+      await act(async () => composerHandle.current!.cancelTurn!());
+      await pressKey('r', true);
+      await waitFor(() => expect(searchLabel('identical')).toBeTruthy());
+      await pressKey(key);
+      if (key === 'tab') {
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(currentEditor().plainText).toBe('identical');
+        await pressKey('return');
+      }
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith('identical', undefined, {
+        submittedPrompt: 'identical',
+        deferUntilIdle: false,
+        displayText: 'identical',
+        humanInput: undefined,
+        hasUnknownInput: true,
+        pasteExpansions: undefined,
+        restoredDraft: undefined,
+      });
+    },
+  );
+
+  it.each(['fresh', 'known', 'unknown'])(
+    'search Escape restores a cleared query with its %s source and paste map',
+    async (source) => {
+      const body = 'workflow source'.padEnd(1200, 'x');
+      const placeholder = '[Pasted Content 1200 chars]';
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const composerHandle = { current: null as OpenTuiComposerHandle | null };
+      const onSubmit = vi.fn(() => true);
+      renderPrompt({
+        composerHandle,
+        onSubmit,
+        onInterrupt: (settled) =>
+          settled?.({
+            kind: 'cancelled',
+            queued: null,
+            prompt: {
+              text: body,
+              displayText: placeholder,
+              submittedPrompt: '@owned.txt',
+              humanInput: source === 'known' ? { text: body } : undefined,
+              pasteExpansions,
+            },
+          }),
+      });
+      if (source === 'fresh') await paste(body);
+      else await act(async () => composerHandle.current!.cancelTurn!());
+      expect(currentEditor().plainText).toBe(placeholder);
+      const offset = currentEditor().cursorOffset;
+      await pressKey('r', true);
+      await pressKey('u', true);
+      expect(currentEditor().plainText).toBe('');
+      await pressKey('escape');
+      expect(currentEditor().plainText).toBe(placeholder);
+      expect(currentEditor().cursorOffset).toBe(offset);
+      await pressKey('return');
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith(body, undefined, {
+        submittedPrompt: source === 'fresh' ? placeholder : '@owned.txt',
+        deferUntilIdle: false,
+        displayText: placeholder,
+        humanInput: source === 'unknown' ? undefined : { text: body },
+        hasUnknownInput: source === 'unknown',
+        pasteExpansions,
+        restoredDraft:
+          source === 'fresh'
+            ? undefined
+            : {
+                modelText: body,
+                displayText: placeholder,
+                submittedPrompt: '@owned.txt',
+                hasUnknownInput: source === 'unknown',
+                ...(source === 'known' ? { humanInput: { text: body } } : {}),
+                pasteExpansions,
+              },
+      });
+    },
+  );
+
+  it('search Escape restores reserved paste IDs as well as their payloads', async () => {
+    const onSubmit = vi.fn(() => true);
+    const first = 'A'.repeat(1200);
+    const second = 'B'.repeat(1200);
+    renderPrompt({ onSubmit });
+    await paste(first);
+    await pressKey('r', true);
+    await pressKey('u', true);
+    await pressKey('escape');
+    await paste(second);
+    const displayText =
+      '[Pasted Content 1200 chars][Pasted Content 1200 chars] #2';
+    expect(currentEditor().plainText).toBe(displayText);
+    await pressKey('return');
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      first + second,
+      undefined,
+      {
+        submittedPrompt: displayText,
+        deferUntilIdle: false,
+        displayText,
+        humanInput: { text: first + second },
+        hasUnknownInput: false,
+        pasteExpansions: new Map([
+          ['[Pasted Content 1200 chars]', first],
+          ['[Pasted Content 1200 chars] #2', second],
+        ]),
+        restoredDraft: undefined,
+      },
+    );
+  });
+
+  it('search Tab only fills; Enter submits the selected entry once and retains rejection', async () => {
+    const submit = vi.fn(() => false);
+    renderPrompt({ userMessages: ['ALPHA', 'BETA'], onSubmit: submit });
+    resetCaretOnSetText();
+    await typeText('ALP');
+    await pressKey('r', true);
+    await waitFor(() => {
+      expect(searchLabel('ALPHA')).toBeTruthy();
+      expect(screen.queryByText('BETA')).toBeNull();
+    });
+    await pressKey('tab');
+    expect(submit).not.toHaveBeenCalled();
+    await typeText('_tail');
+    await pressKey('return');
+    expect(submit).toHaveBeenCalledExactlyOnceWith(
+      'ALPHA_tail',
+      undefined,
+      expect.any(Object),
+    );
+    expect(currentEditor().plainText).toBe('ALPHA_tail');
+    await pressKey('c', true);
+    await pressKey('r', true);
+    await waitFor(() => expect(screen.getByText('BETA')).toBeTruthy());
+    await pressKey('return');
+    expect(submit).toHaveBeenLastCalledWith(
+      'BETA',
+      undefined,
+      expect.any(Object),
+    );
+    expect(submit).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the second search result across a streaming render with unchanged prompts', async () => {
+    const userMessages = ['OLDER', 'NEWER'];
+    const onSubmit = vi.fn(() => true);
+    const component = () => (
+      <OpenTuiInputPrompt
+        userMessages={userMessages}
+        onSubmit={onSubmit}
+        streaming={true}
+      />
+    );
+    const view = render(component());
+    await pressKey('r', true);
+    await waitFor(() => expect(searchLabel('NEWER')).toBeTruthy());
+    await pressKey('down');
+    const selectedRow = () =>
+      searchLabel('OLDER')?.parentElement?.parentElement?.textContent;
+    expect(selectedRow()).toBe('> OLDER');
+    view.rerender(component());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+    expect(selectedRow()).toBe('> OLDER');
+    expect(onSubmit).not.toHaveBeenCalled();
+    await pressKey('return');
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith('OLDER', undefined, {
+      submittedPrompt: 'OLDER',
+      deferUntilIdle: false,
+      displayText: 'OLDER',
+      humanInput: undefined,
+      hasUnknownInput: true,
+      pasteExpansions: undefined,
+      restoredDraft: undefined,
+    });
+  });
+
+  it.each([
+    { name: 'p', ctrl: true },
+    { name: 'n', ctrl: true },
+    { name: 'up', shift: true },
+    { name: 'down', shift: true },
+  ])(
+    'search preserves the selected result for $name ctrl=$ctrl shift=$shift',
+    async (key) => {
+      const submit = vi.fn(() => true);
+      renderPrompt({ userMessages: ['OLDER', 'NEWER'], onSubmit: submit });
+      await pressKey('r', true);
+      await waitFor(() => expect(screen.getByText('NEWER')).toBeTruthy());
+      await act(async () =>
+        lastKeyboardHandler()(baseKeyEvent({ ...key, sequence: '' })),
+      );
+      expect(currentEditor().plainText).toBe('');
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+      expect(screen.getByText('NEWER')).toBeTruthy();
+      expect(screen.getByText('OLDER')).toBeTruthy();
+      await pressKey('return');
+      expect(submit).toHaveBeenCalledExactlyOnceWith(
+        'NEWER',
+        undefined,
+        expect.any(Object),
+      );
+    },
+  );
+
+  it.each([
+    { name: 'tab', shift: true, meta: false, submits: false },
+    { name: 'return', shift: true, meta: false, submits: true },
+    { name: 'return', shift: false, meta: true, submits: true },
+  ])(
+    'search accepts modified $name with shift=$shift meta=$meta',
+    async (key) => {
+      const submit = vi.fn(() => true);
+      renderPrompt({ userMessages: ['HISTORY'], onSubmit: submit });
+      await pressKey('r', true);
+      await waitFor(() => expect(screen.getByText('HISTORY')).toBeTruthy());
+      await act(async () =>
+        lastKeyboardHandler()(baseKeyEvent({ ...key, sequence: '' })),
+      );
+      expect(submit).toHaveBeenCalledTimes(key.submits ? 1 : 0);
+      expect(currentEditor().plainText).toBe(key.submits ? '' : 'HISTORY');
+    },
+  );
+
+  it.each([false, true])(
+    'repeated Ctrl+R refreshes only the shell snapshot: shell=%s',
+    async (shellModeActive) => {
+      renderPrompt({ shellModeActive });
+      await typeText('original');
+      await pressKey('r', true);
+      await typeText('_query');
+      await pressKey('r', true);
+      await pressKey('escape');
+      expect(currentEditor().plainText).toBe(
+        shellModeActive ? 'original_query' : 'original',
+      );
+    },
+  );
+
+  it('search Escape restores text and caret, while no-match arrows cannot recall history', async () => {
+    renderPrompt({ userMessages: ['HISTORY'] });
+    await typeText('original');
+    await act(async () => currentBuffer().moveToOffset(4));
+    await pressKey('r', true);
+    await typeText('no-match');
+    await waitFor(() => expect(screen.queryByText('HISTORY')).toBeNull());
+    await pressKey('up');
+    await pressKey('escape');
+    await typeText('X');
+    expect(currentEditor().plainText).toBe('origXinal');
+  });
+
+  it.each([
+    { ctrl: false, meta: false },
+    { ctrl: true, meta: false },
+    { ctrl: false, meta: true },
+  ])(
+    'expands/collapses long search with ctrl=$ctrl meta=$meta',
+    async (modifiers) => {
+      const long = 'long-history-'.repeat(12);
+      const submit = vi.fn(() => true);
+      renderPrompt({ userMessages: [long], onSubmit: submit });
+      await typeText('long');
+      await pressKey('r', true);
+      await waitFor(() => expect(screen.getByText('(r:)')).toBeTruthy());
+      await waitFor(() =>
+        expect(searchLabel(long.slice(0, 147) + '...')).toBeTruthy(),
+      );
+      expect(screen.getByText('→')).toBeTruthy();
+      expect(searchLabel(long)).toBeNull();
+      await act(async () =>
+        lastKeyboardHandler()(
+          baseKeyEvent({ name: 'right', ...modifiers, sequence: '' }),
+        ),
+      );
+      expect(searchLabel(long)).toBeTruthy();
+      expect(screen.getByText('←')).toBeTruthy();
+      await act(async () =>
+        lastKeyboardHandler()(
+          baseKeyEvent({ name: 'left', ...modifiers, sequence: '' }),
+        ),
+      );
+      expect(searchLabel(long)).toBeNull();
+      expect(screen.getByText('→')).toBeTruthy();
+      expect(currentEditor().plainText).toBe('long');
+      expect(submit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([149, 150, 151])(
+    'shows the search affordance at %i UTF-16 units',
+    async (length) => {
+      const value = length === 150 ? '🙂'.repeat(75) : 'x'.repeat(length);
+      renderPrompt({ userMessages: [value] });
+      await pressKey('r', true);
+      await waitFor(() =>
+        expect(
+          screen.getByText(length > 150 ? value.slice(0, 150) + '...' : value),
+        ).toBeTruthy(),
+      );
+      expect(!!screen.queryByText('→')).toBe(length >= 150);
+      await pressKey('right');
+      expect(!!screen.queryByText('←')).toBe(length >= 150);
+      expect(currentEditor().plainText).toBe('');
+    },
+  );
+
+  it('does not show an inactive long candidate arrow, and highlights a tail match', async () => {
+    const long = 'a'.repeat(180) + 'TAIL';
+    renderPrompt({ userMessages: [long, 'short'] });
+    await pressKey('r', true);
+    await waitFor(() => expect(screen.getByText('short')).toBeTruthy());
+    expect(screen.queryByText('→')).toBeNull();
+    await typeText('TAIL');
+    await waitFor(() => expect(screen.queryByText('short')).toBeNull());
+    const match = screen.getByText('TAIL');
+    expect(match.parentElement?.textContent).toBe(
+      '...' + 'a'.repeat(143) + 'TAIL',
+    );
+    expect(match.getAttribute('bg')).toBeTruthy();
+    expect(screen.getByText('→')).toBeTruthy();
+  });
+
+  it.each([
+    { scenario: 'up', key: 'up', restore: false, recalled: 'printf recalled' },
+    {
+      scenario: 'down',
+      key: 'down',
+      restore: false,
+      recalled: 'printf recalled',
+    },
+    {
+      scenario: 'same-text',
+      key: 'up',
+      restore: true,
+      recalled: 'same display',
+    },
+    { scenario: 'null', key: 'up', restore: true, recalled: null },
+  ] as const)(
+    'shell history $scenario preserves only valid source after Escape',
+    async ({ key, restore, recalled }) => {
+      const composerHandle = { current: null as OpenTuiComposerHandle | null };
+      const onSubmit = vi.fn(() => true);
+      let shellActive = false;
+      function Harness() {
+        const [active, setActive] = useState(false);
+        shellActive = active;
+        return (
+          <OpenTuiInputPrompt
+            userMessages={[]}
+            onSubmit={onSubmit}
+            composerHandle={composerHandle}
+            shellModeActive={active}
+            onToggleShellMode={() => setActive((value) => !value)}
+            onInterrupt={(settled) =>
+              settled?.({
+                kind: 'cancelled',
+                queued: null,
+                prompt: {
+                  text: 'expanded old model text',
+                  displayText: 'same display',
+                  submittedPrompt: '@owned.txt',
+                  humanInput: { text: 'human owned source' },
+                },
+              })
+            }
+          />
+        );
+      }
+      render(<Harness />);
+      await typeText('!');
+      expect(shellActive).toBe(true);
+      expect(currentEditor().plainText).toBe('');
+      if (restore) {
+        await act(async () => composerHandle.current!.cancelTurn!());
+        expect(currentEditor().plainText).toBe('same display');
+      }
+      const history =
+        key === 'up'
+          ? mocks.state.previousShellCommand
+          : mocks.state.nextShellCommand;
+      history.mockReturnValueOnce(recalled);
+      await pressKey(key);
+      expect(history).toHaveBeenCalledOnce();
+      const displayText = recalled ?? 'same display';
+      expect(currentEditor().plainText).toBe(displayText);
+      await pressKey('escape');
+      expect(shellActive).toBe(false);
+      expect(onSubmit).not.toHaveBeenCalled();
+      await pressKey('return');
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith(displayText, undefined, {
+        submittedPrompt: recalled === null ? '@owned.txt' : displayText,
+        deferUntilIdle: false,
+        displayText,
+        humanInput: recalled === null ? { text: displayText } : undefined,
+        hasUnknownInput: recalled !== null,
+        pasteExpansions: undefined,
+        restoredDraft:
+          recalled === null
+            ? {
+                modelText: 'expanded old model text',
+                displayText: 'same display',
+                submittedPrompt: '@owned.txt',
+                humanInput: { text: 'human owned source' },
+                hasUnknownInput: false,
+              }
+            : undefined,
+      });
+      expect(mocks.state.addShellCommand).not.toHaveBeenCalled();
+    },
+  );
+
+  it('recalls shell history without touching chat history or queue and persists submitted shell text', async () => {
+    mocks.state.shellHistory = ['printf newest', 'printf oldest'];
+    mocks.state.previousShellCommand.mockReturnValueOnce('printf newest');
+    mocks.state.nextShellCommand.mockReturnValueOnce('');
+    const pop = vi.fn();
+    const submit = vi.fn(() => true);
+    renderPrompt({
+      userMessages: ['CHAT'],
+      onSubmit: submit,
+      shellModeActive: true,
+      queueLength: 1,
+      onPopQueue: pop,
+    });
+    resetCaretOnSetText();
+    await pressKey('up');
+    expect(currentEditor().cursorOffset).toBe('printf newest'.length);
+    expect(currentEditor().plainText).toBe('printf newest');
+    await pressKey('down');
+    expect(currentEditor().plainText).toBe('');
+    await typeText('oldest');
+    await pressKey('r', true);
+    await waitFor(() => {
+      expect(searchLabel('printf oldest')).toBeTruthy();
+      expect(screen.queryByText('printf newest')).toBeNull();
+    });
+    await pressKey('return');
+    expect(submit).toHaveBeenCalledExactlyOnceWith(
+      'printf oldest',
+      undefined,
+      expect.any(Object),
+    );
+    expect(mocks.state.addShellCommand).toHaveBeenCalledExactlyOnceWith(
+      'printf oldest',
+    );
+    expect(pop).not.toHaveBeenCalled();
+  });
+
+  it('uses the native visual edge and Ink wrapped movement before recalling history', async () => {
+    renderPrompt({ userMessages: ['previous'] });
+    const editor = currentEditor();
+    editor.width = 4;
+    await typeText('abcdefghij');
+    editor.scrollY = 1;
+    editor.visualCursor.visualRow = 1;
+    editor.editorView.getTotalVirtualLineCount = () => 3;
+    await pressKey('p', true);
+    expect(currentBuffer().cursor).toEqual([0, 6]);
+    expect(editor.plainText).toBe('abcdefghij');
+    expect(editor.moveCursorUp).not.toHaveBeenCalled();
+    editor.scrollY = 0;
+    editor.visualCursor.visualRow = 1;
+    await pressKey('p', true);
+    expect(currentBuffer().cursor).toEqual([0, 2]);
+    editor.visualCursor.visualRow = 0;
+    await pressKey('p', true);
+    expect(currentBuffer().cursor).toEqual([0, 0]);
+    expect(editor.plainText).toBe('abcdefghij');
+    await pressKey('p', true);
+    expect(editor.plainText).toBe('previous');
+    editor.visualCursor.visualRow = 1;
+    editor.editorView.getTotalVirtualLineCount = () => 2;
+    await pressKey('n', true);
+    expect(currentBuffer().cursor).toEqual([0, 8]);
+    await pressKey('n', true);
+    expect(editor.plainText).toBe('abcdefghij');
+  });
 
   it.each(['unchanged', 'changed', 'throw'])(
     'restores the renderer after an external editor %s outcome',
@@ -3532,8 +4287,9 @@ describe('OpenTuiInputPrompt external editor ownership', () => {
       await pressKey('x', true);
       expect(mocks.renderer.suspend).toHaveBeenCalledTimes(1);
       expect(mocks.renderer.resume).toHaveBeenCalledTimes(1);
-      expect(currentEditor().replacements).toEqual(
-        mode === 'changed' ? ['edited'] : [],
+      expect(currentEditor().replacements).toEqual([]);
+      expect(currentBuffer().text).toBe(
+        mode === 'changed' ? 'edited' : 'original',
       );
       expect(mocks.state.editExternally.mock.calls[0][1].preferredEditor).toBe(
         'vim',
@@ -3646,14 +4402,407 @@ describe('OpenTuiInputPrompt external editor ownership', () => {
     const placeholder = currentEditor().plainText;
     expect(placeholder).toContain('Pasted Content');
     await pressKey('x', true);
-    expect(currentEditor().replacements).toEqual(['replacement']);
-    // Native undo is tested separately; this restores its original buffer value.
-    currentEditor().setText(placeholder);
+    expect(currentEditor().plainText).toBe('replacement');
+    expect(currentEditor().replacements).toEqual([]);
+    await act(async () => currentBuffer().undo());
+    expect(currentEditor().plainText).toBe(placeholder);
     await pressKey('return');
     expect(submit).toHaveBeenCalledExactlyOnceWith(
       text,
       undefined,
       expect.any(Object),
     );
+  });
+});
+
+describe('Vim composer ownership', () => {
+  function VimOwner(props: Partial<Parameters<typeof OpenTuiInputPrompt>[0]>) {
+    mocks.state.toggleVim = useVimModeActions().toggleVimEnabled;
+    const liveBuffer = useRef<VimBuffer | null>(null);
+    const localComposer = useRef<OpenTuiComposerHandle | null>(null);
+    const composer = props.composerHandle ?? localComposer;
+    const buffer = useMemo(
+      () => createVimBuffer(() => liveBuffer.current!),
+      [],
+    );
+    const { handleInput, vimModeEnabled } = useVim(
+      buffer,
+      (text) => {
+        void composer.current?.submitDraft?.(text);
+      },
+      () => composer.current?.invalidateImportedInput?.(),
+    );
+    return (
+      <OpenTuiInputPrompt
+        userMessages={[]}
+        onSubmit={() => true}
+        {...props}
+        composerHandle={composer}
+        vim={{ buffer: liveBuffer, handleInput, enabled: vimModeEnabled }}
+      />
+    );
+  }
+
+  function renderVim(
+    props: Partial<Parameters<typeof OpenTuiInputPrompt>[0]> = {},
+  ) {
+    return render(
+      <VimModeProvider
+        settings={
+          {
+            merged: { general: { vimMode: true } },
+            setValue: vi.fn(),
+          } as unknown as LoadedSettings
+        }
+      >
+        <VimOwner {...props} />
+      </VimModeProvider>,
+    );
+  }
+
+  it.each([
+    { suffix: 'Z', text: '甲🙂e\u0301Z', cursor: 5 },
+    { suffix: '\x1bx', text: '甲🙂e', cursor: 3 },
+    { suffix: '\x1baZ', text: '甲🙂e\u0301Z', cursor: 5 },
+  ])(
+    'keeps the exact Ink code-point edit for Unicode suffix $suffix',
+    async ({ suffix, text, cursor }) => {
+      renderVim();
+      await typeText('i甲🙂e\u0301');
+      expect(currentBuffer().cursor).toEqual([0, 4]);
+      for (const char of suffix) {
+        if (char === '\x1b') await pressKey('escape');
+        else await typeText(char);
+      }
+      expect(currentBuffer().text).toBe(text);
+      expect(currentBuffer().cursor).toEqual([0, cursor]);
+      expect(currentEditor().plainText).toBe(text);
+      expect(currentEditor().insertCalls).toEqual([]);
+    },
+  );
+
+  it('preserves code-point position and the same undo owner across hot Vim toggles', async () => {
+    renderVim();
+    await typeText('i甲🙂e\u0301');
+    await pressKey('escape');
+    expect(currentBuffer().cursor).toEqual([0, 3]);
+    const editor = currentEditor();
+    await act(async () => {
+      expect(await mocks.state.toggleVim!()).toBe(false);
+    });
+    await typeText('Z');
+    expect(currentBuffer().text).toBe('甲🙂eZ\u0301');
+    expect(currentBuffer().cursor).toEqual([0, 4]);
+    await pressKey('z', true);
+    expect(currentBuffer().text).toBe('甲🙂e\u0301');
+    expect(currentBuffer().cursor).toEqual([0, 3]);
+    await act(async () => {
+      expect(await mocks.state.toggleVim!()).toBe(true);
+    });
+    expect(currentEditor()).toBe(editor);
+    await typeText('x');
+    expect(currentBuffer().text).toBe('甲🙂e');
+    await typeText('u');
+    expect(currentBuffer().text).toBe('甲🙂e\u0301');
+    expect(currentBuffer().cursor).toEqual([0, 3]);
+  });
+
+  it.each([
+    { key: 'p', pasted: 'X', text: 'tXyped' },
+    { key: 'P', pasted: 'X', text: 'Xtyped' },
+    { key: 'p', pasted: '', text: 'typed' },
+    { key: 'P', pasted: '', text: 'typed' },
+  ])(
+    'Vim $key with clipboard "$pasted" invalidates only an actual import',
+    async ({ key, pasted, text }) => {
+      const clipboard = vi.mocked(execFileSync).mockReturnValue(pasted);
+      try {
+        const composerHandle = {
+          current: null as OpenTuiComposerHandle | null,
+        };
+        const onSubmit = vi.fn(() => true);
+        renderVim({
+          composerHandle,
+          onSubmit,
+          onInterrupt: (settled) =>
+            settled?.({
+              kind: 'cancelled',
+              queued: null,
+              prompt: {
+                text: 'typed',
+                submittedPrompt: '@owned.txt',
+                humanInput: { text: 'typed' },
+              },
+            }),
+        });
+        await act(async () => composerHandle.current!.cancelTurn!());
+        await act(async () => currentBuffer().moveToOffset(0));
+        await typeText(key);
+        expect(currentEditor().plainText).toBe(text);
+        expect(clipboard).toHaveBeenCalled();
+        await pressKey('return');
+        expect(onSubmit).toHaveBeenCalledExactlyOnceWith(text, undefined, {
+          submittedPrompt: pasted ? text : '@owned.txt',
+          deferUntilIdle: false,
+          displayText: text,
+          humanInput: pasted ? undefined : { text: 'typed' },
+          hasUnknownInput: Boolean(pasted),
+          pasteExpansions: undefined,
+          restoredDraft: pasted
+            ? undefined
+            : {
+                modelText: 'typed',
+                displayText: 'typed',
+                submittedPrompt: '@owned.txt',
+                hasUnknownInput: false,
+                humanInput: { text: 'typed' },
+              },
+        });
+      } finally {
+        clipboard.mockReset().mockReturnValue('');
+      }
+    },
+  );
+
+  it('routes one decoded batch through Vim and retains a rejected NORMAL submission', async () => {
+    const onSubmit = vi.fn(() => false);
+    renderVim({ onSubmit });
+    await act(async () => {
+      currentBuffer().setText('one two three');
+      currentBuffer().moveToOffset(0);
+    });
+    await typeText('2dw');
+    expect(currentEditor().plainText).toBe('three');
+    await pressKey('return');
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith('three', undefined, {
+      submittedPrompt: 'three',
+      deferUntilIdle: false,
+      displayText: 'three',
+      humanInput: { text: 'three' },
+      hasUnknownInput: false,
+      pasteExpansions: undefined,
+      restoredDraft: undefined,
+    });
+    expect(currentEditor().plainText).toBe('three');
+  });
+
+  it('preserves restored images and submitted provenance across motion and NORMAL Enter', async () => {
+    const composerHandle = { current: null as OpenTuiComposerHandle | null };
+    const onSubmit = vi.fn(() => true);
+    renderVim({
+      composerHandle,
+      onSubmit,
+      onInterrupt: (settled) =>
+        settled?.({
+          kind: 'cancelled',
+          queued: {
+            text: 'expanded input',
+            submittedPrompt: 'original input',
+            imagePaths: ['/tmp/owned.png'],
+          },
+          prompt: null,
+        }),
+    });
+    await act(async () => composerHandle.current!.cancelTurn!());
+    expect(currentEditor().plainText).toBe('expanded input');
+    await typeText('h');
+    await pressKey('return');
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      'expanded input',
+      ['/tmp/owned.png'],
+      {
+        submittedPrompt: 'original input',
+        deferUntilIdle: false,
+        displayText: 'expanded input',
+        humanInput: undefined,
+        hasUnknownInput: true,
+        pasteExpansions: undefined,
+        restoredDraft: {
+          modelText: 'expanded input',
+          displayText: 'expanded input',
+          submittedPrompt: 'original input',
+          hasUnknownInput: true,
+        },
+      },
+    );
+  });
+
+  it('NORMAL owns raw Backspace and chip navigation; INSERT releases Up to chips', async () => {
+    renderVim();
+    await typeText('i');
+    await pressKey('v', true);
+    await waitFor(() =>
+      expect(screen.getByText('📎 clipboard-test.png')).toBeTruthy(),
+    );
+    await typeText('abc');
+    await pressKey('escape');
+    expect(await pressRaw('\x7f')).toBe(false);
+    await pressKey('backspace');
+    await pressKey('up');
+    expect(currentEditor().plainText).toBe('abc');
+    expect(screen.getByText('📎 clipboard-test.png')).toBeTruthy();
+    await typeText('i');
+    await pressKey('up');
+    expect(screen.getByText('> clipboard-test.png')).toBeTruthy();
+  });
+
+  it('pending find owns Enter, then admission waits for images without overwriting the successor', async () => {
+    let finishPaste!: (path: string) => void;
+    mocks.state.saveClipboardImage.mockReturnValue(
+      new Promise((done) => {
+        finishPaste = done;
+      }),
+    );
+    const onSubmit = vi.fn(() => false);
+    renderVim({ onSubmit });
+    await typeText('inote');
+    await pressKey('v', true);
+    await pressKey('escape');
+    await typeText('f');
+    await pressKey('return');
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(currentEditor().plainText).toBe('note');
+    await pressKey('escape');
+    await pressKey('return');
+    expect(currentEditor().plainText).toBe('');
+    await typeText('iNEXT');
+    await act(async () => finishPaste('/tmp/owned-before-enter.png'));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit).toHaveBeenCalledWith(
+      'note',
+      ['/tmp/owned-before-enter.png'],
+      {
+        submittedPrompt: 'note',
+        deferUntilIdle: false,
+        displayText: 'note',
+        humanInput: { text: 'note' },
+        hasUnknownInput: false,
+        pasteExpansions: undefined,
+        restoredDraft: undefined,
+      },
+    );
+    expect(currentEditor().plainText).toBe('note\n\nNEXT');
+    expect(screen.getByText('📎 owned-before-enter.png')).toBeTruthy();
+  });
+
+  it('INSERT consumes unmapped controls and a release event cannot repeat a Vim edit', async () => {
+    renderVim();
+    await typeText('ibase');
+    for (const key of ['k', 'u', 'x']) await pressKey(key, true);
+    expect(currentEditor().plainText).toBe('base');
+    expect(mocks.state.editExternally).not.toHaveBeenCalled();
+    await pressKey('escape');
+    await typeText('0dw');
+    await act(async () =>
+      lastKeyboardHandler()(
+        baseKeyEvent({ name: 'w', sequence: 'w', eventType: 'release' }),
+      ),
+    );
+    expect(currentEditor().plainText).toBe('');
+    expect(currentEditor().replacements).toEqual([]);
+    await act(async () => currentBuffer().undo());
+    expect(currentBuffer().text).toBe('base');
+  });
+});
+
+describe('OpenTuiInputPrompt Ink edit owner', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  it.each(['甲🙂e\u0301', '👨‍👩‍👧‍👦', '👍🏽', '🇨🇳'])(
+    'retains the insertion boundary after %s without Vim',
+    async (text) => {
+      renderPrompt();
+      await typeText(text);
+      expect(currentBuffer().cursor).toEqual([0, cpLen(text)]);
+      await typeText('Z');
+      expect(currentBuffer().text).toBe(text + 'Z');
+      expect(currentEditor().plainText).toBe(text + 'Z');
+      await pressKey('z', true);
+      expect(currentBuffer().text).toBe(text);
+      expect(currentBuffer().cursor).toEqual([0, cpLen(text)]);
+      await act(async () =>
+        lastKeyboardHandler()(
+          baseKeyEvent({ name: 'z', ctrl: true, shift: true, sequence: '' }),
+        ),
+      );
+      expect(currentBuffer().text).toBe(text + 'Z');
+      expect(currentEditor().insertCalls).toEqual([]);
+    },
+  );
+
+  it.each([
+    { text: 'first\nlast', cursor: 8, expected: 'first', position: [0, 5] },
+    { text: 'first\nlast', cursor: 2, expected: 'last', position: [0, 0] },
+    { text: 'single', cursor: 2, expected: '', position: [0, 0] },
+  ])(
+    'keeps native whole-line deletion boundaries for $text',
+    async ({ text, cursor, expected, position }) => {
+      renderPrompt();
+      await act(async () => {
+        currentBuffer().setText(text);
+        currentBuffer().moveToOffset(cursor);
+      });
+      await act(async () =>
+        lastKeyboardHandler()(
+          baseKeyEvent({ name: 'd', ctrl: true, shift: true, sequence: '' }),
+        ),
+      );
+      expect(currentBuffer().text).toBe(expected);
+      expect(currentBuffer().cursor).toEqual(position);
+      await pressKey('z', true);
+      expect(currentBuffer().text).toBe(text);
+      expect(currentBuffer().cursor).toEqual(
+        cursor < 6 ? [0, cursor] : [1, cursor - 6],
+      );
+    },
+  );
+
+  it('keeps the existing 100-entry undo limit with one owner and no native edits', async () => {
+    renderPrompt();
+    await typeText('x'.repeat(105));
+    await act(async () => {
+      for (let i = 0; i < 105; i++)
+        lastKeyboardHandler()(
+          baseKeyEvent({ name: 'z', ctrl: true, sequence: '' }),
+        );
+    });
+    expect(currentBuffer().text).toBe('xxxxx');
+    expect(currentBuffer().cursor).toEqual([0, 5]);
+    await act(async () => {
+      for (let i = 0; i < 100; i++)
+        lastKeyboardHandler()(
+          baseKeyEvent({ name: 'z', ctrl: true, shift: true, sequence: '' }),
+        );
+    });
+    expect(currentBuffer().text).toBe('x'.repeat(105));
+    expect(currentEditor().insertCalls).toEqual([]);
+  });
+
+  it('restores an external edit with one real undo and keeps redo at the exact Unicode insertion position', async () => {
+    mocks.state.editExternally.mockImplementation((_text, options) => {
+      options.beforeLaunch();
+      return '甲🙂e\u0301';
+    });
+    renderPrompt();
+    await typeText('original');
+    await pressKey('x', true);
+    expect(currentBuffer().cursor).toEqual([0, 4]);
+    await pressKey('z', true);
+    expect(currentBuffer().text).toBe('original');
+    await act(async () =>
+      lastKeyboardHandler()(
+        baseKeyEvent({ name: 'z', ctrl: true, shift: true, sequence: '' }),
+      ),
+    );
+    await typeText('Z');
+    expect(currentEditor().plainText).toBe('甲🙂e\u0301Z');
+    expect(mocks.renderer.suspend).toHaveBeenCalledTimes(1);
+    expect(mocks.renderer.resume).toHaveBeenCalledTimes(1);
   });
 });

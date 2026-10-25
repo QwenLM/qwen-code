@@ -26,11 +26,14 @@ import type {
 } from '../../hooks/useComposerCore';
 import {
   clearComposerDraftIfMatches,
+  captureComposerDraftGuard,
   getComposerDraftStorageKey,
 } from '../../hooks/useComposerCore';
 import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
+import { Input } from '../ui/input';
 import { createManagedMessageProjector } from './managed-session-messages';
 import {
   getManagedClientId,
@@ -60,8 +63,10 @@ import { useManagedCwdChange } from './use-managed-cwd-change';
 import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
+import { ManagedPermissionRulesDialog } from './ManagedPermissionRulesDialog';
 import { useManagedSkills } from './use-managed-skills';
 import { useManagedMcp } from './use-managed-mcp';
+import { ManagedMcpManagerPage } from './ManagedMcpManagerPage';
 import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
@@ -69,10 +74,16 @@ import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import type { ManagedCreationSkillsSource } from './managed-creation-skills';
 import { ManagedWorkspaceNavigation } from './ManagedWorkspaceNavigation';
+import { ManagedSessionNavigationRow } from './ManagedSessionNavigationRow';
+import {
+  ManagedArchivedSessions,
+  type ManagedArchivedSessionsStatus,
+} from './ManagedArchivedSessions';
 import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
+import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
 import { TodoFullList } from '../messages/TodoView';
 import { getLatestSuccessfulTodos } from '../../utils/todos';
@@ -98,7 +109,6 @@ interface PendingPrompt {
   text: string;
   draftText?: string;
   sessionId?: string;
-  cwd?: string;
   input?: ManagedInputBlock[];
 }
 
@@ -141,8 +151,6 @@ function readPending(
       typeof pending['sessionId'] !== 'string'
     )
       return undefined;
-    if (pending['cwd'] !== undefined && typeof pending['cwd'] !== 'string')
-      return undefined;
     if (
       pending['draftText'] !== undefined &&
       typeof pending['draftText'] !== 'string'
@@ -175,9 +183,10 @@ export function ManagedSessionsPage({
   workspaceId,
   onSelectWorkspace,
   onSessionWorkspaceChange,
-  workspaceCwd,
   managedAgentProvider,
   navigationTarget,
+  archivedNavigationTarget,
+  onArchivedSessionsStatusChange,
   interactive = true,
   creationSkills,
   onManageSkills,
@@ -200,10 +209,13 @@ export function ManagedSessionsPage({
   workspaceId?: string;
   onSelectWorkspace?: (workspaceId: string) => void;
   onSessionWorkspaceChange?: (workspaceId: string | null) => void;
-  workspaceCwd?: string;
   managedAgentProvider?: ManagedAgentProvider;
   /** Null keeps home layout while its sidebar slot is temporarily unmounted. */
   navigationTarget?: HTMLElement | null;
+  archivedNavigationTarget?: HTMLElement | null;
+  onArchivedSessionsStatusChange?: (
+    status: ManagedArchivedSessionsStatus,
+  ) => void;
   interactive?: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   onManageSkills?: () => void;
@@ -228,10 +240,11 @@ export function ManagedSessionsPage({
         workspaceId={workspaceId}
         onSelectWorkspace={onSelectWorkspace}
         onSessionWorkspaceChange={onSessionWorkspaceChange}
-        workspaceCwd={workspaceCwd}
         provider={managedAgentProvider}
         cancellationEnabled={managedAgentProvider.canCancel}
         navigationTarget={navigationTarget}
+        archivedNavigationTarget={archivedNavigationTarget}
+        onArchivedSessionsStatusChange={onArchivedSessionsStatusChange}
         interactive={interactive}
         creationSkills={creationSkills}
         onManageSkills={onManageSkills}
@@ -296,10 +309,11 @@ function ManagedSessionsContent({
   workspaceId,
   onSelectWorkspace,
   onSessionWorkspaceChange,
-  workspaceCwd,
   provider,
   cancellationEnabled,
   navigationTarget,
+  archivedNavigationTarget,
+  onArchivedSessionsStatusChange,
   interactive,
   creationSkills,
   onManageSkills,
@@ -322,10 +336,13 @@ function ManagedSessionsContent({
   workspaceId?: string;
   onSelectWorkspace?: (workspaceId: string) => void;
   onSessionWorkspaceChange?: (workspaceId: string | null) => void;
-  workspaceCwd?: string;
   provider: ManagedAgentProvider;
   cancellationEnabled: boolean;
   navigationTarget?: HTMLElement | null;
+  archivedNavigationTarget?: HTMLElement | null;
+  onArchivedSessionsStatusChange?: (
+    status: ManagedArchivedSessionsStatus,
+  ) => void;
   interactive: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   onManageSkills?: () => void;
@@ -377,7 +394,14 @@ function ManagedSessionsContent({
     sessionId,
   );
   const skills = useManagedSkills(provider, clientId, sessionId);
-  const mcp = useManagedMcp(provider, clientId, sessionId);
+  const [mcpManagerSession, setMcpManagerSession] = useState<string>();
+  const mcp = useManagedMcp(
+    provider,
+    clientId,
+    sessionId,
+    JSON.stringify([interactive, mcpManagerSession]),
+  );
+  useEffect(() => setMcpManagerSession(undefined), [sessionId]);
   const referenceActions = useMemo(
     () =>
       fileReferences.actions || mcp
@@ -397,7 +421,21 @@ function ManagedSessionsContent({
   const [wideTasks, setWideTasks] = useState(false);
   const [taskPanelSession, setTaskPanelSession] = useState<string>();
   const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
-  const tasks = useManagedTasks(provider, clientId, sessionId, taskPanelOpen);
+  const publicChildren = detail.summary?.capabilities.childAgents === true;
+  const tasks = useManagedTasks(
+    provider,
+    clientId,
+    sessionId,
+    taskPanelOpen || publicChildren,
+  );
+  const [childView, setChildView] = useState<{
+    provider: ManagedAgentProvider;
+    clientId: string;
+    root: string;
+    child: string;
+    trigger: Element | null;
+  }>();
+  useEffect(() => setChildView(undefined), [provider, clientId, sessionId]);
   const taskSnapshots = useMemo(
     () => (tasks.task ? [...tasks.page.data, tasks.task] : tasks.page.data),
     [tasks.page.data, tasks.task],
@@ -429,9 +467,14 @@ function ManagedSessionsContent({
   }, []);
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
-  const [archiveState, setArchiveState] = useState<'unarchived' | 'archived'>(
-    'unarchived',
-  );
+  const [archivedSummaries, setArchivedSummaries] = useState<
+    ManagedAgentSessionSummary[]
+  >([]);
+  const [standaloneArchiveState, setArchiveState] = useState<
+    'unarchived' | 'archived'
+  >('unarchived');
+  const archiveState = home ? 'unarchived' : standaloneArchiveState;
+  const [titleQuery, setTitleQuery] = useState('');
   const [confirmation, setConfirmation] = useState<{
     session: ManagedAgentSessionSummary;
     action: ManagedLifecycleAction;
@@ -525,7 +568,7 @@ function ManagedSessionsContent({
   const listBusy = useRef(false);
   const selection = useRef(sessionId);
   selection.current = sessionId;
-  const lifecycleSummaries = useMemo(
+  const navigationSummaries = useMemo(
     () => [
       ...new Map(
         [...sessions, ...(detail.summary ? [detail.summary] : [])].map(
@@ -534,6 +577,17 @@ function ManagedSessionsContent({
       ).values(),
     ],
     [sessions, detail.summary],
+  );
+  const lifecycleSummaries = useMemo(
+    () => [
+      ...new Map(
+        [...archivedSummaries, ...navigationSummaries].map((session) => [
+          session.sessionId,
+          session,
+        ]),
+      ).values(),
+    ],
+    [archivedSummaries, navigationSummaries],
   );
   const lifecycle = useManagedSessionLifecycle(
     provider,
@@ -601,9 +655,13 @@ function ManagedSessionsContent({
       }
     }
   }
-  const sessionActions = (session: ManagedAgentSessionSummary) => (
+  const sessionActions = (
+    session: ManagedAgentSessionSummary,
+    sidebar = false,
+  ) => (
     <ManagedSessionActions
       session={session}
+      sidebar={sidebar}
       lifecycle={Boolean(provider.lifecycle)}
       state={lifecycle.states[session.sessionId]}
       exporting={exporting[session.sessionId]}
@@ -642,13 +700,26 @@ function ManagedSessionsContent({
     // Unknown while the summary reloads, so the shown approval is kept.
     detail.summary ? detail.summary.capabilities.actions === true : undefined,
     detail.events,
+    publicChildren,
+  );
+  const childApprovalSessions = useMemo(
+    () =>
+      new Set(
+        approvals.actions
+          .filter((action) => action.sessionId !== sessionId)
+          .map((action) => action.sessionId),
+      ),
+    [approvals.actions, sessionId],
   );
   const pendingApproval = useMemo(
     () =>
       approvals.action
-        ? toManagedPermissionRequest(approvals.action, messages)
+        ? toManagedPermissionRequest(
+            approvals.action,
+            approvals.action.sessionId === sessionId ? messages : [],
+          )
         : null,
-    [approvals.action, messages],
+    [approvals.action, messages, sessionId],
   );
   const cwd = useManagedCwdChange(
     provider,
@@ -758,9 +829,12 @@ function ManagedSessionsContent({
     // disablement by delivering a new summary without touching the record.
   }, [pending, sessionId, detail.summary, interactive]);
 
-  // Depend on the value the request actually sends: a provider that drops
-  // workspaceCwd must not refetch (and lose paged rows) on folder change.
-  const listCwd = provider.acceptsWorkspaceCwd ? workspaceCwd : undefined;
+  const listTitleQuery = provider.titleSearch
+    ? home
+      ? navigationSearch
+      : titleQuery
+    : '';
+  const navigationSessions = listTitleQuery ? sessions : navigationSummaries;
   useEffect(() => {
     const abort = new AbortController();
     listLifetime.current = abort;
@@ -771,8 +845,8 @@ function ManagedSessionsContent({
     void provider
       .listSessions({
         clientId,
-        workspaceCwd: listCwd,
         ...(provider.lifecycle ? { archiveState } : {}),
+        ...(listTitleQuery ? { titleQuery: listTitleQuery } : {}),
         limit: 50,
         signal: abort.signal,
       })
@@ -793,7 +867,7 @@ function ManagedSessionsContent({
         if (!abort.signal.aborted) setListLoading(false);
       });
     return () => abort.abort();
-  }, [provider, clientId, listCwd, listRevision, archiveState]);
+  }, [provider, clientId, listRevision, archiveState, listTitleQuery]);
 
   useEffect(() => {
     const current = detail.summary;
@@ -878,8 +952,8 @@ function ManagedSessionsContent({
     try {
       const page = await provider.listSessions({
         clientId,
-        workspaceCwd: listCwd,
         ...(provider.lifecycle ? { archiveState } : {}),
+        ...(listTitleQuery ? { titleQuery: listTitleQuery } : {}),
         cursor: nextCursor,
         limit: 50,
         signal: abort.signal,
@@ -927,6 +1001,12 @@ function ManagedSessionsContent({
       return;
     setDiscarded(false);
     let attempt = pendingRef.current;
+    const ownerSession = attempt ? attempt.sessionId : sessionId;
+    const draftKey = getComposerDraftStorageKey(
+      undefined,
+      `managed:${provider.storageKey}:${ownerSession ?? 'new'}`,
+    );
+    const isDraftUnchanged = captureComposerDraftGuard(draftKey);
     if (!attempt) {
       if (
         (!submittedText.trim() && !images?.length && !files?.length) ||
@@ -959,7 +1039,6 @@ function ManagedSessionsContent({
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
-        cwd: workspaceCwd,
         ...(input.some(
           (block) =>
             block.type === 'input_file' || block.type === 'input_image',
@@ -1007,9 +1086,6 @@ function ManagedSessionsContent({
             {
               text: attempt.text,
               ...(attempt.input ? { input: attempt.input } : {}),
-              workspaceCwd: provider.acceptsWorkspaceCwd
-                ? attempt.cwd
-                : undefined,
             },
             opts,
           );
@@ -1019,17 +1095,16 @@ function ManagedSessionsContent({
       await persistPending(pendingKey, undefined);
       if (abort.signal.aborted) return;
       setListRevision((current) => current + 1);
+      const clearDraft = isDraftUnchanged();
       composerCommit.current?.();
       composerCommit.current = undefined;
-      const draftKey = getComposerDraftStorageKey(
-        undefined,
-        `managed:${provider.storageKey}:${attempt.sessionId ?? 'new'}`,
-      );
-      for (const draft of [attempt.draftText, attempt.text]) {
-        if (draft !== undefined) clearComposerDraftIfMatches(draftKey, draft);
-      }
+      if (clearDraft)
+        for (const draft of [attempt.draftText, attempt.text]) {
+          if (draft !== undefined) clearComposerDraftIfMatches(draftKey, draft);
+        }
       const editor = composerRef.current;
       if (
+        clearDraft &&
         selection.current === attempt.sessionId &&
         editor &&
         [attempt.draftText, attempt.text].includes(editor.getText())
@@ -1062,6 +1137,28 @@ function ManagedSessionsContent({
   }
 
   const summary = detail.summary;
+  const attachmentCapability = useRef({ sessionId, enabled: false });
+  if (attachmentCapability.current.sessionId !== sessionId)
+    attachmentCapability.current = { sessionId, enabled: false };
+  if (summary)
+    attachmentCapability.current.enabled =
+      summary.capabilities.inputAttachments === true;
+  const mcpManagerAvailable = Boolean(
+    interactive &&
+      provider.mcpManagement &&
+      sessionId &&
+      summary?.sessionId === sessionId &&
+      summary.workspace,
+  );
+  const mcpManagerButton = mcpManagerAvailable ? (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => setMcpManagerSession(sessionId)}
+    >
+      {t('managed.mcp.manage')}
+    </Button>
+  ) : null;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const failureMessage = summary?.failure
     ? (FAILURE_MESSAGES[summary.failure.code]?.[language === 'zh-CN' ? 1 : 0] ??
@@ -1194,16 +1291,8 @@ function ManagedSessionsContent({
       ref={sessionsNavRef}
       tabIndex={-1}
       aria-label={t('managed.sessions')}
-      className={`flex min-h-0 flex-col gap-1 overflow-y-auto ${home ? 'p-2' : 'max-h-48 md:max-h-none'}`}
+      className={`flex min-h-0 flex-col gap-1 overflow-y-auto ${home ? '' : 'max-h-48 md:max-h-none'}`}
     >
-      {home && (
-        <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs text-muted-foreground">
-          <span>{t('managed.sessions')}</span>
-          <Button variant="ghost" size="sm" onClick={refresh}>
-            {t('managed.refresh')}
-          </Button>
-        </div>
-      )}
       {!interactive && error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
@@ -1281,7 +1370,7 @@ function ManagedSessionsContent({
             )}
         </div>
       ))}
-      {provider.lifecycle && (
+      {!home && provider.lifecycle && (
         <div className="flex gap-1" aria-label={t('managed.historyFilter')}>
           {(['unarchived', 'archived'] as const).map((state) => (
             <Button
@@ -1296,18 +1385,31 @@ function ManagedSessionsContent({
           ))}
         </div>
       )}
+      {!home && provider.titleSearch && (
+        <label className="px-2 py-1">
+          <span className="sr-only">{t('managed.titleSearch')}</span>
+          <Input
+            type="search"
+            value={titleQuery}
+            maxLength={512}
+            placeholder={t('managed.titleSearchPlaceholder')}
+            aria-label={t('managed.titleSearch')}
+            onChange={(event) => setTitleQuery(event.target.value)}
+          />
+        </label>
+      )}
       {home && provider.workspaceBinding ? (
         <ManagedWorkspaceNavigation
           provider={provider}
           clientId={clientId}
-          sessions={lifecycleSummaries.filter(
+          sessions={navigationSessions.filter(
             (session) =>
               !provider.lifecycle ||
               (archiveState === 'archived'
                 ? session.lifecycleStatus === 'archived'
                 : session.lifecycleStatus !== 'archived'),
           )}
-          renderSessionActions={sessionActions}
+          renderSessionActions={(session) => sessionActions(session, true)}
           sessionId={sessionId}
           workspaceId={workspaceId}
           active={navigationActive}
@@ -1327,6 +1429,22 @@ function ManagedSessionsContent({
           .map((session) => {
             const current =
               summary?.sessionId === session.sessionId ? summary : session;
+            if (home) {
+              return (
+                <ManagedSessionNavigationRow
+                  key={session.sessionId}
+                  session={current}
+                  active={navigationActive && sessionId === session.sessionId}
+                  onSelect={() =>
+                    openSession(
+                      session.sessionId,
+                      session.workspace?.workspaceId,
+                    )
+                  }
+                  actions={sessionActions(current, true)}
+                />
+              );
+            }
             return (
               <div
                 key={session.sessionId}
@@ -1399,11 +1517,47 @@ function ManagedSessionsContent({
       ref={pageRef}
       className={`flex h-full min-h-0 flex-col ${home ? '' : 'gap-3'}`}
     >
+      {mcpManagerAvailable &&
+        mcpManagerSession === sessionId &&
+        summary?.workspace && (
+          <Dialog
+            open
+            onOpenChange={(open) => !open && setMcpManagerSession(undefined)}
+          >
+            <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-5xl">
+              <DialogHeader>
+                <DialogTitle>{t('managed.mcp.manage')}</DialogTitle>
+              </DialogHeader>
+              <ManagedMcpManagerPage
+                provider={provider}
+                sessionId={summary.sessionId}
+                workspaceId={summary.workspace.workspaceId}
+              />
+            </DialogContent>
+          </Dialog>
+        )}
       {/* The uncertain-request row unmounts on the Discard click itself, so
           a persistent region announces the outcome wherever focus lands. */}
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
       </p>
+      {home &&
+        provider.lifecycle &&
+        archivedNavigationTarget &&
+        createPortal(
+          <ManagedArchivedSessions
+            key={listRevision}
+            provider={provider}
+            clientId={clientId}
+            sessionId={sessionId}
+            active={navigationActive}
+            onSelectSession={openSession}
+            renderSessionActions={sessionActions}
+            onSessionsChange={setArchivedSummaries}
+            onStatusChange={onArchivedSessionsStatusChange}
+          />,
+          archivedNavigationTarget,
+        )}
       {confirmation && (
         <ManagedLifecycleConfirmation
           {...confirmation}
@@ -1522,10 +1676,10 @@ function ManagedSessionsContent({
                         {t('sidebar.rename')}
                       </Button>
                     )}
+                    {mcpManagerButton}
                   </span>
                 }
                 workspaceName={summary.workspace?.workspaceId}
-                workspacePath={summary.workspaceCwd}
                 location={
                   <Badge variant="secondary">
                     {t(`managed.phase.${summary.phase}`)}
@@ -1568,6 +1722,7 @@ function ManagedSessionsContent({
                   {t('sidebar.rename')}
                 </Button>
               )}
+              {mcpManagerButton}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (
@@ -1783,35 +1938,23 @@ function ManagedSessionsContent({
                 onAbandoned={() => setListRevision((current) => current + 1)}
               />
             )}
-          {(detail.loading ||
-            (latestSuccessfulTodos !== undefined &&
-              latestSuccessfulTodos.length > 0)) && (
-            <section
-              className="shrink-0 rounded-md border px-3 py-2"
-              aria-label={t('todo.title')}
-              data-managed-todo-list
-            >
-              <div className="mb-2 flex items-center justify-between gap-2 text-sm">
-                <span className="font-medium">{t('todo.title')}</span>
-                {detail.loading && (
-                  <span role="status" className="text-muted-foreground">
-                    {t('managed.loading')}
-                  </span>
-                )}
-              </div>
-              {latestSuccessfulTodos !== undefined ? (
+          {latestSuccessfulTodos !== undefined &&
+            latestSuccessfulTodos.length > 0 && (
+              <section
+                className="max-h-[35vh] shrink-0 overflow-y-auto rounded-md border px-3 py-2"
+                aria-label={t('todo.title')}
+                data-managed-todo-list
+              >
+                <div className="mb-2 text-sm font-medium">
+                  {t('todo.title')}
+                </div>
                 <TodoFullList todos={latestSuccessfulTodos} numbered />
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  {t('managed.loading')}
-                </p>
-              )}
-              {detail.olderCursor && latestSuccessfulTodos !== undefined && (
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {t('managed.todo.loadedWindow')}
-                </p>
-              )}
-            </section>
+              </section>
+            )}
+          {sessionId && detail.olderCursor && (
+            <p className="text-xs text-muted-foreground">
+              {t('managed.todo.loadedWindow')}
+            </p>
           )}
           {!(!sessionId && provider.workspaceBinding) && (
             <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
@@ -1831,13 +1974,12 @@ function ManagedSessionsContent({
                   hasOlderHistory={Boolean(detail.olderCursor)}
                   loadingOlderHistory={detail.loadingOlder}
                   onLoadOlderHistory={detail.loadOlder}
-                  workspaceCwd={summary?.workspaceCwd}
                   hideSessionTimeline
                   welcomeHeader={
                     messages.length === 0 && !detail.loading ? (
                       <WelcomeHeader
                         version=""
-                        cwd={summary?.workspaceCwd ?? ''}
+                        cwd=""
                         currentModel={displayedModel}
                         currentMode=""
                       />
@@ -1904,9 +2046,16 @@ function ManagedSessionsContent({
               className={home ? shellStyles.footer : 'shrink-0'}
               data-testid="managed-approval"
             >
+              {approvals.action?.sessionId !== sessionId && (
+                <p className="mb-2 text-sm font-medium">
+                  {t('managed.tasks.childApproval')} ·{' '}
+                  {approvals.action?.sessionId}
+                </p>
+              )}
               <ToolApproval
                 request={pendingApproval}
                 planExecutionMode={
+                  approvals.action?.sessionId === sessionId &&
                   approvals.action?.toolName === 'exit_plan_mode' &&
                   approvals.action.turnId === detail.summary?.activeTurnId
                     ? detail.summary?.approvalMode
@@ -2046,9 +2195,7 @@ function ManagedSessionsContent({
                 workspaceFeaturesEnabled={false}
                 fileReferenceActions={referenceActions}
                 persistFileReferences
-                attachmentsEnabled={
-                  summary?.capabilities.inputAttachments === true
-                }
+                attachmentsEnabled={attachmentCapability.current.enabled}
                 visibleToolbarActions={
                   interactive
                     ? [
@@ -2206,6 +2353,7 @@ function ManagedSessionsContent({
                         if (
                           mode === 'default' ||
                           mode === 'auto-edit' ||
+                          mode === 'auto' ||
                           mode === 'yolo'
                         )
                           void approvalChange.submit(mode);
@@ -2356,6 +2504,39 @@ function ManagedSessionsContent({
                   </p>
                 )}
               {interactive &&
+                approvalChange.options?.permissionRulesSupported && (
+                  <ManagedPermissionRulesDialog
+                    key={`${provider.storageKey}:${sessionId}`}
+                    rules={approvalChange.options.permissionRules}
+                    revision={approvalChange.options.approvalRevision}
+                    busy={approvalChange.busy}
+                    errorCode={approvalChange.errorCode}
+                    disabled={
+                      !approvalChange.options.supported ||
+                      approvalChange.optionsLoading ||
+                      approvalChange.isBlocked() ||
+                      compression.isBlocked() ||
+                      modelChange.isBlocked() ||
+                      cwd.isBlocked() ||
+                      busy ||
+                      Boolean(active) ||
+                      Boolean(pendingApproval) ||
+                      Boolean(pending) ||
+                      approvalChange.options.approvalRevision !==
+                        (summary?.approvalRevision ?? 0)
+                    }
+                    onSave={(rules) =>
+                      summary?.approvalMode
+                        ? approvalChange.submit(
+                            summary.approvalMode,
+                            undefined,
+                            rules,
+                          )
+                        : Promise.resolve(undefined)
+                    }
+                  />
+                )}
+              {interactive &&
                 (approvalChange.busy ||
                   approvalChange.blocked ||
                   approvalChange.optionsLoading ||
@@ -2469,6 +2650,16 @@ function ManagedSessionsContent({
             key={`${provider.storageKey}:${sessionId}`}
             wide={wideTasks}
             tasks={tasks}
+            waitingSessions={childApprovalSessions}
+            onOpenChild={(child) =>
+              setChildView({
+                provider,
+                clientId,
+                root: sessionId,
+                child,
+                trigger: document.activeElement,
+              })
+            }
             cancel={taskCancel}
             canCancel={
               summary?.capabilities.tasks === true && !!provider.tasks.cancel
@@ -2488,6 +2679,26 @@ function ManagedSessionsContent({
             }}
           />
         )}
+        {childView &&
+          childView.provider === provider &&
+          childView.clientId === clientId &&
+          childView.root === sessionId && (
+            <ManagedChildSessionView
+              key={`${provider.storageKey}:${sessionId}:${childView.child}`}
+              provider={provider}
+              clientId={clientId}
+              sessionId={childView.child}
+              onClose={() => setChildView(undefined)}
+              restoreFocus={() => {
+                if (
+                  childView.trigger instanceof HTMLElement &&
+                  childView.trigger.isConnected
+                )
+                  childView.trigger.focus();
+                else taskTriggerRef.current?.focus();
+              }}
+            />
+          )}
       </div>
     </div>
   );

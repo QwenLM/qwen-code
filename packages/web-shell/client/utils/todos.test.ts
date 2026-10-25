@@ -1453,19 +1453,30 @@ describe('todoDetailSignature', () => {
   });
 });
 
-it('keeps successful Managed Todo state through failed calls and clears it on success', () => {
-  const first = todoWriteMessage('first', [todo('a', 'pending')]);
-  const failed = todoWriteMessage('failed', [todo('a', 'completed')]);
-  const pending = todoWriteMessage('pending', []);
-  if (failed.role !== 'tool_group' || pending.role !== 'tool_group')
+it('uses committed Managed Todo output, ignoring requested, failed and cancelled lists', () => {
+  const committed = (id: string, todos: TodoItem[]): Message => ({
+    id,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: id,
+        toolName: 'todo_write',
+        status: 'completed',
+        rawOutput: { todos },
+      },
+    ],
+  });
+  const first = committed('first', [todo('a', 'pending')]);
+  const failed = committed('failed', []);
+  const cancelled = committed('cancelled', []);
+  if (failed.role !== 'tool_group' || cancelled.role !== 'tool_group')
     throw new Error('Invalid fixture');
   failed.tools[0].status = 'failed';
-  pending.tools[0].status = 'pending';
-  expect(getLatestSuccessfulTodos([first, failed, pending])).toEqual([
+  cancelled.tools[0].wasCancelled = true;
+  const requested = todoWriteMessage('requested', []);
+  expect(getLatestSuccessfulTodos([first, failed, cancelled, requested])).toEqual([
     expect.objectContaining({ id: 'a', status: 'pending' }),
   ]);
-  expect(
-    getLatestSuccessfulTodos([first, todoWriteMessage('clear', [])]),
-  ).toEqual([]);
-  expect(getLatestSuccessfulTodos([failed, pending])).toBeUndefined();
+  expect(getLatestSuccessfulTodos([first, committed('clear', [])])).toEqual([]);
+  expect(getLatestSuccessfulTodos([requested])).toBeUndefined();
 });

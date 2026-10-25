@@ -40,8 +40,7 @@ export function parseTodoItemsFromEntries(
     const meta = getRecord(item?.['_meta']);
     const qwenTodo = getRecord(meta?.['qwenTodo']);
     const blockedBy =
-      getStringArray(qwenTodo, 'blockedBy') ??
-      getStringArray(item, 'blockedBy');
+      getStringArray(qwenTodo, 'blockedBy') ?? getStringArray(item, 'blockedBy');
     return [
       {
         id:
@@ -188,7 +187,11 @@ export function getLatestSuccessfulTodos(
   for (const message of messages) {
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
-      if (!isTodoWriteToolName(tool.toolName) || tool.status !== 'completed')
+      if (
+        !isTodoWriteToolName(tool.toolName) ||
+        tool.status !== 'completed' ||
+        tool.wasCancelled === true
+      )
         continue;
       const executionStatus = tool.toolResult?.execution_status;
       if (executionStatus !== undefined && executionStatus !== 'success')
@@ -196,7 +199,7 @@ export function getLatestSuccessfulTodos(
       const outputTodos = getTodoArray(getRecord(tool.rawOutput));
       const todos = outputTodos
         ? parseTodoItemsFromEntries(outputTodos)
-        : extractTodosFromToolCall(tool);
+        : undefined;
       if (todos !== undefined) latest = todos;
     }
   }

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.List;
@@ -14,9 +15,32 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("Hosted wake recovery is unavailable");
     }
 
+    default boolean supportsPublicChildAgents() { return false; }
+
+    default String closeSession(OperationRecord operation) {
+        return closeSession(operation.tenantId(), operation.sessionId());
+    }
+
+    default void runLifecycleChildOperation(OperationRecord operation, Map<String, Object> body) {
+        runChildOperation(operation.tenantId(), operation.sessionId(), body);
+    }
+
+    default Map<String, Object> drainInstance(String instanceId, String operationId) {
+        throw new UnsupportedOperationException("Harness drain is unavailable");
+    }
+
+    default Map<String, Object> releaseOwnership(String tenantId, String sessionId,
+            String operationId, long expectedPlacementEpoch) {
+        throw new UnsupportedOperationException("Harness ownership release is unavailable");
+    }
+
     default boolean supportsApprovalSelection() { return false; }
 
     default boolean supportsLiveApprovalSelection() { return false; }
+
+    default boolean supportsAutoApproval() { return false; }
+
+    default boolean supportsPermissionRules() { return false; }
 
     default boolean supportsAgentDefinitionApprovalSelection() { return false; }
 
@@ -49,6 +73,20 @@ public interface HarnessConnector extends AutoCloseable {
     default boolean supportsInputAttachments() { return false; }
 
     default boolean supportsSessionSkills() { return false; }
+
+    default boolean supportsMcpManagement() { return false; }
+
+    default Map<String, Object> mcpManagement(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default Map<String, Object> manageMcp(String tenantId, String sessionId, Map<String, Object> command) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default Map<String, Object> mcpManagementOperation(String tenantId, String sessionId, String operationId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
 
     default boolean isWorkspaceFilesAvailable() {
         return false;
@@ -298,7 +336,10 @@ public interface HarnessConnector extends AutoCloseable {
     default void close() {
     }
 
-    record AttachedSession(String tenantId, String sessionId) {
+    record AttachedSession(String tenantId, String sessionId, String writerIdentity, long placementEpoch) {
+        public AttachedSession(String tenantId, String sessionId) {
+            this(tenantId, sessionId, null, 0);
+        }
     }
 
     record Attachment(String bootId, HarnessRuntimeRecovery runtimeRecovery,

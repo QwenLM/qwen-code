@@ -114,6 +114,23 @@ public class ManagedSessionStoreController {
                 writerToken, request, lifecycleAuthority(headers));
     }
 
+    @PostMapping("/writers:release-ownership")
+    public com.fasterxml.jackson.databind.JsonNode releaseOwnership(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.ReleaseOwnershipRequest request) {
+        return store.releaseOwnership(tenant.tenantId(), sessionId, writerToken, request);
+    }
+
+    @PostMapping("/writers:quiesce-ownership")
+    public java.util.Map<String, String> quiesceOwnership(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.QuiesceOwnershipRequest request) {
+        store.quiesceOwnership(tenant.tenantId(), sessionId, writerToken, request);
+        return java.util.Map.of("state", "QUIESCING");
+    }
+
     @PostMapping("/recovery:block")
     public RecoveryStateReceipt blockRecovery(TenantContext tenant,
             @PathVariable String sessionId,

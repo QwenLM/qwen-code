@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { validateTodos } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
 import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
 import {
@@ -481,7 +482,8 @@ export async function verifyRecoverySession(
       );
     } else if (ref.kind === 'managed-todo_state') {
       requireValue(
-        !checkHostedTodoWriteInput({ todos: body['todos'] }).error,
+        !checkHostedTodoWriteInput({ todos: body['todos'] }).error &&
+          !validateTodos(body['todos']),
         'invalid Hosted Todo state',
       );
     } else {
@@ -829,10 +831,9 @@ export async function verifyRecoverySession(
         'invalid genesis',
       );
       const definition = object(json(await read(header.definitionRef)));
-      // The /2 profiles are the same Hosted files/shell surfaces plus glob;
-      // the W1b bundle doc puts Hosted files and Shell profiles inside the
-      // capture closure, so one /2 Session must not abort recovery of the
-      // whole shared storage.
+      // The W1b bundle includes Hosted file-search and Shell profiles in
+      // its capture closure, so a search-capable Session must not abort
+      // recovery of the whole shared storage.
       requireValue(
         definition['engine'] === 'managed' &&
           definition['sessionId'] === source.sessionId &&

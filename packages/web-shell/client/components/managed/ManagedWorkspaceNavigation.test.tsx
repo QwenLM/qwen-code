@@ -49,10 +49,8 @@ describe('Managed workspace navigation', () => {
     localStorage.clear();
     list.mockResolvedValue({ data: [workspace], supported: true });
     provider = {
-      kind: 'java',
       storageKey: 'provider:a',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       workspaceBinding: {
         agentId: 'agent',
         list,
@@ -65,6 +63,7 @@ describe('Managed workspace navigation', () => {
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -145,8 +144,8 @@ describe('Managed workspace navigation', () => {
       )!.disabled,
     ).toBe(true);
     await act(async () =>
-      [...group('unpaged').querySelectorAll('button')]
-        .find((item) => item.textContent === 'Task outside')!
+      group('unpaged')
+        .querySelector<HTMLElement>('[data-managed-session-id="outside"]')!
         .click(),
     );
     expect(selectSession).toHaveBeenCalledWith('outside', 'unpaged');
@@ -156,8 +155,8 @@ describe('Managed workspace navigation', () => {
     await render({ active: false });
     expect(container.querySelector('[aria-current]')).toBeNull();
     await act(async () =>
-      [...container.querySelectorAll('button')]
-        .find((item) => item.textContent === 'Task one')!
+      container
+        .querySelector<HTMLElement>('[data-managed-session-id="one"]')!
         .click(),
     );
     expect(selectSession).toHaveBeenCalledWith('one', 'a');
@@ -193,7 +192,7 @@ describe('Managed workspace navigation', () => {
         Boolean(row.querySelector('[role="status"][aria-label="Running"]')),
       ).toBe(running);
       expect(row.getAttribute('aria-current')).toBeNull();
-      await act(async () => (row as HTMLButtonElement).click());
+      await act(async () => (row as HTMLElement).click());
       expect(selectSession).toHaveBeenCalledWith('one', 'a');
     },
   );
@@ -227,7 +226,7 @@ describe('Managed workspace navigation', () => {
         </button>
       ),
     });
-    const row = container.querySelector<HTMLButtonElement>(
+    const row = container.querySelector<HTMLElement>(
       '[data-managed-session-id="one"]',
     )!;
     const action = container.querySelector<HTMLButtonElement>(
@@ -236,7 +235,7 @@ describe('Managed workspace navigation', () => {
     expect(
       row.querySelector('[data-web-shell-session-running]'),
     ).not.toBeNull();
-    expect(row.contains(action)).toBe(false);
+    expect(row.contains(action)).toBe(true);
     await act(async () => action.click());
     expect(archive).toHaveBeenCalledOnce();
     expect(selectSession).not.toHaveBeenCalled();

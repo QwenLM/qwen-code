@@ -36,8 +36,9 @@ public class ManagedActionController {
             TenantContext tenant,
             @PathVariable String sessionId,
             @RequestParam(required = false) String cursor,
-            @RequestParam(defaultValue = "20") int limit) {
-        return actions.listPublic(tenant.tenantId(), tenant.actorId(), sessionId, cursor, limit);
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestParam(name = "include_children", defaultValue = "false") boolean includeChildren) {
+        return actions.listPublic(tenant.tenantId(), tenant.actorId(), sessionId, cursor, limit, includeChildren);
     }
 
     @GetMapping("/v1/agents/sessions/{sessionId}/actions/{actionId}")
@@ -77,7 +78,7 @@ public class ManagedActionController {
                 tenant.actorId(),
                 request.sessionId(),
                 request.cursor(),
-                request.limit() == null ? 20 : request.limit());
+                request.limit() == null ? 20 : request.limit(), Boolean.TRUE.equals(request.includeChildren()));
     }
 
     @PostMapping("/api/agent/web-shell/v1/actions/get")

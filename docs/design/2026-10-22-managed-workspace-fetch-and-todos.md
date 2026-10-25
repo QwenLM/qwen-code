@@ -1,41 +1,46 @@
-# Durable Todo for Managed Workspace Sessions
+# Managed Session durable Todo
 
 [中文](2026-10-22-managed-workspace-fetch-and-todos.zh-CN.md) | English
 
 ## Problem and scope
 
-[#15076](https://github.com/QwenLM/qwen-code/issues/15076) needs a durable task list across Turns and replacement Workers. A Worker-local file keyed by a runtime ID cannot provide that contract. Hosted Harness therefore owns Todo through the existing Session Store `todo_state` domain. This extends #15089 without changing the shared local CLI web-fetch behavior.
+#15089 adds `todo_write` on `hosted-workspace-files/3`, but its Worker identity is scoped to a Turn. The list is lost across Turns and is not available to the Harness model loop or the WebShell task panel. This follow-up stores the list with the Hosted Session and projects committed state to the client. Refs #15076, #15084.
 
-Native `web_fetch` is deferred by the [recorded issue decision](https://github.com/QwenLM/qwen-code/issues/15076#issuecomment-6321618001). An admitted Shell can use `run_shell_command` under its existing approval and deployment policy. File-only profiles do not gain network access. This change adds no network sandbox or outbound policy.
+The profile and approval boundaries follow main: only `files/3` declares Todo; Shell stays on the unified `shell/1` profile. Public Plan admission remains limited to `files/1` and `shell/1`. This change adds no profile, lifecycle protocol, deployment default, MCP capacity rule or automatic continuation.
 
-## Admission and ownership
+Native `web_fetch` was originally deferred because a files-only Session could reach private, link-local or metadata destinations without an outbound policy. Main now ships fetch with its own destination checks; this follow-up preserves that implementation and does not extend its policy.
 
-- Only `hosted-workspace-files/3` and `hosted-workspace-shell/3` advertise `todo_write`. Earlier versions, team-lead and read-only child profiles retain their vocabulary. The saved profile is the enablement source; the Worker does not register `TodoWriteTool` or need a local Config flag.
-- Stored Agent definitions may select `/3` when operators explicitly allow that profile. Public approval selection and the existing Plan admission gates recognize these profiles. Built-in defaults remain `/1`; no deployment setting is silently widened.
-- The existing approval modes pre-approve Todo. Public Plan mode still refuses this writing tool. Recognition for approval does not promote `/3` into lifecycle, resident Workspace or SSH qualification.
-- Harness validates the complete replacement list using core Todo validation, enforces a 16 KiB serialized-state ceiling, and refuses active/completed tasks whose dependencies are unfinished. Malformed calls produce correctable tool results before Runtime acquisition.
-- Native fetch is excluded from declarations, input previews and Worker execution. Existing core web-fetch behavior is unchanged.
+## Storage and execution
 
-## Durable state and recovery
+The Harness writes `todo_state` through the Session authority. The envelope carries the operation identity, revision and previous record reference. The command digest binds the original input; retrying the same command returns its original record even after later writes, while different input conflicts. A stored record is read and validated on Session load.
 
-The tenant/workspace/session-scoped authority commits each full list with its existing writer lease, revision chain and resource store. A digest of the prompt ID and tool call ID identifies the command; the input digest detects conflicting retries. Replaying an earlier call returns that call's committed list without replacing a newer list.
+Validation retains main's 64-item, 1000-code-point content, 32-dependency and 16 KiB serialized-list bounds. Shared core validation rejects duplicate IDs, missing dependencies and cycles. Core and Hosted use the same dependency-preservation helper: an unfinished prior plan preserves omitted edges to surviving IDs; an explicit empty array clears them; a preservation-created cycle falls back to the caller's valid list. The merged list must also fit the Hosted limits. There is no additional Hosted-only status-versus-dependency restriction.
 
-State commits before its successful tool result, which includes structured `todos`. These are two ordered commits, not an atomic pair: a failure between them leaves durable state, and retrying the same command can recover its original result. This does not broaden recovery admission for interrupted tool batches. In particular, no new in-flight Shell recovery guarantee is claimed.
+A valid Todo call commits without acquiring, preparing or executing a Runtime. The constructor's existing warm-up and configured Hook execution can still contact the Broker. Successful journal-only writes count as dispatch evidence for PostToolUse; validation refusals do not. Worker Todo support remains available for existing execution paths, but fresh Hosted Todo dispatch is owned by the Harness.
 
-Each fresh model request receives the latest durable list in system context, including after reopening a Session or compacting conversation history. A frozen recovery request retains its original instructions until the next new request. Workspace recovery verifies Todo resource bodies and predecessor chains. Corrupt state fails rather than becoming an empty list. No SQL schema change is needed because the domain already exists.
+The state commit and tool-result commit are ordered, not atomic. A crash between them can leave committed state before a public success receipt. Replaying the command recovers its original result; this does not expand interrupted-batch recovery admission. New journal-only Todo batches are not captured as Worker continuations; previously saved Worker continuations retain their original execution path.
 
-## WebShell behavior
+## Model context
 
-The Managed Session page reuses the existing Todo list. It shows the latest successful `todo_write` snapshot in loaded history; failed and pending calls do not overwrite it, and a successful empty list clears it. Refresh/reconnect rebuilds the projection from history. While history is loading the page shows loading state; when older pages remain it explicitly identifies the snapshot as coming from loaded records. This is not a separate server-side current-Todo query, and partial history must not be presented as a fully restored list.
+Fresh model requests read the latest durable list. Saved recovery requests retain their recorded context. The reminder labels the JSON as task data, not instructions, and tells the model not to follow instructions embedded in task text. It remains bounded by the stored-list limit; this change does not introduce a context cache or change provider prefix caching.
 
-Team `task_*` ownership is unchanged. This change injects current state; it does not force automatic continuation or promise that a model will complete every task.
+## Committed client projection
 
-## Acceptance and remaining qualification
+The committed `tool_result` is the producer of the visible snapshot. For an exact `todo_write` success, the Harness validates and serializes the committed list as a `todoSnapshot` string on its existing journal progress event. Java forwards that scalar only for a completed Todo journal event and only up to 16 KiB. Other tool outputs and uncommitted progress retain their existing redaction. No general nested-output forwarding or new endpoint is introduced.
 
-1. `/3` advertises Todo without fetch; earlier profiles retain their tools. Java and Harness approval predicates agree for explicitly admitted `/3` definitions.
-2. Valid Todo writes do not acquire or execute a Worker. Invalid lists and blocked-task transitions return correctable errors.
-3. Reopening the same durable Session retains the latest list. Identical retries preserve it; changed input under the same command identity conflicts.
-4. Fresh model requests receive current state; successful UI snapshots survive refresh and failed/pending calls do not replace them. Pagination limitations remain visible.
-5. Fetch calls fail before dispatch and the Worker offers neither native fetch nor Todo.
+The same attributes are persisted on tool Items and returned through live events, transcript replay and snapshots. The client recognizes only Todo snapshots, rejects stale source revisions, and uses committed output rather than requested arguments. Failed, cancelled and pending calls cannot replace the last successful list; a successful empty list clears it.
 
-Source regression cases cover these contracts where practical, but local tests, builds and UI/runtime verification were not run at the user's request. Java-to-Harness deployment, remote-store replay, fault recovery and visual qualification remain reviewer acceptance work. Keep #15076 open until that acceptance is complete; the proposal does not qualify new lifecycle, CSI, SSH or OS isolation support.
+The task card mounts only when a nonempty committed snapshot exists. Its height is bounded and its contents scroll, preserving room for the transcript. When older events remain unloaded, a separate history-window note remains visible even without a loaded Todo snapshot. This is a projection of loaded history, not a separate current-state query.
+
+## Acceptance criteria
+
+1. A `files/3` Session retains main's tools and approvals. Other profiles, Plan admission, lifecycle and MCP limits do not expand.
+2. Write a list, update it in another Turn, then reopen the Session: fresh requests receive the latest list. Command retries return the original committed result, and mismatched input conflicts.
+3. Dependency preservation matches core; malformed graphs and oversized merged lists return correctable errors without Runtime dispatch.
+4. Successful writes fire the configured success Hook. Refused writes do not appear as successful dispatches.
+5. A real journal Todo completion passes through Java projection and renders identically from live events and persisted Items. Other tool payloads remain redacted; stale and unsuccessful updates cannot replace the list.
+6. Empty lists clear the card; long lists remain scrollable without hiding the transcript; unloaded history has a visible limitation notice.
+
+## Verification boundaries
+
+Regression sources cover durable replay, dependency preservation, success Hooks, the journal snapshot producer, Java redaction and client live/replay projection. Execution results belong in the PR at an exact commit. MySQL, remote-store crash recovery, full Hosted-process and browser acceptance must be recorded separately; source inspection or unexecuted tests do not establish those outcomes.

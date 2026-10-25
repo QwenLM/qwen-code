@@ -38,11 +38,33 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
+    'packages/cli/src/serve/memory-import.ts',
+    {
+      reason:
+        'Import refuses process-global legacy memory path overrides because native memory readers still consume them, even if a runtime overlay clears them. Project scope uses the selected runtime snapshot; only parent-process runtimes without a snapshot use the process environment.',
+      accesses: {
+        'computed:key': 1,
+        'key:QWEN_CODE_MEMORY_PROJECT_SCOPE': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/hosted-harness-contract.ts',
     {
       reason:
-        'The Hosted lifecycle v2 profile advertisement is a process-scoped deployment gate fixed when the daemon contract is created.',
-      accesses: { 'computed:HOSTED_LIFECYCLE_V2_PROFILES_ENV': 1 },
+        'The Hosted lifecycle v2 profile advertisement and pool instance identity are process-scoped deployment contracts fixed when the daemon contract is created.',
+      accesses: {
+        'computed:HOSTED_LIFECYCLE_V2_PROFILES_ENV': 1,
+        'key:QWEN_HOSTED_HARNESS_INSTANCE_ID': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/hosted-harness-profile.ts',
+    {
+      reason:
+        'Hosted profile validation refuses private CSI roots when the process-scoped pool instance identity is configured.',
+      accesses: { 'key:QWEN_HOSTED_HARNESS_INSTANCE_ID': 1 },
     },
   ],
   [
@@ -236,6 +258,26 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-local-runtime.ts',
+    {
+      reason:
+        'The foreground Managed launcher resolves its version-matched runtime and Java from deployment-owned process settings before any Workspace exists.',
+      accesses: {
+        'key:JAVA_HOME': 1,
+        'key:PATH': 1,
+        'key:QWEN_MANAGED_LOCAL_RUNTIME_DIR': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-local-serve.ts',
+    {
+      reason:
+        'The foreground Managed launcher starts its private Java and Hosted Harness processes from its own deployment environment, before any Workspace environment is resolved.',
+      accesses: { whole: 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-mcp-runtime.ts',
     {
       reason:
@@ -358,7 +400,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
         'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
-        'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped contracts fixed at daemon bootstrap.',
+        'The Hosted Harness capability digest, Broker URL/token and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
@@ -372,6 +414,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:NODE_EXTRA_CA_CERTS': 1,
         'key:NODE_TLS_REJECT_UNAUTHORIZED': 1,
         'key:QWEN_CODE_IDE_WORKSPACE_PATH': 1,
+        'key:QWEN_HOSTED_HARNESS_BROKER_URL': 1,
+        'key:QWEN_HOSTED_HARNESS_BROKER_TOKEN': 1,
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
@@ -498,8 +542,13 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'Embedded server construction keeps a process-environment compatibility fallback. ' +
         'The collaboration opt-in is read once at daemon startup and is process-scoped ' +
         'by design: it governs work no session owns (the dispatch timer and Host ' +
-        'transport routes), so it cannot be a per-session setting.',
-      accesses: { whole: 1, 'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1 },
+        'transport routes), so it cannot be a per-session setting. ' +
+        'The Hosted pool instance setting is captured once when the server installs its process-scoped private routes.',
+      accesses: {
+        whole: 1,
+        'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1,
+        'key:QWEN_HOSTED_HARNESS_INSTANCE_ID': 1,
+      },
     },
   ],
   [
