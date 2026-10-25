@@ -25,6 +25,7 @@
  */
 
 import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
+import { stripSuppressOnRestore } from '../utils/resumeHistoryUtils.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
   useCallback,
@@ -175,6 +176,8 @@ export interface OpenTuiLiveTurn {
   interrupt(onSettled?: OpenTuiCancelSettled): void;
   retryLastPrompt(): void;
   notifyInputProcessed(): void;
+  isCurrentHistory(snapshot: readonly LiveHistoryItem[]): boolean;
+  rewindTranscript(userId: string): readonly LiveHistoryItem[] | undefined;
   /** Replaces the transcript from a replay batch (session switch/resume). */
   resetTranscript(events: readonly OpenTuiStreamEvent[]): void;
   /** Folds one externally produced event (update notices, startup warnings). */
@@ -811,6 +814,30 @@ export function useOpenTuiLiveTurn(
     };
   }, [dualOutput]);
 
+  const rewindTranscript = useCallback(
+    (userId: string) => {
+      const index = itemsRef.current.findIndex((item) => item.id === userId);
+      if (index < 0) return;
+      const retained = itemsRef.current
+        .slice(0, index)
+        .filter((item) => item.display?.kind !== 'collapse-summary')
+        .map(stripSuppressOnRestore);
+      resetTranscript([]);
+      itemsRef.current = retained;
+      setItems(retained);
+      return retained;
+    },
+    [resetTranscript],
+  );
+
+  const isCurrentHistory = useCallback(
+    (snapshot: readonly LiveHistoryItem[]) =>
+      mountedRef.current &&
+      !streamingRef.current &&
+      itemsRef.current === snapshot,
+    [],
+  );
+
   return {
     items,
     streaming,
@@ -823,6 +850,8 @@ export function useOpenTuiLiveTurn(
     interrupt,
     retryLastPrompt,
     notifyInputProcessed,
+    isCurrentHistory,
+    rewindTranscript,
     resetTranscript,
     applyEvent: apply,
     settleWaitingCall,
