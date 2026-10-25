@@ -262,6 +262,8 @@ export function runCleanup(
   // Under the lock, the ownership checked again: taken over while the
   // checks above asked the remote, the watch is the new owner's, and no
   // helper of it can start between the check and the removal.
+  // Removed without the lock: checked once more just before.
+  if (!state || force) assertNoFixInFlight(paths, prNumber);
   const history =
     state && !force
       ? withWatchLock(paths, prNumber, () => {

@@ -27,7 +27,7 @@ import {
   backgroundFixOf,
   canonicalWorktreePath,
   confirmedWatch,
-  FIX_CLAIM_WINDOW_MS,
+  FIX_CLAIM_DEADLINE_MS,
   FIX_HEARTBEAT_MS,
   FIX_TIME_LIMIT_MS,
   forgetAutofixPrSession,
@@ -51,6 +51,7 @@ if (process.env.FAKE_LOG) require('node:fs').appendFileSync(process.env.FAKE_LOG
 if (sub !== 'autofix-pr') { process.stderr.write('not autofix-pr'); process.exit(2); }
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
+else if (mode === 'refuse-stack') { process.stderr.write('An unexpected critical error occurred:\\nError: no round of PR #12 has a fix to start\\n    at runFixStart (fix.js:1:1)\\n    at handler (fix.js:2:2)\\n'); process.exit(1); }
 else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, host: process.env.FAKE_HOST || undefined, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1' }) + '\\n');
 else if (command === 'status') process.stdout.write(process.env.FAKE_STATUS + '\\n');
 else if (command === 'fix-start') process.stdout.write(JSON.stringify({ attempt: (rest.find((a) => a.startsWith('--attempt=')) || '').slice(10), task: process.env.FAKE_TASK || 'feedc0ffee12' }) + '\\n');
@@ -1201,6 +1202,16 @@ describe('background fixes', () => {
     expect(backgroundFixOf('session-a', 12)).toBeUndefined();
   });
 
+  it("reads the helper's reason from the line that names the error, not the stack after it", async () => {
+    await granted();
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse-stack');
+    await expect(
+      openBackgroundFix('session-a', worktree, signal()),
+    ).rejects.toThrow(
+      /^autofix-pr fix-start refused: no round of PR #12 has a fix to start$/,
+    );
+  });
+
   it("refuses with the helper's reason, and with no grant or no task", async () => {
     await expect(
       openBackgroundFix('session-a', worktree, signal()),
@@ -1492,18 +1503,30 @@ describe('background fixes', () => {
       expect(fix.done).toBe(false);
     });
 
-    it('waits for a claim for 10 minutes after the agent ended, and no longer', async () => {
+    it('waits for a claim until 40 minutes after it opened, however late the agent ended', async () => {
+      writeMarker(fix.attempt);
+      await vi.advanceTimersByTimeAsync(FIX_CLAIM_DEADLINE_MS - 60_000);
       fix.end({ status: 'completed', report: 'done' });
       // Once: a later end changes nothing.
       fix.end({ status: 'failed', report: 'late' });
       expect(fix.ended).toEqual({ status: 'completed', report: 'done' });
-      writeMarker(fix.attempt);
-      await vi.advanceTimersByTimeAsync(FIX_CLAIM_WINDOW_MS - 1000);
       expect(fix.done).toBe(false);
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(fix.done).toBe(true);
-      expect(cancel).not.toHaveBeenCalled();
       expect(backgroundFixOf('session-a', 12)).toBeUndefined();
+    });
+
+    it('lets go of a marker too large to be one', async () => {
+      fs.writeFileSync(
+        marker(),
+        JSON.stringify({
+          version: 1,
+          attempt: fix.attempt,
+          pad: 'x'.repeat(5000),
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(FIX_HEARTBEAT_MS);
+      expect(fix.done).toBe(true);
     });
 
     it('ends with its session', () => {

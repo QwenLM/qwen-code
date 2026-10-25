@@ -231,8 +231,11 @@ export const FIX_HEARTBEAT_MS = 30_000;
 const FIX_HEARTBEAT_LATE_MS = 60_000;
 /** The attempt time limit: the agent is stopped then. */
 export const FIX_TIME_LIMIT_MS = 30 * 60_000;
-/** How long an ended agent's attempt waits for its round's claim. */
-export const FIX_CLAIM_WINDOW_MS = 10 * 60_000;
+/** How long an attempt waits for its round's claim, from when it opened:
+ * a notification waits for the session to be idle. */
+export const FIX_CLAIM_DEADLINE_MS = 40 * 60_000;
+/** The largest marker the session reads: `fix-start` writes a few lines. */
+const FIX_MARKER_MAX_BYTES = 4096;
 
 /** How the agent of a background fix ended, as its registry entry says. */
 export interface BackgroundFixEnd {
@@ -263,6 +266,7 @@ export class BackgroundFix {
   private stopRequested = false;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private deadline: ReturnType<typeof setTimeout> | null = null;
   private lastBeat = Date.now();
 
   constructor(
@@ -298,13 +302,18 @@ export class BackgroundFix {
       // Never through a link, and never blocking on what is no file: the
       // agent can put anything at this path, and the session's own thread
       // reads it.
+      // Read and write: Windows sets a file's times only through a handle
+      // opened for writing.
       fd = openSync(
         this.marker,
-        constants.O_RDONLY |
+        constants.O_RDWR |
           (constants.O_NOFOLLOW ?? 0) |
           (constants.O_NONBLOCK ?? 0),
       );
-      if (!fstatSync(fd).isFile()) return this.drop();
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size > FIX_MARKER_MAX_BYTES) {
+        return this.drop();
+      }
       const marker = JSON.parse(readFileSync(fd, 'utf8')) as {
         attempt?: unknown;
       } | null;
@@ -323,6 +332,8 @@ export class BackgroundFix {
     // From now: the helper that opened the attempt may have waited its turn.
     this.lastBeat = Date.now();
     this.restartTimer(FIX_TIME_LIMIT_MS, () => this.stop());
+    this.deadline = setTimeout(() => this.drop(), FIX_CLAIM_DEADLINE_MS);
+    this.deadline.unref?.();
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = setInterval(() => this.beat(), FIX_HEARTBEAT_MS);
     this.heartbeat.unref?.();
@@ -343,11 +354,12 @@ export class BackgroundFix {
     else this.stopRequested = true;
   }
 
-  /** The agent ended: its round has the claim window to go on. Once. */
+  /** The agent ended: its round goes on, until the claim deadline. Once. */
   end(end: BackgroundFixEnd): void {
     if (this.ended) return;
     this.ended = end;
-    if (!this.done) this.restartTimer(FIX_CLAIM_WINDOW_MS, () => this.drop());
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
   }
 
   /** The agent's body settled. */
@@ -415,7 +427,8 @@ export class BackgroundFix {
     this.done = true;
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.timer) clearTimeout(this.timer);
-    this.heartbeat = this.timer = null;
+    if (this.deadline) clearTimeout(this.deadline);
+    this.heartbeat = this.timer = this.deadline = null;
     if (fixes.get(this.worktree) === this) fixes.delete(this.worktree);
   }
 

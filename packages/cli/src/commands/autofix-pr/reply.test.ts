@@ -651,6 +651,10 @@ describe('runReply', () => {
       runReply({ pr: 7, planPath, post: false, task: 'aaaaaaaaaaaa' }),
     ).not.toThrow();
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    // A `--once` round, with no task, has options of its own.
+    expect(() => runReply({ pr: 7, planPath, post: true })).not.toThrow(
+      /--no-reply/,
+    );
   });
 
   it('posts nothing for a watch cleanup ended', () => {

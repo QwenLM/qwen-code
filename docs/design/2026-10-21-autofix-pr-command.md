@@ -1278,8 +1278,10 @@ as the user now wants. `/autofix-pr stop` in this session — `cleanup`
 through the tool — stops the agent without a notification, waits up to 15
 seconds for its body to settle (outside the helpers' queue), ends the
 attempt and then cleans up. The session drops the
-attempt, and with it the marker's refreshes, when no claim came within 10
-minutes of the agent's end, and when the session or its process ends.
+attempt, and with it the marker's refreshes, when no claim came within 40
+minutes of the attempt's opening — a notification waits for the session to
+be idle, so the deadline does not run from the agent's end — and when the
+session or its process ends.
 Another session cannot stop the agent: its `cleanup`, `prepare --take-over`
 and `resume` refuse while the marker is fresh, saying that a fix of the
 session that owns the watch is running there. A marker no longer fresh is
@@ -1308,13 +1310,17 @@ skill again, whatever the conversation kept of the round, and runs
 that attempt only and prints the snapshot the attempt took, its brief and
 the head it started from; the tool adds how the agent ended, its report and
 the watch's options, from memory, which the turn uses whatever the
-follow-up said. A refusal of the helper leaves the attempt to claim again.
+follow-up said. A refusal of the helper leaves the attempt to claim again; one that says
+the round's snapshot is gone leaves it to go stale. The tool reads a
+helper's refusal from the line of the CLI's error that names it, not from
+the stack printed after it.
 The brief lists, besides the agent's items, the round's own — the re-runs
 and the items needing a human that the round decided before the fix — so
 the turn answers them too. Then it goes on with Section 7's re-runs, push
 and reply, exactly as after a foreground agent. Nothing an agent that failed or
 was stopped made is pushed: the turn runs `sync --discard` and answers the
-brief's items as needing a human, as for a fix that did not verify, so
+brief's items as needing a human — on the PR with a fixed sentence, the
+agent's report only in the session — as for a fix that did not verify, so
 they are recorded and not lost to a gate that reported them already. A claim
 the helper refuses — the attempt was dropped, or a round discarded it —
 ends with one line. In plan mode the tool refuses `fix-end`; the turn says

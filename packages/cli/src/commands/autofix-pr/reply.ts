@@ -345,9 +345,9 @@ function replyLocked(
   let state = requireState(paths.statePath, args.pr);
   assertWatching(state, args.task);
   assertNoFixInFlight(paths, args.pr);
-  // The option the watch was started with holds whatever a round's turn
-  // remembers of it.
-  if (args.post && state.watch?.reply === false) {
+  // The option the watch was started with holds for its rounds, whatever
+  // a round's turn remembers of it; a `--once` round has options of its own.
+  if (args.post && args.task !== undefined && state.watch?.reply === false) {
     throw new Error(
       `PR #${args.pr}'s watch was started with --no-reply: run reply with --no-post.`,
     );

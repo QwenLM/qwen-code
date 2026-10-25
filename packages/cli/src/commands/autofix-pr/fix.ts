@@ -130,7 +130,8 @@ export function assertNoFixInFlight(
     `a fix agent is working in PR #${prNumber}'s worktree (attempt ` +
       `${attempt.attempt}, started ${attempt.startedAt}); its round goes on ` +
       `when it ends. In the session that runs it, /autofix-pr stop ` +
-      `${prNumber} stops it; it ends by itself within 45 minutes.`,
+      `${prNumber} stops it; it ends by itself within 45 minutes, and one ` +
+      `its session gave up on within 90 seconds.`,
   );
 }
 
@@ -285,7 +286,14 @@ export function runFixEnd(args: FixEndArgs): FixEndResult {
     // `schedule` printed it, not this file's. Moved before the marker goes,
     // so a move that fails leaves the attempt to the next round's sync.
     const snapshot = fixSnapshotPath(paths, args.pr);
-    if (!args.abandon && isRegularFile(paths.snapshotPath)) {
+    if (!args.abandon) {
+      // Gone, the attempt has no round to go on from: it is left to go
+      // stale, and the round after it discards and redoes it.
+      if (!isRegularFile(paths.snapshotPath)) {
+        throw new Error(
+          `attempt ${args.attempt} of PR #${args.pr}'s fix has lost its round's snapshot.`,
+        );
+      }
       rmSync(snapshot, { force: true, recursive: true });
       renameSync(paths.snapshotPath, snapshot);
     }

@@ -758,7 +758,13 @@ const FIX_STOP_WAIT_MS = 15_000;
 /** A helper's refusal in one line: its last line on stderr, or why it did
  * not finish. */
 function helperRefusal(command: string, run: AutofixPrRun): string {
-  const said = run.stderr.trim().split('\n').pop()?.trim();
+  // The CLI prints a helper's error with its stack: the reason is the line
+  // that names the error, not the last.
+  const lines = run.stderr.split('\n').map((line) => line.trim());
+  const named = lines
+    .find((line) => /^(?:[A-Z]\w*)?Error: /.test(line))
+    ?.replace(/^(?:[A-Z]\w*)?Error: /, '');
+  const said = named ?? lines.filter(Boolean).pop();
   return `autofix-pr ${command} refused: ${said || run.failure || `exit ${run.exitCode}`}`;
 }
 

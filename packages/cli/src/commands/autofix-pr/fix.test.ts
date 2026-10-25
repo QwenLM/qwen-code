@@ -199,6 +199,20 @@ describe('fix-start and fix-end', () => {
     expect(existsSync(fixSnapshotPath(paths, 7))).toBe(false);
   });
 
+  it("refuses a claim whose round's snapshot is gone, leaving the attempt to go stale", () => {
+    runFixStart({ pr: 7, attempt: ATTEMPT });
+    rmSync(paths.snapshotPath);
+    writeFileSync(fixSnapshotPath(paths, 7), '{"from":"an earlier round"}');
+    expect(() => runFixEnd({ pr: 7, attempt: ATTEMPT })).toThrow(
+      /has lost its round's snapshot/,
+    );
+    expect(fixInFlight(paths)?.attempt).toBe(ATTEMPT);
+    // Abandoned, it needs none.
+    expect(runFixEnd({ pr: 7, attempt: ATTEMPT, abandon: true }).attempt).toBe(
+      ATTEMPT,
+    );
+  });
+
   it("moves the round's snapshot over whatever is in its place", () => {
     runFixStart({ pr: 7, attempt: ATTEMPT });
     mkdirSync(join(fixSnapshotPath(paths, 7), 'planted'), { recursive: true });
