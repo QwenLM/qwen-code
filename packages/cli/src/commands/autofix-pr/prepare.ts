@@ -234,7 +234,7 @@ export interface PrepareArgs {
  * outside it can be created but never used: no test, no commit, no push.
  * Refuse here, before anything is made under `.qwen/tmp`.
  */
-function assertSessionCanRunWorktree(worktreePath: string): void {
+function assertSessionCanRunWorktree(root: string, worktreePath: string): void {
   if (process.env['QWEN_CODE_SERVE'] !== '1') return;
   const sessionDir = realpathNearestExisting(process.cwd());
   if (isWithinRoot(realpathNearestExisting(worktreePath), sessionDir)) return;
@@ -242,8 +242,7 @@ function assertSessionCanRunWorktree(worktreePath: string): void {
     `${worktreePath} is outside this session's working directory ` +
       `(${sessionDir}): the daemon runs the fix agent's commands only there, ` +
       `so a watch here could never run its checks, commit or push. Open the ` +
-      `session where its working directory contains ${worktreePath} and ` +
-      `prepare the PR there.`,
+      `session at ${root} and prepare the PR there.`,
   );
 }
 
@@ -338,7 +337,7 @@ export function runPrepare(args: PrepareArgs): void {
       `refusing to create ${paths.worktreePath}: ${redirected} is a symlink.`,
     );
   }
-  assertSessionCanRunWorktree(paths.worktreePath);
+  assertSessionCanRunWorktree(root, paths.worktreePath);
   mkdirSync(dirname(paths.lockPath), { recursive: true });
   const state = withWatchLock(paths, args.pr, () => {
     // What was read before the lock may have moved since: another session

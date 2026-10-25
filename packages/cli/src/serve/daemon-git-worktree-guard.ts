@@ -315,9 +315,11 @@ interface TrustedDaemonToolGuardRequest
 const UNVERIFIABLE_SCOPE_DENIAL_PREFIX =
   'Daemon shell guard could not establish the execution directory of this call: ';
 // The refusal names the boundary it enforced: a caller that retries elsewhere,
-// or hands the command to a fresh session, only moves the same denial.
+// or hands the command to a fresh session, only moves the same denial. It
+// speaks about the directory, not the caller: a session whose own effective
+// directory moved outside the tracked one is refused the same way.
 const UNVERIFIABLE_SCOPE_DENIAL_HINT =
-  ' (a sub-agent may run only inside the session working directory or a worktree that session owns)';
+  ' (a command runs only inside the session working directory or a worktree that session owns)';
 
 interface GuardToken {
   readonly text: string;
