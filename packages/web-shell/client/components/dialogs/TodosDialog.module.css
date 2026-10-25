@@ -242,7 +242,7 @@
 .cardSession {
   margin-left: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  opacity: 0.5;
+  opacity: 0.65;
 }
 
 .dueChip {
@@ -319,26 +319,6 @@
   padding: 3px 6px;
 }
 
-.iconPending {
-  opacity: 0.55;
-}
-
-.iconProgress {
-  color: #7fb1ff;
-}
-
-:global(.theme-light) .iconProgress {
-  color: #1e40af;
-}
-
-.iconDone {
-  color: #5fd3a5;
-}
-
-:global(.theme-light) .iconDone {
-  color: #065f46;
-}
-
 /* --- Selection --- */
 
 .cardSelected {
@@ -404,4 +384,21 @@
 
 :global(.theme-light) .pillProgress {
   color: #1e40af;
+}
+
+/* --- A11y: keyboard focus + dark native form controls --- */
+
+.filter:focus-visible,
+.filterActive:focus-visible,
+.miniButton:focus-visible,
+.select:focus-visible,
+.search:focus-visible,
+.doneButton:focus-visible,
+.copy-btn:focus-visible {
+  outline: 2px solid #6d44e8;
+  outline-offset: 1px;
+}
+
+.wrap {
+  color-scheme: dark light;
 }
