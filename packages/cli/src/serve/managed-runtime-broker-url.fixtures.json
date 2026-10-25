@@ -223,7 +223,8 @@
     { "url": "http://", "verdict": "invalid" },
     {
       "url": "http://xn--localhost-:4182",
-      "verdict": "plain-outside-loopback"
+      "verdict": "plain-outside-loopback",
+      "strictIdnaVerdict": "invalid"
     },
     {
       "url": "http://xn--bcher-kva.example:4182",
