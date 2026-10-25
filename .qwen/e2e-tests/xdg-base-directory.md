@@ -2,12 +2,14 @@
 
 Design: [docs/design/2026-10-24-xdg-base-directory.md](../../docs/design/2026-10-24-xdg-base-directory.md)
 
-Run every step with a throwaway home, so the operator's real configuration is never read or written:
+Start every group from a fresh throwaway home, so the operator's real configuration is never read or written and no group sees another group's files. The one exception is the recreated `~/.qwen` group, which continues in the new-install group's home on purpose.
 
 ```bash
 export HOME=$(mktemp -d)
-unset QWEN_HOME XDG_CONFIG_HOME
+unset QWEN_HOME XDG_CONFIG_HOME QWEN_USAGE_STATISTICS_ENABLED QWEN_CODE_SIMPLE
 ```
+
+On Windows, Node reads the home directory from `USERPROFILE`, not `HOME`, so also set `export USERPROFILE="$HOME"` (and `HOMEDRIVE`/`HOMEPATH` for cmd or PowerShell), or use a throwaway user account. Otherwise the run reads and writes the real profile.
 
 `qwen -p "say hi"` without credentials is enough. The run performs first-run setup and then stops at "No auth type is selected", so no model is called.
 
@@ -15,11 +17,15 @@ unset QWEN_HOME XDG_CONFIG_HOME
 
 ### New install on Linux
 
-Run `qwen -p "say hi"` in an empty home. Expect `~/.config/qwen` to contain `installation_id` and `output-language.md`, and no `~/.qwen`.
+Run `qwen -p "say hi"` in an empty home. Expect `~/.config/qwen` to contain `.qwen-global-dir`, `installation_id` and `output-language.md`, and no `~/.qwen`.
+
+### New install in bare mode with usage statistics off
+
+Run `QWEN_USAGE_STATISTICS_ENABLED=false qwen --bare -p "say hi"` in an empty home. Expect `~/.config/qwen/.qwen-global-dir` even though neither `installation_id` nor `output-language.md` is written. Then `mkdir ~/.qwen` and run `qwen -p "say hi"`: expect `~/.config/qwen` to stay in use.
 
 ### Existing install on Linux
 
-Create `~/.qwen`, then run the same command. Expect the first-run files under `~/.qwen` and no `~/.config/qwen/installation_id`.
+Create `~/.qwen`, then run the same command. Expect the first-run files under `~/.qwen`, and no `~/.config/qwen/.qwen-global-dir`.
 
 ### Unrelated ~/.config/qwen
 
@@ -27,12 +33,19 @@ Create `~/.qwen` and `~/.config/qwen/settings.json` containing `{}`, then run th
 
 ### ~/.qwen recreated after an XDG install
 
-After the new-install run, `mkdir ~/.qwen` and run the command again. Expect `~/.config/qwen` to stay in use.
+In the new-install group's home, `mkdir ~/.qwen` and run the command again. Expect `~/.config/qwen` to stay in use.
+
+### QWEN_HOME pointed at the XDG directory
+
+Create `~/.qwen`, run `QWEN_HOME=$HOME/.config/qwen qwen -p "say hi"`, then run `qwen -p "say hi"` without it. Expect the second run to use `~/.qwen`, and no `~/.config/qwen/.qwen-global-dir`.
 
 ### Overrides
 
+Each in its own fresh home, with no `~/.qwen`:
+
 - `XDG_CONFIG_HOME=$HOME/xdg`: files appear under `$HOME/xdg/qwen`.
 - `XDG_CONFIG_HOME=relative`: the value is ignored and `~/.config/qwen` is used.
+- `XDG_CONFIG_HOME=$HOME/xdg` written to `~/.env` instead of the environment: the value is ignored and `~/.config/qwen` is used.
 - `QWEN_HOME=$HOME/custom`: files appear under `$HOME/custom`, whatever else exists.
 
 ### macOS and Windows
@@ -47,19 +60,19 @@ No global `qwen` is installed on the verification machine, so the repository's l
 - `-p "say hi"` stopped at "No auth type is selected". It created `~/.qwen` with `installation_id`, `output-language.md`, `extension-store/`, `extensions/` and `skills/`.
 - The same run with `QWEN_USAGE_STATISTICS_ENABLED=false` created everything except `installation_id`.
 
-This is why both `installation_id` and `output-language.md` count as markers.
+That is why neither file can serve as the marker: each is skipped by one of those switches, and a first run with both switches writes neither. The CLI writes `.qwen-global-dir` instead.
 
 ## Local verification
 
 All runs used a throwaway `HOME` with `QWEN_HOME` and `XDG_CONFIG_HOME` unset.
 
-- `cd packages/core && npx vitest run src/config/storage.test.ts src/permissions/autoMode.test.ts` and the other suites that read the global directory: 16 files passed.
-- `cd packages/cli && npx vitest run src/config/storage-paths-lite.test.ts src/config/settings.test.ts src/config/path-freshness.test.ts src/serve/fast-path.test.ts` and related suites: 9 files passed.
-- `cd packages/vscode-ide-companion && npx vitest run src/utils/paths.test.ts src/ide-server.test.ts`: passed.
-- `cd packages/channels/base && npx vitest run src/paths.test.ts`: passed.
-- `cd packages/sdk-typescript && npx vitest run test/unit/peer/registry.test.ts`: passed.
-- `npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/cli-entry.test.js`: passed.
-- Linux simulation: with the macOS exemption temporarily disabled in every resolver and `dist/` rebuilt, the same suites passed under an empty `HOME`. The only failures were the cases that assert macOS keeps `~/.qwen`, which the simulation disables by design.
+- `cd packages/core && npx vitest run src/config/storage.test.ts src/permissions/autoMode.test.ts src/skills/bundled/stuck/SKILL.test.ts` and the other suites that read the global directory.
+- `cd packages/cli && npx vitest run src/config/storage-paths-lite.test.ts src/config/environment.test.ts src/config/settings.test.ts src/config/path-freshness.test.ts src/serve/fast-path.test.ts src/serve/run-qwen-serve.test.ts` and the profiler suites.
+- `cd packages/vscode-ide-companion && npx vitest run src/utils/paths.test.ts src/ide-server.test.ts`.
+- `cd packages/channels/base && npx vitest run src/paths.test.ts`.
+- `cd packages/sdk-typescript && npx vitest run test/unit/peer/registry.test.ts`.
+- `npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/cli-entry.test.js scripts/tests/global-dir-marker.test.js`.
+- Linux simulation: with the macOS exemption temporarily disabled in every resolver and `dist/` rebuilt, the same suites passed under a throwaway `HOME`. The only failures were the cases that assert macOS keeps `~/.qwen`, which the simulation disables by design.
 
 ## Not run
 
