@@ -45,9 +45,13 @@ impl Tool for StartRecordingTool {
     fn def(&self) -> &ToolDef {
         START_REC_DEF.get_or_init(|| ToolDef {
             name: "start_recording".into(),
-            description: "Start trajectory recording. Every subsequent action-tool \
+            description: "Start trajectory recording for the calling session. Each action-tool \
                 invocation (click, right_click, scroll, type_text, press_key, hotkey, \
-                set_value) writes a turn folder under `output_dir`:\n\n\
+                set_value) from that session writes a turn folder under `output_dir`. \
+                Without `session`, calls on the same connection are recorded, including \
+                named-session calls. Other connections and session lifecycle calls \
+                (`start_session` / `end_session`) are not recorded. CLI recordings started \
+                with `cua-driver recording start` are daemon-wide.\n\n\
                 - `before_state.json` / `after_state.json` — application AX/UIA/AT-SPI \
                   state immediately before and after the action.\n\
                 - `before.png` / `after.png` — target-window screenshots immediately \
@@ -91,6 +95,10 @@ impl Tool for StartRecordingTool {
                         "description": "Absolute or ~-rooted directory where turn folders \
                             and (when enabled) the video file are written."
                     },
+                    "session": {
+                        "type": "string",
+                        "description": "Public session label to record. Omit to record calls on the authenticated connection."
+                    },
                     "record_video": {
                         "type": "boolean",
                         "description": "Capture the main display to <output_dir>/recording.mp4. \
@@ -117,10 +125,11 @@ impl Tool for StartRecordingTool {
             return ToolResult::error("`output_dir` is required.");
         }
         let record_video = args.bool_or("record_video", false);
-        // Daemon-injected ownership key (absent for one-shot CLI / anonymous
-        // sessions). Stamps the recording so a session-scoped teardown
-        // (session_end) only stops the recording its own session started.
-        let owner = args.opt_str("_session_id");
+        // Use the trusted connection when no named lifecycle was selected.
+        // CLI recording commands without either key remain daemon-wide.
+        let owner = args
+            .opt_str("_session_id")
+            .or_else(|| args.opt_str("_transport_session_id"));
 
         match self.session.start(
             output_dir.as_deref().unwrap(),

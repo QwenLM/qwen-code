@@ -37,7 +37,7 @@ G0 开放随创建会话准入的一次初始文件工具轮次，使用现有�
 | 现有 Broker/worker            | 复用生产路由与 fencing                          | 所选 Runtime 及持久 Workspace |
 | 契约与 README                 | 记录有限的创建能力及剩余门禁                    | 公开 REST 与 WebShell 适配器  |
 
-生产行为在 `packages/sdk-java/managed-agent-server`、`packages/sdk-java/qwencode` 的私有 Hosted DTO、CLI Hosted 会话路由（`packages/cli`），以及 WebShell 托管会话页及其 provider（`packages/web-shell`）中变化，覆盖初始 Workspace Read/Write/Edit Turn 与创建者后续 Turn 的提交、取消和重命名准入。不需要为 core authority、工具执行循环、数据库 schema 或公开请求字段新增抽象。
+生产行为在 `packages/managed-agent-server`、`packages/sdk-java/qwencode` 的私有 Hosted DTO、CLI Hosted 会话路由（`packages/cli`），以及 WebShell 托管会话页及其 provider（`packages/web-shell`）中变化，覆盖初始 Workspace Read/Write/Edit Turn 与创建者后续 Turn 的提交、取消和重命名准入。不需要为 core authority、工具执行循环、数据库 schema 或公开请求字段新增抽象。
 
 合入的改动还涉及该范围之外的两处，均不增加运行时行为：
 

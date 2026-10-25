@@ -21,6 +21,10 @@ import {
 } from '../ui/select';
 import { Switch } from '../ui/switch';
 import {
+  WorkspaceExecutionSelect,
+  type WorkspaceExecutionMode,
+} from '../workspaces/WorkspaceExecutionSelect';
+import {
   CornerLeftUpIcon,
   FolderOpenIcon,
   LaptopIcon,
@@ -46,8 +50,13 @@ export interface WorkspaceLocationOption {
 }
 
 interface AddWorkspaceDialogProps {
+  executionMode?: WorkspaceExecutionMode;
+  onExecutionModeChange?: (mode: WorkspaceExecutionMode) => void;
+  executionModeLocked?: boolean;
   browseDirectories?: boolean;
   initialPath?: string;
+  pathHint?: string;
+  pathPlaceholder?: string;
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
   displayNameEnabled?: boolean;
@@ -79,8 +88,13 @@ function isAbsoluteLike(value: string): boolean {
 }
 
 export function AddWorkspaceDialog({
+  executionMode,
+  onExecutionModeChange,
+  executionModeLocked,
   browseDirectories = false,
   initialPath = '',
+  pathHint,
+  pathPlaceholder = '/absolute/path or ssh://user@host/project',
   onClose,
   onAdd,
   displayNameEnabled = false,
@@ -421,6 +435,13 @@ export function AddWorkspaceDialog({
         onSubmit={handleSubmit}
       >
         <FieldGroup className="gap-4 sm:gap-5">
+          {executionMode && onExecutionModeChange && (
+            <WorkspaceExecutionSelect
+              value={executionMode}
+              onValueChange={onExecutionModeChange}
+              disabled={submitting || browsing || executionModeLocked}
+            />
+          )}
           {browseDirectories &&
             locations &&
             locations.length > 0 &&
@@ -474,7 +495,7 @@ export function AddWorkspaceDialog({
                   id="add-workspace-path"
                   className="min-w-0"
                   type="text"
-                  placeholder="/absolute/path or ssh://user@host/project"
+                  placeholder={pathPlaceholder}
                   value={path}
                   onChange={(e) => {
                     setPath(e.target.value);
@@ -623,7 +644,7 @@ export function AddWorkspaceDialog({
               id={browseDirectories ? undefined : HINT_ID}
               className={browseDirectories ? 'hidden sm:block' : undefined}
             >
-              {t('sidebar.addWorkspaceHint')}
+              {pathHint ?? t('sidebar.addWorkspaceHint')}
             </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
           </Field>

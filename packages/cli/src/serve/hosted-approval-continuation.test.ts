@@ -12,7 +12,10 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import {
+  HostedWorkspaceToolTurn,
+  HostedToolRecoveryRequiredError,
+} from './hosted-workspace-tool-turn.js';
 import {
   HostedWorkspaceBroker,
   hostedRuntimeSessionId,
@@ -24,18 +27,69 @@ import {
   resolveHostedAction,
 } from './hosted-tool-approval.js';
 import { findHostedApprovalContinuation } from './hosted-approval-continuation.js';
+import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { hostedPublicPlanActive } from './hosted-plan-mode.js';
+import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 afterEach(() => vi.restoreAllMocks());
 
 it.each(
-  ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
-    [randomUUID(), 'mon_1:notify:3', `arun_${'a'.repeat(32)}:input`].map(
-      (promptId) => ({ decision, promptId }),
+  ['allow', 'deny', 'cancelled', 'expired']
+    .flatMap((decision) =>
+      [0, 16].flatMap((round) =>
+        [randomUUID(), 'mon_1:notify:3', `arun_${'a'.repeat(32)}:input`].map(
+          (promptId) => ({
+            decision,
+            promptId,
+            round,
+            planMode: false,
+            publicTool: 'write_file',
+            profile: 'hosted-workspace-files/1',
+          }),
+        ),
+      ),
+    )
+    .concat(
+      ['allow', 'deny', 'cancelled', 'expired'].map((decision) => ({
+        decision,
+        promptId: randomUUID(),
+        round: 1,
+        planMode: false,
+        publicTool: 'web_fetch',
+        profile: 'hosted-workspace-files/1',
+      })),
+    )
+    .concat(
+      ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
+        ['hosted-workspace-files/1', 'hosted-workspace-shell/1'].map(
+          (profile) => ({
+            decision,
+            promptId: randomUUID(),
+            round: 1,
+            planMode: true,
+            publicTool: 'write_file',
+            profile,
+          }),
+        ),
+      ),
+    )
+    .concat(
+      ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
+        ['write_file', 'web_fetch', 'agent', 'run_shell_command'].map(
+          (publicTool) => ({
+            decision,
+            promptId: randomUUID(),
+            round: 1,
+            planMode: false,
+            profile: 'hosted-workspace-shell/1',
+            publicTool,
+          }),
+        ),
+      ),
     ),
-  ),
 )(
-  'restores the original native batch and final Action under a replacement owner ($decision, $promptId)',
-  async ({ decision, promptId }) => {
+  'restores the original native batch and final Action under a replacement owner ($decision, $promptId, round=$round)',
+  async ({ decision, promptId, round, planMode, profile, publicTool }) => {
     const root = await mkdtemp(path.join(tmpdir(), 'g3-step3-baseline-'));
     const sessionKey = {
       tenantId: 'tenant',
@@ -64,7 +118,10 @@ it.each(
           Buffer.from(
             JSON.stringify({
               engine: 'managed',
-              toolProfile: 'hosted-workspace-files/1',
+              toolProfile: profile,
+              ...(profile === 'hosted-workspace-shell/1' && !planMode
+                ? { publicChildAgentsVersion: 1 }
+                : {}),
             }),
           ),
         ),
@@ -93,11 +150,24 @@ it.each(
         {
           inputId: promptId,
           turnId: promptId,
-          source: 'baseline-probe',
+          source: planMode ? 'hosted-harness' : 'baseline-probe',
           contentRef: await resources.publish('managed-input', content),
           admissionRef: await resources.publish(
             'managed-admission',
-            Buffer.from('{}'),
+            Buffer.from(
+              JSON.stringify(
+                planMode
+                  ? {
+                      promptId,
+                      approvalSelection: {
+                        mode: 'yolo',
+                        revision: 1,
+                        planMode: true,
+                      },
+                    }
+                  : {},
+              ),
+            ),
           ),
           deadline: null,
           wakeReason: 'input',
@@ -124,6 +194,17 @@ it.each(
       });
       const prepare = vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare');
       const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
+      const publicShell = profile === 'hosted-workspace-shell/1' && !planMode;
+      const publication = publicShell
+        ? {
+            owner: {
+              owner: vi.fn(),
+              request: vi.fn(),
+              rememberAdmission: vi.fn(),
+            } as unknown as HttpToolPublicationOwner,
+            captureBytes: 1024 * 1024,
+          }
+        : undefined;
       const turn = new HostedWorkspaceToolTurn(
         { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
         first,
@@ -146,20 +227,59 @@ it.each(
           return uuid;
         },
         () => true,
-        undefined,
+        publication,
         undefined,
         {
-          settings: { mode: 'default', timeoutMs: 60_000 },
+          settings: { mode: planMode ? 'yolo' : 'default', timeoutMs: 60_000 },
           waiters: new HostedApprovalWaiters(),
+        },
+        {
+          profile,
+          publicPlanMode: planMode,
+          ...(profile === 'hosted-workspace-shell/1' && !planMode
+            ? {
+                backgroundLane: {
+                  resources: first.resources,
+                  assertWritable: async () => {},
+                },
+                childAgents: {
+                  funnel: new HostedChildAgentSession(
+                    { authority: first.authority, resources: first.resources },
+                    sessionKey,
+                  ),
+                  depth: 0,
+                  publicChildren: true,
+                  queueConsumption: () => {},
+                },
+              }
+            : {}),
         },
       );
       const call = {
-        name: 'write_file',
+        name: planMode ? 'exit_plan_mode' : publicTool,
         callId: 'original-call',
-        args: { file_path: 'original.txt', content: 'one original batch' },
+        args: planMode
+          ? { plan: '# Plan\nRead the files, then update original.txt.' }
+          : publicTool === 'agent'
+            ? {
+                description: 'audit',
+                prompt: 'review the file',
+                run_in_background: true,
+              }
+            : publicTool === 'run_shell_command'
+              ? { command: 'printf once' }
+              : publicTool === 'web_fetch'
+                ? { url: 'https://example.com/docs', prompt: 'Summarize' }
+                : { file_path: 'original.txt', content: 'one original batch' },
         isClientInitiated: false,
         prompt_id: promptId,
       };
+      turn.setChildModelRoute('fixture-model', {
+        authType: 'openai',
+        endpointDigest: 'a'.repeat(64),
+        providerPin: 'b'.repeat(64),
+      });
+      turn.setModelRound(round);
       running = turn
         .execute(
           [call],
@@ -232,6 +352,7 @@ it.each(
         );
         expect(saved?.plan).toMatchObject({
           promptId,
+          round,
           batchId: first.authority
             .eventsInSequenceRange(1, first.authority.committedSequence)
             .find(
@@ -256,6 +377,10 @@ it.each(
           promptId,
         });
         expect(saved!.inputs[0].input).toEqual(call.args);
+        if (planMode)
+          expect(await hostedPublicPlanActive(replacement, promptId)).toBe(
+            decision !== 'allow',
+          );
         expect(descriptor.v).toBe(3);
         expect(prepare).not.toHaveBeenCalled();
         expect(execute).not.toHaveBeenCalled();
@@ -270,6 +395,63 @@ it.each(
             continuation: { phase: 'model_output_committed' },
           },
         });
+        if (publicShell && publicTool === 'run_shell_command') {
+          expect(saved!.plan.calls[0].publicationId).toMatch(
+            /^[a-f0-9-]{36}$/u,
+          );
+          if (decision === 'allow') {
+            const prepareV3 = vi
+              .spyOn(HostedWorkspaceBroker.prototype, 'prepareV3')
+              .mockRejectedValue(new Error('stop before physical dispatch'));
+            const resumed = new HostedWorkspaceToolTurn(
+              { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
+              replacement,
+              harness,
+              promptId,
+              vi.fn().mockResolvedValue('unused'),
+              () => true,
+              publication,
+              undefined,
+              {
+                settings: { mode: 'default', timeoutMs: 60_000 },
+                waiters: new HostedApprovalWaiters(),
+              },
+              {
+                profile,
+                backgroundLane: {
+                  resources: replacement.resources,
+                  assertWritable: async () => {},
+                },
+                childAgents: {
+                  funnel: new HostedChildAgentSession(
+                    {
+                      authority: replacement.authority,
+                      resources: replacement.resources,
+                    },
+                    sessionKey,
+                  ),
+                  depth: 0,
+                  publicChildren: true,
+                  queueConsumption: () => {},
+                },
+              },
+            );
+            await expect(
+              resumed.resumeSavedNativeBatch(
+                saved!,
+                1,
+                new AbortController().signal,
+              ),
+            ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+            expect(prepareV3).toHaveBeenCalledWith(
+              saved!.plan.calls[0].runtimeCallId,
+              saved!.plan.calls[0].argsDigest,
+              saved!.plan.calls[0].requestDigest,
+              saved!.plan.calls[0].publicationId,
+              promptId,
+            );
+          }
+        }
       } finally {
         await replacement.close();
       }

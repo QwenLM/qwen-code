@@ -268,6 +268,13 @@ the conflict, which may flush queued records to the active transcript.
 Workspace-qualified lifecycle routes now use that HTTP `200` batch envelope
 instead of their earlier HTTP `409 session_conflict` response.
 
+When `session_archive_idle_guard` is advertised, archive also accepts
+`requireIdle: true`. The owning runtime then confirms the session is idle
+immediately before entering the close transition. Active, unknown, or
+unsupported work remains active and is returned in the batch `errors` array;
+a persisted session whose live child has already been reaped can still be
+archived.
+
 ### Context Usage (`session_context_usage` capability tag)
 
 `GET /session/:id/context-usage` returns structured context-window usage.

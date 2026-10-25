@@ -31,6 +31,16 @@ export async function composeManagedCsiFiles(options: {
     storage: Awaited<ReturnType<ManagedCsiFileBackend['observeRetained']>>;
   }>;
   close: () => Promise<void>;
+  retirementInventory: () => Promise<{
+    history: ReturnType<ManagedRuntimeFileHistory['state']>;
+    backend: Awaited<ReturnType<ManagedCsiFileBackend['retirementInventory']>>;
+    mount: Awaited<ReturnType<ManagedCsiMount['retirementInspection']>>;
+  }>;
+  retirementCloseInspection: () => Promise<{
+    compositionClosed: boolean;
+    backend: ReturnType<ManagedCsiFileBackend['retirementCloseInspection']>;
+    mount: Awaited<ReturnType<ManagedCsiMount['retirementInspection']>>;
+  }>;
 }> {
   if (
     options.ownerSessionId !== options.runtimeSessionId ||
@@ -104,6 +114,42 @@ export async function composeManagedCsiFiles(options: {
             throw new Error('Managed CSI history changed during observation.');
           return { history: result, storage: observation };
         },
+        retirementInventory: async () => {
+          if (closed)
+            throw new Error('Managed CSI file composition is closed.');
+          await history.history.drain();
+          const state = history.state();
+          const backendInventory = await storage.retirementInventory(
+            Object.keys(state.files),
+          );
+          for (const file of backendInventory.files) {
+            const expected = state.files[file.path];
+            if (
+              !isDeepStrictEqual(
+                expected,
+                file.pin
+                  ? { digest: file.pin.digest, mode: file.pin.mode }
+                  : null,
+              )
+            )
+              throw new Error(
+                'Managed CSI working file changed before retirement.',
+              );
+          }
+          const mountInventory = await options.mount.retirementInspection();
+          if (closed || !isDeepStrictEqual(state, history.state()))
+            throw new Error('Managed CSI history changed before retirement.');
+          return {
+            history: state,
+            backend: backendInventory,
+            mount: mountInventory,
+          };
+        },
+        retirementCloseInspection: async () => ({
+          compositionClosed: closed,
+          backend: storage.retirementCloseInspection(),
+          mount: await options.mount.retirementInspection(),
+        }),
         close: () => {
           closed = true;
           closing ??= (async () => {
