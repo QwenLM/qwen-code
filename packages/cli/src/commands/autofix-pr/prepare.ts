@@ -28,6 +28,7 @@ import {
   assertOwnedBySession,
   autofixPrPaths,
   currentSessionId,
+  ghNotFound,
   historyPath,
   isBranchName,
   isCommandSafeName,
@@ -198,8 +199,8 @@ function authorCanPush(slug: string, author: string, viewer: string): boolean {
     // Not a collaborator: GitHub answers 404. Anything else — a rate
     // limit, the network — says nothing of the author, and must not pass
     // for a no: a resume would end a watch over it.
+    if (ghNotFound(err)) return false;
     const text = `${(err as Error).message}\n${String((err as { stderr?: unknown }).stderr ?? '')}`;
-    if (/\bHTTP 404\b/.test(text)) return false;
     throw new Error(
       `could not ask GitHub whether ${author} can push to ${slug}; try again: ${text.trim().split('\n').at(-1) ?? ''}`,
     );

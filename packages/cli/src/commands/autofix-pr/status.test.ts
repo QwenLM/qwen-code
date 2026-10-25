@@ -191,25 +191,29 @@ describe('runStatus', () => {
     expect(at(11)).toBe(false);
   });
 
-  it('never blocks on a state file or cursor that is not a regular file', () => {
-    const paths = write(7);
-    rmSync(paths.gatePath, { force: true });
-    execFileSync('mkfifo', [paths.gatePath]);
-    const eight = autofixPrPaths(repo, 8).statePath;
-    execFileSync('mkfifo', [eight]);
-    const outcome = runStatus({});
-    expect(
-      outcome.watches.map(({ pr, lastCheck }) => ({ pr, lastCheck })),
-    ).toEqual([{ pr: 7, lastCheck: null }]);
-    expect(outcome.unreadable).toEqual([
-      {
-        pr: 8,
-        error: expect.stringMatching(
-          /not a regular file; `qwen autofix-pr cleanup 8 --force` discards it/,
-        ),
-      },
-    ]);
-  });
+  // FIFOs are POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'never blocks on a state file or cursor that is not a regular file',
+    () => {
+      const paths = write(7);
+      rmSync(paths.gatePath, { force: true });
+      execFileSync('mkfifo', [paths.gatePath]);
+      const eight = autofixPrPaths(repo, 8).statePath;
+      execFileSync('mkfifo', [eight]);
+      const outcome = runStatus({});
+      expect(
+        outcome.watches.map(({ pr, lastCheck }) => ({ pr, lastCheck })),
+      ).toEqual([{ pr: 7, lastCheck: null }]);
+      expect(outcome.unreadable).toEqual([
+        {
+          pr: 8,
+          error: expect.stringMatching(
+            /not a regular file; `qwen autofix-pr cleanup 8 --force` discards it/,
+          ),
+        },
+      ]);
+    },
+  );
 
   it("takes nothing from a cursor older than the watch, a former watch's", () => {
     const paths = write(7, { preparedAt: '2026-10-20T00:00:00.000Z' });

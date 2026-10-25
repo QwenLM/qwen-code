@@ -2045,21 +2045,25 @@ describe('runSnapshot --gate', () => {
     ).toThrow(/--task names a task of a watch/);
   });
 
-  it('never blocks on a cursor or a reply cache that is not a regular file', () => {
-    const paths = autofixPrPaths(mocks.root, 7);
-    mkdirSync(dirname(paths.gatePath), { recursive: true });
-    // A cache in the way is asked again, not read.
-    execFileSync('mkfifo', [paths.repliesPath]);
-    respond(withComments('I1'));
-    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
-    expect(printedIds()).toEqual([['I1']]);
-    // A cursor in the way fails the gate, which the scheduler reports.
-    rmSync(paths.gatePath);
-    execFileSync('mkfifo', [paths.gatePath]);
-    expect(() => runSnapshot({ pr: 7, repo: 'o/r', gate: true })).toThrow(
-      /not a regular file/,
-    );
-  });
+  // FIFOs are POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'never blocks on a cursor or a reply cache that is not a regular file',
+    () => {
+      const paths = autofixPrPaths(mocks.root, 7);
+      mkdirSync(dirname(paths.gatePath), { recursive: true });
+      // A cache in the way is asked again, not read.
+      execFileSync('mkfifo', [paths.repliesPath]);
+      respond(withComments('I1'));
+      runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+      expect(printedIds()).toEqual([['I1']]);
+      // A cursor in the way fails the gate, which the scheduler reports.
+      rmSync(paths.gatePath);
+      execFileSync('mkfifo', [paths.gatePath]);
+      expect(() => runSnapshot({ pr: 7, repo: 'o/r', gate: true })).toThrow(
+        /not a regular file/,
+      );
+    },
+  );
 
   it('stores the cursor before printing, so a failed print is not repeated', () => {
     mocks.stdout.mockImplementationOnce(() => {

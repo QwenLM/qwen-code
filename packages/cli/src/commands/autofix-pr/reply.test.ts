@@ -571,10 +571,14 @@ describe('runReply', () => {
     ]);
   });
 
-  it('never blocks on a snapshot that is not a regular file', () => {
-    execFileSync('mkfifo', [paths.snapshotPath]);
-    expect(reply({ handled: [] })).toMatchObject({ posted: [], skipped: 0 });
-  });
+  // FIFOs are POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'never blocks on a snapshot that is not a regular file',
+    () => {
+      execFileSync('mkfifo', [paths.snapshotPath]);
+      expect(reply({ handled: [] })).toMatchObject({ posted: [], skipped: 0 });
+    },
+  );
 
   it('posts nothing for a round its task no longer drives', () => {
     writeState(paths.statePath, {
@@ -663,6 +667,53 @@ describe('runReply', () => {
       summarySkipped: true,
     });
     expect(mocks.ghWithInput).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps what a round left for a person when a later post fails', () => {
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            thread('T1', [comment('PRRC_101', 'alice', 'COLLABORATOR')]),
+            thread('T3', [comment('PRRC_301', 'carol', 'OWNER')]),
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+    let calls = 0;
+    mocks.ghWithInput.mockImplementation(() => {
+      calls += 1;
+      if (calls === 2) throw new Error('HTTP 502');
+      return JSON.stringify({ node_id: `POSTED_${calls}`, html_url: '' });
+    });
+    const second = {
+      replyTo: 301,
+      body: 'Fixed in abc: two.',
+      handled: ['PRRC_301'],
+    };
+    expect(() =>
+      reply({
+        replies: [
+          {
+            replyTo: 101,
+            body: 'Needs a human decision: the API.',
+            handled: ['PRRC_101'],
+          },
+          second,
+        ],
+        needsHuman: ['PRRC_101: whether to keep the API'],
+      }),
+    ).toThrow(/HTTP 502/);
+    // The first reply marked its comment handled: the next round answers
+    // only the second, and has nothing to say about the first.
+    expect(state()).toMatchObject({ handledCommentIds: ['PRRC_101'] });
+    reply({ replies: [second] });
+    expect(state().handledCommentIds).toEqual(['PRRC_101', 'PRRC_301']);
+    expect(state().needsHuman!.map(({ text }) => text)).toEqual([
+      'PRRC_101: whether to keep the API',
+    ]);
   });
 
   it('recognizes a reply whose answer was lost by what it was posted for, not by the next plan', () => {

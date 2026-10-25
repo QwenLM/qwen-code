@@ -44,6 +44,7 @@ import {
   assertWatching,
   autofixPrPaths,
   checkAttemptKey,
+  ghNotFound,
   isRegularFile,
   NO_FOLLOW,
   readGateCursor,
@@ -1571,10 +1572,8 @@ function markOrphanReplies(
           '.in_reply_to_id',
         ).trim();
       } catch (err) {
-        // gh's own words for a missing comment, not the command line,
-        // which names the repository and the comment.
-        const stderr = (err as { stderr?: unknown }).stderr;
-        if (/\(HTTP 404\)/.test(typeof stderr === 'string' ? stderr : '')) {
+        // A missing comment.
+        if (ghNotFound(err)) {
           first.replyUnknown = true;
           continue;
         }

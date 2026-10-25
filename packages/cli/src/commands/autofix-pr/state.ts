@@ -945,6 +945,13 @@ export function assertWatching(state: AutofixPrState, task?: string): void {
   }
 }
 
+/** `gh` answered that what it asked for is not there: its own words, not
+ * the command line, which names what was asked. */
+export function ghNotFound(err: unknown): boolean {
+  const stderr = (err as { stderr?: unknown }).stderr;
+  return /\(HTTP 404\)/.test(typeof stderr === 'string' ? stderr : '');
+}
+
 export function assertOwnedBySession(state: AutofixPrState): void {
   const sessionId = currentSessionId();
   if (state.sessionId !== sessionId) {

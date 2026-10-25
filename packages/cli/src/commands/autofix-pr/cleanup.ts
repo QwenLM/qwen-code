@@ -153,17 +153,21 @@ export function runCleanup(
     state = null;
   }
   // Stopping a watch another session left behind — one whose session
-  // ended, or whose PR the gate saw end — needs the watch first; unlike
-  // --force, the work its worktree holds is still kept.
-  if (state && !force && takeOver && state.sessionId !== currentSessionId()) {
-    state = withWatchLock(paths, prNumber, () => {
-      const current = requireState(paths.statePath, prNumber);
-      const moved = { ...current, sessionId: currentSessionId() };
-      writeState(paths.statePath, moved);
-      return moved;
-    });
-  }
-  if (state && !force) assertOwnedBySession(state);
+  // ended, or whose PR the gate saw end — takes it over; unlike --force,
+  // the work its worktree holds is still kept. The watch moves only as it
+  // ends, under the lock below: moved before a step that fails, it would be
+  // left owned by no running session, and its owner's gate would stop it.
+  const takenFrom =
+    state && !force && takeOver && state.sessionId !== currentSessionId()
+      ? state.sessionId
+      : null;
+  // Taken by a third session meanwhile, the watch is that one's.
+  const assertStoppable = (current: AutofixPrState) => {
+    if (takenFrom === null || current.sessionId !== takenFrom) {
+      assertOwnedBySession(current);
+    }
+  };
+  if (state && !force) assertStoppable(state);
 
   if (!force) {
     const reason = unsavedWork(
@@ -181,10 +185,12 @@ export function runCleanup(
           const current = readState(paths.statePath);
           if (!current) return;
           // Taken over meanwhile: the watch is the new owner's, and goes on.
-          assertOwnedBySession(current);
+          assertStoppable(current);
           const { watch: _ended, ...rest } = current;
+          // Ended under this session, as a stop of its own would.
           writeState(paths.statePath, {
             ...rest,
+            sessionId: currentSessionId(),
             ended: { at: new Date().toISOString(), reason },
           });
           // Its gate answers `watch_ended` from now on and checks nothing,
@@ -245,7 +251,7 @@ export function runCleanup(
     state && !force
       ? withWatchLock(paths, prNumber, () => {
           const current = requireState(paths.statePath, prNumber);
-          assertOwnedBySession(current);
+          assertStoppable(current);
           return remove(current);
         })
       : remove(state);

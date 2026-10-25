@@ -377,6 +377,46 @@ describe('runCleanup (real git)', () => {
     expect(existsSync(paths.statePath)).toBe(false);
   });
 
+  it('leaves a watch it failed to take over to end with the session that owns it', () => {
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    // A ref lock git leaves behind: the branch cannot be deleted.
+    writeFileSync(
+      join(repo, '.git', 'refs', 'heads', `${paths.branch}.lock`),
+      '',
+    );
+    expect(() => runCleanup(7, false, true)).toThrow(/lock/);
+    // Its owner's gate still finds the watch its own.
+    expect(readState(paths.statePath)).toMatchObject({
+      sessionId: 'session-a',
+    });
+    expect(readState(paths.statePath)!.ended).toBeUndefined();
+  });
+
+  // A shell script stands in for the remote.
+  it.skipIf(process.platform === 'win32')(
+    'does not end a watch a third session took over while it looked',
+    () => {
+      process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'wip');
+      // Asking the remote for the PR head is when session-c takes it.
+      const script = join(repo, 'take-over.sh');
+      writeFileSync(
+        script,
+        `#!/bin/sh\nsed 's/"session-a"/"session-c"/' '${paths.statePath}' > '${paths.statePath}.new'\nmv '${paths.statePath}.new' '${paths.statePath}'\nexit 1\n`,
+        { mode: 0o755 },
+      );
+      run(repo, 'remote', 'add', 'origin', repo);
+      run(repo, 'config', 'remote.origin.uploadpack', script);
+      expect(() => runCleanup(7, false, true)).toThrow(
+        /watched by another session \(session-c\)/,
+      );
+      expect(readState(paths.statePath)).toMatchObject({
+        sessionId: 'session-c',
+      });
+      expect(readState(paths.statePath)!.ended).toBeUndefined();
+    },
+  );
+
   it('keeps a leftover worktree with uncommitted changes even without state', () => {
     rmSync(paths.statePath);
     writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
@@ -428,32 +468,40 @@ describe('runCleanup (real git)', () => {
     expect(existsSync(paths.statePath)).toBe(true);
   });
 
-  it('discards a state that is not a regular file with --force, without blocking on it', () => {
-    rmSync(paths.statePath);
-    execFileSync('mkfifo', [paths.statePath]);
-    expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
-    runCleanup(7, true);
-    expect(existsSync(paths.statePath)).toBe(false);
-    // A directory or a link to nothing in its place goes the same way.
-    mkdirSync(paths.statePath);
-    expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
-    runCleanup(7, true);
-    expect(existsSync(paths.statePath)).toBe(false);
-    symlinkSync(join(repo, 'nowhere'), paths.statePath);
-    expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
-    runCleanup(7, true);
-    expect(
-      lstatSync(paths.statePath, { throwIfNoEntry: false }),
-    ).toBeUndefined();
-  });
+  // FIFOs are POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'discards a state that is not a regular file with --force, without blocking on it',
+    () => {
+      rmSync(paths.statePath);
+      execFileSync('mkfifo', [paths.statePath]);
+      expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
+      runCleanup(7, true);
+      expect(existsSync(paths.statePath)).toBe(false);
+      // A directory or a link to nothing in its place goes the same way.
+      mkdirSync(paths.statePath);
+      expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
+      runCleanup(7, true);
+      expect(existsSync(paths.statePath)).toBe(false);
+      symlinkSync(join(repo, 'nowhere'), paths.statePath);
+      expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
+      runCleanup(7, true);
+      expect(
+        lstatSync(paths.statePath, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+    },
+  );
 
-  it('never blocks on a history that is not a regular file, and replaces it', () => {
-    const history = historyPath(paths, readState(paths.statePath)!);
-    execFileSync('mkfifo', [history]);
-    runCleanup(7, true);
-    expect(lastReport()).toMatchObject({ removed: true });
-    expect(readHistory(history)).toMatchObject({ prNumber: 7 });
-  });
+  // FIFOs are POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'never blocks on a history that is not a regular file, and replaces it',
+    () => {
+      const history = historyPath(paths, readState(paths.statePath)!);
+      execFileSync('mkfifo', [history]);
+      runCleanup(7, true);
+      expect(lastReport()).toMatchObject({ removed: true });
+      expect(readHistory(history)).toMatchObject({ prNumber: 7 });
+    },
+  );
 
   it('replaces a directory planted at the history, and with --force one at the cursor', () => {
     const history = historyPath(paths, readState(paths.statePath)!);

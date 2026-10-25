@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path';
 import {
   autofixPrPaths,
   breakStaleLock,
+  ghNotFound,
   historyPath,
   isBranchName,
   keepHistory,
@@ -461,5 +462,21 @@ describe('history', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('ghNotFound', () => {
+  it("reads gh's own words, not the command line", () => {
+    const failed = (message: string, stderr?: string) =>
+      Object.assign(new Error(message), stderr === undefined ? {} : { stderr });
+    expect(
+      ghNotFound(failed('Command failed: gh api', 'gh: Not Found (HTTP 404)')),
+    ).toBe(true);
+    expect(ghNotFound(failed('Command failed: gh api x (HTTP 404)'))).toBe(
+      false,
+    );
+    expect(
+      ghNotFound(failed('Command failed: gh api', 'gh: Forbidden (HTTP 403)')),
+    ).toBe(false);
   });
 });

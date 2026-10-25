@@ -479,6 +479,26 @@ function replyLocked(
     currentChecks.push(key);
   }
 
+  // Kept per head, newest last: a later round answers new events only, so
+  // what an earlier one left stays listed until the watch ends. Recorded
+  // before anything is posted: a reply that reaches the PR marks its
+  // comments handled at once, and a round after a later failure would not
+  // see them again.
+  const now = new Date().toISOString();
+  const needsHuman = [
+    ...(state.needsHuman ?? []),
+    ...[...new Set(plan.needsHuman)]
+      .filter(
+        (text) =>
+          text !== '' &&
+          !(state.needsHuman ?? []).some(
+            (item) => item.sha === head && item.text === text,
+          ),
+      )
+      .map((text) => ({ sha: head, at: now, text })),
+  ].slice(-MAX_NEEDS_HUMAN);
+  if (needsHuman.length > 0) record({ needsHuman });
+
   const outcome: ReplyOutcome = {
     posted: [],
     skipped,
@@ -587,23 +607,7 @@ function replyLocked(
   }
 
   outcome.handledChecks = currentChecks.length;
-  // Kept per head, newest last: a later round answers new events only, so
-  // what an earlier one left stays listed until the watch ends.
-  const now = new Date().toISOString();
-  const needsHuman = [
-    ...(state.needsHuman ?? []),
-    ...[...new Set(plan.needsHuman)]
-      .filter(
-        (text) =>
-          text !== '' &&
-          !(state.needsHuman ?? []).some(
-            (item) => item.sha === head && item.text === text,
-          ),
-      )
-      .map((text) => ({ sha: head, at: now, text })),
-  ].slice(-MAX_NEEDS_HUMAN);
   record({
-    ...(needsHuman.length > 0 ? { needsHuman } : {}),
     handledCommentIds: [
       ...state.handledCommentIds,
       ...addHandled(otherHandled),
