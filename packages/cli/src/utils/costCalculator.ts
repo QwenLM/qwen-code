@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getUsageOutputTokenCountForPromptEstimate } from '@qwen-code/qwen-code-core/services/tokenEstimation.js';
-
 export interface ModelPricing {
   inputPerMillionTokens?: number;
   outputPerMillionTokens?: number;
@@ -19,14 +17,40 @@ interface CostTokenMetrics {
   thoughts: number;
 }
 
-// Normalize each source before summing; missing-total fallbacks are not additive.
+interface RawCostTokenUsage {
+  promptTokenCount: number | null;
+  totalTokenCount: number | null;
+  candidatesTokenCount: number;
+  thoughtsTokenCount: number;
+}
+
+// Shared by the stats panels and review ledger. A usable total is authoritative.
+// Without one, auth_type is no longer available, so equality is treated as
+// included reasoning and only larger thoughts are added as disjoint reasoning.
+// This cost-only fallback cannot distinguish every provider convention and must
+// not replace the different conservative heuristic used by the compaction gate.
+export function getCostOutputTokensFromRawUsage(
+  usage: RawCostTokenUsage,
+): number {
+  if (
+    usage.promptTokenCount !== null &&
+    usage.totalTokenCount !== null &&
+    usage.totalTokenCount > usage.promptTokenCount
+  ) {
+    return usage.totalTokenCount - usage.promptTokenCount;
+  }
+  const candidates = Math.max(0, usage.candidatesTokenCount);
+  const thoughts = Math.max(0, usage.thoughtsTokenCount);
+  return candidates >= thoughts ? candidates : candidates + thoughts;
+}
+
 export function getCostOutputTokens(tokens: CostTokenMetrics): number {
+  // Raw buckets coerce missing prompt counts to zero; cached input can recover
+  // that boundary, but a total alone is not evidence of output usage.
   const prompt = tokens.prompt > 0 ? tokens.prompt : tokens.cached;
-  return getUsageOutputTokenCountForPromptEstimate({
-    promptTokenCount: prompt,
-    // Raw buckets coerce missing prompt counts to zero; a total alone is not output.
-    totalTokenCount:
-      prompt > 0 && tokens.total > prompt ? tokens.total : undefined,
+  return getCostOutputTokensFromRawUsage({
+    promptTokenCount: prompt > 0 ? prompt : null,
+    totalTokenCount: tokens.total > 0 ? tokens.total : null,
     candidatesTokenCount: tokens.candidates,
     thoughtsTokenCount: tokens.thoughts,
   });

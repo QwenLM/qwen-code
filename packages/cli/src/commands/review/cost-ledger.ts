@@ -36,6 +36,7 @@ import {
   writeStdoutLineSafe,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { getCostOutputTokensFromRawUsage } from '../../utils/costCalculator.js';
 import {
   transcriptPaths,
   listAgentTranscriptFiles,
@@ -167,19 +168,14 @@ function readUsage(
         // can report the pair inverted, and the inversion would otherwise
         // land in BOTH the rendered share and the archived --out JSON.
         cached: Math.min(rawCount('cachedContentTokenCount') ?? 0, prompt),
-        // `total − prompt` is the output including thinking under BOTH usage
-        // conventions — reasoning inside candidates, and thoughts disjoint
-        // from them — the same derivation tokenEstimation uses. Candidates
-        // alone is the fallback when the provider reported no total; it stays
-        // correct for the providers this CLI converts, which clamp thoughts
-        // inside candidates. Derive it only when BOTH operands survived the
-        // provider intact: a mixed-sign record coerces prompt to 0 while
-        // keeping a positive total, and the subtraction would bill the
-        // call's whole total as output.
-        output:
-          rawPrompt !== null && rawTotal !== null && rawTotal > rawPrompt
-            ? rawTotal - rawPrompt
-            : candidates,
+        // Share the stats cost fallback without losing raw null facts: a
+        // mixed-sign record must not turn its whole total into output.
+        output: getCostOutputTokensFromRawUsage({
+          promptTokenCount: rawPrompt,
+          totalTokenCount: rawTotal,
+          candidatesTokenCount: candidates,
+          thoughtsTokenCount: rawCount('thoughtsTokenCount') ?? 0,
+        }),
         thoughts: rawCount('thoughtsTokenCount') ?? 0,
       });
     }

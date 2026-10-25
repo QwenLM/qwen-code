@@ -241,6 +241,38 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(ledger.main?.thoughtsTokens).toBe(100);
   });
 
+  it('uses the stats fallback when a total is absent or unusable', () => {
+    const { plan, env, project } = fixture();
+    writeFileSync(
+      chatFile(project),
+      [
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-08-03T10:01:00Z',
+          usageMetadata: {
+            promptTokenCount: 1_000,
+            candidatesTokenCount: 50_000,
+            thoughtsTokenCount: 120_000,
+          },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-08-03T10:02:00Z',
+          usageMetadata: {
+            promptTokenCount: 1_000,
+            candidatesTokenCount: 800,
+            thoughtsTokenCount: 800,
+            totalTokenCount: 1_000,
+          },
+        }),
+      ].join('\n'),
+    );
+
+    const ledger = computeLedger(plan, env);
+
+    expect(ledger.main?.outputTokens).toBe(170_800);
+  });
+
   it('coerces broken provider counts instead of corrupting totals', () => {
     const { plan, env, project } = fixture();
     writeFileSync(

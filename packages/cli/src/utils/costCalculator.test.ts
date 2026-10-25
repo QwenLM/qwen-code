@@ -337,10 +337,10 @@ describe('getCostOutputTokens', () => {
       tokens: {
         prompt: 100000,
         candidates: 120000,
-        total: 220000,
+        total: 250000,
         thoughts: 120000,
       },
-      expected: 120000,
+      expected: 150000,
     },
   ])(
     'derives output from the aggregate total: $name',
@@ -374,6 +374,16 @@ describe('getCostOutputTokens', () => {
         thoughts: 50000,
       },
       expected: 200000,
+    },
+    {
+      name: 'equal candidates and thoughts are billed only once',
+      tokens: {
+        prompt: 1000,
+        candidates: 800,
+        total: 0,
+        thoughts: 800,
+      },
+      expected: 800,
     },
   ])(
     'uses the existing fallback when total is unavailable or unusable: $name',
