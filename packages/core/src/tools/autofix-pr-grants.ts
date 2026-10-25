@@ -500,14 +500,14 @@ function live(fix: BackgroundFix | undefined): BackgroundFix | undefined {
  * that agent was writing in.
  */
 export async function settleBackgroundFix(
-  where: { worktree: string } | { sessionId: string; pr: number },
+  where: { worktree: string } | { pr: number },
 ): Promise<void> {
+  // By the PR alone: another session of this process acting on it waits
+  // too, and a PR of that number in another clone costs a wait at most.
   const at = (map: Map<string, BackgroundFix>) =>
     'worktree' in where
       ? map.get(canonicalWorktreePath(where.worktree))
-      : [...map.values()].find(
-          (f) => f.sessionId === where.sessionId && f.pr === where.pr,
-        );
+      : [...map.values()].find((f) => f.pr === where.pr);
   const fix = at(fixes);
   if (fix?.isLate()) fix.drop();
   const ended = at(settling);

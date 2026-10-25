@@ -1078,12 +1078,17 @@ class AutofixPrInvocation extends BaseToolInvocation<
     }
     const sessionId = this.config.getSessionId();
     if (this.params.pr !== undefined && this.params.command !== 'status') {
-      await settleBackgroundFix({ sessionId, pr: this.params.pr });
+      await settleBackgroundFix({ pr: this.params.pr });
     }
-    const fix =
+    const found =
       this.params.pr === undefined || this.params.command === 'status'
         ? undefined
         : backgroundFixOf(sessionId, this.params.pr);
+    // This clone's: after a `/cd`, a PR of that number elsewhere is not it.
+    const fix =
+      found && preparedWatch(this.config, found.pr)?.worktree === found.worktree
+        ? found
+        : undefined;
     if (this.params.command === 'fix-end') return this.claim(fix, signal);
     if (fix && this.params.command === 'cleanup') {
       const refused = await this.stopFix(fix, signal);
@@ -1173,9 +1178,10 @@ class AutofixPrInvocation extends BaseToolInvocation<
     // doing gets a little longer to settle before the round acts.
     await fix.waitSettled(FIX_STOP_WAIT_MS);
     const ended = fix.ended;
+    // Under the task this session scheduled, whatever the turn copied.
     const run = await runAutofixPrHelper(
       this.config,
-      autofixPrArgs(this.params),
+      autofixPrArgs({ ...this.params, task: fix.task.task }),
       signal,
     );
     // A refusal leaves the attempt to claim again (a helper busy with the

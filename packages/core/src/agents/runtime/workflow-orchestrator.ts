@@ -91,6 +91,10 @@ import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { resolveExternalWorktreeDir } from '../worktree-pin.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
+import {
+  backgroundFixAt,
+  settleBackgroundFix,
+} from '../../tools/autofix-pr-grants.js';
 import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import {
@@ -1425,6 +1429,14 @@ async function runOverridePath(
       // the same threat the agentType SECURITY note above names.
       throw new Error(
         `agent({workingDir: ${sanitizeForErrorMessage(JSON.stringify(opts.workingDir))}}): ${sanitizeForErrorMessage(resolved.error)}`,
+      );
+    }
+    // Not beside a background fix agent of /autofix-pr, as the agent tool
+    // refuses too.
+    await settleBackgroundFix({ worktree: resolved.path });
+    if (backgroundFixAt(resolved.path)) {
+      throw new Error(
+        `agent({workingDir}): a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,
       );
     }
     effectiveContext = deriveWorktreeConfig(config, resolved.path, {

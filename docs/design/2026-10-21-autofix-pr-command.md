@@ -1235,8 +1235,8 @@ then runs). The round falls back to that foreground fix only when the
 grant no longer holds or no round has a fix to start; any other refusal (a
 fix in flight, one left behind, a watch no longer the round's) ends the
 round. So every background agent at a worktree has an attempt tied to the
-round that prepared it, and while one lives no other agent or teammate
-launches there, in the foreground or the background.
+round that prepared it, and while one lives no other agent, teammate or
+workflow agent launches there, in the foreground or the background.
 
 A background fix agent is never continued: once it ends, `send_message` to
 it, a revival of its transcript and a resume after a restart are refused,

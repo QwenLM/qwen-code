@@ -6,6 +6,13 @@
 
 // T7 (PR #4732 R1): `vi` directly, like every other test file in the repo.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  grantUnattendedFixes,
+  openBackgroundFix,
+  recordConfirmedWatch,
+  recordWatchTask,
+  resetUnattendedFixGrantsForTests,
+} from '../../tools/autofix-pr-grants.js';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -4582,6 +4589,42 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       /incompatible options/,
     );
     expect(worktreeStubs.instances).toHaveLength(0);
+  });
+
+  it('workingDir refuses a worktree a background fix of /autofix-pr works in', async () => {
+    const wt = '/fake/repo/.qwen/tmp/review-pr-7';
+    grantUnattendedFixes('wf-session', {
+      pr: 7,
+      worktree: wt,
+      check: async () => true,
+      open: async () => ({ task: 't' }),
+      close: async () => {},
+    });
+    recordConfirmedWatch('wf-session', {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      targetDir: '/fake/repo',
+      preparedAt: null,
+      worktree: wt,
+      authorCanPush: true,
+    });
+    recordWatchTask('wf-session', 7, {
+      task: 't',
+      reply: true,
+      instructions: '',
+    });
+    try {
+      await openBackgroundFix('wf-session', wt, new AbortController().signal);
+      await expectRefused(
+        {},
+        'hi',
+        PINNED,
+        /a background fix agent of \/autofix-pr is working/,
+      );
+    } finally {
+      resetUnattendedFixGrantsForTests();
+    }
   });
 
   // A refused pin must not fall through to an agent in the parent tree.
