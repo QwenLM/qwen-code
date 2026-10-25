@@ -1003,7 +1003,7 @@ its events in the gate output, so a quiet check never becomes a turn.
 
 ```text
 snapshot --gate (in the gate)
-  ├─ stop     → cron_delete, cleanup, report outcome
+  ├─ stop     → cleanup, cron_delete, report outcome
   ├─ wait     → end the turn with no message
   ├─ resync   → fetch, fast-forward the worktree to the new head, set cursor,
   │             then handle the other events of the same output (the gate

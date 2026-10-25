@@ -194,6 +194,11 @@ describe('bundled autofix-pr skill', () => {
     );
     // A daemon conversation binds one task, so a second watch says so.
     expect(body).toContain('`session_already_bound`');
+    // A durable task of another session is project-visible: a bare stop must
+    // leave it, and resume must warn about it, before anything is deleted.
+    expect(body).toContain('A task whose watch another session still runs');
+    expect(body).toContain('delete no task of that PR');
+    expect(body).toContain("whose gate names the watch's session");
   });
 
   it("forbids the fix agent's brief every write to GitHub, which only the main session makes", () => {

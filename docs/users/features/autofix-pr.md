@@ -65,7 +65,7 @@ Comments are acted on when their author is an owner, member or collaborator of t
 
 ## Stopping and files
 
-`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; the watch has ended all the same, and `qwen autofix-pr cleanup <n> --force` discards the work. `/autofix-pr stop <n>` also stops a watch another session left behind. A watch whose task expired, or whose terminal session exited, ends without a report; `/autofix-pr resume` starts it again (above). Starting `/autofix-pr <n>` in a new session — or after `/clear` or `/resume` — also offers to take the watch over, its pushes and budgets kept.
+`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; the watch has ended all the same, and `qwen autofix-pr cleanup <n> --force` discards the work. `/autofix-pr stop <n>` also stops a watch another session left behind; a bare `/autofix-pr stop` leaves a watch another session is still running alone, and naming its PR ends it. A watch whose task expired, or whose terminal session exited, ends without a report; `/autofix-pr resume` starts it again (above). Starting `/autofix-pr <n>` in a new session — or after `/clear` or `/resume` — also offers to take the watch over, its pushes and budgets kept.
 
 Files live under `.qwen/tmp/` of the clone's main worktree:
 
