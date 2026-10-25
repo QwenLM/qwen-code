@@ -44,12 +44,12 @@ lease_until < ?`) with fence-checked ledger writes, so working different
    parks one thread per pending join otherwise.
 5. Finish in-flight work at shutdown; never interrupt it. The pool's
    `destroy()` returns immediately (`awaitTerminationSeconds(0)`), so the pool
-   adds no shutdown wait of its own. A tick caught mid-join still bounds the
-   close, though: the scheduler that invokes it (`managedAutomationScheduler`)
-   is itself a `SmartLifecycle`, so the close waits out
-   `spring.lifecycle.timeout-per-shutdown-phase` (30 s here) for that bean
-   before the tick is interrupted — a bound that predates this change. Claims
-   are durable: an interrupted answer is re-driven by a later tick.
+   adds no shutdown wait of its own. A tick caught mid-join is still bounded by
+   the scheduler that invokes it (`managedAutomationScheduler`, itself a
+   `SmartLifecycle`): the lifecycle processor caps that bean's stop at
+   `spring.lifecycle.timeout-per-shutdown-phase` (30 s here). That is an upper
+   bound on the close rather than a fixed wait, and it predates this change.
+   Claims are durable: an interrupted answer is re-driven by a later tick.
 
 The asynchronous fire answer is rejected for this change: today's `firing`
 means "answer pending inside this call", and persisting a pending state means
