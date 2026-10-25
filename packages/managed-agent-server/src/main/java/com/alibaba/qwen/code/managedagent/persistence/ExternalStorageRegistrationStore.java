@@ -19,6 +19,8 @@ public final class ExternalStorageRegistrationStore {
     private static final ReceiptNamespace NAMESPACE = ReceiptNamespace.EXTERNAL_STORAGE;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
+    // Strict parsing (duplicate/unknown/trailing rejection) lives at the controller
+    // boundary; this mapper only encodes/decodes payloads this store produced itself.
     private final ObjectMapper json = new ObjectMapper();
 
     public ExternalStorageRegistrationStore(JdbcTemplate jdbc, PlatformTransactionManager manager) {
