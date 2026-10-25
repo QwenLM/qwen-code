@@ -202,6 +202,11 @@ describe('relatedTests', () => {
       );
     }
     write('packages/core/src/a.ts');
+    // cli's tests import core's source, as this repo's cli config arranges.
+    write(
+      'packages/cli/vitest.config.ts',
+      "resolve: { alias: [{ find: /^@x\\/core$/, replacement: path.resolve(__dirname, '../core/src') }] }",
+    );
     write('docs/guide.md');
     // What names the doc: a test in the suite, a module it can import, and
     // the same two in a workspace it cannot reach.
@@ -240,10 +245,118 @@ describe('relatedTests', () => {
     ]);
   });
 
-  it('looks up no source module by name: the graph covers it', () => {
-    write('packages/core/src/a.test.ts', "'a.ts'");
+  it('looks up a source module by name too: a test can assert its text', () => {
+    // build-budget.test.ts reads agent-prompt.ts; it imports nothing of it.
+    write(
+      'packages/core/src/a-text.test.ts',
+      "readFileSync(join(here, 'a.ts'))",
+    );
     expect(select(['packages/core/src/a.ts'], 'packages/core')?.paths).toEqual([
+      'src/a-text.test.ts',
       'src/a.ts',
+    ]);
+  });
+
+  it('runs the suite whole around an npm pretest or posttest', () => {
+    for (const hook of ['pretest', 'posttest']) {
+      write(
+        'packages/core/package.json',
+        JSON.stringify({
+          scripts: { test: 'vitest run', [hook]: 'node f.js' },
+        }),
+      );
+      expect(
+        select(['packages/core/src/a.ts'], 'packages/core'),
+      ).toBeUndefined();
+    }
+  });
+
+  it('runs the suite whole when its config moves the root, or hides what it sets', () => {
+    const configs = [
+      "export default defineConfig({ root: 'client' })",
+      'const root = "client"; export default { root, test: {} }',
+      "export default defineConfig({ test: { root: './src' } })",
+      "import base from './vitest.base'; export default mergeConfig(base, {})",
+      "export default async () => (await import('./shared.js')).default",
+      "import './register-root.js'",
+    ];
+    const ruled = configs.map((text) => {
+      write('packages/core/vitest.config.ts', text);
+      return select(['packages/core/src/a.ts'], 'packages/core');
+    });
+    expect(ruled).toEqual(configs.map(() => undefined));
+    // What only mentions a root in a comment, or a dir named root, is not one.
+    write(
+      'packages/core/vitest.config.ts',
+      "// resolved against this file, not vitest's root/cwd\nconst p = '../root/x';",
+    );
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeDefined();
+  });
+
+  it('runs the suite whole beside a vitest workspace or projects file', () => {
+    write('packages/core/vitest.workspace.ts', 'export default []');
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
+  });
+
+  it('reads the config the script names, and runs whole when it changes or is missing', () => {
+    write(
+      'packages/core/package.json',
+      JSON.stringify({
+        scripts: { test: 'vitest run --config test.config.ts' },
+      }),
+    );
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
+    write('packages/core/test.config.ts', "export default { root: 'x' }");
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
+    write('packages/core/test.config.ts', 'export default {}');
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeDefined();
+    expect(
+      select(
+        ['packages/core/src/a.ts', 'packages/core/test.config.ts'],
+        'packages/core',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('runs a dependent whole when it imports a changed dependency as build output', () => {
+    // No source alias: cli's tests import core's `dist`, which the diff's
+    // `src` path does not name.
+    write('packages/cli/vitest.config.ts', 'export default {}');
+    expect(select(['packages/core/src/a.ts'], 'packages/cli')).toBeUndefined();
+    // ...and a module that names a changed doc counts the same way.
+    expect(select(['docs/guide.md'], 'packages/cli')).toBeUndefined();
+    // A dependency whose entry is its source is in the graph as source.
+    write(
+      'packages/core/package.json',
+      JSON.stringify({
+        scripts: { test: 'vitest run' },
+        exports: { '.': { import: './src/index.ts' } },
+      }),
+    );
+    expect(select(['packages/core/src/a.ts'], 'packages/cli')).toBeDefined();
+    // A dependency's own test is no module anything imports.
+    write(
+      'packages/core/package.json',
+      JSON.stringify({
+        scripts: { test: 'vitest run' },
+        main: 'dist/index.js',
+      }),
+    );
+    write('packages/core/src/a.test.ts');
+    expect(
+      select(['packages/core/src/a.test.ts'], 'packages/cli'),
+    ).toBeDefined();
+    // A change outside what the suite can reach is not its concern.
+    write('packages/web/src/w.ts');
+    write(
+      'packages/core/package.json',
+      JSON.stringify({
+        scripts: { test: 'vitest run' },
+        main: 'dist/index.js',
+      }),
+    );
+    expect(select(['packages/web/src/w.ts'], 'packages/cli')?.paths).toEqual([
+      '../web/src/w.ts',
     ]);
   });
 
@@ -281,6 +394,7 @@ describe('relatedTests', () => {
         scripts: { test: 'vitest run --config vitest.unit.config.ts' },
       }),
     );
+    write('packages/web/vitest.unit.config.ts', 'export default {}');
     expect(select(['docs/guide.md'], 'packages/web')).toEqual({
       config: 'vitest.unit.config.ts',
       paths: [

@@ -101,6 +101,11 @@ describe('runBuildTest: a suite runs only the tests related to the diff', () => 
       }),
     );
     write('packages/core/src/a.ts');
+    // cli's tests import core's source, as this repo's cli config arranges.
+    write(
+      'packages/cli/vitest.config.ts',
+      "resolve: { alias: { '@x/core': path.resolve(__dirname, '../core/src') } }",
+    );
   });
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -192,11 +197,32 @@ describe('runBuildTest: a suite runs only the tests related to the diff', () => 
         },
       }),
     );
+    write('packages/core/vitest.unit.config.ts', 'export default {}');
     writePlan(['packages/core/src/a.ts']);
     expect(runWith().test[0].command).toBe(
       'npm exec --workspace="packages/core" --yes=false -- vitest related --run ' +
         '--config "vitest.unit.config.ts" "src/a.ts"',
     );
+  });
+
+  it('runs a dependent whole that imports the changed package as build output', () => {
+    write('packages/cli/vitest.config.ts', 'export default {}');
+    writePlan(['packages/core/src/a.ts']);
+    const rep = runWith();
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm exec --workspace="packages/core" --yes=false -- vitest related --run "src/a.ts"',
+      'npm test --workspace="packages/cli"',
+    ]);
+    expect(rep.relatedTests).toEqual(['packages/core']);
+  });
+
+  it("leaves a dependency's suite related when its consumer changes too", () => {
+    write('packages/cli/src/b.ts');
+    writePlan(['packages/core/src/a.ts', 'packages/cli/src/b.ts']);
+    expect(runWith().test.map((t) => t.command)).toEqual([
+      'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "../core/src/a.ts" "src/b.ts"',
+      'npm exec --workspace="packages/core" --yes=false -- vitest related --run "../cli/src/b.ts" "src/a.ts"',
+    ]);
   });
 
   it('says so when a related run found no test to run', () => {

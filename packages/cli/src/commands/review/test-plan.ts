@@ -54,6 +54,7 @@ import { getPlatformReader } from './lib/platform/registry.js';
 import { isGitIgnored } from '@qwen-code/qwen-code-core';
 import { GIT_TIMEOUT_MS } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
+import { relatedTestDir } from './lib/npm-toolchain.js';
 import {
   hasUnmodeledWorkspaceGlob,
   readWorkspaceGlobs,
@@ -609,29 +610,52 @@ function ruleCommand(
       (command.startsWith(claimed) && command[claimed.length] === ' ')
     );
   });
+  // A related run (`vitest related`) is this review's run of a suite's `test`
+  // script narrowed to the diff. It settles a bare test claim by its exit
+  // code too, and the note says it was narrowed: a pass is not the whole
+  // suite passing.
+  const related = /^(?:npm|pnpm|yarn)\s+(?:run\s+)?test$/.test(text.trim())
+    ? (buildTest?.test ?? []).filter(
+        (c) => relatedTestDir(c.command) !== undefined,
+      )
+    : [];
+  const runs = [...matches, ...related];
   // build-test records one scoped command per package and does not stop on
   // failure, so a bare claim can match several runs. Prefer a failure: if ANY
   // scoped run failed, the phase failed, and the bare claim must read
   // `contradicted` — the first match could be a green package that merely
   // sorted first, stating the opposite of the authoritative `ok: false`.
   const ran =
-    matches.find((c) => !c.timedOut && c.exitCode !== 0) ??
-    matches.find((c) => !c.timedOut);
+    runs.find((c) => !c.timedOut && c.exitCode !== 0) ??
+    runs.find((c) => !c.timedOut);
   if (ran) {
+    const narrowed = [
+      ...new Set(
+        related
+          .filter((c) => !c.timedOut)
+          .map((c) => relatedTestDir(c.command)),
+      ),
+    ].join(', ');
     return ran.exitCode === 0
       ? {
           kind: 'command',
           text,
           verdict: 'reproduces',
           observed: 'exit 0',
-          note: 'this review ran it',
+          note: narrowed
+            ? `this review ran it — in ${narrowed}, only the tests related ` +
+              'to the diff (vitest related)'
+            : 'this review ran it',
         }
       : {
           kind: 'command',
           text,
           verdict: 'contradicted',
           observed: `exit ${ran.exitCode}`,
-          note: 'this review ran it and it failed',
+          note: related.includes(ran)
+            ? 'this review ran the tests related to the diff (vitest ' +
+              'related) and they failed'
+            : 'this review ran it and it failed',
         };
   }
 

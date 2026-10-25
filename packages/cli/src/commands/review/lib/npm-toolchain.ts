@@ -17,6 +17,7 @@ import {
   affectedWorkspaces,
   buildSetFor,
   chainsCommands,
+  dependencyClosure,
   hasUnmodeledWorkspaceGlob,
   readRootPackage,
   readWorkspaceGlobs,
@@ -110,7 +111,7 @@ function testCommands(
     renamedFrom: args.renamedFrom ?? [],
     ownerOf: (file) =>
       scope.singleRoot ? null : workspaceDirFor(file, scope.globs),
-    reachOf: (dir) => buildSetFor([dir], scope.graph),
+    reachOf: (dir) => dependencyClosure([dir], scope.graph),
   });
   return (dir) => {
     const selection = related.select(dir);
@@ -141,8 +142,8 @@ function relatedTestsSentence(test: CommandResult[]): string {
   );
   return (
     ` In ${dirs.join(', ')}, only the tests related to the diff ran ` +
-    '(`vitest related`: the tests that import a changed file, or import a ' +
-    'file that names one) — not the whole suite. A test that reads a ' +
+    '(`vitest related`: the tests that import a changed file, name one, or ' +
+    'import a module that names one) — not the whole suite. A test that reads a ' +
     'changed file without naming it, or lists a directory, is not among ' +
     'them.' +
     (none.length > 0

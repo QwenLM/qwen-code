@@ -1050,6 +1050,57 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toBe('exit 1');
     });
 
+    it('settles a bare test claim by a related run, and says it was narrowed', () => {
+      const related = (exitCode: number) =>
+        ({
+          build: [],
+          test: [
+            {
+              command: 'npm test --workspace="packages/core"',
+              exitCode: 0,
+              seconds: 3,
+              timedOut: false,
+              output: '',
+            },
+            {
+              command:
+                'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+              exitCode,
+              seconds: 3,
+              timedOut: false,
+              output: '',
+            },
+          ],
+        }) as unknown as BuildTestReport;
+      const pass = run(
+        '## Test Plan\n\nRan `npm test`',
+        [],
+        related(0),
+      ).claims.find((c) => c.text === 'npm test');
+      expect(pass?.verdict).toBe('reproduces');
+      expect(pass?.observed).toBe('exit 0');
+      expect(pass?.note).toBe(
+        'this review ran it — in packages/cli, only the tests related to the diff (vitest related)',
+      );
+      const fail = run(
+        '## Test Plan\n\nRan `npm test`',
+        [],
+        related(1),
+      ).claims.find((c) => c.text === 'npm test');
+      expect(fail?.verdict).toBe('contradicted');
+      expect(fail?.observed).toBe('exit 1');
+      expect(fail?.note).toBe(
+        'this review ran the tests related to the diff (vitest related) and they failed',
+      );
+      // A claim that is not the bare script is not one a related run settles.
+      const other = run(
+        '## Test Plan\n\nRan `npm run test:e2e`',
+        [],
+        related(1),
+      ).claims.find((c) => c.text === 'npm run test:e2e');
+      expect(other?.note).not.toContain('this review ran');
+    });
+
     it('does not rule on a command killed by the deadline', () => {
       // A timeout is an infrastructure result, never a defect in the PR.
       const bt = {
