@@ -173,6 +173,8 @@ describe('hooksCommand', () => {
         hookSystem?: 'none';
         gated?: boolean;
         projectHooks?: Record<string, unknown>;
+        /** What `${VAR}` resolution made of `projectHooks`. */
+        resolvedProjectHooks?: Record<string, unknown>;
       } = {},
     ) {
       const hookSystem = {
@@ -208,8 +210,15 @@ describe('hooksCommand', () => {
             reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
             getSystemHooks: () => systemHooks,
             getUserHooks: () => userHooks,
-            getProjectHooks: () => opts.projectHooks ?? projectHooks,
-            workspace: { path: '/work/repo/.qwen/settings.json' },
+            getProjectHooks: () =>
+              opts.resolvedProjectHooks ?? opts.projectHooks ?? projectHooks,
+            isTrusted: true,
+            workspace: {
+              path: '/work/repo/.qwen/settings.json',
+              originalSettings: {
+                hooks: (opts.projectHooks ?? projectHooks) as never,
+              },
+            },
           },
         },
       });
@@ -244,7 +253,14 @@ describe('hooksCommand', () => {
     });
 
     const runnable = {
-      SessionStart: [{ hooks: [{ type: 'command', command: './setup.sh' }] }],
+      SessionStart: [
+        { hooks: [{ type: 'command', command: './setup.sh ${TOKEN}' }] },
+      ],
+    };
+    const resolved = {
+      SessionStart: [
+        { hooks: [{ type: 'command', command: './setup.sh secret' }] },
+      ],
     };
 
     it.each([
@@ -259,9 +275,11 @@ describe('hooksCommand', () => {
         }
         const onPending = vi.fn();
         appEvents.on(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
+        // The decision binds the unresolved block, as startup hashed it.
         const { context, config, hookSystem } = makeReloadContext({
           gated: true,
           projectHooks: runnable,
+          resolvedProjectHooks: resolved,
         });
 
         await hooksCommand.action!(context, '');

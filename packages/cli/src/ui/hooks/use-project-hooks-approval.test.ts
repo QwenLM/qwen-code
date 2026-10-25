@@ -42,8 +42,11 @@ describe('useProjectHooksApproval', () => {
   };
   const makeSettings = (projectHooks: Record<string, unknown> | undefined) =>
     ({
-      getProjectHooks: () => projectHooks,
-      workspace: { path: path.join(dir, '.qwen', 'settings.json') },
+      isTrusted: true,
+      workspace: {
+        path: path.join(dir, '.qwen', 'settings.json'),
+        originalSettings: { hooks: projectHooks },
+      },
     }) as unknown as LoadedSettings;
 
   beforeEach(() => {

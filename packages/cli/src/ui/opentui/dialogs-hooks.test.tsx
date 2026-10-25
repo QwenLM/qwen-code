@@ -310,7 +310,7 @@ describe('hooks dialog helpers', () => {
       'disabled (safe mode)',
       'disabled (disableAllHooks)',
       'disabled (folder not trusted)',
-      'disabled (awaiting approval)',
+      'disabled (not approved)',
       'disabled (turned off for this session)',
     ]);
     expect(new Set(texts).size).toBe(reasons.length);

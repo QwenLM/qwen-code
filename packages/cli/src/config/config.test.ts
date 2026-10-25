@@ -5679,19 +5679,22 @@ describe('loadCliConfig with includeDirectories', () => {
       },
     );
 
-    it('keys the decision by the project that supplied the hooks', async () => {
+    it('gates the unresolved block under the project that supplied it', async () => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
       const root = path.resolve(path.sep, 'home', 'user', 'repo');
+      const unresolved = structuredClone(projectHooks);
 
       await loadCliConfig({}, argv, cwd, undefined, {
         projectHooks,
-        projectHooksRoot: root,
+        projectHooksApproval: { root, hooks: unresolved },
       });
 
-      expect(isProjectHooksPendingApproval).toHaveBeenCalledWith(
-        projectHooks,
-        root,
+      expect(vi.mocked(isProjectHooksPendingApproval).mock.calls).toEqual([
+        [unresolved, root],
+      ]);
+      expect(vi.mocked(isProjectHooksPendingApproval).mock.calls[0]![0]).toBe(
+        unresolved,
       );
     });
 

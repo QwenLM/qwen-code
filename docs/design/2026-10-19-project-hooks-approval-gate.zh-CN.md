@@ -24,21 +24,21 @@
 
 ### 审批存储
 
-`packages/cli/src/config/hook-approvals.ts` 把决定持久化到 `~/.qwen/hookApprovals.json`（可用 `QWEN_CODE_HOOK_APPROVALS_PATH` 覆盖），每个项目根目录一条记录：`{ hash, status }`，`status` 为 `approved` 或 `rejected`。`hash` 是项目 `hooks` 对象按键排序序列化后的 SHA-256（使用无原型对象，因此自有的 `__proto__` 键也会参与哈希），因此文件里的键顺序无关，但任何行为上的修改都会改变它。哈希与当前 hooks 不匹配、或状态不是这两个值之一的记录视为 `pending`。调用方交给 Config 的是该块的副本：hook 注册表会原地给已加载的定义标注来源，而 ACP daemon 会在多个会话间复用同一个设置实例，这样设置中的块哈希保持不变。项目根目录是 hooks 所在 `.qwen/settings.json` 的目录，而不是会话的工作目录，因此 `/cd` 与 `--worktree` 不会改变键；其规范化方式与 `mcpApprovals.json` 相同。文件以 `0600` 写入（已有的更宽松权限会被收紧），`QWEN_CODE_HOOK_APPROVALS_PATH` 与同类存储路径一样不允许由项目 `.env` 设置。
+`packages/cli/src/config/hook-approvals.ts` 把决定持久化到 `~/.qwen/hookApprovals.json`（可用 `QWEN_CODE_HOOK_APPROVALS_PATH` 覆盖），每个项目根目录一条记录：`{ hash, status }`，`status` 为 `approved` 或 `rejected`。`hash` 是项目 `hooks` 对象按文件原文（`${VAR}` 解析之前；启动时在项目 `.env` 加载前解析、`/hooks` 在其后解析，解析后的块在两条路径上哈希不同）按键排序序列化后的 SHA-256（使用无原型对象，因此自有的 `__proto__` 键也会参与哈希），因此文件里的键顺序无关，但任何行为上的修改都会改变它。哈希与当前 hooks 不匹配、或状态不是这两个值之一的记录视为 `pending`。调用方交给 Config 的是解析后块的副本：hook 注册表会原地给已加载的定义标注来源，而 ACP daemon 会在多个会话间复用同一个设置实例。项目根目录是 hooks 所在 `.qwen/settings.json` 的目录，而不是会话的工作目录，因此 `/cd` 与 `--worktree` 不会改变键；其规范化方式与 `mcpApprovals.json` 相同。文件以 `0600` 写入（已有的更宽松权限会被收紧），`QWEN_CODE_HOOK_APPROVALS_PATH` 与同类存储路径一样不允许由项目 `.env` 设置。
 
 `isProjectHooksPendingApproval(projectHooks, projectRoot)` 在 hooks 块至少声明了一个可运行的 hook 且状态不是 `approved`（待定或已拒绝）时为 `true`。不存在、为 `null`、为空或没有可运行内容的块永远不受闸门约束。
 
 ### Core
 
-`ConfigParameters.projectHooksPendingApproval` 记录启动时的判定；`undefined` 表示该会话完全不对项目 hooks 设闸门。为 `true` 期间，`getProjectHooks()` 在既有的信任检查之后返回 `undefined`，`getUserHooks()` 中旧的合并 `hooks` 回退也同样返回 `undefined`（未拆分作用域时它可能携带同一工作区块）。`setProjectHooksPendingApproval()` 允许 CLI 在会话中途解除闸门，下一次 `HookSystem.reload()` 即注册它们。`getWithheldProjectHooks()` 仅为展示返回被扣留的块，OpenTUI `/hooks` 浏览器和 ACP 状态背后的 hooks 列表以原因 `pendingApproval` 显示它们。
+`ConfigParameters.projectHooksPendingApproval` 记录启动时的判定；`undefined` 表示该会话完全不对项目 hooks 设闸门。为 `true` 期间，`getProjectHooks()` 在既有的信任检查之后返回 `undefined`，`getUserHooks()` 中旧的合并 `hooks` 回退也同样返回 `undefined`（未拆分作用域时它可能携带同一工作区块）。`setProjectHooksPendingApproval()` 允许 CLI 在会话中途解除闸门，下一次 `HookSystem.reload()` 即注册它们。`getWithheldProjectHooks()` 仅为展示返回被扣留的块，OpenTUI `/hooks` 浏览器背后的 hooks 列表以原因 `pendingApproval` 显示它们。ACP 状态只报告 `enabled: false`，不带原因。
 
 ### CLI 启动
 
-`loadCliConfig` 根据拆分出的 `projectHooks`（调用方未提供作用域时用合并后的 `hooks`）计算该标志，并以传入的项目根目录为键。在 `--bare`、`--safe-mode` 和 `disableAllHooks` 下（此时不加载任何 hooks），以及命令行要求的 YOLO 审批模式下（`--yolo`、`--approval-mode yolo`），该标志为 `undefined`。来自设置的 YOLO 模式不豁免 hooks，因为工作区自己的 `tools.approvalMode` 就能设置它。
+`loadCliConfig` 根据调用方提供的未解析项目块及其项目根目录（未提供作用域时用合并后的 `hooks`）计算该标志。在 `--bare`、`--safe-mode` 和 `disableAllHooks` 下（此时不加载任何 hooks），以及命令行要求的 YOLO 审批模式下（`--yolo`、`--approval-mode yolo`），该标志为 `undefined`。来自设置的 YOLO 模式不豁免 hooks，因为工作区自己的 `tools.approvalMode` 就能设置它。
 
 ### 交互式审批
 
-`useProjectHooksApproval`（ink 与 OpenTUI 共用）在状态严格为 `pending` 时显示对话框，按 `Event[matcher]  target [details]` 列出每个 hook：命令及其 `env`、`shell`、`async`；URL 及其请求头名称与 `allowedEnvVars`；prompt 文本。仓库提供的每个字符串都压成一行，并去除转义序列、双向控制及其他格式字符；超过 200 字符的值会被截断并标明原长度，被省略的尾部不会悄无声息。每个 hook 占一行，列表按可用高度截断（至少保留三行）并显示 "… and N more" 行，保证选项始终可见。批准会持久化 `approved`、解除运行中 `Config` 的闸门并重载 hook 系统；拒绝会持久化 `rejected`，hooks 保持不加载；Esc 关闭对话框且不保存任何决定，并在会话记录中加一行说明 hooks 未加载；下次启动或打开 `/hooks` 会再次询问。该对话框排在 MCP 审批对话框之后。ink 的 `/hooks` 浏览器把被扣留的项目 hooks 标为等待审批。
+`useProjectHooksApproval`（ink 与 OpenTUI 共用）在状态严格为 `pending` 时显示对话框，基于未解析的块按 `Event  target [details]` 列出每个 hook：命令及其 `env`（以 `KEY=value` 显示）、`shell`、`async`；URL 及其请求头名称与 `allowedEnvVars`；prompt 文本；matcher 放在最后，不会把执行目标挤出该行。仓库提供的每个字符串都压成一行，并去除转义序列、双向控制及其他格式字符；超过 200 字符的值会被截断并标明原长度，被省略的尾部不会悄无声息。每个 hook 占一行，按对话框文本宽度截断并带 `… [+N chars]` 标记；列表按该宽度下换行后的标题所剩行数截断（至少保留三行）并显示 "… and N more" 行，保证选项始终可见。批准会持久化 `approved`、解除运行中 `Config` 的闸门并重载 hook 系统；拒绝会持久化 `rejected`，hooks 保持不加载；Esc 关闭对话框且不保存任何决定，并在会话记录中加一行说明 hooks 未加载；下次启动或打开 `/hooks` 会再次询问。该对话框排在 MCP 审批对话框之后。ink 的 `/hooks` 浏览器把被扣留的项目 hooks 标为未批准，待定与已拒绝都适用。
 
 ### `/hooks` 重载
 
@@ -70,7 +70,7 @@
 
 ## 后续工作
 
-- ACP：增加列出并审批待定项目 hooks 的请求，与 MCP 的对应。
+- ACP：增加列出并审批待定项目 hooks 的请求，与 MCP 的对应，并在 hooks 状态中带上扣留原因。
 - LSP：以同样方式为工作区 `.lsp.json` 的命令设闸门。
 - 项目 skill 与 subagent frontmatter 中的 hooks：目前仍只需要目录信任。
 - 非交互式审批项目 hooks 的方式（用于 CI），与 `qwen mcp approve` 对应。

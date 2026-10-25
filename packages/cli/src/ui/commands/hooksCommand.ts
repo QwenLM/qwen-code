@@ -26,6 +26,7 @@ import { MessageType } from '../types.js';
 import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
 import {
   getProjectHooksApprovalState,
+  getProjectHooksForApproval,
   getProjectHooksRoot,
   reloadHookApprovals,
 } from '../../config/hook-approvals.js';
@@ -85,7 +86,7 @@ async function reloadHooksFromSettings(
   if (gated) reloadHookApprovals();
   const state = gated
     ? getProjectHooksApprovalState(
-        settings.getProjectHooks(),
+        getProjectHooksForApproval(settings),
         getProjectHooksRoot(settings),
       )
     : undefined;

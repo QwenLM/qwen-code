@@ -1695,8 +1695,8 @@ export async function loadCliConfig(
     systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
-    /** Project whose `.qwen/settings.json` supplied `projectHooks`; defaults to `cwd`. */
-    projectHooksRoot?: string;
+    /** The unresolved `projectHooks` block the approval gate hashes, and its project. */
+    projectHooksApproval?: { root: string; hooks: Record<string, unknown> };
   },
   /**
    * Live-read provider for the set of disabled skill names. Forwarded to
@@ -2551,10 +2551,15 @@ export async function loadCliConfig(
   const projectHooksPendingApproval =
     bareMode || safeMode || settings.disableAllHooks || commandLineYolo
       ? undefined
-      : isProjectHooksPendingApproval(
-          hooksConfig ? hooksConfig.projectHooks : settings.hooks,
-          hooksConfig?.projectHooksRoot ?? cwd,
-        );
+      : hooksConfig?.projectHooksApproval
+        ? isProjectHooksPendingApproval(
+            hooksConfig.projectHooksApproval.hooks,
+            hooksConfig.projectHooksApproval.root,
+          )
+        : isProjectHooksPendingApproval(
+            hooksConfig ? hooksConfig.projectHooks : settings.hooks,
+            cwd,
+          );
   const advisorModel =
     bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 

@@ -2275,7 +2275,12 @@ describe('llm.tsx main function', () => {
         getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => hooks,
-        workspace: { path: join(root, '.qwen', 'settings.json') },
+        isTrusted: true,
+        user: { originalSettings: {} },
+        workspace: {
+          path: join(root, '.qwen', 'settings.json'),
+          originalSettings: { hooks },
+        },
       } as never);
       vi.mocked(loadCliConfig).mockResolvedValue(configStub);
       vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(

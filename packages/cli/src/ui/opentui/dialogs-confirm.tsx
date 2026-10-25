@@ -83,11 +83,9 @@ import { caretSpans, useLineEdit } from './line-edit.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
 import {
-  PROJECT_HOOKS_DIALOG_CHROME_ROWS,
-  PROJECT_HOOKS_DIALOG_MIN_HOOK_ROWS,
+  layoutProjectHooksLines,
   ProjectHooksApprovalChoice,
 } from '../components/hooks/ProjectHooksApprovalDialog.js';
-import { fitHookLines } from '../../config/hook-approvals.js';
 import { computeHeaderCap } from '../components/messages/AskUserQuestionDialog.js';
 import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
 import { t } from '../../i18n/index.js';
@@ -1501,6 +1499,10 @@ export function OpenTuiProjectHooksApprovalDialog(
       onSelect(ProjectHooksApprovalChoice.DISMISS);
     }
   });
+  const title = t('Untrusted hooks in .qwen/settings.json');
+  const description = t(
+    'This workspace declares hooks: commands Qwen Code runs on events such as session start or before a tool call. Approving lets them run with your privileges. Approval is bound to this exact configuration — if .qwen/settings.json changes, you will be asked again.',
+  );
 
   return (
     <box marginLeft={3} width={Math.max(0, dialogAreaWidth(width) - 1)}>
@@ -1508,21 +1510,16 @@ export function OpenTuiProjectHooksApprovalDialog(
         <box flexDirection="column">
           <box flexDirection="column" marginBottom={1}>
             <text fg={C.text} attributes={1}>
-              {t('Untrusted hooks in .qwen/settings.json')}
+              {title}
             </text>
-            <text fg={C.text}>
-              {t(
-                'This workspace declares hooks: commands Qwen Code runs on events such as session start or before a tool call. Approving lets them run with your privileges. Approval is bound to this exact configuration — if .qwen/settings.json changes, you will be asked again.',
-              )}
-            </text>
+            <text fg={C.text}>{description}</text>
           </box>
           <box flexDirection="column" marginBottom={1}>
-            {fitHookLines(
+            {layoutProjectHooksLines(
               lines,
-              Math.max(
-                PROJECT_HOOKS_DIALOG_MIN_HOOK_ROWS,
-                height - PROJECT_HOOKS_DIALOG_CHROME_ROWS,
-              ),
+              [title, description],
+              width,
+              height,
             ).map((line, index) => (
               <text key={`${index}-${line}`} fg={C.text} wrapMode="none">
                 {`  ${line}`}

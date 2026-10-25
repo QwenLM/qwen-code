@@ -10,7 +10,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   HOOK_APPROVALS_FILENAME,
+  fitHookLine,
   fitHookLines,
+  getProjectHooksForApproval,
   getProjectHooksHeadlessWarning,
   getProjectHooksRoot,
   getSeparatedHookSettings,
@@ -170,19 +172,43 @@ describe('hook-approvals (hash-bound approval store)', () => {
     ['no block', undefined, false],
     ['an empty block', {}, false],
     ['a block with nothing runnable', { PreToolUse: [{ hooks: [] }] }, false],
-  ])('gives the gate a project root for %s: %s', (_label, block, rooted) => {
+  ])('gives the gate the unresolved block for %s: %s', (_label, raw, gated) => {
+    const resolved = raw && structuredClone(raw);
+    const system = { Stop: [] };
+    const user = { SessionEnd: [] };
     const separated = getSeparatedHookSettings({
-      getSystemHooks: () => undefined,
-      getUserHooks: () => undefined,
-      getProjectHooks: () => block,
-      workspace: { path: path.join('/work', 'repo', '.qwen', 'settings.json') },
+      getSystemHooks: () => system,
+      getUserHooks: () => user,
+      getProjectHooks: () => resolved,
+      isTrusted: true,
+      workspace: {
+        path: path.join('/work', 'repo', '.qwen', 'settings.json'),
+        originalSettings: { hooks: raw },
+      },
     });
-    expect(separated.projectHooks).toEqual(block);
-    if (block) expect(separated.projectHooks).not.toBe(block);
-    expect('projectHooksRoot' in separated).toBe(rooted);
-    if (rooted) {
-      expect(separated.projectHooksRoot).toBe(path.join('/work', 'repo'));
+    // Only the gated scope is copied; the registry tags nested configs.
+    expect(separated.systemHooks).toBe(system);
+    expect(separated.userHooks).toBe(user);
+    expect(separated.projectHooks).toEqual(resolved);
+    if (resolved) {
+      const copy = separated.projectHooks as typeof hooks;
+      if (copy.SessionStart) {
+        Object.assign(copy.SessionStart[0]!.hooks[0]!, { source: 'project' });
+        expect(resolved).toEqual(raw);
+      }
     }
+    expect(separated.projectHooksApproval).toEqual(
+      gated ? { root: path.join('/work', 'repo'), hooks: raw } : undefined,
+    );
+  });
+
+  it('withholds the unresolved block from the gate in an untrusted folder', () => {
+    expect(
+      getProjectHooksForApproval({
+        isTrusted: false,
+        workspace: { originalSettings: { hooks } },
+      }),
+    ).toBeUndefined();
   });
 
   it('names the recovery for a rejected block and the review for a pending one', () => {
@@ -224,8 +250,8 @@ describe('summarizeProjectHooks', () => {
         bogus: 'not an array',
       }),
     ).toEqual([
-      'PreToolUse[Bash]  lint.sh [env: LD_PRELOAD; shell: bash; async]',
-      'PreToolUse[Bash]  http https://hooks.test/pre [headers: X-T; allowedEnvVars: GITHUB_TOKEN]',
+      'PreToolUse  lint.sh [env: LD_PRELOAD=x; shell: bash; async; matcher: Bash]',
+      'PreToolUse  http https://hooks.test/pre [headers: X-T; allowedEnvVars: GITHUB_TOKEN; matcher: Bash]',
       'Stop  prompt "Review"',
     ]);
   });
@@ -279,5 +305,20 @@ describe('fitHookLines', () => {
     [['a', 'b'], 0, ['… and 2 more (see .qwen/settings.json)']],
   ])('fits %j into %i rows', (lines, rows, expected) => {
     expect(fitHookLines(lines, rows)).toEqual(expected);
+  });
+});
+
+describe('fitHookLine', () => {
+  it.each([
+    ['fits', 'abc', 10, 'abc'],
+    ['cuts with a count', 'x'.repeat(30), 20, `${'x'.repeat(7)}… [+23 chars]`],
+    [
+      'counts wide characters by width',
+      '界'.repeat(20),
+      20,
+      `${'界'.repeat(3)}… [+17 chars]`,
+    ],
+  ])('%s', (_label, line, width, expected) => {
+    expect(fitHookLine(line, width)).toBe(expected);
   });
 });

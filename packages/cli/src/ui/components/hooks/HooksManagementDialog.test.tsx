@@ -472,7 +472,7 @@ describe('HooksManagementDialog', () => {
     await vi.waitFor(() => {
       expect(lastFrame()).toContain('./repo-hook.sh');
       expect(lastFrame()).toContain('Local Settings · disabled');
-      expect(lastFrame()).toContain('(awaiting approval)');
+      expect(lastFrame()).toContain('approved)');
     });
   });
 });

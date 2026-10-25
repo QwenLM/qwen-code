@@ -4,7 +4,7 @@ The Trusted Folders feature is a security setting that gives you control over wh
 
 ## Enabling the Feature
 
-The Trusted Folders feature is **disabled by default**. While it is disabled, every folder counts as trusted, so a project's `.qwen/settings.json` is loaded without any prompt. Two things in it that can run commands are still gated individually: project MCP servers and project [hooks](../features/hooks.md#approving-project-hooks) ask for your approval the first time they are seen and whenever they change. To be asked before any project configuration is read at all, enable the feature in your settings.
+The Trusted Folders feature is **disabled by default**. While it is disabled, every folder counts as trusted, so a project's `.qwen/settings.json` is loaded without any prompt. Project MCP servers and project [hooks](../features/hooks.md#approving-project-hooks) still ask for your approval the first time they are seen and whenever they change, but other project configuration can run commands without asking (for example a `ui.statusLine` of `type: "command"`, or hooks in a project skill's frontmatter). To be asked before any project configuration is read at all, enable the feature in your settings.
 
 Add the following to your user `settings.json` file:
 

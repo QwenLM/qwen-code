@@ -115,6 +115,7 @@ import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import {
   getProjectHooksApprovalState,
+  getProjectHooksForApproval,
   getProjectHooksHeadlessWarning,
   getProjectHooksRoot,
   getSeparatedHookSettings,
@@ -1543,7 +1544,7 @@ export async function main() {
         writeStderrLine(
           getProjectHooksHeadlessWarning(
             getProjectHooksApprovalState(
-              settings.getProjectHooks(),
+              getProjectHooksForApproval(settings),
               getProjectHooksRoot(settings),
             ),
           ),

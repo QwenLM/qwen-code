@@ -12,7 +12,12 @@ import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite
 import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
 import stripJsonComments from 'strip-json-comments';
 import { normalizeProjectRoot } from './approval-project-root.js';
-import { sanitizeTerminalLine } from '../ui/utils/textUtils.js';
+import {
+  clipToWidth,
+  cpLen,
+  getCachedStringWidth,
+  sanitizeTerminalLine,
+} from '../ui/utils/textUtils.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export const HOOK_APPROVALS_FILENAME = 'hookApprovals.json';
@@ -47,23 +52,45 @@ export function getProjectHooksRoot(settings: {
   return path.dirname(path.dirname(settings.workspace.path));
 }
 
-/** The separated hook scopes `loadCliConfig` takes, with the project root they gate under. */
+/**
+ * The workspace hooks block as written in `.qwen/settings.json`, before
+ * `${VAR}` resolution: startup and `/hooks` resolve against different
+ * environments, so only the unresolved text hashes the same on both.
+ */
+export function getProjectHooksForApproval(settings: {
+  isTrusted: boolean;
+  workspace: { originalSettings: { hooks?: unknown } };
+}): Record<string, unknown> | undefined {
+  const hooks = settings.isTrusted
+    ? settings.workspace.originalSettings.hooks
+    : undefined;
+  return isRecord(hooks) ? hooks : undefined;
+}
+
+/** The separated hook scopes `loadCliConfig` takes, with the block it gates. */
 export function getSeparatedHookSettings(settings: {
   getSystemHooks(): Record<string, unknown> | undefined;
   getUserHooks(): Record<string, unknown> | undefined;
   getProjectHooks(): Record<string, unknown> | undefined;
-  workspace: { path: string };
+  isTrusted: boolean;
+  workspace: { path: string; originalSettings: { hooks?: unknown } };
 }) {
   // A copy: the hook registry tags loaded definitions in place, and an ACP
-  // daemon reuses one settings instance, whose block must keep its hash.
+  // daemon reuses one settings instance.
   const projectHooks = structuredClone(settings.getProjectHooks());
+  const gated = getProjectHooksForApproval(settings);
   return {
     systemHooks: settings.getSystemHooks(),
     userHooks: settings.getUserHooks(),
     projectHooks,
-    // Only a block with something runnable is gated, so only it needs a root.
-    ...(isRecord(projectHooks) && summarizeProjectHooks(projectHooks).length > 0
-      ? { projectHooksRoot: getProjectHooksRoot(settings) }
+    // Only a block with something runnable is gated.
+    ...(gated && summarizeProjectHooks(gated).length > 0
+      ? {
+          projectHooksApproval: {
+            root: getProjectHooksRoot(settings),
+            hooks: gated,
+          },
+        }
       : {}),
   };
 }
@@ -105,6 +132,14 @@ function displayText(value: unknown, max = 200): string {
     : text;
 }
 
+/** `KEY=value` pairs: a command's env can rewrite what runs (`NODE_OPTIONS`, `${VAR}`). */
+function envList(value: unknown): string | undefined {
+  if (!isRecord(value)) return keyList(value);
+  return Object.entries(value)
+    .map(([k, v]) => `${displayText(k)}=${displayText(v, 80)}`)
+    .join(', ');
+}
+
 function keyList(value: unknown): string | undefined {
   if (Array.isArray(value)) return value.map((v) => displayText(v)).join(', ');
   if (isRecord(value))
@@ -114,7 +149,7 @@ function keyList(value: unknown): string | undefined {
   return undefined;
 }
 
-function describeHook(hook: Record<string, unknown>): string {
+function describeHook(hook: Record<string, unknown>, matcher: unknown): string {
   const details: string[] = [];
   const add = (label: string, value: string | undefined) => {
     if (value) details.push(`${label}: ${value}`);
@@ -123,7 +158,7 @@ function describeHook(hook: Record<string, unknown>): string {
   switch (hook['type']) {
     case 'command':
       head = displayText(hook['command']);
-      add('env', keyList(hook['env']));
+      add('env', envList(hook['env']));
       if (hook['shell']) add('shell', displayText(hook['shell']));
       if (hook['async'] === true) details.push('async');
       break;
@@ -138,6 +173,8 @@ function describeHook(hook: Record<string, unknown>): string {
     default:
       head = displayText(hook['type'] ?? 'unknown');
   }
+  // Last, so a long matcher cannot push what runs off the row.
+  if (matcher) add('matcher', displayText(matcher, 80));
   return details.length > 0 ? `${head} [${details.join('; ')}]` : head;
 }
 
@@ -155,13 +192,10 @@ export function summarizeProjectHooks(
       if (!isRecord(definition) || !Array.isArray(definition['hooks'])) {
         continue;
       }
-      const matcher = definition['matcher']
-        ? `[${displayText(definition['matcher'], 80)}]`
-        : '';
       for (const hook of definition['hooks']) {
         if (isRecord(hook)) {
           lines.push(
-            `${displayText(event, 40)}${matcher}  ${describeHook(hook)}`,
+            `${displayText(event, 24)}  ${describeHook(hook, definition['matcher'])}`,
           );
         }
       }
@@ -185,6 +219,15 @@ export function fitHookLines(
     ...lines.slice(0, shown),
     `… and ${lines.length - shown} more (see .qwen/settings.json)`,
   ];
+}
+
+/** `line` cut to `width` columns with a marker, so a clipped row never looks whole. */
+export function fitHookLine(line: string, width: number): string {
+  if (getCachedStringWidth(line) <= width) return line;
+  const total = cpLen(line);
+  const marker = `… [+${total} chars]`;
+  const kept = clipToWidth(line, width - getCachedStringWidth(marker));
+  return `${kept}… [+${total - cpLen(kept)} chars]`;
 }
 
 export class LoadedHookApprovals {

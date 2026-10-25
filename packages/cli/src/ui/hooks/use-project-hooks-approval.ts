@@ -9,6 +9,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   getProjectHooksApprovalState,
+  getProjectHooksForApproval,
   getProjectHooksRoot,
   loadHookApprovals,
   summarizeProjectHooks,
@@ -41,7 +42,7 @@ export const useProjectHooksApproval = (
 
   const computePending = useCallback((): PendingProjectHooks | undefined => {
     if (!config.isProjectHooksPendingApproval()) return undefined;
-    const hooks = settings.getProjectHooks();
+    const hooks = getProjectHooksForApproval(settings);
     if (
       !hooks ||
       getProjectHooksApprovalState(hooks, getProjectHooksRoot(settings)) !==
