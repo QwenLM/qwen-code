@@ -1787,6 +1787,7 @@ export class HostedWorkspaceToolTurn {
 
   private readonly publicPlanMode: boolean;
   private planning: boolean;
+  private residentWorkspace = false;
   private logicalRound = 0;
   private nativeBatch?: {
     messageId: string;
@@ -2069,11 +2070,31 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
-    await waitForTurn(this.broker.resolveCapabilities(), signal);
+    if (
+      this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+      (this.profile === undefined &&
+        !this.mcp &&
+        !this.hooks &&
+        !this.shell &&
+        !this.publication)
+    ) {
+      try {
+        await waitForTurn(this.broker.resolveCapabilities(), signal);
+      } catch (cause) {
+        if (
+          !(cause instanceof HostedWorkspaceBrokerRejection) ||
+          cause.status !== 404
+        )
+          throw cause;
+        await waitForTurn(this.warmed, signal);
+      }
+      this.residentWorkspace =
+        this.broker.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    }
     this.planning =
       this.publicPlanMode &&
       (await hostedPublicPlanActive(this.session, this.promptId));
-    if (this.broker.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST) {
+    if (this.residentWorkspace) {
       this.advertised = hostedWorkspaceDeclarations(
         HOSTED_WORKSPACE_FILE_TOOLS,
         !this.fileBackupsEnabled,
@@ -4410,7 +4431,7 @@ export class HostedWorkspaceToolTurn {
     );
     if (
       !restored &&
-      this.broker.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST &&
+      this.residentWorkspace &&
       calls.some(
         (call) =>
           !HOSTED_WORKSPACE_FILE_TOOLS.some(

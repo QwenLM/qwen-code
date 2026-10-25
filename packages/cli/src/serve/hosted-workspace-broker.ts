@@ -217,7 +217,12 @@ export class HostedWorkspaceBroker {
     await (this.capabilityResolution ??= this.harnessRequest(
       '/runtimes:capabilities',
       {},
-    ).then((response) => this.readRuntime(response)));
+    )
+      .then((response) => this.readRuntime(response))
+      .catch((cause: unknown) => {
+        this.capabilityResolution = undefined;
+        throw cause;
+      }));
   }
 
   async mcpDefinitions(

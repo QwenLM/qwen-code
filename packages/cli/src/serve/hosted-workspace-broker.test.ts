@@ -60,6 +60,55 @@ it('resolves and pins Harness capability once without acquiring or warming a Run
   expect(broker.runtime).toBeUndefined();
 });
 
+it.each(['http503', 'connection-drop', 'scope-mismatch'])(
+  'retries capability resolution after %s while sharing concurrent reads',
+  async (failure) => {
+    let requests = 0;
+    const broker = await fixture(() => {
+      requests++;
+      if (requests === 1 && failure === 'http503')
+        return { code: 503, body: { error: 'unavailable' } };
+      if (requests === 1 && failure === 'connection-drop')
+        return { drop: true };
+      return {
+        body: {
+          protocolVersion: 1,
+          harnessSessionId: 'session',
+          scope: {
+            tenantId:
+              requests === 1 && failure === 'scope-mismatch'
+                ? 'foreign'
+                : 'tenant',
+            workspaceId: 'workspace',
+            workspaceGeneration: '1',
+            capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+            isolationClass: 'workspace',
+          },
+        },
+      };
+    });
+    const failed = await Promise.allSettled([
+      broker.resolveCapabilities(),
+      broker.resolveCapabilities(),
+    ]);
+    expect(failed.map((result) => result.status)).toEqual([
+      'rejected',
+      'rejected',
+    ]);
+    expect(requests).toBe(1);
+    expect(() => broker.capabilityDigest).toThrow('unavailable');
+    await Promise.all([
+      broker.resolveCapabilities(),
+      broker.resolveCapabilities(),
+    ]);
+    await broker.resolveCapabilities();
+    expect(requests).toBe(2);
+    expect(broker.capabilityDigest).toBe(RESIDENT_WORKSPACE_CAPABILITY_DIGEST);
+    expect(broker.runtime).toBeUndefined();
+    expect(broker.acquired).toBe(false);
+  },
+);
+
 it.each(['tenantId', 'workspaceId', 'capabilityDigest', 'isolationClass'])(
   'refuses a mismatched %s in Harness capability resolution',
   async (field) => {

@@ -1678,6 +1678,72 @@ it('refuses unresolved capability instead of advertising ordinary tools', async 
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
+it.each([
+  'hosted-workspace-shell/1',
+  'hosted-workspace-files/2',
+  'hosted-workspace-files/3',
+  'hosted-workspace-read/1',
+  'hosted-workspace-mcp/1',
+])(
+  'keeps %s declarations independent of capability lookup and warmup',
+  async (profile) => {
+    broker.warm.mockReturnValueOnce(new Promise(() => {}));
+    broker.resolveCapabilities.mockRejectedValue(new Error('must not query'));
+    const ordinary = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile },
+    );
+    expect(
+      await ordinary.declarations(new AbortController().signal),
+    ).not.toEqual([]);
+    expect(broker.resolveCapabilities).not.toHaveBeenCalled();
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
+
+it.each([WORKSPACE_CAPABILITY_DIGEST, RESIDENT_WORKSPACE_CAPABILITY_DIGEST])(
+  'uses the existing warm capability after a legacy route 404 (%s)',
+  async (digest) => {
+    broker.capabilityDigest = digest;
+    broker.warm.mockClear();
+    turn = createTurn();
+    broker.resolveCapabilities.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(404, 'not_found'),
+    );
+    const names = (await turn.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    );
+    expect(names).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      ...(digest === WORKSPACE_CAPABILITY_DIGEST ? ['web_fetch'] : []),
+    ]);
+    expect(broker.warm).toHaveBeenCalledOnce();
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
+
+it.each([403, 503])(
+  'does not downgrade a capability HTTP %s to completed warm metadata',
+  async (status) => {
+    const refusal = new HostedWorkspaceBrokerRejection(status, 'unavailable');
+    broker.resolveCapabilities.mockRejectedValueOnce(refusal);
+    await expect(turn.declarations(new AbortController().signal)).rejects.toBe(
+      refusal,
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
+
 it('preserves resident public Plan approval before restoring file mutations', async () => {
   broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
   const active = vi
