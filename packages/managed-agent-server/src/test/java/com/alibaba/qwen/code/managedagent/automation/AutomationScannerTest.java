@@ -2594,6 +2594,14 @@ class AutomationScannerTest {
             rows.destroy();
         }
         assertThat(claims.get()).isEqualTo(1);
+        // The armed task is the one that has to win: only it derives slots,
+        // so a tick that kept just the firing task would still claim once
+        // yet never record the slot that came due meanwhile.
+        assertThat(ledger.listOccurrences(tenant, automation.id(), null, 100)
+                .rows().stream()
+                .map(OccurrenceView::occurrence)
+                .map(AutomationLedgerStore.OccurrenceRow::occurrenceKey))
+                .contains("schedule:2026-06-01T10:02:00Z");
     }
 
     @Test
