@@ -774,6 +774,16 @@ describe('Mod session ownership', () => {
       reason: 'aborted',
     });
 
+    // MAX_TOKENS finished the first part before the model went on.
+    const recovered = session.startTurn('', turnSignal, abortHost)!;
+    recovered.saw(content('Part one, '));
+    recovered.saw(finished());
+    recovered.saw({ type: LlmEventType.Retry, isContinuation: true });
+    recovered.saw(content('part two.'));
+    recovered.saw(finished());
+    await recovered.complete();
+    expect(ended().answer).toBe('Part one, part two.');
+
     // Cancelled while its tools ran: the last finished response stands.
     const cancelled = session.startTurn('', turnSignal, abortHost)!;
     cancelled.saw({
@@ -1109,6 +1119,28 @@ describe('Mod session ownership', () => {
     expect(order.slice(0, 2)).toEqual(['stdout', 'note']);
   });
 
+  it('writes the note of a turn an exit ended', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(((
+      _chunk: unknown,
+      encoding?: unknown,
+      callback?: unknown,
+    ) => {
+      const done = typeof encoding === 'function' ? encoding : callback;
+      if (typeof done === 'function') done();
+      return true;
+    }) as typeof process.stderr.write);
+    onTestFinished(() => stderr.mockRestore());
+    const { session, runtime } = await loadTurns(['hello-mod'], {
+      getOutputFormat: () => OutputFormat.TEXT,
+    });
+    runtime.completeTurn.mockResolvedValueOnce('TL;DR');
+    session.startTurn('', turnSignal, abortHost)!.saw(content('Halfway'));
+    await runExitCleanup();
+    expect(
+      stderr.mock.calls.filter(([text]) => String(text).includes('TL;DR')),
+    ).toEqual([['[Mod hello-mod] TL;DR\n']]);
+  });
+
   it('ends the turn a close cuts short before session.end', async () => {
     const { session, runtime, ended } = await loadTurns();
     const order: string[] = [];
@@ -1268,6 +1300,30 @@ describe('Mod session ownership', () => {
       `$.turn.abort: ${turn.id} is already ending`,
     );
     await turn.complete();
+    expect(ended()).toMatchObject({ reason: 'answer', isAborted: false });
+  });
+
+  it('lets $.turn.abort try again after the host failed to cancel', async () => {
+    const { session, abortTurn, ended } = await loadTurns();
+    const abort = vi
+      .fn<() => boolean>()
+      .mockImplementationOnce(() => {
+        throw new Error('cancel failed');
+      })
+      .mockReturnValue(true);
+    const turn = session.startTurn('', turnSignal, abort)!;
+    expect(() => abortTurn(turn.id)).toThrow('cancel failed');
+    abortTurn(turn.id);
+    expect(abort).toHaveBeenCalledTimes(2);
+    await turn.complete();
+    expect(ended()).toMatchObject({ reason: 'aborted' });
+
+    // One the host never cancelled ends as what it streamed.
+    const failing = session.startTurn('', turnSignal, () => {
+      throw new Error('cancel failed');
+    })!;
+    expect(() => abortTurn(failing.id)).toThrow('cancel failed');
+    await failing.complete();
     expect(ended()).toMatchObject({ reason: 'answer', isAborted: false });
   });
 

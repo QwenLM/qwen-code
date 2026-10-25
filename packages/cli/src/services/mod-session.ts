@@ -182,7 +182,8 @@ export class ModSession implements ICommandLoader {
       () => {
         // Exit cleanup iterates its registry; do not splice its current item.
         this.unregisterCleanup = () => {};
-        return this.close();
+        // No result follows an exit, so a note of the turn it ended is due.
+        return this.close().then(() => this.flushOutput());
       },
       { first: Boolean(this.terminal) },
     );
@@ -617,8 +618,10 @@ export class ModSession implements ICommandLoader {
         );
         break;
       case LlmEventType.Retry:
-        // A fresh attempt replaces what the failed one streamed.
+        // A fresh attempt replaces what the failed one streamed. A
+        // continuation appends, also to a response MAX_TOKENS finished.
         if (!event.isContinuation) turn.streaming = '';
+        else if (!turn.streaming) turn.streaming = turn.answer;
         break;
       case LlmEventType.ModelFallback:
         turn.streaming = '';
@@ -725,11 +728,16 @@ export class ModSession implements ICommandLoader {
     if (turn.aborting)
       throw new Error(`$.turn.abort: ${turnId} is already ending`);
     turn.aborting = true;
-    // A turn the host finds already over or cancelled is not the Mod's end.
-    if (!turn.abort()) {
-      turn.aborting = false;
-      throw new Error(`$.turn.abort: ${turnId} is already ending`);
+    let cancelled = false;
+    try {
+      cancelled = turn.abort();
+    } finally {
+      // A turn the host finds already over or cancelled, or fails to cancel,
+      // is not the Mod's end.
+      turn.aborting = cancelled;
     }
+    if (!cancelled)
+      throw new Error(`$.turn.abort: ${turnId} is already ending`);
     logger.debug(`$.turn.abort: cancelled turn ${turnId}`);
   }
 

@@ -120,12 +120,12 @@ These go into the user guide:
 - Mod session tests:
   - `turn.start` runs beside the turn, and its end after the turn's tools;
   - cancelling the turn ends its `turn.start` hooks, not its `turn.complete` hooks;
-  - the answer through retries and cancels;
+  - the answer through retries, cancels and a continuation after MAX_TOKENS;
   - the reasons;
   - the usage sums, with reasoning counted once for each provider and a consistent total deciding, counts that are not whole counts, and the model of the turn's own prompt;
   - a prompt and an answer too long for a Mod payload;
-  - the note, cut without splitting a character, kept to 4,096 characters in a terminal, and written beneath the answer in text mode;
-  - the rules of `$.turn.abort`;
+  - the note, cut without splitting a character, kept to 4,096 characters in a terminal, and written beneath the answer in text mode, also when an exit ended the turn;
+  - the rules of `$.turn.abort`, and a second try after the host failed to cancel;
   - a failed hook;
   - a turn whose session has ended;
   - a turn still running when the session closes, an end the close overtook, an end already running at the close, every queued end in order, and the budget that bounds them.
