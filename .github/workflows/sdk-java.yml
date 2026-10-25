@@ -255,9 +255,13 @@ jobs:
               echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
               exit 1
             fi
-            mkdir -p -- "$(dirname -- "${cached}")"
-            cp -- "${archive}" "${cached}.$$"
-            mv -- "${cached}.$$" "${cached}"
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
           fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
@@ -777,9 +781,13 @@ jobs:
               echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
               exit 1
             fi
-            mkdir -p -- "$(dirname -- "${cached}")"
-            cp -- "${archive}" "${cached}.$$"
-            mv -- "${cached}.$$" "${cached}"
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
           fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
@@ -1684,9 +1692,13 @@ jobs:
               echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
               exit 1
             fi
-            mkdir -p -- "$(dirname -- "${cached}")"
-            cp -- "${archive}" "${cached}.$$"
-            mv -- "${cached}.$$" "${cached}"
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
           fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
@@ -1935,9 +1947,13 @@ jobs:
               echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
               exit 1
             fi
-            mkdir -p -- "$(dirname -- "${cached}")"
-            cp -- "${archive}" "${cached}.$$"
-            mv -- "${cached}.$$" "${cached}"
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
           fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
@@ -2291,9 +2307,13 @@ jobs:
               echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
               exit 1
             fi
-            mkdir -p -- "$(dirname -- "${cached}")"
-            cp -- "${archive}" "${cached}.$$"
-            mv -- "${cached}.$$" "${cached}"
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
           fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
