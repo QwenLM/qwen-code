@@ -215,6 +215,16 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain(
       'if that write is refused or fails, the watch cannot carry them',
     );
+    // Fixes run unattended only on the user's own answer, confirmed by the
+    // tool's dialog; --yes never makes that choice.
+    expect(body).toContain('"Start, fixes run without asking"');
+    expect(body).toContain('"Resume, fixes run without asking"');
+    expect(body).toContain(
+      'call `autofix_pr` with `command: "unattended"` and `pr`: its dialog confirms the answer',
+    );
+    expect(body).toContain(
+      '`--yes` skips the question and so never makes this choice.',
+    );
     // The start reports a watch only when its task exists.
     expect(body).toContain('When step 8 created the task, tell the user');
     // Whether another session still runs a watch is the helper's to say.

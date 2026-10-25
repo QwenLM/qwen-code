@@ -224,7 +224,8 @@ describe('Config sessionEnvClaimed guard', () => {
     const watch = {
       pr: 7,
       repo: 'o/r',
-      host: null,
+      targetDir: '/repo',
+      preparedAt: null,
       worktree: '/w',
       authorCanPush: true,
     };
@@ -234,6 +235,22 @@ describe('Config sessionEnvClaimed guard', () => {
     config.startNewSession('resumed-session');
     expect(grants.confirmedWatch(first, 7)).toBeUndefined();
     expect(grants.confirmedWatch('resumed-session', 7)).toBeUndefined();
+  });
+
+  it('shutdown forgets them too, so a daemon that loads the session again asks again', async () => {
+    const { Config } = await import('./config.js');
+    const grants = await import('../tools/autofix-pr-grants.js');
+    const config = new Config({ ...baseParams, sessionId: 'daemon-session' });
+    grants.recordConfirmedWatch('daemon-session', {
+      pr: 7,
+      repo: 'o/r',
+      targetDir: '/repo',
+      preparedAt: null,
+      worktree: '/w',
+      authorCanPush: true,
+    });
+    await config.shutdown({ shutdownTelemetry: false });
+    expect(grants.confirmedWatch('daemon-session', 7)).toBeUndefined();
   });
 });
 

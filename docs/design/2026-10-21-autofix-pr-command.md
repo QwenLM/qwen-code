@@ -917,6 +917,8 @@ the reason for a state file that could not be read. Each watch carries:
   head the watch knows (`headSha`);
 - `pushes` and `maxPushes`;
 - `session`, the session that owns it, and `thisSession`;
+- `preparedAt`, when `prepare` made the watch (null for one from before it
+  recorded that), which `prepare` reports too;
 - `lastCheck`, the last run of the watch's own gate (one with a
   `--session`) that read the PR — it touches
   `.qwen/tmp/autofix-pr-<n>-gate.checked` on every such run, which
@@ -1007,9 +1009,10 @@ parameters carry its options (`pr`, `repo`, `host`, `take_over`, `task`,
 `--name=value`, and starts the CLI without a shell, so nothing in a
 parameter is read as shell syntax or as an option; a parameter the command
 does not take is a refusal before anything runs. `reply`'s plan must be the
-one the skill writes, `.qwen/tmp/autofix-pr-<n>-plan.json`, and not a file
-inside the worktree: a file the PR's own tree carries must not speak on the
-PR.
+one the skill writes, `.qwen/tmp/autofix-pr-<n>-plan.json` beside the
+worktree — for a watch this session prepared, beside that very worktree —
+and not a file inside it: a file the PR's own tree carries must not speak on
+the PR.
 
 - It runs the CLI of the session: `QWEN_CODE_CLI` when it names a usable
   entry — a script through the JavaScript interpreter, an executable
@@ -1029,6 +1032,8 @@ PR.
   outside the model, and only the user discards a worktree's work.
 - Only the main session has it: subagents, forks, teammates and workspace
   agents do not, and code mode's `exec` cannot call it.
+- In plan mode it runs nothing but `status`: a rule lets a round's helpers
+  past the dialog plan mode would block, and each of them writes.
 
 `status` only reads and needs no approval. Every other call asks, as a shell
 command does — in auto mode the classifier decides — and rules match on
@@ -1036,19 +1041,21 @@ command does — in auto mode the classifier decides — and rules match on
 
 - **A watch this session prepared.** When `prepare` succeeds through the
   tool, the session records, in memory, the watch it reported: the PR, its
-  repository and host, the worktree, and whether GitHub said just then that
-  the author can push. A helper of any other watch is matched as
-  `unconfirmed <command>`, so a rule for `push` covers only the watches the
-  user started or resumed in this session. The state file sits in reach of
+  repository, the directory it was prepared from, the worktree, its
+  `preparedAt`, and whether GitHub said just then that the author can push.
+  A helper of any other watch — one this session did not prepare, or one of
+  that number in another clone after `/cd` — is matched as `unconfirmed
+<command>`, so a rule for `push` covers only the watches the user started
+  or resumed in this session. The state file sits in reach of
   the code a round runs; none of this is read back from it. The record ends
   with `cleanup` of the PR through the tool and with the session.
 - **A take-over** is matched as `take-over prepare` or `take-over cleanup`,
   so no rule for `prepare` or `cleanup` covers taking a watch from another
   session.
-- **A start, a take-over and a helper of an unconfirmed watch** offer no
-  "always allow": a saved rule would let every later one through. The
-  `prepare` dialog says that the watch's rounds then push and reply without
-  asking.
+- **A start, a new schedule, a take-over and a helper of an unconfirmed
+  watch** offer no "always allow": a saved rule would let every later one
+  through. The `prepare` dialog says that the watch's rounds then push and
+  reply without asking.
 
 The skill's `allowedTools` grant the commands a round runs — `snapshot`,
 `ci-log`, `sync`, `push`, `reply`, `rerun`, `status` and `cleanup` — and not
@@ -1059,8 +1066,9 @@ that another task drives (Section 6.1, step 5; Section 6.8), `push` checks
 where it pushes and counts the pushes, and `reply` answers only threads with
 a new comment from a trusted author.
 
-Where the tool is not registered — a tool allowlist in the settings, or the
-per-command execution sandbox — the skill runs the same helper through the
+Where the tool is not registered — a tool allowlist in the settings
+(`autofix_pr` is one of the core tools it lists), or the per-command
+execution sandbox — the skill runs the same helper through the
 shell tool, as before. Under that sandbox the fix agent cannot start anyway:
 an `agent` with `working_dir` is refused there. The daemon's shell guard
 checks shell calls only; it never saw the git commands a helper runs, and
@@ -1070,29 +1078,39 @@ the tool's working directory is the session's own.
 
 The fix agent asks before each command in the default, auto-edit and auto
 modes, so until now a watch ran unattended only when the whole session
-lets commands run. `command: "unattended"` with `pr` asks whether the fix
-agent of this watch may run its commands without asking, and records the
-answer for this session.
+lets commands run. The start, take-over and resume questions now offer a
+choice for that ("Start, fixes run without asking"), and on it the skill
+calls `command: "unattended"` with `pr`, which confirms the choice in a
+dialog of its own and records it for this session.
 
-- It always asks, in a dialog with no "always allow", and the grant is made
-  only from that dialog's answer: no saved rule, hook, auto-edit approval or
-  auto-mode classifier stands in for it. Without anyone to answer — a
-  headless run, a background agent — it is refused, and so is the answer of
-  a stream-json host, a program that would run in YOLO mode if it wanted
-  this. In YOLO mode nothing is needed, and it records nothing.
+- The dialog has no "always allow", and the grant is made only from its
+  answer: no saved rule, hook, auto-edit approval or auto-mode classifier
+  stands in for it. Declining it is a cancelled tool call, which ends the
+  turn, so the skill offers it only to a user who just chose it; the watch
+  is then left prepared without its task, and the start or resume is run
+  again. Without anyone to answer — a headless run, a background agent — it
+  is refused, and so is the answer of a stream-json host, a program that
+  would run in YOLO mode if it wanted this. In YOLO mode nothing is needed,
+  and it records nothing. A refusal known before the dialog (the folder,
+  the host, the watch below) is given without one.
 - It grants only a watch this session prepared through the tool
   (Section 6.12) whose author GitHub then said can push, and only while
-  `status <pr>` lists it as this session's, not ended, of that repository,
-  with that worktree. `status` reads the state file, so it can only take the
+  `status <pr>` lists it as this session's, not ended, of that repository
+  (the name compared without case), with that worktree and that
+  `preparedAt` — a watch another process of the session prepared again is
+  another one. The grant is for the watch the dialog named; one prepared
+  again before the answer is refused. `status` reads the state file, so it can only take the
   grant away. A PR by anyone else is never watched (Section 8), and a
   `--once` round of one asks for each command. An untrusted folder, or a
   session-agents session, is refused: their subagents get no privileged
   mode.
 - The grant lives in the CLI process, keyed by the session id and the
   worktree's real path. Nothing is written to disk.
-- It reaches one agent: a `general-purpose` agent that the session itself
-  — not a subagent of it — launches with `working_dir` at the granted
-  worktree. Before the launch it checks again: the folder still trusted, the
+- It reaches one agent: the built-in `general-purpose` agent — not a
+  project's or user's definition of that name, which may run another
+  executor that no deny rule of this session reaches — when the session
+  itself, not a subagent of it, launches it with `working_dir` at the
+  granted worktree. Before the launch it checks again: the folder still trusted, the
   watch still as above. Then the agent runs in YOLO mode, and so do the
   agents it starts. Plan mode stays plan mode; an agent of another executor
   (Codex), a teammate and a workflow agent are not affected.
@@ -1100,7 +1118,8 @@ answer for this session.
   `prepare` of the PR (a start or a resume asks again), with a check at
   launch that fails, and with the session: `/clear`, `/new` and `/resume`
   drop what the session confirmed and granted, the session left and the one
-  entered alike.
+  entered alike, and so does closing it, which a daemon does before it loads
+  the session again. Plan mode grants nothing.
 
 It does not contain the agent. The agent runs as an agent of a YOLO session
 would: with the user's credentials, able to reach files outside the

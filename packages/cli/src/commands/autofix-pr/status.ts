@@ -41,6 +41,8 @@ export interface WatchStatus {
   maxPushes: number;
   /** The session that owns the watch; '' when prepared outside one. */
   session: string;
+  /** When `prepare` made the watch, or null for one from before it said. */
+  preparedAt: string | null;
   thisSession: boolean;
   /** The last run of the watch's own gate (one with its session) that read
    * the PR, or null before the first. */
@@ -156,6 +158,7 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         pushes: state.pushCount ?? 0,
         maxPushes: MAX_PUSHES,
         session: state.sessionId,
+        preparedAt: state.preparedAt ?? null,
         thisSession: state.sessionId === session,
         lastCheck,
         checkedRecently:

@@ -36,11 +36,12 @@ const mode = process.env.FAKE_AUTOFIX_MODE;
 if (sub !== 'autofix-pr') { process.stderr.write('not autofix-pr'); process.exit(2); }
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
-else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, authorCanPush: process.env.FAKE_CAN_PUSH === '1' }) + '\\n');
+else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, authorCanPush: process.env.FAKE_CAN_PUSH === '1' }) + '\\n');
 else if (command === 'status') process.stdout.write(process.env.FAKE_STATUS + '\\n');
 else process.stdout.write(JSON.stringify({ command, rest, session: process.env.QWEN_CODE_SESSION_ID, cwd: process.cwd() }) + '\\n');
 `;
 
+const PREPARED_AT = '2026-10-25T10:00:00.000Z';
 let dir: string;
 let worktree: string;
 const signal = () => new AbortController().signal;
@@ -67,6 +68,7 @@ function status(watch: Record<string, unknown> = {}): string {
         pr: 12,
         repo: 'o/r',
         host: 'github.com',
+        preparedAt: PREPARED_AT,
         thisSession: true,
         ended: null,
         worktreePath: worktree,
@@ -100,6 +102,7 @@ beforeEach(() => {
   vi.stubEnv('FAKE_STATUS', status());
   vi.stubEnv('FAKE_WORKTREE', worktree);
   vi.stubEnv('FAKE_CAN_PUSH', '1');
+  vi.stubEnv('FAKE_PREPARED_AT', PREPARED_AT);
   vi.stubEnv('FAKE_AUTOFIX_MODE', '');
 });
 
@@ -147,6 +150,14 @@ describe('validateAutofixPrParams', () => {
     ],
     [
       { command: 'reply', pr: 1, plan: '/home/me/.ssh/id_rsa' },
+      /reply plan the skill writes/,
+    ],
+    [
+      {
+        command: 'reply',
+        pr: 1,
+        plan: '/repo/.qwen/tmp/AUTOFIX-PR-1/.qwen/tmp/autofix-pr-1-plan.json',
+      },
       /reply plan the skill writes/,
     ],
   ])('refuses %j', (params, error) => {
@@ -272,6 +283,44 @@ describe('permission rules', () => {
     );
   });
 
+  it('treats a watch prepared from another clone as unconfirmed after /cd', async () => {
+    await prepare();
+    const elsewhere = makeConfig({ getTargetDir: () => os.tmpdir() });
+    expect(
+      invocation({ command: 'push', pr: 12 }, elsewhere)
+        .getPermissionMatchParams!()['command'],
+    ).toBe('unconfirmed push');
+  });
+
+  it('runs no helper but status in plan mode, whatever a rule allows', async () => {
+    await prepare();
+    const plan = makeConfig({ getApprovalMode: () => ApprovalMode.PLAN });
+    const push = await invocation({ command: 'push', pr: 12 }, plan).execute(
+      signal(),
+    );
+    expect(push.error?.message).toMatch(/not in plan mode/);
+    const status = await invocation({ command: 'status' }, plan).execute(
+      signal(),
+    );
+    expect(status.error).toBeUndefined();
+    const unattended = invocation({ command: 'unattended', pr: 12 }, plan);
+    expect(unattended.requiresUserInteraction!()).toBe(false);
+    expect((await unattended.execute(signal())).error?.message).toMatch(
+      /plan mode/,
+    );
+  });
+
+  it('asks for a new schedule each time', async () => {
+    await prepare();
+    expect(
+      await invocation({
+        command: 'schedule',
+        pr: 12,
+        again: true,
+      }).getConfirmationDetails(signal()),
+    ).toMatchObject({ hideAlwaysAllow: true });
+  });
+
   it('asks for a start each time, saying what it lets through', async () => {
     const details = await invocation({
       command: 'prepare',
@@ -285,11 +334,17 @@ describe('permission rules', () => {
   });
 
   it('always asks the user for unattended, with no "always allow", except in YOLO mode', async () => {
+    // Nothing to answer before a prepare: no dialog, just the refusal.
+    const early = invocation({ command: 'unattended', pr: 12 });
+    expect(early.requiresUserInteraction!()).toBe(false);
+    expect(await early.getDefaultPermission()).toBe('allow');
+    await prepare();
     const asked = invocation({ command: 'unattended', pr: 12 });
     expect(asked.requiresUserInteraction!()).toBe(true);
     expect(await asked.getConfirmationDetails(signal())).toMatchObject({
       type: 'info',
       hideAlwaysAllow: true,
+      permissionRules: [],
     });
     const yolo = invocation(
       { command: 'unattended', pr: 12 },
@@ -363,6 +418,48 @@ describe('running a helper', () => {
     });
   });
 
+  it('passes a path with shell syntax through as one argument', async () => {
+    const clone = path.join(dir, 'a $(touch pwned); b');
+    const tmp = path.join(clone, '.qwen', 'tmp');
+    fs.mkdirSync(path.join(tmp, 'autofix-pr-12'), { recursive: true });
+    vi.stubEnv('FAKE_WORKTREE', path.join(tmp, 'autofix-pr-12'));
+    await prepare();
+    const plan = path.join(tmp, 'autofix-pr-12-plan.json');
+    const result = await invocation({ command: 'reply', pr: 12, plan }).execute(
+      signal(),
+    );
+    expect(JSON.parse(String(result.llmContent)).rest).toEqual(['12', plan]);
+    expect(fs.existsSync(path.join(dir, 'pwned'))).toBe(false);
+  });
+
+  it('takes the plan of a watch prepared here only from beside its worktree', async () => {
+    await prepare();
+    const elsewhere = path.join(
+      os.tmpdir(),
+      'other',
+      '.qwen',
+      'tmp',
+      'autofix-pr-12-plan.json',
+    );
+    const result = await invocation({
+      command: 'reply',
+      pr: 12,
+      plan: elsewhere,
+    }).execute(signal());
+    expect(result.error?.message).toContain(
+      path.join(dir, '.qwen', 'tmp', 'autofix-pr-12-plan.json'),
+    );
+  });
+
+  it('takes a run id the model gives as a number', () => {
+    const tool = new AutofixPrTool(makeConfig());
+    expect(
+      autofixPrArgs(
+        tool.build({ command: 'rerun', pr: 12, run_id: 99 as never }).params,
+      ),
+    ).toEqual(['rerun', '12', '99']);
+  });
+
   it("returns a refusal with the helper's message", async () => {
     vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
     const result = await invocation({ command: 'sync', pr: 12 }).execute(
@@ -397,7 +494,8 @@ describe('running a helper', () => {
     expect(confirmedWatch('session-a', 12)).toEqual({
       pr: 12,
       repo: 'o/r',
-      host: null,
+      targetDir: dir,
+      preparedAt: PREPARED_AT,
       worktree,
       authorCanPush: true,
     });
@@ -453,6 +551,31 @@ describe('unattended', () => {
     );
   });
 
+  it('grants only the watch its dialog named', async () => {
+    await prepare();
+    const inv = invocation({ command: 'unattended', pr: 12 });
+    const details = await inv.getConfirmationDetails(signal());
+    // Prepared again, of another repository, between the dialog and the grant.
+    await invocation({ command: 'prepare', pr: 12, repo: 'other/x' }).execute(
+      signal(),
+    );
+    await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    expect((await inv.execute(signal())).error?.message).toMatch(
+      /changed after the dialog/,
+    );
+    expect(await granted()).toBe(false);
+  });
+
+  it('ends when the watch was prepared again in another process', async () => {
+    await prepare();
+    await confirmAndRun();
+    vi.stubEnv(
+      'FAKE_STATUS',
+      status({ preparedAt: '2026-10-25T11:00:00.000Z' }),
+    );
+    expect(await granted()).toBe(false);
+  });
+
   it('matches the worktree by its real path', async () => {
     await prepare();
     await confirmAndRun();
@@ -464,6 +587,13 @@ describe('unattended', () => {
 
   it('ends with a later prepare of the PR, which asks again, and with its cleanup', async () => {
     await prepare();
+    await confirmAndRun();
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
+    await invocation({ command: 'prepare', pr: 12, repo: 'o/r' }).execute(
+      signal(),
+    );
+    vi.stubEnv('FAKE_AUTOFIX_MODE', '');
+    expect(await granted()).toBe(false);
     await confirmAndRun();
     await prepare();
     expect(await granted()).toBe(false);
@@ -494,7 +624,7 @@ describe('unattended', () => {
     expect(result.error?.message).toMatch(/cannot push/);
   });
 
-  it.each<[string, Record<string, unknown>, RegExp]>([
+  it.each<[string, Record<string, unknown>, RegExp | null]>([
     ['another session owns it', { thisSession: false }, /another session/],
     ['it was ended', { ended: { at: 'x', reason: 'stop' } }, /was ended/],
     ['its worktree is gone', { worktreeExists: false }, /not the one prepared/],
@@ -505,10 +635,15 @@ describe('unattended', () => {
     ],
     ['it is another PR', { pr: 13 }, /has no watch/],
     ['it is a PR of another repository', { repo: 'fork/r' }, /has no watch/],
+    ['the repository differs only in case', { repo: 'O/R' }, null],
   ])('refuses when %s', async (_, watch, reason) => {
     await prepare();
     vi.stubEnv('FAKE_STATUS', status(watch));
     const result = await confirmAndRun();
+    if (reason === null) {
+      expect(result.error).toBeUndefined();
+      return;
+    }
     expect(result.error?.message).toMatch(reason);
     expect(await granted()).toBe(false);
   });
@@ -543,6 +678,13 @@ describe('unattended', () => {
     ],
   ])('refuses when %s', async (_, config, outcome, reason) => {
     await prepare();
+    if (outcome === ToolConfirmationOutcome.ProceedOnce) {
+      // Known before any dialog: none is shown.
+      expect(
+        invocation({ command: 'unattended', pr: 12 }, config)
+          .requiresUserInteraction!(),
+      ).toBe(false);
+    }
     const result = await confirmAndRun(config, outcome);
     expect(result.error?.message).toMatch(reason);
     expect(await granted()).toBe(false);

@@ -22,8 +22,10 @@ export interface ConfirmedWatch {
   pr: number;
   /** `<owner>/<repo>`, as `prepare` was given it. */
   repo: string;
-  /** The host `prepare` was given, or null for the default one. */
-  host: string | null;
+  /** The session's directory it was prepared from: one clone's watch. */
+  targetDir: string;
+  /** When `prepare` made the watch: a later one of the PR is another. */
+  preparedAt: string | null;
   /** The worktree's canonical path. */
   worktree: string;
   /** What GitHub said when `prepare` asked, just now. */

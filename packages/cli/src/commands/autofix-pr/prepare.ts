@@ -221,6 +221,7 @@ function report(state: AutofixPrState, extra: Record<string, unknown>): void {
       viewer: state.viewer,
       prAuthor: state.prAuthor,
       sessionId: state.sessionId,
+      preparedAt: state.preparedAt ?? null,
       authorCanPush: state.authorCanPush ?? false,
       ...extra,
     }),

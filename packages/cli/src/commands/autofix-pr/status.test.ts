@@ -89,6 +89,7 @@ describe('runStatus', () => {
       text: 'IC_9: a design call',
     };
     const seven = write(7, {
+      preparedAt: '2026-10-01T00:00:00.000Z',
       pushCount: 3,
       watch: { every: 5, reply: false, instructions: 'keep the API' },
       needsHuman: [item],
@@ -133,6 +134,7 @@ describe('runStatus', () => {
         pushes: 3,
         maxPushes: 10,
         session: 'session-a',
+        preparedAt: '2026-10-01T00:00:00.000Z',
         thisSession: true,
         lastCheck: checked.toISOString(),
         checkedRecently: false,
@@ -149,6 +151,7 @@ describe('runStatus', () => {
       expect.objectContaining({
         pr: 12,
         session: 'session-b',
+        preparedAt: null,
         thisSession: false,
         pushes: 0,
         lastCheck: null,

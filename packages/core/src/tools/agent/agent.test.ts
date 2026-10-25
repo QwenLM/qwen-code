@@ -2572,6 +2572,15 @@ describe('AgentTool', () => {
       };
       const fix = (wt: string) =>
         review(wt, { subagent_type: 'general-purpose' });
+      /** The built-in general-purpose definition, as the registry gives it. */
+      const builtin = (extra: Partial<SubagentConfig> = {}) =>
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...mockSubagents[0],
+          name: 'general-purpose',
+          isBuiltin: true,
+          ...extra,
+        });
+      beforeEach(() => builtin());
 
       itInRepo(
         'runs the agent of a granted worktree in YOLO mode once its watch checks out',
@@ -2617,6 +2626,19 @@ describe('AgentTool', () => {
           vi.mocked(config.getApprovalMode).mockReturnValue(PLAN);
           await run(fix(wt));
           expect(childConfig(1).getApprovalMode()).toBe(PLAN);
+          expect(check).not.toHaveBeenCalled();
+        },
+      );
+
+      itInRepo(
+        "grants nothing to a project's own general-purpose agent",
+        async (repo) => {
+          const wt = addWorktree(repo);
+          vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+          const check = grant(wt, true);
+          builtin({ isBuiltin: false });
+          await run(fix(wt));
+          expect(childConfig().getApprovalMode()).toBe(AUTO_EDIT);
           expect(check).not.toHaveBeenCalled();
         },
       );

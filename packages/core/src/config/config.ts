@@ -8057,6 +8057,9 @@ export class Config {
     // installs is owned and cleaned up by that profile.
     if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
+    // What the session confirmed for autofix-pr ends with it: a daemon that
+    // loads it again under the same id asks again.
+    forgetAutofixPrSession(this.sessionId);
     void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
     // Only a Config with a Runtime waits for it, so others close their

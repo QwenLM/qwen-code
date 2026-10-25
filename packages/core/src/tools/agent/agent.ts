@@ -3465,7 +3465,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const unattendedFixes =
         !isCodex &&
         worktreeIsolation?.externallyManaged === true &&
-        this.params.subagent_type === 'general-purpose' &&
+        this.params.subagent_type?.toLowerCase() === 'general-purpose' &&
+        // The built-in one: a project's or user's definition of that name may
+        // run another executor, which no deny rule of this session reaches.
+        subagentConfig.isBuiltin === true &&
+        !subagentConfig.executor &&
         getCurrentAgentId() === null &&
         parentApprovalMode !== ApprovalMode.PLAN &&
         this.config.isTrustedFolder() &&
