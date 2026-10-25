@@ -29,7 +29,13 @@ export type ManagedAgentRuntimeState =
   | 'ready'
   | 'failed';
 
-export type ManagedApprovalMode = 'default' | 'auto-edit' | 'yolo';
+export interface ManagedPermissionRules {
+  readonly allow: readonly string[];
+  readonly ask: readonly string[];
+  readonly deny: readonly string[];
+}
+
+export type ManagedApprovalMode = 'default' | 'auto-edit' | 'auto' | 'yolo';
 export type ManagedInputBlock = components['schemas']['InputBlock'];
 export type ManagedSessionSkills =
   components['schemas']['WebShellSessionSkills'];
@@ -38,7 +44,29 @@ export type ManagedSessionMcp = components['schemas']['PublicMcpCatalog'];
 export function isManagedApprovalMode(
   value: unknown,
 ): value is ManagedApprovalMode {
-  return value === 'default' || value === 'auto-edit' || value === 'yolo';
+  return (
+    value === 'default' ||
+    value === 'auto-edit' ||
+    value === 'auto' ||
+    value === 'yolo'
+  );
+}
+
+export function isManagedInitialApprovalMode(
+  value: unknown,
+): value is Exclude<ManagedApprovalMode, 'auto'> {
+  return isManagedApprovalMode(value) && value !== 'auto';
+}
+
+export function managedPermissionRulesEqual(
+  left: ManagedPermissionRules | undefined,
+  right: ManagedPermissionRules | undefined,
+): boolean {
+  return (['allow', 'ask', 'deny'] as const).every((kind) => {
+    const a = left?.[kind] ?? [];
+    const b = right?.[kind] ?? [];
+    return a.length === b.length && a.every((rule, index) => rule === b[index]);
+  });
 }
 
 export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
@@ -66,6 +94,8 @@ export interface ManagedSessionApproval extends ManagedSessionOptions {
   supported: boolean;
   planMode?: boolean;
   liveSupported?: boolean;
+  permissionRulesSupported?: boolean;
+  permissionRules?: ManagedPermissionRules;
 }
 
 export interface ManagedApprovalChangeResult {
@@ -74,6 +104,7 @@ export interface ManagedApprovalChangeResult {
   approvalRevision: number;
   replayed: boolean;
   planMode?: boolean;
+  permissionRules?: ManagedPermissionRules;
 }
 
 export interface ManagedModelContext {
@@ -429,6 +460,7 @@ export interface ManagedAgentProvider {
         approvalMode: ManagedApprovalMode;
         expectedRevision: number;
         planMode?: boolean;
+        permissionRules?: ManagedPermissionRules;
       },
       options: ManagedAgentCommandOptions & { requestId: string },
     ): Promise<ManagedApprovalChangeResult>;

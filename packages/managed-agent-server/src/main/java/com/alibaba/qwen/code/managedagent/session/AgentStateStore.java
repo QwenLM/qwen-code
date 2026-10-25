@@ -750,6 +750,18 @@ public interface AgentStateStore {
                 supported, agentDefinitionSupported);
     }
 
+    default WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported, Boolean planMode, boolean planModeSupported,
+            boolean liveSupported, Map<String, List<String>> permissionRules, boolean rulesSupported,
+            boolean autoSupported) {
+        if (permissionRules != null || "auto".equals(mode)) {
+            throw new UnsupportedOperationException("Extended approval policy is unavailable");
+        }
+        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported, planMode, planModeSupported, liveSupported);
+    }
+
     default WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
             String promptId) { return null; }
 

@@ -434,7 +434,11 @@ public final class ApiModels {
         }
     }
 
-    public record WebShellApprovalSelection(String mode, long revision, boolean planMode) {
+    public record WebShellApprovalSelection(String mode, long revision, boolean planMode,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, List<String>> permissionRules) {
+        public WebShellApprovalSelection(String mode, long revision, boolean planMode) {
+            this(mode, revision, planMode, null);
+        }
         public WebShellApprovalSelection(String mode, long revision) {
             this(mode, revision, false);
         }
@@ -442,7 +446,8 @@ public final class ApiModels {
 
     public record WebShellSessionApproval(String approvalMode, long approvalRevision,
             List<String> availableApprovalModes, boolean supported, boolean planMode, boolean planModeSupported,
-            boolean liveSupported) {}
+            boolean liveSupported, boolean permissionRulesSupported,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, List<String>> permissionRules) {}
 
     public record WebShellSessionApprovalRequest(@NotBlank @Size(max = 128) String sessionId) {}
 
@@ -450,10 +455,15 @@ public final class ApiModels {
             @NotBlank @Size(max = 128) String sessionId,
             @NotBlank @Size(max = 128) String idempotencyKey,
             @NotBlank String approvalMode,
-            @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision, Boolean planMode) {}
+            @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision, Boolean planMode,
+            Map<String, Object> permissionRules) {}
 
     public record WebShellApprovalChangeResult(String sessionId, String approvalMode,
-            long approvalRevision, boolean replayed, boolean planMode) {
+            long approvalRevision, boolean replayed, boolean planMode,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, List<String>> permissionRules) {
+        public WebShellApprovalChangeResult(String sessionId, String approvalMode, long approvalRevision, boolean replayed, boolean planMode) {
+            this(sessionId, approvalMode, approvalRevision, replayed, planMode, null);
+        }
         public WebShellApprovalChangeResult(String sessionId, String approvalMode, long approvalRevision, boolean replayed) {
             this(sessionId, approvalMode, approvalRevision, replayed, false);
         }
@@ -687,7 +697,11 @@ public final class ApiModels {
         }
     }
 
-    /** H6b: the definition fields a create or revise request carries. */
+    /**
+     * H6b: the definition fields a create or revise request carries. The
+     * gate is a JsonNode so an explicit null — which clears a committed
+     * gate — stays distinct from an absent field, which keeps it.
+     */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record AutomationDefinitionRequest(
             @JsonProperty("session_id") String sessionId, String goal,
@@ -695,7 +709,24 @@ public final class ApiModels {
             @JsonProperty("session_mode") String sessionMode, String overlap,
             @JsonProperty("catch_up") String catchUp,
             @JsonProperty("catch_up_limit") Long catchUpLimit,
-            Boolean enabled) {
+            Boolean enabled, JsonNode gate) {
+        public AutomationDefinitionRequest(String sessionId, String goal,
+                String cron, String timezone, String prompt,
+                String sessionMode, String overlap, String catchUp,
+                Long catchUpLimit, Boolean enabled) {
+            this(sessionId, goal, cron, timezone, prompt, sessionMode,
+                    overlap, catchUp, catchUpLimit, enabled, null);
+        }
+    }
+
+    /** The recent outcomes of a definition's gate probe. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicAutomationGateStatus(
+            @JsonProperty("last_outcome") String lastOutcome,
+            @JsonProperty("last_at") long lastAt,
+            @JsonProperty("quiet_since_delivery") int quietSinceDelivery,
+            @JsonProperty("consecutive_failures") int consecutiveFailures,
+            @JsonProperty("last_error") String lastError) {
     }
 
     /** H6b: one automation definition at its current revision. */
@@ -709,7 +740,8 @@ public final class ApiModels {
             @JsonProperty("catch_up_limit") Long catchUpLimit,
             boolean enabled, String state,
             @JsonProperty("created_at") long createdAt,
-            @JsonProperty("updated_at") long updatedAt) {
+            @JsonProperty("updated_at") long updatedAt, String gate,
+            @JsonProperty("gate_status") PublicAutomationGateStatus gateStatus) {
     }
 
     /** H5c: one route binding of a channel connection (PublicChannelRoute). */

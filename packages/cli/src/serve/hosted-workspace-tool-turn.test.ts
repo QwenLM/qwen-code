@@ -58,6 +58,7 @@ import {
   HOSTED_WORKSPACE_FILE_TOOLS,
   HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_INPUT_PREVIEW_TOOLS,
+  HOSTED_TODO_WRITE_TOOL,
   HOSTED_MEMBER_PLAN_TOOL,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
@@ -70,6 +71,7 @@ import {
   HOSTED_TOOL_APPROVAL_POLICY,
   HostedApprovalWaiters,
   hostedActionAllowed,
+  hostedApprovalAsks,
   resolveHostedAction,
   type HostedApprovalMode,
   type HostedApprovalSettings,
@@ -197,6 +199,7 @@ function createTurn(
     timeoutMs?: number;
     readSettings?: () => Promise<HostedApprovalSettings>;
     isBlocked?: () => boolean;
+    permissionRules?: HostedApprovalSettings['permissionRules'];
   },
   hooks?: HostedHookSession,
   skills?: HostedSkillCatalog,
@@ -217,6 +220,9 @@ function createTurn(
       settings: {
         mode: approval.mode,
         timeoutMs: approval.timeoutMs ?? 60_000,
+        ...(approval.permissionRules
+          ? { permissionRules: approval.permissionRules }
+          : {}),
       },
       waiters,
       readSettings: approval.readSettings,
@@ -1542,7 +1548,98 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
-it('offers glob only under the /2 and the read Workspace profiles', async () => {
+it.each([
+  { url: 'http://example.com', prompt: 'Read' },
+  { url: 'https://user:secret@example.com', prompt: 'Read' },
+  { url: 'https://example.com', prompt: '' },
+  { url: 'https://example.com', prompt: 'Read', format: 'json' },
+  { url: 'https://example.com', prompt: 'Read', headers: {} },
+])(
+  'refuses invalid web_fetch arguments before acquiring a Runtime: %j',
+  async (args) => {
+    const call = { ...calls[0], name: 'web_fetch', args };
+    const result = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(result)).toContain('Hosted web_fetch requires');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['default', 'auto-edit'] as const)(
+  'requires %s web_fetch approval with the actual destination and persists the result',
+  async (mode) => {
+    turn = createTurn(false, { mode });
+    const call = {
+      ...calls[0],
+      name: 'web_fetch',
+      args: {
+        url: 'https://github.com/QwenLM/qwen-code/blob/main/README.md',
+        prompt: 'Summarize',
+      },
+    };
+    const running = turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const requestId = await requested();
+    const input = JSON.parse(
+      (
+        await session.resources.read(
+          (await checkpoint()).approval!.invocationRef!,
+        )
+      ).toString(),
+    );
+    expect(JSON.parse(input.payloadJson).input.url).toBe(
+      'https://raw.githubusercontent.com/QwenLM/qwen-code/main/README.md',
+    );
+    expect(broker.prepare).not.toHaveBeenCalled();
+    await resolveHostedAction(session, waiters, requestId, answer('allow'));
+    const result = await running;
+    expect(broker.execute).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toMatchObject({
+      url: 'https://raw.githubusercontent.com/QwenLM/qwen-code/main/README.md',
+      prompt: 'Summarize',
+    });
+    expect(result[0].functionResponse?.response?.['executionStatus']).toBe(
+      'success',
+    );
+    expect((await session.sink.project()).at(-1)?.message?.parts).toEqual(
+      JSON.parse(JSON.stringify(result)),
+    );
+    await turn.consumeResults();
+    await turn.finish();
+  },
+);
+
+it('does not dispatch a denied web_fetch', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const call = {
+    ...calls[0],
+    name: 'web_fetch',
+    args: { url: 'https://example.com/docs', prompt: 'Summarize' },
+  };
+  const running = turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  expect(JSON.stringify(await running)).toContain('denied');
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+});
+
+it('offers glob under the unified Shell, file-search and read profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
     (
@@ -1561,21 +1658,21 @@ it('offers glob only under the /2 and the read Workspace profiles', async () => 
         { profile },
       ).declarations(signal)
     ).map((tool) => tool.name);
-  const file = ['read_file', 'write_file', 'edit'];
+  const file = ['read_file', 'write_file', 'edit', 'web_fetch'];
   const shellTools = [...file, 'run_shell_command', 'monitor'];
   await expect(advertised()).resolves.toEqual(file);
   await expect(advertised('hosted-workspace-files/1')).resolves.toEqual(file);
-  await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual(
-    shellTools,
-  );
+  await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual([
+    ...shellTools,
+    'glob',
+  ]);
   await expect(advertised('hosted-workspace-files/2')).resolves.toEqual([
     ...file,
     'glob',
   ]);
-  await expect(advertised('hosted-workspace-shell/2', true)).resolves.toEqual([
-    ...shellTools,
-    'glob',
-  ]);
+  await expect(
+    advertised('hosted-workspace-team-lead/1', true),
+  ).resolves.toEqual(shellTools);
   // #13753 I3: the read profile declares its two read tools, whatever
   // lane the Session has.
   await expect(advertised('hosted-workspace-read/1')).resolves.toEqual([
@@ -1631,6 +1728,7 @@ it('dispatches read_file and glob on the read profile', async () => {
 // #13753 I3: every tool that writes, and every other tool, is refused on
 // the read profile before the Broker is acquired.
 it.each([
+  ['web_fetch', { url: 'https://example.com/docs', prompt: 'Summarize' }],
   ['write_file', { file_path: 'a.txt', content: 'x' }],
   ['edit', { file_path: 'a.txt', old_string: 'a', new_string: 'b' }],
   ['run_shell_command', { command: 'touch a.txt' }],
@@ -1666,96 +1764,105 @@ it.each([
 // #13905 (item 41): the approval wiring keys on the Session's own profile,
 // not the call's name — a read-profile glob asks nothing under `default`,
 // while an MCP-declared glob on files/1 still asks.
-it('pre-approves glob only where the profile declares it', async () => {
-  const globCall = {
-    ...calls[0],
-    callId: 'call-glob',
-    name: 'glob',
-    args: { pattern: '**/*.ts' },
-  };
-  const globParts: Part[] = [
-    {
-      functionCall: {
-        id: globCall.callId,
-        name: globCall.name,
-        args: globCall.args,
-      },
-    },
-  ];
-  const read = new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    commit,
-    messageFitsInline,
-    undefined,
-    undefined,
-    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
-    { profile: 'hosted-workspace-read/1' },
-  );
-  const responses = await read.execute(
-    [globCall],
-    globParts,
-    'model',
-    new AbortController().signal,
-  );
-  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
-  expect(actionIds()).toEqual([]);
-  expect(
-    broker.execute.mock.calls.map(
-      (args: unknown[]) => JSON.parse(args[1] as string).toolName,
-    ),
-  ).toEqual(['glob']);
-  await read.consumeResults();
-  await read.finish();
-
-  const mcp = {
-    broker,
-    ensureReady: async () => undefined,
-    refresh: async () => undefined,
-    tools: () => [{ name: 'glob', parametersJsonSchema: { type: 'object' } }],
-    toolInput: () => ({ toolName: 'managed_mcp_call', input: {} }),
-  };
-  turn = new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    commit,
-    messageFitsInline,
-    undefined,
-    undefined,
-    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
-    {
-      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
-    },
-  );
-  const mcpGlobCall = { ...globCall, callId: 'call-glob-mcp' };
-  const running = turn.execute(
-    [mcpGlobCall],
-    [
+it.each([
+  ['hosted-workspace-read/1', 'default'],
+  ['hosted-workspace-shell/1', 'default'],
+  ['hosted-workspace-shell/1', 'auto-edit'],
+] as const)(
+  'pre-approves native glob on %s in %s mode',
+  async (profile, mode) => {
+    const globCall = {
+      ...calls[0],
+      callId: 'call-glob',
+      name: 'glob',
+      args: { pattern: '**/*.ts' },
+    };
+    const globParts: Part[] = [
       {
         functionCall: {
-          id: mcpGlobCall.callId,
-          name: mcpGlobCall.name,
-          args: mcpGlobCall.args,
+          id: globCall.callId,
+          name: globCall.name,
+          args: globCall.args,
         },
       },
-    ],
-    'model',
-    new AbortController().signal,
-  );
-  // The files/1 Session must ask before dispatching even this name.
-  const requestId = await requested();
-  expect(actionIds()).toEqual([requestId]);
-  expect(broker.execute).toHaveBeenCalledOnce();
-  await resolveHostedAction(session, waiters, requestId, answer('allow'));
-  await running;
-  expect(broker.execute).toHaveBeenCalledTimes(2);
-  await turn.consumeResults();
-  await turn.finish();
-});
+    ];
+    const native = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      profile === 'hosted-workspace-shell/1'
+        ? { resources: session.resources, assertWritable: async () => {} }
+        : undefined,
+      undefined,
+      { settings: { mode, timeoutMs: 60_000 }, waiters },
+      { profile },
+    );
+    const responses = await native.execute(
+      [globCall],
+      globParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
+    expect(actionIds()).toEqual([]);
+    expect(
+      broker.execute.mock.calls.map(
+        (args: unknown[]) => JSON.parse(args[1] as string).toolName,
+      ),
+    ).toEqual(['glob']);
+    await native.consumeResults();
+    await native.finish();
+
+    const mcp = {
+      broker,
+      ensureReady: async () => undefined,
+      refresh: async () => undefined,
+      tools: () => [{ name: 'glob', parametersJsonSchema: { type: 'object' } }],
+      toolInput: () => ({ toolName: 'managed_mcp_call', input: {} }),
+    };
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+      {
+        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
+    );
+    const mcpGlobCall = { ...globCall, callId: 'call-glob-mcp' };
+    const running = turn.execute(
+      [mcpGlobCall],
+      [
+        {
+          functionCall: {
+            id: mcpGlobCall.callId,
+            name: mcpGlobCall.name,
+            args: mcpGlobCall.args,
+          },
+        },
+      ],
+      'model',
+      new AbortController().signal,
+    );
+    // The files/1 Session must ask before dispatching even this name.
+    const requestId = await requested();
+    expect(actionIds()).toEqual([requestId]);
+    expect(broker.execute).toHaveBeenCalledOnce();
+    await resolveHostedAction(session, waiters, requestId, answer('allow'));
+    await running;
+    expect(broker.execute).toHaveBeenCalledTimes(2);
+    await turn.consumeResults();
+    await turn.finish();
+  },
+);
 
 function createSearchTurn() {
   return new HostedWorkspaceToolTurn(
@@ -1772,7 +1879,7 @@ function createSearchTurn() {
   );
 }
 
-it('refuses a glob call a /1 profile never advertised', async () => {
+it('refuses a glob call the files/1 profile never advertised', async () => {
   const call = {
     ...calls[0],
     name: 'glob',
@@ -1791,6 +1898,199 @@ it('refuses a glob call a /1 profile never advertised', async () => {
     ),
   ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
   expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+// #15076: `todo_write` ships only with the `/3` profiles.
+function createV3Turn(profile = 'hosted-workspace-files/3') {
+  return new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile },
+  );
+}
+
+it('declares todo_write on hosted-workspace-files/3', async () => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-files/3' },
+  );
+  const declarations = await turn.declarations(new AbortController().signal);
+  const names = declarations.map((tool) => tool.name);
+  expect(names).toContain('todo_write');
+  expect(names).toContain('glob');
+  // files/3 keeps everything files/2 declares, including the shipped fetch.
+  expect(names).toContain('web_fetch');
+  expect(names).not.toContain('run_shell_command');
+  // The byte budget is enforced, so the declaration has to expose it too.
+  expect(
+    JSON.stringify(
+      declarations.find((tool) => tool.name === 'todo_write')
+        ?.parametersJsonSchema,
+    ),
+  ).toContain('16,000 bytes');
+});
+
+it.each(['hosted-workspace-files/1', 'hosted-workspace-files/2'])(
+  'never offers todo_write on %s',
+  async (profile) => {
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile },
+    );
+    const names = (await turn.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    );
+    expect(names).not.toContain('todo_write');
+  },
+);
+
+it('refuses todo_write on a /2 profile before the Broker', async () => {
+  turn = createSearchTurn();
+  const call = {
+    ...calls[0],
+    name: 'todo_write',
+    args: { todos: [{ id: 'a', content: 'a', status: 'pending' }] },
+  };
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+// #15076: a malformed task-list call is refused before the Runtime is
+// acquired, so its correction costs no durable work.
+it.each([
+  {},
+  { todos: 'x' },
+  { todos: [{}] },
+  { todos: [{ id: '', content: 'a', status: 'pending' }] },
+  { todos: [{ id: 'a', content: '  ', status: 'pending' }] },
+  { todos: [{ id: 'a', content: 'a', status: 'done' }] },
+  { todos: [{ id: 'a', content: 'a', status: 'pending', blockedBy: 'b' }] },
+  { todos: [{ id: 'a', content: 'a', status: 'pending', extra: 1 }] },
+  {
+    todos: [{ id: 'a'.repeat(501), content: 'a', status: 'pending' }],
+  },
+  // The declared and enforced bounds: each trips on its own, so removing a
+  // bound turns exactly one case red.
+  {
+    todos: [{ id: 'a', content: 'x'.repeat(1001), status: 'pending' }],
+  },
+  {
+    todos: Array.from({ length: 65 }, (_, index) => ({
+      id: `t${index}`,
+      content: 'a',
+      status: 'pending',
+    })),
+  },
+  {
+    todos: Array.from({ length: 40 }, (_, index) => ({
+      id: `t${index}`,
+      content: 'x'.repeat(500),
+      status: 'pending',
+    })),
+  },
+])(
+  'persists a correctable todo_write argument error without dispatch: %j',
+  async (args) => {
+    turn = createV3Turn();
+    const call = { ...calls[0], name: 'todo_write', args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const error = responses[0].functionResponse?.response?.['error'];
+    expect(responses[0].functionResponse?.id).toBe(call.callId);
+    expect(error).toContain('todo_write');
+    expect(error).toContain('retry');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  },
+);
+
+it('dispatches an admitted todo_write with its argument payload', async () => {
+  turn = createV3Turn();
+  const args = { todos: [{ id: 'a', content: 'audit', status: 'pending' }] };
+  const call = { ...calls[0], name: 'todo_write', args };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
+  expect(broker.acquire).toHaveBeenCalled();
+  expect(
+    broker.execute.mock.calls.map((entry: unknown[]) =>
+      JSON.parse(entry[1] as string),
+    ),
+  ).toEqual([{ toolName: 'todo_write', input: args }]);
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+it('declares the preservation rule for omitted dependencies', async () => {
+  turn = createV3Turn();
+  const todo = (await turn.declarations(new AbortController().signal)).find(
+    (tool) => tool.name === 'todo_write',
+  );
+  const schema = todo?.parametersJsonSchema as
+    | {
+        properties?: {
+          todos?: {
+            items?: { properties?: Record<string, { description?: string }> };
+          };
+        };
+      }
+    | undefined;
+  const description =
+    schema?.properties?.todos?.items?.properties?.['blockedBy']?.description;
+  expect(description).toContain('preserved');
+  expect(description).toContain('[]');
+});
+
+it('pre-approves todo_write under default and auto-edit, and yolo never asks', () => {
+  expect(
+    hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'todo_write'),
+  ).toBe(false);
+  expect(
+    hostedApprovalAsks({ mode: 'auto-edit', timeoutMs: 60_000 }, 'todo_write'),
+  ).toBe(false);
+  expect(
+    hostedApprovalAsks({ mode: 'yolo', timeoutMs: 60_000 }, 'todo_write'),
+  ).toBe(false);
 });
 
 it.each([
@@ -2888,6 +3188,7 @@ it.each(['files', 'shell', 'mcp'])(
         'read_file',
         'write_file',
         'edit',
+        'web_fetch',
         'mcp_write',
       ]);
       expect(declarations.at(-1)).toEqual(remote);
@@ -3574,6 +3875,141 @@ async function toolResultErrors() {
     .flatMap((record) => record.message?.parts ?? [])
     .map((part) => part.functionResponse?.response?.['error']);
 }
+
+it('evaluates the actual rewritten WebFetch destination before Full Access dispatch', async () => {
+  turn = createTurn(false, {
+    mode: 'yolo',
+    permissionRules: {
+      allow: [],
+      ask: [],
+      deny: ['WebFetch(domain:raw.githubusercontent.com)'],
+    },
+  });
+  const call = {
+    ...calls[0],
+    name: 'web_fetch',
+    args: {
+      url: 'https://github.com/QwenLM/qwen-code/blob/main/README.md',
+      prompt: 'Read',
+    },
+  };
+  const result = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(JSON.stringify(result)).toContain('permission rules denied');
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it.each(['default', 'auto-edit', 'auto', 'yolo'] as const)(
+  'honors an explicit deny before mode %s and does not run the classifier',
+  async (mode) => {
+    turn = createTurn(false, {
+      mode,
+      permissionRules: { allow: ['Edit'], ask: ['Edit'], deny: ['Edit'] },
+    });
+    const classify = vi.fn();
+    turn.setPermissionClassifier(classify);
+    const result = await turn.execute(
+      [calls[1]],
+      [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(result)).toContain('permission rules denied');
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(classify).not.toHaveBeenCalled();
+    expect(actionIds()).toEqual([]);
+  },
+);
+
+it('does not dispatch when cancellation arrives during auto classification', async () => {
+  turn = createTurn(false, { mode: 'auto' });
+  const abort = new AbortController();
+  turn.setPermissionClassifier(async () => {
+    abort.abort();
+    return {
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    };
+  });
+  await expect(
+    turn.execute([calls[1]], [parts[1]], 'model', abort.signal),
+  ).rejects.toThrow();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+});
+
+it('keeps an explicit ask human-only when live mode changes to Full Access', async () => {
+  let mode: HostedApprovalMode = 'auto';
+  const permissionRules = { allow: ['Edit'], ask: ['Edit'], deny: [] };
+  turn = createTurn(false, {
+    mode,
+    permissionRules,
+    readSettings: async () => ({ mode, timeoutMs: 60_000, permissionRules }),
+  });
+  const classify = vi.fn();
+  turn.setPermissionClassifier(classify);
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const options = JSON.parse(
+    (
+      await session.resources.read(
+        session.authority.action(requestId)!.optionsRef!,
+      )
+    ).toString(),
+  );
+  expect(options.requiresHumanDecision).toBe(true);
+  mode = 'yolo';
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(classify).not.toHaveBeenCalled();
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  await running;
+});
+
+it.each(['allow', 'block', 'unavailable', 'absent'] as const)(
+  'handles auto classifier %s through native execution or durable approval',
+  async (outcome) => {
+    turn = createTurn(false, { mode: 'auto' });
+    const classify = vi.fn().mockResolvedValue({
+      shouldBlock: outcome !== 'allow',
+      reason: 'policy refusal',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+      ...(outcome === 'unavailable' ? { unavailable: true } : {}),
+    });
+    if (outcome !== 'absent') turn.setPermissionClassifier(classify);
+    const running = turn.execute(
+      [calls[1]],
+      [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    if (outcome === 'unavailable' || outcome === 'absent') {
+      const requestId = await requested();
+      expect(broker.execute).not.toHaveBeenCalled();
+      await resolveHostedAction(session, waiters, requestId, answer('allow'));
+    }
+    const result = await running;
+    expect(broker.execute).toHaveBeenCalledTimes(outcome === 'block' ? 0 : 1);
+    if (outcome === 'block')
+      expect(JSON.stringify(result)).toContain('Auto approval blocked');
+    expect(classify).toHaveBeenCalledTimes(outcome === 'absent' ? 0 : 1);
+  },
+);
 
 it.each(['auto-edit', 'yolo'] as const)(
   'durably allows a pending ordinary edit after changing to %s in the current Turn',
@@ -4579,12 +5015,15 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
   // set is pinned here and each name must still be a declared native tool —
   // the child launch declares through HOSTED_AGENT_TOOL, a session message
   // through its two send_message declarations and the team board through
-  // HOSTED_TEAM_TOOLS, not the shell set.
+  // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is appended only for
+  // `files/3` (which is not a shell profile), so it joins the set on its own.
   expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
+    'web_fetch',
     'read_file',
     'write_file',
     'edit',
     'run_shell_command',
+    'todo_write',
     'agent',
     'send_message',
     'team_create',
@@ -4597,6 +5036,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
   ]);
   const declared = [
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
+    HOSTED_TODO_WRITE_TOOL.name,
     HOSTED_AGENT_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_PARENT_TOOL.name,
@@ -5054,7 +5494,7 @@ it.each(
     ),
   ),
 )(
-  'durably refuses malformed Shell Unicode before Hooks and acquisition ($publication/$version/$field/$value/last:$invalidLast)',
+  'durably refuses malformed Shell Unicode before Hooks and acquisition: %j',
   async ({ publication, version, field, value, invalidLast }) => {
     const owner = {
       owner: vi.fn(),
@@ -6348,6 +6788,15 @@ it.each(['allow', 'deny'] as const)(
       new AbortController().signal,
     );
     const approval = await requested();
+    expect(
+      JSON.parse(
+        (
+          await session.resources.read(
+            session.authority.action(approval)!.optionsRef!,
+          )
+        ).toString(),
+      ).requiresHumanDecision,
+    ).toBe(true);
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
     await resolveHostedAction(session, waiters, approval, answer(decision));
@@ -9935,6 +10384,7 @@ it('keeps the SSH foreground-only declaration and admission free of detached too
     'read_file',
     'write_file',
     'edit',
+    'web_fetch',
     'run_shell_command',
   ]);
   const shell = declarations.find((tool) => tool.name === 'run_shell_command');
