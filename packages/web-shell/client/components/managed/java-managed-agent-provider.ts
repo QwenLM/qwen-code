@@ -15,6 +15,7 @@ import { isManagedApprovalMode } from './managed-agent-provider';
 import { browserArtifactSave } from './managed-artifact-download';
 import type { ManagedArtifactSave } from './managed-tool-result-types';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
+import { parseManagedPermissionRules } from '@qwen-code/qwen-code-core/managed-runtime/managed-permission-rules.js';
 import type {
   ManagedAgentCommandOptions,
   ManagedAgentPendingAction,
@@ -115,6 +116,9 @@ export function createJavaManagedAgentProvider(
     },
     command: ManagedAgentCommandOptions,
   ) {
+    const approvalMode = request.approvalMode;
+    if (approvalMode === 'auto')
+      throw new Error('Select Auto after creating the Managed Session.');
     const result = await client.createSession(
       {
         requestId: managedRequestId(),
@@ -127,9 +131,7 @@ export function createJavaManagedAgentProvider(
         ...(request.text === undefined
           ? {}
           : { title: titleFor(request.text) }),
-        ...(request.approvalMode === undefined
-          ? {}
-          : { approvalMode: request.approvalMode }),
+        ...(approvalMode === undefined ? {} : { approvalMode }),
         ...(request.planMode === undefined
           ? {}
           : { planMode: request.planMode }),
@@ -153,6 +155,17 @@ export function createJavaManagedAgentProvider(
     return { sessionId: result.sessionId };
   }
   return {
+    userMessages: {
+      query: (sessionId, options) =>
+        client.queryUserMessages(sessionId, options.signal),
+      command: (sessionId, command, options) =>
+        client.commandUserMessages(
+          sessionId,
+          command,
+          options.idempotencyKey,
+          options.signal,
+        ),
+    },
     lifecycle: {
       submit: (kind, sessionId, command) =>
         client.lifecycleCommand(
@@ -364,7 +377,9 @@ export function createJavaManagedAgentProvider(
                 typeof result.supported !== 'boolean' ||
                 !Array.isArray(result.availableApprovalModes) ||
                 !result.availableApprovalModes.every(isManagedApprovalMode) ||
-                !result.availableApprovalModes.includes(result.approvalMode)
+                !result.availableApprovalModes.includes(result.approvalMode) ||
+                (result.permissionRulesSupported !== undefined &&
+                  typeof result.permissionRulesSupported !== 'boolean')
               )
                 throw new Error('Invalid Session approval options');
               return {
@@ -372,6 +387,16 @@ export function createJavaManagedAgentProvider(
                 approvalRevision: result.approvalRevision,
                 availableApprovalModes: result.availableApprovalModes,
                 supported: result.supported,
+                ...(result.permissionRulesSupported === true
+                  ? { permissionRulesSupported: true }
+                  : {}),
+                ...(result.permissionRules === undefined
+                  ? {}
+                  : {
+                      permissionRules: parseManagedPermissionRules(
+                        result.permissionRules,
+                      ),
+                    }),
                 ...(result.liveSupported === true
                   ? { liveSupported: true }
                   : {}),
@@ -384,9 +409,19 @@ export function createJavaManagedAgentProvider(
               };
             },
             async submit(sessionId, request, command) {
+              const { permissionRules, ...selection } = request;
               const result = await client.changeApproval(
                 {
-                  ...request,
+                  ...selection,
+                  ...(permissionRules === undefined
+                    ? {}
+                    : {
+                        permissionRules: {
+                          allow: [...permissionRules.allow],
+                          ask: [...permissionRules.ask],
+                          deny: [...permissionRules.deny],
+                        },
+                      }),
                   sessionId,
                   idempotencyKey: command.idempotencyKey,
                   requestId: command.requestId,
@@ -406,6 +441,13 @@ export function createJavaManagedAgentProvider(
                 approvalMode: result.approvalMode,
                 approvalRevision: result.approvalRevision,
                 replayed: result.replayed,
+                ...(result.permissionRules === undefined
+                  ? {}
+                  : {
+                      permissionRules: parseManagedPermissionRules(
+                        result.permissionRules,
+                      ),
+                    }),
                 ...(typeof result.planMode === 'boolean'
                   ? { planMode: result.planMode }
                   : {}),

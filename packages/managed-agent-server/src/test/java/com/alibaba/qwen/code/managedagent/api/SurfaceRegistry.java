@@ -23,6 +23,16 @@ import java.util.Set;
  * exactly one rule class.
  */
 public enum SurfaceRegistry {
+    PUBLIC_USER_MESSAGES_QUERY(Method.GET, "/v1/agents/sessions/{sessionId}/user-messages",
+            Surface.PUBLIC, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_QUERY)),
+    PUBLIC_USER_MESSAGES_COMMAND(Method.POST, "/v1/agents/sessions/{sessionId}/user-messages",
+            Surface.PUBLIC, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_COMMAND)),
+    WEBSHELL_USER_MESSAGES_QUERY(Method.POST, "/api/agent/web-shell/v1/user-messages/query",
+            Surface.WEBSHELL, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_QUERY)),
+    WEBSHELL_USER_MESSAGES_COMMAND(Method.POST, "/api/agent/web-shell/v1/user-messages/command",
+            Surface.WEBSHELL, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_COMMAND)),
+    INTERNAL_USER_MESSAGES_CLAIM(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/user-messages:claim",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_USER_MESSAGE_CLAIM)),
     // PublicAgentController: public Session surfaces.
     PUBLIC_SESSION_CREATE(Method.POST, "/v1/agents/sessions",
             Surface.PUBLIC, RuleClass.WORKSPACE_CREATE,
@@ -382,6 +392,10 @@ public enum SurfaceRegistry {
             Surface.WEBSHELL, RuleClass.OWNER,
             EnumSet.of(Capability.SESSION_APPROVAL_CHANGE)),
     // ManagedSessionStoreController: internal writer routes.
+    INTERNAL_EXTERNAL_STORAGE_REGISTER(Method.POST,
+            "/internal/managed-workspaces/v1/storage:register-external",
+            Surface.INTERNAL, RuleClass.INTERNAL_OPERATOR,
+            EnumSet.of(Capability.EXTERNAL_STORAGE_REGISTER)),
     INTERNAL_APPROVAL_QUERY(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/approval:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
@@ -411,6 +425,12 @@ public enum SurfaceRegistry {
                     + "/writers:seal",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_WRITER_SEAL)),
+    INTERNAL_WRITER_QUIESCE_OWNERSHIP(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/writers:quiesce-ownership",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_WRITER_SEAL)),
+    INTERNAL_WRITER_RELEASE_OWNERSHIP(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/writers:release-ownership",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_WRITER_SEAL)),
     INTERNAL_RECOVERY_BLOCK(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/recovery:block",
@@ -595,6 +615,8 @@ public enum SurfaceRegistry {
      * carries both {@link #TURN_SUBMIT} and {@link #TURN_CANCEL}.
      */
     public enum Capability {
+        EXTERNAL_STORAGE_REGISTER,
+        USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
         SESSION_CREATE,
         SESSION_LIST,
         SESSION_GET,
@@ -839,6 +861,7 @@ public enum SurfaceRegistry {
          * read). On a dedicated internal listener the routing filter
          * answers a public-connector caller {@code 404}.
          */
-        INTERNAL_WRITER
+        INTERNAL_WRITER,
+        INTERNAL_OPERATOR
     }
 }

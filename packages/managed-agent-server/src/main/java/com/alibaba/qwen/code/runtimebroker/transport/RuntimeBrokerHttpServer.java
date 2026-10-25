@@ -237,6 +237,22 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod())
+                    && "/runtimes:capabilities".equals(relative)) {
+                Map<String, Object> body = requestBody(exchange, "capabilities request");
+                requireProtocol(body);
+                JsonCodec.requiredString(body, "requestId", "capabilities request");
+                String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "capabilities request");
+                if (!body.keySet().equals(Set.of("protocolVersion", "requestId", "harnessSessionId"))) {
+                    throw new IllegalArgumentException("Invalid capabilities request");
+                }
+                complete(exchange, service.capabilities(sessionId, lifecycleAuthority(exchange)), scope -> Map.of(
+                        "protocolVersion", 1, "harnessSessionId", sessionId,
+                        "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
+                                "workspaceGeneration", scope.getWorkspaceGeneration(),
+                                "isolationClass", scope.getIsolationClass(), "capabilityDigest", scope.getCapabilityDigest())));
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod())
                     && "/runtimes:warm".equals(relative)) {
                 Map<String, Object> body = requestBody(exchange, "warm request");
                 requireProtocol(body);
