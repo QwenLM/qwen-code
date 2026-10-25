@@ -56,6 +56,7 @@ import {
   getSettingsWarnings,
   isAllowedBaseUrlsWorkspaceOnly,
   loadSettings,
+  readModelPolicyOptions,
   getUserSettingsPath,
   getSystemSettingsPath,
   getSystemDefaultsPath,
@@ -5480,6 +5481,27 @@ describe('Settings Loading and Merging', () => {
         expect(isAllowedBaseUrlsWorkspaceOnly(settings)).toBe(false);
       },
     );
+
+    it('readModelPolicyOptions carries the list with its exemption (R5-1)', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              model: {
+                allowedBaseUrls: ['https://workspace-llm.example/v1'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      expect(readModelPolicyOptions(loadSettings(MOCK_WORKSPACE_DIR))).toEqual({
+        allowedModelBaseUrls: ['https://workspace-llm.example/v1'],
+        qwenOAuthBuiltinsDisabled: false,
+        allowedBaseUrlsWorkspaceOnly: true,
+      });
+    });
 
     it('is false when the workspace does not set the allowlist', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
