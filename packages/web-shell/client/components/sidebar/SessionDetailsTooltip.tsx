@@ -30,6 +30,7 @@ import {
   sessionIssueStateLabel,
   sessionPrStateLabel,
 } from '../SessionPrStateIcon';
+import { openableSessionPrs } from '../SessionPrBadge';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 
@@ -38,6 +39,7 @@ interface SessionDetailsTooltipProps {
   label: string;
   time: string;
   completedUnread: boolean;
+  statusLabel?: string;
   workspaceLabel?: string;
   openOnClick?: boolean;
   ownerToken?: string;
@@ -52,6 +54,7 @@ export function SessionDetailsTooltip({
   label,
   time,
   completedUnread,
+  statusLabel,
   workspaceLabel,
   openOnClick = false,
   ownerToken,
@@ -91,9 +94,7 @@ export function SessionDetailsTooltip({
     : null;
   const folderPath = session.workspaceCwd;
   const branch = session.worktree?.branch ?? session.branch?.name;
-  const prs = [...(session.prs ?? [])]
-    .reverse()
-    .filter((pr) => isExternalOpenUrl(pr.url));
+  const prs = openableSessionPrs([...(session.prs ?? [])].reverse());
   // Stacked PRs can close the same issue; list it once, under its newest PR.
   const seenIssueUrls = new Set<string>();
   const issues = prs
@@ -344,7 +345,7 @@ export function SessionDetailsTooltip({
           })}
           <div className={styles.sessionDetailsRow}>
             <RadioTowerIcon aria-hidden="true" />
-            <span>{status}</span>
+            <span>{statusLabel ?? status}</span>
           </div>
           <div className={styles.sessionDetailsIdRow}>
             <span

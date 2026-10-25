@@ -53,6 +53,7 @@ import type {
   ManagedAgentWorkspace,
   ManagedApprovalMode,
   ManagedSessionOptions,
+  ManagedModelPreset,
   ManagedInputBlock,
   ManagedSessionSkill,
 } from './managed-agent-provider';
@@ -67,12 +68,13 @@ import {
   readManagedPending,
   saveManagedPending,
 } from './managed-pending-storage';
-import { isManagedApprovalMode } from './managed-agent-provider';
+import { isManagedInitialApprovalMode } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
 import { RemoteWorkspaceRegistration } from './RemoteWorkspaceRegistration';
 
 interface PendingCreation {
   agentId: string;
+  modelId?: string;
   workspaceId: string;
   cwdRelative: string;
   input: ManagedInputBlock[];
@@ -147,12 +149,14 @@ function readPending(
     const input = item['input'];
     if (
       typeof item['agentId'] !== 'string' ||
+      (item['modelId'] !== undefined &&
+        (typeof item['modelId'] !== 'string' || !item['modelId'].trim())) ||
       typeof item['workspaceId'] !== 'string' ||
       typeof item['cwdRelative'] !== 'string' ||
       typeof item['clientId'] !== 'string' ||
       typeof item['idempotencyKey'] !== 'string' ||
       (item['approvalMode'] !== undefined &&
-        !isManagedApprovalMode(item['approvalMode'])) ||
+        !isManagedInitialApprovalMode(item['approvalMode'])) ||
       (item['planMode'] !== undefined &&
         typeof item['planMode'] !== 'boolean') ||
       (item['skills'] !== undefined &&
@@ -281,17 +285,26 @@ export function WorkspaceBindingCreator({
   const [cwdDraft, setCwdDraft] = useState<string>();
   const cwdEdited = useRef(Boolean(handoff?.cwdRelative));
   const modelPresets = binding.modelPresets ?? [];
-  const [agentId, setAgentId] = useState(
-    modelPresets.find((item) => item.agentId === handoff?.agentId)?.agentId ??
-      (handoff?.agentId === binding.agentId ? binding.agentId : undefined) ??
-      modelPresets.find((item) => item.agentId === binding.agentId)?.agentId ??
-      modelPresets[0]?.agentId ??
-      binding.agentId,
-  );
-  const availableModels =
+  const availableModels: readonly ManagedModelPreset[] =
     modelPresets.length > 0
       ? modelPresets
       : [{ agentId: binding.agentId, label: t('managed.modelDefault') }];
+  const [selectedModel, setSelectedModel] = useState(() => {
+    const preferred: ManagedModelPreset =
+      availableModels.find((item) => item.agentId === handoff?.agentId) ??
+      (handoff?.agentId === binding.agentId
+        ? { agentId: binding.agentId, label: t('managed.modelDefault') }
+        : undefined) ??
+      availableModels.find((item) => item.agentId === binding.agentId) ??
+      availableModels[0]!;
+    return preferred.modelId ?? preferred.agentId;
+  });
+  const selectedPreset = availableModels.find(
+    (item) => (item.modelId ?? item.agentId) === selectedModel,
+  );
+  const agentId = selectedPreset?.agentId ?? binding.agentId;
+  const modelId = selectedPreset?.modelId;
+
   const [nextCursor, setNextCursor] = useState<string>();
   const [supported, setSupported] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -497,9 +510,9 @@ export function WorkspaceBindingCreator({
         });
         if (abort.signal.aborted) return;
         if (
-          !isManagedApprovalMode(options.approvalMode) ||
+          !isManagedInitialApprovalMode(options.approvalMode) ||
           !Array.isArray(options.availableApprovalModes) ||
-          !options.availableApprovalModes.every(isManagedApprovalMode) ||
+          !options.availableApprovalModes.every(isManagedInitialApprovalMode) ||
           !options.availableApprovalModes.includes(options.approvalMode)
         ) {
           throw new Error(t('managed.approvalOptionsInvalid'));
@@ -552,8 +565,9 @@ export function WorkspaceBindingCreator({
       : undefined,
   );
   const approvalReady =
-    !supportsApprovalModeSelection ||
-    (!optionsLoading && Boolean(currentOptions));
+    (!supportsApprovalModeSelection ||
+      (!optionsLoading && Boolean(currentOptions))) &&
+    (modelId === undefined || currentOptions?.modelSelectionSupported === true);
   const displayedApprovalMode = pending
     ? pending.approvalMode
     : supportsApprovalModeSelection
@@ -614,6 +628,12 @@ export function WorkspaceBindingCreator({
       !supportsApprovalModeSelection
     )
       return;
+    if (
+      attempt?.modelId !== undefined &&
+      !attempt.sessionId &&
+      currentOptions?.modelSelectionSupported !== true
+    )
+      return;
     const firstSubmission = !attempt;
     if (!attempt) {
       if (
@@ -634,7 +654,7 @@ export function WorkspaceBindingCreator({
       if (!approvalReady) return;
       if (
         !supported ||
-        !availableModels.some((item) => item.agentId === agentId) ||
+        !selectedPreset ||
         !items.find(
           (item) => item.workspaceId === selected && item.canCreateSession,
         )
@@ -682,6 +702,7 @@ export function WorkspaceBindingCreator({
       }
       attempt = {
         agentId,
+        ...(modelId === undefined ? {} : { modelId }),
         workspaceId: selected,
         cwdRelative,
         input,
@@ -716,6 +737,9 @@ export function WorkspaceBindingCreator({
       if (!attempt.sessionId) {
         const request = {
           agentId: attempt.agentId,
+          ...(attempt.modelId === undefined
+            ? {}
+            : { modelId: attempt.modelId }),
           workspaceId: attempt.workspaceId,
           cwdRelative: attempt.cwdRelative,
           ...(attempt.skills?.length ? { skills: attempt.skills } : {}),
@@ -766,9 +790,10 @@ export function WorkspaceBindingCreator({
       if (abort.signal.aborted) return;
       if (
         session.sessionId !== createdSessionId ||
+        (attempt.modelId !== undefined &&
+          session.modelSelection?.modelId !== attempt.modelId) ||
         (attempt.approvalMode !== undefined &&
-          (session.initialApprovalMode ?? session.approvalMode) !==
-            attempt.approvalMode) ||
+          session.initialApprovalMode !== attempt.approvalMode) ||
         ((modelPresets.length > 0 || session.agentId !== undefined) &&
           session.agentId !== attempt.agentId) ||
         !session.workspace ||
@@ -1279,7 +1304,7 @@ export function WorkspaceBindingCreator({
                 }
                 onValueChange={(value) => {
                   if (
-                    isManagedApprovalMode(value) &&
+                    isManagedInitialApprovalMode(value) &&
                     currentOptions?.availableApprovalModes.includes(value)
                   )
                     setSessionOptions({
@@ -1307,8 +1332,8 @@ export function WorkspaceBindingCreator({
                 {t('managed.modelPreset')}
               </label>
               <Select
-                value={agentId}
-                onValueChange={setAgentId}
+                value={selectedModel}
+                onValueChange={setSelectedModel}
                 disabled={busy}
               >
                 <SelectTrigger id="managed-model-select" className="w-full">
@@ -1316,7 +1341,10 @@ export function WorkspaceBindingCreator({
                 </SelectTrigger>
                 <SelectContent>
                   {availableModels.map((item) => (
-                    <SelectItem key={item.agentId} value={item.agentId}>
+                    <SelectItem
+                      key={item.modelId ?? item.agentId}
+                      value={item.modelId ?? item.agentId}
+                    >
                       {item.label}
                     </SelectItem>
                   ))}
@@ -1427,7 +1455,7 @@ export function WorkspaceBindingCreator({
               Boolean(switchTo) ||
               !approvalReady ||
               busy ||
-              !availableModels.some((item) => item.agentId === agentId) ||
+              !selectedPreset ||
               !items.some(
                 (item) =>
                   item.workspaceId === selected && item.canCreateSession,
@@ -1500,7 +1528,9 @@ export function WorkspaceBindingCreator({
               }
               showChatWidthToggle={false}
               contextChipPlacement="below"
-              currentModel={pending?.agentId ?? agentId}
+              currentModel={
+                pending?.modelId ?? pending?.agentId ?? selectedModel
+              }
               modelControlsDisabled={
                 busy || workspaceCreating || Boolean(pending)
               }
@@ -1544,7 +1574,7 @@ export function WorkspaceBindingCreator({
                   !workspaceCreating &&
                   !pendingRef.current &&
                   !optionsLoading &&
-                  isManagedApprovalMode(value) &&
+                  isManagedInitialApprovalMode(value) &&
                   currentOptions?.availableApprovalModes.includes(value)
                 ) {
                   setSessionOptions({
@@ -1554,12 +1584,12 @@ export function WorkspaceBindingCreator({
                 }
               }}
               availableModels={availableModels.map((item) => ({
-                id: item.agentId,
+                id: item.modelId ?? item.agentId,
                 label: item.label,
               }))}
               onSelectModel={(id) => {
                 if (!busy && !encoding.current && !pendingRef.current)
-                  setAgentId(id);
+                  setSelectedModel(id);
               }}
               workspaces={items.map((item) => ({
                 id: item.workspaceId,

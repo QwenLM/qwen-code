@@ -123,10 +123,10 @@ public class BrokerSecurity {
             this.signingKey = null;
         }
         if (properties.getRuntimeBroker().isLocalDirectoryImportEnabled()
-                && (mode != Mode.OPEN || !publicLoopback
-                        || StringUtils.isBlank(properties.getTrustedActorHeader()))) {
-            throw new IllegalStateException("Local directory import requires a loopback OPEN listener"
-                    + " with a trusted actor header for a single-user deployment.");
+                && (!publicLoopback || (mode == Mode.OPEN
+                        && StringUtils.isBlank(properties.getTrustedActorHeader())))) {
+            throw new IllegalStateException("Local directory import requires a loopback listener"
+                    + " with signed authentication or a trusted actor header for a single-user deployment.");
         }
         this.allowedDrift = auth.getAllowedDrift() == null
                 ? Duration.ofMinutes(5) : auth.getAllowedDrift();
@@ -277,6 +277,19 @@ public class BrokerSecurity {
     private void checkHarnessTransport(ManagedAgentProperties properties,
             java.util.List<String> skippedGuards) {
         if (!properties.getHarness().isEnabled()) {
+            return;
+        }
+        if (properties.getHarness().getPool().isEnabled()) {
+            if (!properties.getSessionStore().isEnabled() || StringUtils.isBlank(properties.getSessionStore().getBindingKey())) {
+                throw new IllegalStateException("Harness pool requires an enabled Session Store and binding key");
+            }
+            for (var instance : properties.getHarness().getPool().getInstances()) {
+                java.net.URI endpoint = java.net.URI.create(instance.getBaseUrl());
+                if (!"https".equals(endpoint.getScheme())
+                        && !("http".equals(endpoint.getScheme()) && isLoopback(hostOf(endpoint)))) {
+                    throw new IllegalStateException("Harness pool requires TLS for remote endpoints");
+                }
+            }
             return;
         }
         String baseUrl = properties.getHarness().getBaseUrl();

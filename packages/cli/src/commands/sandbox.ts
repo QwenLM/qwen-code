@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getJsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -225,7 +226,9 @@ export const sandboxCommand: CommandModule = {
         const handle = await executeSandbox(
           policy,
           {
-            executable: fs.realpathSync(process.execPath),
+            executable: fs.realpathSync(
+              getJsInterpreterCommand(import.meta.url).command,
+            ),
             args: ['-e', program, inside, outside],
             cwd: policy.workspace,
             env: { PATH: '/usr/bin:/bin' },
