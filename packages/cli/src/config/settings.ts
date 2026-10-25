@@ -1077,7 +1077,9 @@ export function createMinimalSettings(): LoadedSettings {
     ...(operator.privacy ? { privacy: operator.privacy } : {}),
     // Bare mode must keep the operator's model controls in force — the
     // managed allowlist and the Qwen OAuth builtins disable (issue #12805).
-    ...(operator.model ? { model: operator.model } : {}),
+    ...(operator.modelByScope.system
+      ? { model: operator.modelByScope.system }
+      : {}),
   };
   const emptySettingsFile: SettingsFile = {
     path: '',
@@ -1085,14 +1087,26 @@ export function createMinimalSettings(): LoadedSettings {
     originalSettings: {},
     rawJson: '{}',
   };
+  // The User and SystemDefaults model controls go into their own slots, so
+  // the normal merge decides precedence and scope attribution stays true.
+  const modelScopeFile = (
+    model: Settings['model'] | undefined,
+  ): SettingsFile =>
+    model
+      ? {
+          ...emptySettingsFile,
+          settings: { model },
+          originalSettings: { model },
+        }
+      : emptySettingsFile;
   return new LoadedSettings(
     {
       ...emptySettingsFile,
       settings: operatorSettings,
       originalSettings: operatorSettings,
     },
-    emptySettingsFile,
-    emptySettingsFile,
+    modelScopeFile(operator.modelByScope.systemDefaults),
+    modelScopeFile(operator.modelByScope.user),
     emptySettingsFile,
     false,
     new Set(),

@@ -5358,6 +5358,29 @@ describe('Settings Loading and Merging', () => {
       }
     });
 
+    it('names the SystemDefaults scope when SystemDefaults disables the built-ins (R5-14)', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemDefaultsPath())
+            return JSON.stringify({
+              model: { qwenOAuthBuiltinsDisabled: true },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.qwenOAuthBuiltinsDisabled).toBe(true);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes(
+            'model.qwenOAuthBuiltinsDisabled is set in SystemDefaults scope settings',
+          ),
+        ),
+      ).toBe(true);
+    });
+
     it('strips a workspace-scope qwenOAuthBuiltinsDisabled and warns it is ignored', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(
@@ -5429,6 +5452,34 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       expect(isAllowedBaseUrlsWorkspaceOnly(settings)).toBe(false);
     });
+
+    it.each([
+      ['System', () => getSystemSettingsPath()],
+      ['SystemDefaults', () => getSystemDefaultsPath()],
+    ])(
+      'is false when the %s scope also sets the allowlist (R5-15)',
+      (_scope, operatorPath) => {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === operatorPath())
+              return JSON.stringify({
+                model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+              });
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify({
+                model: {
+                  allowedBaseUrls: ['https://workspace-llm.example/v1'],
+                },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(isAllowedBaseUrlsWorkspaceOnly(settings)).toBe(false);
+      },
+    );
 
     it('is false when the workspace does not set the allowlist', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
