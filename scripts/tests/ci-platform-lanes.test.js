@@ -40,16 +40,19 @@ const LANES = ['test_macos', 'test_windows'];
 const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
-// The extended ceilings below, except the test lane's, are scoped to the ECS
-// pool: `runs-on` falls back to ubuntu-latest for fork PRs from untrusted
-// authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths
-// keep the pre-contention ceiling. Evaluate the real timeout expression for both
-// routings instead of pinning a bare number -- the same
+// The extended ceilings below, except the test lane's, are scoped to the
+// self-hosted pool: `runs-on` falls back to ubuntu-latest for fork PRs from
+// untrusted authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those
+// hosted paths keep the pre-contention ceiling. The ARM64 fleet renders
+// `["self-hosted", "linux", "arm64"]` — no `ecs-qwen` label — so the scope
+// cannot key on the x64 fleet's name. Evaluate the real timeout expression for
+// each routing instead of pinning a bare number -- the same
 // substitute-then-evaluate technique
 // `.github/scripts/ci-runner-routing.test.mjs` uses on `runs-on` -- so a
 // regression to an unconditional ceiling fails here instead of reading as a
 // passing constant.
 const ECS_RUNNER = '["self-hosted", "linux", "x64", "ecs-qwen"]';
+const ARM_RUNNER = '["self-hosted", "linux", "arm64"]';
 const HOSTED_RUNNER = '["ubuntu-latest"]';
 const timeoutMinutesOn = (job, ubuntuRunner) => {
   // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
@@ -59,8 +62,8 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
     .replace(/^\$\{\{\s*/, '')
     .replace(/\s*\}\}$/, '')
     .replace(
-      /contains\(needs\.classify_pr\.outputs\.ubuntu_runner \|\| '\["ubuntu-latest"\]', 'ecs-qwen'\)/g,
-      String(effective.includes('ecs-qwen')),
+      /contains\(needs\.classify_pr\.outputs\.ubuntu_runner \|\| '\["ubuntu-latest"\]', 'self-hosted'\)/g,
+      String(effective.includes('self-hosted')),
     )
     .replace(/fromJSON\(/g, '(');
   if (/needs\.|contains\(|fromJSON\(/.test(expr)) {
@@ -225,6 +228,15 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
   expect(timeoutMinutesOn('lint_and_static', ECS_RUNNER)).toBe(90);
   expect(timeoutMinutesOn('lint_and_static', HOSTED_RUNNER)).toBe(45);
   expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
+});
+
+it('gives the ARM64 fleet the same contended-pool ceilings as the x64 pool', () => {
+  // `LINUX_RUNNER_FLEET=arm64` renders ["self-hosted", "linux", "arm64"] — the
+  // same reserved, shared hosts without the x64 fleet's `ecs-qwen` label. A
+  // fleet-name scope would price them as hosted and behead lint at 45 / no_ak
+  // at 30, which reads as an ARM compatibility failure.
+  expect(timeoutMinutesOn('lint_and_static', ARM_RUNNER)).toBe(90);
+  expect(timeoutMinutesOn('integration_no_ak', ARM_RUNNER)).toBe(60);
 });
 
 it('routes the browser smoke to ARM64 independently of the shared Linux test lane', () => {

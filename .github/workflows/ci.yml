@@ -938,7 +938,10 @@ jobs:
     # contention is why test runs 120/60 and no_ak 60/30; a flat 45 priced
     # only the warm half of that reality. Hosted runners keep the tighter
     # ceiling so a genuine hang there does not burn the ECS allowance.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''90'' || ''45'') }}'
+    # Keyed on `self-hosted`, not on the x64 fleet's `ecs-qwen` label: the
+    # ARM64 fleet renders ["self-hosted", "linux", "arm64"], so a
+    # fleet-specific substring priced those reserved machines as hosted.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''90'' || ''45'') }}'
     env:
       LINT_BASE_SHA: "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}"
     permissions:
@@ -2128,9 +2131,10 @@ jobs:
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    # Same ECS-only scoping as the `test` job: hosted fallback routing keeps
-    # the pre-contention ceiling.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''60'' || ''30'') }}'
+    # Same self-hosted scoping as `lint_and_static`: hosted fallback routing
+    # keeps the pre-contention ceiling, and the ARM64 fleet — which carries
+    # no `ecs-qwen` label — gets the contended-pool allowance it runs under.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
     permissions:
       contents: 'read'
     steps:
