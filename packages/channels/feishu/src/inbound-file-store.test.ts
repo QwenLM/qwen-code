@@ -125,27 +125,33 @@ describe('Feishu inbound file storage', () => {
     });
   }
 
-  it('keeps successful files until the existing cleanup grace period', async () => {
-    receive();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    const attachment = dispatch.mock.calls[0]![0].attachments?.[0];
-    expect(attachment).toEqual({
-      type: 'file',
-      filePath: expect.any(String),
-      mimeType: 'application/pdf',
-      fileName: 'report.pdf',
-    });
-    expect(readFileSync(attachment!.filePath!)).toEqual(Buffer.from(bytes));
-    expect(dispatch.mock.calls[0]![0]).toMatchObject({
-      text: '(file: report.pdf)',
-      syntheticText: true,
-    });
-    await vi.advanceTimersByTimeAsync(59_999);
-    expect(existsSync(attachment!.filePath!)).toBe(true);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
-  });
+  it.each([
+    { messageType: 'file', text: '(file: report.pdf)' },
+    { messageType: 'media', text: '(video)' },
+  ])(
+    'keeps successful $messageType files until the existing cleanup grace period',
+    async ({ messageType, text }) => {
+      receive({ message_type: messageType });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      const attachment = dispatch.mock.calls[0]![0].attachments?.[0];
+      expect(attachment).toEqual({
+        type: 'file',
+        filePath: expect.any(String),
+        mimeType: 'application/pdf',
+        fileName: 'report.pdf',
+      });
+      expect(readFileSync(attachment!.filePath!)).toEqual(Buffer.from(bytes));
+      expect(dispatch.mock.calls[0]![0]).toMatchObject({
+        text,
+        syntheticText: true,
+      });
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(existsSync(attachment!.filePath!)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
+    },
+  );
 
   it('keeps two messages with the same filename in separate directories', async () => {
     vi.mocked(fetch).mockImplementation(async (input) => {
