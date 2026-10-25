@@ -85,7 +85,8 @@ describe('fix-start and fix-end', () => {
     utimesSync(path, at, at);
   };
   /** The round's prepared snapshot, as `snapshot` writes it. */
-  const round = (snapshot: object = { action: 'fix', headSha: HEAD }) =>
+  const ROUND = { action: 'fix', headSha: HEAD, task: 'feedc0ffee12' };
+  const round = (snapshot: object = ROUND) =>
     writeFileSync(paths.snapshotPath, JSON.stringify(snapshot));
 
   beforeEach(() => {
@@ -133,7 +134,7 @@ describe('fix-start and fix-end', () => {
     // The round's snapshot, taken: no later attempt starts from it.
     expect(existsSync(paths.snapshotPath)).toBe(false);
     expect(JSON.parse(readFileSync(fixSnapshotPath(paths, 7), 'utf8'))).toEqual(
-      { action: 'fix', headSha: HEAD },
+      ROUND,
     );
     expect(() => runFixStart({ pr: 7, attempt: 'ba9876543210' })).toThrow(
       /no round of PR #7 has a fix to start/,
@@ -218,15 +219,18 @@ describe('fix-start and fix-end', () => {
     mkdirSync(join(fixSnapshotPath(paths, 7), 'planted'), { recursive: true });
     runFixEnd({ pr: 7, attempt: ATTEMPT });
     expect(JSON.parse(readFileSync(fixSnapshotPath(paths, 7), 'utf8'))).toEqual(
-      { action: 'fix', headSha: HEAD },
+      ROUND,
     );
     expect(existsSync(paths.fixPath)).toBe(false);
   });
 
   it("starts only from a round's recent snapshot to fix at the watch's head", () => {
     for (const snapshot of [
-      { action: 'wait', headSha: HEAD },
-      { action: 'fix', headSha: 'b'.repeat(40) },
+      { ...ROUND, action: 'wait' },
+      { ...ROUND, headSha: 'b'.repeat(40) },
+      // A `--once` round's, or another task's.
+      { action: 'fix', headSha: HEAD },
+      { ...ROUND, task: 'aaaaaaaaaaaa' },
     ]) {
       round(snapshot);
       expect(() => runFixStart({ pr: 7, attempt: ATTEMPT })).toThrow(
@@ -248,6 +252,15 @@ describe('fix-start and fix-end', () => {
     );
     expect(existsSync(paths.fixPath)).toBe(false);
     round();
+    // The gate reported more since: its round must come after this fix.
+    writeFileSync(paths.gatePath, '{}');
+    const later = new Date(Date.now() + 2000);
+    utimesSync(paths.gatePath, later, later);
+    expect(() => runFixStart({ pr: 7, attempt: ATTEMPT })).toThrow(
+      /no round of PR #7 has a fix to start: the gate reported more/,
+    );
+    const earlier = new Date(Date.now() - 60_000);
+    utimesSync(paths.gatePath, earlier, earlier);
     expect(runFixStart({ pr: 7, attempt: ATTEMPT }).attempt).toBe(ATTEMPT);
   });
 

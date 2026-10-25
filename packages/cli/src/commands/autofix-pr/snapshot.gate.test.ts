@@ -2354,6 +2354,23 @@ describe('runSnapshot --gate', () => {
     // The long line is one entry: the array of its pieces.
     expect(written.events[0]!.body).toHaveLength(1);
     expect((written.events[0]!.body[0] as string[]).join('')).toBe(long);
+    // No task's round: no background fix starts from it.
+    expect(written).not.toHaveProperty('task');
+    const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
+    writeState(paths.statePath, {
+      ...state,
+      watch: { every: 2, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    respond(data);
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    try {
+      runSnapshot({ pr: 7, task: 'aaaaaaaaaaaa' });
+    } finally {
+      if (saved !== undefined) process.env['QWEN_CODE_SESSION_ID'] = saved;
+    }
+    expect(JSON.parse(readFileSync(paths.snapshotPath, 'utf8'))).toMatchObject({
+      task: 'aaaaaaaaaaaa',
+    });
   });
 
   it('wakes the session a watch was taken from, and moves no cursor for it', () => {

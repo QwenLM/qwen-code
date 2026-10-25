@@ -1214,7 +1214,12 @@ attempt: the grant runs `fix-start <n> --attempt <id>` (a helper only the
 session runs). It refuses unless this session owns the watch, the watch has
 not ended, no marker of an attempt is there (a fresh one runs; a stale one
 is the round's `sync` to remove), and the round prepared a snapshot to fix
-at the watch's head in the last 30 minutes; and it writes the attempt
+at the watch's head in the last 30 minutes, under the watch's task (the
+prepared snapshot records the task it ran under, so a `--once` round's
+never qualifies), and the gate has reported nothing since that snapshot —
+otherwise the gate's fire waits in the queue, and its round, run while the
+fix worked, would find nothing to do and the events it reported would not
+come again; with a foreground fix it runs after. It writes the attempt
 marker `autofix-pr-<n>-fix.json` beside the state file: the attempt id, the
 watch's task, the head and when. The claim (`fix-end`) moves the round's
 snapshot to `autofix-pr-<n>-fix-snapshot.json`, which `reply` reads until
@@ -1250,9 +1255,14 @@ launches stops it as it registers. The marker is for the gate and for
 other sessions and processes: every 30 seconds the session refreshes the
 modification time of the marker (opened without following a link or
 blocking, and only when it is a regular file) while it still names the
-attempt, and stops the agent when it does not, or when a refresh
-comes more than a minute late (the process was suspended, and another
-session may have taken the worktree meanwhile). A helper takes the marker as
+attempt, and stops the agent when it does not, when the
+attempt it names started more than a minute ahead of the clock (the clock
+was set back, and the helpers would read the marker as stale), or when a
+refresh comes more than a minute late (the process was suspended, and another
+session may have taken the worktree meanwhile). A late refresh is also found as the tool or the
+agent tool looks the attempt up: after a laptop's sleep the gate can find the
+marker stale before the session's timer runs again, and the round it starts
+must not be refused for an attempt that is already over. A helper takes the marker as
 fresh when it was refreshed within the last 90 seconds and its attempt
 started neither more than a minute ahead of the clock nor more than 45
 minutes ago. While it
@@ -1311,7 +1321,7 @@ that attempt only and prints the snapshot the attempt took, its brief and
 the head it started from; the tool adds how the agent ended, its report and
 the watch's options, from memory, which the turn uses whatever the
 follow-up said. A refusal of the helper leaves the attempt to claim again; one that says
-the round's snapshot is gone leaves it to go stale. The tool reads a
+the round's snapshot is gone drops it, to go stale. The tool reads a
 helper's refusal from the line of the CLI's error that names it, not from
 the stack printed after it.
 The brief lists, besides the agent's items, the round's own — the re-runs

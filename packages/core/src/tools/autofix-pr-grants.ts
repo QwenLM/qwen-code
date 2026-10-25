@@ -289,13 +289,21 @@ export class BackgroundFix {
     );
   }
 
+  /**
+   * Whether the last refresh is too long ago: the process was suspended (a
+   * laptop asleep stops the timer, not the clock), and the marker may have
+   * gone stale meanwhile, the worktree another session's.
+   */
+  isLate(now = Date.now()): boolean {
+    return now - this.lastBeat > FIX_HEARTBEAT_MS + FIX_HEARTBEAT_LATE_MS;
+  }
+
   /** Refreshes the marker while it names this attempt; stops otherwise. */
   beat(now = Date.now()): void {
     if (this.done) return;
-    const late = now - this.lastBeat > FIX_HEARTBEAT_MS + FIX_HEARTBEAT_LATE_MS;
+    const late = this.isLate(now);
     this.lastBeat = now;
-    // Suspended past the marker's freshness, the worktree may be another
-    // session's now: its agent must not go on in it.
+    // Its agent must not go on in a worktree that may be another's.
     if (late) return this.drop();
     let fd: number | undefined;
     try {
@@ -316,8 +324,17 @@ export class BackgroundFix {
       }
       const marker = JSON.parse(readFileSync(fd, 'utf8')) as {
         attempt?: unknown;
+        startedAt?: unknown;
       } | null;
       if (marker?.attempt !== this.attempt) return this.drop();
+      // A clock set back past it: the helpers would take the marker as no
+      // attempt's while the agent still works.
+      if (
+        typeof marker.startedAt !== 'string' ||
+        !(Date.parse(marker.startedAt) <= now + FIX_HEARTBEAT_LATE_MS)
+      ) {
+        return this.drop();
+      }
       futimesSync(fd, now / 1000, now / 1000);
     } catch {
       this.drop();
@@ -442,10 +459,17 @@ export class BackgroundFix {
 // One per worktree, whichever session: a worktree has one attempt at a time.
 const fixes = new Map<string, BackgroundFix>();
 
+/** A live attempt, or none: one whose refresh is late is dropped first —
+ * after a sleep, the gate may find its marker stale before its timer runs. */
+function live(fix: BackgroundFix | undefined): BackgroundFix | undefined {
+  if (fix?.isLate()) fix.drop();
+  return fix?.done ? undefined : fix;
+}
+
 /** The attempt whose agent works, or whose round has yet to claim it, at a
  * worktree — of any session of this process. */
 export function backgroundFixAt(worktree: string): BackgroundFix | undefined {
-  return fixes.get(canonicalWorktreePath(worktree));
+  return live(fixes.get(canonicalWorktreePath(worktree)));
 }
 
 export function backgroundFixOf(
@@ -453,7 +477,7 @@ export function backgroundFixOf(
   pr: number,
 ): BackgroundFix | undefined {
   for (const fix of fixes.values()) {
-    if (fix.sessionId === sessionId && fix.pr === pr) return fix;
+    if (fix.sessionId === sessionId && fix.pr === pr) return live(fix);
   }
   return undefined;
 }

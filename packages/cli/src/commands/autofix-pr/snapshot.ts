@@ -2043,10 +2043,12 @@ export function runSnapshot(args: SnapshotArgs): void {
   // A body is written as its lines, and a long line folded: `read_file`
   // pages a file by lines and cuts what one read returns at 25,000
   // characters, and GitHub takes bodies of 65,536.
+  // With the task whose round took it: only that round's fix may run in
+  // the background (`fix-start`).
   atomicWriteFileSync(
     paths.snapshotPath,
     `${JSON.stringify(
-      snapshot,
+      args.task === undefined ? snapshot : { ...snapshot, task: args.task },
       (key, value: unknown) =>
         key === 'body' && typeof value === 'string' ? bodyLines(value) : value,
       2,

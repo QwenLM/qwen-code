@@ -1175,9 +1175,12 @@ class AutofixPrInvocation extends BaseToolInvocation<
       signal,
     );
     // A refusal leaves the attempt to claim again (a helper busy with the
-    // lock), until the claim window ends it.
+    // lock), until its deadline; one with its round's snapshot gone never
+    // will be, and goes stale now.
     if (run.failure || run.exitCode !== 0) {
-      return refuse(helperRefusal('fix-end', run));
+      const refusal = helperRefusal('fix-end', run);
+      if (/has lost its round's snapshot/.test(refusal)) fix.drop();
+      return refuse(refusal);
     }
     fix.claim();
     const printed = lastJsonLine(run.stdout);

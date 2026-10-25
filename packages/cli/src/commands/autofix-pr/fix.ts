@@ -177,9 +177,14 @@ function assertRoundToFix(
   paths: AutofixPrPaths,
   prNumber: number,
   head: string,
+  task: string,
 ): void {
   const stat = lstatSync(paths.snapshotPath, { throwIfNoEntry: false });
-  let snapshot: { action?: unknown; headSha?: unknown } | null = null;
+  let snapshot: {
+    action?: unknown;
+    headSha?: unknown;
+    task?: unknown;
+  } | null = null;
   if (stat?.isFile()) {
     try {
       snapshot = JSON.parse(readFileSync(paths.snapshotPath, 'utf8'));
@@ -191,12 +196,25 @@ function assertRoundToFix(
     !stat ||
     snapshot?.action !== 'fix' ||
     snapshot.headSha !== head ||
+    // A round of the watch's task: a `--once` round's fix is its own.
+    snapshot.task !== task ||
     Date.now() - stat.mtimeMs > FIX_SNAPSHOT_MAX_AGE_MS
   ) {
     throw new Error(
       `no round of PR #${prNumber} has a fix to start: a fix runs in the ` +
-        `background only after the round's snapshot (action "fix" at the ` +
-        `watch's head, within ${FIX_SNAPSHOT_MAX_AGE_MS / 60_000} minutes).`,
+        `background only after the snapshot of a round of the watch's task ` +
+        `(action "fix" at the watch's head, within ` +
+        `${FIX_SNAPSHOT_MAX_AGE_MS / 60_000} minutes).`,
+    );
+  }
+  // The gate reported more since the round's snapshot: its fire is queued,
+  // and its round, run while this fix worked, would find nothing to do and
+  // never get the reported events again. A foreground fix keeps it after.
+  const gate = lstatSync(paths.gatePath, { throwIfNoEntry: false });
+  if (gate && gate.mtimeMs > stat.mtimeMs) {
+    throw new Error(
+      `no round of PR #${prNumber} has a fix to start: the gate reported ` +
+        `more since the round's snapshot; the fix runs in the foreground.`,
     );
   }
 }
@@ -233,7 +251,7 @@ export function runFixStart(args: FixStartArgs): AutofixPrFixAttempt & {
         `an earlier attempt of PR #${args.pr}'s fix was left behind; the round's sync removes it first.`,
       );
     }
-    assertRoundToFix(paths, args.pr, state.lastKnownHeadSha);
+    assertRoundToFix(paths, args.pr, state.lastKnownHeadSha, task);
     const attempt: AutofixPrFixAttempt = {
       version: 1,
       attempt: args.attempt,

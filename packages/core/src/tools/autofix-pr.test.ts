@@ -51,6 +51,7 @@ if (process.env.FAKE_LOG) require('node:fs').appendFileSync(process.env.FAKE_LOG
 if (sub !== 'autofix-pr') { process.stderr.write('not autofix-pr'); process.exit(2); }
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
+else if (mode === 'lost') { process.stderr.write("An unexpected critical error occurred:\\nError: attempt x of PR #12's fix has lost its round's snapshot.\\n    at runFixEnd (fix.js:1:1)\\n"); process.exit(1); }
 else if (mode === 'refuse-stack') { process.stderr.write('An unexpected critical error occurred:\\nError: no round of PR #12 has a fix to start\\n    at runFixStart (fix.js:1:1)\\n    at handler (fix.js:2:2)\\n'); process.exit(1); }
 else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, host: process.env.FAKE_HOST || undefined, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1' }) + '\\n');
 else if (command === 'status') process.stdout.write(process.env.FAKE_STATUS + '\\n');
@@ -1364,6 +1365,30 @@ describe('background fixes', () => {
     expect(backgroundFixOf('session-a', 12)).toBeUndefined();
   });
 
+  it("drops an attempt whose round's snapshot is gone: it is never claimed", async () => {
+    await granted();
+    const fix = await launched();
+    fix.end({ status: 'completed', report: '' });
+    fix.bodySettled();
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'lost');
+    expect(
+      (await run({ command: 'fix-end', pr: 12, attempt: fix.attempt })).error
+        ?.message,
+    ).toMatch(/has lost its round's snapshot/);
+    expect(fix.done).toBe(true);
+    expect(backgroundFixOf('session-a', 12)).toBeUndefined();
+  });
+
+  it('drops an attempt whose refresh is late as soon as anything looks it up, before its timer runs', async () => {
+    await granted();
+    const fix = await launched();
+    // Asleep past the marker's freshness: the gate's round arrives first.
+    vi.setSystemTime(Date.now() + 3 * 60_000);
+    expect((await run({ command: 'sync', pr: 12 })).error).toBeUndefined();
+    expect(fix.done).toBe(true);
+    expect(cancel).toHaveBeenCalledWith('agent-1');
+  });
+
   it('leaves the attempt to claim again when the helper refuses', async () => {
     await granted();
     const fix = await launched();
@@ -1408,7 +1433,14 @@ describe('background fixes', () => {
     const marker = () =>
       path.join(dir, '.qwen', 'tmp', 'autofix-pr-12-fix.json');
     const writeMarker = (attempt: string) =>
-      fs.writeFileSync(marker(), JSON.stringify({ version: 1, attempt }));
+      fs.writeFileSync(
+        marker(),
+        JSON.stringify({
+          version: 1,
+          attempt,
+          startedAt: new Date().toISOString(),
+        }),
+      );
     const mtime = () => fs.lstatSync(marker()).mtimeMs;
     let fix: BackgroundFix;
     beforeEach(async () => {
@@ -1523,6 +1555,19 @@ describe('background fixes', () => {
       await vi.advanceTimersByTimeAsync(20 * 60_000);
       expect(fix.done).toBe(false);
       expect(fix.followUp()).toContain(`--attempt ${fix.attempt}`);
+    });
+
+    it('lets go when the clock was set back past when the attempt started', async () => {
+      fs.writeFileSync(
+        marker(),
+        JSON.stringify({
+          version: 1,
+          attempt: fix.attempt,
+          startedAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(FIX_HEARTBEAT_MS);
+      expect(fix.done).toBe(true);
     });
 
     it('lets go of a marker too large to be one', async () => {
