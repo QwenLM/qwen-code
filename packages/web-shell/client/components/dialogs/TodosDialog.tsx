@@ -51,8 +51,12 @@ interface FlatTodo {
   mtimeMs: number;
 }
 
+/** Local-time "today" as YYYY-MM-DD — agenda buckets are user-facing, so
+ * they must use the user's timezone, not UTC (toISOString was off by a day
+ * for any timezone east of UTC in the evening, west of UTC in the morning). */
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
 function bucketOf(due: string | null, today: string): AgendaBucket {
@@ -167,7 +171,12 @@ export function TodosDialog() {
     async (patch: { status?: DaemonTodoStatus; dueDate?: string | null }) => {
       setBusyKey('bulk');
       try {
+        // Only operate on todos that are visible under the current filter —
+        // a stale selection key (from a filter change or a completed reload)
+        // must not silently mutate a hidden todo.
+        const itemKeys = new Set(items.map((i) => i.key));
         for (const key of selected) {
+          if (!itemKeys.has(key)) continue;
           const sep = key.indexOf(':');
           const sessionId = key.substring(0, sep);
           const todoId = key.substring(sep + 1);
@@ -181,7 +190,7 @@ export function TodosDialog() {
         setBusyKey(null);
       }
     },
-    [actions, load, selected],
+    [actions, items, load, selected],
   );
 
   const today = todayIso();
@@ -382,8 +391,15 @@ export function TodosDialog() {
             key={status}
             className={styles.column}
             data-testid={`todos-column-${status}`}
-            onDragOver={(e) => e.preventDefault()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.currentTarget.classList.add(styles.columnDragOver);
+            }}
+            onDragLeave={(e) => {
+              e.currentTarget.classList.remove(styles.columnDragOver);
+            }}
             onDrop={(e) => {
+              e.currentTarget.classList.remove(styles.columnDragOver);
               const key = e.dataTransfer.getData('text/plain');
               if (key) void update(key, { status });
             }}

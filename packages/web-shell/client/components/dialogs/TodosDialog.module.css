@@ -138,6 +138,11 @@
   flex: none;
 }
 
+.columnDragOver {
+  border-color: #6d44e8;
+  background: rgba(109, 68, 232, 0.08);
+}
+
 .columnCount {
   margin-left: auto;
   font-size: 11px;
