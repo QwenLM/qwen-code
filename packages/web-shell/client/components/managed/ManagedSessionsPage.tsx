@@ -87,6 +87,8 @@ import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
+import { TodoFullList } from '../messages/TodoView';
+import { getLatestSuccessfulTodos } from '../../utils/todos';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -692,6 +694,10 @@ function ManagedSessionsContent({
   const messages = useMemo(
     () => messageProjector(detail.events, truncatedLabel),
     [messageProjector, detail.events, truncatedLabel],
+  );
+  const latestSuccessfulTodos = useMemo(
+    () => getLatestSuccessfulTodos(messages),
+    [messages],
   );
   // The caveat sits beside the card rather than inside the panel, so the panel
   // is told about it: without this the dialog describes only the tool name and
@@ -1974,6 +1980,24 @@ function ManagedSessionsContent({
                 onAbandoned={() => setListRevision((current) => current + 1)}
               />
             )}
+          {latestSuccessfulTodos !== undefined &&
+            latestSuccessfulTodos.length > 0 && (
+              <section
+                className="max-h-[35vh] shrink-0 overflow-y-auto rounded-md border px-3 py-2"
+                aria-label={t('todo.title')}
+                data-managed-todo-list
+              >
+                <div className="mb-2 text-sm font-medium">
+                  {t('todo.title')}
+                </div>
+                <TodoFullList todos={latestSuccessfulTodos} numbered />
+              </section>
+            )}
+          {sessionId && detail.olderCursor && (
+            <p className="text-xs text-muted-foreground">
+              {t('managed.todo.loadedWindow')}
+            </p>
+          )}
           {!(!sessionId && provider.workspaceBinding) && (
             <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
               <ToolDetailsContext.Provider value={loadToolDetails}>
