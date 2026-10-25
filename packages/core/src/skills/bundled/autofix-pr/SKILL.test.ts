@@ -223,7 +223,7 @@ describe('bundled autofix-pr skill', () => {
       'call `autofix_pr` with `command: "unattended"` and `pr`: its dialog confirms the answer',
     );
     expect(body).toContain(
-      'which skips the question and so never makes this choice, call `autofix_pr` with `command: "attended"` and `pr` instead',
+      'and with `--yes` when it skipped the question (so no choice was made), call `autofix_pr` with `command: "attended"` and `pr` instead',
     );
     expect(body).toContain(
       'On plain "Resume": `autofix_pr` with `command: "attended"` and `pr`.',

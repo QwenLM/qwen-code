@@ -61,6 +61,7 @@ function makeConfig(overrides: Partial<Record<string, unknown>> = {}): Config {
     isTrustedFolder: () => true,
     isSessionAgentSession: () => false,
     isInteractive: () => true,
+    getExperimentalZedIntegration: () => false,
     getInputFormat: () => 'text',
     ...overrides,
   } as unknown as Config;
@@ -102,6 +103,12 @@ beforeEach(() => {
   dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-pr-')));
   worktree = path.join(dir, '.qwen', 'tmp', 'autofix-pr-12');
   fs.mkdirSync(worktree, { recursive: true });
+  // A repository of its own, with git's sample hooks only, and none of this
+  // machine's global settings.
+  vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
+  execFileSync('git', ['init', '-q', worktree], {
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
+  });
   const cli = path.join(dir, 'fake-cli.cjs');
   fs.writeFileSync(cli, FAKE_CLI);
   vi.stubEnv('QWEN_CODE_CLI', cli);
@@ -319,15 +326,21 @@ describe('permission rules', () => {
     );
   });
 
-  it('asks the user for a start in auto mode, whatever the classifier says', async () => {
-    const start = (mode: ApprovalMode) =>
+  it('asks the user for a start in auto mode, whatever the classifier says, where a user can answer', async () => {
+    const start = (mode: ApprovalMode, interactive = true) =>
       invocation(
         { command: 'prepare', pr: 12, repo: 'o/r' },
-        makeConfig({ getApprovalMode: () => mode }),
+        makeConfig({
+          getApprovalMode: () => mode,
+          isInteractive: () => interactive,
+          getExperimentalZedIntegration: () => false,
+        }),
       ).requiresUserInteraction!();
     expect(start(ApprovalMode.AUTO)).toBe(true);
     expect(start(ApprovalMode.DEFAULT)).toBe(false);
     expect(start(ApprovalMode.YOLO)).toBe(false);
+    // Headless: its rules decide, as in default mode.
+    expect(start(ApprovalMode.AUTO, false)).toBe(false);
   });
 
   it('treat a prepared watch the state file now names otherwise as unconfirmed', async () => {
@@ -426,23 +439,39 @@ describe('permission rules', () => {
       (
         (await push.getConfirmationDetails(signal())) as { warnings?: string[] }
       ).warnings?.join(' '),
-    ).toMatch(/runs git hooks the PR's own tree supplies/);
+    ).toMatch(/runs git hooks that may run what the PR's tree holds/);
     await confirmAndRunHere();
     expect((await presented({ command: 'push', pr: 12 }))['watch']).toBe(
       'confirmed',
     );
-    // Hooks of the clone's own, outside the worktree, run as before.
-    execFileSync('git', [
-      '-C',
-      repo,
-      'config',
-      'core.hooksPath',
-      path.join(os.tmpdir(), 'hooks'),
-    ]);
+    // A hooks directory outside the worktree with no hook a push or sync
+    // runs asks nothing; one with a pre-push hook asks, as it may dispatch
+    // to a config file in the tree.
+    const hooks = path.join(dir, 'hooks');
+    fs.mkdirSync(hooks);
+    execFileSync('git', ['-C', repo, 'config', 'core.hooksPath', hooks]);
     resetUnattendedFixGrantsForTests();
     await prepare();
     expect((await presented({ command: 'push', pr: 12 }))['watch']).toBe(
       'confirmed',
+    );
+    fs.writeFileSync(path.join(hooks, 'pre-push'), '#!/bin/sh\n', {
+      mode: 0o755,
+    });
+    expect((await presented({ command: 'push', pr: 12 }))['watch']).toBe(
+      'unconfirmed',
+    );
+    fs.rmSync(path.join(hooks, 'pre-push'));
+    execFileSync('git', ['-C', repo, 'config', '--unset', 'core.hooksPath']);
+    fs.writeFileSync(
+      path.join(repo, '.git', 'hooks', 'post-merge'),
+      '#!/bin/sh\n',
+      {
+        mode: 0o755,
+      },
+    );
+    expect((await presented({ command: 'sync', pr: 12 }))['watch']).toBe(
+      'unconfirmed',
     );
   });
 

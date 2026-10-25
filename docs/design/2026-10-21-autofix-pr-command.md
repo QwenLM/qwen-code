@@ -1037,7 +1037,9 @@ the PR.
   agents do not, and code mode's `exec` cannot call it.
 - Before any git command in the worktree, `push`, `sync`, `status` and
   `cleanup` check its `.git` from the files: it must name this clone's own
-  admin entry for a worktree, which must point back at it. A round's code
+  admin entry for a worktree, which must point back at it. The file is read
+  as git reads it (`gitdir: ` and the rest), the path resolved as the
+  kernel resolves it, and a worktree without one is refused. A round's code
   can rewrite that file, and a git directory it built would hand every git
   command there its config — a `core.fsmonitor` command runs on the next
   `git status`.
@@ -1061,10 +1063,13 @@ command does — in auto mode the classifier decides. Rules match on
   session and not ended. `status` runs there with `--no-work`, which skips
   its git scan of the worktree, and not at all in YOLO mode, which asks
   nothing, or in plan mode, which runs no helper. A `push` or `sync` is
-  `confirmed` only when the clone's `core.hooksPath` keeps git's hooks
-  outside the worktree, or the watch's fixes run unattended (Section 6.13):
-  a relative one (husky's `.husky`) resolves inside the worktree, where the
-  PR's own tree supplies them, and the dialog of such a call says so. An ask rule for the shell command
+  `confirmed` only when git would run none of the hooks they trigger
+  (`pre-push`, `post-checkout`, `post-merge`, `reference-transaction`), or
+  the watch's fixes run unattended (Section 6.13): a relative
+  `core.hooksPath` (husky's `.husky`) resolves inside the worktree, where the
+  PR's own tree supplies the hooks, and a hook in the clone's own hooks
+  directory may be a dispatcher (pre-commit, lefthook, husky 4) that runs
+  what a config file in the tree says. The dialog of such a call says so. An ask rule for the shell command
   (`Bash(qwen autofix-pr push *)`) keeps the call `unconfirmed` too. The
   state file the helper reads sits in reach of
   the code a round runs, so it can only make a call `unconfirmed`; none of

@@ -8,18 +8,10 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { GIT_TIMEOUT_MS, gitOpt, gitProbe } from '../review/lib/git.js';
 import { redirectedAncestor, sanitizedGitEnv } from '../review/lib/worktree.js';
 import type { AutofixPrPaths } from './state.js';
-
-function isBrokenLink(file: string): boolean {
-  try {
-    return lstatSync(file).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Why the worktree's `.git` is not to be trusted, or null. It is a file a
@@ -36,9 +28,6 @@ export function untrustedGitfile(
   root: string,
 ): string | null {
   const dotGit = join(worktreePath, '.git');
-  // None at all: git walks up to the clone itself, the user's own, and the
-  // caller's own check finds the directory is no worktree.
-  if (!existsSync(dotGit) && !isBrokenLink(dotGit)) return null;
   let text: string;
   try {
     if (!lstatSync(dotGit).isFile()) {
@@ -46,20 +35,41 @@ export function untrustedGitfile(
     }
     text = readFileSync(dotGit, 'utf8');
   } catch {
-    return `${dotGit} cannot be read`;
+    // None: git walks up, and finds a git directory a round's code may have
+    // planted beside the worktree, naming it as its `core.worktree`.
+    return `${worktreePath} is not a git worktree: it has no gitfile of its own`;
   }
-  const pointer = /^gitdir: *(.+?)\s*$/m.exec(text)?.[1];
-  if (!pointer) return `${dotGit} names no git directory`;
+  // Read as git reads it (setup.c, read_gitfile_gently): the file starts
+  // with `gitdir: `, one space, and the path is the rest of it, less the
+  // line breaks that end it — spaces and all. Any other reading could pass
+  // a path git resolves elsewhere, inside the worktree.
+  if (!text.startsWith('gitdir: ')) {
+    return `${dotGit} is not a gitfile git reads`;
+  }
+  const pointer = text.slice('gitdir: '.length).replace(/[\r\n]+$/, '');
+  if (pointer === '' || pointer.includes('\0') || /[\r\n]/.test(pointer)) {
+    return `${dotGit} names no git directory git and this check read alike`;
+  }
   const common = gitOpt('-C', root, 'rev-parse', '--git-common-dir');
   if (common === null) return `git cannot find the git directory of ${root}`;
+  // Resolved as the kernel resolves what git hands it: symlinks first, a
+  // `..` after the link it follows. A lexical resolve() reads `link/..`
+  // differently, so the joined string goes to the native realpath as is.
+  const asGitNames = (base: string, named: string) =>
+    realpathSync.native(isAbsolute(named) ? named : `${base}${sep}${named}`);
   try {
-    const entry = realpathSync(resolve(worktreePath, pointer));
-    const entries = realpathSync(join(resolve(root, common), 'worktrees'));
+    const entry = asGitNames(worktreePath, pointer);
+    const entries = realpathSync.native(
+      join(resolve(root, common), 'worktrees'),
+    );
     if (dirname(entry) !== entries) {
       return `${dotGit} points to ${pointer}, not to this clone's own entry for a worktree`;
     }
-    const back = readFileSync(join(entry, 'gitdir'), 'utf8').trim();
-    if (realpathSync(resolve(entry, back)) !== realpathSync(dotGit)) {
+    const back = readFileSync(join(entry, 'gitdir'), 'utf8').replace(
+      /[\r\n]+$/,
+      '',
+    );
+    if (asGitNames(entry, back) !== realpathSync.native(dotGit)) {
       return `${dotGit} points to ${entry}, the entry of another worktree`;
     }
   } catch {

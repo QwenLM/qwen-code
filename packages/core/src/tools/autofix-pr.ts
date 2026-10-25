@@ -27,6 +27,7 @@ import {
   ShellExecutionService,
   type ShellOutputEvent,
 } from '../services/shellExecutionService.js';
+import { resolveInteractionMode } from '../core/prompts.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { execCommand } from '../utils/shell-utils.js';
 import { getJsInterpreterCommand } from '../utils/runtime-info.js';
@@ -575,11 +576,11 @@ async function stillPrepared(
   ) {
     return 'unconfirmed';
   }
-  // These run git hooks in the worktree. When the clone takes them from its
-  // tree, the PR's code runs, which a watch whose fixes ask must ask for.
+  // These run git hooks in the worktree. When a hook may run what the PR's
+  // tree holds, a watch whose fixes ask must ask for them too.
   return !HOOK_COMMANDS.has(command) ||
     unattendedFixGranted(config.getSessionId(), prepared.worktree) ||
-    !(await hooksFromWorktree(prepared.worktree, signal))
+    !(await hooksMayRunPrCode(prepared.worktree, signal))
     ? 'confirmed'
     : 'hooks';
 }
@@ -587,43 +588,65 @@ async function stillPrepared(
 /** The helpers that run git commands with hooks in the worktree. */
 const HOOK_COMMANDS = new Set<AutofixPrCommand>(['sync', 'push']);
 
+/** The hooks a `push` or a `sync` (fetch, merge, switch) makes git run. */
+const PUSH_SYNC_HOOKS = [
+  'pre-push',
+  'post-checkout',
+  'post-merge',
+  'reference-transaction',
+];
+
 /**
- * Whether git takes the worktree's hooks from inside it: a relative
- * `core.hooksPath` (husky's `.husky`, a `.githooks`) resolves against the
- * working tree, so the PR's own tree supplies them. Unknown counts as yes.
+ * Whether a `push` or `sync` may run code the PR's tree controls through a
+ * git hook. A relative `core.hooksPath` (husky's `.husky`) resolves inside
+ * the worktree, so the tree supplies the hooks; and a hook installed in the
+ * clone's own hooks directory may be a dispatcher (pre-commit, lefthook,
+ * husky 4) that runs what a config file in the tree says. So any such hook
+ * counts, wherever it lives. Unknown counts as yes.
  */
-async function hooksFromWorktree(
+async function hooksMayRunPrCode(
   worktree: string,
   signal: AbortSignal,
 ): Promise<boolean> {
+  const git = (...args: string[]) =>
+    execCommand('git', ['-C', worktree, ...args], {
+      preserveOutputOnError: true,
+      signal,
+      timeout: 10_000,
+      windowsHide: true,
+    });
   try {
-    const { stdout, code } = await execCommand(
-      'git',
-      ['-C', worktree, 'config', '--get', 'core.hooksPath'],
-      {
-        preserveOutputOnError: true,
-        signal,
-        timeout: 10_000,
-        windowsHide: true,
-      },
-    );
-    // Unset: the clone's own hooks directory, outside every worktree.
-    if (code === 1 && stdout.trim() === '') return false;
-    if (code !== 0) return true;
-    const value = stdout.trim();
-    const expanded =
-      value === '~' || value.startsWith('~/')
-        ? path.join(os.homedir(), value.slice(1))
-        : value;
-    const inside = path.relative(
-      worktree,
-      canonicalWorktreePath(path.resolve(worktree, expanded)),
-    );
-    return (
-      inside !== '..' &&
-      !inside.startsWith(`..${path.sep}`) &&
-      !path.isAbsolute(inside)
-    );
+    const configured = await git('config', '--get', 'core.hooksPath');
+    let dir: string;
+    if (configured.code === 1 && configured.stdout.trim() === '') {
+      const common = await git('rev-parse', '--git-common-dir');
+      if (common.code !== 0) return true;
+      dir = path.join(path.resolve(worktree, common.stdout.trim()), 'hooks');
+    } else if (configured.code === 0) {
+      const value = configured.stdout.trim();
+      const expanded =
+        value === '~' || value.startsWith('~/')
+          ? path.join(os.homedir(), value.slice(1))
+          : value;
+      dir = path.resolve(worktree, expanded);
+      const inside = path.relative(worktree, canonicalWorktreePath(dir));
+      if (
+        inside !== '..' &&
+        !inside.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(inside)
+      ) {
+        return true;
+      }
+    } else {
+      return true;
+    }
+    return PUSH_SYNC_HOOKS.some((hook) => {
+      try {
+        return statSync(path.join(dir, hook)).isFile();
+      } catch {
+        return false;
+      }
+    });
   } catch {
     return true;
   }
@@ -855,10 +878,12 @@ class AutofixPrInvocation extends BaseToolInvocation<
    */
   override requiresUserInteraction(): boolean {
     // A start lets the watch's rounds push and reply without asking, so in
-    // auto mode the classifier does not stand in for the user there.
+    // auto mode the classifier does not stand in for the user there — where
+    // a user can answer: a headless run keeps its rules, as in default mode.
     if (
       this.params.command === 'prepare' &&
-      this.config.getApprovalMode() === ApprovalMode.AUTO
+      this.config.getApprovalMode() === ApprovalMode.AUTO &&
+      resolveInteractionMode(this.config) !== 'headless'
     ) {
       return true;
     }
@@ -940,7 +965,7 @@ class AutofixPrInvocation extends BaseToolInvocation<
       return `Records the scheduled task of the watch of PR #${pr}, replacing any it has.`;
     }
     if (this.prHooks) {
-      return `${this.params.command} runs git hooks the PR's own tree supplies (this clone's core.hooksPath lies inside the worktree), so it asks unless the watch's fixes run without asking.`;
+      return `${this.params.command} runs git hooks that may run what the PR's tree holds (a hooks path inside the worktree, or a hook that reads its config there), so it asks unless the watch's fixes run without asking.`;
     }
     return `PR #${pr} is not a watch this session started or resumed.`;
   }

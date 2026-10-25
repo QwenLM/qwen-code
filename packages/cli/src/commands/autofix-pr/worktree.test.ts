@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
+  symlinkSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -15,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { unsavedWork } from './cleanup.js';
 import { autofixPrPaths } from './state.js';
@@ -107,6 +108,33 @@ describe('untrustedGitfile (real git)', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  it('reads the gitfile as git does, so a spelling git resolves inside the worktree is refused', () => {
+    const real = readFileSync(join(worktree, '.git'), 'utf8')
+      .slice('gitdir: '.length)
+      .trim();
+    // Two spaces: git takes " <real>", a path relative to the worktree, and
+    // reads the git directory planted there.
+    plantGitDir();
+    const planted = join(worktree, ` ${real}`);
+    mkdirSync(dirname(planted), { recursive: true });
+    execFileSync('mv', [join(worktree, 'fake'), planted]);
+    writeFileSync(join(worktree, '.git'), `gitdir:  ${real}\n`);
+    git(worktree, '--no-optional-locks', 'status', '--porcelain');
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    expect(untrustedGitfile(worktree, root)).toMatch(
+      /names no git directory|not to this clone's own entry/,
+    );
+    for (const text of [`x\ngitdir: ${real}\n`, `gitdir: ${real}  \n`]) {
+      writeFileSync(join(worktree, '.git'), text);
+      expect(untrustedGitfile(worktree, root)).not.toBeNull();
+    }
+    expect(() => requireWorktree(autofixPrPaths(root, 7), 7, root)).toThrow(
+      /no git command runs in/,
+    );
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it('refuses a .git directory, and the entry of another worktree', () => {
     const other = join(root, '.qwen', 'tmp', 'other');
     git(root, 'worktree', 'add', '-q', '-b', 'other', other);
@@ -121,11 +149,51 @@ describe('untrustedGitfile (real git)', () => {
     );
   });
 
-  it('leaves a directory with no .git to the worktree check', () => {
+  it('refuses a worktree without its gitfile: git would walk up to a git directory planted beside it', () => {
     rmSync(join(worktree, '.git'));
-    expect(untrustedGitfile(worktree, root)).toBeNull();
+    const planted = join(root, '.qwen', 'tmp', '.git');
+    execFileSync('cp', ['-r', join(root, '.git'), planted]);
+    execFileSync('git', [
+      '--git-dir',
+      planted,
+      'config',
+      'core.worktree',
+      worktree,
+    ]);
+    execFileSync('git', [
+      '--git-dir',
+      planted,
+      'config',
+      'core.fsmonitor',
+      `touch ${marker}`,
+    ]);
+    expect(untrustedGitfile(worktree, root)).toMatch(
+      /is not a git worktree: it has no gitfile/,
+    );
     expect(() => requireWorktree(autofixPrPaths(root, 7), 7, root)).toThrow(
       /is not a git worktree/,
     );
+    expect(unsavedWork(autofixPrPaths(root, 7), [])).toMatch(
+      /is not a git worktree/,
+    );
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('resolves the pointer as the kernel does, symlinks before `..`', () => {
+    const real = readFileSync(join(worktree, '.git'), 'utf8')
+      .slice('gitdir: '.length)
+      .trim();
+    // `L/../../..` names the clone's entry lexically, but through the link
+    // git lands inside the worktree, on a git directory planted there.
+    plantGitDir();
+    const deep = join(worktree, 'x', 'a', 'b', 'c', 'd');
+    mkdirSync(deep, { recursive: true });
+    symlinkSync(deep, join(worktree, 'L'));
+    const ups = real.split(sep).filter(Boolean).length;
+    const lexical = `L${sep}${Array(ups + 1)
+      .fill('..')
+      .join(sep)}${real}`;
+    writeFileSync(join(worktree, '.git'), `gitdir: ${lexical}\n`);
+    expect(untrustedGitfile(worktree, root)).not.toBeNull();
   });
 });
