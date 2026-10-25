@@ -3,7 +3,6 @@
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
     "version": "1.93.0",
-    "version": "1.93.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
@@ -5373,6 +5372,226 @@
         },
         "description": "Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.",
         "summary": "Read one immutable public Session snapshot page for reading exports"
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/user-messages": {
+      "get": {
+        "operationId": "queryUserMessages",
+        "tags": ["Public Resources"],
+        "summary": "Query or mutate the durable Session user message queue",
+        "responses": {
+          "200": {
+            "description": "Authoritative queue snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMessageSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-qwen-implementation-status": "partial"
+      },
+      "post": {
+        "operationId": "commandUserMessages",
+        "tags": ["Public Resources"],
+        "summary": "Query or mutate the durable Session user message queue",
+        "responses": {
+          "200": {
+            "description": "Authoritative queue snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMessageSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserMessageCommand"
+              }
+            }
+          }
+        },
+        "x-qwen-implementation-status": "partial"
+      }
+    },
+    "/api/agent/web-shell/v1/user-messages/query": {
+      "post": {
+        "operationId": "webShellQueryUserMessages",
+        "tags": ["WebShell"],
+        "summary": "Query or mutate the durable Session user message queue",
+        "responses": {
+          "200": {
+            "description": "Authoritative queue snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMessageSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellUserMessageQuery"
+              }
+            }
+          }
+        },
+        "x-qwen-implementation-status": "partial"
+      }
+    },
+    "/api/agent/web-shell/v1/user-messages/command": {
+      "post": {
+        "operationId": "webShellCommandUserMessages",
+        "tags": ["WebShell"],
+        "summary": "Query or mutate the durable Session user message queue",
+        "responses": {
+          "200": {
+            "description": "Authoritative queue snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMessageSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellUserMessageCommand"
+              }
+            }
+          }
+        },
+        "x-qwen-implementation-status": "partial"
       }
     }
   },
@@ -13660,6 +13879,124 @@
           }
         },
         "description": "Session-scoped portable permission-rules/1. Each rule must be trimmed, nonempty, free of control characters, and at most 512 UTF-8 bytes. At most 32 unique strings per list, 64 across all lists and 8192 UTF-8 bytes of compact JSON. Tool names and aliases match whole tools; MCP names may end with a wildcard. Bash/Shell/run_shell_command/monitor command globs and WebFetch/web_fetch(domain:host) are supported; file-path specifiers and arbitrary tool predicates are rejected. Deny takes precedence over ask, then allow, in every mode. Rules do not provide filesystem or process isolation."
+      },
+      "UserMessage": {
+        "type": "object",
+        "required": ["id", "sequence", "revision", "state", "input"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sequence": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "state": {
+            "type": "string",
+            "enum": ["queued", "claimed", "recovery_blocked"]
+          },
+          "input": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "resource": {
+                  "type": "object",
+                  "required": ["uri", "text", "mimeType"],
+                  "properties": {
+                    "uri": {
+                      "type": "string"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "mimeType": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "turnId": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "UserMessageSnapshot": {
+        "type": "object",
+        "required": ["paused", "messages"],
+        "properties": {
+          "paused": {
+            "type": "boolean"
+          },
+          "messages": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/UserMessage"
+            }
+          }
+        }
+      },
+      "UserMessageCommand": {
+        "type": "object",
+        "description": "submit queues input; edit only changes queued input. withdraw removes queued input or explicitly discards recovery_blocked input without replaying it. Unknown delivery may already have reached the original Turn: discarding does not undo it, preserves late durable receipts and keeps the queue paused until resume. In-flight claimed input remains immutable. Commands replay the actor-scoped recorded result before checking new-work availability.",
+        "required": ["action"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["submit", "edit", "withdraw", "resume"]
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "input": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InputBlock"
+            }
+          }
+        }
+      },
+      "WebShellUserMessageQuery": {
+        "type": "object",
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          }
+        }
+      },
+      "WebShellUserMessageCommand": {
+        "type": "object",
+        "required": ["sessionId", "idempotencyKey", "command"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "command": {
+            "$ref": "#/components/schemas/UserMessageCommand"
+          }
+        }
       }
     }
   }

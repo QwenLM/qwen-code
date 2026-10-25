@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { selectNpmBunHandoff } from './npm-runtime.js';
 import { isInteractiveInvocation } from './interactive-mode.js';
 import { NPM_RUNTIME_CONTEXT } from './env-provenance.js';
+import { selectTuiRenderer } from '../ui/opentui/renderer-selection.js';
 
 const roots: string[] = [];
 const originalVersions = Object.getOwnPropertyDescriptor(process, 'versions')!;
@@ -98,6 +99,26 @@ describe('npm Bun runtime admission', () => {
     },
   );
 
+  it.each(['26.4.0', '27.0.0'])(
+    'hands Node %s npm OpenTUI to its installed private Bun',
+    (node) => {
+      const f = fixture();
+      const result = selectNpmBunHandoff({
+        ...f.options,
+        versions: { node },
+      });
+      expect(result?.interpreter).toEqual({
+        command: realpathSync(f.bun),
+        runtime: 'bun',
+      });
+      expect(JSON.parse(result!.childEnv[NPM_RUNTIME_CONTEXT]!)).toEqual({
+        node: realpathSync(process.execPath),
+        bun: realpathSync(f.bun),
+        cli: realpathSync(f.script),
+      });
+    },
+  );
+
   const unavailableCases: Array<
     [string, Partial<Parameters<typeof selectNpmBunHandoff>[0]>]
   > = [
@@ -107,8 +128,10 @@ describe('npm Bun runtime admission', () => {
     ['musl override', { env: { OPENTUI_LIBC: 'musl' } }],
     ['disabled relaunch', { env: { QWEN_CODE_NO_RELAUNCH: 'true' } }],
     ['Node loader', { execArgv: ['--import', 'loader.js'] }],
+    ['Node FFI flag', { execArgv: ['--experimental-ffi'] }],
     ['Node memory flag', { execArgv: ['--max-old-space-size=4096'] }],
     ['NODE_OPTIONS', { env: { NODE_OPTIONS: '--trace-warnings' } }],
+    ['BUN_OPTIONS', { env: { BUN_OPTIONS: '--preload ./payload.mjs' } }],
   ];
   it.each([
     ['default renderer', { env: {} }],
@@ -120,8 +143,6 @@ describe('npm Bun runtime admission', () => {
     ['whole-CLI sandbox', { sandbox: true }],
     ['inside sandbox', { env: { QWEN_TUI_RENDERER: 'opentui', SANDBOX: '1' } }],
     ['already Bun', { versions: { bun: '1.3.14', node: '24.3.0' } }],
-    ['Node 26.4', { versions: { node: '26.4.0' } }],
-    ['newer Node', { versions: { node: '27.0.0' } }],
   ])('does not hand off %s', (_name, override) => {
     const f = fixture();
     expect(selectNpmBunHandoff({ ...f.options, ...override })).toBeUndefined();
@@ -143,6 +164,52 @@ describe('npm Bun runtime admission', () => {
           env: { ...options.env, QWEN_TUI_RENDERER_STRICT: 'true' },
         }),
       ).toThrow('OpenTUI npm Bun handoff unavailable');
+    },
+  );
+
+  for (const node of ['26.4.0', '27.0.0']) {
+    it.each(unavailableCases)(
+      `keeps Node ${node} out of OpenTUI when handoff is unavailable: %s`,
+      (_name, override) => {
+        const f = fixture();
+        const options = {
+          ...f.options,
+          ...override,
+          versions: { node },
+          env: { ...f.options.env, ...override.env },
+        };
+        expect(selectNpmBunHandoff(options)).toBeUndefined();
+        expect(
+          selectTuiRenderer('opentui', options.versions, options.env).renderer,
+        ).toBe('ink');
+        const strictEnv = { ...options.env, QWEN_TUI_RENDERER_STRICT: 'true' };
+        expect(() =>
+          selectNpmBunHandoff({ ...options, env: strictEnv }),
+        ).toThrow('OpenTUI npm Bun handoff unavailable');
+        expect(() =>
+          selectTuiRenderer('opentui', options.versions, strictEnv),
+        ).toThrow('QWEN_TUI_RENDERER_STRICT');
+      },
+    );
+  }
+
+  it.each(['26.4.0', '27.0.0'])(
+    'keeps Node %s out of OpenTUI when its private Bun is missing',
+    (node) => {
+      const f = fixture();
+      rmSync(f.dependency, { recursive: true });
+      const options = { ...f.options, versions: { node } };
+      expect(selectNpmBunHandoff(options)).toBeUndefined();
+      expect(
+        selectTuiRenderer('opentui', options.versions, options.env).renderer,
+      ).toBe('ink');
+      const strictEnv = { ...options.env, QWEN_TUI_RENDERER_STRICT: '1' };
+      expect(() => selectNpmBunHandoff({ ...options, env: strictEnv })).toThrow(
+        'install the published optional dependency',
+      );
+      expect(() =>
+        selectTuiRenderer('opentui', options.versions, strictEnv),
+      ).toThrow('QWEN_TUI_RENDERER_STRICT');
     },
   );
 

@@ -116,7 +116,10 @@ describe('no-AK integration CI wiring', () => {
       let previous = -1;
       for (const command of [
         'set +e',
-        'npm run test:ci',
+        // The Linux job runs the suites through the lane script.
+        jobName === 'test'
+          ? '.github/scripts/ci/run-unit-test-lanes.sh'
+          : 'npm run test:ci',
         'RC=$?',
         'set -e',
         'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
@@ -363,6 +366,8 @@ describe('no-AK integration CI wiring', () => {
       'interactive/mixed-input-crash.test.ts': 'Runtime budget',
       'interactive/protocol-tags-interactive.test.ts': 'Runtime budget',
       'interactive/submitted-prompt-provenance.test.ts': 'Runtime budget',
+      'interactive/tui-checkpoint-restore.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-clipboard-source.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-dual-output.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-migration.test.ts': 'Runtime budget',
       'interactive/tui-session-recovery.test.ts': 'Dedicated TUI parity gate',

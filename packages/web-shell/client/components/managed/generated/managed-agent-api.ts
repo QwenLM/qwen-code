@@ -832,6 +832,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/user-messages/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query or mutate the durable Session user message queue */
+        post: operations["webShellQueryUserMessages"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/user-messages/command": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query or mutate the durable Session user message queue */
+        post: operations["webShellCommandUserMessages"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2123,6 +2157,43 @@ export interface components {
             allow: string[];
             ask: string[];
             deny: string[];
+        };
+        UserMessage: {
+            id: string;
+            sequence: number;
+            revision: number;
+            /** @enum {string} */
+            state: "queued" | "claimed" | "recovery_blocked";
+            input: {
+                type: string;
+                text?: string;
+                resource?: {
+                    uri: string;
+                    text: string;
+                    mimeType: string;
+                };
+            }[];
+            turnId?: string | null;
+        };
+        UserMessageSnapshot: {
+            paused: boolean;
+            messages: components["schemas"]["UserMessage"][];
+        };
+        /** @description submit queues input; edit only changes queued input. withdraw removes queued input or explicitly discards recovery_blocked input without replaying it. Unknown delivery may already have reached the original Turn: discarding does not undo it, preserves late durable receipts and keeps the queue paused until resume. In-flight claimed input remains immutable. Commands replay the actor-scoped recorded result before checking new-work availability. */
+        UserMessageCommand: {
+            /** @enum {string} */
+            action: "submit" | "edit" | "withdraw" | "resume";
+            messageId?: string;
+            expectedRevision?: number;
+            input?: components["schemas"]["InputBlock"][];
+        };
+        WebShellUserMessageQuery: {
+            sessionId: string;
+        };
+        WebShellUserMessageCommand: {
+            sessionId: string;
+            idempotencyKey: string;
+            command: components["schemas"]["UserMessageCommand"];
         };
     };
     responses: {
@@ -3863,6 +3934,68 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["CursorExpired"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellQueryUserMessages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellUserMessageQuery"];
+            };
+        };
+        responses: {
+            /** @description Authoritative queue snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserMessageSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellCommandUserMessages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellUserMessageCommand"];
+            };
+        };
+        responses: {
+            /** @description Authoritative queue snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserMessageSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["Unavailable"];
         };
     };
 }

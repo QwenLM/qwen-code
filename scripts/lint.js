@@ -8,7 +8,7 @@
 
 import { execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { getLintScope } from './lint-scope.js';
@@ -423,6 +423,29 @@ function runChangedFiles(command, options, files) {
   if (failed) process.exit(1);
 }
 
+// A history fallback is the one full scan nobody expects: the lane stays
+// green while every file is checked, so without a signal the optimization can
+// silently stop working — after #15381 a failing history fetch made 3 of 8
+// sampled PR runs fall back to full lint with nothing in the UI showing it.
+// Falling back because a lint config or dependency changed is routine and
+// stays quiet. The summary is deduplicated because every lane invokes this
+// script separately.
+function announceHistoryFallback(scope) {
+  const reason = scope.full ? (scope.reason ?? '') : '';
+  if (!reason.startsWith('Incremental selection unavailable:')) return;
+  if (process.env.GITHUB_ACTIONS !== 'true') return;
+  console.log(`::warning::${reason}; running the full lint`);
+  const summary = process.env.GITHUB_STEP_SUMMARY;
+  if (!summary) return;
+  const line = `- Incremental lint unavailable: ${reason}\n`;
+  try {
+    if (readFileSync(summary, 'utf8').includes(reason)) return;
+  } catch {
+    // Missing summary file is the normal first-write case.
+  }
+  appendFileSync(summary, line);
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -443,6 +466,7 @@ async function main() {
   console.log(
     scope.full ? `Full lint: ${scope.reason}` : 'Incremental PR lint.',
   );
+  announceHistoryFallback(scope);
   if (args.length === 0 || args.includes('--setup')) setupLinters(scope);
   const lanes = {
     eslint: () =>
