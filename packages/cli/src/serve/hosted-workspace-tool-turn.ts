@@ -27,6 +27,11 @@ import {
   HOSTED_GLOB_TOO_COMPLEX,
 } from './hosted-glob-pattern.js';
 import {
+  HostedTodoInputError,
+  hostedTodoInstructions,
+  writeHostedTodos,
+} from './hosted-todo-session.js';
+import {
   checkHostedTodoWriteInput,
   HOSTED_TODO_CONTENT_MAX_CHARS,
   HOSTED_TODO_MAX_DEPENDENCIES,
@@ -687,14 +692,14 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
-// #15076: `todo_write`, declared only on `files/3`. The Worker keeps the
-// list, which writes no Workspace file. `web_fetch` is not part of this
-// declaration: `main` adds it to the same files lane under its own argument
+// #15076: `todo_write`, declared only on `files/3`. The Harness persists
+// the Session list without writing a Workspace file. `web_fetch` is not part
+// of this declaration: `main` adds it to the same files lane under its own argument
 // and destination checks, so this array appends only the todo tool.
 export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
   name: 'todo_write',
   description:
-    'Create or replace the task list for complex or multi-step work in this turn. Send the whole list each time: the call replaces the stored list, and while the plan has unfinished items an omitted `blockedBy` is preserved for an id that already exists.',
+    'Create or replace the task list of this Session for complex or multi-step work. Send the whole list each time: the call replaces the stored list, and while the plan has unfinished items an omitted `blockedBy` is preserved for an id that already exists.',
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -1773,6 +1778,7 @@ interface HostedPreparedRequest {
   command: boolean;
   skill: boolean;
   planExit?: boolean;
+  todo?: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -2251,6 +2257,14 @@ export class HostedWorkspaceToolTurn {
             HOSTED_PUBLIC_PLAN_READS.has(tool.name ?? ''),
         )
       : this.advertised;
+  }
+
+  async todoInstructions(): Promise<string> {
+    // A planning round withholds `todo_write` from `declarations()`, so it must
+    // not inject an instruction to keep the list current with it.
+    return this.declaresTodoTool() && !this.planning
+      ? hostedTodoInstructions(this.session)
+      : '';
   }
 
   planModeInstructions(): string {
@@ -3014,6 +3028,7 @@ export class HostedWorkspaceToolTurn {
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
+          (call.name === 'todo_write' && this.declaresTodoTool()) ||
           HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
             this.commands?.command(
@@ -3510,6 +3525,7 @@ export class HostedWorkspaceToolTurn {
     if (
       !batch ||
       batch.uncaptured ||
+      batch.requests.some((request) => request.todo) ||
       !runtime ||
       (isHostedWorkspaceShellProfile(this.profile) &&
         !singlePlanExit &&
@@ -4414,6 +4430,7 @@ export class HostedWorkspaceToolTurn {
           command,
           skill,
           planExit,
+          todo: call.name === 'todo_write',
         };
       });
     };
@@ -4498,7 +4515,11 @@ export class HostedWorkspaceToolTurn {
         skillOrigin,
       );
     }
-    if (this.hooks || this.mcp || requests.some((request) => !request.skill))
+    if (
+      this.hooks ||
+      this.mcp ||
+      requests.some((request) => !request.skill && !request.todo)
+    )
       await waitForTurn(this.warmed, signal);
     // H4b: an agent-only batch runs entirely inside its own Sessions and
     // needs no Runtime at all — holding the parent's mount across the
@@ -4518,7 +4539,8 @@ export class HostedWorkspaceToolTurn {
           request.message !== true &&
           !request.team &&
           request.command !== true &&
-          !request.skill,
+          !request.skill &&
+          !request.todo,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -4773,6 +4795,7 @@ export class HostedWorkspaceToolTurn {
           request.command ||
           request.planExit ||
           request.skill ||
+          request.todo ||
           request.workflow
         )
           continue;
@@ -5250,6 +5273,44 @@ export class HostedWorkspaceToolTurn {
             );
           await this.commit('tool_result', converted, model);
           this.planning = false;
+          responses.push(...converted);
+          continue;
+        }
+        if (request.todo) {
+          let converted: Part[];
+          try {
+            const todos = await writeHostedTodos(
+              this.session,
+              this.promptId,
+              request.call.callId,
+              request.input,
+            );
+            converted = convertToFunctionResponse(
+              request.call.name,
+              request.call.callId,
+              [{ text: 'Todo list updated.' }],
+            );
+            const response = converted[0]?.functionResponse;
+            if (!response) throw new Error('Hosted Todo result is missing.');
+            response.response = {
+              ...response.response,
+              todos,
+              executionStatus: 'success',
+            };
+          } catch (cause) {
+            if (!(cause instanceof HostedTodoInputError)) throw cause;
+            converted = convertToFunctionErrorResponse(
+              request.call.name,
+              request.call.callId,
+              [],
+              cause.message,
+            );
+          }
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted Todo result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
           responses.push(...converted);
           continue;
         }
