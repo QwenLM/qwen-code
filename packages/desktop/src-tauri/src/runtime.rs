@@ -650,6 +650,44 @@ mod tests {
         );
     }
 
+    // kill_on_drop maps to KILL_ON_JOB_CLOSE, so dropping the group handle must
+    // take the daemon with it; otherwise a crashed desktop leaves it holding
+    // node.exe and blocks the next update (#15276).
+    #[cfg(windows)]
+    #[test]
+    fn dropping_the_runtime_group_kills_the_daemon() {
+        use std::time::{Duration, Instant};
+
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 60"]);
+        let mut child = spawn_runtime_group(&mut command).expect("spawn long-lived runtime child");
+        assert!(
+            child.try_wait().expect("inspect runtime child").is_none(),
+            "probe exited before the group was dropped"
+        );
+        let pid = child.id();
+        drop(child);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let probe =
+                format!("if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 1 }}");
+            let alive = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", probe.as_str()])
+                .status()
+                .map(|status| !status.success())
+                .unwrap_or(true);
+            if !alive {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon {pid} outlived the dropped runtime group"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn runtime_layout_strips_windows_verbatim_prefix() {
