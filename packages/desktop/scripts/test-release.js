@@ -119,6 +119,17 @@ async function testBootstrapWorkspaceVisibility() {
     /let mut child = spawn_runtime_group\(&mut command\)/,
     'DesktopRuntime::start must spawn the runtime through the hidden-console helper.',
   );
+  // kill_on_drop maps to KILL_ON_JOB_CLOSE; without it a force-killed desktop
+  // leaves the daemon holding node.exe and blocks the next update. Job objects
+  // cannot be exercised off Windows, so pin the flag itself here; this gate
+  // reads the source and runs on every platform.
+  const spawnGroup =
+    runtimeSource.match(/fn spawn_runtime_group[\s\S]*?\n\}\n/)?.[0] ?? '';
+  assert.match(
+    spawnGroup,
+    /\.kill_on_drop\(true\)\s*\.creation_flags\(CREATE_NO_WINDOW\)/,
+    'spawn_runtime_group must keep kill_on_drop(true) so the daemon cannot outlive the desktop.',
+  );
   const primary = await createBootstrapHarness();
   const { body, commands, element, listeners, resolveBootstrapState } = primary;
 
