@@ -48,6 +48,8 @@ describe('Session ID Support (E2E)', () => {
           cwd: testDir,
           sessionId: customSessionId,
           debug: false,
+          logLevel: 'debug',
+          stderr: (message) => console.error(message),
         },
       });
 
