@@ -466,6 +466,28 @@ function live(fix: BackgroundFix | undefined): BackgroundFix | undefined {
   return fix?.done ? undefined : fix;
 }
 
+/** How long a caller waits for the agent of an attempt it ended to settle. */
+export const FIX_SETTLE_WAIT_MS = 15_000;
+
+/**
+ * Drops a late attempt at the worktree, or of the session's PR, and waits
+ * (at most `FIX_SETTLE_WAIT_MS`) for its stopped agent to settle: what the
+ * caller does next acts on the worktree that agent was writing in.
+ */
+export async function settleLateBackgroundFix(
+  where: { worktree: string } | { sessionId: string; pr: number },
+): Promise<void> {
+  const fix =
+    'worktree' in where
+      ? fixes.get(canonicalWorktreePath(where.worktree))
+      : [...fixes.values()].find(
+          (f) => f.sessionId === where.sessionId && f.pr === where.pr,
+        );
+  if (!fix?.isLate()) return;
+  fix.drop();
+  await fix.waitSettled(FIX_SETTLE_WAIT_MS);
+}
+
 /** The attempt whose agent works, or whose round has yet to claim it, at a
  * worktree — of any session of this process. */
 export function backgroundFixAt(worktree: string): BackgroundFix | undefined {

@@ -1216,8 +1216,11 @@ not ended, no marker of an attempt is there (a fresh one runs; a stale one
 is the round's `sync` to remove), and the round prepared a snapshot to fix
 at the watch's head in the last 30 minutes, under the watch's task (the
 prepared snapshot records the task it ran under, so a `--once` round's
-never qualifies), and the gate has reported nothing since that snapshot —
-otherwise the gate's fire waits in the queue, and its round, run while the
+never qualifies), and no run of the gate that printed something read the
+PR after that snapshot did (the gate's cursor records when its last such
+run began to read, `reportedAt`, and the snapshot when it did, `readAt`; a
+quiet run, which may still move the cursor, records nothing) — otherwise
+the gate's fire waits in the queue, and its round, run while the
 fix worked, would find nothing to do and the events it reported would not
 come again; with a foreground fix it runs after. It writes the attempt
 marker `autofix-pr-<n>-fix.json` beside the state file: the attempt id, the
@@ -1262,7 +1265,9 @@ refresh comes more than a minute late (the process was suspended, and another
 session may have taken the worktree meanwhile). A late refresh is also found as the tool or the
 agent tool looks the attempt up: after a laptop's sleep the gate can find the
 marker stale before the session's timer runs again, and the round it starts
-must not be refused for an attempt that is already over. A helper takes the marker as
+must not be refused for an attempt that is already over. The caller then
+waits, as a stop does, up to 15 seconds for the stopped agent to settle
+before it acts on the worktree. A helper takes the marker as
 fresh when it was refreshed within the last 90 seconds and its attempt
 started neither more than a minute ahead of the clock nor more than 45
 minutes ago. While it
@@ -1286,8 +1291,10 @@ the round's to claim, as an agent that was stopped. When the grant ends
 drops the attempt: the next round redoes the fix in the foreground, asking
 as the user now wants. `/autofix-pr stop` in this session — `cleanup`
 through the tool — stops the agent without a notification, waits up to 15
-seconds for its body to settle (outside the helpers' queue), ends the
-attempt and then cleans up. The session drops the
+seconds for its body to settle (outside the helpers' queue; also when the
+agent had ended already, as its grace can end it first), ends the attempt
+and then cleans up; a refusal of the helper that ends it keeps the attempt
+for the next stop. The session drops the
 attempt, and with it the marker's refreshes, when no claim came within 40
 minutes of the attempt's opening — a notification waits for the session to
 be idle, so the deadline does not run from the agent's end — and when the

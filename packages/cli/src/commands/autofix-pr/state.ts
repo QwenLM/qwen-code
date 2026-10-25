@@ -217,6 +217,9 @@ export interface AutofixPrGateCursor {
   /** The background fix attempt whose marker its session left behind,
    * reported once so a round handles its items again (Section 6.14). */
   reportedAbandonedFix?: string;
+  /** When the last run that printed something began to read the PR: a
+   * background fix starts only from a snapshot read after it. */
+  reportedAt?: string;
 }
 
 export interface AutofixPrPaths {

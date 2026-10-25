@@ -48,6 +48,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import {
   backgroundFixOf,
   canonicalWorktreePath,
+  settleLateBackgroundFix,
   confirmedWatch,
   forgetConfirmedWatch,
   grantUnattendedFixes,
@@ -1076,6 +1077,9 @@ class AutofixPrInvocation extends BaseToolInvocation<
       };
     }
     const sessionId = this.config.getSessionId();
+    if (this.params.pr !== undefined && this.params.command !== 'status') {
+      await settleLateBackgroundFix({ sessionId, pr: this.params.pr });
+    }
     const fix =
       this.params.pr === undefined || this.params.command === 'status'
         ? undefined
@@ -1215,17 +1219,18 @@ class AutofixPrInvocation extends BaseToolInvocation<
         // Stopped as it launches, with no round to go on.
         await fix.abandon();
         return refuse(
-          `The fix agent of PR #${this.params.pr} is starting; run cleanup again once it runs.`,
+          `The fix agent of PR #${this.params.pr} was starting; it stops as it launches: run cleanup again.`,
         );
       }
       this.config
         .getBackgroundTaskRegistry()
         .cancel(fix.agentId, { notify: false });
-      await fix.waitSettled(FIX_STOP_WAIT_MS);
-      fix.end({ status: 'cancelled', report: '' });
     }
-    fix.claim();
-    // The marker goes before the watch: `cleanup` refuses a fresh one.
+    // Ended need not be settled: a stopped agent's grace may have run out.
+    await fix.waitSettled(FIX_STOP_WAIT_MS);
+    fix.end({ status: 'cancelled', report: '' });
+    // The marker goes before the watch: `cleanup` refuses a fresh one. A
+    // refusal keeps the attempt, refreshed, for the next stop.
     const run = await runAutofixPrHelper(
       this.config,
       [
@@ -1239,6 +1244,7 @@ class AutofixPrInvocation extends BaseToolInvocation<
     if (run.failure || run.exitCode !== 0) {
       return refuse(helperRefusal('fix-end', run));
     }
+    fix.claim();
     return null;
   }
 

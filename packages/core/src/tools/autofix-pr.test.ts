@@ -1354,6 +1354,20 @@ describe('background fixes', () => {
     expect(backgroundFixOf('session-a', 12)).toBeUndefined();
   });
 
+  it('waits for an ended agent whose body has not settled before a cleanup, and keeps the attempt when its helper refuses', async () => {
+    await granted();
+    const fix = await launched();
+    // Ended by its grace's notification, its body still running.
+    fix.end({ status: 'cancelled', report: '' });
+    const pending = run({ command: 'cleanup', pr: 12 });
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(log().at(-1)).not.toMatch(/^fix-end/);
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await pending).error?.message).toMatch(/fix-end refused/);
+    expect(backgroundFixOf('session-a', 12)).toBe(fix);
+  });
+
   it('stops the agent and drops its attempt when the fixes ask again', async () => {
     await granted();
     const fix = await launched();
@@ -1384,9 +1398,16 @@ describe('background fixes', () => {
     const fix = await launched();
     // Asleep past the marker's freshness: the gate's round arrives first.
     vi.setSystemTime(Date.now() + 3 * 60_000);
-    expect((await run({ command: 'sync', pr: 12 })).error).toBeUndefined();
+    const syncing = run({ command: 'sync', pr: 12 });
+    await vi.advanceTimersByTimeAsync(0);
     expect(fix.done).toBe(true);
     expect(cancel).toHaveBeenCalledWith('agent-1');
+    // The helper waits for the stopped agent to settle, at most 15 seconds.
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(log().at(-1)).not.toMatch(/^sync/);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await syncing).error).toBeUndefined();
+    expect(log().at(-1)).toBe('sync 12');
   });
 
   it('leaves the attempt to claim again when the helper refuses', async () => {
@@ -1407,7 +1428,7 @@ describe('background fixes', () => {
     await granted();
     const fix = await openBackgroundFix('session-a', worktree, signal());
     expect((await run({ command: 'cleanup', pr: 12 })).error?.message).toMatch(
-      /is starting; run cleanup again/,
+      /was starting; it stops as it launches: run cleanup again/,
     );
     expect(log().at(-1)).toBe(`fix-end 12 --attempt=${fix.attempt} --abandon`);
     expect(fix.done).toBe(true);

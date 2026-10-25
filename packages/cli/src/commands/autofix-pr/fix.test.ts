@@ -85,7 +85,12 @@ describe('fix-start and fix-end', () => {
     utimesSync(path, at, at);
   };
   /** The round's prepared snapshot, as `snapshot` writes it. */
-  const ROUND = { action: 'fix', headSha: HEAD, task: 'feedc0ffee12' };
+  const ROUND = {
+    action: 'fix',
+    headSha: HEAD,
+    task: 'feedc0ffee12',
+    readAt: '2026-10-26T10:00:00.000Z',
+  };
   const round = (snapshot: object = ROUND) =>
     writeFileSync(paths.snapshotPath, JSON.stringify(snapshot));
 
@@ -252,15 +257,48 @@ describe('fix-start and fix-end', () => {
     );
     expect(existsSync(paths.fixPath)).toBe(false);
     round();
-    // The gate reported more since: its round must come after this fix.
-    writeFileSync(paths.gatePath, '{}');
-    const later = new Date(Date.now() + 2000);
-    utimesSync(paths.gatePath, later, later);
+    // The gate reported what it read after the snapshot read the PR: its
+    // round must come after this fix.
+    const cursor = (reportedAt?: string) =>
+      writeFileSync(
+        paths.gatePath,
+        JSON.stringify({
+          version: 1,
+          host: 'github.com',
+          owner: 'o',
+          repo: 'r',
+          prNumber: 7,
+          viewer: 'me',
+          prAuthor: 'me',
+          headSha: HEAD,
+          reportedCommentIds: [],
+          reportedChecks: [],
+          conflictSha: null,
+          stopped: null,
+          reportedTruncated: [],
+          ...(reportedAt ? { reportedAt } : {}),
+        }),
+      );
+    cursor('2026-10-26T10:00:01.000Z');
     expect(() => runFixStart({ pr: 7, attempt: ATTEMPT })).toThrow(
       /no round of PR #7 has a fix to start: the gate reported more/,
     );
-    const earlier = new Date(Date.now() - 60_000);
-    utimesSync(paths.gatePath, earlier, earlier);
+    // A snapshot from before snapshots said when they read: the same.
+    round({ ...ROUND, readAt: undefined });
+    cursor('2026-10-26T09:00:00.000Z');
+    expect(() => runFixStart({ pr: 7, attempt: ATTEMPT })).toThrow(
+      /the gate reported more/,
+    );
+    round();
+    // A gate that never reported, or reported what the snapshot read since,
+    // or a cursor it cannot read: the fix starts.
+    cursor();
+    expect(runFixStart({ pr: 7, attempt: ATTEMPT }).attempt).toBe(ATTEMPT);
+    rmSync(paths.fixPath);
+    cursor('2026-10-26T10:00:00.000Z');
+    expect(runFixStart({ pr: 7, attempt: ATTEMPT }).attempt).toBe(ATTEMPT);
+    rmSync(paths.fixPath);
+    writeFileSync(paths.gatePath, 'not json');
     expect(runFixStart({ pr: 7, attempt: ATTEMPT }).attempt).toBe(ATTEMPT);
   });
 

@@ -1818,7 +1818,8 @@ function staleTask(
 }
 
 function runGate(args: SnapshotArgs): void {
-  const deadline = Date.now() + GATE_READ_BUDGET_MS;
+  const readAt = Date.now();
+  const deadline = readAt + GATE_READ_BUDGET_MS;
   // A blank --host is refused here: resolved, it would be '', recorded as
   // the cursor's host, and later fires would ask whatever host `gh` defaults to.
   setGhHost(args.host);
@@ -1953,11 +1954,18 @@ function runGate(args: SnapshotArgs): void {
   }
   // An attempt opened while GitHub was asked.
   if (ownFix && fixInFlight(paths)) return;
-  const { snapshot, cursor: next } = withAbandonedFix(
+  const reported = withAbandonedFix(
     result,
     ownFix ? readFixMarker(paths) : null,
     { headSha: pr.headRefOid, isDraft: pr.isDraft, url: pr.url },
   );
+  const { snapshot } = reported;
+  // A run that reports wakes a round: when it read the PR says whether a
+  // round's snapshot saw what it reported (`fix-start`). A quiet run, which
+  // may still move the cursor, wakes none.
+  const next = snapshot
+    ? { ...reported.cursor, reportedAt: new Date(readAt).toISOString() }
+    : reported.cursor;
   // The cursor lands before the output: a probe that prints and then dies
   // would otherwise report the same transitions on the next fire.
   if (JSON.stringify(next) !== JSON.stringify(existing)) {
@@ -2029,6 +2037,9 @@ export function runSnapshot(args: SnapshotArgs): void {
   assertNoFixInFlight(paths, args.pr);
   setGhHost(state.host);
   ensureAuthenticated();
+  // When this snapshot began to read the PR: the gate's runs that read it
+  // later may have reported what it does not hold (`fix-start`).
+  const readAt = new Date().toISOString();
   const { pr } = fetchPrData(state, roundReplyCheck(state));
   // Asked only when the API disagrees with the watch: whether the branch
   // moved, or the API has yet to see the head `sync` or `push` recorded.
@@ -2048,7 +2059,11 @@ export function runSnapshot(args: SnapshotArgs): void {
   atomicWriteFileSync(
     paths.snapshotPath,
     `${JSON.stringify(
-      args.task === undefined ? snapshot : { ...snapshot, task: args.task },
+      {
+        ...snapshot,
+        readAt,
+        ...(args.task === undefined ? {} : { task: args.task }),
+      },
       (key, value: unknown) =>
         key === 'body' && typeof value === 'string' ? bodyLines(value) : value,
       2,

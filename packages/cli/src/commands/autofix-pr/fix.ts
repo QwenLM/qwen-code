@@ -21,6 +21,7 @@ import {
   autofixPrPaths,
   isRegularFile,
   NO_FOLLOW,
+  readGateCursor,
   repoRoot,
   requireState,
   TASK_OPTION,
@@ -184,6 +185,7 @@ function assertRoundToFix(
     action?: unknown;
     headSha?: unknown;
     task?: unknown;
+    readAt?: unknown;
   } | null = null;
   if (stat?.isFile()) {
     try {
@@ -207,11 +209,19 @@ function assertRoundToFix(
         `${FIX_SNAPSHOT_MAX_AGE_MS / 60_000} minutes).`,
     );
   }
-  // The gate reported more since the round's snapshot: its fire is queued,
-  // and its round, run while this fix worked, would find nothing to do and
-  // never get the reported events again. A foreground fix keeps it after.
-  const gate = lstatSync(paths.gatePath, { throwIfNoEntry: false });
-  if (gate && gate.mtimeMs > stat.mtimeMs) {
+  // The gate reported what it read after the round's snapshot did: its fire
+  // is queued, and its round, run while this fix worked, would find nothing
+  // to do and never get the reported events again. A foreground fix keeps
+  // it after. A cursor that cannot be read says nothing here.
+  let reportedAt = Number.NaN;
+  try {
+    reportedAt = Date.parse(readGateCursor(paths.gatePath)?.reportedAt ?? '');
+  } catch {
+    reportedAt = Number.NaN;
+  }
+  const readAt =
+    typeof snapshot.readAt === 'string' ? Date.parse(snapshot.readAt) : NaN;
+  if (!(reportedAt <= readAt) && Number.isFinite(reportedAt)) {
     throw new Error(
       `no round of PR #${prNumber} has a fix to start: the gate reported ` +
         `more since the round's snapshot; the fix runs in the foreground.`,

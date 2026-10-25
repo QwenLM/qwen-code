@@ -1985,6 +1985,55 @@ describe('runSnapshot --gate', () => {
     expect(printedIds()).toEqual([['I1'], ['I2']]);
   });
 
+  it('records when a run that printed began to read the PR, and no quiet run', () => {
+    const reportedAt = () =>
+      (JSON.parse(readFileSync(gatePath(), 'utf8')) as { reportedAt?: string })
+        .reportedAt;
+    const before = Date.now();
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    const first = reportedAt()!;
+    expect(Date.parse(first)).toBeGreaterThanOrEqual(before);
+    expect(Date.parse(first)).toBeLessThanOrEqual(Date.now());
+    // Quiet, though the cursor moves: a check run queued since.
+    respond(
+      pr({
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [comment('I1', 'alice', 'MEMBER')],
+        },
+        commits: {
+          nodes: [
+            {
+              commit: {
+                oid: HEAD,
+                statusCheckRollup: {
+                  contexts: {
+                    pageInfo: { hasNextPage: false },
+                    nodes: [
+                      {
+                        __typename: 'CheckRun',
+                        databaseId: 5,
+                        name: 'Test',
+                        status: 'QUEUED',
+                        conclusion: null,
+                        detailsUrl:
+                          'https://github.com/o/r/actions/runs/1/job/5',
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ],
+        },
+      } as never),
+    );
+    runSnapshot({ pr: 7, gate: true });
+    expect(mocks.stdout).toHaveBeenCalledTimes(1);
+    expect(reportedAt()).toBe(first);
+  });
+
   it("marks every check by the watch's own gate, for `status`, and none by a gate of no session", () => {
     const paths = autofixPrPaths(mocks.root, 7);
     respond(withComments('I1'));
@@ -2370,6 +2419,8 @@ describe('runSnapshot --gate', () => {
     }
     expect(JSON.parse(readFileSync(paths.snapshotPath, 'utf8'))).toMatchObject({
       task: 'aaaaaaaaaaaa',
+      // When it began to read the PR: before it wrote the file.
+      readAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
     });
   });
 
