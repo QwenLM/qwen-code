@@ -620,6 +620,7 @@ export interface DaemonUiSessionRewoundEvent extends DaemonUiEventBase {
   promptId: string;
   daemonPromptId?: string;
   targetTurnIndex: number;
+  replay?: DaemonUiEvent[];
 }
 
 export interface DaemonUiSessionBranchedEvent extends DaemonUiEventBase {

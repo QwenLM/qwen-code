@@ -885,6 +885,8 @@ export interface DaemonSessionRewoundData {
   promptId: string;
   daemonPromptId?: string;
   targetTurnIndex: number;
+  /** Authoritative surviving UI prefix, with newly seeded daemon event IDs. */
+  replay?: DaemonEvent[];
   filesChanged: string[];
   filesFailed: string[];
   originatorClientId?: string;
@@ -1913,6 +1915,19 @@ function isSessionRewoundData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['promptId']) &&
     isFiniteNumber(value['targetTurnIndex']) &&
+    (value['replay'] === undefined ||
+      (Array.isArray(value['replay']) &&
+        value['replay'].every(
+          (event) =>
+            isRecord(event) &&
+            event['v'] === 1 &&
+            isNonEmptyString(event['type']) &&
+            event['type'] !== 'session_rewound' &&
+            'data' in event &&
+            (!isRecord(event['data']) ||
+              event['data']['sessionId'] === undefined ||
+              event['data']['sessionId'] === value['sessionId']),
+        ))) &&
     Array.isArray(value['filesChanged']) &&
     Array.isArray(value['filesFailed'])
   );

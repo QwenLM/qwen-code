@@ -112,12 +112,34 @@ VS Code fix that exits edit mode after a refused submission must also land
 before this dependent change is ready to ship. Acceptance for #9437 spans the
 shared/Ink and ACP deliveries; landing #13737 alone does not complete it.
 
-This delivery remains a draft. A successful rewind to a checkpoint outside the
-loaded transcript can leave discarded blocks visible. Readiness requires
-reconciliation from authoritative surviving history and proof that cached replay
-and reconnect cannot resurrect discarded turns, including live sessions with
-recording disabled. The current identity-miss no-op and a mocked fresh reload do
-not satisfy that acceptance.
+This delivery remains a draft pending independent runtime verification. Before
+native rewind, the owning prompt queue resolves a unique checkpoint-to-daemon
+identity and freezes the existing complete bounded UI replay. Its ordinary user
+chunk group determines the surviving prefix; multipart text and attachments
+belong to one group, while background and injected rows are excluded. Missing,
+ambiguous, degraded, truncated, partial or unfinished paginated history refuses
+recoverably before conversation, files or recording change. Server proof loss
+therefore differs from eviction in a client's smaller retained window.
+
+After native conversation rewind, the daemon resets replay even for an empty
+prefix, reseeds surviving events with new monotonic IDs, clears obsolete restore
+metadata and publishes that same prefix in an optional `session_rewound.replay`
+field. File restore failures still install the prefix because the conversation
+has already changed. The rewind notification stays transient in compaction,
+preventing nested prefixes in later snapshots. Recording-disabled live sessions
+use the same bounded authority without a new Session journal.
+
+The SDK normalizes the prefix through its existing event normalizer, including
+formerly optimistic own-user rows, and installs it atomically with its existing
+block and byte budgets. Indexes, accounting and active references follow the
+replacement; truncation callbacks observe the final window and re-anchor to its
+oldest source record, while the outer rewind cursor remains latest. Older producers without `replay` retain the identity or
+legacy-index behavior. Acceptance requires ROOT+A+B+C with A evicted only in the
+client to rewind A and restore ROOT in the original client, server cache and
+unbounded observer. Reconnect, fresh/paged loads, a second rewind after reseeding
+and the next actual model request must not resurrect A/B/C. Both recording modes,
+empty prefixes, file restore failures and refusal without native mutation require
+independent evidence; a mocked fresh reload does not establish this acceptance.
 
 ACP selects targets by their snapshot identity, not a second classification of
 model text. It resolves the recorder's complete-branch boundary by that same
@@ -144,8 +166,9 @@ snapshot position, including retry gaps and compressed prefixes. Recorder
 projections recover the association from existing records, and with recording
 disabled ACP retains it only for live file-history snapshots. Web Shell and
 VS Code select a uniquely associated user block and checkpoint by this ID;
-the SDK applies the rewind notification at that block, not the raw index.
-Missing or ambiguous associations disable the target rather than guessing.
+the SDK installs authoritative replay when present and otherwise applies the
+rewind at that block, not the raw index. Missing or ambiguous associations disable
+the target rather than guessing.
 Admission binds the existing optimistic block, including a failed submission
 reused by retry; no new transcript event or identity counter is needed.
 

@@ -2306,7 +2306,12 @@ describe('EmbeddedApp rewind preflight localization', () => {
     // of appending the edited text as a new turn.
     sdkMocks.getRewindSnapshots.mockClear();
     sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
-      snapshots: [{ turnIndex: 0, promptId: 'p-1' }],
+      snapshots: [
+        { turnIndex: 0, promptId: 'p-1', daemonPromptId: 'daemon-localized' },
+      ],
+    });
+    sdkMocks.rewindSession.mockImplementationOnce(async () => {
+      callback<(blocks: unknown[]) => void>(props, 'onTranscriptChange')([]);
     });
     const retry = callback<
       (submission: {
@@ -2375,7 +2380,12 @@ describe('EmbeddedApp rewind preflight localization', () => {
     // again rather than send the edited text as a new prompt.
     sdkMocks.getRewindSnapshots.mockClear();
     sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
-      snapshots: [{ turnIndex: 0, promptId: 'p-1' }],
+      snapshots: [
+        { turnIndex: 0, promptId: 'p-1', daemonPromptId: 'daemon-localized' },
+      ],
+    });
+    sdkMocks.rewindSession.mockImplementationOnce(async () => {
+      callback<(blocks: unknown[]) => void>(props, 'onTranscriptChange')([]);
     });
     const retry = callback<
       (submission: {
@@ -2389,6 +2399,7 @@ describe('EmbeddedApp rewind preflight localization', () => {
       ).resolves.toBeUndefined();
     });
     expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledOnce();
+    expect(sdkMocks.rewindSession).toHaveBeenCalledTimes(2);
     expect(sdkMocks.rewindSession).toHaveBeenLastCalledWith(
       'session-1',
       'p-1',

@@ -16110,6 +16110,78 @@ export function createSessionControlPlane(
         if (entry.closing) {
           throw new SessionNotFoundError(sessionId, 'The session is closing');
         }
+        const directory = await requestSessionStatus<{
+          snapshots: Array<{ promptId: string; daemonPromptId?: string }>;
+        }>(sessionId, SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots);
+        const snapshots = Array.isArray(directory.snapshots)
+          ? directory.snapshots
+          : [];
+        const targets = snapshots.filter(
+          (snapshot) => snapshot.promptId === req.promptId,
+        );
+        const daemonPromptId = targets[0]?.daemonPromptId;
+        const snapshot = entry.events.snapshotReplay('full');
+        if (
+          targets.length !== 1 ||
+          !daemonPromptId ||
+          snapshots.filter(
+            (candidate) => candidate.daemonPromptId === daemonPromptId,
+          ).length !== 1 ||
+          !snapshot ||
+          snapshot.degraded ||
+          entry.restoreReplayPartial ||
+          entry.restoreReplayError ||
+          entry.restoreHistoryHasMore
+        ) {
+          throw new InvalidRewindTargetError(
+            sessionId,
+            'Cannot prove the surviving transcript; reload the session before retrying rewind',
+          );
+        }
+        const replay = [...snapshot.compactedTurns, ...snapshot.liveJournal];
+        const boundaries: number[] = [];
+        let previousTargetChunk = false;
+        for (const [index, event] of replay.entries()) {
+          if (event.type === 'history_truncated') {
+            throw new InvalidRewindTargetError(
+              sessionId,
+              'Cannot rewind from an incomplete transcript replay',
+            );
+          }
+          const data = isRecord(event.data) ? event.data : undefined;
+          const update = isRecord(data?.['update'])
+            ? data['update']
+            : undefined;
+          const meta = isRecord(update?.['_meta'])
+            ? update['_meta']
+            : undefined;
+          const isOrdinaryUserChunk =
+            event.type === 'session_update' &&
+            update?.['sessionUpdate'] === 'user_message_chunk' &&
+            meta?.['source'] !== 'background_notification' &&
+            meta?.['source'] !== 'mid_turn_message_injected' &&
+            meta?.['backgroundTurn'] === undefined;
+          const isTargetChunk =
+            isOrdinaryUserChunk &&
+            (event.promptId ?? meta?.['promptId']) === daemonPromptId;
+          if (isTargetChunk && !previousTargetChunk) boundaries.push(index);
+          if (
+            isOrdinaryUserChunk ||
+            event.type === 'turn_complete' ||
+            event.type === 'turn_error' ||
+            (event.type === 'session_update' &&
+              update?.['sessionUpdate'] !== 'user_message_chunk')
+          ) {
+            previousTargetChunk = isTargetChunk;
+          }
+        }
+        if (boundaries.length !== 1) {
+          throw new InvalidRewindTargetError(
+            sessionId,
+            'Rewind target does not uniquely match the cached transcript',
+          );
+        }
+        const prefix = replay.slice(0, boundaries[0]);
         let response: Record<string, unknown>;
         try {
           // ACP cannot cancel a rewind after dispatch. Keep the queue until
@@ -16143,15 +16215,19 @@ export function createSessionControlPlane(
           throw err;
         }
 
+        entry.events.resetReplay();
+        const survivingReplay = entry.events.seedReplayEvents(
+          prefix.map(({ id: _id, v: _v, ...event }) => event),
+        );
+        entry.restoreReplayPartial = undefined;
+        entry.restoreReplayError = undefined;
+        entry.restoreHistoryHasMore = undefined;
+        entry.restoreHistoryAnchorRecordId = undefined;
         entry.terminalTurnStatuses.clear();
         entry.enrichedTerminalPromptIds.clear();
         entry.rewindGeneration += 1;
 
         const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
-        const daemonPromptId =
-          typeof response['daemonPromptId'] === 'string'
-            ? response['daemonPromptId']
-            : undefined;
         const filesChanged = (response['filesChanged'] as string[]) ?? [];
         const filesFailed = (response['filesFailed'] as string[]) ?? [];
         const artifactSnapshot = restoredArtifactSnapshotFromState(
@@ -16213,6 +16289,7 @@ export function createSessionControlPlane(
               sessionId,
               promptId: req.promptId,
               targetTurnIndex,
+              replay: survivingReplay,
               ...(daemonPromptId ? { daemonPromptId } : {}),
               filesChanged,
               filesFailed,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createDaemonTranscriptState,
   reduceDaemonTranscriptEvents,
@@ -10,6 +10,249 @@ import { matchTurnEvent } from '../src/daemon/DaemonClient.js';
 import { normalizeDaemonEvent } from '../src/daemon/ui/normalizer.js';
 
 describe('daemon transcript rewind', () => {
+  it.each([
+    { v: 1, type: 'session_rewound', data: {} },
+    { v: 1, type: 'session_update', data: { sessionId: 'other-session' } },
+  ])('rejects a nested or cross-session authoritative prefix: %j', (frame) => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_rewound',
+      data: {
+        sessionId: 'session',
+        promptId: 'native-A',
+        daemonPromptId: 'daemon-A',
+        targetTurnIndex: 0,
+        filesChanged: [],
+        filesFailed: [],
+        replay: [frame],
+      },
+    });
+    expect(events.some((event) => event.type === 'session.rewound')).toBe(
+      false,
+    );
+  });
+
+  it('restores the authoritative prefix after the target was evicted locally', () => {
+    const turns: DaemonUiEvent[] = ['ROOT', 'A', 'B', 'C'].flatMap((text) => [
+      {
+        type: 'user.text.delta',
+        text,
+        promptId: `daemon-${text}`,
+        sourceRecordIds: [`record-${text}`],
+      },
+      { type: 'assistant.text.delta', text: `${text} reply` },
+      { type: 'assistant.done' },
+    ]);
+    const onTruncation = vi.fn();
+    const before = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ maxBlocks: 4, onTruncation }),
+      turns,
+    );
+    expect(before.blocks.map((block) => 'text' in block && block.text)).toEqual(
+      ['B', 'B reply', 'C', 'C reply'],
+    );
+    onTruncation.mockClear();
+    const replay = [
+      {
+        v: 1,
+        id: 100,
+        type: 'session_update',
+        promptId: 'daemon-ROOT',
+        originatorClientId: 'own-client',
+        data: {
+          sessionId: 'session',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'ROOT' },
+            _meta: { qwenTranscript: { sourceRecordIds: ['record-ROOT'] } },
+          },
+        },
+      },
+      {
+        v: 1,
+        id: 101,
+        type: 'session_update',
+        data: {
+          sessionId: 'session',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'ROOT reply' },
+          },
+        },
+      },
+    ];
+    const after = reduceDaemonTranscriptEvents(
+      before,
+      normalizeDaemonEvent(
+        {
+          v: 1,
+          id: 102,
+          type: 'session_rewound',
+          data: {
+            sessionId: 'session',
+            promptId: 'native-A',
+            daemonPromptId: 'daemon-A',
+            targetTurnIndex: 7,
+            filesChanged: [],
+            filesFailed: ['locked.txt'],
+            replay,
+          },
+        },
+        { clientId: 'own-client', suppressOwnUserEcho: true },
+      ),
+    );
+    expect(after.blocks.map((block) => 'text' in block && block.text)).toEqual([
+      'ROOT',
+      'ROOT reply',
+    ]);
+    expect(after.lastEventId).toBe(102);
+    expect(after.activeUserBlockId).toBeUndefined();
+    expect(after.activeAssistantBlockId).toBeUndefined();
+    expect(onTruncation).toHaveBeenCalledTimes(1);
+    expect(onTruncation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'blocks',
+        blockCount: 2,
+        evictedOldest: true,
+        oldestRetainedRecordId: 'record-ROOT',
+        retainedBytes: after.retainedBytes,
+      }),
+    );
+    expect(before.blocks.map((block) => 'text' in block && block.text)).toEqual(
+      ['B', 'B reply', 'C', 'C reply'],
+    );
+    const continued = reduceDaemonTranscriptEvents(after, [
+      {
+        type: 'user.text.delta',
+        text: 'D',
+        promptId: 'daemon-D',
+        eventId: 103,
+      },
+    ]);
+    expect(
+      continued.blocks.map((block) => 'text' in block && block.text),
+    ).toEqual(['ROOT', 'ROOT reply', 'D']);
+  });
+
+  it.each([
+    { maxBlocks: 2, maxRetainedBytes: 1_000_000 },
+    { maxBlocks: 100, maxRetainedBytes: 1 },
+  ])(
+    'applies retention and rebuilds indexes when installing a prefix ($maxBlocks blocks)',
+    (budget) => {
+      const replay: DaemonUiEvent[] = [
+        {
+          type: 'user.text.delta',
+          text: 'ROOT',
+          promptId: 'root',
+          sourceRecordIds: ['root-record'],
+        },
+        { type: 'assistant.text.delta', text: 'root answer' },
+        { type: 'assistant.done' },
+        { type: 'user.text.delta', text: 'A', promptId: 'a' },
+        {
+          type: 'tool.update',
+          toolCallId: 'kept-tool',
+          status: 'completed',
+          title: 'Read',
+        },
+        { type: 'assistant.text.delta', text: 'A answer' },
+        { type: 'assistant.done' },
+      ];
+      const onTruncation = vi.fn();
+      const before = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({
+          ...budget,
+          onTruncation,
+        }),
+        [
+          {
+            type: 'tool.update',
+            toolCallId: 'discarded-tool',
+            status: 'running',
+            title: 'Old',
+          },
+          { type: 'assistant.text.delta', text: 'discarded streaming answer' },
+        ],
+      );
+      onTruncation.mockClear();
+      const after = reduceDaemonTranscriptEvents(before, [
+        {
+          type: 'session.rewound',
+          promptId: 'native-B',
+          targetTurnIndex: 5,
+          eventId: 500,
+          replay,
+        },
+      ]);
+      const expected = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(budget),
+        replay,
+      );
+      expect(after.blocks.map((block) => block.kind)).toEqual(
+        expected.blocks.map((block) => block.kind),
+      );
+      expect(
+        after.blocks.map((block) =>
+          block.kind === 'tool'
+            ? block.toolCallId
+            : 'text' in block
+              ? block.text
+              : block.kind,
+        ),
+      ).toEqual(
+        budget.maxBlocks === 2 ? ['kept-tool', 'A answer'] : ['A answer'],
+      );
+      expect(after.retainedBytes).toBe(expected.retainedBytes);
+      expect(after.lastEventId).toBe(500);
+      expect(after.toolBlockByCallId['discarded-tool']).toBeUndefined();
+      expect(after.currentToolCallId).toBeUndefined();
+      expect(after.activeAssistantBlockId).toBeUndefined();
+      expect(after.activeUserBlockId).toBeUndefined();
+      for (const [index, block] of after.blocks.entries()) {
+        expect(after.blockIndexById[block.id]).toBe(index);
+        if (block.kind === 'tool')
+          expect(after.toolBlockByCallId[block.toolCallId]).toBe(block.id);
+      }
+      expect(onTruncation.mock.calls.length).toBeGreaterThan(0);
+      for (const [notification] of onTruncation.mock.calls) {
+        expect(notification.blockCount).toBe(after.blocks.length);
+        expect(notification.retainedBytes).toBe(after.retainedBytes);
+      }
+    },
+  );
+
+  it('installs an empty prefix over paged blocks without event IDs and clears a resync latch', () => {
+    const before = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'user.text.delta', text: 'paged stale turn', promptId: 'stale' },
+      {
+        type: 'session.state_resync_required',
+        reason: 'test',
+        lastDeliveredId: 2,
+        earliestAvailableId: 9,
+      },
+    ]);
+    const after = reduceDaemonTranscriptEvents(before, [
+      {
+        type: 'session.rewound',
+        promptId: 'native-first',
+        targetTurnIndex: 0,
+        eventId: 20,
+        replay: [],
+      },
+    ]);
+    expect(after.blocks).toEqual([]);
+    expect(after.retainedBytes).toBe(0);
+    expect(Object.keys(after.blockIndexById)).toEqual([]);
+    expect(after.awaitingResync).toBe(false);
+    expect(after.lastResyncRequired).toBeUndefined();
+    expect(after.lastEventId).toBe(20);
+    const continued = reduceDaemonTranscriptEvents(after, [
+      { type: 'user.text.delta', text: 'fresh' },
+    ]);
+    expect(continued.blocks).toHaveLength(1);
+  });
+
   it.each([2, 6])(
     'rewinds by daemon identity instead of raw snapshot position %i',
     (rawPosition) => {

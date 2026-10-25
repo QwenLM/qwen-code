@@ -307,7 +307,11 @@ function applyDaemonTranscriptEvent(
   if (event.eventId !== undefined) {
     next.lastEventId = Math.max(next.lastEventId ?? 0, event.eventId);
   }
-  if (next.awaitingResync && !RESYNC_PASSTHROUGH_TYPES.has(event.type)) {
+  if (
+    next.awaitingResync &&
+    !RESYNC_PASSTHROUGH_TYPES.has(event.type) &&
+    !(event.type === 'session.rewound' && event.replay !== undefined)
+  ) {
     // Diagnostic for the "permanently frozen
     // transcript" case. Without this log, consumers debugging a stuck UI
     // had no signal that events were being dropped. The latch is
@@ -553,7 +557,33 @@ function applyDaemonTranscriptEvent(
       // transcript mutation.
       break;
     case 'session.rewound':
-      if (event.daemonPromptId) {
+      if (event.replay !== undefined) {
+        const previousLength = next.blocks.length;
+        next.awaitingResync = false;
+        next.lastResyncRequired = undefined;
+        truncateTranscriptBeforeBlock(next, 0, false);
+        for (const frame of event.replay)
+          applyDaemonTranscriptEvent(next, frame);
+        finishAssistant(next);
+        next.activeUserBlockId = undefined;
+        const callback = truncationCallbacks.get(next);
+        // Retention and rewind notifications must observe the installed prefix.
+        trimTranscriptState(next);
+        if (previousLength > 0) {
+          callback?.({
+            kind: 'blocks',
+            oldestRetainedRecordId: next.blocks.find(
+              (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+            )?.sourceRecordIds?.[0],
+            // Replacement can restore a prefix older than the previous window.
+            evictedOldest: true,
+            blockCount: next.blocks.length,
+            retainedBytes: next.retainedBytes,
+            maxBlocks: next.maxBlocks,
+            maxRetainedBytes: next.maxRetainedBytes,
+          });
+        }
+      } else if (event.daemonPromptId) {
         const block = findDaemonRewindUserBlock(
           next.blocks,
           event.daemonPromptId,
@@ -2220,6 +2250,7 @@ function rewindTranscriptToUserTurn(
 function truncateTranscriptBeforeBlock(
   state: DaemonTranscriptState,
   blockIndex: number,
+  notify = true,
 ): void {
   takeBlocksOwnership(state);
   const originalLength = state.blocks.length;
@@ -2233,7 +2264,7 @@ function truncateTranscriptBeforeBlock(
   ownedBlocks.set(state, state.blocks);
   rebuildTranscriptIndexes(state);
   ownedBlockIndexes.set(state, state.blockIndexById);
-  if (state.blocks.length < originalLength) {
+  if (notify && state.blocks.length < originalLength) {
     // A rewind frees retention capacity just like an eviction does. Fire the
     // same 'blocks' truncation signal so consumers reconciling a pagination
     // capacity latch on freed capacity observe rewinds too. `evictedOldest`
