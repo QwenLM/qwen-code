@@ -800,6 +800,64 @@ CREATE TABLE ma_workspace_access (
     CONSTRAINT ck_ma_access_role CHECK (CASE role WHEN 'READER' THEN 6 WHEN 'OPERATOR' THEN 8 WHEN 'OWNER' THEN 5 ELSE -1 END = CHAR_LENGTH(role))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
+CREATE TABLE ma_extension_package (
+    package_key CHAR(64) NOT NULL,
+    scope_key CHAR(64) NOT NULL,
+    tenant_id VARBINARY(512) NOT NULL,
+    workspace_id VARBINARY(512) NOT NULL,
+    extension_id VARBINARY(128) NOT NULL,
+    package_revision BIGINT NOT NULL,
+    package_digest CHAR(64) NOT NULL,
+    manifest_json LONGTEXT NOT NULL,
+    byte_length BIGINT NOT NULL,
+    state VARCHAR(16) NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (package_key),
+    CONSTRAINT uq_ma_extension_package UNIQUE (scope_key, extension_id, package_revision),
+    FOREIGN KEY (tenant_id, workspace_id) REFERENCES ma_workspace (tenant_id, workspace_id),
+    CONSTRAINT ck_ma_extension_package_revision CHECK (package_revision > 0),
+    CONSTRAINT ck_ma_extension_package_bytes CHECK (byte_length >= 0 AND byte_length <= 104857600),
+    CONSTRAINT ck_ma_extension_package_state CHECK (CASE state WHEN 'PREPARING' THEN 9 WHEN 'PUBLISHED' THEN 9 ELSE -1 END = CHAR_LENGTH(state))
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE TABLE ma_extension_settings (
+    settings_key CHAR(64) NOT NULL,
+    scope_key CHAR(64) NOT NULL,
+    tenant_id VARBINARY(512) NOT NULL,
+    workspace_id VARBINARY(512) NOT NULL,
+    extension_id VARBINARY(128) NOT NULL,
+    settings_revision BIGINT NOT NULL,
+    encryption_key_id VARBINARY(128) NOT NULL,
+    encrypted_values LONGTEXT NOT NULL,
+    configured_keys_json LONGTEXT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (settings_key),
+    CONSTRAINT uq_ma_extension_settings UNIQUE (scope_key, extension_id, settings_revision),
+    FOREIGN KEY (tenant_id, workspace_id) REFERENCES ma_workspace (tenant_id, workspace_id),
+    CONSTRAINT ck_ma_extension_settings_revision CHECK (settings_revision > 0)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE TABLE ma_extension_operation (
+    operation_key CHAR(64) NOT NULL,
+    scope_key CHAR(64) NOT NULL,
+    tenant_id VARBINARY(512) NOT NULL,
+    workspace_id VARBINARY(512) NOT NULL,
+    actor_key CHAR(64) NOT NULL,
+    operation_id VARCHAR(128) NOT NULL,
+    extension_id VARBINARY(128) NOT NULL,
+    operation_kind VARCHAR(16) NOT NULL,
+    revision BIGINT NOT NULL,
+    package_digest CHAR(64),
+    request_digest CHAR(64) NOT NULL,
+    state VARCHAR(16) NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (operation_key),
+    FOREIGN KEY (tenant_id, workspace_id) REFERENCES ma_workspace (tenant_id, workspace_id),
+    CONSTRAINT ck_ma_extension_operation_revision CHECK (revision > 0),
+    CONSTRAINT ck_ma_extension_operation_kind CHECK (CASE operation_kind WHEN 'publish' THEN 7 WHEN 'settings' THEN 8 ELSE -1 END = CHAR_LENGTH(operation_kind)),
+    CONSTRAINT ck_ma_extension_operation_state CHECK (CASE state WHEN 'pending' THEN 7 WHEN 'settled' THEN 7 ELSE -1 END = CHAR_LENGTH(state))
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE ma_storage (
     alias_key CHAR(64) NOT NULL,
     tenant_key CHAR(64) NOT NULL,

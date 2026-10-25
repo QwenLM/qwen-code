@@ -38,7 +38,7 @@ class RuntimeBrokerFlywaySchemaTest {
         Map<String, TableShape> actual = describe(migrate(dataSource(), MigrationVersion.LATEST));
 
         assertThat(expected)
-                .hasSize(35)
+                .hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size())
                 .containsKeys(
                         "ma_runtime_slot",
                         "ma_runtime_binding",
@@ -81,7 +81,7 @@ class RuntimeBrokerFlywaySchemaTest {
         JdbcRuntimeBrokerSchema.initialize(source);
         assertThat(executions.findByIdempotencyKey("retention-key")).usingRecursiveComparison().isEqualTo(settled);
         Map<String, TableShape> shape = describe(source);
-        assertThat(shape).hasSize(35);
+        assertThat(shape).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
         assertThat(shape.get("ma_runtime_binding").indexes()).contains(
                 "INDEX [binding_state, last_active_at, binding_id]", "INDEX [tenant_id, binding_state]");
         assertThat(shape.get("ma_storage_owner").indexes())

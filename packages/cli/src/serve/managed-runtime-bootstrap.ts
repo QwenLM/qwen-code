@@ -59,7 +59,9 @@ export interface SshRuntimeRecord {
 }
 
 export interface SshRuntimeCleanProof {
-  readonly version: 1;
+  readonly version: 1 | 2;
+  readonly executionMode?: 'linux-cgroup' | 'developer-process-group';
+  readonly scope?: 'process_tree' | 'process_group';
   readonly resourceId: string;
   readonly bindingId: string;
   readonly bindingGeneration: number;
@@ -364,7 +366,16 @@ export function sshCleanProof(
   retiredAt: string,
 ): SshRuntimeCleanProof {
   return {
-    version: 1,
+    version: record.boot.managedExtensions ? 2 : 1,
+    ...(record.boot.managedExtensions
+      ? {
+          executionMode: record.boot.managedExtensions.mode,
+          scope:
+            record.boot.managedExtensions.mode === 'linux-cgroup'
+              ? ('process_tree' as const)
+              : ('process_group' as const),
+        }
+      : {}),
     resourceId: record.resourceId,
     bindingId: record.bindingId,
     bindingGeneration: record.bindingGeneration,
