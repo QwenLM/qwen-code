@@ -186,7 +186,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                 if (lastLease != null && !seed.matches(lastLease)) {
                     throw conflict();
                 }
-                retained = admitPlacement(request, seed, handle);
+                retained = admitPlacement(request, seed, handle, true);
                 RuntimeObservation observation = observe(request, seed, handle);
                 URI originalEndpoint = retained.endpoint() != null ? retained.endpoint()
                         : lastLease == null ? null : lastLease.getEndpoint();
