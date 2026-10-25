@@ -252,6 +252,8 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
       'actual edit awaiting approval',
       30000,
     );
+    expect(screen).toMatch(/✓\s+Read owned-checkpoint\.txt(?:\s|$)/);
+    expect(screen).not.toMatch(/\bReadFile\s+owned-checkpoint\.txt/);
     expect(server.requests).toHaveLength(2);
     expect(readFileSync(file, 'utf8')).toBe(bytes);
     await until(
@@ -560,6 +562,8 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
     expect(server.requests).toHaveLength(4);
     const resumedScreen = await session.viewport();
     facts.coldInitialScreen = resumedScreen;
+    expect(resumedScreen).toMatch(/✓\s+Read owned-checkpoint\.txt(?:\s|$)/);
+    expect(resumedScreen).not.toMatch(/\bReadFile\s+owned-checkpoint\.txt/);
     expect(readFileSync(file, 'utf8')).toBe(edited);
     expect(editCalls()).toHaveLength(2);
     await session.idle();
