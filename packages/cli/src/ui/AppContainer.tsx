@@ -556,14 +556,53 @@ export function useQueuedSubmissionDrain({
             );
             markAdmissionFailed();
           },
-          onDeliveryFailed: () => {
-            restorePeerMessage(
-              submission.modelText,
-              submission.displayText,
-              true,
-              submission.delivery,
-            );
-            markAdmissionFailed();
+          onDeliveryFailed: (reason) => {
+            // What a failed turn means for a peer envelope depends on
+            // whether the envelope was consumed, and that is what the
+            // reason now encodes. Restoring on a terminal failure
+            // re-submitted the same envelope after every failed call: the
+            // failed turn settles, that settle releases the admission
+            // guard below, and the drain pops the restored entry again —
+            // unbounded, with no backoff and nothing on screen, while the
+            // sender holds a `delivered` receipt.
+            switch (reason) {
+              case 'cancelled':
+                // Esc is recovery: the user asked for the turn to stop, so
+                // the message goes back.
+                restorePeerMessage(
+                  submission.modelText,
+                  submission.displayText,
+                  true,
+                  submission.delivery,
+                );
+                markAdmissionFailed();
+                return;
+              case 'not-admitted':
+                // Already restored by onAdmissionFailed above — every site
+                // that reports this fires that callback too — so restoring
+                // here would leave two copies of one envelope queued.
+                return;
+              case 'error-after-send':
+                // The turn carried the envelope before it failed. The
+                // `delivered` receipt the sender holds is true, and `expired`
+                // is terminal, so correcting it would be a lie that cannot be
+                // undone. Leave it, and leave the entry out of the queue.
+                return;
+              case 'unrecoverable':
+              case 'error-before-send':
+                // Accepted but never carried: correct the receipt the same
+                // way the exit scrub does, and drop the entry. The drain is
+                // deliberately not parked, so the next queued entry drains
+                // instead of the queue stalling on this one.
+                peerMessaging?.settleFailedPeerTurn(submission.delivery);
+                return;
+              default: {
+                const unreachable: never = reason;
+                throw new Error(
+                  `Unhandled peer delivery failure reason: ${unreachable}`,
+                );
+              }
+            }
           },
         },
       );
@@ -2928,18 +2967,22 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       // The wire text for `expired` speaks of a held message, which is
       // only right when the message was held. A delivery corrected to
-      // expired means the session exited with it unread. An expiry with
-      // no delivery at all usually means the message arrived as that
-      // session was shutting down — but `previous` records what this
-      // sender *heard*, not what the receiver did, and a `held` receipt
-      // can be lost to the outbound ceiling under exactly the flood this
-      // feature is about, so the claim stays disjunctive and keeps the
-      // advice.
+      // expired has two producers and the sender cannot tell them apart:
+      // the exit scrub, where the session exited with it unread, and a
+      // turn that ended before it carried the envelope, where the session
+      // is alive and idle. So the claim is disjunctive and keeps the
+      // retry advice — the case where a retry would actually succeed must
+      // not be the one that gets no advice. An expiry with no delivery at
+      // all usually means the message arrived as that session was
+      // shutting down — but `previous` records what this sender *heard*,
+      // not what the receiver did, and a `held` receipt can be lost to the
+      // outbound ceiling under exactly the flood this feature is about, so
+      // that claim stays disjunctive too.
       const detail =
         status !== 'expired'
           ? describeDeliveryStatus(status)
           : previous === 'delivered'
-            ? 'That session exited before it read your message; it was not delivered.'
+            ? 'That session accepted your message but no turn carried it — it exited, or its turn ended on an error. It was not delivered. Retry once it is idle.'
             : previous === 'held'
               ? describeDeliveryStatus(status)
               : 'Your message was not delivered; that session was shutting down, or could not keep it. Retry once it is idle.';

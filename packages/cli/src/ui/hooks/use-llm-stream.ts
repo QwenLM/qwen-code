@@ -408,6 +408,13 @@ interface StreamProcessingResult {
   status: StreamProcessingStatus;
   scheduledToolContinuation: boolean;
   userPromptBlocked: boolean;
+  /**
+   * Whether this turn put anything in front of the model — streamed
+   * assistant output, or a tool call it went on to execute. The only
+   * evidence available that the prompt was actually consumed, which is
+   * what separates `error-before-send` from `error-after-send`.
+   */
+  consumedEnvelope: boolean;
 }
 
 const EDIT_TOOL_NAMES = new Set([
@@ -443,6 +450,44 @@ const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 export const INTERIM_MONITOR_MIN_TURN_INTERVAL_MS = 10_000;
 
 /**
+ * Why a submitted turn produced no delivery.
+ *
+ * A caller that restores a queued entry on failure has to tell these
+ * apart: restoring a cancelled turn is recovery, restoring a turn that
+ * ended on a model error is an automatic retry nobody asked for.
+ *
+ * - `cancelled`: the user interrupted the turn (Esc), either while it
+ *   was running or while it was still being prepared.
+ * - `not-admitted`: the submission never started (the session was busy,
+ *   an empty steer drain). Every site that reports this also fires the
+ *   admission callback, and that callback — not this one — is what puts
+ *   a queued entry back.
+ * - `unrecoverable`: the submission can never succeed in this process
+ *   (a mod failed to initialize; `mods.ready` stays rejected until
+ *   restart). Nothing is restored, because another attempt is certain to
+ *   fail the same way.
+ * - `error-before-send`: the turn ended on a terminal error before the
+ *   model produced anything, so whatever prompt it was carrying was
+ *   never consumed.
+ * - `error-after-send`: the turn produced output or ran tools and *then*
+ *   ended on a terminal error. The prompt was consumed; only the turn
+ *   failed. Reporting this as `error-before-send` would tell a peer that
+ *   its message was never delivered while this session had already acted
+ *   on it — and `expired` is terminal, so the lie could not be corrected.
+ *
+ * The two `error-*` members are split because a turn-end aggregate cannot
+ * answer the question that matters. `lastPromptErroredRef` is set for any
+ * error event on the turn, including one raised by a later model call in a
+ * tool loop, after the envelope was consumed and its tools had run.
+ */
+export type DeliveryFailureReason =
+  | 'cancelled'
+  | 'not-admitted'
+  | 'unrecoverable'
+  | 'error-before-send'
+  | 'error-after-send';
+
+/**
  * An overflow summary taken from the tally and awaiting a turn to carry it.
  * `displayed` mirrors the per-notification flag so a re-queued summary is not
  * rendered twice.
@@ -470,7 +515,7 @@ interface QueuedNotification {
   monitor?: { id: string; status: string };
   todoWorkChainId?: string;
   onDelivered?: () => void;
-  onDeliveryFailed?: () => void;
+  onDeliveryFailed?: (reason: DeliveryFailureReason) => void;
   displayed?: boolean;
 }
 
@@ -2723,6 +2768,11 @@ export const useLlmStream = (
       let thoughtBuffer = '';
       let scheduledToolContinuation = false;
       let userPromptBlocked = false;
+      // Whether anything reached the transcript or the tool scheduler this
+      // turn. `assistantOutputStarted` cannot answer that: the Error and
+      // Finished handlers reset it, so by the time the turn ends it says
+      // only whether the *last* segment was open.
+      let consumedEnvelope = false;
       let assistantOutputStarted =
         pendingHistoryItemRef.current?.type === 'gemini' ||
         pendingHistoryItemRef.current?.type === 'gemini_content';
@@ -2783,6 +2833,7 @@ export const useLlmStream = (
             );
             if (contentParts.some((part) => part.trim().length > 0)) {
               assistantOutputStarted = true;
+              consumedEnvelope = true;
             }
             continue;
           }
@@ -2810,6 +2861,7 @@ export const useLlmStream = (
               });
               llmMessageBuffer = '';
               assistantOutputStarted = true;
+              consumedEnvelope = true;
               continue;
             }
 
@@ -2957,6 +3009,7 @@ export const useLlmStream = (
                 );
               }
               toolCallRequests.push(event.value);
+              consumedEnvelope = true;
               // Count tool call args JSON toward token estimation.
               try {
                 const argsJson = JSON.stringify(event.value.args);
@@ -2973,6 +3026,9 @@ export const useLlmStream = (
                 status: StreamProcessingStatus.UserCancelled,
                 scheduledToolContinuation: false,
                 userPromptBlocked,
+                // Only what already reached the transcript counts: the
+                // pending tool calls were just cleared and will not run.
+                consumedEnvelope,
               };
             case ServerLlmEventType.Error:
               flushBufferedStreamEvents();
@@ -3290,6 +3346,7 @@ export const useLlmStream = (
             status: StreamProcessingStatus.Completed,
             scheduledToolContinuation: false,
             userPromptBlocked,
+            consumedEnvelope,
           };
         }
 
@@ -3393,6 +3450,10 @@ export const useLlmStream = (
         status: StreamProcessingStatus.Completed,
         scheduledToolContinuation,
         userPromptBlocked,
+        // A tool call counts even when the turn errored right after emitting
+        // it: the Error case only breaks the switch, and the execution gate
+        // below has no error check, so those tools still run.
+        consumedEnvelope,
       };
     },
     [
@@ -3692,7 +3753,7 @@ export const useLlmStream = (
         notificationDisplayText?: string;
         todoWorkChainId?: string;
         onDelivered?: () => void;
-        onDeliveryFailed?: () => void;
+        onDeliveryFailed?: (reason: DeliveryFailureReason) => void;
         onAdmissionFailed?: () => void;
         onGoalClaimDeferred?: () => void;
         onRequestStarted?: () => void;
@@ -3734,8 +3795,19 @@ export const useLlmStream = (
             Date.now(),
           );
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
-          metadata?.onAdmissionFailed?.();
-          metadata?.onDeliveryFailed?.();
+          if (submitType !== SendMessageType.Teammate) {
+            // A typed prompt keeps its place in the queue: the text is the
+            // user's, and the error above tells them why it is stuck.
+            metadata?.onAdmissionFailed?.();
+            metadata?.onDeliveryFailed?.('not-admitted');
+            return;
+          }
+          // `mods.ready` is one memoized promise, rejected until restart, so
+          // no retry in this process can succeed. Restoring a peer envelope
+          // here would re-attempt forever — one duplicate ERROR line per
+          // attempt and the head of the queue held by an entry that can never
+          // drain — so settle it once instead.
+          metadata?.onDeliveryFailed?.('unrecoverable');
           return;
         }
       }
@@ -3782,7 +3854,7 @@ export const useLlmStream = (
       ) {
         await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
         metadata?.onAdmissionFailed?.();
-        metadata?.onDeliveryFailed?.();
+        metadata?.onDeliveryFailed?.('not-admitted');
         return;
       }
 
@@ -3794,7 +3866,7 @@ export const useLlmStream = (
       ) {
         await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
         metadata?.onAdmissionFailed?.();
-        metadata?.onDeliveryFailed?.();
+        metadata?.onDeliveryFailed?.('not-admitted');
         return;
       }
 
@@ -4067,7 +4139,14 @@ export const useLlmStream = (
         if (!shouldProceed || queryToSend === null) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
           releaseSubmissionLease();
-          metadata?.onDeliveryFailed?.();
+          // This is the one delivery failure that does not also fire
+          // onAdmissionFailed, so a caller cannot lean on that callback
+          // to put its entry back. Report it as an interrupt, which is
+          // what it is: of the `shouldProceed: false` returns upstream,
+          // the only one a Teammate submit can reach is
+          // `turnCancelledRef` (a peer envelope is never empty, and the
+          // remaining returns sit behind the Teammate early-return).
+          metadata?.onDeliveryFailed?.('cancelled');
           return;
         }
 
@@ -4360,7 +4439,7 @@ export const useLlmStream = (
           ) {
             cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
-            metadata?.onDeliveryFailed?.();
+            metadata?.onDeliveryFailed?.('cancelled');
             return;
           }
 
@@ -4473,7 +4552,14 @@ export const useLlmStream = (
             goalTerminalErrorRef.current ||
             processingResult.userPromptBlocked
           ) {
-            metadata?.onDeliveryFailed?.();
+            // Split at the point where consumption is known rather than at
+            // the point where the turn ended: a peer message whose tools ran
+            // and whose *next* model call died was still carried.
+            metadata?.onDeliveryFailed?.(
+              processingResult.consumedEnvelope
+                ? 'error-after-send'
+                : 'error-before-send',
+            );
           } else {
             metadata?.onDelivered?.();
           }
@@ -4510,7 +4596,18 @@ export const useLlmStream = (
           }
         } catch (error: unknown) {
           cleanupReviewLease = true;
-          metadata?.onDeliveryFailed?.();
+          // A throw is not evidence either way: it can come from the request
+          // or from the turn's own bookkeeping, and `processLlmStreamEvents`
+          // never returns when it throws, so `consumedEnvelope` is unknown
+          // here. Report the consumed side, which leaves a peer's `delivered`
+          // receipt standing — under-claiming delivery is recoverable by the
+          // sender, whereas a terminal `expired` for a message this session
+          // did carry is not.
+          metadata?.onDeliveryFailed?.(
+            isNodeError(error) && error.name === 'AbortError'
+              ? 'cancelled'
+              : 'error-after-send',
+          );
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -7015,9 +7112,9 @@ export const useLlmStream = (
             // the text also carries a command's untrusted output.
             shellMode: false,
             onDelivered: item.onDelivered,
-            onDeliveryFailed: () => {
+            onDeliveryFailed: (reason) => {
               restoreDroppedSummary();
-              item.onDeliveryFailed?.();
+              item.onDeliveryFailed?.(reason);
             },
             onAdmissionFailed: () => {
               queue.unshift(item);

@@ -1042,21 +1042,68 @@ export class PeerMessaging {
     debugLogger.debug(
       `dropping queued peer message ${delivery.msgId}: addressed to session ${delivery.toSessionId}, this is ${ownSessionId}`,
     );
-    if (delivery.from) {
-      void sendDeliveryStatus(
-        delivery.from,
-        {
-          status: 'misaddressed',
-          origMsgId: delivery.msgId,
-          from: this.inbox?.socketPath,
-        },
-        delivery.replyToken,
-      );
-    }
+    this.sendQueuedDeliveryStatus(delivery, 'misaddressed');
+    // Only here: the frame was dropped before the model saw it, which is the
+    // precondition `forgetBody` documents for rolling the admission record
+    // back. Settling a failed turn must NOT forget it — the far model may
+    // already have read the message, and an honest retry of the same body has
+    // to be answered `duplicate` rather than admitted as new.
     if (delivery.admissionKey !== undefined) {
       this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
     }
     return false;
+  }
+
+  /**
+   * Settle a peer message that no turn will ever carry: the submission never
+   * reached the model, or it can never be made to.
+   *
+   * The drain does not put such an entry back — restoring it re-submitted the
+   * same envelope after every failed call with no bound. The sender still
+   * holds the `delivered` receipt it got at admission, so correct it the same
+   * way the exit scrub settles accepted-but-unconsumed messages: `expired` is
+   * the status that says "accepted, never consumed", which is this case.
+   *
+   * The admission record is deliberately left in place: `expired` is what the
+   * gate elsewhere advertises as licence to retry, and the retry has to be
+   * answerable as `duplicate` on body. `drainQueuedFrame` is the only caller
+   * that forgets the record, because only there is it known that the model
+   * never saw the message.
+   */
+  settleFailedPeerTurn(delivery: PeerQueuedDelivery | undefined): void {
+    if (delivery === undefined) {
+      return;
+    }
+    debugLogger.debug(
+      `settling peer message ${delivery.msgId}: no turn will carry it`,
+    );
+    this.sendQueuedDeliveryStatus(delivery, 'expired');
+  }
+
+  /**
+   * Send a delivery-status frame for a queued envelope, and nothing else.
+   *
+   * Shared by the two settle paths so a future field on the status frame — or
+   * folding these into `DropReceiptCoalescer`, which exists to collapse a
+   * burst of them into one frame — cannot be added to one copy and silently
+   * missed by the other.
+   */
+  private sendQueuedDeliveryStatus(
+    delivery: PeerQueuedDelivery,
+    status: PeerControlFrame['status'],
+  ): void {
+    if (!delivery.from) {
+      return;
+    }
+    void sendDeliveryStatus(
+      delivery.from,
+      {
+        status,
+        origMsgId: delivery.msgId,
+        from: this.inbox?.socketPath,
+      },
+      delivery.replyToken,
+    );
   }
 
   private emitHeldChange(held: readonly HeldMessage[]): void {

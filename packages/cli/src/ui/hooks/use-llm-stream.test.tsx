@@ -20018,7 +20018,56 @@ describe('useLlmStream', () => {
         );
       });
 
-      await waitFor(() => expect(onDeliveryFailed).toHaveBeenCalled());
+      // Nothing was streamed before the error, so the prompt this turn
+      // carried was never consumed — the keyless-provider shape from
+      // #14409, and the one case where `expired` is a true receipt.
+      await waitFor(() =>
+        expect(onDeliveryFailed).toHaveBeenCalledWith('error-before-send'),
+      );
+      expect(onDelivered).not.toHaveBeenCalled();
+    });
+
+    it('reports an error that lands after output as error-after-send', async () => {
+      // The turn produced an answer and then died, so the envelope was
+      // carried. Calling this `error-before-send` would settle a peer
+      // message as never delivered while this session had already acted on
+      // it, and `expired` admits no correction. The distinction is the
+      // whole point of the split: the turn-end aggregate cannot tell these
+      // two apart, `assistantOutputStarted` can.
+      (mockConfig as any).getHookSystem = vi.fn(() => null);
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Content,
+            value: 'partial answer',
+          };
+          yield {
+            type: ServerLlmEventType.Error,
+            value: { error: { message: 'model overloaded' } },
+          };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'run the deploy script',
+          SendMessageType.UserQuery,
+          'prompt-id-after-send',
+          { onDelivered, onDeliveryFailed },
+        );
+      });
+
+      await waitFor(() =>
+        expect(onDeliveryFailed).toHaveBeenCalledWith('error-after-send'),
+      );
       expect(onDelivered).not.toHaveBeenCalled();
     });
 

@@ -835,6 +835,65 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(m.drainQueuedFrame(undefined)).toBe(true);
   });
 
+  it('settles a peer message whose turn ended on a model error', async () => {
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      getSessionId: () => 'session-a',
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const queued: PeerQueuedDelivery[] = [];
+    started.setSubmitFn((_modelText, _displayText, delivery) => {
+      if (delivery) queued.push(delivery);
+      return true;
+    });
+    const frame = peerFrame({
+      content: 'the turn this starts will fail',
+      from: sender.socketPath,
+      toSessionId: 'session-a',
+    });
+    await send(started.socketPath!, frame);
+    await settle();
+    expect(queued).toHaveLength(1);
+
+    // The turn was admitted and then its model call failed, so the
+    // envelope is not put back. The sender is still holding the
+    // `delivered` receipt it got at admission: correct it with the
+    // status the exit scrub uses for accepted-but-never-consumed.
+    started.settleFailedPeerTurn(queued[0]);
+    await settle();
+    const statuses = receipts
+      .filter((receipt) => receipt.type === 'control')
+      .filter((receipt) => receipt.origMsgId === frame.msgId)
+      .map((receipt) => receipt.status);
+    expect(statuses).toEqual(['delivered', 'expired']);
+
+    // `expired` is what the gate elsewhere advertises as licence to retry,
+    // and the far model may already have read this message, so the honest
+    // retry has to be answered `duplicate` rather than admitted as new —
+    // which is why the settle does not roll the admission record back.
+    // The mirror of this is the `misaddressed` drain path, where the model
+    // provably never saw the frame and the record IS forgotten.
+    await send(started.socketPath!, { ...frame, msgId: 'retry-1' });
+    await settle();
+    expect(queued).toHaveLength(1);
+  });
+
+  it('ignores a settle for a message that carried no delivery', async () => {
+    // A queue entry that never came from the transport has nothing to
+    // settle, and must not throw. Driven through a real instance: on a
+    // null `messaging` the optional chain would short-circuit and assert
+    // nothing at all.
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    expect(() => m.settleFailedPeerTurn(undefined)).not.toThrow();
+    expect(receipts).toEqual([]);
+  });
+
   it('holds a message when the receiver bypasses prompts and the sender says nothing', async () => {
     const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
     await send(
