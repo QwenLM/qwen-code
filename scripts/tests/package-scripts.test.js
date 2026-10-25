@@ -1229,16 +1229,16 @@ describe('package scripts', () => {
     expect(step).toContain('[ "${VITEST_RETRY}" != \'off\' ]');
     expect(step).toContain('retry_arg=(--retry="${VITEST_RETRY}")');
     // The step hands the flag to the lane script, which passes it to all
-    // three of its Vitest runs: web-shell in the side lane, the other
-    // workspaces, and scripts/tests.
+    // three of its Vitest runs: the CLI and core suites in the main lane, and
+    // the other workspaces and scripts/tests in the side lane.
     expect(step).toContain(
       '.github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"',
     );
     const lanes = readWorkflow('.github/scripts/ci/run-unit-test-lanes.sh');
     expect(lanes).toContain(
-      'npm run test:ci --workspace="$side_workspace" -- "$@"',
+      'npm run test:ci "${main_workspaces[@]/#/--workspace=}" -- "$@"',
     );
-    expect(lanes).toContain('npm run test:ci "${main_workspaces[@]}" -- "$@"');
+    expect(lanes).toContain('npm run test:ci "${side_workspaces[@]}" -- "$@"');
     expect(lanes).toContain('npm run test:scripts:unit -- "$@"');
   });
 
@@ -1281,14 +1281,15 @@ describe('package scripts', () => {
 
   // `tail --pid` is GNU; the script runs only in the Linux test job.
   it.runIf(process.platform === 'linux')(
-    'runs web-shell and the standalone regression beside the other workspaces',
+    'runs every other suite beside the CLI and core suites',
     () => {
-      // The CLI suite keeps its workers busy for most of the step, while
-      // web-shell waits on App.test.tsx alone and the standalone regression
-      // starts one runtime at a time, so the lane script overlaps those two
-      // with the other workspaces. Run it against a stub npm: each lane runs
-      // what it should, beside the other, every failure reaches the exit
-      // code, and the side lane's log comes out whole after the main lane's.
+      // The CLI and core suites keep their workers busy for most of the
+      // step, while the other suites are small or wait on a few files and the
+      // standalone regression starts one runtime at a time, so the lane
+      // script runs all of those beside the CLI and core suites. Run it
+      // against a stub npm: each lane runs what it should, beside the other,
+      // every failure reaches the exit code, and the side lane's log comes
+      // out whole after the main lane's.
       const lanes = path.join(
         root,
         '.github/scripts/ci/run-unit-test-lanes.sh',
@@ -1314,16 +1315,16 @@ describe('package scripts', () => {
             '  printf "%s" "$STUB_WORKSPACES"; exit "$STUB_PKG_GET_RC"',
             'fi',
             'echo "npm $* heap=$NODE_OPTIONS workers=$VITEST_MAX_FORKS/$VITEST_MAX_THREADS" >> "$STUB_CALLS"',
-            // web-shell and the main lane's suites each wait for the other to
-            // start, so a side lane run before or after the main lane, rather
-            // than beside it, fails here.
+            // The main lane's suites and the side lane's workspaces each wait
+            // for the other to start, so a side lane run before or after the
+            // main lane, rather than beside it, fails here.
             'meet() {',
             '  touch "$STUB_CALLS.$1"; i=0',
             '  while [ ! -e "$STUB_CALLS.$2" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done',
             '  [ -e "$STUB_CALLS.$2" ] || { echo "$1 lane ran alone"; exit 9; }',
             '}',
             'case "$*" in',
-            '  *--workspace=@qwen-code/acp-bridge*) meet main side ;;',
+            '  *--workspace=@qwen-code/qwen-code-core*) meet main side ;;',
             '  *--workspace=@qwen-code/web-shell*) meet side main ;;',
             'esac',
             'echo "output of npm $*"',
@@ -1334,6 +1335,8 @@ describe('package scripts', () => {
         chmodSync(path.join(bin, 'npm'), 0o755);
         const allWorkspaces = {
           '@qwen-code/acp-bridge': 'vitest run',
+          '@qwen-code/qwen-code': 'vitest run',
+          '@qwen-code/qwen-code-core': 'vitest run',
           '@qwen-code/web-shell': 'vitest run --config vitest.config.ts',
           '@qwen-code/web-templates': {},
           '@qwen-code/sdk': 'vitest run',
@@ -1345,8 +1348,6 @@ describe('package scripts', () => {
             pkgGet = JSON.stringify(workspaces),
             pkgGetRc = 0,
             realListing = false,
-            mainLane = realListing ||
-              (pkgGetRc === 0 && pkgGet.includes('"@qwen-code/acp-bridge"')),
             fail = '',
             tmp = dir,
             // ci.yml sets both to the same cap; apart, they show which is which.
@@ -1355,10 +1356,6 @@ describe('package scripts', () => {
           } = {},
         ) => {
           const calls = path.join(dir, `${name}.calls`);
-          // With no main lane to start, lift the barrier up front.
-          if (!mainLane) {
-            writeFileSync(`${calls}.main`, '');
-          }
           const result = spawnSync('bash', [lanes, '--retry=2'], {
             cwd: root,
             encoding: 'utf8',
@@ -1391,49 +1388,44 @@ describe('package scripts', () => {
               : [],
           };
         };
-        const sideWebShell = `npm run test:ci --workspace=@qwen-code/web-shell -- --retry=2 heap=--max-old-space-size=${heap} workers=2/3`;
+        const mainSuites = `npm run test:ci --workspace=@qwen-code/qwen-code --workspace=@qwen-code/qwen-code-core -- --retry=2 heap=--max-old-space-size=${heap} workers=4/6`;
+        const sideWorkspaces = `npm run test:ci --workspace=@qwen-code/acp-bridge --workspace=@qwen-code/web-shell --workspace=@qwen-code/sdk -- --retry=2 heap=--max-old-space-size=${heap} workers=2/3`;
         const standalone =
           'npm run test:standalone:runtimes:ci heap= workers=4/6';
-        const mainWorkspaces = `npm run test:ci --workspace=@qwen-code/acp-bridge --workspace=@qwen-code/sdk -- --retry=2 heap=--max-old-space-size=${heap} workers=4/6`;
         const scriptsUnit =
-          'npm run test:scripts:unit -- --retry=2 heap= workers=4/6';
+          'npm run test:scripts:unit -- --retry=2 heap= workers=2/3';
 
-        // The two lanes run at once, so only each lane's own order is fixed.
+        // The two lanes run at once, so only the side lane's order is fixed.
         const passing = run('passing');
         expect(passing.rc).toBe('0');
         expect([...passing.calls].sort()).toEqual(
-          [sideWebShell, standalone, mainWorkspaces, scriptsUnit].sort(),
+          [mainSuites, sideWorkspaces, standalone, scriptsUnit].sort(),
         );
         const order = (calls, line) => calls.indexOf(line);
-        expect(order(passing.calls, sideWebShell)).toBeLessThan(
+        expect(order(passing.calls, sideWorkspaces)).toBeLessThan(
           order(passing.calls, standalone),
         );
-        expect(order(passing.calls, mainWorkspaces)).toBeLessThan(
+        expect(order(passing.calls, standalone)).toBeLessThan(
           order(passing.calls, scriptsUnit),
         );
-        expect(passing.stdout).toContain(
-          'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
-        );
-        expect(passing.stdout).toContain('output of npm run test:scripts:unit');
         const replay = passing.stdout.indexOf('Side lane output');
         expect(
-          passing.stdout.indexOf('output of npm run test:scripts:unit'),
+          passing.stdout.indexOf(
+            'output of npm run test:ci --workspace=@qwen-code/qwen-code ',
+          ),
         ).toBeLessThan(replay);
-        expect(replay).toBeLessThan(
-          passing.stdout.indexOf(
-            'output of npm run test:ci --workspace=@qwen-code/web-shell',
-          ),
-        );
-        expect(replay).toBeLessThan(
-          passing.stdout.indexOf(
-            'output of npm run test:standalone:runtimes:ci',
-          ),
-        );
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
+          'output of npm run test:standalone:runtimes:ci',
+          'output of npm run test:scripts:unit',
+        ]) {
+          expect(replay).toBeLessThan(passing.stdout.indexOf(side));
+        }
 
-        // Each Vitest run applies the worker cap on its own, so web-shell
-        // takes half of it, at least 1, beside the main lane's full cap. With
-        // no cap set, as on the hosted runners, it takes 2 rather than
-        // Vitest's default of all CPUs but one.
+        // Each Vitest run applies the worker cap on its own, so the side
+        // lane's runs take half of it, at least 1, beside the main lane's
+        // full cap. With no cap set, as on the hosted runners, they take 2
+        // rather than Vitest's default of all CPUs but one.
         for (const [cap, side] of [
           ['', '2'],
           ['1', '1'],
@@ -1443,31 +1435,32 @@ describe('package scripts', () => {
             threads: cap,
           });
           expect(capped.rc).toBe('0');
-          expect(capped.calls).toContain(
-            sideWebShell.replace('workers=2/3', `workers=${side}/${side}`),
-          );
-          expect(capped.calls).toContain(
-            mainWorkspaces.replace('workers=4/6', `workers=${cap}/${cap}`),
+          expect([...capped.calls].sort()).toEqual(
+            [
+              mainSuites.replace('workers=4/6', `workers=${cap}/${cap}`),
+              sideWorkspaces.replace('workers=2/3', `workers=${side}/${side}`),
+              standalone.replace('workers=4/6', `workers=${cap}/${cap}`),
+              scriptsUnit.replace('workers=2/3', `workers=${side}/${side}`),
+            ].sort(),
           );
         }
 
-        // Against npm's real listing, the main lane runs every workspace the
-        // release pins select (scripts/workspaces.js) but web-shell.
+        // Against npm's real listing, the two lanes split every workspace the
+        // release pins select (scripts/workspaces.js) between them, each one
+        // in one lane.
         const real = run('real-listing', { realListing: true });
         expect(real.rc, real.stdout).toBe('0');
-        const realMain = real.calls.filter(
-          (call) =>
-            call.startsWith('npm run test:ci --workspace=') &&
-            call !== sideWebShell,
-        );
-        expect(realMain).toHaveLength(1);
-        expect(
-          realMain[0]
+        const names = (call) =>
+          call
             .split(' ')
             .filter((arg) => arg.startsWith('--workspace='))
-            .map((arg) => arg.slice('--workspace='.length))
-            .sort(),
-        ).toEqual(
+            .map((arg) => arg.slice('--workspace='.length));
+        const realWorkspaces = real.calls.filter((call) =>
+          call.startsWith('npm run test:ci --workspace='),
+        );
+        expect(realWorkspaces).toContain(mainSuites);
+        expect(realWorkspaces).toHaveLength(2);
+        expect(realWorkspaces.flatMap(names).sort()).toEqual(
           getTestCiWorkspacePackageJsonPaths(root)
             .map(
               (packageJsonPath) =>
@@ -1475,48 +1468,47 @@ describe('package scripts', () => {
                   readFileSync(path.join(root, packageJsonPath), 'utf8'),
                 ).name,
             )
-            .filter((name) => name !== '@qwen-code/web-shell')
             .sort(),
         );
 
-        // A web-shell failure still lets the standalone regression run.
-        const webShellFails = run('web-shell-fails', {
-          fail: '--workspace=@qwen-code/web-shell',
-        });
-        expect(webShellFails.rc).toBe('7');
-        expect(webShellFails.calls).toContain(standalone);
-        expect(webShellFails.calls).toContain(scriptsUnit);
+        // A failure in one side-lane suite still lets the others run, and a
+        // main-lane failure still waits for the side lane and prints it.
+        for (const [failing, fail] of [
+          ['side-workspace', '--workspace=@qwen-code/web-shell'],
+          ['standalone', 'test:standalone'],
+          ['scripts', 'test:scripts:unit'],
+          ['main', '--workspace=@qwen-code/qwen-code-core'],
+        ]) {
+          const failed = run(`${failing}-fails`, { fail });
+          expect(failed.rc, failing).toBe('7');
+          expect([...failed.calls].sort(), failing).toEqual(
+            [...passing.calls].sort(),
+          );
+          expect(failed.stdout, failing).toContain('Side lane exited with');
+          expect(failed.stdout, failing).toContain(
+            'output of npm run test:scripts:unit',
+          );
+        }
 
-        expect(run('standalone-fails', { fail: 'test:standalone' }).rc).toBe(
-          '7',
-        );
-
-        // A main-lane failure skips scripts/tests, as before, and still
-        // waits for the side lane and prints it.
-        const mainFails = run('main-fails', {
-          fail: '--workspace=@qwen-code/acp-bridge',
-        });
-        expect(mainFails.rc).toBe('7');
-        expect(mainFails.calls).not.toContain(scriptsUnit);
-        expect(mainFails.stdout).toContain(
-          'output of npm run test:standalone:runtimes:ci',
-        );
-
-        // With nothing left beside the side lane, the step fails rather than
-        // fall back to the root's test:ci, which reruns every suite.
+        // With nothing left beside the CLI and core suites, the step fails
+        // rather than fall back to the root's test:ci, which reruns every
+        // suite.
         const nothingElse = run('nothing-else', {
-          workspaces: { '@qwen-code/web-shell': 'vitest run' },
+          workspaces: {
+            '@qwen-code/qwen-code': 'vitest run',
+            '@qwen-code/qwen-code-core': 'vitest run',
+            '@qwen-code/web-templates': {},
+          },
         });
         expect(nothingElse.rc).toBe('1');
         expect(nothingElse.stdout).toContain(
-          '::error::Found no workspaces to test beside the side lane.',
+          '::error::Found no workspaces to test beside the CLI and core suites.',
         );
-        expect(nothingElse.calls).toEqual([sideWebShell, standalone]);
+        expect(nothingElse.calls).toEqual([]);
 
         // A failed listing says so instead of claiming there is nothing to
-        // test, and still fails the step after the side lane. A failing
-        // `npm pkg get --json` prints an error object, which parses as a
-        // listing with no workspaces in it.
+        // test, and runs no suites. A failing `npm pkg get --json` prints an
+        // error object, which parses as a listing with no workspaces in it.
         const unlisted =
           '::error::Could not list the workspaces that define test:ci; the error is above.';
         for (const [name, options] of [
@@ -1533,10 +1525,10 @@ describe('package scripts', () => {
           expect(listingFails.rc).toBe('1');
           expect(listingFails.stdout).toContain(unlisted);
           expect(listingFails.stdout).not.toContain('Found no workspaces');
-          expect(listingFails.calls).toEqual([sideWebShell, standalone]);
+          expect(listingFails.calls).toEqual([]);
         }
 
-        // The main lane's arguments are read one per line, so a workspace
+        // The side lane's arguments are read one per line, so a workspace
         // name with a line break in it would split into other arguments,
         // flags among them.
         const splitName = run('name-with-newline', {
@@ -1544,14 +1536,13 @@ describe('package scripts', () => {
             ...allWorkspaces,
             '@qwen-code/evil\n--workspaces': 'vitest run',
           },
-          mainLane: false,
         });
         expect(splitName.rc).toBe('1');
         expect(splitName.stdout).toContain(unlisted);
         expect(splitName.stderr).toContain(
           'A workspace name holds whitespace: "@qwen-code/evil\\n--workspaces"',
         );
-        expect(splitName.calls).toEqual([sideWebShell, standalone]);
+        expect(splitName.calls).toEqual([]);
 
         // Without a log file for the side lane, nothing runs.
         const noTmp = run('no-tmpdir', { tmp: path.join(dir, 'missing') });
