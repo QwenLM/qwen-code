@@ -2895,6 +2895,7 @@ export async function runNonInteractive(
                     abortController.abort(new ModTurnAbortedError());
                     return true;
                   },
+                  currentPromptId,
                 );
               },
             }),

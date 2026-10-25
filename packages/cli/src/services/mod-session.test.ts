@@ -12,12 +12,13 @@ import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import { convertClaudePluginPackage } from '@qwen-code/qwen-code-core/extension/claude-converter.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
-import type {
-  ModCommand,
-  ModLog,
-  ModSessionFacts,
-  ModTurnComplete,
-  ModTurnStart,
+import {
+  MOD_END_TIMEOUT_MS,
+  type ModCommand,
+  type ModLog,
+  type ModSessionFacts,
+  type ModTurnComplete,
+  type ModTurnStart,
 } from '@qwen-code/qwen-code-core/mods/types.js';
 import {
   EVENT_API_RESPONSE,
@@ -891,6 +892,50 @@ describe('Mod session ownership', () => {
     },
   );
 
+  it('names the model of the turn’s own prompt, not a concurrent one', async () => {
+    const { session, ended } = await loadTurns();
+    const turn = session.startTurn('', turnSignal, abortHost, 'prompt-1')!;
+    uiTelemetryService.addEvent(
+      apiResponse({ model: 'qwen-plus', prompt_id: 'prompt-1' }),
+      'session-1',
+    );
+    // A /btw side question answers under its own prompt id.
+    uiTelemetryService.addEvent(
+      apiResponse({ model: 'btw-model', prompt_id: 'session-1########9' }),
+      'session-1',
+    );
+    turn.saw(finished({ promptTokenCount: 1, candidatesTokenCount: 1 }));
+    await turn.complete();
+    expect(ended().usage?.model).toBe('qwen-plus');
+  });
+
+  it('lets a consistent total decide whether reasoning is in the output', async () => {
+    const { session, ended } = await loadTurns(['hello-mod'], {
+      getContentGeneratorConfig: () => ({ authType: 'gemini-api-key' }),
+    });
+    const turn = session.startTurn('', turnSignal, abortHost)!;
+    // The total shows the reasoning inside the output, whatever the auth.
+    turn.saw(
+      finished({
+        promptTokenCount: 10,
+        candidatesTokenCount: 8,
+        thoughtsTokenCount: 6,
+        totalTokenCount: 18,
+      }),
+    );
+    // And here beside it.
+    turn.saw(
+      finished({
+        promptTokenCount: 10,
+        candidatesTokenCount: 8,
+        thoughtsTokenCount: 6,
+        totalTokenCount: 24,
+      }),
+    );
+    await turn.complete();
+    expect(ended().usage).toMatchObject({ output_tokens: 8 + 14 });
+  });
+
   it('ends a running turn.start with its turn, but not turn.complete', async () => {
     const { session, runtime } = await loadTurns();
     const host = new AbortController();
@@ -1039,8 +1084,8 @@ describe('Mod session ownership', () => {
   it('ends the turn a close cuts short before session.end', async () => {
     const { session, runtime, ended } = await loadTurns();
     const order: string[] = [];
-    runtime.completeTurn.mockImplementation(async (input) => {
-      order.push(`complete ${input.reason}`);
+    runtime.completeTurn.mockImplementation(async (input, signal) => {
+      order.push(`complete ${input.reason} ${signal.aborted}`);
       return input.answer;
     });
     runtime.end.mockImplementation(async () => {
@@ -1048,17 +1093,102 @@ describe('Mod session ownership', () => {
     });
     const turn = session.startTurn('Fix it', turnSignal, abortHost)!;
     turn.saw(content('Halfway'));
-    await session.close();
-    expect(order).toEqual(['complete aborted', 'end']);
+    const closed = session.close();
+    // The host's own end arrives while the close runs.
+    void turn.complete();
+    await closed;
+    expect(order).toEqual(['complete aborted false', 'end']);
     expect(ended()).toMatchObject({
       answer: 'Halfway',
       isAborted: true,
       turnId: turn.id,
     });
-    expect(runtime.completeTurn.mock.calls[0][1].aborted).toBe(false);
     // A host that ends it afterwards adds no second end.
     await turn.complete();
-    expect(order).toEqual(['complete aborted', 'end']);
+    expect(order).toEqual(['complete aborted false', 'end']);
+  });
+
+  it('lets an end that is running finish when the session closes', async () => {
+    const { session, runtime, adapter } = await loadTurns();
+    const order: string[] = [];
+    let release: () => void = () => {};
+    runtime.completeTurn.mockImplementation(async (input, signal) => {
+      order.push('complete');
+      await new Promise<void>((resolve) => (release = resolve));
+      order.push(`finished ${signal.aborted}`);
+      return 'Summary';
+    });
+    runtime.end.mockImplementation(async () => {
+      order.push('end');
+    });
+    const turn = session.startTurn('Fix it', turnSignal, abortHost)!;
+    turn.saw(content('Done.'));
+    turn.saw(finished());
+    void turn.complete();
+    await vi.waitFor(() => expect(order).toEqual(['complete']));
+    const closed = session.close();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    await closed;
+    expect(order).toEqual(['complete', 'finished false', 'end']);
+    expect(adapter.emitSystemMessage).toHaveBeenCalledWith('ui_log', {
+      plugin: 'hello-mod',
+      text: 'Summary',
+    });
+  });
+
+  it('runs every end the close finds queued, in order', async () => {
+    const { session, runtime } = await loadTurns();
+    const order: string[] = [];
+    // A turn.start that holds the queue until the close cancels it.
+    runtime.startTurn.mockImplementation(
+      (_input, signal) =>
+        new Promise<void>((_, reject) =>
+          signal.addEventListener('abort', () => reject(signal.reason)),
+        ),
+    );
+    runtime.completeTurn.mockImplementation(async (input) => {
+      order.push(`complete ${input.answer} ${input.reason}`);
+      return input.answer;
+    });
+    runtime.end.mockImplementation(async () => {
+      order.push('end');
+    });
+    const first = session.startTurn('First', turnSignal, abortHost)!;
+    first.saw(content('One'));
+    first.saw(finished());
+    void first.complete();
+    // In a terminal the next prompt starts before the last turn's end runs.
+    const second = session.startTurn('Second', turnSignal, abortHost)!;
+    second.saw(content('Two'));
+    await session.close();
+    expect(order).toEqual([
+      'complete One answer',
+      'complete Two aborted',
+      'end',
+    ]);
+  });
+
+  it('cuts the ends short at their budget, then runs session.end', async () => {
+    const { session, runtime } = await loadTurns();
+    let cancelled: boolean | undefined;
+    runtime.completeTurn.mockImplementation(
+      (_input, signal) =>
+        new Promise<string>((_, reject) =>
+          signal.addEventListener('abort', () => {
+            cancelled = true;
+            reject(signal.reason);
+          }),
+        ),
+    );
+    session.startTurn('Fix it', turnSignal, abortHost);
+    const started = Date.now();
+    await session.close();
+    expect(cancelled).toBe(true);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(
+      MOD_END_TIMEOUT_MS - 50,
+    );
+    expect(runtime.end).toHaveBeenCalledOnce();
   });
 
   it('runs no end again at close once it ran', async () => {

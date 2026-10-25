@@ -424,6 +424,7 @@ export function useOpenTuiLiveTurn(
                   abort.abort();
                   return true;
                 },
+                promptId,
               );
             },
             onStreamEvent: (event: ServerLlmStreamEvent) => modTurn?.saw(event),

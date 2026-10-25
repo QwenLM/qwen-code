@@ -43,3 +43,24 @@ export function outputIncludesThoughts(authType: string | undefined): boolean {
     authType === AuthType.QWEN_OAUTH
   );
 }
+
+/**
+ * The output tokens of one response, reasoning counted once. A total that
+ * lies in the band both conventions allow decides; otherwise the provider's
+ * convention does.
+ */
+export function outputTokenCount(
+  counts: { input: number; output: number; thoughts: number; total: number },
+  authType: string | undefined,
+): number {
+  const derived = counts.total - counts.input;
+  if (
+    counts.total > 0 &&
+    derived >= counts.output &&
+    derived <= counts.output + counts.thoughts
+  )
+    return derived;
+  return outputIncludesThoughts(authType)
+    ? counts.output
+    : counts.output + counts.thoughts;
+}

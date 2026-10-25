@@ -43,7 +43,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   getGenAiUsageProvenance,
-  outputIncludesThoughts,
+  outputTokenCount,
 } from '@qwen-code/qwen-code-core/telemetry/gen-ai-usage.js';
 import type { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
@@ -107,8 +107,10 @@ interface RunningTurn {
   failed: boolean;
   usage?: Omit<ModTurnUsage, 'model'>;
   model?: string;
+  // The host's prompt id for the turn's requests, when it has one.
+  promptId?: string;
   // Its turn.complete dispatch, once the turn has ended.
-  end?: (signal: AbortSignal) => Promise<void>;
+  ended?: Promise<void>;
 }
 
 export class ModSession implements ICommandLoader {
@@ -119,6 +121,9 @@ export class ModSession implements ICommandLoader {
   private runtime?: ModRuntime;
   private toolQueue: Promise<unknown> = Promise.resolve();
   private readonly lifetime = new AbortController();
+  // A close cancels other hooks at once; a turn.complete that is running or
+  // queued gets the end budget first.
+  private readonly endLifetime = new AbortController();
   private initialization?: Promise<void>;
   private closing?: Promise<void>;
   private logsReady = false;
@@ -139,8 +144,6 @@ export class ModSession implements ICommandLoader {
   private recorder?: ChatRecordingService;
   private context = { tokens: 0, window: 0 };
   private turn?: RunningTurn;
-  // An ended turn whose turn.complete has not run yet.
-  private unheard?: RunningTurn;
   // Also runs on every API response, so a session that no hook saw still has
   // its figures when it ends. A subagent's response emits from inside its
   // agent frame, whose model would otherwise answer for the main session.
@@ -158,7 +161,10 @@ export class ModSession implements ICommandLoader {
       const response = event as unknown as ApiResponseEvent;
       if (
         response.subagent_name === undefined &&
-        !isInternalPromptId(response.prompt_id)
+        !isInternalPromptId(response.prompt_id) &&
+        // A concurrent /btw answers under a prompt id of its own.
+        (this.turn.promptId === undefined ||
+          response.prompt_id === this.turn.promptId)
       )
         this.turn.model = response.model;
     });
@@ -549,12 +555,14 @@ export class ModSession implements ICommandLoader {
    * model request. `signal` is the turn's own: cancelling the turn ends its
    * `turn.start` hooks too. `abort` ends the turn as a cancel does, without
    * the notice a person's cancel leaves, and returns whether it did;
-   * `$.turn.abort` calls it.
+   * `$.turn.abort` calls it. `promptId`, the id the turn's requests carry,
+   * keeps another prompt's response from naming the turn's model.
    */
   startTurn(
     text: string,
     signal: AbortSignal,
     abort: () => boolean,
+    promptId?: string,
   ): ModTurn | undefined {
     const hooks = this.runtime?.turnHooks;
     if (!hooks || (!hooks.start && !hooks.complete.length) || this.closing)
@@ -568,6 +576,7 @@ export class ModSession implements ICommandLoader {
       streaming: '',
       answer: '',
       failed: false,
+      ...(promptId !== undefined && { promptId }),
     };
     this.turn = turn;
     // The model request does not wait for these hooks; the turn's tool calls
@@ -592,6 +601,8 @@ export class ModSession implements ICommandLoader {
   }
 
   private see(turn: RunningTurn, event: ServerLlmStreamEvent): void {
+    // Only a turn.complete reads what the turn streamed.
+    if (turn.ended || !this.runtime?.turnHooks.complete.length) return;
     switch (event.type) {
       case LlmEventType.Content:
         turn.streaming += event.value;
@@ -627,6 +638,7 @@ export class ModSession implements ICommandLoader {
     turn: RunningTurn,
     ending?: 'aborted' | 'error',
   ): Promise<void> {
+    if (turn.ended) return turn.ended;
     if (this.turn === turn) this.turn = undefined;
     const plugins = this.runtime?.turnHooks.complete ?? [];
     if (!plugins.length) return Promise.resolve();
@@ -655,8 +667,7 @@ export class ModSession implements ICommandLoader {
         : {}),
       ...(answer.truncated && { isAnswerTruncated: true as const }),
     };
-    turn.end = async (signal) => {
-      if (this.unheard === turn) this.unheard = undefined;
+    const run = async (signal: AbortSignal) => {
       const text = await this.runtime!.completeTurn(input, signal);
       // A different text is shown beneath the answer; the record keeps it.
       if (text === input.answer || !text.trim()) return;
@@ -673,25 +684,25 @@ export class ModSession implements ICommandLoader {
         );
       else this.pendingLogs.push(note);
     };
-    this.unheard = turn;
-    return this.queueTurnEvent(turn, turn.end);
+    return (turn.ended = this.queueTurnEvent(turn, run, true));
   }
 
   private queueTurnEvent(
     turn: RunningTurn,
     run: (signal: AbortSignal) => Promise<void>,
+    isEnd = false,
   ): Promise<void> {
     const task = this.toolQueue
       .then(async () => {
         if (
-          this.closing ||
+          (this.closing && !isEnd) ||
           turn.sessionId !== this.sessionId ||
           !this.allowed() ||
           !this.active()
         )
           return;
         try {
-          await run(this.lifetime.signal);
+          await run(isEnd ? this.endLifetime.signal : this.lifetime.signal);
         } finally {
           this.flushLogs();
         }
@@ -831,28 +842,23 @@ export class ModSession implements ICommandLoader {
     this.closing ??= (async () => {
       this.unregisterCleanup();
       uiTelemetryService.off('update', this.observe);
+      // A turn the close cuts short ends as aborted. Its end and every end
+      // already queued run in order before session.end, within one budget.
+      if (this.turn) void this.completeTurn(this.turn, 'aborted');
+      const endBudget = setTimeout(
+        () => this.endLifetime.abort(),
+        MOD_END_TIMEOUT_MS,
+      );
       this.lifetime.abort();
       this.invalidateTools();
       await this.initialization?.catch(() => {});
       try {
         await this.toolQueue;
-        // The queue is shut by now. A turn the close cut short, or one whose
-        // end had not run, still ends before session.end, bounded as it is.
-        if (this.turn) void this.completeTurn(this.turn, 'aborted');
-        const unheard = this.unheard;
-        if (
-          unheard?.end &&
-          unheard.sessionId === this.sessionId &&
-          this.allowed() &&
-          this.active()
-        ) {
-          await unheard
-            .end(AbortSignal.timeout(MOD_END_TIMEOUT_MS))
-            .catch((error) => logger.debug(`Mod turn event: ${String(error)}`));
-          this.flushLogs();
-        }
+        clearTimeout(endBudget);
         await this.end('other');
       } finally {
+        clearTimeout(endBudget);
+        this.endLifetime.abort();
         this.lifetime.abort();
         await this.runtime?.dispose();
         await this.flushStreams();
@@ -874,16 +880,20 @@ function addTurnUsage(
   const read = metadata.cachedContentTokenCount ?? 0;
   const written =
     getGenAiUsageProvenance(metadata)?.cacheCreationInputTokens ?? 0;
-  const thoughts = outputIncludesThoughts(authType)
-    ? 0
-    : (metadata.thoughtsTokenCount ?? 0);
+  // Counted as the session's billable output counts it.
+  const output = outputTokenCount(
+    {
+      input: prompt,
+      output: metadata.candidatesTokenCount ?? 0,
+      thoughts: metadata.thoughtsTokenCount ?? 0,
+      total: metadata.totalTokenCount ?? 0,
+    },
+    authType,
+  );
   return {
     input_tokens:
       (usage?.input_tokens ?? 0) + Math.max(0, prompt - read - written),
-    output_tokens:
-      (usage?.output_tokens ?? 0) +
-      (metadata.candidatesTokenCount ?? 0) +
-      thoughts,
+    output_tokens: (usage?.output_tokens ?? 0) + output,
     cache_read_input_tokens: (usage?.cache_read_input_tokens ?? 0) + read,
     cache_creation_input_tokens:
       (usage?.cache_creation_input_tokens ?? 0) + written,

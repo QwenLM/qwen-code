@@ -6583,7 +6583,12 @@ describe('runNonInteractive', () => {
         }),
       };
       const startTurn = vi.fn(
-        (_text: string, _signal: AbortSignal, abortTurn: () => boolean) => {
+        (
+          _text: string,
+          _signal: AbortSignal,
+          abortTurn: () => boolean,
+          _promptId?: string,
+        ) => {
           order.push('start');
           abort = abortTurn;
           return turn;
@@ -6635,6 +6640,7 @@ describe('runNonInteractive', () => {
         'Fix it',
         expect.any(AbortSignal),
         expect.any(Function),
+        mockLlmClient.sendMessageStream.mock.calls[0][2],
       );
       // The run's own signal, so an interrupt ends the turn.start hooks.
       expect(startTurn.mock.calls[0][1]).toBe(
@@ -6781,6 +6787,7 @@ describe('runNonInteractive', () => {
         '',
         expect.any(AbortSignal),
         expect.any(Function),
+        mockLlmClient.sendMessageStream.mock.calls[0][2],
       );
       expect(turn.complete.mock.calls[0]).toEqual([]);
       expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);

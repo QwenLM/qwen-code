@@ -19,7 +19,7 @@ import type {
 } from './types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
-import { outputIncludesThoughts } from './gen-ai-usage.js';
+import { outputIncludesThoughts, outputTokenCount } from './gen-ai-usage.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
@@ -265,21 +265,16 @@ const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
   );
 };
 
-const getEventBillableOutputTokens = (event: ApiResponseEvent): number => {
-  const candidates = event.output_token_count;
-  const thoughts = event.thoughts_token_count;
-  const derived = event.total_token_count - event.input_token_count;
-  if (
-    event.total_token_count > 0 &&
-    derived >= candidates &&
-    derived <= candidates + thoughts
-  ) {
-    return derived;
-  }
-  return outputIncludesThoughts(event.auth_type)
-    ? candidates
-    : candidates + thoughts;
-};
+const getEventBillableOutputTokens = (event: ApiResponseEvent): number =>
+  outputTokenCount(
+    {
+      input: event.input_token_count,
+      output: event.output_token_count,
+      thoughts: event.thoughts_token_count,
+      total: event.total_token_count,
+    },
+    event.auth_type,
+  );
 
 const getLegacySubagentId = (
   event: { prompt_id?: string; subagent_name?: string },

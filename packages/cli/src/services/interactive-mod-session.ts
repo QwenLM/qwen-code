@@ -166,10 +166,11 @@ export class InteractiveModSession implements ICommandLoader {
     text: string,
     signal: AbortSignal,
     abort: () => boolean,
+    promptId?: string,
   ): ModTurn | undefined {
     return this.closing
       ? undefined
-      : this.session.startTurn(text, signal, abort);
+      : this.session.startTurn(text, signal, abort, promptId);
   }
 
   close(): Promise<void> {

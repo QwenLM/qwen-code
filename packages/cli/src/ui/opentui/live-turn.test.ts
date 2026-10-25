@@ -2008,7 +2008,12 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
   const installMods = () => {
     const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
     const startTurn = vi.fn(
-      (_text: string, _signal: AbortSignal, _abort: () => boolean) => turn,
+      (
+        _text: string,
+        _signal: AbortSignal,
+        _abort: () => boolean,
+        _promptId?: string,
+      ) => turn,
     );
     vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
       startTurn,
@@ -2043,7 +2048,9 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
       'Fix it',
       expect.any(AbortSignal),
       expect.any(Function),
+      options(1).promptId,
     );
+    expect(options(1).promptId).toEqual(expect.any(String));
     // The turn's own signal, so Esc ends its turn.start hooks.
     expect(startTurn.mock.calls[0][1]).toBe(live.signals[0]);
     const event = { type: 'content', value: 'Done.' } as ServerLlmStreamEvent;
