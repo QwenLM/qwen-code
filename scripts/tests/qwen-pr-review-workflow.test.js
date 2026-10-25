@@ -7457,7 +7457,12 @@ describe('review model canary routing', () => {
   });
 
   it('buckets by PR number and stays inside the configured percent', () => {
-    const fn = run.match(/review_model_for_bucket\(\) \{[\s\S]*?\n\}/)?.[0];
+    // The router delegates its clamp to canary_percent_effective, so executing
+    // either needs both. js-yaml has stripped the block scalar's indentation,
+    // so both closing braces sit at column 0.
+    const fn = run.match(
+      /canary_percent_effective\(\) \{[\s\S]*?review_model_for_bucket\(\) \{[\s\S]*?\n\}/,
+    )?.[0];
     expect(fn).toBeTruthy();
     const pick = (defaultModel, canaryModel, percent, pr) =>
       execFileSync(
@@ -7508,5 +7513,81 @@ describe('review model canary routing', () => {
     // A PR number that cannot be read keeps the default rather than guessing.
     expect(pick('main', 'canary', '100', '')).toBe('main');
     expect(pick('main', 'canary', '100', 'x123')).toBe('main');
+  });
+
+  // The rows above supply their own positional arguments, so they cannot see
+  // the four the workflow actually passes: transposing the default and canary
+  // arguments inverts the rollout, and swapping PR_NUMBER for a per-run value
+  // loses the bucket entirely — both with every row above still green. Slice
+  // the real block (helper, router, trim, call site, notice, MODEL_ARGS) and
+  // execute it with the values the step's `env:` supplies.
+  it('routes and reports at the real call site, not a paraphrase of it', () => {
+    const start = run.indexOf('canary_percent_effective() {');
+    const notice = run.indexOf('echo "::notice title=Review model::');
+    const args = run.indexOf('MODEL_ARGS=()', notice);
+    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(notice).toBeGreaterThan(start);
+    expect(args).toBeGreaterThan(notice);
+    expect(end).toBeGreaterThan(args);
+    const block = run.slice(start, end);
+
+    // GITHUB_RUN_ID is pinned so the fourth argument cannot be swapped for a
+    // per-run value unnoticed: 9999999 % 100 = 99 is outside every percent a
+    // case below configures, so such a swap routes to the default model.
+    const serve = (canary, percent, pr) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nprintf '%s' "$OPENAI_MODEL|${'${MODEL_ARGS[*]-}'}"`,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: 'default-model',
+            REVIEW_MODEL_CANARY: canary,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            PR_NUMBER: pr,
+            GITHUB_RUN_ID: '9999999',
+          },
+        },
+      );
+
+    // 12309 % 100 = 9 is inside a 10% split; 12310 % 100 = 10 is not. The
+    // notice's model field is anchored — a bare 'canary' check is satisfied
+    // by the percent suffix even when the model field is wrong.
+    expect(serve('canary-model', '10', '12309')).toBe(
+      '::notice title=Review model::canary-model (PR #12309, canary 10%)\n' +
+        'canary-model|--model canary-model',
+    );
+    expect(serve('canary-model', '10', '12310')).toBe(
+      '::notice title=Review model::default-model (PR #12310, canary 10%)\n' +
+        'default-model|--model default-model',
+    );
+
+    // The notice reports the percent the router APPLIED, not the configured
+    // one. Both of these clamp to off, so the raw variable would announce a
+    // canary cohort that never ran — '10 ' is the silent spelling, since
+    // nothing about `canary 10 %` looks malformed.
+    for (const percent of ['250', '10 ']) {
+      expect(serve('canary-model', percent, '12309')).toBe(
+        `::notice title=Review model::default-model (PR #12309, canary 0%)\n` +
+          'default-model|--model default-model',
+      );
+    }
+
+    // A padded canary name must not reach --model verbatim: the provider
+    // rejects it and that failure is terminal for the whole cohort. Trimming
+    // still leaves whitespace-only meaning "no split", not an invented one.
+    expect(serve(' canary-model ', '100', '12345')).toBe(
+      '::notice title=Review model::canary-model (PR #12345, canary 100%)\n' +
+        'canary-model|--model canary-model',
+    );
+    expect(serve('   ', '100', '12345')).toBe(
+      '::notice title=Review model::default-model (PR #12345, canary 100%)\n' +
+        'default-model|--model default-model',
+    );
   });
 });
