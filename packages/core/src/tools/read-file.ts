@@ -142,8 +142,10 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   async execute(signal: AbortSignal): Promise<ToolResult> {
     signal.throwIfAborted();
     this.recordedStats = undefined;
+    const cacheGeneration = this.config.getFileReadCache().getClearGeneration();
     const fileSystem = this.config.getFileSystemService();
-    if (!fileSystem.withReadFile) return this.executeContent(signal);
+    if (!fileSystem.withReadFile)
+      return this.executeContent(signal, cacheGeneration);
     try {
       const result = await fileSystem.withReadFile(
         {
@@ -151,12 +153,16 @@ class ReadFileToolInvocation extends BaseToolInvocation<
           mediaDelivery: this.config.isOmniEnabled?.() ? 'omni' : 'inline',
           signal,
         },
-        (source) => this.executeContent(signal, source),
+        (source) => this.executeContent(signal, cacheGeneration, source),
       );
       signal.throwIfAborted();
       return result;
     } catch (error) {
-      if (!this.config.getFileReadCacheDisabled() && this.recordedStats) {
+      if (
+        !this.config.getFileReadCacheDisabled() &&
+        this.recordedStats &&
+        this.config.getFileReadCache().getClearGeneration() === cacheGeneration
+      ) {
         this.config.getFileReadCache().invalidate(this.recordedStats);
       }
       signal.throwIfAborted();
@@ -176,6 +182,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   private async executeContent(
     signal: AbortSignal,
+    cacheGeneration: number,
     source?: FileReadSource,
   ): Promise<ToolResult> {
     signal.throwIfAborted();
@@ -230,7 +237,12 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     }
     signal.throwIfAborted();
 
-    if (useFastPath && stats && isFullRead) {
+    if (
+      useFastPath &&
+      stats &&
+      isFullRead &&
+      cache.getClearGeneration() === cacheGeneration
+    ) {
       const status = cache.check(stats);
       if (
         status.state === 'fresh' &&
@@ -326,7 +338,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // a few microseconds wide. Closing it completely needs a content
     // hash on the read pipeline (deferred follow-up — see Risk
     // section in the PR description).
-    if (cacheEnabled && (result.stats ?? stats)) {
+    if (
+      cacheEnabled &&
+      (result.stats ?? stats) &&
+      cache.getClearGeneration() === cacheGeneration
+    ) {
       const cacheable = isCacheableReadResult(result);
       const recordStats: Stats = result.stats ?? stats!;
       cache.recordRead(absPath, recordStats, {
