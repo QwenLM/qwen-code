@@ -2792,7 +2792,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.archive': 'Archive',
   'sidebar.unarchive': 'Restore',
   'sidebar.moreActions': 'More actions',
-  'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archiveRunningDisabled':
     'A running session cannot be archived; archiving would stop its work',
   'sidebar.archivedTitle': 'Archived',
@@ -8044,7 +8043,6 @@ const ZH: Messages = {
   'sidebar.archive': '归档',
   'sidebar.unarchive': '恢复',
   'sidebar.moreActions': '更多操作',
-  'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archiveRunningDisabled':
     '不能归档运行中的会话，归档会终止其正在执行的工作',
   'sidebar.archivedTitle': '已归档',
