@@ -182,6 +182,21 @@ describe.skipIf(process.platform === 'win32')(
       },
     );
 
+    it('selects from commits and trees even when a blob is missing', async () => {
+      // The PR lane may leave a blobless checkout behind (Report test growth
+      // fetches the merge base with --filter=blob:none). Selection must never
+      // need file content: this deletes the changed file's blob object, so any
+      // command that reads it would fail instead of narrowing the scope.
+      put('changed.ts');
+      commit();
+      const blob = git('rev-parse', 'HEAD:changed.ts');
+      rmSync(join(repo, '.git', 'objects', blob.slice(0, 2), blob.slice(2)));
+      expect(() => git('show', 'HEAD:changed.ts')).toThrow();
+      const result = await scope();
+      expect(result.full).toBe(false);
+      expect(result.eslint).toEqual(['changed.ts']);
+    });
+
     it('does not extend the shell lane to paths that lane excludes', async () => {
       // The full lane greps terminal-bench out of its candidates, but the
       // escalation arm was evaluated over every changed path, so a PR whose
@@ -260,7 +275,7 @@ describe.skipIf(process.platform === 'win32')(
 describe.skipIf(process.platform === 'win32')(
   'incremental lint subprocesses',
   () => {
-    const run = (lanes, fail = '', script = lintScript) => {
+    const run = (lanes, fail = '', script = lintScript, extraEnv = {}) => {
       const bin = join(repo, 'node_modules', '.bin');
       const log = join(root, 'calls.jsonl');
       mkdirSync(bin, { recursive: true });
@@ -298,6 +313,7 @@ describe.skipIf(process.platform === 'win32')(
             LINT_BASE_SHA: baseSha,
             LINT_LOG: log,
             FAIL_LINTER: fail,
+            ...extraEnv,
           },
         },
       );
@@ -437,6 +453,38 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.stdout).toContain('Skipping eslint');
       expect(result.stdout).toContain('Skipping prettier');
       expect(result.stdout).toContain('Skipping shellcheck');
+    });
+
+    it('announces a history fallback on a workflow run but not a config one', () => {
+      put('changed.ts');
+      commit();
+      const summary = join(root, 'step-summary.md');
+      const never = 'deadbeef'.repeat(5);
+      const history = run(['eslint'], '', lintScript, {
+        LINT_BASE_SHA: never,
+        GITHUB_ACTIONS: 'true',
+        GITHUB_STEP_SUMMARY: summary,
+      });
+      expect(history.status, history.stderr).toBe(0);
+      expect(history.stdout).toContain(
+        '::warning::Incremental selection unavailable',
+      );
+      expect(readFileSync(summary, 'utf8')).toContain(
+        'Incremental lint unavailable: Incremental selection unavailable',
+      );
+
+      // A configuration/dependency fallback is routine: no annotation, no
+      // summary line, or the signal becomes noise nobody reads.
+      rmSync(summary, { force: true });
+      put('eslint.config.js', 'export default [];\n');
+      commit();
+      const config = run(['eslint'], '', lintScript, {
+        GITHUB_ACTIONS: 'true',
+        GITHUB_STEP_SUMMARY: summary,
+      });
+      expect(config.status, config.stderr).toBe(0);
+      expect(config.stdout).not.toContain('::warning::');
+      expect(existsSync(summary)).toBe(false);
     });
 
     it('keeps the spawned linter temp dir inside the fixture', () => {

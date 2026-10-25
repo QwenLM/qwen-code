@@ -55,7 +55,7 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void initializesExactly32TablesAndValidatesWithoutRewriting() throws Exception {
+    void initializesExactly35TablesAndValidatesWithoutRewriting() throws Exception {
         DataSource source = source();
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
@@ -64,7 +64,7 @@ class ManagedSchemaTest {
         try (var connection = source.getConnection()) {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
-            assertEquals(32, ManagedSchemaCatalog.tables(connection).size());
+            assertEquals(35, ManagedSchemaCatalog.tables(connection).size());
         }
     }
 
