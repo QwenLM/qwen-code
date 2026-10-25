@@ -212,3 +212,26 @@ jobs:
           # concurrent runs on one ECS host would share.
           OUT: '${{ runner.temp }}/opentui-noflicker-out'
         run: 'bash scripts/tui-parity/accept-noflicker.sh'
+      - name: 'Bundle the product for cold checkpoint recovery'
+        run: 'npm run bundle'
+      - name: 'Cold checkpoint recovery (Node+Ink, Bun+Ink, Bun+OpenTUI)'
+        env:
+          QWEN_SANDBOX: 'false'
+          QWEN_TUI_ACCEPTANCE_OUT: '${{ runner.temp }}/tui-checkpoint-${{ github.run_id }}-${{ github.run_attempt }}'
+        run: |-
+          set -euo pipefail
+          cd integration-tests
+          failed=0
+          for leg in node:ink bun:ink bun:opentui; do
+            export QWEN_E2E_RUNTIME="${leg%%:*}"
+            export QWEN_E2E_RENDERER="${leg#*:}"
+            npx vitest run interactive/tui-checkpoint-restore.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
+          done
+          exit "$failed"
+      - name: 'Upload cold checkpoint recovery evidence'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'tui-checkpoint-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/tui-checkpoint-${{ github.run_id }}-${{ github.run_attempt }}/'
+          if-no-files-found: 'warn'

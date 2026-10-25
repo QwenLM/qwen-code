@@ -9282,6 +9282,94 @@ describe('AppContainer State Management', () => {
     });
   });
 
+  describe('rewind command origin admission', () => {
+    it('opens the admitted builtin slash rewind during its own artificial responding state', () => {
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.Responding,
+      });
+      renderRewindHarness();
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+        -1,
+      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      act(() => actions.openRewindSelector('slash-command'));
+      expect(capturedUIState.isRewindSelectorOpen).toBe(true);
+    });
+
+    it.each([StreamingState.Responding, StreamingState.WaitingForConfirmation])(
+      'keeps keyboard double-Escape and default UI rewind closed while the owner is %s',
+      (streamingState) => {
+        mockedUseLlmStream.mockReturnValue({
+          ...mockedUseLlmStream(),
+          streamingState,
+        });
+        renderRewindHarness();
+        act(() => capturedUIActions.openRewindSelector());
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+        const keypress = getGlobalKeypress();
+        expect(keypress).toBeDefined();
+        const escape: Key = {
+          name: 'escape',
+          sequence: '\x1b',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+        };
+        act(() => {
+          keypress!(escape);
+          keypress!(escape);
+        });
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+      },
+    );
+
+    it('does not bypass tool confirmation with slash rewind origin', () => {
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.WaitingForConfirmation,
+      });
+      renderRewindHarness();
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+        -1,
+      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      act(() => actions.openRewindSelector('slash-command'));
+      expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+    });
+
+    it.each(['ide', 'dialog', 'no-user'] as const)(
+      'preserves the %s guard for admitted slash rewind',
+      (blockedBy) => {
+        mockedUseLlmStream.mockReturnValue({
+          ...mockedUseLlmStream(),
+          streamingState: StreamingState.Responding,
+        });
+        if (blockedBy === 'ide')
+          vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(true);
+        if (blockedBy === 'dialog')
+          mockedUseThemeCommand.mockReturnValue({
+            ...mockedUseThemeCommand(),
+            isThemeDialogOpen: true,
+          });
+        const harness = renderRewindHarness(
+          blockedBy === 'no-user' ? { history: [] } : {},
+        );
+        const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+          -1,
+        )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+        act(() => actions.openRewindSelector('slash-command'));
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+        if (blockedBy === 'ide')
+          expect(harness.addItem).toHaveBeenCalledWith(
+            expect.objectContaining({
+              text: 'Rewind is disabled in IDE mode.',
+            }),
+            expect.any(Number),
+          );
+      },
+    );
+  });
+
   describe('IDE mode rewind guard', () => {
     it('shows info message instead of opening rewind selector when IDE mode is enabled', () => {
       const mockAddItem = vi.fn();
