@@ -23,6 +23,7 @@ import {
   ModelRegistry,
   isBaseUrlAllowed,
   resolveModelSelectionAuthType,
+  type AllowlistDroppedModel,
 } from './modelRegistry.js';
 import {
   type ModelProvidersConfig,
@@ -1604,7 +1605,7 @@ export class ModelsConfig {
    * the resolved baseUrl it was judged against); empty when no policy is in
    * force or nothing was dropped.
    */
-  getAllowlistDroppedModels(): Array<{ id: string; baseUrl: string }> {
+  getAllowlistDroppedModels(): AllowlistDroppedModel[] {
     return this.modelRegistry.getAllowlistDroppedModels();
   }
 }

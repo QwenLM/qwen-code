@@ -503,6 +503,7 @@ import {
   type AvailableModel,
   type ResolvedModelConfig,
   type RuntimeModelSnapshot,
+  type AllowlistDroppedModel,
 } from '../models/index.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { WebSearchSettings } from '../tools/web-search.js';
@@ -7603,7 +7604,7 @@ export class Config {
    * the resolved baseUrl each was judged against. Read-only diagnostics view;
    * empty when no policy dropped anything.
    */
-  getAllowlistDroppedModels(): Array<{ id: string; baseUrl: string }> {
+  getAllowlistDroppedModels(): AllowlistDroppedModel[] {
     return this.modelsConfig.getAllowlistDroppedModels();
   }
 

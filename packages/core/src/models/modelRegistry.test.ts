@@ -11,8 +11,11 @@ import {
   isBaseUrlAllowed,
   modelRegistryKey,
   resolveProviderProtocol,
+  scrubBaseUrlForMessage,
 } from './modelRegistry.js';
 import { AuthType } from '../core/contentGenerator.js';
+import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
+import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
 import type {
   ModelConfig,
   ModelProvidersConfig,
@@ -1269,7 +1272,11 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(narrowed.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
     expectHardCodedQwenCount(narrowed);
     expect(narrowed.getAllowlistDroppedModels()).toEqual([
-      { id: 'ext', baseUrl: 'https://external-llm.example/v1' },
+      {
+        id: 'ext',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://external-llm.example/v1',
+      },
     ]);
   });
 
@@ -1356,7 +1363,11 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
       [CORP],
     );
     expect(registry.getAllowlistDroppedModels()).toEqual([
-      { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
+      {
+        id: 'coder-model',
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+      },
     ]);
     registry.reloadModels(
       {
@@ -1371,8 +1382,16 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
       { custom: 'openai' },
     );
     expect(registry.getAllowlistDroppedModels()).toEqual([
-      { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
-      { id: 'off', baseUrl: 'https://external-llm.example/v1' },
+      {
+        id: 'coder-model',
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+      },
+      {
+        id: 'off',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://external-llm.example/v1',
+      },
     ]);
   });
 
@@ -1557,8 +1576,16 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     // The off-list provider entry plus the built-in qwen-oauth model, whose
     // dynamic endpoint can never match an allowlist entry.
     expect(registry.getAllowlistDroppedModels()).toEqual([
-      { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
-      { id: 'ext', baseUrl: 'https://external-llm.example/v1' },
+      {
+        id: 'coder-model',
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+      },
+      {
+        id: 'ext',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://external-llm.example/v1',
+      },
     ]);
   });
 
@@ -1573,5 +1600,138 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     );
     const model = registry.getModel(AuthType.USE_OPENAI, 'llm');
     expect(model?.baseUrl).toBe(OPENAI_URL);
+  });
+  it('stamps no baseUrl on baseUrl-less anthropic/gemini/responses models (R1-3)', () => {
+    // The allowlist judges the protocol-table endpoint, but the registered
+    // model keeps the pre-allowlist stamp: the table's Anthropic value
+    // (`https://api.anthropic.com/v1`) would make the SDK dial
+    // `/v1/v1/messages`, and any stamp shadows MissingBaseUrlError and the
+    // SDK/env fallbacks (issue #12805).
+    const registry = new ModelRegistry(
+      {
+        anthropic: [{ id: 'claude' }],
+        gemini: [{ id: 'gem' }],
+        openai: [{ id: 'resp-model', wireApi: 'responses' }],
+      } as ModelProvidersConfig,
+      undefined,
+      [
+        getDefaultBaseUrlForProtocol(AuthType.USE_ANTHROPIC),
+        getDefaultBaseUrlForProtocol(AuthType.USE_GEMINI),
+        getDefaultBaseUrlForProtocol(AuthType.USE_OPENAI_RESPONSES),
+      ],
+    );
+    // Registered: the allowlist judged (and admitted) the table endpoints.
+    expect(registry.getModel(AuthType.USE_ANTHROPIC, 'claude')?.baseUrl).toBe(
+      '',
+    );
+    expect(registry.getModel(AuthType.USE_GEMINI, 'gem')?.baseUrl).toBe('');
+    expect(
+      registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'resp-model')?.baseUrl,
+    ).toBe('');
+    // Same stamp without any policy.
+    const unmanaged = new ModelRegistry({ anthropic: [{ id: 'claude' }] });
+    expect(unmanaged.getModel(AuthType.USE_ANTHROPIC, 'claude')?.baseUrl).toBe(
+      '',
+    );
+  });
+
+  it('pins the OpenAI protocol-table default to the SDK default (R5-25)', () => {
+    // The registry stamps DEFAULT_OPENAI_BASE_URL while both gates judge the
+    // protocol table; the two literals must stay byte-equal.
+    expect(getDefaultBaseUrlForProtocol(AuthType.USE_OPENAI)).toBe(
+      DEFAULT_OPENAI_BASE_URL,
+    );
+  });
+
+  it('scrubs userinfo credentials from the drop record and warning (R5-27)', () => {
+    const registry = new ModelRegistry(
+      {
+        custom: [
+          {
+            id: 'gw',
+            baseUrl: 'https://team:sk-live-abc123@gw-legacy.corp.example/v1',
+          },
+        ],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [CORP],
+    );
+    const dropped = registry
+      .getAllowlistDroppedModels()
+      .find((entry) => entry.id === 'gw');
+    expect(dropped?.baseUrl).toContain('gw-legacy.corp.example/v1');
+    expect(dropped?.baseUrl).not.toContain('sk-live-abc123');
+    const warned = debugLoggerWarnSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((message) => message.includes('"gw"'));
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain('gw-legacy.corp.example/v1');
+    expect(warned[0]).not.toContain('sk-live-abc123');
+    // The Qwen OAuth sentinel is recorded verbatim — the built-in remedy
+    // branch compares against it.
+    expect(
+      registry
+        .getAllowlistDroppedModels()
+        .find((entry) => entry.id === 'coder-model')?.baseUrl,
+    ).toBe('DYNAMIC_QWEN_OAUTH_BASE_URL');
+  });
+
+  it('reloadModels preserves the workspace-only built-ins exemption (R5-24)', () => {
+    const registry = new ModelRegistry(
+      externalCustom(),
+      { custom: 'openai' },
+      [CORP],
+      false,
+      true,
+    );
+    expectHardCodedQwenCount(registry);
+    registry.reloadModels(externalCustom(), { custom: 'openai' });
+    // The exemption survives the reload, and the external endpoint is still
+    // judged against the boot list.
+    expectHardCodedQwenCount(registry);
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('fails startup on a malformed off-list entry instead of dropping it (R5-26)', () => {
+    // Validation runs before the policy decision: an id-less entry the
+    // allowlist would also drop must still refuse startup with its own error.
+    expect(
+      () =>
+        new ModelRegistry(
+          {
+            openai: [{ id: '', baseUrl: 'https://external-llm.example/v1' }],
+          },
+          undefined,
+          [CORP],
+        ),
+    ).toThrow('missing required field: id');
+  });
+});
+
+describe('scrubBaseUrlForMessage (R2-18)', () => {
+  it.each([
+    ['user:pass@corp.example/v1', '***@corp.example/v1'],
+    ['//user:pass@corp.example', '//***@corp.example'],
+    ['sk-abc123:tok@gw.corp.example/v1', '***@gw.corp.example/v1'],
+    ['https://user:sk@', 'https://***@'],
+    ['ftp://user:pass@host/v1', 'ftp://***@host/v1'],
+  ])('masks the userinfo of a non-http(s) shape %j', (input, expected) => {
+    expect(scrubBaseUrlForMessage(input)).toBe(expected);
+  });
+
+  it('echoes clean http(s) URLs verbatim and strips userinfo from parseable ones', () => {
+    expect(scrubBaseUrlForMessage('https://corp.example/v1?x=a@b')).toBe(
+      'https://corp.example/v1?x=a@b',
+    );
+    expect(scrubBaseUrlForMessage('https://user:pass@corp.example/v1')).toBe(
+      'https://corp.example/v1',
+    );
+  });
+
+  it('keeps values that carry no userinfo, including the Qwen OAuth sentinel', () => {
+    expect(scrubBaseUrlForMessage('DYNAMIC_QWEN_OAUTH_BASE_URL')).toBe(
+      'DYNAMIC_QWEN_OAUTH_BASE_URL',
+    );
+    expect(scrubBaseUrlForMessage('corp.example/v1')).toBe('corp.example/v1');
   });
 });

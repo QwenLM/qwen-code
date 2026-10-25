@@ -7,7 +7,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ModelsConfig } from './modelsConfig.js';
 import type { ModelsConfigOptions } from './modelsConfig.js';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType, validateModelConfig } from '../core/contentGenerator.js';
+import { MissingBaseUrlError } from './modelConfigErrors.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ModelConfig, ModelProvidersConfig } from './types.js';
 import type { ConfigSource, ConfigSources } from '../utils/configResolver.js';
@@ -2285,6 +2286,58 @@ describe('ModelsConfig', () => {
       );
     });
 
+    it('keeps MissingBaseUrlError for a baseUrl-less anthropic model (R1-3)', () => {
+      // The registry must not stamp the protocol-table placeholder on an
+      // anthropic model without baseUrl: the selection keeps an empty
+      // baseUrl and validation still names the missing setting.
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_ANTHROPIC,
+        modelProvidersConfig: {
+          anthropic: [entry('claude', 'Claude', undefined, 'ANTHROPIC_KEY')],
+        },
+      });
+      modelsConfig.syncAfterAuthRefresh(AuthType.USE_ANTHROPIC, 'claude');
+      const gc = currentGenerationConfig(modelsConfig);
+      expect(gc.baseUrl || undefined).toBeUndefined();
+      expect(
+        validateModelConfig(
+          { ...gc, authType: modelsConfig.getCurrentAuthType() },
+          true,
+        ).errors.some((error) => error instanceof MissingBaseUrlError),
+      ).toBe(true);
+    });
+
+    it('drops an off-list cli baseUrl on the registry-found refresh branch (R5-28)', () => {
+      const build = (allowedModelBaseUrls?: readonly string[]) =>
+        new ModelsConfig({
+          initialAuthType: AuthType.USE_OPENAI,
+          modelProvidersConfig: {
+            openai: [
+              entry('on-list', 'On List', `${CORP}/v1`, 'OPENAI_API_KEY'),
+            ],
+          },
+          allowedModelBaseUrls,
+          generationConfig: {
+            model: 'on-list',
+            apiKey: 'sk-test-key',
+            baseUrl: OFF_LIST,
+          },
+          generationConfigSources: {
+            model: { kind: 'cli', detail: '--model' },
+            apiKey: { kind: 'cli', detail: '--openaiApiKey' },
+            baseUrl: { kind: 'cli', detail: '--openaiBaseUrl' },
+          },
+        });
+
+      // Under a policy the saved off-list endpoint is not restored over the
+      // registry (on-list) endpoint.
+      expect(refreshOpenAI(build([CORP]), 'on-list').baseUrl).toBe(
+        `${CORP}/v1`,
+      );
+      // No policy: the cli endpoint survives the refresh as before.
+      expect(refreshOpenAI(build(), 'on-list').baseUrl).toBe(OFF_LIST);
+    });
+
     it('delegates getAllowlistDroppedModels to the registry', () => {
       const modelsConfig = new ModelsConfig({
         modelProvidersConfig: {
@@ -2299,8 +2352,16 @@ describe('ModelsConfig', () => {
       // The off-list provider entry plus the built-in qwen-oauth model, whose
       // dynamic endpoint can never match an allowlist entry.
       expect(modelsConfig.getAllowlistDroppedModels()).toEqual([
-        { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
-        { id: 'ext', baseUrl: 'https://external-llm.example/v1' },
+        {
+          id: 'coder-model',
+          authType: AuthType.QWEN_OAUTH,
+          baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+        },
+        {
+          id: 'ext',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://external-llm.example/v1',
+        },
       ]);
     });
 

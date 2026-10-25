@@ -951,5 +951,130 @@ describe('modelConfigResolver', () => {
       expect(masked).toContain('***@');
       expect(masked).not.toContain('user:sk');
     });
+
+    it.each([
+      'user:pass@external-llm.example/v1',
+      '//user:pass@external-llm.example/v1',
+    ])(
+      'scrubs a scheme-less or protocol-relative credential shape %j (R2-18)',
+      (baseUrl) => {
+        // Shape-independent: a value that is not a clean http(s) URL gets its
+        // userinfo-shaped prefix masked instead of being echoed verbatim.
+        expectFatal(
+          () =>
+            resolve({
+              env: { MY_CUSTOM_KEY: 'provider-key' },
+              modelProvider: {
+                id: 'provider-model',
+                name: 'Provider Model',
+                envKey: 'MY_CUSTOM_KEY',
+                baseUrl,
+                generationConfig: {},
+              },
+              allowedBaseUrls: [CORP],
+            }),
+          'external-llm.example/v1',
+        );
+        let error: unknown;
+        try {
+          resolve({
+            env: { MY_CUSTOM_KEY: 'provider-key' },
+            modelProvider: {
+              id: 'provider-model',
+              name: 'Provider Model',
+              envKey: 'MY_CUSTOM_KEY',
+              baseUrl,
+              generationConfig: {},
+            },
+            allowedBaseUrls: [CORP],
+          });
+        } catch (e) {
+          error = e;
+        }
+        expect(String((error as Error).message)).not.toContain('user:pass');
+      },
+    );
+
+    it('still gates configured endpoints when the list is workspace-scoped only (R5-21)', () => {
+      // The workspace-only flag exempts only the Qwen OAuth dynamic endpoint;
+      // an off-list provider endpoint is refused by the same list.
+      expectFatal(
+        () =>
+          resolve({
+            env: { MY_CUSTOM_KEY: 'provider-key' },
+            modelProvider: {
+              id: 'provider-model',
+              name: 'Provider Model',
+              envKey: 'MY_CUSTOM_KEY',
+              baseUrl: 'https://external-llm.example/v1',
+              generationConfig: {},
+            },
+            allowedBaseUrls: [CORP],
+            allowedBaseUrlsWorkspaceOnly: true,
+          }),
+        'model.allowedBaseUrls',
+        'https://external-llm.example/v1',
+      );
+      // The operator disable wins over the workspace-only exemption.
+      expectFatal(
+        () =>
+          oauth({
+            allowedBaseUrls: [CORP],
+            allowedBaseUrlsWorkspaceOnly: true,
+            qwenOAuthBuiltinsDisabled: true,
+          }),
+        'model.qwenOAuthBuiltinsDisabled',
+      );
+    });
+
+    it('names the workspace file and the baseUrl source in the remedy (R5-22)', () => {
+      const offListEnv = {
+        OPENAI_API_KEY: 'key',
+        OPENAI_MODEL: 'some-model',
+        OPENAI_BASE_URL: 'https://external-llm.example/v1',
+      };
+      expectFatal(
+        () =>
+          resolve({
+            env: offListEnv,
+            allowedBaseUrls: [CORP],
+            allowedBaseUrlsWorkspaceOnly: true,
+          }),
+        'model.allowedBaseUrls',
+        'https://external-llm.example/v1',
+        "this workspace's settings (.qwen/settings.json)",
+        'OPENAI_BASE_URL',
+      );
+      let operator: unknown;
+      try {
+        resolve({ env: offListEnv, allowedBaseUrls: [CORP] });
+      } catch (e) {
+        operator = e;
+      }
+      const message = String((operator as Error).message);
+      expect(message).toContain('system or user settings');
+      expect(message).not.toContain('.qwen/settings.json');
+    });
+
+    it('fails closed for an auth type with no protocol default and no baseUrl (R5-23)', () => {
+      expectFatal(
+        () =>
+          resolve({
+            authType: AuthType.USE_VERTEX_AI,
+            env: { GOOGLE_API_KEY: 'key' },
+            allowedBaseUrls: [CORP],
+          }),
+        'has no protocol default endpoint',
+        'model.allowedBaseUrls',
+      );
+      // An explicit on-list baseUrl gives the gate something to judge.
+      const result = resolve({
+        authType: AuthType.USE_VERTEX_AI,
+        env: { GOOGLE_API_KEY: 'key' },
+        cli: { baseUrl: `${CORP}/v1` },
+        allowedBaseUrls: [CORP],
+      });
+      expect(result.config.baseUrl).toBe(`${CORP}/v1`);
+    });
   });
 });

@@ -2284,7 +2284,11 @@ describe('loadCliConfig', () => {
       // which also proves the registry saw the same list.
       expect(config.getAllowedModelBaseUrls()).toEqual(list);
       expect(config.getModelsConfig().getAllowlistDroppedModels()).toEqual([
-        { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
+        {
+          id: 'coder-model',
+          authType: AuthType.QWEN_OAUTH,
+          baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+        },
       ]);
     });
 

@@ -22,7 +22,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { FatalConfigError } from '../utils/errors.js';
 import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
-import { isBaseUrlAllowed } from './modelRegistry.js';
+import { isBaseUrlAllowed, scrubBaseUrlForMessage } from './modelRegistry.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { knownTokenLimit } from '../core/tokenLimits.js';
@@ -338,13 +338,19 @@ export function resolveModelConfig(
   // the SDK would dial. QWEN_OAUTH returns above; its dynamic endpoint is
   // handled in resolveQwenOAuthConfig.
   if (input.allowedBaseUrls !== undefined) {
+    // Who owns the list decides the remedy: a workspace-only list lives in
+    // the workspace settings file, not with the operator.
+    const allowlistOwner = input.allowedBaseUrlsWorkspaceOnly
+      ? `Add it to model.allowedBaseUrls in this workspace's settings (.qwen/settings.json)`
+      : `Ask the operator to add it to the allowlist in system or user settings`;
     if (config.baseUrl) {
       if (!isBaseUrlAllowed(config.baseUrl, input.allowedBaseUrls)) {
         throw new FatalConfigError(
           `Model endpoint '${scrubBaseUrlForMessage(config.baseUrl)}'` +
             (authType ? ` (auth type '${authType}')` : '') +
+            describeBaseUrlSource(sources['baseUrl']) +
             ` is not in the managed allowlist 'model.allowedBaseUrls'. ` +
-            `Ask the operator to add it to the allowlist in system or user settings, or choose a model on an allowed endpoint.`,
+            `${allowlistOwner}, or choose a model on an allowed endpoint.`,
         );
       }
     } else if (authType) {
@@ -353,7 +359,7 @@ export function resolveModelConfig(
         if (!isBaseUrlAllowed(protocolDefault, input.allowedBaseUrls)) {
           throw new FatalConfigError(
             `Model endpoint '${protocolDefault}' (the protocol default for auth type '${authType}') is not in the managed allowlist 'model.allowedBaseUrls'. ` +
-              `Ask the operator to add it to the allowlist in system or user settings, set an explicit baseUrl on the model, or choose a model on an allowed endpoint.`,
+              `${allowlistOwner}, set an explicit baseUrl on the model, or choose a model on an allowed endpoint.`,
           );
         }
       } else {
@@ -371,25 +377,28 @@ export function resolveModelConfig(
 }
 
 /**
- * Render a baseUrl for a user-visible error message without leaking
- * userinfo credentials to stderr (issue #12805): a parseable URL with
- * user:pass@ is shown with the credential stripped; a value that does not
- * parse as a URL is shown with any userinfo-shaped prefix masked, so a
- * malformed endpoint cannot echo a live secret.
+ * Name the source that supplied an off-list baseUrl (issue #12805), so a
+ * user's own env/CLI typo is distinguishable from a provider entry hitting
+ * the policy. Empty when the source carries nothing nameable.
  */
-function scrubBaseUrlForMessage(url: string): string {
-  try {
-    const parsed = new URL(url);
-    if (parsed.username.length === 0 && parsed.password.length === 0) {
-      return url;
-    }
-    parsed.username = '';
-    parsed.password = '';
-    return parsed.toString();
-  } catch {
-    return url
-      .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/@\s]*@/, '***@')
-      .replace(/^[\w.-]+:[\w.-]+@/, '***@');
+function describeBaseUrlSource(source: ConfigSource | undefined): string {
+  switch (source?.kind) {
+    case 'env':
+      return source.envKey
+        ? ` (from environment variable ${source.envKey})`
+        : '';
+    case 'cli':
+      return source.detail ? ` (from ${source.detail})` : '';
+    case 'settings':
+      return source.settingsPath
+        ? ` (from settings ${source.settingsPath})`
+        : '';
+    case 'modelProviders':
+      return source.modelId
+        ? ` (from modelProviders entry '${source.modelId}')`
+        : '';
+    default:
+      return '';
   }
 }
 

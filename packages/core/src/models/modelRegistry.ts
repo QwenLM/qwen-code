@@ -7,6 +7,7 @@
 import { AuthType } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
+import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
 import {
   type ModelConfig,
@@ -18,6 +19,7 @@ import {
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { DYNAMIC_QWEN_OAUTH_BASE_URL, QWEN_OAUTH_MODELS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { FatalConfigError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('MODEL_REGISTRY');
 
@@ -178,6 +180,25 @@ function baseUrlMatchesEntry(target: string, entry: string): boolean {
 }
 
 /**
+ * Startup shape check for the `model.allowedBaseUrls` setting value, shared
+ * by every entry point that reads it from settings (interactive startup,
+ * `qwen batch`), so a mistyped key fails with the same actionable error
+ * everywhere instead of a policy rejection naming an endpoint (issue
+ * #12805). `undefined` means no policy and is returned as is — never
+ * coerced to `[]`.
+ */
+export function assertAllowedBaseUrlsSetting(
+  value: unknown,
+): readonly string[] | undefined {
+  if (value !== undefined && !Array.isArray(value)) {
+    throw new FatalConfigError(
+      `model.allowedBaseUrls must be an array of base URL strings; got ${typeof value}. Remove or correct the value to start.`,
+    );
+  }
+  return value as readonly string[] | undefined;
+}
+
+/**
  * Validate a managed endpoint allowlist (`model.allowedBaseUrls`).
  * `undefined` means no policy and is kept as-is. A non-array value is a
  * runtime data error (a hand-edited settings file): warn and fail closed
@@ -235,6 +256,39 @@ export function validateAllowedBaseUrls(
 }
 
 /**
+ * Render an endpoint for a user-visible message or a diagnostics record
+ * without leaking credentials (issue #12805). Fail closed: the value is
+ * returned verbatim only when it parses as an http(s) URL with no userinfo,
+ * and a credential-bearing http(s) URL is shown with its userinfo stripped.
+ * Every other shape (scheme-less, protocol-relative, opaque-scheme, or
+ * unparseable) has its authority masked up to the last `@` before the path,
+ * so a value that cannot be positively identified as credential-free never
+ * echoes one. A value with no `@` in its authority (including the Qwen OAuth
+ * sentinel) carries no userinfo and is returned as is.
+ */
+export function scrubBaseUrlForMessage(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      if (parsed.username.length === 0 && parsed.password.length === 0) {
+        return url;
+      }
+      parsed.username = '';
+      parsed.password = '';
+      return parsed.toString();
+    }
+  } catch {
+    // Not a URL: fall through to the shape-independent mask below.
+  }
+  const lead = /^(?:[a-zA-Z][a-zA-Z0-9+.-]*:)?\/\//.exec(url)?.[0] ?? '';
+  const rest = url.slice(lead.length);
+  const authorityEnd = rest.search(/[/?#]/);
+  const authority = authorityEnd < 0 ? rest : rest.slice(0, authorityEnd);
+  const at = authority.lastIndexOf('@');
+  return at < 0 ? url : `${lead}***@${rest.slice(at + 1)}`;
+}
+
+/**
  * Decide whether a resolved model baseUrl passes a managed allowlist.
  *
  * A baseUrl passes when it matches an entry: same origin (explicit default
@@ -259,6 +313,18 @@ export function isBaseUrlAllowed(
     if (typeof entry !== 'string') return false;
     return baseUrlMatchesEntry(target, entry.trim());
   });
+}
+
+/**
+ * A model the managed allowlist dropped at registration: its id, the auth
+ * type it was registered under, and the endpoint it was judged against —
+ * credential-scrubbed (see {@link scrubBaseUrlForMessage}), since the record
+ * is exposed to user-visible channels.
+ */
+export interface AllowlistDroppedModel {
+  id: string;
+  authType: AuthType;
+  baseUrl: string;
 }
 
 /** Resolve the startup wire, including checks before persisting a selection. */
@@ -352,7 +418,7 @@ export class ModelRegistry {
    * user-visible explanation — the picker and the /model list cannot name
    * models they never contain.
    */
-  private allowlistDroppedModels: Array<{ id: string; baseUrl: string }> = [];
+  private allowlistDroppedModels: AllowlistDroppedModel[] = [];
 
   /**
    * Boot-frozen operator decision (model.qwenOAuthBuiltinsDisabled),
@@ -387,16 +453,40 @@ export class ModelRegistry {
   }
 
   /**
-   * The baseUrl a model of this authType resolves to: its explicit baseUrl
-   * or the protocol default. The single expression both the allowlist filter
-   * and the registered model use, so the URL the allowlist judges and the URL
-   * the model carries are the same value.
+   * The endpoint a model of this authType dials, as the allowlist judges it:
+   * its explicit baseUrl or the protocol default (the same value the
+   * resolution gate judges, so the two enforcement points agree).
    */
   private resolveRegistryBaseUrl(
     config: ModelConfig,
     authType: AuthType,
   ): string {
     return config.baseUrl || this.getDefaultBaseUrl(authType);
+  }
+
+  /**
+   * The baseUrl stamped on a registered model that declares none. Only
+   * OpenAI's protocol default is SDK-dialable as a stamp (pinned equal to the
+   * protocol table by test); the table's Anthropic/Gemini/Responses values
+   * are UI placeholders the SDKs would mis-dial (Anthropic appends `/v1`
+   * itself, so a stamped `.../v1` 404s at `/v1/v1/messages`) and would
+   * shadow MissingBaseUrlError and env fallbacks, so those stay empty as
+   * before the allowlist (issue #12805). The allowlist still judges the
+   * table value (resolveRegistryBaseUrl).
+   */
+  private stampRegistryBaseUrl(
+    config: ModelConfig,
+    authType: AuthType,
+  ): string {
+    if (config.baseUrl) return config.baseUrl;
+    switch (authType) {
+      case AuthType.QWEN_OAUTH:
+        return DYNAMIC_QWEN_OAUTH_BASE_URL;
+      case AuthType.USE_OPENAI:
+        return DEFAULT_OPENAI_BASE_URL;
+      default:
+        return '';
+    }
   }
 
   constructor(
@@ -551,7 +641,7 @@ export class ModelRegistry {
       // baseUrl (explicit, or the protocol default) is on the list. An
       // `undefined` allowlist keeps today's behavior; an empty list blocks
       // everything, including protocol-default endpoints. The URL judged
-      // here is the same one the registered model carries
+      // here is the one the resolution gate judges for the same model
       // (resolveRegistryBaseUrl). Built-in qwen-oauth models are exempt when
       // the list came from workspace scope only: their endpoint is discovered
       // at login and cannot be listed, so a workspace must not disable
@@ -571,13 +661,17 @@ export class ModelRegistry {
         // Record the drop so user-visible channels (advisor errors, skipped
         // provider warnings) can name the cause — the picker only ever sees
         // models that registered.
+        // Scrubbed: the record is user-visible and the warn reaches the
+        // debug log file, so a userinfo credential must not be kept.
+        const judgedBaseUrl = scrubBaseUrlForMessage(resolvedBaseUrl);
         this.allowlistDroppedModels.push({
           id: config.id,
-          baseUrl: resolvedBaseUrl,
+          authType: modelAuthType,
+          baseUrl: judgedBaseUrl,
         });
         debugLogger.warn(
           `Model "${config.id}" for protocol "${modelAuthType}" (resolved ` +
-            `baseUrl "${resolvedBaseUrl}") is not in the ` +
+            `baseUrl "${judgedBaseUrl}") is not in the ` +
             `model.allowedBaseUrls allowlist; not registered.`,
         );
         continue;
@@ -723,9 +817,9 @@ export class ModelRegistry {
       ...config,
       authType,
       name: config.name || config.id,
-      // Same expression the allowlist filter judges (resolveRegistryBaseUrl),
-      // so the URL the policy checked and the URL the model carries are equal.
-      baseUrl: this.resolveRegistryBaseUrl(config, authType),
+      // An explicit baseUrl is the URL the allowlist judged; a missing one
+      // keeps the pre-allowlist stamp (see stampRegistryBaseUrl).
+      baseUrl: this.stampRegistryBaseUrl(config, authType),
       ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
       capabilities: config.capabilities || {},
@@ -805,7 +899,7 @@ export class ModelRegistry {
    * the resolved baseUrl it was judged against); empty when no policy is in
    * force or nothing was dropped.
    */
-  getAllowlistDroppedModels(): Array<{ id: string; baseUrl: string }> {
+  getAllowlistDroppedModels(): AllowlistDroppedModel[] {
     return this.allowlistDroppedModels;
   }
 }
