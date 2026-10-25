@@ -1412,6 +1412,47 @@ describe('background fixes', () => {
     expect(log().at(-1)).toBe('sync 12');
   });
 
+  it('waits for the agent of an attempt its heartbeat dropped, before a helper acts on its worktree', async () => {
+    await granted();
+    const fix = await launched();
+    // The heartbeat runs first after a sleep, and drops it.
+    fix.beat(Date.now() + 3 * 60_000);
+    expect(fix.done).toBe(true);
+    const syncing = run({ command: 'sync', pr: 12 });
+    await vi.advanceTimersByTimeAsync(14_000);
+    execFileSync('sleep', ['1']);
+    expect(log().at(-1)).not.toMatch(/^sync/);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await syncing).error).toBeUndefined();
+    expect(log().at(-1)).toBe('sync 12');
+    // Settled, or waited for once: the next helper goes on at once.
+    fix.bodySettled();
+    expect((await run({ command: 'push', pr: 12 })).error).toBeUndefined();
+  });
+
+  it('is never late before its heartbeat starts: its helper may wait its turn', async () => {
+    await granted();
+    const fix = new BackgroundFix(
+      'session-a',
+      12,
+      'o/r',
+      worktree,
+      { task: 't', reply: true, instructions: '' },
+      {
+        pr: 12,
+        worktree,
+        check: async () => true,
+        open: async () => ({ task: 't' }),
+        close: async () => {},
+      },
+    );
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    expect(fix.isLate()).toBe(false);
+    fix.startHeartbeat();
+    expect(fix.isLate()).toBe(false);
+    fix.drop();
+  });
+
   it('leaves the attempt to claim again when the helper refuses', async () => {
     await granted();
     const fix = await launched();

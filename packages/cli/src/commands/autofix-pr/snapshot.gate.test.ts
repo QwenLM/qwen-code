@@ -1989,12 +1989,26 @@ describe('runSnapshot --gate', () => {
     const reportedAt = () =>
       (JSON.parse(readFileSync(gatePath(), 'utf8')) as { reportedAt?: string })
         .reportedAt;
-    const before = Date.now();
-    respond(withComments('I1'));
-    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    // When it finished reading: GitHub answers ten seconds after it asked.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-26T10:00:00.000Z'));
+    const answer = JSON.stringify({
+      data: {
+        viewer: { login: 'me' },
+        repository: { pullRequest: withComments('I1') },
+      },
+    });
+    mockGh.mockImplementationOnce(() => {
+      vi.setSystemTime(new Date('2026-10-26T10:00:10.000Z'));
+      return answer;
+    });
+    try {
+      runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    } finally {
+      vi.useRealTimers();
+    }
     const first = reportedAt()!;
-    expect(Date.parse(first)).toBeGreaterThanOrEqual(before);
-    expect(Date.parse(first)).toBeLessThanOrEqual(Date.now());
+    expect(first).toBe('2026-10-26T10:00:10.000Z');
     // Quiet, though the cursor moves: a check run queued since.
     respond(
       pr({

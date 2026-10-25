@@ -58,7 +58,12 @@ import {
   type AutofixPrState,
 } from './state.js';
 import { remoteRef } from './worktree.js';
-import { assertNoFixInFlight, fixInFlight, readFixMarker } from './fix.js';
+import {
+  assertNoFixInFlight,
+  fixInFlight,
+  freshAttempt,
+  readFixMarker,
+} from './fix.js';
 
 const CHECK_CONTEXT_FIELDS = `nodes {
   __typename
@@ -1818,8 +1823,7 @@ function staleTask(
 }
 
 function runGate(args: SnapshotArgs): void {
-  const readAt = Date.now();
-  const deadline = readAt + GATE_READ_BUDGET_MS;
+  const deadline = Date.now() + GATE_READ_BUDGET_MS;
   // A blank --host is refused here: resolved, it would be '', recorded as
   // the cursor's host, and later fires would ask whatever host `gh` defaults to.
   setGhHost(args.host);
@@ -1921,6 +1925,9 @@ function runGate(args: SnapshotArgs): void {
     },
     deadline,
   );
+  // When this run finished reading the PR: a round's snapshot that began
+  // to read later saw everything it may report.
+  const readAt = Date.now();
   const cursor: AutofixPrGateCursor = {
     ...(existing ?? {
       version: 1,
@@ -1952,17 +1959,19 @@ function runGate(args: SnapshotArgs): void {
     writeStdoutLine(JSON.stringify({ action: 'stop', events: [restale] }));
     return;
   }
-  // An attempt opened while GitHub was asked.
-  if (ownFix && fixInFlight(paths)) return;
-  const reported = withAbandonedFix(
-    result,
-    ownFix ? readFixMarker(paths) : null,
-    { headSha: pr.headRefOid, isDraft: pr.isDraft, url: pr.url },
-  );
+  // An attempt opened while GitHub was asked. Read once: a marker written
+  // between two reads would be reported as one its session left behind.
+  const marker = ownFix ? readFixMarker(paths) : null;
+  if (freshAttempt(marker)) return;
+  const reported = withAbandonedFix(result, marker, {
+    headSha: pr.headRefOid,
+    isDraft: pr.isDraft,
+    url: pr.url,
+  });
   const { snapshot } = reported;
-  // A run that reports wakes a round: when it read the PR says whether a
-  // round's snapshot saw what it reported (`fix-start`). A quiet run, which
-  // may still move the cursor, wakes none.
+  // A run that reports wakes a round: when it finished reading the PR says
+  // whether a round's snapshot saw what it reported (`fix-start`). A quiet
+  // run, which may still move the cursor, wakes none.
   const next = snapshot
     ? { ...reported.cursor, reportedAt: new Date(readAt).toISOString() }
     : reported.cursor;

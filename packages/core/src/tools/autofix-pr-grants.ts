@@ -218,6 +218,7 @@ export function forgetAutofixPrSession(sessionId: string): void {
 /** Test-only: forgets every session. */
 export function resetUnattendedFixGrantsForTests(): void {
   for (const fix of [...fixes.values()]) fix.drop();
+  settling.clear();
   confirmed.clear();
   grants.clear();
   tasks.clear();
@@ -234,6 +235,9 @@ export const FIX_TIME_LIMIT_MS = 30 * 60_000;
 /** How long an attempt waits for its round's claim, from when it opened:
  * a notification waits for the session to be idle. */
 export const FIX_CLAIM_DEADLINE_MS = 40 * 60_000;
+/** How long, after an attempt ended, whoever acts on its worktree next
+ * waits for its stopped agent to settle. */
+export const FIX_SETTLE_WAIT_MS = 15_000;
 /** The largest marker the session reads: `fix-start` writes a few lines. */
 const FIX_MARKER_MAX_BYTES = 4096;
 
@@ -264,6 +268,9 @@ export class BackgroundFix {
   private cancelAgent: (() => void) | null = null;
   /** A stop asked for before the agent launched: done as it launches. */
   private stopRequested = false;
+  private isSettled = false;
+  /** Until when an ended attempt's agent is waited for. */
+  settleBy = 0;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private deadline: ReturnType<typeof setTimeout> | null = null;
@@ -295,6 +302,8 @@ export class BackgroundFix {
    * gone stale meanwhile, the worktree another session's.
    */
   isLate(now = Date.now()): boolean {
+    // Not before it refreshes at all: the helper opening it may wait its turn.
+    if (!this.heartbeat) return false;
     return now - this.lastBeat > FIX_HEARTBEAT_MS + FIX_HEARTBEAT_LATE_MS;
   }
 
@@ -381,6 +390,7 @@ export class BackgroundFix {
 
   /** The agent's body settled. */
   bodySettled(): void {
+    this.isSettled = true;
     this.settle();
   }
 
@@ -417,9 +427,10 @@ export class BackgroundFix {
     );
   }
 
-  /** The round claims the attempt: nothing refreshes or drops it now. */
+  /** The round claims the attempt: nothing refreshes or drops it now. The
+   * claim waited for the agent to settle already. */
   claim(): void {
-    this.finish();
+    this.finish(false);
   }
 
   /**
@@ -440,7 +451,19 @@ export class BackgroundFix {
     await this.grant.close(this.attempt).catch(() => {});
   }
 
-  private finish(): void {
+  private finish(settles = true): void {
+    // Its agent stopped, maybe not settled: whoever acts on the worktree
+    // next waits for it a while (`settleBackgroundFix`).
+    if (settles && !this.done && this.agentId !== null && !this.isSettled) {
+      this.settleBy = Date.now() + FIX_SETTLE_WAIT_MS;
+      settling.set(this.worktree, this);
+      const forget = () => {
+        if (settling.get(this.worktree) === this)
+          settling.delete(this.worktree);
+      };
+      void this.settled.then(forget);
+      setTimeout(forget, FIX_SETTLE_WAIT_MS).unref?.();
+    }
     this.done = true;
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.timer) clearTimeout(this.timer);
@@ -458,6 +481,8 @@ export class BackgroundFix {
 
 // One per worktree, whichever session: a worktree has one attempt at a time.
 const fixes = new Map<string, BackgroundFix>();
+// Attempts that ended, whose stopped agents have not settled yet.
+const settling = new Map<string, BackgroundFix>();
 
 /** A live attempt, or none: one whose refresh is late is dropped first —
  * after a sleep, the gate may find its marker stale before its timer runs. */
@@ -466,26 +491,27 @@ function live(fix: BackgroundFix | undefined): BackgroundFix | undefined {
   return fix?.done ? undefined : fix;
 }
 
-/** How long a caller waits for the agent of an attempt it ended to settle. */
-export const FIX_SETTLE_WAIT_MS = 15_000;
-
 /**
- * Drops a late attempt at the worktree, or of the session's PR, and waits
- * (at most `FIX_SETTLE_WAIT_MS`) for its stopped agent to settle: what the
- * caller does next acts on the worktree that agent was writing in.
+ * Before a caller acts on a worktree, or on the session's PR: drops an
+ * attempt there whose refresh is late, and waits (at most
+ * `FIX_SETTLE_WAIT_MS` from when it ended) for the stopped agent of any
+ * attempt there that ended — dropped by its heartbeat, its deadline or a
+ * revoked grant — to settle: what the caller does next acts on the worktree
+ * that agent was writing in.
  */
-export async function settleLateBackgroundFix(
+export async function settleBackgroundFix(
   where: { worktree: string } | { sessionId: string; pr: number },
 ): Promise<void> {
-  const fix =
+  const at = (map: Map<string, BackgroundFix>) =>
     'worktree' in where
-      ? fixes.get(canonicalWorktreePath(where.worktree))
-      : [...fixes.values()].find(
+      ? map.get(canonicalWorktreePath(where.worktree))
+      : [...map.values()].find(
           (f) => f.sessionId === where.sessionId && f.pr === where.pr,
         );
-  if (!fix?.isLate()) return;
-  fix.drop();
-  await fix.waitSettled(FIX_SETTLE_WAIT_MS);
+  const fix = at(fixes);
+  if (fix?.isLate()) fix.drop();
+  const ended = at(settling);
+  if (ended) await ended.waitSettled(Math.max(0, ended.settleBy - Date.now()));
 }
 
 /** The attempt whose agent works, or whose round has yet to claim it, at a

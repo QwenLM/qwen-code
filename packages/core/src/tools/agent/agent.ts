@@ -117,7 +117,7 @@ import {
   isUnattendedFixConfig,
   markUnattendedFixConfig,
   openBackgroundFix,
-  settleLateBackgroundFix,
+  settleBackgroundFix,
   unattendedFixGranted,
   type BackgroundFix,
   type BackgroundFixEnd,
@@ -3428,7 +3428,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // A background fix agent works there now, or its round has yet to go
         // on: no other agent may work beside it, in either mode. One that is
         // late is over, once its agent settled.
-        await settleLateBackgroundFix({ worktree: resolved.path });
+        await settleBackgroundFix({ worktree: resolved.path });
         if (backgroundFixAt(resolved.path)) {
           return failWorktreeProvisioning(
             `Error: a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,
@@ -5334,7 +5334,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
         // Not beside a background fix agent of /autofix-pr, nor before its
         // round went on.
-        await settleLateBackgroundFix({ worktree: resolved.path });
+        await settleBackgroundFix({ worktree: resolved.path });
         if (backgroundFixAt(resolved.path)) {
           return this.buildSpawnBlockedResult(
             `Error: a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,

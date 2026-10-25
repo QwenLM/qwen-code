@@ -108,7 +108,14 @@ export function fixInFlight(
   paths: AutofixPrPaths,
   now = Date.now(),
 ): AutofixPrFixAttempt | null {
-  const marker = readFixMarker(paths);
+  return freshAttempt(readFixMarker(paths), now);
+}
+
+/** The attempt of a marker read already, when it is fresh. */
+export function freshAttempt(
+  marker: ReturnType<typeof readFixMarker>,
+  now = Date.now(),
+): AutofixPrFixAttempt | null {
   if (!marker?.attempt) return null;
   const started = Date.parse(marker.attempt.startedAt);
   const fresh =

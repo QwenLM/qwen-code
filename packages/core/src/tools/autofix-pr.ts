@@ -48,7 +48,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import {
   backgroundFixOf,
   canonicalWorktreePath,
-  settleLateBackgroundFix,
+  settleBackgroundFix,
   confirmedWatch,
   forgetConfirmedWatch,
   grantUnattendedFixes,
@@ -1078,7 +1078,7 @@ class AutofixPrInvocation extends BaseToolInvocation<
     }
     const sessionId = this.config.getSessionId();
     if (this.params.pr !== undefined && this.params.command !== 'status') {
-      await settleLateBackgroundFix({ sessionId, pr: this.params.pr });
+      await settleBackgroundFix({ sessionId, pr: this.params.pr });
     }
     const fix =
       this.params.pr === undefined || this.params.command === 'status'
