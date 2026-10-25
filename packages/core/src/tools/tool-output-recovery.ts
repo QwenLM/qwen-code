@@ -14,6 +14,24 @@ export interface ToolOutputRecovery {
 const recoveryKey = Symbol('tool-output-recovery');
 type RecoveryPart = Part & { [recoveryKey]?: ToolOutputRecovery };
 
+/**
+ * The handle is an in-process side channel, not part of a part's value, so it
+ * is defined non-enumerable: a part that carries one still compares equal to
+ * its own serialized form (the agent JSONL transcript asserts recorded parts
+ * equal the parts that were sent) and never leaks into a model request.
+ *
+ * Callers that copy a part with a spread drop the handle, so attach it last.
+ */
+function defineRecovery(part: Part, recovery: ToolOutputRecovery): Part {
+  Object.defineProperty(part, recoveryKey, {
+    value: recovery,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
+  return part;
+}
+
 export function getToolOutputRecovery(
   part: Part,
 ): ToolOutputRecovery | undefined {
@@ -24,7 +42,7 @@ export function setToolOutputRecovery(
   part: Part,
   recovery: ToolOutputRecovery,
 ): void {
-  (part as RecoveryPart)[recoveryKey] = recovery;
+  defineRecovery(part, recovery);
 }
 
 export function attachToolOutputRecovery(
@@ -32,6 +50,6 @@ export function attachToolOutputRecovery(
   recovery: ToolOutputRecovery,
 ): Part[] {
   return parts.map(
-    (part): RecoveryPart => ({ ...part, [recoveryKey]: recovery }),
+    (part): RecoveryPart => defineRecovery({ ...part }, recovery),
   );
 }

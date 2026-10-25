@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { attachToolOutputRecovery } from '../tools/tool-output-recovery.js';
+import {
+  attachToolOutputRecovery,
+  type ToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 
 import { logToolResultSize } from '../telemetry/loggers.js';
 import { ToolResultSizeEvent } from '../telemetry/types.js';
@@ -1015,6 +1018,7 @@ export function convertToFunctionResponse(
 ): Part[] {
   const processed = measureToolOutput(llmContent, config);
   let rawSize: ReturnType<typeof measureToolOutput> | undefined;
+  let recovery: ToolOutputRecovery = {};
   try {
     if (producerResult) {
       // A producer that bounds its own render declares null, so its raw size
@@ -1024,31 +1028,32 @@ export function convertToFunctionResponse(
         producerResult.rawOutputSize === null
           ? undefined
           : (producerResult.rawOutputSize ?? processed);
+      recovery = {
+        text: producerResult.recoveryText,
+        persistedOutputFiles: producerResult.persistedOutputFiles,
+      };
     }
   } catch {
     // Optional observation metadata must not change a tool's outcome.
   }
-  return attachToolOutputProvenance(
-    attachToolOutputRecovery(
+  return attachToolOutputRecovery(
+    attachToolOutputProvenance(
       convertToFunctionResponseParts(toolName, callId, llmContent),
       {
-        text: producerResult?.recoveryText,
-        persistedOutputFiles: producerResult?.persistedOutputFiles,
+        callId,
+        toolName,
+        promptId: '',
+        toolType: toolName.startsWith('mcp__') ? 'mcp' : 'native',
+        rawSize,
+        truncated:
+          producerResult?.truncatedByProducer === true
+            ? true
+            : rawSize === undefined
+              ? undefined
+              : rawSize.chars > processed.chars,
       },
     ),
-    {
-      callId,
-      toolName,
-      promptId: '',
-      toolType: toolName.startsWith('mcp__') ? 'mcp' : 'native',
-      rawSize,
-      truncated:
-        producerResult?.truncatedByProducer === true
-          ? true
-          : rawSize === undefined
-            ? undefined
-            : rawSize.chars > processed.chars,
-    },
+    recovery,
   );
 }
 
@@ -6389,12 +6394,8 @@ export class CoreToolScheduler {
           this.config,
         ).chars;
         const budgetReduced = !replacement && appliedOutputBudget !== undefined;
-        response.responseParts = attachToolOutputProvenance(
-          attachToolOutputRecovery(response.responseParts, {
-            text: replacement ? undefined : producerToolResult?.recoveryText,
-            persistedOutputFiles: response.persistedOutputFiles,
-          }),
-          {
+        response.responseParts = attachToolOutputRecovery(
+          attachToolOutputProvenance(response.responseParts, {
             callId,
             toolName: getModelFacingToolName(scheduledCall.request),
             promptId: scheduledCall.request.prompt_id,
@@ -6415,6 +6416,10 @@ export class CoreToolScheduler {
             budgetSource: budgetReduced
               ? appliedOutputBudget?.source
               : undefined,
+          }),
+          {
+            text: replacement ? undefined : producerToolResult?.recoveryText,
+            persistedOutputFiles: response.persistedOutputFiles,
           },
         );
         try {
