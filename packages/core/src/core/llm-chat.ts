@@ -4124,6 +4124,21 @@ export class LlmChat {
               extraRetryErrorCodes,
             });
 
+            // DIAGNOSTIC BRANCH ONLY (diagnose/sdk-v0.26.1-session-id, not for
+            // merge): emit one line of strictly allowlisted scalar fields per
+            // failed stream attempt so CI logs carry the retry classification
+            // that otherwise only reaches the debug log file. No error
+            // messages, provider bodies, or credentials are printed.
+            const emitRetryDiagnostic = (decision: string): void => {
+              process.stderr.write(
+                `[qwen-retry-diagnostic] decision=${decision}` +
+                  ` kind=${classification.kind}` +
+                  ` reason=${classification.reason}` +
+                  ` transportCode=${classification.transportCode ?? 'none'}` +
+                  ` statusCode=${classification.statusCode ?? 'none'}\n`,
+              );
+            };
+
             // Permanent quota exhaustion (e.g. Bailian token-plan "1-week
             // quota has been exhausted, will reset at ...") can arrive
             // mid-stream as a StreamContentError, bypassing retryWithBackoff
@@ -4314,6 +4329,7 @@ export class LlmChat {
                   }),
                 },
               );
+              emitRetryDiagnostic('stream-retry-scheduled');
               yield { type: StreamEventType.RETRY };
               // A replay is a fresh restart, so anything a previous
               // continuation had staged must go. Without
@@ -4452,6 +4468,7 @@ export class LlmChat {
                   }),
                 },
               );
+              emitRetryDiagnostic('stream-retry-not-taken');
             }
 
             // Both detectors were computed above the recovery gates, so that a

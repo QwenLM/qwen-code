@@ -40,6 +40,30 @@ jobs:
         run: |
           npm run build
           node scripts/bundle-cli.js
+      - name: 'Probe the configured model endpoint'
+        env:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+        run: |-
+          set -u
+          url="${OPENAI_BASE_URL%/}/chat/completions"
+          payload=$(jq -nc --arg model "${OPENAI_MODEL}" '{
+            model: $model,
+            messages: [{role: "user", content: "What is 1 + 1? Just the number."}],
+            max_tokens: 8
+          }')
+          for i in 1 2 3; do
+            rc=0
+            metrics=$(curl -s -o /dev/null -m 60 \
+              -w 'http=%{http_code} total=%{time_total}s' \
+              -X POST "${url}" \
+              -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+              -H 'Content-Type: application/json' \
+              -d "${payload}") || rc=$?
+            echo "endpoint probe ${i}: rc=${rc} ${metrics}"
+          done
+          exit 0
       - name: 'Reproduce the session ID suite without retries'
         timeout-minutes: 12
         env:
