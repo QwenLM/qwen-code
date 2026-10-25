@@ -5,7 +5,7 @@
  */
 
 import path from 'node:path';
-import { statSync } from 'node:fs';
+import { accessSync, constants, lstatSync, statSync } from 'node:fs';
 import { watch, type FSWatcher } from 'chokidar';
 import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -95,8 +95,23 @@ export class FileChangedWatcher {
         // Observe surviving ancestors so missing or replaced roots can reappear.
         const anchors = next.map(discoveryRoot);
         if (anchors.some((root) => root === undefined)) this.paths = [];
+        // Keep a ready parent observer when an anchor's unlinkDir is missed.
         const watchRoots = [
-          ...new Set(anchors.filter((root) => root !== undefined)),
+          ...new Set(
+            anchors
+              .filter((root) => root !== undefined)
+              .map((root) => {
+                const parent = discoveryRoot(root);
+                if (!parent) return root;
+                try {
+                  if (!lstatSync(parent).isDirectory()) return root;
+                  accessSync(parent, constants.R_OK);
+                  return parent;
+                } catch {
+                  return root;
+                }
+              }),
+          ),
         ];
         if (watchRoots.length === 0) return;
         const watcher = watch(watchRoots, {

@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { FSWatcher } from 'chokidar';
 import { FileChangedWatcher } from './file-changed-watcher.js';
 
 const waitOptions = { timeout: 5000, interval: 25 };
@@ -23,6 +24,7 @@ describe('FileChangedWatcher with real files', () => {
 
   afterEach(async () => {
     await watcher?.close();
+    vi.restoreAllMocks();
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -324,6 +326,58 @@ describe('FileChangedWatcher with real files', () => {
     );
   });
 
+  it('keeps observing a file when its discovery parent has an unreadable parent', async () => {
+    const parent = path.join(root, 'parent');
+    const anchor = path.join(parent, 'anchor');
+    const file = path.join(anchor, 'topic.md');
+    await fs.mkdir(anchor, { recursive: true });
+    await fs.writeFile(file, 'initial');
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await fs.chmod(parent, 0o111);
+    try {
+      await watcher.setPaths([file], [file]);
+      await fs.writeFile(file, 'changed');
+      await vi.waitFor(
+        () =>
+          expect(notify).toHaveBeenCalledWith(
+            file,
+            'change',
+            expect.any(AbortSignal),
+          ),
+        waitOptions,
+      );
+    } finally {
+      await fs.chmod(parent, 0o700);
+    }
+  });
+
+  it('keeps observing a file below a symlinked ancestor', async () => {
+    const directory = path.join(root, 'real');
+    const alias = path.join(root, 'alias');
+    await fs.mkdir(path.join(directory, 'child'), { recursive: true });
+    await fs.symlink(
+      directory,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const file = path.join(alias, 'child', 'topic.md');
+    await fs.writeFile(file, 'initial');
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([file], [file]);
+    await fs.writeFile(file, 'changed');
+    await vi.waitFor(
+      () =>
+        expect(notify).toHaveBeenCalledWith(
+          file,
+          'change',
+          expect.any(AbortSignal),
+        ),
+      waitOptions,
+    );
+  });
+
   it('continues observing a root deleted and recreated after a gap', async () => {
     const directory = path.join(root, 'memory');
     await fs.mkdir(directory);
@@ -357,10 +411,31 @@ describe('FileChangedWatcher with real files', () => {
     );
   });
 
-  it.each(['dynamic', 'static'] as const)(
-    'recovers a %s target when its discovery anchor is deleted and recreated',
-    async (kind) => {
+  it.each([
+    ['dynamic', false],
+    ['static', false],
+    ['dynamic', true],
+    ['static', true],
+  ] as const)(
+    'recovers a %s target when its discovery anchor is deleted and recreated (suppress unlinkDir: %s)',
+    async (kind, suppressUnlinkDir) => {
       const anchor = path.join(root, 'anchor');
+      const emit = FSWatcher.prototype.emit;
+      vi.spyOn(FSWatcher.prototype, 'emit').mockImplementation(function (
+        this: FSWatcher,
+        event,
+        ...args
+      ) {
+        if (
+          suppressUnlinkDir &&
+          event === 'all' &&
+          args[0] === 'unlinkDir' &&
+          args[1] === anchor
+        ) {
+          return false;
+        }
+        return Reflect.apply(emit, this, [event, ...args]);
+      });
       const directory = kind === 'static' ? anchor : path.join(anchor, 'out');
       await fs.mkdir(directory, { recursive: true });
       const file = path.join(directory, 'topic.md');
