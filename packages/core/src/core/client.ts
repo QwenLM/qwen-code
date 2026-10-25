@@ -281,6 +281,14 @@ export interface SendMessageOptions {
   promptAdmission?: UserPromptAdmission;
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
+  /**
+   * The host already recorded this UserQuery's user message and started its
+   * todo work chain, as ACP does when it admits a prompt, so the client does
+   * neither.
+   */
+  userTurnRecordedByHost?: boolean;
+  /** Also yield `ToolCallPreparation` for calls the model starts streaming. */
+  toolCallPreparations?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -3586,6 +3594,11 @@ export class LlmClient {
   async admitUserPrompt(
     prompt: string,
     promptId: string,
+    options: {
+      /** The hook's `submitted_prompt`; `prompt` when it has text by default. */
+      submittedPrompt?: string;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<UserPromptAdmission> {
     const owner = captureHookExecutionOwner(this.config);
     const messageBus = this.config.getMessageBus();
@@ -3597,7 +3610,12 @@ export class LlmClient {
             messageBus,
             owner,
             prompt,
-            prompt.trim().length > 0 ? prompt : undefined,
+            'submittedPrompt' in options
+              ? options.submittedPrompt
+              : prompt.trim().length > 0
+                ? prompt
+                : undefined,
+            options.signal,
           )
         : {};
     const admission: UserPromptAdmission = Object.freeze({
@@ -3640,6 +3658,7 @@ export class LlmClient {
     owner: HookExecutionOwner | undefined,
     prompt: string,
     submittedPrompt: string | undefined,
+    signal?: AbortSignal,
   ): Promise<UserPromptSubmitDecision> {
     const response = await messageBus.request<
       HookExecutionRequest,
@@ -3655,6 +3674,7 @@ export class LlmClient {
             ? { submitted_prompt: submittedPrompt }
             : {}),
         },
+        ...(signal ? { signal } : {}),
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
     );
@@ -4334,20 +4354,23 @@ export class LlmClient {
     // LoopDetected early on the notification turn.
     if (messageType === SendMessageType.UserQuery) {
       this.activeAutomaticTodoWorkChainPromptIds.clear();
-      // A registered reminder means the previous chain's plan still has
-      // unfinished items (todo_write deletes it on completion): continue
-      // that chain instead of discarding its context with the very turn
-      // that may be asking about it (#10953).
-      const continuedFrom =
-        this.activeTodoWorkChainPromptId !== undefined &&
-        this.config.getActiveTodoReminder(this.activeTodoWorkChainPromptId) !==
-          undefined &&
-        this.config.getActiveTodoWorkChainOwner(
-          this.activeTodoWorkChainPromptId,
-        ) === this.config.getActiveTodoPlanWriterOwner()
-          ? this.activeTodoWorkChainPromptId
-          : undefined;
-      this.config.startActiveTodoWorkChain(prompt_id, continuedFrom);
+      if (!options?.userTurnRecordedByHost) {
+        // A registered reminder means the previous chain's plan still has
+        // unfinished items (todo_write deletes it on completion): continue
+        // that chain instead of discarding its context with the very turn
+        // that may be asking about it (#10953).
+        const continuedFrom =
+          this.activeTodoWorkChainPromptId !== undefined &&
+          this.config.getActiveTodoReminder(
+            this.activeTodoWorkChainPromptId,
+          ) !== undefined &&
+          this.config.getActiveTodoWorkChainOwner(
+            this.activeTodoWorkChainPromptId,
+          ) === this.config.getActiveTodoPlanWriterOwner()
+            ? this.activeTodoWorkChainPromptId
+            : undefined;
+        this.config.startActiveTodoWorkChain(prompt_id, continuedFrom);
+      }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
       this.config.startActiveTodoWorkChain(
@@ -4470,7 +4493,7 @@ export class LlmClient {
               options?.notificationDisplayText,
               goalPermit,
             );
-        } else {
+        } else if (!options?.userTurnRecordedByHost) {
           const recorder = this.config.getChatRecordingService();
           recorder?.recordUserMessage(
             request,
@@ -4736,6 +4759,7 @@ export class LlmClient {
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
         options?.retractDeliveredOutputOnRetry,
         options?.onPreparedRequest,
+        options?.toolCallPreparations,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -5717,6 +5741,7 @@ export class LlmClient {
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
                 steerInput: pendingSteer,
+                toolCallPreparations: options?.toolCallPreparations,
               },
               hookTurnBudget,
               managedMemoryType,

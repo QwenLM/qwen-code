@@ -2959,6 +2959,8 @@ export const useLlmStream = (
             case ServerLlmEventType.ToolCallResponse:
               flushBufferedStreamEvents();
               break;
+            case ServerLlmEventType.ToolCallPreparation:
+              break;
             case ServerLlmEventType.MaxSessionTurns:
               flushBufferedStreamEvents();
               if (pendingHistoryItemRef.current) {

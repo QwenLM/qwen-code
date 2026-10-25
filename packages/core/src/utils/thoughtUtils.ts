@@ -113,6 +113,14 @@ export function parseThought(rawText: string): ThoughtSummary {
   return { subject, description };
 }
 
+/** The text of a response's thought parts, joined as the model sent it. */
+export function getThoughtText(response: GenerateContentResponse): string {
+  return (response.candidates?.[0]?.content?.parts ?? [])
+    .filter((part) => part.thought)
+    .map((part) => part.text ?? '')
+    .join('');
+}
+
 export function getThoughtSummary(
   response: GenerateContentResponse,
 ): ThoughtSummary | null {

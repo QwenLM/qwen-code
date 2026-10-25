@@ -2743,6 +2743,33 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
+    it('leaves the user message record and work chain to a host that did both', async () => {
+      const recordUserMessage = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordUserMessage,
+        recordAttributionSnapshot: vi.fn(),
+        recordFileHistorySnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+
+      await runTurn(
+        SendMessageType.UserQuery,
+        [{ text: 'hello' }],
+        'prompt-host',
+        { userTurnRecordedByHost: true },
+      );
+
+      expect(recordUserMessage).not.toHaveBeenCalled();
+      expect(mockConfig.startActiveTodoWorkChain).not.toHaveBeenCalled();
+
+      await runTurn(SendMessageType.Retry, [{ text: 'hello' }], 'prompt-retry');
+
+      // A retry still continues the chain the host's prompt opened.
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-retry',
+        'prompt-host',
+      );
+    });
+
     it.each(['agent', 'task'])(
       'forces the active todo reminder due when a %s tool result returns',
       async (agentToolName) => {
@@ -11809,6 +11836,26 @@ Other open files:
         expect(tel.endInteractionSpan).toHaveBeenCalledWith('ok', {
           promptId: 'prompt-stop-hook-budget',
         });
+      });
+
+      it('asks for tool call preparations in a blocking Stop hook continuation too', async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-preparations', {
+          type: SendMessageType.UserQuery,
+          toolCallPreparations: true,
+        });
+
+        expect(mockTurnConstructorFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnConstructorFn.mock.calls.map((args) => args[6])).toEqual(
+          [true, true],
+        );
       });
 
       it('gives a blocking Stop hook continuation a fresh exploration phase', async () => {
