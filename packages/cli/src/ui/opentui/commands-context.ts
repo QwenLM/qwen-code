@@ -15,6 +15,8 @@
  * services regardless of renderer.
  */
 
+import type { OpenTuiStreamEvent } from './event-adapter.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
 import type { ReactNode } from 'react';
 import type {
   Config,
@@ -53,7 +55,8 @@ export interface OpenTuiCommandHost {
   addItem: UseHistoryManagerReturn['addItem'];
   updateItem: UseHistoryManagerReturn['updateItem'];
   clearItems: UseHistoryManagerReturn['clearItems'];
-  loadHistory: UseHistoryManagerReturn['loadHistory'];
+  loadHistory: CommandContext['ui']['loadHistory'];
+  resetTranscript(events: OpenTuiStreamEvent[]): void;
   refreshStatic(): void;
   clearPendingState(): void;
   cancelBtw(): void;
@@ -97,6 +100,7 @@ export interface OpenTuiCommandServices {
   config: Config | null;
   settings: LoadedSettings;
   logger: Logger | null;
+  onInputProcessed?: () => void;
   extensionRefreshState?: ExtensionRefreshState;
 }
 
@@ -149,7 +153,14 @@ export function createOpenTuiCommandContext(
         host.setSessionName(null);
       },
       clearPendingState: () => host.clearPendingState(),
-      loadHistory: (history) => host.loadHistory(history),
+      loadHistory: (history, mode) => {
+        host.loadHistory(history, mode);
+        if (mode !== 'expand') {
+          host.resetTranscript(
+            projectHistoryToStreamEvents(history, { config: services.config }),
+          );
+        }
+      },
       refreshStatic: () => host.refreshStatic(),
       setDebugMessage: (message) => host.setDebugMessage(message),
       pendingItem: host.pendingItem,

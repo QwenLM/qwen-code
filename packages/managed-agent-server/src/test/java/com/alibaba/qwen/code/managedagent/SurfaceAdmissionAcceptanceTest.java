@@ -470,7 +470,9 @@ class SurfaceAdmissionAcceptanceTest {
                 boolean actorRequired = entry.capabilities().contains(Capability.SESSION_CWD_CHANGE)
                         || entry.capabilities().contains(Capability.MCP_MANAGEMENT)
                         || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
-                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION);
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)
+                        || entry.capabilities().contains(Capability.USER_MESSAGE_QUERY)
+                        || entry.capabilities().contains(Capability.USER_MESSAGE_COMMAND);
                 expect(entry, null, actorRequired ? 401 : 404,
                         actorRequired
                                 ? "actor_required" : "session_not_found");
@@ -540,6 +542,7 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case SESSION_OPTIONS ->
                 expect(entry, null, 401, "actor_required");
+            case INTERNAL_OPERATOR -> expect(entry, null, 403, "external_storage_registration_denied");
             case INTERNAL_WRITER ->
                 expectInternal(entry);
             default -> throw new AssertionError(
@@ -1345,7 +1348,7 @@ class SurfaceAdmissionAcceptanceTest {
      */
     private void expectInternal(SurfaceRegistry entry) throws Exception {
         int status = switch (entry.capabilities().iterator().next()) {
-            case STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
+            case STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
                     STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
                     STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, PUB_FINISHED,
@@ -1558,9 +1561,18 @@ class SurfaceAdmissionAcceptanceTest {
 
     private String bodyFor(SurfaceRegistry entry, String tenant,
             String session) {
+        if (entry == SurfaceRegistry.INTERNAL_WRITER_QUIESCE_OWNERSHIP
+                || entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP) {
+            String scope = "\"workspaceId\":\"ws\",\"writerId\":\"boot-probe\",\"writerGeneration\":1,"
+                    + "\"instanceId\":\"pod-probe\",\"bootId\":\"boot-probe\",\"placementEpoch\":1";
+            return "{" + scope + (entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP
+                    ? ",\"operationId\":\"release-probe\",\"journalRevision\":1,\"commitProof\":{\"lastCommitSequence\":1,"
+                            + "\"committedPrefixHash\":\"" + "a".repeat(64) + "\"}" : "") + "}";
+        }
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case STORE_USER_MESSAGE_CLAIM -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"promptId\":\"prompt-probe\",\"initialOnly\":false}";
             case SESSION_CREATE -> publicSurface
                     ? "{\"agent_id\":\"qwen-code\",\"input\":[],"
                             + "\"workspace\":{\"workspace_id\":\"ws\"}}"
@@ -1589,6 +1601,11 @@ class SurfaceAdmissionAcceptanceTest {
                             + nextKey() + "\",\"expectedCompactionRevision\":0}";
             case SESSION_LIST -> "{}";
             case SESSION_GET -> "{\"sessionId\":\"" + session + "\"}";
+            case USER_MESSAGE_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case USER_MESSAGE_COMMAND -> publicSurface
+                    ? "{\"action\":\"resume\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"" + nextKey()
+                            + "\",\"command\":{\"action\":\"resume\"}}";
             case SESSION_RECOVERY_QUERY -> "{\"sessionId\":\"" + session + "\"}";
             case SESSION_RECOVERY_RECHECK -> publicSurface
                     ? "{\"turnId\":\"turn_0000000000000000\"}"

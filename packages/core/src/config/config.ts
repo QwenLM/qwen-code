@@ -1417,6 +1417,8 @@ export interface ConfigParameters {
   /** Opt-in flag for the built-in `todo_write` tool. */
   todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
+  /** Experimental: run migrated surfaces on the shared agent loop. */
+  unifiedAgentLoopEnabled?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -2490,6 +2492,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getWorkspaceContext'
     | 'getFileService'
     | 'getEffectiveInputModalities'
+    | 'isOmniEnabled'
     | 'getFileReadCache'
     | 'getFileHistoryService'
     | 'getToolRegistry'
@@ -3161,6 +3164,7 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
+  private readonly unifiedAgentLoopEnabled: boolean = false;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private artifactSnapshotsEnabled = false;
@@ -3615,6 +3619,7 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
+    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
@@ -6345,7 +6350,7 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    // Include the request-only catalog as well as the system memory policy.
+    // Include the current catalog as well as the system memory policy.
     const memoryContextWarning = this.buildMemoryContextWarning(
       [
         this.getUserMemory(),
@@ -9285,7 +9290,7 @@ export class Config {
     return this.autoMemoryPrompt;
   }
 
-  /** Latest legacy catalog, sent only at the request tail, never stored history. */
+  /** Latest legacy catalog; scoped maintenance configs suppress it. */
   getAutoMemoryContext(): string {
     // Scoped maintenance configs override the policy getter to suppress session
     // memory. Respect that override rather than inheriting the parent's catalog.
@@ -10398,6 +10403,11 @@ export class Config {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
     return this.agentTeamEnabled;
+  }
+
+  isUnifiedAgentLoopEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
+    return this.unifiedAgentLoopEnabled;
   }
 
   /**

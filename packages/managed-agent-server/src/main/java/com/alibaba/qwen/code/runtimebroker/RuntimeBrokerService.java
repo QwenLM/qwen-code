@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
@@ -928,6 +929,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return warm(harnessSessionId, null);
     }
 
+    public CompletionStage<RuntimeScope> capabilities(
+            String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        requireOpen();
+        String harnessId = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                "harnessSessionId");
+        return resolveScope(harnessId, true, authority);
+    }
+
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId) {
         requireOpen();
         String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
@@ -1536,6 +1546,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
                                 && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
                             throw invalid("runtime_payload_invalid", "The private CSI profile requires a file Tool v2 payload");
+                        }
+                        if (ResidentWorkspaceProfile.selects(context.binding().getRequest().getScope())
+                                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
+                            Map<String, Object> refusal = new LinkedHashMap<>();
+                            refusal.put("executionStatus", "not_started");
+                            refusal.put("responseParts", List.of());
+                            refusal.put("capture", null);
+                            refusal.put("error", Map.of("type", "resident_tool_unsupported",
+                                    "message", "Resident Workspace supports only read_file, write_file and edit."));
+                            ToolExecutionRecord settled = executionRepository.settlePrepared(record, refusal, clock.instant());
+                            return CompletableFuture.completedFuture(settled == null
+                                    ? requireExecution(context, executionId) : settled);
                         }
                         if (v3) {
                             if (!"run_shell_command".equals(payload.get("toolName"))
@@ -3599,12 +3621,23 @@ public final class RuntimeBrokerService implements AutoCloseable {
         try {
             provisioner.reserveResource(claimed);
         } catch (RuntimeException failure) {
+            // Pre-create admission has not committed a resource identity yet,
+            // so any retryable failure leaves the binding PROVISIONING with its
+            // original seed for a later Broker round. Once a handle exists,
+            // only the capacity/busy answers are known to stay adoptable; the
+            // external provisioner's retryable reserveResource outcomes are
+            // exactly capacity and shutdown.
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
-                    && ((request.isManagedContext() && brokerFailure.getStatusCode() == 409
-                            && "workspace_csi_busy".equals(brokerFailure.getCode()))
-                            || (!request.isManagedContext() && "kubernetes-scratch".equals(request.getProvisionerKind())
-                                    && brokerFailure.getStatusCode() == 503
-                                    && "runtime_kubernetes_capacity".equals(brokerFailure.getCode())));
+                    && (claimed.getResourceHandle() == null
+                            || (request.isManagedContext() && brokerFailure.getStatusCode() == 409
+                                    && "workspace_csi_busy".equals(brokerFailure.getCode()))
+                            || (!request.isManagedContext() && brokerFailure.getStatusCode() == 503
+                                    && (("kubernetes-scratch".equals(request.getProvisionerKind())
+                                            && "runtime_kubernetes_capacity".equals(brokerFailure.getCode()))
+                                            || (ExternalRuntimeProvisioner.KIND.equals(request.getProvisionerKind())
+                                                    && ("runtime_external_capacity".equals(brokerFailure.getCode())
+                                                            || "runtime_external_unavailable"
+                                                                    .equals(brokerFailure.getCode()))))));
             if (!busy) {
                 blockRecoveryQuietly(claimed, failure);
             }
@@ -3714,7 +3747,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                                 cause);
                                     }
                                 } else if (currentClaim
-                                        .getResourceHandle() == null) {
+                                        .getResourceHandle() == null
+                                        // The external ensureResource commits
+                                        // nothing before the handle is returned.
+                                        && !ExternalRuntimeProvisioner.KIND
+                                                .equals(request.getProvisionerKind())) {
                                     blockRecoveryQuietly(currentClaim, cause);
                                 }
                             }
