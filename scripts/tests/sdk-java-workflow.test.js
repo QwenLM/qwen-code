@@ -259,7 +259,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     // Maven rewrites resolver tracking files in place, so every seed needs
     // the de-alias before that lane runs Maven against the job-local copy.
     const deAlias =
-      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \\) -links +1 -delete";
+      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml' \\) -links +1 -delete";
     let from = 0;
     for (const seed of seeds) {
       const seedAt = workflow.indexOf(seed, from);
@@ -290,6 +290,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         join('com', 'example', 'resolver-status.properties'),
         join('com', 'example', 'artifact.pom.lastUpdated'),
         join('com', 'example', '_remote.repositories'),
+        join('com', 'example', 'maven-metadata-local.xml'),
       ];
       mkdirSync(join(home, '.cache', 'qwen-code-ci'), { recursive: true });
       mkdirSync(dirname(seeded), { recursive: true });
@@ -329,9 +330,10 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(result.status, suite + result.stderr).toBe(0);
         const copied = join(runnerTemp, 'm2-repo', 'marker.txt');
         expect(statSync(copied).ino).toBe(statSync(seeded).ino);
-        // Maven rewrites resolver tracking files in place while the suite is
-        // unlocked; they must not keep the host inode, or a transient
-        // resolution failure poisons the host cache every later job seeds.
+        // Maven rewrites resolver tracking files and local install metadata
+        // in place while the suite is unlocked; they must not keep the host
+        // inode, or a transient failure poisons the host cache every later
+        // job seeds.
         for (const relative of trackingFiles) {
           const host = join(home, '.m2', 'repository', relative);
           expect(
@@ -1891,7 +1893,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // has already passed.
     expect(step.run).toContain('mkdir -p "${HOME}/.m2/repository"');
     expect(step.run).toContain(
-      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \\) -links +1 -delete",
+      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml' \\) -links +1 -delete",
     );
     // Run 39563394993 spent 60 minutes streaming the whole seeded tree and
     // was cancelled at the job ceiling. Only the nlink == 1 delta Maven

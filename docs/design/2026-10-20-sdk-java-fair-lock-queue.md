@@ -108,9 +108,10 @@ failed at 19:15 without starting Maven — the hold, not the queue order, was
 the bound.
 
 Both Maven runs already resolve from a job-local repository, and the seed
-de-aliases Maven's in-place resolver tracking files (`*.lastUpdated`,
-`resolver-status.properties`) after the copy, so the unlocked runs cannot
-write through those inodes to `~/.m2`. Only the cache write-back mutates
+de-aliases Maven's in-place mutable files (`*.lastUpdated`,
+`resolver-status.properties`, `_remote.repositories`, and local install
+`maven-metadata-*.xml`) after the copy, so the unlocked runs cannot write
+through those inodes to `~/.m2`. Only the cache write-back mutates
 host-shared state, so only the write-back takes the lock. The seed (`cp -aln`)
 is read-only and best-effort and runs before the acquisition; the Maven runs
 run unlocked; the write-back
@@ -135,7 +136,7 @@ Retiring the per-host suite serialization #10552 introduced is deliberate.
 That contract treated concurrent suites on one physical host as unsafe after
 a pool OOM; since #14903 the MariaDB lane has run its suite unlocked on the
 same pool without that failure mode returning, and both suites now resolve
-from job-local repositories whose mutable tracking files are de-aliased after
+from job-local repositories whose mutable files are de-aliased after
 the seed, so the only host-shared state the suites mutate is the cache
 write-back the queue serializes. The test job's checkstyle and package steps
 carry no `-Dmaven.repo.local` and no seed, so they read and write host-shared

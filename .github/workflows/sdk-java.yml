@@ -252,12 +252,12 @@ jobs:
           if [ -d "${HOME}/.m2/repository" ]; then
             cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
           fi
-          # Maven rewrites resolver tracking files in place. A hardlinked one
-          # would write its "do not reattempt until the update interval"
-          # marker through to the host copy, so drop those aliases; artifacts
-          # stay hardlinked and the seed stays cheap.
+          # Maven rewrites resolver tracking files and local install metadata
+          # in place. A hardlinked one would write through to the host copy,
+          # so drop those aliases; artifacts stay hardlinked and the seed
+          # stays cheap.
           if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) -links +1 -delete
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml' \) -links +1 -delete
           fi
           # The suite resolves from the job-local copy above, so it no longer
           # touches host-shared state and must not hold the per-host lock: a
@@ -832,11 +832,11 @@ jobs:
           if [ -d "${HOME}/.m2/repository" ]; then
             cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
           fi
-          # Maven rewrites resolver tracking files in place; a hardlink would
-          # write the "do not reattempt" marker through to the host copy, so
+          # Maven rewrites resolver tracking files and local install metadata
+          # in place; a hardlink would write through to the host copy, so
           # drop those aliases. Artifacts stay hardlinked.
           if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) -links +1 -delete
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml' \) -links +1 -delete
           fi
           # Both Maven runs resolve from the job-local copy above (its
           # resolver tracking files de-aliased), so they no longer touch
@@ -1595,10 +1595,10 @@ jobs:
           if [ -d "${HOME}/.m2/repository" ]; then
             cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
           fi
-          # Maven rewrites resolver tracking files in place; de-alias them so
-          # a transient failure cannot write through to the host copy.
+          # Maven rewrites resolver tracking files and local install metadata
+          # in place; de-alias them so a write cannot reach the host copy.
           if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) -links +1 -delete
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml' \) -links +1 -delete
           fi
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Cache the RocketMQ distribution'
@@ -1842,10 +1842,10 @@ jobs:
           if [ -d "${HOME}/.m2/repository" ]; then
             cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
           fi
-          # Maven rewrites resolver tracking files in place; de-alias them so
-          # a transient failure cannot write through to the host copy.
+          # Maven rewrites resolver tracking files and local install metadata
+          # in place; de-alias them so a write cannot reach the host copy.
           if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) -links +1 -delete
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml' \) -links +1 -delete
           fi
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Install libfaketime'
