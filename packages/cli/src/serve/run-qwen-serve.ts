@@ -156,6 +156,7 @@ import {
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import { isGitAvailable } from './git-availability.js';
 import {
   isLocalPathOpenAvailable,
   isLocalTerminalAvailable,
@@ -2485,6 +2486,7 @@ function currentServeFeaturesForRunQwenServe(
     // serves all five once the app is up.
     dynamicWorkspaceRegistrationAvailable: true,
     scratchWorkspaceRegistrationAvailable: true,
+    gitWorkspaceCloneAvailable: isGitAvailable(),
     standaloneSessionsAvailable: true,
     workspaceTrustHotReloadAvailable: true,
     acpHttpEnabled:
