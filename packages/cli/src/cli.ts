@@ -55,7 +55,7 @@ export const TOP_LEVEL_COMMANDS = [
   ],
   [
     'autofix-pr <command>',
-    'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, cleanup)',
+    'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, guarded push, replies, re-runs, the scheduled task, status, cleanup)',
   ],
   ['auth', 'Configure authentication (removed)'],
   [

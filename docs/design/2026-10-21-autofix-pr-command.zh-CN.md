@@ -2,7 +2,7 @@
 
 [English](2026-10-21-autofix-pr-command.md) | [简体中文](2026-10-21-autofix-pr-command.zh-CN.md)
 
-状态：进行中。2026-10-21，同日在定时任务闸门（[2026-10-21-scheduled-task-gate.md](2026-10-21-scheduled-task-gate.md)，PR #15069）取代模型驱动的 tick 之后修订：触发层是定时任务上的 `gate`，本命令的探针——作者侧的 `snapshot --gate` 和评审者侧的 `review watch-repo`——已实现，与之一起实现的还有 `prepare`、`ci-log` 和 `cleanup` 辅助命令。交付第 3 步（2026-10-24）加上了反应层：`push`、`sync`、`reply`、`rerun` 辅助命令，以及带 `--once` 和 watch 模式的 bundled `/autofix-pr` skill。评审者监视、第 4 步的循环状态和第 5 步的后续工作仍是提案。[已定决策](#11-已定决策)中的四项产品决策于 2026-10-21 确定；第四项在该节中修订。
+状态：进行中。2026-10-21，同日在定时任务闸门（[2026-10-21-scheduled-task-gate.md](2026-10-21-scheduled-task-gate.md)，PR #15069）取代模型驱动的 tick 之后修订：触发层是定时任务上的 `gate`，本命令的探针——作者侧的 `snapshot --gate` 和评审者侧的 `review watch-repo`——已实现，与之一起实现的还有 `prepare`、`ci-log` 和 `cleanup` 辅助命令。交付第 3 步（2026-10-24）加上了反应层：`push`、`sync`、`reply`、`rerun` 辅助命令，以及带 `--once` 和 watch 模式的 bundled `/autofix-pr` skill。第 4 步已开始（2026-10-25）：`status`、`schedule` 辅助命令和 `/autofix-pr resume`。评审者监视、第 4 步的其余部分和第 5 步的后续工作仍是提案。[已定决策](#11-已定决策)中的四项产品决策于 2026-10-21 确定；第四项在该节中修订。
 
 ## 1. 问题
 
@@ -48,7 +48,8 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
 
 ```text
 /autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions...]
-/autofix-pr status
+/autofix-pr status [<pr-number>]
+/autofix-pr resume [<pr-number>]
 /autofix-pr stop [<pr-number>]
 ```
 
@@ -65,7 +66,9 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
 
 每次启动都会确认，定时检查不会。无法显示确认的会话需要加 `--yes`。
 
-启动后，只有发生了事情的检查才会给用户一行输出，例如 `autofix-pr owner/repo#123: fixed "Test ubuntu" and 2 review comments, pushed 3f2a1c0`。`status` 列出正在盯的 PR，包括上次检查时间、head SHA、已用推送次数和等待人工处理的评论。
+启动后，只有发生了事情的检查才会给用户一行输出，例如 `autofix-pr owner/repo#123: fixed "Test ubuntu" and 2 review comments, pushed 3f2a1c0`。`status` 列出这个 clone 的所有监视，不论归哪个会话，包括上次检查和上一轮的时间、head SHA、已用推送次数、等待人工处理的事项，以及是否由本会话运行。
+
+监视的定时任务随运行它的会话结束（daemon 会话里任务持久化并绑定该会话：daemon 会保活该会话，重启后任务仍在，浏览器关掉也不会静默停摆），7 天后也会过期。`resume` 在当前会话里重新启动它，沿用启动时的间隔、`--no-reply` 和附加指令，推送、历史和预算都保留。它为要恢复的全部监视只确认一次，然后对每个监视跑一轮并重新排程。
 
 ## 5. 架构
 
@@ -81,9 +84,11 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
   ├─ qwen autofix-pr sync      adopt a head someone else pushed
   ├─ qwen autofix-pr reply     post replies with a marker, record what a round handled
   ├─ qwen autofix-pr rerun     re-run an infrastructure failure, once per check and head
+  ├─ qwen autofix-pr schedule  record the watch's task, print its cron, gate and prompt
+  ├─ qwen autofix-pr status    every watch of the clone, read from its files
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
-  └─ cron_create               session-only, recurring, gate:
-                               "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>";
+  └─ cron_create               recurring, gate（终端会话里是会话内任务；daemon 里是绑定该会话的持久化任务）:
+                               "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId> --task <task>";
                                the prompt says how to handle the events the gate printed
 
 qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marked
@@ -95,9 +100,11 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - worktree：`.qwen/tmp/autofix-pr-<n>/`
 - 状态：`.qwen/tmp/autofix-pr-<n>-state.json`
 - 闸门游标：`.qwen/tmp/autofix-pr-<n>-gate.json`
+- 监视自己的闸门上次检查的时间：`.qwen/tmp/autofix-pr-<n>-gate.checked`
 - 最近一次已准备快照：`.qwen/tmp/autofix-pr-<n>-snapshot.json`
 - GitHub 对 bot 评论的答复：`.qwen/tmp/autofix-pr-<n>-replies.json`
 - 日志、修复说明和回复计划：`.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
+- 用户给每一轮的附加指令：`.qwen/tmp/autofix-pr-<n>-instructions.txt`
 - 评审者游标：`.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
 
 ## 6. 辅助命令契约
@@ -108,12 +115,12 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 2. 动手之前先检查推送权限。同仓库 PR 要求仓库的 `viewerPermission` 为 `WRITE`、`MAINTAIN` 或 `ADMIN`。fork PR 要求当前用户就是 fork 的所有者，或者既有写权限又有 `maintainerCanModify`。否则拒绝并说明原因。
 3. 要求本地恰好有一个 remote 和 base 仓库匹配（使用 `review match-remote` 背后的匹配逻辑）。
 4. 确定推送目标。优先使用唯一一个和 head 仓库匹配、并且只推送到它的本地 remote：匹配器只读 fetch URL，所以该 remote 推送到的每一个 URL——它的 `pushurl`，或者多条 `url` 里的每一条——都用同一个匹配器再核对一遍，任何一个目的地在别处的 remote 都不算。没有的话，按 `gh config get git_protocol` 给出的协议使用 head 仓库的 URL。把结果记到状态文件里。
-5. 状态文件就是锁。它记录会话 id（`QWEN_CODE_SESSION_ID`）；由另一个会话写下的状态文件直接导致拒绝。`/clear` 和 `/resume` 会给会话换一个新 id，而它的定时任务继续运行，所以在用户同意时，`prepare --take-over` 把监视（连同历史和预算）移交给发起请求的会话；被移交的那个会话的辅助命令从此拒绝执行，它的定时任务在下一次触发时停止：它的闸门写明创建它的会话（`--session`，即 `prepare` 报告的 `sessionId`），在那之前不推进游标——写游标之前会再确认一次监视归谁——只把它唤醒（`watched_elsewhere`）。
+5. 状态文件就是锁。它记录会话 id（`QWEN_CODE_SESSION_ID`）；由另一个会话写下的状态文件直接导致拒绝。`/clear` 和 `/resume` 会给会话换一个新 id，而它的定时任务继续运行，所以在用户同意时，`prepare --take-over` 把监视（连同历史和预算）移交给发起请求的会话；被移交的那个会话的辅助命令从此拒绝执行，它的定时任务在下一次触发时停止：它的闸门写明创建它的会话（`--session`，即 `prepare` 报告的 `sessionId`），在那之前不推进游标——写游标之前会再确认一次监视归谁——只把它唤醒（`watched_elsewhere`，`session` 是拥有者）。每个任务还写明 `schedule` 为它生成的 id（`--task`，第 6.11 节）：id 与状态文件记录的不一致的闸门——被之后的启动或 resume 替换掉的任务，或者同一会话在第二个进程（`qwen --continue`）里的副本，这时辅助命令会接受它的轮次——同样这样回答；监视已被 `cleanup` 删除的闸门回答 `watch_ended`。两种事件都写明闸门自己的会话和任务（`gateSession`、`gateTask`），这一轮据此精确删除那个任务。原拥有者已在进行中的一轮，会被它下一次辅助命令调用拦下，因为那些调用也带着任务（第 6.8 节）；但它的修复 agent 不调用辅助命令，拦不住，可能继续往 worktree 里提交，新拥有者的一轮可能把这些提交推上去。这是已知限制：`status` 报告 `checkedRecently` 时，接管和 resume 的提问会说明这一点，最好等另一个会话停下后再接管。
 6. 把 `refs/pull/<n>/head` fetch 到本地分支 `qwen-autofix/pr-<n>`，并在它上面创建 worktree。`prepare` 从不丢弃之前的工作：残留的 worktree，或可能含有超出记录 head 的提交的残留分支，都会导致拒绝，并提示先运行 `cleanup`。
-7. 在拥有这次监视的会话里重新运行 `prepare`，且 worktree 还在时，直接报告现有状态并带上 `resumed: true`，不再调用其他任何东西。如果 worktree 已被删除（包括用 `rm -rf` 删除，`git worktree prune` 会清掉它的登记），就重新创建它，并保留已记录的 `pushedShas`、`handledCommentIds` 和 `postedCommentIds`。状态文件属于另一个仓库的同号 PR 时直接拒绝。仓库按 GitHub 的方式比较：owner 和仓库名不区分大小写；host 不区分大小写、忽略默认端口，但保留其他端口，因为不同端口可能是不同的实例。
+7. 在拥有这次监视的会话里重新运行 `prepare`，且 worktree 还在时，直接报告现有状态并带上 `resumed: true`，只向 GitHub 询问 PR 作者是谁、能否推送，并按本 clone 的 remote 重新推导 remote 和推送目标：状态文件就在 worktree 旁边，一轮运行的代码够得着它，所以这些都不从它读回；本 clone 不服务的仓库直接拒绝。只有权限 API 返回 404 才表示作者不能推送；其他失败（限流、网络）都是什么也不改的拒绝，接管也只在拿到这些答案之后才写入。head 仓库已被删除的 PR 同样拒绝。新建监视时，作者能否推送在获取或创建任何东西之前就询问，所以被拒时不留下任何东西。监视的每个文件——状态、游标、history、回复缓存、快照——都只在是普通文件时才读取，所以以其名字放置的 FIFO 卡不住辅助命令或闸门；写入时替换链接而不是跟随它，所以没有辅助命令会写到 `.qwen/tmp` 之外。如果 worktree 已被删除（包括用 `rm -rf` 删除，`git worktree prune` 会清掉它的登记），就重新创建它，并保留已记录的 `pushedShas`、`handledCommentIds` 和 `postedCommentIds`，以及预算、记下的任务（`watch`）和 `needsHuman`，报告里写 `recreated: true`：随后被取消的启动不能清理一个不是它创建的监视。`stop` 已结束的监视也以同样方式恢复（`wasEnded`，与保留 worktree 的路径相同）。带 `--take-over` 时，只有 PR 通过第 2 步的检查后才把监视移交给本会话，被拒时监视仍归原来的会话。状态文件属于另一个仓库的同号 PR 时直接拒绝。仓库按 GitHub 的方式比较：owner 和仓库名不区分大小写；host 不区分大小写、忽略默认端口，但保留其他端口，因为不同端口可能是不同的实例。在 daemon 会话里（`QWEN_CODE_SERVE=1`），worktree 不在会话工作目录之内时，在读取状态文件之前就拒绝，恢复、接管和新建监视都一样：daemon 只在那个目录里运行修复 agent 的命令，在那里的一轮无法测试、提交或推送。拒绝信息会写明应该从哪个 clone 根目录运行 prepare。
 8. 输出 JSON 报告：worktree 路径、分支、head SHA、base/head ref、推送目标、当前用户和 PR 作者的 login、draft 和 fork 标志，以及 `localUnpushedCommits`，即用户自己那份 head 分支上 PR 还没有的提交数。worktree 看不到这些提交。只有 upstream 是推送 remote 上 head 分支的本地分支才算这份副本，因此 fork 的 `main` 永远不会和用户自己的 `main` 比较。
 
-### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>]`
+### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>] [--task <id>]`
 
 一次 GraphQL 调用（check context、check suite 或 review thread 每多一页再加一次；对开启线程的机器人评论，另有一次 REST 调用询问它是否在回答一条已删除的评论，见本节评论规则）读取：
 
@@ -238,7 +245,8 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
   "summary": { "body": "...", "handled": ["IC_y"] },
   "handled": ["PRR_z"],
   "handledChecks": ["Test ubuntu@<head>@#789"],
-  "handledConflict": false
+  "handledConflict": false,
+  "needsHuman": ["PRRC_x: rename the public option, or keep it?"]
 }
 ```
 
@@ -254,13 +262,14 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - 每条正文只加一次标记，且必须在 GitHub 的 65,536 字符以内。
 - 每个发出的 id 一产生就写入状态文件，连同它所回复的评论。中途失败时，其余部分不发也不记录；用同一份计划重跑时会认出已发出的内容（见上），回复的评论全部已处理才跳过，评论都已处理的总结也跳过——除非该 head 是本监视推送且尚无总结：每次推送都有一条总结，每个 head 一条（记在 `summarizedSha`），不论它是否回答评论。
 - `handledChecks` 和 `handledConflict` 记录这一轮没有靠推送修好的失败和冲突，prepared snapshot 不再报告它们：失败按 attempt 记（重跑后再次失败算新的），冲突按 head 记。
+- `needsHuman` 每行一项，是这一轮留给人处理的事项。辅助命令把每项连同回答它时的 head 和时间记入状态文件，按时间先后排列，最多保留最新的 20 项，供 `status` 列出。空白会折叠，超过 300 字符的行会被截断，同一 head 上的同一行只记一次，所以重跑同一份计划不会增加条目。
 - `--no-post`（skill 的 `--no-reply`）记录同样的内容（包括总结的 `summarizedSha`），但不发任何东西。
 
 回复 review thread 使用 `POST /repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies`；总结是一条 issue 评论。两种 POST 都不重试：在传输错误之前已到达 GitHub 的请求会发出两次。
 
-### 6.6 `cleanup <pr> [--force]`
+### 6.6 `cleanup <pr> [--force] [--take-over]`
 
-一起删除 worktree、它的分支和状态文件。worktree 有未提交的改动（包括未跟踪文件和子模块里的改动，不受 `status.showUntrackedFiles` 或子模块的 `ignore` 设置影响），或者 worktree（worktree 已被删除时则是分支）有监视已知的任何 PR head 都不包含的提交时，三者都保留，并在报告里说明原因。已知的 head 是 `lastKnownHeadSha` 和 `pushedShas`，以及——只在前两者比完仍有多出的提交时才去问——远端的 PR head（`refs/pull/<n>/head`），所以手工推送过的工作不会被拦住。worktree 路径上的目录如果不是独立的 worktree，会被保留：在它里面运行 git 会判断外层 clone。没有状态文件时没有记录的 head，因此残留的 worktree 或分支都会被保留。状态文件属于另一个会话时直接拒绝。`--force` 跳过这些检查，也会丢弃无法读取的状态文件。分支删不掉时报错，状态文件保留。在要删除的 worktree 内部运行 `cleanup` 会被拒绝。闸门游标不会被删除：它属于定时任务，而定时任务比一次监视活得久，没有游标的话下一次触发会把所有内容重新报告一遍。要停掉闸门，就删除该任务。报告里会写出保留的游标（`gateCursor`）：之后对另一个仓库同号 PR 的闸门会被拒绝，直到删除这个文件。
+一起删除 worktree、它的分支和状态文件。worktree 有未提交的改动（包括未跟踪文件和子模块里的改动，不受 `status.showUntrackedFiles` 或子模块的 `ignore` 设置影响），或者 worktree（worktree 已被删除时则是分支）有监视已知的任何 PR head 都不包含的提交时，三者都保留，并在报告里说明原因。监视照样结束：记下的任务（`watch`，第 6.11 节）被去掉，状态里记下 `ended`（时间和原因）。这样 `/autofix-pr resume` 不会重新启动它，仍在进行的一轮（删除任务之前就已排队的触发、同一会话的第二个进程）的辅助命令会拒绝它，它的闸门回答 `watch_ended`——否则其中任何一个都会丢弃保留下来的内容。显式启动（`prepare`，报告 `wasEnded`）会恢复它。已知的 head 是 `lastKnownHeadSha` 和 `pushedShas`，以及——只在前两者比完仍有多出的提交时才去问——远端的 PR head（`refs/pull/<n>/head`），所以手工推送过的工作不会被拦住。worktree 路径上的目录如果不是独立的 worktree，会被保留：在它里面运行 git 会判断外层 clone。没有状态文件时没有记录的 head，因此残留的 worktree 或分支都会被保留。状态文件属于另一个会话时直接拒绝，除非 `--take-over` 先像 `prepare --take-over` 那样把监视移交给本会话：`/autofix-pr stop <n>` 会带上它，这样另一个会话留下的监视也能停掉，而不丢弃其中的工作。`--force` 跳过这些检查，也会丢弃无法读取的状态文件。分支删不掉时报错，状态文件保留。在要删除的 worktree 内部运行 `cleanup` 会被拒绝。闸门游标不会被删除：它属于定时任务，而定时任务比一次监视活得久，没有游标的话下一次触发会把所有内容重新报告一遍。要停掉闸门，就删除该任务。报告里会写出保留的游标（`gateCursor`）：之后对另一个仓库同号 PR 的闸门会被拒绝，直到删除这个文件。
 
 监视发出和处理过的内容——`handledCommentIds`、`postedCommentIds`、`handledChecks`、`rerunChecks`、`handledConflictSha`，以及已登记但尚未结算的回复（`pendingPosts`）和延后的重跑（`deferredRuns`、`heldChecks`）——后两者取监视自己当前的列表（它们本就从历史开始，之后已结算的不能再回来）——会在删除状态文件之前并入该 PR 的历史 `.qwen/tmp/autofix-pr-<n>-history-<host>+<owner>+<repo>.history.json`（同一个 clone 可能监视 fork 和上游里同号的 PR；`+` 和代替端口 `:` 的 `@` 不会出现在任何名字里，后缀也永远不会与 skill 可写的文件名重合），这个文件同样保留（报告里的 `history`）。`--force` 还会删除这次监视的锁，以防某个辅助命令在持锁时被杀掉。之后对同一 PR 的新监视在 `prepare` 时从它开始，所以不会再回复之前监视回复过的评论，也不会在同一 head 上把一个检查重跑两次；另一个仓库同号 PR 的历史会被忽略。
 
@@ -275,7 +284,9 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 输出：`{ "repo": "<owner>/<repo>", "events": [...] }`，没有事件时什么都不输出。与作者侧闸门同样以 12 KiB 为限，放不下的事件被留下并计入 `deferred`；这些 PR 在游标里保留旧的 head，所以下一次运行会报告它们。使用它的 skill 决定每个事件的含义：对每个 PR 运行 `/qreview <number>` 或一次验证。
 
-### 6.8 `sync <pr> [--discard]`
+### 6.8 `sync <pr> [--discard] [--task <id>]`
+
+一轮从 `sync` 开始，所以它也检查这一轮能否运行：监视没有结束（第 6.6 节）且归本会话，带 `--task`（即这一轮 prompt 写明的任务）时还要求该任务仍在驱动监视。在之后的 `schedule` 替换掉它的任务之前、或在 `stop` 结束监视之前就已排队的触发，会在这里被拒绝，这一轮随即删除该任务。`snapshot`、`ci-log`、`push`、`reply` 和 `rerun` 带同样的 `--task`、以同样的方式拒绝，所以任务被替换时已经过了 `sync` 的一轮，会在下一次辅助命令时停下。
 
 接纳别人推送的 head。它从推送目标读取 PR 分支——也就是推送 lease 保护的那个 ref，它会立即变化，不像 `refs/pull/<n>/head` 有延迟——取到 worktree 自己的 `FETCH_HEAD`（不碰用户的 checkout），并像 `push` 一样检查 worktree。然后：
 
@@ -296,13 +307,47 @@ GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就
 
 `push`、`sync`、`reply` 和 `rerun` 在读写状态文件期间都持有这次监视的锁（`.qwen/tmp/autofix-pr-<n>.lock`）：否则模型同时发出的两个辅助命令调用会各自写回自己读到的内容，抹掉对方关于推送、回复或重跑的记录。`prepare` 在创建 worktree 和状态文件期间也持有它，所以同时进行的两次启动不会回滚或接管对方的 worktree。锁以硬链接的方式整体创建（链接到一个已写好令牌的文件），并且只在仍持有自己令牌时才删除。沙箱可能让每条命令运行在独立的 pid 命名空间里，pid 会重复，所以只在同一命名空间里才检查持有者的 pid；其他锁在存在时间超过任何辅助命令的运行时长（十五分钟）后被接管，`cleanup --force` 则会立即删除它。过期锁一次只由一个辅助命令打破，在独占的 `<lock>.break` 文件保护下进行（被杀掉的辅助命令留下的 `.break` 在一分钟后清除，不论时钟偏前还是偏后）；此时锁里仍是过期令牌，就用一次 rename 把它替换成打破者自己的令牌，所以锁路径从不出现空档让别的辅助命令趁机拿到，新的锁也永远不会被动到。
 
+### 6.10 `status [<pr>]`
+
+列出这个 clone 的监视，从主 worktree 的 `.qwen/tmp` 下它们的文件读取：不取锁，也不询问 GitHub，所以辅助命令运行期间也能回答，且不论监视归哪个会话。输出为 `{ "now": "<时间>", "watches": [...] }`；读不了的状态文件放在 `unreadable` 里，带 PR 和原因。每个监视包含：
+
+- PR、它的仓库、host 和 URL；`headRefName`、`pushTarget` 和监视已知的 head（`headSha`）；
+- `pushes` 和 `maxPushes`；
+- `session`（拥有它的会话）和 `thisSession`；
+- `lastCheck`：监视自己的闸门（带 `--session` 的那个）最近一次读取 PR 的时间——每次这样的运行都会更新 `.qwen/tmp/autofix-pr-<n>-gate.checked`，`cleanup` 会随监视一起删除它；共用游标但不带会话的闸门不碰它；`lastRound`：最近一次已准备快照的时间；首次之前两者都是 null；
+- `checkedRecently`：`lastCheck` 是否在该监视的两个间隔之内，即某个闸门（本会话的或别的会话的）很可能仍在运行。由辅助命令给出而不是由模型判断，因为模型知道日期但不知道时刻；
+- `stopped`：闸门看到 PR 已合并或关闭而监视没有清理时为 `merged` 或 `closed`——以 `lastCheck` 时为准：PR 之后可能已重新打开，所以 skill 只通过会读 GitHub 的一轮来处理它；
+- `watch`：`schedule` 记下的任务，`--once` 为 null；
+- `ended`：保留了 worktree 的 `cleanup` 结束该监视的时间和原因；
+- `needsHuman`（第 6.5 节）；
+- worktree 的路径及其是否存在，以及 `worktreeWork`：worktree 或其分支里有而 PR 没有的内容，按 `cleanup` 的方式判断，但不询问远端、也不占用 index 锁，没有则为 null。在它上面开始的一轮会丢弃这些内容，所以接管或 resume 会在提问前说明。
+
+闸门游标比一次监视活得久（第 6.6 节），所以只有它指向该监视的仓库、且不早于该监视（`preparedAt`，由 `prepare` 写入：在 PR 重新打开并再次被监视之前看到它被关闭的游标，属于之前那个监视）时才读取；读不了的游标让 `stopped` 为 null，而不会让这个监视从列表里消失。状态文件只按辅助命令给出的名字读取（不带前导零），并且必须是它自己那个 PR 的；它和游标都只在是普通文件时才读取（同名的 FIFO 会让读取阻塞）；其他情况都放进 `unreadable`，并写明文件和处理办法（`cleanup <n> --force`）。
+
+定时任务只存在于创建它的会话里，辅助命令看不到：由 skill 把列表和 `cron_list` 对照，说明哪些监视由本会话运行。
+
+### 6.11 `schedule <pr> [--every <minutes>] [--no-reply] [--instructions] | --again`
+
+把监视的定时任务记入状态文件（`watch: { every, reply, instructions, task }`；读状态时只取这些字段，文件里多出来的内容会被丢弃），并按 `cron_create` 的参数输出：`cron`、`recurring`、`gate`、`prompt`，以及这些选项。闸门和 prompt 都带着任务 id（`tick <owner>/<repo>#<n> --task <id>`），所以被替换掉的任务唤醒的一轮会在第一次 `sync` 时停下。skill 照原样用它们创建任务，这样闸门和 prompt 不再由模型拼出来。
+
+- 每次运行都生成一个新的任务 id，由闸门带上（`--task`）。用这份输出创建的任务是该监视唯一的任务：其他任务——之前启动留下的、接管之前的，或同一会话在第二个进程里的副本——的闸门都会回答 stop（第 6.1 节第 5 步），skill 也会在创建这个任务之前删掉该 PR 的其他任务。
+
+- `--every` 取 `1, 2, 5, 10, 15, 30, 60` 之一（默认 2），且必须带值；60 对应 `0 * * * *`。
+- `--instructions` 从 `.qwen/tmp/autofix-pr-<n>-instructions.txt` 读取用户的附加指令，该文件由 skill 按用户原话写入。prompt 只有一行，所以空白会折叠，格式字符（双向控制符、零宽字符）会被去掉；超过 2,000 字符会被拒绝。
+- 闸门写明拥有该监视的会话；在会话之外准备的监视，或会话 id 无法原样放进命令的（必须以字母或数字开头，这样它永远不会被当成选项），会被拒绝。
+- 附加指令里的控制字符和空白一样折叠；状态文件自身的校验把记下的任务限制为一行、最多 2,000 字符，所以 `--again` 输出的不会更长。
+- `--again` 用之前记下的选项、以新的 id 再次排程该任务，不接受其他选项：resume 在接管之后、跑那一轮之前运行它。没有记录任务的监视（`--once` 启动，或 `cleanup` 保留 worktree 时结束的监视）会被拒绝，这一轮已结束的监视也会被拒绝：用 `/autofix-pr <n>` 重新启动。
+- PR 作者无法推送时拒绝——只要状态不是 `authorCanPush: true`：它的代码会在用户凭据可及的环境里运行，这只能按 `--once` 一轮一轮地确认，不能用于监视。
+- `watch`、`ended`、`needsHuman` 里本 CLI 不认识的字段（较新版本写入的）会在读状态时被丢弃，因此也不会被写回。
+- 只有拥有该监视的会话能运行它；任务做不出来时什么也不记录。
+
 ## 7. 一轮检查（`tick`）
 
 闸门已经运行了 `snapshot --gate`；到达模型的触发在闸门输出里带着事件，所以安静的检查永远不会变成一个回合。
 
 ```text
 snapshot --gate (in the gate)
-  ├─ stop     → cron_delete, cleanup, report outcome
+  ├─ stop     → cleanup, cron_delete, report outcome
   ├─ wait     → end the turn with no message
   ├─ resync   → fetch, fast-forward the worktree to the new head, set cursor,
   │             then handle the other events of the same output (the gate
@@ -330,7 +375,7 @@ snapshot --gate (in the gate)
 
 resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force-push 了），worktree 会被重置到新 head，而不是快进。工具推送过的内容此时已在作者手中，是作者改写的那段历史的一部分。重置最多丢掉一次没有推送的尝试，它基于旧的 head，`push` 本来也会拒绝它；这次尝试按上面的规则结束。
 
-一轮检查从不向用户提问。需要人来判断的情况（设计分歧、互相矛盾的评论、超出 PR 范围的要求）会回复"需要人工决定"并记入 `needsHuman`。循环继续关注其他事件。（交付第 3 步在 PR 上回复这类事项并在本轮消息里报告；`needsHuman` 列表随第 4 步的 `status` 一起提供。）
+一轮检查从不向用户提问。需要人来判断的情况（设计分歧、互相矛盾的评论、超出 PR 范围的要求）会回复"需要人工决定"并记入 `needsHuman`。循环继续关注其他事件。这一轮会在 PR 上回复这类事项，在本轮消息里报告，并写进回复计划的 `needsHuman`，由 `status` 列出（第 6.5、6.10 节）。
 
 ## 8. 信任模型
 
@@ -349,7 +394,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 永远不处理：
 
 - 工具自己的回复：id 在 `postedCommentIds` 里，或者当前用户发的、以回复标记结尾的评论。当前用户往往就是 PR 作者，因此是可信的；没有这条规则，工具就会回复自己。
-- 其他任何人的评论。它们会出现在 `status` 和最终报告里，但不会被处理，也不会被回复。
+- 其他任何人的评论。它们会出现在这一轮的快照和报告里，但不会被处理，也不会被回复。
 
 即使是可处理的评论，修复说明也禁止：泄露密钥或 token；修改 CI 配置来跳过、禁用或削弱检查；删除或削弱测试来让它们通过；跳过仓库的 commit hook（`--no-verify`）；强推；与 PR 无关的改动。这类请求会收到"需要人工决定"的回复。
 
@@ -367,9 +412,9 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 
 ## 10. 调度、预算与生命周期
 
-- 启动时立即跑第一轮检查——已准备模式的 `snapshot <n>`，它读状态文件而不读闸门游标，所以新的监视能看到所有未处理的事项，不论旧闸门报告过什么——然后调用 `cron_create` 创建会话级循环任务，cron 为 `*/<every> * * * *`（默认 `*/2`），闸门为 `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>`（即传给 `prepare` 的 host 和 `prepare` 报告的会话），prompt 告诉模型如何处理闸门输出中的事件（`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`）。闸门在创建任务时像 Monitor 命令一样确认一次。
+- 启动时立即跑第一轮检查——已准备模式的 `snapshot <n>`，它读状态文件而不读闸门游标，所以新的监视能看到所有未处理的事项，不论旧闸门报告过什么——然后在 `status` 确认监视仍记录着它之后，用那一轮之前 `schedule` 输出的任务（第 6.11 节）调用 `cron_create`——这一轮的修复 agent 可能写进状态文件的内容，到不了任务里：循环任务——终端会话里是会话级任务，daemon（`QWEN_CODE_SERVE=1`）里是绑定该会话的持久化任务，否则会话空闲回收会把会话级任务的内存调度器一并带走——cron 为 `*/<every> * * * *`（默认 `*/2`），闸门为 `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId> --task <task>`（即传给 `prepare` 的 host 和拥有该监视的会话），prompt 告诉模型如何处理闸门输出中的事件（`Run /autofix-pr tick <owner>/<repo>#<n> --task <task>`）。第一轮也在这个任务下运行。闸门在创建任务时像 Monitor 命令一样确认一次。一个 daemon 会话只承载一个定时任务，因此第二个监视需要另开会话。
 - 会话忙时到达的触发会在通知队列里等待；会话空闲后探针运行一次，输出自上次运行以来的全部新内容。
-- 任务随进程结束。状态文件保留，归写下它的会话所有，新会话的 `prepare` 会拒绝它（第 6.1 节）。之后的会话在用户同意后用 `prepare --take-over` 接管监视，推送和预算都保留（第 6.1 节第 5 步）。监视发出和处理过的内容保存在 PR 的历史文件里（第 6.6 节），所以新的监视不会再回复同样的评论。已经停止的监视已经运行过 `cleanup`。
+- 任务随进程结束，daemon 会话例外：任务持久化并绑定该会话，daemon 会保活该会话，重启后重新加载它。状态文件保留，归写下它的会话所有，新会话的 `prepare` 会拒绝它（第 6.1 节）。之后的会话在用户同意后用 `prepare --take-over` 接管监视，推送和预算都保留（第 6.1 节第 5 步）。`/autofix-pr resume` 对本会话没有在运行其任务的每个监视做这件事：确认一次后接管，并创建启动时 `schedule` 记下的任务（`schedule --again`），监视按原来的间隔、`--no-reply` 和附加指令继续。过期的任务也用同样的方式恢复。它先对要恢复的每个监视完成接管并运行 `schedule --again`，然后才跑任何一轮——一轮的修复 agent 就在其他监视的状态文件旁边工作——打印出的选项与提问时不同的监视会被排除；新的任务 id 让这些监视的其他所有任务（包括同一会话在第二个进程里的）停下，并删掉本会话里这些 PR 残留的任务。然后在各自的任务下逐个跑一轮，最后在 `status` 确认监视仍记录着该任务后，按打印出的内容创建任务；没有点名 PR 时，跳过另一个会话的闸门在两个间隔内检查过的监视；`stop` 在保留 worktree 时结束的监视没有记录任务，不会被恢复。监视发出和处理过的内容保存在 PR 的历史文件里（第 6.6 节），所以新的监视不会再回复同样的评论。已经停止的监视已经运行过 `cleanup`。
 - cron 最长存活时间的设置（`QWEN_CODE_CRON_MAX_AGE_DAYS`）仍然生效。
 
 预算记录在状态文件里：
@@ -425,9 +470,10 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 1. 触发层：定时任务闸门（PR #15069）。
 2. 探针（本 PR）：带游标和 check 翻页的 `snapshot --gate`，以及 `review watch-repo`；`prepare`、`ci-log` 和 `cleanup` 一同交付，等待反应层。
 3. 辅助命令 `push` 和 `reply`，带测试；以及 skill：支持 `--once` 的 `/autofix-pr`，然后是作为带闸门任务的 watch 模式，以及对每个事件运行 `/qreview` 或一次验证的评审者监视。状态文件记录已处理过的失败检查 attempt，键与闸门游标相同（检查，head，attempt），这样 agent 已放弃的失败不会被再次派发，而重跑后再次失败的会。
-   除评审者监视外已交付（2026-10-24）：`push`、`sync`（第 6.8 节）、`reply`、`rerun`（第 6.9 节），以及支持 `--once`、watch 模式、`stop` 和简单 `status` 的 bundled skill。这一步里修复 agent 在前台运行：会话等它结束，所以不会有触发再启动第二次尝试，暂时不需要 `inFlight`。它执行的预算是每次启动的推送次数（`push`）、每个检查每个 head 一次重跑（`rerun`），以及每条 review 评论一次尝试（一轮处理过的评论无论结果如何都会被记录；最后一次推送所在的那一轮是监视的最后一轮）；同一轮内两次 resync 会停止监视；一轮没能推送的工作以 `sync --discard` 结束，下一轮不会建立在它之上。第 8 节的沙箱规则在启动时执行，每一轮都先运行 `sync`，所以 GitHub API 尚未显示的推送或回退也会被跟上；推送之前还会再 sync 一次，把修复 agent 的合并留在原处的子模块移过去。skill 的 `allowedTools` 只放行读取它的 `.qwen/tmp` 文件、写它的修复说明和回复计划，以及 `cron_list`——不放行任何 shell 命令。权限匹配器把开头的 `"${QWEN_CODE_CLI:-qwen}"` 读成空词，没有规则能只放行这些辅助命令；而即使是 `gh pr view *` 这样只读命令的放行规则，也会连带放行其后的命令替换、重定向和环境变量前缀。所以在默认审批模式下，每次辅助命令调用——包括推送——都会先询问。
+   除评审者监视外已交付（2026-10-24）：`push`、`sync`（第 6.8 节）、`reply`、`rerun`（第 6.9 节），以及支持 `--once`、watch 模式、`stop` 和简单 `status` 的 bundled skill。这一步里修复 agent 在前台运行：会话等它结束，所以不会有触发再启动第二次尝试，暂时不需要 `inFlight`。它执行的预算是每次启动的推送次数（`push`）、每个检查每个 head 一次重跑（`rerun`），以及每条 review 评论一次尝试（一轮处理过的评论无论结果如何都会被记录；最后一次推送所在的那一轮是监视的最后一轮）；同一轮内两次 resync 会停止监视；一轮没能推送的工作以 `sync --discard` 结束，下一轮不会建立在它之上。第 8 节的沙箱规则在启动时执行，每一轮都先运行 `sync`，所以 GitHub API 尚未显示的推送或回退也会被跟上；推送之前还会再 sync 一次，把修复 agent 的合并留在原处的子模块移过去。skill 的 `allowedTools` 只放行读取它的 `.qwen/tmp` 文件、写它的修复说明、回复计划和用户的附加指令（最后一项由第 4 步加上），以及 `cron_list`——不放行任何 shell 命令。权限匹配器把开头的 `"${QWEN_CODE_CLI:-qwen}"` 读成空词，没有规则能只放行这些辅助命令；而即使是 `gh pr view *` 这样只读命令的放行规则，也会连带放行其后的命令替换、重定向和环境变量前缀。所以在默认审批模式下，每次辅助命令调用——包括推送——都会先询问。
 4. 循环状态：`status`、`stop`、预算，以及由之后的会话接管状态文件。
-5. 后续工作：daemon 会话里的持久化监视（`durable` 加 `sessionMode: "current"`，待闸门支持后）；可配置的 bot 允许名单。
+   已开始（2026-10-25）：`status`（第 6.10 节）从文件列出每个监视，包括留给人处理的事项（回复计划里的 `needsHuman`，第 6.5 节）；`schedule`（第 6.11 节）记录监视的任务；`/autofix-pr resume` 接管监视并重新排程该任务。尚未完成：修复 agent 改到后台运行并记录 `inFlight`，以及第 10 节中尚未执行的预算。
+5. 后续工作：可配置的 bot 允许名单。
 
 待定问题：
 

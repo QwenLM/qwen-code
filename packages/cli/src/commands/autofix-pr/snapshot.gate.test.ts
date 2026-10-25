@@ -5,12 +5,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
+  utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -30,6 +33,7 @@ import {
   autofixPrPaths,
   writeState,
   type AutofixPrGateCursor,
+  type AutofixPrState,
 } from './state.js';
 
 const mockGh = vi.hoisted(() => vi.fn());
@@ -1907,6 +1911,160 @@ describe('runSnapshot --gate', () => {
     expect(printedIds()).toEqual([['I1'], ['I2']]);
   });
 
+  it("marks every check by the watch's own gate, for `status`, and none by a gate of no session", () => {
+    const paths = autofixPrPaths(mocks.root, 7);
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    expect(existsSync(paths.checkedPath)).toBe(false);
+    writeState(paths.statePath, {
+      version: 1,
+      sessionId: 'session-a',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: 'qwen-autofix/pr-7',
+      worktreePath: join(dirname(paths.statePath), 'autofix-pr-7'),
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+      watch: { every: 2, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    const own = () =>
+      runSnapshot({
+        pr: 7,
+        gate: true,
+        session: 'session-a',
+        task: 'aaaaaaaaaaaa',
+      });
+    respond(withComments('I1'));
+    own();
+    expect(existsSync(paths.checkedPath)).toBe(true);
+    const old = new Date('2026-10-01T00:00:00.000Z');
+    utimesSync(paths.checkedPath, old, old);
+    // A quiet run counts: the cursor stays as it was.
+    const written = readFileSync(gatePath(), 'utf8');
+    respond(withComments('I1'));
+    own();
+    expect(readFileSync(gatePath(), 'utf8')).toBe(written);
+    expect(statSync(paths.checkedPath).mtimeMs).toBeGreaterThan(old.getTime());
+    // A Managed automation's gate, or a probe run by hand, is no sign that
+    // the watch is running, though it moves the cursor.
+    utimesSync(paths.checkedPath, old, old);
+    respond(withComments('I1', 'I2'));
+    runSnapshot({ pr: 7, gate: true });
+    expect(statSync(paths.checkedPath).mtimeMs).toBe(old.getTime());
+  });
+
+  it('stops a task from before task ids once one is recorded, and any task of a watch cleanup ended', () => {
+    const paths = autofixPrPaths(mocks.root, 7);
+    mkdirSync(dirname(paths.statePath), { recursive: true });
+    const state: AutofixPrState = {
+      version: 1,
+      sessionId: 'session-a',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: 'qwen-autofix/pr-7',
+      worktreePath: join(dirname(paths.statePath), 'autofix-pr-7'),
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+      watch: { every: 2, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+    };
+    writeState(paths.statePath, state);
+    const out = () => JSON.parse(mocks.stdout.mock.calls.at(-1)![0]);
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true, session: 'session-a' });
+    expect(out()).toEqual({
+      action: 'stop',
+      events: [
+        {
+          type: 'watched_elsewhere',
+          session: 'session-a',
+          gateSession: 'session-a',
+        },
+      ],
+    });
+    // A cleanup that kept the worktree ended the watch.
+    const { watch: _w, ...kept } = state;
+    writeState(paths.statePath, {
+      ...kept,
+      ended: { at: '2026-10-25T00:00:00.000Z', reason: 'kept' },
+    });
+    for (const task of ['aaaaaaaaaaaa', undefined]) {
+      runSnapshot({
+        pr: 7,
+        repo: 'o/r',
+        gate: true,
+        session: 'session-a',
+        task,
+      });
+      expect(out()).toMatchObject({
+        action: 'stop',
+        events: [{ type: 'watch_ended', gateSession: 'session-a' }],
+      });
+    }
+    // A task made by schedule, of a watch that no longer records one.
+    writeState(paths.statePath, kept);
+    runSnapshot({
+      pr: 7,
+      repo: 'o/r',
+      gate: true,
+      session: 'session-a',
+      task: 'aaaaaaaaaaaa',
+    });
+    expect(out()).toMatchObject({ events: [{ type: 'watch_ended' }] });
+    // A state of another repository's PR of the number is no watch of it.
+    writeState(paths.statePath, { ...state, owner: 'fork' });
+    runSnapshot({
+      pr: 7,
+      repo: 'o/r',
+      gate: true,
+      session: 'session-a',
+      task: 'aaaaaaaaaaaa',
+    });
+    expect(out()).toMatchObject({ events: [{ type: 'watch_ended' }] });
+    expect(mockGh).not.toHaveBeenCalled();
+    expect(() =>
+      runSnapshot({ pr: 7, repo: 'o/r', gate: true, task: 'aaaaaaaaaaaa' }),
+    ).toThrow(/--task names a task of a watch/);
+  });
+
+  // FIFOs are POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'never blocks on a cursor or a reply cache that is not a regular file',
+    () => {
+      const paths = autofixPrPaths(mocks.root, 7);
+      mkdirSync(dirname(paths.gatePath), { recursive: true });
+      // A cache in the way is asked again, not read.
+      execFileSync('mkfifo', [paths.repliesPath]);
+      respond(withComments('I1'));
+      runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+      expect(printedIds()).toEqual([['I1']]);
+      // A cursor in the way fails the gate, which the scheduler reports.
+      rmSync(paths.gatePath);
+      execFileSync('mkfifo', [paths.gatePath]);
+      expect(() => runSnapshot({ pr: 7, repo: 'o/r', gate: true })).toThrow(
+        /not a regular file/,
+      );
+    },
+  );
+
   it('stores the cursor before printing, so a failed print is not repeated', () => {
     mocks.stdout.mockImplementationOnce(() => {
       throw new Error('EPIPE');
@@ -2058,7 +2216,13 @@ describe('runSnapshot --gate', () => {
     runSnapshot({ pr: 7, repo: 'o/r', gate: true, session: 'session-a' });
     expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toEqual({
       action: 'stop',
-      events: [{ type: 'watched_elsewhere', session: 'session-b' }],
+      events: [
+        {
+          type: 'watched_elsewhere',
+          session: 'session-b',
+          gateSession: 'session-a',
+        },
+      ],
     });
     expect(mockGh).not.toHaveBeenCalled();
     expect(existsSync(gatePath())).toBe(false);
@@ -2113,9 +2277,88 @@ describe('runSnapshot --gate', () => {
     });
     runSnapshot({ pr: 7, repo: 'o/r', gate: true, session: 'session-a' });
     expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toMatchObject({
-      events: [{ type: 'watched_elsewhere', session: 'session-b' }],
+      events: [
+        {
+          type: 'watched_elsewhere',
+          session: 'session-b',
+          gateSession: 'session-a',
+        },
+      ],
     });
     expect(existsSync(gatePath())).toBe(false);
+  });
+
+  it('stops a task a later schedule replaced, and one whose watch ended, moving no cursor', () => {
+    const statePath = autofixPrPaths(mocks.root, 7).statePath;
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeState(statePath, {
+      version: 1,
+      sessionId: 'session-a',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: 'qwen-autofix/pr-7',
+      worktreePath: join(dirname(statePath), 'autofix-pr-7'),
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+      watch: { every: 2, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    const gate = (task: string) =>
+      runSnapshot({
+        pr: 7,
+        repo: 'o/r',
+        gate: true,
+        session: 'session-a',
+        task,
+      });
+    // The watch's own task reads the PR.
+    respond(pr());
+    gate('aaaaaaaaaaaa');
+    expect(mockGh).toHaveBeenCalledTimes(1);
+    const old = new Date('2026-10-01T00:00:00.000Z');
+    utimesSync(gatePath(), old, old);
+    // A task the watch's latest schedule replaced — one in a second
+    // process of the same session, say — stops without asking GitHub, and
+    // leaves the cursor's time to the gate that drives the watch.
+    mocks.stdout.mockClear();
+    gate('bbbbbbbbbbbb');
+    expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toEqual({
+      action: 'stop',
+      events: [
+        {
+          type: 'watched_elsewhere',
+          session: 'session-a',
+          gateSession: 'session-a',
+          gateTask: 'bbbbbbbbbbbb',
+        },
+      ],
+    });
+    expect(mockGh).toHaveBeenCalledTimes(1);
+    expect(statSync(gatePath()).mtimeMs).toBe(old.getTime());
+    // Once cleanup removed the watch, its task stops too.
+    rmSync(statePath);
+    mocks.stdout.mockClear();
+    gate('aaaaaaaaaaaa');
+    expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toEqual({
+      action: 'stop',
+      events: [
+        {
+          type: 'watch_ended',
+          gateSession: 'session-a',
+          gateTask: 'aaaaaaaaaaaa',
+        },
+      ],
+    });
+    expect(mockGh).toHaveBeenCalledTimes(1);
   });
 
   it('leaves out what a prepared watch handled: failures, a conflict, and a deferred run until it ends', () => {

@@ -30,9 +30,6 @@ const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
 const writeBackFind =
   "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \\) -prune -o -type f -links 1 ! -name '_remote.repositories' ! -name 'maven-metadata-local.xml' ! -name 'resolver-status.properties' ! -name '*.lastUpdated' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
 
-const seedUnlink =
-  "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' \\) -delete 2>/dev/null || true";
-
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const job = (name) => {
   const start = workflow.indexOf(`  ${name}:`);
@@ -141,27 +138,30 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(scripts.bundle).toBeTruthy();
   });
 
-  it('serializes the host-shared cache write-back on each physical ECS host', () => {
+  it('serializes the host-shared Maven cache write-back on each physical ECS host', () => {
     const block = job('test');
     expect(block).toContain(
       'if: "${{ runner.environment == \'self-hosted\' }}"',
     );
-    // The ticketed queue makes the wake order deterministic and the fast
-    // class puts this tier's ticket ahead of waiting full-tier tickets, so
+    // The suite resolves from a job-local repository; only the cache
+    // write-back mutates the host-shared ~/.m2. The ticketed queue orders
+    // that one wait and keeps the fast class ahead of full-tier tickets, so
     // the pin is the sourced helper, its budget, and the tier argument. The
-    // 5400 s budget covers eighteen write-back holds, the only locked work
-    // this lane does now that its suite resolves from a job-local repository.
+    // 9600 s budget is carried from the pre-split topology where a test lane
+    // could queue behind several suite holds; with the suite unlocked it is
+    // a conservative bound, not a measured need (#14566, #15031). Run
+    // 39754359013 burned the old 5400 s behind the MariaDB lane's verify
+    // hold, a shape #15128 removed.
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    expect(block).toContain('sdk_java_lock_acquire 5400 "${TIER}"');
+    expect(block).toContain('sdk_java_lock_acquire 9600 "${TIER}"');
     // release-sdk-java.yml resumes an existing tag by checking out that
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.
-    expect(block).toContain('flock --wait 5400 9');
-    expect(block).toContain('::error::sdk-java host lock not acquired within');
+    expect(block).toContain('flock --wait 9600 9');
     expect(block).toContain(
-      '::error::sdk-java host lock not acquired within 90 minutes',
+      '::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -174,32 +174,337 @@ describe('SDK Java self-hosted workflow guards', () => {
       jobs[name].steps.filter((s) => s.run?.includes('sdk-java-tests.lock')),
     );
     // The MariaDB lane's two Maven steps are one step now (#14903), so the
-    // lock-bearing steps are the test job's and this job's single one.
+    // lock-bearing steps are the test job's and this job's single one. Both
+    // lock only their cache write-back: every Maven run is above the
+    // acquisition, and the write-back children drop fd 9 so a cancelled
+    // job's survivor cannot retain the lock.
     expect(lockedSteps).toHaveLength(2);
-    // Both lanes lock only their cache write-back: every Maven run resolves
-    // from a job-local repository above the acquisition, and the write-back
-    // children drop fd 9 so a cancelled job's survivor cannot retain the
-    // lock.
-    for (const { name, run } of lockedSteps) {
-      const lockAt = run.indexOf(
+    for (const locked of lockedSteps) {
+      const lockAt = locked.run.indexOf(
         'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
       );
-      expect(lockAt, name).toBeGreaterThan(-1);
-      const maven = run.match(/^\s*mvn .+$/gm) ?? [];
-      expect(maven.length, name).toBeGreaterThan(0);
-      for (const command of maven) {
-        expect(run.indexOf(command), name).toBeLessThan(lockAt);
-        expect(command.trim(), name).not.toMatch(/ 9>&-$/);
-      }
-      expect(run).toContain('mkdir -p "${HOME}/.m2/repository" 9>&-');
-      expect(run).toContain(
-        'rm -rf -- "${HOME}/.m2/repository/com/alibaba/qwencode-sdk" "${HOME}/.m2/repository/com/alibaba/qwen-managed-agent-server" 9>&-',
-      );
-      expect(run).toMatch(
+      expect(lockAt, locked.name).toBeGreaterThan(-1);
+      const seedAt = locked.run.indexOf('cp -aln "${HOME}/.m2/repository/."');
+      expect(seedAt, locked.name).toBeGreaterThan(-1);
+      expect(seedAt, locked.name).toBeLessThan(lockAt);
+      // Assert on the region below the acquisition, not on first-occurrence
+      // indices: a duplicated Maven run below the lock shares its text with
+      // the legitimate run above it, so indexOf would resolve to the wrong
+      // one. Comments are stripped because the MariaDB step's post-lock
+      // comment names mvn.
+      const belowCode = locked.run
+        .slice(lockAt)
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n');
+      expect(belowCode, locked.name).not.toMatch(/\bmvn\b/);
+      expect(locked.run).toContain('mkdir -p "${HOME}/.m2/repository" 9>&-');
+      expect(locked.run).toMatch(
         /timeout 300 find \..*-exec cp -ln --parents -t "\$\{HOME\}\/\.m2\/repository" \{\} \+ 9>&- \|\| write_back=\$\?/,
       );
     }
+    // The MariaDB lane keeps its two specific Maven runs above the lock.
+    const integration = lockedSteps.find((lockedStep) =>
+      lockedStep.run.includes('-Pmysql-integration'),
+    ).run;
+    const integrationLockAt = integration.indexOf(
+      'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
+    );
+    const integrationInstallAt = integration.indexOf(
+      '-f packages/sdk-java/qwencode/pom.xml',
+    );
+    expect(integrationInstallAt).toBeGreaterThan(-1);
+    expect(integrationInstallAt).toBeLessThan(integrationLockAt);
+    expect(integration.indexOf('-Pmysql-integration')).toBeGreaterThan(-1);
   });
+
+  it('keeps the cache write-back byte-identical across both lock sites', () => {
+    // The test job's write-back prelude and tail were cloned from
+    // mysql-integration's, and the wildcard pin above would not notice one
+    // copy losing an errexit probe, -links 1 or its -prune excludes. That is
+    // the #13506 drift class: a later fix applied to only one copy
+    // republishes the whole seeded tree, publishes the in-house fixed
+    // coordinates into the host cache the next seed reads, or reintroduces
+    // the fatal setup path this PR warns past.
+    const runs = ['test', 'mysql-integration'].map(
+      (name) =>
+        parse(workflow).jobs[name].steps.find((candidate) =>
+          candidate.run?.includes('sdk-java-tests.lock'),
+        ).run,
+    );
+    const preludes = runs.map((run) => {
+      const start = run.indexOf('lock_setup_fault() {');
+      const end = run.indexOf('\nfi\n', start);
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      return run.slice(start, end + '\nfi\n'.length);
+    });
+    // The test job alone passes its tier and carries the longer budget; the
+    // prelude must otherwise stay byte-identical. The comment block between
+    // the prelude and the write-back differs by site, so the tail is pinned
+    // from its first command instead.
+    expect(preludes[0]).toContain('sdk_java_lock_acquire 9600 "${TIER}"');
+    expect(preludes[1]).toContain('sdk_java_lock_acquire 5400 >&7');
+    expect(preludes[0]).toContain('flock --wait 9600 9');
+    expect(preludes[1]).toContain('flock --wait 5400 9');
+    expect(
+      preludes[1]
+        .replace(
+          'sdk_java_lock_acquire 5400 >&7',
+          'sdk_java_lock_acquire 9600 "${TIER}" >&7',
+        )
+        .replace('flock --wait 5400 9', 'flock --wait 9600 9'),
+    ).toBe(preludes[0]);
+    const tails = runs.map((run) => {
+      const start = run.indexOf('write_back=0');
+      expect(start).toBeGreaterThan(-1);
+      return run.slice(start);
+    });
+    expect(tails[1]).toBe(tails[0]);
+  });
+
+  it('keeps the seeded coordinate drops and write-back prunes in step', () => {
+    // The in-house coordinate set is spelled by hand at every seed site and
+    // at both write-back prunes. A set that drifts on one side leaves a
+    // seeded hardlink alive, so the unlocked Maven run rewrites the host
+    // cache through it; compare every spelling instead of one pinned pair.
+    const parsed = parse(workflow);
+    const drops = [];
+    const prunes = [];
+    for (const [jobName, job] of Object.entries(parsed.jobs)) {
+      for (const candidate of job.steps ?? []) {
+        const run = candidate.run;
+        if (typeof run !== 'string') continue;
+        const seedAt = run.indexOf('cp -aln "${HOME}/.m2/repository/."');
+        if (seedAt !== -1) {
+          const seedEnd = run.indexOf('\nmvn --batch-mode', seedAt);
+          expect(seedEnd, jobName).toBeGreaterThan(seedAt);
+          drops.push([
+            jobName,
+            [
+              ...run
+                .slice(seedAt, seedEnd)
+                .matchAll(
+                  /"\$\{RUNNER_TEMP\}\/m2-repo\/com\/alibaba\/([^"]+)"/g,
+                ),
+            ]
+              .map((match) => match[1])
+              .sort(),
+          ]);
+        }
+        const pruneAt = run.indexOf('timeout 300 find .');
+        if (pruneAt === -1) continue;
+        const prune = run.slice(pruneAt, run.indexOf('\n', pruneAt));
+        prunes.push([
+          jobName,
+          [...prune.matchAll(/-path '\*\/com\/alibaba\/([^']+)'/g)]
+            .map((match) => match[1])
+            .sort(),
+        ]);
+      }
+    }
+    const expected = ['qwen-managed-agent-server', 'qwencode-sdk'];
+    expect(drops.length).toBeGreaterThan(0);
+    expect(prunes.length).toBeGreaterThan(0);
+    for (const [jobName, set] of [...drops, ...prunes]) {
+      expect(set, jobName).toEqual(expected);
+    }
+  });
+
+  it('binds the lock and queue probes to the helper paths', () => {
+    // Both call sites spell the helper's lock/queue paths by hand. Read
+    // them from the helper so a rename cannot leave a probe watching a
+    // path the helper never creates.
+    const helper = readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8');
+    const lockPath = helper.match(/local lock="\$\{HOME\}\/([^"]+)"/)?.[1];
+    expect(lockPath).toBeDefined();
+    expect(helper).toContain('local queue="${lock}.queue"');
+    const separator = lockPath.lastIndexOf('/');
+    const cacheDir = lockPath.slice(0, separator);
+    const lockName = lockPath.slice(separator + 1);
+    const runs = Object.values(parse(workflow).jobs)
+      .flatMap((job) => (job.steps ?? []).map((step) => step.run))
+      .filter(
+        (run) => typeof run === 'string' && run.includes('sdk-java-tests.lock'),
+      );
+    expect(runs).toHaveLength(2);
+    for (const run of runs) {
+      expect(run).toContain(`cache_dir="\${HOME}/${cacheDir}"`);
+      expect(run).toContain(`queue_dir="\${cache_dir}/${lockName}.queue"`);
+      expect(run).toContain(`[ ! -d "\${cache_dir}/${lockName}" ]`);
+      expect(run).toContain(`exec 9>"\${cache_dir}/${lockName}"`);
+    }
+  });
+
+  it.skipIf(process.platform !== 'linux')(
+    'runs the Maven suite before taking the host lock',
+    () => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const suite = run.slice(
+        run.indexOf('cp -aln "${HOME}/.m2/repository/."'),
+        run.indexOf('# Only the write-back mutates host-shared state'),
+      );
+      expect(suite).toContain(
+        'mvn --batch-mode --no-transfer-progress clean test',
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-'));
+      mkdirSync(join(dir, 'home', '.cache', 'qwen-code-ci'), {
+        recursive: true,
+      });
+      try {
+        const result = spawnSync(
+          'bash',
+          [
+            '-e',
+            '-c',
+            `
+            mvn() { :; }
+            ${suite}
+            flock --nonblock "$HOME/.cache/qwen-code-ci/sdk-java-tests.lock" true
+          `,
+          ],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              HOME: join(dir, 'home'),
+              RUNNER_TEMP: join(dir, 'temp'),
+              GITHUB_WORKSPACE: process.cwd(),
+              MATRIX_JAVA: '11',
+              TIER: 'fast',
+            },
+          },
+        );
+        expect(result.error, suite).toBeUndefined();
+        expect(result.status, suite + result.stderr).toBe(0);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'drops seeded in-house coordinates so Maven writes fresh inodes',
+    () => {
+      const jobs = parse(workflow).jobs;
+      const seeds = Object.entries(jobs).flatMap(([name, job]) =>
+        (job.steps ?? [])
+          .filter((candidate) =>
+            candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
+          )
+          .map((candidate) => [name, candidate.run]),
+      );
+      expect(seeds.map(([name]) => name).sort()).toEqual([
+        'event-transport-broker',
+        'event-transport-multi-node',
+        'mysql-integration',
+        'test',
+      ]);
+      for (const [name, seedRun] of seeds) {
+        const start = seedRun.indexOf('cp -aln "${HOME}/.m2/repository/."');
+        const end = seedRun.indexOf('\nmvn --batch-mode', start);
+        expect(start, name).toBeGreaterThan(-1);
+        expect(end, name).toBeGreaterThan(start);
+        const seed = seedRun.slice(start, end);
+        expect(seed, name).toContain(
+          'rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk"',
+        );
+        expect(seed, name).toContain(
+          '${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server',
+        );
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-'));
+        const home = join(dir, 'home');
+        const runnerTemp = join(dir, 'runner-temp');
+        mkdirSync(runnerTemp, { recursive: true });
+        const hostRepo = join(home, '.m2', 'repository');
+        const hostJars = [
+          ['com', 'alibaba', 'qwencode-sdk', '0.1.0-alpha', 'sdk.jar'],
+          [
+            'com',
+            'alibaba',
+            'qwen-managed-agent-server',
+            '0.1.0-alpha',
+            'server.jar',
+          ],
+          ['org', 'example', 'third-party', '1.0', 'third-party.jar'],
+        ].map((parts) => join(hostRepo, ...parts));
+        for (const jar of hostJars) {
+          mkdirSync(dirname(jar), { recursive: true });
+          writeFileSync(jar, 'host');
+        }
+        // Maven rewrites these tracking files in place, so a seeded hardlink
+        // would let the unlocked run mutate the host cache through it.
+        const hostMarkers = [
+          ['resolver-status.properties'],
+          ['_remote.repositories'],
+          ['maven-metadata-local.xml'],
+          ['third-party-1.0.pom.lastUpdated'],
+        ].map((parts) =>
+          join(hostRepo, 'org', 'example', 'third-party', '1.0', ...parts),
+        );
+        for (const marker of hostMarkers) {
+          writeFileSync(marker, 'host');
+        }
+        try {
+          const result = spawnSync('bash', ['-e', '-c', seed], {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+            },
+          });
+          expect(result.error, name).toBeUndefined();
+          expect(result.status, name + result.stderr).toBe(0);
+          for (const coordinate of [
+            'qwencode-sdk',
+            'qwen-managed-agent-server',
+          ]) {
+            expect(
+              existsSync(
+                join(runnerTemp, 'm2-repo', 'com', 'alibaba', coordinate),
+              ),
+              `${name}/${coordinate}`,
+            ).toBe(false);
+          }
+          expect(
+            existsSync(
+              join(
+                runnerTemp,
+                'm2-repo',
+                'org',
+                'example',
+                'third-party',
+                '1.0',
+                'third-party.jar',
+              ),
+            ),
+            name,
+          ).toBe(true);
+          for (const jar of hostJars.slice(0, 2)) {
+            expect(readFileSync(jar, 'utf8'), name).toBe('host');
+            // The job-local copy held the only extra link; dropping it must
+            // leave the host file exactly as seeded.
+            expect(statSync(jar).nlink, name).toBe(1);
+          }
+          for (const marker of hostMarkers) {
+            expect(
+              existsSync(
+                join(runnerTemp, 'm2-repo', marker.slice(hostRepo.length + 1)),
+              ),
+              `${name}/${marker}`,
+            ).toBe(false);
+            expect(readFileSync(marker, 'utf8'), name).toBe('host');
+            expect(statSync(marker).nlink, name).toBe(1);
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it.skipIf(process.platform !== 'linux')(
     'releases the host lock when a write-back child survives the step',
@@ -465,122 +770,6 @@ describe('SDK Java self-hosted workflow guards', () => {
   );
 
   it.skipIf(process.platform !== 'linux')(
-    'seeds the in-house coordinates without hardlinked metadata',
-    () => {
-      // Maven's resolver rewrites its bookkeeping in place, so a hardlinked
-      // seed would mutate the host cache above the lock. Every seed (four in
-      // `sdk-java.yml` and the release lane's) must drop those names across
-      // the job-local copy and leave Maven to create them fresh.
-      const reference = parse(
-        readFileSync(
-          '.github/workflows/release-managed-agent-reference.yml',
-          'utf8',
-        ),
-      );
-      const sdkJavaSeeds = Object.values(parse(workflow).jobs)
-        .flatMap((entry) => entry.steps ?? [])
-        .filter((candidate) =>
-          candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
-        );
-      const referenceSeeds = Object.values(reference.jobs)
-        .flatMap((entry) => entry.steps ?? [])
-        .filter((candidate) =>
-          candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
-        );
-      expect(sdkJavaSeeds).toHaveLength(4);
-      expect(referenceSeeds).toHaveLength(1);
-      // The release lane has no write-back and takes no lock; its isolation
-      // is the rm -rf of both in-house trees, so pin it explicitly.
-      for (const candidate of referenceSeeds) {
-        expect(candidate.run, candidate.name).toContain(
-          'rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/qwen-managed-agent-server"',
-        );
-      }
-      const seeding = [...sdkJavaSeeds, ...referenceSeeds];
-      for (const candidate of seeding) {
-        const lines = candidate.run.split('\n');
-        const cpAt = lines.findIndex((line) =>
-          line.includes('cp -aln "${HOME}/.m2/repository/."'),
-        );
-        expect(cpAt, candidate.name).toBeGreaterThan(0);
-        expect(lines[cpAt - 1].trim(), candidate.name).toMatch(/^mkdir -p /);
-        const mvn = lines.findIndex(
-          (line, index) => index > cpAt && /^\s*mvn /.test(line),
-        );
-        expect(mvn, candidate.name).toBeGreaterThan(cpAt);
-        const seedLines = lines.slice(cpAt - 1, mvn);
-        // The release lane's seed sits inside an `if` whose closing `fi`
-        // precedes its first Maven run; the slice runs the body alone.
-        if (seedLines.at(-1)?.trim() === 'fi') seedLines.pop();
-        const seed = seedLines.join('\n');
-        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-'));
-        const home = join(dir, 'home');
-        const runnerTemp = join(dir, 'runner-temp');
-        const host = join(home, '.m2', 'repository');
-        const local = join(runnerTemp, 'm2-repo');
-        const metadata = [
-          'com/alibaba/qwencode-sdk/0.1.0-alpha/_remote.repositories',
-          'com/alibaba/qwencode-sdk/maven-metadata-local.xml',
-          'com/alibaba/qwen-managed-agent-server/0.1.0-alpha/_remote.repositories',
-          'com/alibaba/qwen-managed-agent-server/maven-metadata-local.xml',
-          'org/example/lib/1.0/_remote.repositories',
-          'org/example/lib/1.0/resolver-status.properties',
-          'org/example/lib/1.0/artifact.lastUpdated',
-        ];
-        const artifacts = [
-          'com/alibaba/qwencode-sdk/0.1.0-alpha/qwencode-sdk.jar',
-          'com/alibaba/qwencode-sdk/0.1.0-alpha/qwencode-sdk.pom',
-          'org/example/lib/kept.jar',
-        ];
-        // The release lane drops whole in-house coordinate trees instead of
-        // unlinking individual names.
-        const removesInHouse = referenceSeeds.includes(candidate);
-        try {
-          for (const path of [...metadata, ...artifacts]) {
-            mkdirSync(dirname(join(host, path)), { recursive: true });
-            writeFileSync(join(host, path), path);
-          }
-          const result = spawnSync('bash', ['-e', '-c', seed], {
-            encoding: 'utf8',
-            timeout: 10000,
-            env: {
-              ...process.env,
-              HOME: home,
-              RUNNER_TEMP: runnerTemp,
-              repo: local,
-            },
-          });
-          expect(result.status, candidate.name + result.stderr).toBe(0);
-          // Left in the job-local copy these are the host inodes, and Maven
-          // would rewrite them without the lock.
-          for (const path of metadata) {
-            expect(existsSync(join(local, path)), candidate.name + path).toBe(
-              false,
-            );
-            expect(readFileSync(join(host, path), 'utf8'), path).toBe(path);
-          }
-          // Everything else is still seeded and still hardlinked, except the
-          // release lane's in-house trees, which it removes outright.
-          for (const path of artifacts) {
-            if (removesInHouse && path.startsWith('com/alibaba/')) {
-              expect(existsSync(join(local, path)), candidate.name + path).toBe(
-                false,
-              );
-            } else {
-              expect(existsSync(join(local, path)), candidate.name + path).toBe(
-                true,
-              );
-              expect(statSync(join(local, path)).nlink, path).toBe(2);
-            }
-          }
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-        }
-      }
-    },
-  );
-
-  it.skipIf(process.platform !== 'linux')(
     'removes the in-house coordinates from the host cache in the write-back',
     () => {
       const jobs = parse(workflow).jobs;
@@ -588,7 +777,9 @@ describe('SDK Java self-hosted workflow guards', () => {
         const locked = jobs[jobName].steps.find((candidate) =>
           candidate.run?.includes('sdk-java-tests.lock'),
         );
-        const lockAt = locked.run.indexOf('sdk_java_lock_acquire 5400');
+        const lockAt = locked.run.indexOf(
+          'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
+        );
         const start = locked.run.indexOf('write_back=0');
         expect(start, locked.name).toBeGreaterThan(lockAt);
         const rmLine = locked.run
@@ -685,207 +876,346 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
-  const lockTimeoutShim =
-    'sdk_java_lock_acquire() {\n' +
-    '  echo "::error::sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast)"\n' +
-    '  return 1\n' +
-    '}\n';
-
-  const runSelfHostedSuite = ({
-    failAt = 1,
-    exitCode = 1,
-    lockScript = 'sdk_java_lock_acquire() { :; }\n',
-    helper = true,
-  } = {}) => {
-    const suite = parse(workflow).jobs.test.steps.find(
-      (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
-    );
-    const dir = mkdtempSync(join(tmpdir(), 'sdk-java-suite-status-'));
-    const home = join(dir, 'home');
-    const runnerTemp = join(dir, 'runner-temp');
-    const workspace = join(dir, 'workspace');
-    const bin = join(dir, 'bin');
-    mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
-    mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
-    writeFileSync(join(runnerTemp, 'm2-repo', 'downloaded.jar'), 'new');
-    if (helper) {
-      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
-      writeFileSync(
-        join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
-        lockScript,
+  it.skipIf(process.platform !== 'linux')(
+    'seeds the in-house coordinates without hardlinked metadata',
+    () => {
+      // Maven's resolver rewrites its bookkeeping in place, so a hardlinked
+      // seed would mutate the host cache above the lock. Every seed (four in
+      // `sdk-java.yml` and the release lane's) must drop those names across
+      // the job-local copy and leave Maven to create them fresh.
+      const reference = parse(
+        readFileSync(
+          '.github/workflows/release-managed-agent-reference.yml',
+          'utf8',
+        ),
       );
-    }
-    mkdirSync(bin, { recursive: true });
-    if (!helper) {
-      // A tag resumed from release-sdk-java.yml may predate the helper, so
-      // the bare-lock fallback runs; shim flock to time out so its timeout
-      // arm is the branch under test.
-      writeFileSync(join(bin, 'flock'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
-    }
-    // Fail exactly one invocation: with every call failing, a later
-    // `|| suite_status=$?` re-sets the status after the first guard is
-    // removed, so the case would pass without pinning the guard.
-    const mvnCount = join(dir, 'mvn-count');
-    writeFileSync(
-      join(bin, 'mvn'),
-      '#!/bin/sh\n' +
-        `count=$(cat "${mvnCount}" 2>/dev/null || echo 0)\n` +
-        'count=$((count + 1))\n' +
-        `echo "$count" > "${mvnCount}"\n` +
-        `[ "$count" -eq ${failAt} ] && exit ${exitCode}\n` +
-        'exit 0\n',
-      { mode: 0o755 },
-    );
-    const result = spawnSync('bash', ['-e', '-c', suite.run], {
-      encoding: 'utf8',
-      timeout: 15000,
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
-        HOME: home,
-        RUNNER_TEMP: runnerTemp,
-        GITHUB_WORKSPACE: workspace,
-        MATRIX_JAVA: '21',
-        TIER: 'fast',
-      },
-    });
-    return {
-      suite,
-      result,
-      mvnCount,
-      published: () =>
-        existsSync(join(home, '.m2', 'repository', 'downloaded.jar')),
-      cleanup: () => rmSync(dir, { recursive: true, force: true }),
-    };
-  };
-
-  it.skipIf(process.platform !== 'linux')(
-    "keeps the suite's exit status so the write-back still runs",
-    () => {
-      // GitHub's default run shell is `bash -e`, so a failed `mvn` used to
-      // abort before the lock and the write-back, throwing away the whole
-      // resolved dependency tree. The step must retain the first failure,
-      // publish what it downloaded, and re-raise the failure afterwards.
-      const run = runSelfHostedSuite();
-      try {
-        expect(run.result.status, run.suite.name + run.result.stderr).toBe(1);
-        expect(readFileSync(run.mvnCount, 'utf8').trim(), run.suite.name).toBe(
-          '1',
+      const sdkJavaSeeds = Object.values(parse(workflow).jobs)
+        .flatMap((entry) => entry.steps ?? [])
+        .filter((candidate) =>
+          candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
         );
-        expect(run.published(), run.suite.name).toBe(true);
-      } finally {
-        run.cleanup();
-      }
-    },
-  );
-
-  it.skipIf(process.platform !== 'linux')(
-    'stops the Java 21 lane after a failed SDK install',
-    () => {
-      // The inner suite_status gate stops the managed-agent suite after the
-      // SDK install fails. Without it the step still exits 1 but runs one
-      // more `mvn`, so pin the invocation count, not only the status.
-      const run = runSelfHostedSuite({ failAt: 2 });
-      try {
-        expect(run.result.status, run.suite.name + run.result.stderr).toBe(1);
-        expect(readFileSync(run.mvnCount, 'utf8').trim(), run.suite.name).toBe(
-          '2',
+      const referenceSeeds = Object.values(reference.jobs)
+        .flatMap((entry) => entry.steps ?? [])
+        .filter((candidate) =>
+          candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
         );
-      } finally {
-        run.cleanup();
+      expect(sdkJavaSeeds).toHaveLength(4);
+      expect(referenceSeeds).toHaveLength(1);
+      // The release lane has no write-back and takes no lock; its isolation
+      // is the rm -rf of both in-house trees, so pin it explicitly.
+      for (const candidate of referenceSeeds) {
+        expect(candidate.run, candidate.name).toContain(
+          'rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/qwen-managed-agent-server"',
+        );
+      }
+      const seeding = [...sdkJavaSeeds, ...referenceSeeds];
+      for (const candidate of seeding) {
+        const lines = candidate.run.split('\n');
+        const cpAt = lines.findIndex((line) =>
+          line.includes('cp -aln "${HOME}/.m2/repository/."'),
+        );
+        expect(cpAt, candidate.name).toBeGreaterThan(0);
+        expect(lines[cpAt - 1].trim(), candidate.name).toMatch(/^mkdir -p /);
+        const mvn = lines.findIndex(
+          (line, index) => index > cpAt && /^\s*mvn /.test(line),
+        );
+        expect(mvn, candidate.name).toBeGreaterThan(cpAt);
+        const seedLines = lines.slice(cpAt - 1, mvn);
+        // The release lane's seed sits inside an `if` whose closing `fi`
+        // precedes its first Maven run; the slice runs the body alone.
+        if (seedLines.at(-1)?.trim() === 'fi') seedLines.pop();
+        const seed = seedLines.join('\n');
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-'));
+        const home = join(dir, 'home');
+        const runnerTemp = join(dir, 'runner-temp');
+        const host = join(home, '.m2', 'repository');
+        const local = join(runnerTemp, 'm2-repo');
+        const metadata = [
+          'com/alibaba/qwencode-sdk/0.1.0-alpha/_remote.repositories',
+          'com/alibaba/qwencode-sdk/maven-metadata-local.xml',
+          'com/alibaba/qwen-managed-agent-server/0.1.0-alpha/_remote.repositories',
+          'com/alibaba/qwen-managed-agent-server/maven-metadata-local.xml',
+          'org/example/lib/1.0/_remote.repositories',
+          'org/example/lib/1.0/resolver-status.properties',
+          'org/example/lib/1.0/artifact.lastUpdated',
+        ];
+        const artifacts = [
+          'com/alibaba/qwencode-sdk/0.1.0-alpha/qwencode-sdk.jar',
+          'com/alibaba/qwencode-sdk/0.1.0-alpha/qwencode-sdk.pom',
+          'org/example/lib/kept.jar',
+        ];
+        try {
+          for (const path of [...metadata, ...artifacts]) {
+            mkdirSync(dirname(join(host, path)), { recursive: true });
+            writeFileSync(join(host, path), path);
+          }
+          const result = spawnSync('bash', ['-e', '-c', seed], {
+            encoding: 'utf8',
+            timeout: 10000,
+            env: {
+              ...process.env,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              repo: local,
+            },
+          });
+          expect(result.status, candidate.name + result.stderr).toBe(0);
+          // Left in the job-local copy these are the host inodes, and Maven
+          // would rewrite them without the lock.
+          for (const path of metadata) {
+            expect(existsSync(join(local, path)), candidate.name + path).toBe(
+              false,
+            );
+            expect(readFileSync(join(host, path), 'utf8'), path).toBe(path);
+          }
+          // Every seed removes the two in-house coordinate trees, so their
+          // artifacts are absent; everything else is still seeded and
+          // still hardlinked.
+          for (const path of artifacts) {
+            if (path.startsWith('com/alibaba/')) {
+              expect(existsSync(join(local, path)), candidate.name + path).toBe(
+                false,
+              );
+            } else {
+              expect(existsSync(join(local, path)), candidate.name + path).toBe(
+                true,
+              );
+              expect(statSync(join(local, path)).nlink, path).toBe(2);
+            }
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
       }
     },
   );
 
   it.skipIf(process.platform !== 'linux')(
-    're-raises the suite verdict after a write-back lock timeout',
+    'skips the cache write-back when the host lock cannot be acquired',
     () => {
-      // A contended host must not turn a completed product failure into the
-      // pinned infrastructure signature: the step exits with the suite's
-      // status and skips the write-back it could not lock.
-      const run = runSelfHostedSuite({
-        exitCode: 3,
-        lockScript: lockTimeoutShim,
-      });
-      try {
-        expect(run.result.status, run.suite.name + run.result.stderr).toBe(3);
-        expect(run.published(), run.suite.name).toBe(false);
-      } finally {
-        run.cleanup();
-      }
-    },
-  );
-
-  it.skipIf(process.platform !== 'linux')(
-    'fails the step when the write-back lock times out after a passing suite',
-    () => {
-      // Without the final exit the `if` falls through with 0, so a passing
-      // suite would mask the timeout and report success with no write-back.
-      const run = runSelfHostedSuite({
-        failAt: 0,
-        lockScript: lockTimeoutShim,
-      });
-      try {
-        expect(run.result.status, run.suite.name + run.result.stderr).toBe(1);
-        expect(run.published(), run.suite.name).toBe(false);
-      } finally {
-        run.cleanup();
-      }
-    },
-  );
-
-  it.skipIf(process.platform !== 'linux')(
-    'fails the bare-lock fallback when the helper is absent and the lock times out',
-    () => {
-      // The fallback is reachable only from release-sdk-java.yml resuming a
-      // pre-helper tag, a lane PR CI never runs. A timeout there must skip
-      // the unlocked write-back instead of publishing without the lock.
-      const run = runSelfHostedSuite({ failAt: 0, helper: false });
-      try {
-        expect(run.result.status, run.suite.name + run.result.stderr).toBe(1);
-        expect(run.published(), run.suite.name).toBe(false);
-      } finally {
-        run.cleanup();
+      const signatures = new RegExp(
+        parse(
+          readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+        ).env.INFRA_FAILURE_SIGNATURES,
+        'i',
+      );
+      const helperSource = readFileSync(
+        '.github/scripts/sdk-java-lock.sh',
+        'utf8',
+      );
+      // Derive the stub's timeout line from the real helper: a wording or
+      // casing drift in the helper must not leave this arm passing against
+      // a hand-copied line the call site's sed rewrite no longer matches.
+      const timeoutLine = helperSource
+        .split('\n')
+        .find((line) =>
+          line.includes('::error::sdk-java host lock not acquired within'),
+        );
+      expect(timeoutLine).toBeDefined();
+      const jobs = parse(workflow).jobs;
+      for (const name of ['test', 'mysql-integration']) {
+        const run = jobs[name].steps.find((candidate) =>
+          candidate.run?.includes('sdk-java-tests.lock'),
+        ).run;
+        const start = run.indexOf('lock_setup_fault() {');
+        expect(start, name).toBeGreaterThan(-1);
+        const acquisitionAndWriteBack = run.slice(start);
+        for (const arm of [
+          'helper',
+          'helper-capitalised',
+          'helper-no-flock',
+          'fallback',
+          'fallback-no-flock',
+          'setup-fault',
+          'queue-fault',
+          'lock-fault',
+          'fallback-setup-fault',
+          'fallback-fault',
+        ]) {
+          const noFlock =
+            arm === 'helper-no-flock' || arm === 'fallback-no-flock';
+          const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-skip-'));
+          const workspace = join(dir, 'workspace');
+          const home = join(dir, 'home');
+          const runnerTemp = join(dir, 'runner-temp');
+          const shims = join(dir, 'bin');
+          mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+          mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+          mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+          mkdirSync(shims);
+          // A publishable delta (nlink 1, outside the pruned coordinates):
+          // if the skip falls through into the write-back, it lands in the
+          // host cache and the assertion below catches it.
+          writeFileSync(join(runnerTemp, 'm2-repo', 'delta.marker'), 'x');
+          if (arm === 'helper' || arm === 'helper-capitalised') {
+            // The slot the slice sources is this stub, built from the real
+            // helper's own timeout annotation. The capitalised arm pins the
+            // sed rewrite's case-insensitivity against the classifiers,
+            // which are all case-insensitive.
+            const stubLine =
+              arm === 'helper-capitalised'
+                ? timeoutLine.replace(
+                    /lock not acquired within/i,
+                    'Lock not acquired within',
+                  )
+                : timeoutLine;
+            writeFileSync(
+              join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+              'sdk_java_lock_acquire() {\n' +
+                '  local wait_seconds=5400 seq=1 class=fast head="(no other ticket queued)"\n' +
+                `  ${stubLine.trim()}\n` +
+                '  return 1\n' +
+                '}\n',
+            );
+          } else if (arm === 'helper-no-flock') {
+            // The real helper without flock on PATH: the probe must skip in
+            // seconds instead of spinning out the whole wait budget.
+            writeFileSync(
+              join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+              helperSource,
+            );
+          } else if (
+            arm === 'setup-fault' ||
+            arm === 'queue-fault' ||
+            arm === 'lock-fault'
+          ) {
+            // The real helper with a broken setup: a mkdir fault, a stray
+            // file at the queue path, and a directory at the lock path are
+            // the shapes the parent-directory probe could not see.
+            writeFileSync(
+              join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+              helperSource,
+            );
+            if (arm === 'setup-fault') {
+              writeFileSync(join(shims, 'mkdir'), '#!/bin/sh\nexit 1\n', {
+                mode: 0o755,
+              });
+            } else if (arm === 'queue-fault') {
+              mkdirSync(join(home, '.cache', 'qwen-code-ci'), {
+                recursive: true,
+              });
+              writeFileSync(
+                join(
+                  home,
+                  '.cache',
+                  'qwen-code-ci',
+                  'sdk-java-tests.lock.queue',
+                ),
+                'stray',
+              );
+            } else {
+              mkdirSync(
+                join(home, '.cache', 'qwen-code-ci', 'sdk-java-tests.lock'),
+                { recursive: true },
+              );
+            }
+          } else if (arm === 'fallback-setup-fault') {
+            // The fallback's own cache probe: without it a read-only HOME
+            // would redden the step after the gate already passed.
+            writeFileSync(join(shims, 'mkdir'), '#!/bin/sh\nexit 1\n', {
+              mode: 0o755,
+            });
+          } else if (arm === 'fallback-fault') {
+            writeFileSync(join(shims, 'flock'), '#!/bin/sh\nexit 127\n', {
+              mode: 0o755,
+            });
+          } else if (arm === 'fallback') {
+            writeFileSync(join(shims, 'flock'), '#!/bin/sh\nexit 1\n', {
+              mode: 0o755,
+            });
+          }
+          if (noFlock) {
+            // Keep mkdir and sed available so the queue and rewrite paths
+            // still run; flock is the only missing command this arm tests.
+            for (const command of ['mkdir', 'sed']) {
+              writeFileSync(
+                join(shims, command),
+                `#!/bin/sh\nexec /bin/${command} "$@"\n`,
+                { mode: 0o755 },
+              );
+            }
+          }
+          try {
+            const result = spawnSync(
+              '/bin/bash',
+              ['-e', '-c', acquisitionAndWriteBack],
+              {
+                encoding: 'utf8',
+                timeout: 5000,
+                env: {
+                  ...process.env,
+                  PATH: noFlock ? shims : `${shims}:${process.env.PATH}`,
+                  HOME: home,
+                  RUNNER_TEMP: runnerTemp,
+                  GITHUB_WORKSPACE: workspace,
+                  TIER: 'fast',
+                },
+              },
+            );
+            expect(result.error, `${name}/${arm}`).toBeUndefined();
+            // A genuine timeout and a known host fault warn and skip; an
+            // unexpected flock status is not a fault this call site knows,
+            // so it stays fatal.
+            if (arm === 'fallback-fault') {
+              expect(result.status, `${name}/${arm}${result.stderr}`).toBe(1);
+              expect(result.stdout, `${name}/${arm}`).toContain(
+                'Maven cache write-back setup failed',
+              );
+            } else {
+              expect(result.status, `${name}/${arm}${result.stderr}`).toBe(0);
+              expect(result.stdout, `${name}/${arm}`).toContain(
+                '::warning::Maven cache write-back skipped',
+              );
+            }
+            // Neither the call-site warning nor the helper's timeout line
+            // (rewritten at the call site) may carry a rerun-classifier
+            // signature onto this now-green step.
+            expect(result.stdout, `${name}/${arm}`).not.toMatch(signatures);
+            const reasons = {
+              'setup-fault':
+                '::warning::Maven cache write-back skipped: the write-back queue directory cannot be created',
+              'queue-fault':
+                '::warning::Maven cache write-back skipped: the write-back queue directory cannot be created',
+              'lock-fault':
+                '::warning::Maven cache write-back skipped: the write-back lock path is a directory',
+              'fallback-setup-fault':
+                '::warning::Maven cache write-back skipped: ' +
+                join(home, '.cache', 'qwen-code-ci') +
+                ' cannot be created',
+            };
+            if (reasons[arm]) {
+              expect(result.stdout, `${name}/${arm}`).toContain(reasons[arm]);
+            }
+            // The skip must not fall through into an unlocked write-back.
+            expect(
+              existsSync(join(home, '.m2', 'repository', 'delta.marker')),
+              `${name}/${arm}`,
+            ).toBe(false);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        }
       }
     },
   );
 
   it('runs Broker tests from the combined Server after installing the SDK on self-hosted Java 21', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
-    const selfHosted = parse(workflow).jobs.test.steps.find(
-      (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
-    );
-    expect(selfHosted.env.MAVEN_ARGS).toContain(
-      '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
-    );
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
     expect(block).toContain("TIER: '${{ inputs.tier }}'");
     expect(block).toContain(
-      'mkdir -p "${RUNNER_TEMP}/m2-repo"\n' +
-        '          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true\n' +
-        "          # Maven's resolver rewrites its bookkeeping in place through the\n" +
-        "          # seed's hardlinks; unlink those names so only the locked write-back\n" +
-        '          # mutates the host cache (issue #15281).\n' +
-        '          ' +
-        seedUnlink +
-        '\n' +
-        '          suite_status=0\n' +
-        '          set +e\n' +
-        '          mvn --batch-mode --no-transfer-progress clean test || suite_status=$?\n' +
-        '          if [ "${MATRIX_JAVA}" = "21" ] && [ "${suite_status}" -eq 0 ]; then\n' +
-        '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || suite_status=$?\n' +
-        '            if [ "${suite_status}" -eq 0 ]; then\n' +
-        '              cd ../../managed-agent-server\n' +
-        '              # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
-        '              if [ "${TIER}" = "fast" ]; then\n' +
-        '                mvn --batch-mode --no-transfer-progress clean test || suite_status=$?\n' +
-        '              else\n' +
-        `                mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test || suite_status=$?\n` +
-        '              fi\n' +
+      'mvn --batch-mode --no-transfer-progress clean test\n' +
+        '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
+        '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install\n' +
+        '            cd ../../managed-agent-server\n' +
+        '            # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
+        '            if [ "${TIER}" = "fast" ]; then\n' +
+        '              mvn --batch-mode --no-transfer-progress clean test\n' +
+        '            else\n' +
+        `              mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
         '            fi\n' +
-        '          fi\n' +
-        '          set -e',
+        '          fi',
     );
   });
 
@@ -1063,40 +1393,6 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'checkstyle:check checkstyle:check@runtime-broker-checkstyle',
     );
-    // On the ECS leg the SDK is installed into the job-local repository by
-    // the self-hosted suite step, so Checkstyle must resolve from there; the
-    // hosted leg keeps the default repository its state-test step populated.
-    expect(block).toContain(
-      '          if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then\n' +
-        '            export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${RUNNER_TEMP}/m2-repo"\n' +
-        '          fi\n' +
-        '          mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle',
-    );
-    // Checkstyle consumes the SDK installed into the job-local repository by
-    // the suite step's Java-21 branch, so the producer must precede it, the
-    // install must stay inside that branch, and both steps must keep the
-    // same Java-21 gate.
-    const steps = parse(workflow).jobs.test.steps;
-    const names = steps.map((candidate) => candidate.name);
-    const suiteIndex = names.indexOf('Run Java SDK tests (self-hosted)');
-    expect(suiteIndex).toBeGreaterThan(-1);
-    expect(suiteIndex).toBeLessThan(
-      names.indexOf('Run Managed Agent Server Checkstyle'),
-    );
-    const suite = steps[suiteIndex];
-    const installAt = suite.run.indexOf(
-      '-DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install',
-    );
-    expect(installAt).toBeGreaterThan(-1);
-    const gateAt = suite.run.indexOf('if [ "${MATRIX_JAVA}" = "21" ]');
-    expect(gateAt).toBeGreaterThan(-1);
-    expect(installAt).toBeGreaterThan(gateAt);
-    const branchEnd = suite.run.indexOf('fi\nset -e');
-    expect(branchEnd).toBeGreaterThan(-1);
-    expect(installAt).toBeLessThan(branchEnd);
-    expect(block).toContain(
-      "if: \"${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}\"",
-    );
   });
 
   it.each([
@@ -1110,11 +1406,13 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       "settings-path: '${{ runner.temp }}/setup-java-m2'",
     );
-    // Two tail-anchored forms, no prefix match: mysql-integration and the
-    // test job append a job-local -Dmaven.repo.local where they touch the
-    // host-shared cache, the EventTransport lanes to both of theirs; the
-    // other jobs must carry no suffix at all — an appended -DskipTests
-    // would be word-split live by the mvn launcher.
+    // Two tail-anchored forms, no prefix match: mysql-integration appends
+    // a job-local -Dmaven.repo.local to its single Maven-bearing step
+    // (pinned by the 'installs and verifies against one job-local Maven
+    // repository' test), the EventTransport lanes to both of theirs, and
+    // the test job to its self-hosted suite; the other jobs must carry no
+    // suffix at all — an appended -DskipTests would be word-split live by
+    // the mvn launcher.
     const exact = block.match(
       /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
     );
@@ -1132,17 +1430,22 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     if (name.startsWith('event-transport-')) {
       expect(exact).toBeNull();
-      expect(block).toContain('mkdir -p "${RUNNER_TEMP}/m2-repo"');
       expect(block).toContain(
         'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/"',
       );
-    } else if (name === 'test' || name === 'mysql-integration') {
-      expect(jobLocal?.length).toBe(1);
-      expect(block).toContain('mkdir -p "${RUNNER_TEMP}/m2-repo"');
-      expect(block).toContain(
-        'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/"',
+    } else if (name === 'test') {
+      // The self-hosted suite resolves from a job-local repository; only the
+      // cache write-back takes the host lock. Bind the suffix to the step,
+      // not just its count: moving it to another step leaves the suite on
+      // the host-shared ~/.m2 and the write-back with no delta to publish.
+      expect(jobLocal?.length ?? 0).toBe(1);
+      const selfHosted = parse(workflow).jobs[name].steps.find(
+        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
       );
-    } else {
+      expect(selfHosted?.env?.MAVEN_ARGS).toContain(
+        '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
+      );
+    } else if (name !== 'mysql-integration') {
       expect(jobLocal).toBeNull();
     }
     expect(block).not.toContain('Drop shared Maven toolchains.xml');
@@ -1862,10 +2165,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // predate the helper, so this site must also keep the bare-lock arm.
     expect(step.run).toContain('flock --wait 5400 9');
     expect(step.run).toContain(
-      '::error::sdk-java host lock not acquired within',
-    );
-    expect(step.run).toContain(
-      '::error::sdk-java host lock not acquired within 90 minutes',
+      '::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget',
     );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
     // The fast tier owns the same lock: it overtakes this job only while
@@ -1877,7 +2177,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(seconds).toBe(90 * 60);
     // This site stays in the normal class: a tier argument here would put
     // full-tier MariaDB holds ahead of fast PR-feedback work.
-    expect(step.run).toContain('sdk_java_lock_acquire 5400\n');
+    expect(step.run).toContain(
+      'sdk_java_lock_acquire 5400 >&7 2>&1 || lock_rc=$?',
+    );
     // Promotion must fire strictly inside the acquisition budget; at or
     // above it the rename lands in the iteration whose timeout arm deletes
     // the ticket, and no test would see the anti-starvation arm go dead.
@@ -1915,37 +2217,22 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + writeBackBound + 30 * 60);
-    // The test job locks the same write-back. Its Maven runs resolve from
-    // the same job-local repository above the acquisition, and its ceiling
-    // must cover one full wait, the 925 s suite, one write-back, and ~11
-    // minutes of setup. The 925 s was measured while the lock serialized
-    // suites; concurrent suites spend the ceiling's slack instead.
-    const testStep = parsed.jobs.test.steps.find(
-      (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+    // The sibling test job carries the longer, now-conservative 9600 s
+    // budget; its ceiling must cover that full wait, its worst measured
+    // whole-step suite at this head (1205 s; the 925 s suite-alone figure
+    // from #14801 is a lower bound), the bounded write-back it guards and
+    // ~11 minutes of setup.
+    const testBudget = Number(
+      parsed.jobs.test.steps
+        .map(
+          (s) => s.run?.match(/sdk_java_lock_acquire (\d+) "\$\{TIER\}"/)?.[1],
+        )
+        .find(Boolean),
     );
-    const testLockAt = testStep.run.indexOf(
-      'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
-    );
-    expect(testLockAt).toBeGreaterThan(-1);
-    const testMaven = testStep.run.match(/^\s*mvn .+$/gm) ?? [];
-    expect(
-      Math.max(...testMaven.map((command) => testStep.run.indexOf(command))),
-    ).toBeLessThan(testLockAt);
-    expect(testStep.run).toContain('sdk_java_lock_acquire 5400 "${TIER}"');
-    const testWriteBackAt = testStep.run.indexOf(
-      'mkdir -p "${HOME}/.m2/repository" 9>&-',
-    );
-    expect(testWriteBackAt).toBeGreaterThan(testLockAt);
-    // This copy is the one lane that installs the fixed 0.1.0-alpha SDK, so
-    // pin it byte-identical to the MariaDB lane's literal: a partial pin let
-    // its prune and delta filter drift unnoticed.
-    expect(testStep.run).toContain(writeBackFind);
-    const testWriteBackBound = Number(
-      testStep.run.match(/timeout (\d+) find \. /)?.[1],
-    );
-    expect(testWriteBackBound).toBe(300);
+    expect(testBudget).toBe(9600);
+    expect(testBudget).toBeGreaterThan(seconds);
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      seconds + 925 + testWriteBackBound + 11 * 60,
+      testBudget + 1205 + writeBackBound + 11 * 60,
     );
   });
 
@@ -1962,12 +2249,11 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(step?.env?.MAVEN_ARGS).toContain(
       '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
     );
-    expect(step.run).toContain('mkdir -p "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
       'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/"',
     );
-    // The write-back closes the host-shared ~/.m2 loop — the seed above is
-    // one-way, so without it a pom key rotation leaves a
+    // The write-back closes the host-shared ~/.m2 loop — the seed above only
+    // reads that repository, so without it a pom key rotation leaves a
     // thin entry that never recaptures the managed-agent-server tree. The
     // excludes name the two in-house fixed release coordinates, not the
     // whole com/alibaba group, so third-party artifacts under it (druid)

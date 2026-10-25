@@ -38,22 +38,28 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    # One per-host lock wait plus the cache write-back it guards. The suite
-    # runs from a job-local Maven repository and a hold is the write-back's
-    # 300-second backstop, so the 5400-second wait covers eighteen of them.
-    # The ticketed queue in .github/scripts/sdk-java-lock.sh serves the fast
-    # class first: a fast-tier leg waits for the running hold, at most one
-    # parked full-tier head and older fast-class tickets, overtaking only
-    # full-tier tickets younger than SDK_JAVA_LOCK_PROMOTE_AFTER (under a
-    # longer hold the queue is plain sequence order), while a full-tier leg
-    # (the default) keeps its FIFO position among the other rank-1 tickets.
-    # The ceiling is that wait plus one write-back, the 925 s suite, and
-    # ~11 minutes of uncapped setup and margin: 150. The 925 s was measured
-    # while the lock admitted one suite per host; suites from different jobs
-    # can now run concurrently, and the ~1700 s of slack is their buffer.
-    # Hosted lanes never take the lock and inherit this ceiling as a bound,
-    # not as an expected duration.
-    timeout-minutes: 150
+    # One per-host lock wait plus the bounded write-back it guards, and the
+    # unlocked Maven work the job runs outside it. The only hold is the
+    # 300-second write-back: the suite runs before the acquisition and holds
+    # nothing. The 9600-second wait is carried from the pre-split topology
+    # where a test lane could queue behind several suite holds; with the
+    # suite unlocked it is a conservative bound (about 32 queued copies),
+    # not a measured need, and no constant budget bounds the queue itself
+    # (#14566, #15031). The 2026-10-22 run 39754359013 burned the then
+    # 5400-second budget behind the MariaDB lane's verify hold — the shape
+    # #15128 removed (qwen-code#15243). The ticketed queue in
+    # .github/scripts/sdk-java-lock.sh serves the fast class first: a
+    # fast-tier leg waits for the running hold, at most one parked full-tier
+    # head and older fast-class tickets, overtaking only full-tier tickets
+    # younger than SDK_JAVA_LOCK_PROMOTE_AFTER (under a longer hold the
+    # queue is plain sequence order), while a full-tier leg (the default)
+    # keeps its FIFO position among the other rank-1 tickets.
+    # The ceiling is that wait plus the worst measured whole-step suite
+    # (1205 s; the 925 s suite-alone figure from #14801 is a lower bound),
+    # the write-back and ~11 minutes of setup and margin: 200. Hosted lanes
+    # never take the lock and inherit this ceiling as a bound, not as an
+    # expected duration.
+    timeout-minutes: 200
     strategy:
       fail-fast: false
       matrix:
@@ -237,84 +243,132 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         working-directory: 'packages/sdk-java/qwencode'
         env:
-          # The suite and its SDK install resolve from a job-local copy, so
-          # they touch no host-shared state and run above the lock; only the
-          # cache write-back at the end takes it (issue #15281).
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
           MATRIX_JAVA: '${{ matrix.java }}'
           TIER: '${{ inputs.tier }}'
         run: |-
-          # A seed from the host-shared cache keeps the job-local repository
-          # warm without taking the lock; its hardlinked resolver bookkeeping
-          # is unlinked below. Copy the contents into the existing directory:
-          # `cp -aln SRC DEST` nests SRC inside DEST when DEST survives from
-          # an earlier job on this host.
+          # Seed from the host-shared repo so a warm host still starts warm.
+          # The seed only reads the host cache and is best-effort, so it takes
+          # no lock and cannot delay the lane.
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
-          # Maven's resolver rewrites its bookkeeping in place through the
-          # seed's hardlinks; unlink those names so only the locked write-back
-          # mutates the host cache (issue #15281).
-          find "${RUNNER_TEMP}/m2-repo" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' \) -delete 2>/dev/null || true
-          suite_status=0
-          set +e
-          mvn --batch-mode --no-transfer-progress clean test || suite_status=$?
-          if [ "${MATRIX_JAVA}" = "21" ] && [ "${suite_status}" -eq 0 ]; then
-            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || suite_status=$?
-            if [ "${suite_status}" -eq 0 ]; then
-              cd ../../managed-agent-server
-              # The fast tier skips mysql-integration, which owns the full H2 unit suite.
-              if [ "${TIER}" = "fast" ]; then
-                mvn --batch-mode --no-transfer-progress clean test || suite_status=$?
-              else
-                mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test || suite_status=$?
-              fi
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-local.xml' \) \
+            -delete 2>/dev/null || true
+          # Both in-house coordinates are fixed release versions this job
+          # builds locally, so a seeded copy is only a hardlink the unlocked
+          # Maven runs would rewrite through into the host cache. Drop them
+          # so the install writes fresh inodes.
+          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+          # The suite resolves from the job-local copy above, so it does not
+          # touch host-shared state and must not hold the per-host lock.
+          # On 2026-10-22 run 39771949573's fast tier failed at its
+          # 5400-second budget on two hosts; the full-tier Java 21 leg of
+          # run 39754414693 ran 89 minutes on a third, itself mostly one
+          # lock wait after its own attempt 1 starved at 5400 seconds. A
+          # suite hold measures in tens of minutes to hours; the write-back
+          # is bounded at 300 seconds, whoever holds it.
+          mvn --batch-mode --no-transfer-progress clean test
+          if [ "${MATRIX_JAVA}" = "21" ]; then
+            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+            cd ../../managed-agent-server
+            # The fast tier skips mysql-integration, which owns the full H2 unit suite.
+            if [ "${TIER}" = "fast" ]; then
+              mvn --batch-mode --no-transfer-progress clean test
+            else
+              mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
             fi
           fi
-          set -e
-          # Only the write-back mutates the host-shared cache, so only it
-          # takes the lock. Ticketed queue, not a bare flock: only the head
-          # ticket — lowest class, then oldest — retries the lock, and the
-          # fast class is served first — see the sourced helper. Capture a
-          # timeout instead of letting errexit abort: the suite verdict below
-          # must still reach the classifier.
-          lock_status=0
+          # Only the write-back mutates host-shared state, so only it takes
+          # the per-host lock. The ticketed queue orders that one wait, and
+          # the tier argument keeps the fast class ahead of waiting full-tier
+          # tickets — see the sourced helper. The gate result is final before
+          # this runs, so an expired wait warns and skips the copy instead of
+          # reddening a green suite.
+          # A host fault takes the same warn-and-skip path as an expired wait.
+          lock_setup_fault() {
+            echo "::warning::Maven cache write-back skipped: $1; the gate result above is unaffected"
+            exit 0
+          }
+          cache_dir="${HOME}/.cache/qwen-code-ci"
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            sdk_java_lock_acquire 5400 "${TIER}" || lock_status=$?
+            # The helper runs on the left of `||`, where bash suppresses
+            # errexit for its whole body, so probe the setup it depends on
+            # before it can spin out the whole wait budget.
+            command -v flock >/dev/null 2>&1 ||
+              lock_setup_fault 'flock is unavailable'
+            queue_dir="${cache_dir}/sdk-java-tests.lock.queue"
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${queue_dir}" ||
+              lock_setup_fault 'the write-back queue directory cannot be created'
+            [ -w "${cache_dir}" ] ||
+              lock_setup_fault "${cache_dir} is not writable"
+            [ -w "${queue_dir}" ] ||
+              lock_setup_fault "${queue_dir} is not writable"
+            # The rerun classifiers match `lock not acquired within` in the
+            # annotations of a failed run; rewrite the helper's timeout line
+            # so this tolerated path cannot misattribute a later genuine
+            # failure in the same job to infrastructure.
+            exec 7> >(sed -u -e 's/^::error::/::warning::/' -e 's/lock not acquired within/lock wait exhausted/I')
+            lock_filter=$!
+            lock_rc=0
+            sdk_java_lock_acquire 9600 "${TIER}" >&7 2>&1 || lock_rc=$?
+            exec 7>&-
+            wait "${lock_filter}" 2>/dev/null || true
+            if [ "${lock_rc}" -ne 0 ]; then
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
+              exit 0
+            fi
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
             # back to the bare lock this queue replaced rather than dying
             # before the write-back and wedging the release.
-            mkdir -p "${HOME}/.cache/qwen-code-ci"
-            exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-            if ! flock --wait 5400 9; then
-              echo "::error::sdk-java host lock not acquired within 90 minutes"
-              lock_status=1
+            command -v flock >/dev/null 2>&1 ||
+              lock_setup_fault 'flock is unavailable'
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${cache_dir}" ||
+              lock_setup_fault "${cache_dir} cannot be created"
+            [ -w "${cache_dir}" ] ||
+              lock_setup_fault "${cache_dir} is not writable"
+            exec 9>"${cache_dir}/sdk-java-tests.lock"
+            lock_rc=0
+            flock --wait 9600 9 || lock_rc=$?
+            if [ "${lock_rc}" -eq 1 ]; then
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
+              exit 0
+            elif [ "${lock_rc}" -ne 0 ]; then
+              echo "::error::Maven cache write-back setup failed: flock exited ${lock_rc}"
+              exit 1
             fi
           fi
-          if [ "${lock_status}" -eq 0 ]; then
-            # No write-back child inherits fd 9, or a cancelled job's survivor
-            # would hold the host lock until it exits. The in-house coordinates
-            # are never published, so drop any pre-PR copies from the host cache
-            # in the same locked stanza. Resolver bookkeeping stays job-local:
-            # publishing it would hardlink an inode every later Maven run must
-            # rewrite outside the lock.
-            write_back=0
-            rm -rf -- "${HOME}/.m2/repository/com/alibaba/qwencode-sdk" "${HOME}/.m2/repository/com/alibaba/qwen-managed-agent-server" 9>&- || write_back=$?
-            mkdir -p "${HOME}/.m2/repository" 9>&- || write_back=$?
-            cd "${RUNNER_TEMP}/m2-repo"
-            timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 ! -name '_remote.repositories' ! -name 'maven-metadata-local.xml' ! -name 'resolver-status.properties' ! -name '*.lastUpdated' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
-            if [ "${write_back}" -eq 124 ]; then
-              echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
-            elif [ "${write_back}" -ne 0 ]; then
-              echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
-            fi
+          # Publish only this job's downloads: seeded files are hardlinks
+          # (nlink >= 2), so the delta is nlink == 1. Each link is atomic and
+          # -n never replaces a host file, so the backstop can leave an
+          # artifact missing for the next job to re-resolve, never truncated.
+          # No write-back child inherits fd 9, or a cancelled job's survivor
+          # would hold the host lock until it exits. The in-house coordinates
+          # are never published, so drop any pre-PR copies from the host cache
+          # in the same locked stanza. Resolver bookkeeping stays job-local:
+          # publishing it would hardlink an inode every later Maven run must
+          # rewrite outside the lock.
+          write_back=0
+          rm -rf -- "${HOME}/.m2/repository/com/alibaba/qwencode-sdk" "${HOME}/.m2/repository/com/alibaba/qwen-managed-agent-server" 9>&- || write_back=$?
+          mkdir -p "${HOME}/.m2/repository" 9>&- || write_back=$?
+          cd "${RUNNER_TEMP}/m2-repo"
+          timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 ! -name '_remote.repositories' ! -name 'maven-metadata-local.xml' ! -name 'resolver-status.properties' ! -name '*.lastUpdated' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          if [ "${write_back}" -eq 124 ]; then
+            echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
+          elif [ "${write_back}" -ne 0 ]; then
+            echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
           fi
-          if [ "${suite_status}" -ne 0 ]; then
-            exit "${suite_status}"
-          fi
-          exit "${lock_status}"
 
       - name: 'Run Java SDK tests (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -366,9 +420,7 @@ jobs:
         run: |-
           # The ECS leg resolves the SDK from the job-local repository the
           # self-hosted step installed it into; the hosted leg's SDK comes
-          # from the default repository the state-test step populated. The
-          # write-back never publishes resolver bookkeeping, so this run
-          # resolves from the job-local copy without unlinking.
+          # from the default repository the state-test step populated.
           if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then
             export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${RUNNER_TEMP}/m2-repo"
           fi
@@ -803,15 +855,22 @@ jobs:
           set -o pipefail
           # Seed from the host-shared repo (cache-restored on hosted runners)
           # so it and the egress proxy keep paying off for the job-local copy.
-          # The seed reads the host cache and, apart from the resolver
-          # bookkeeping unlinked below, writes nothing through its hardlinks;
-          # it is best-effort, so it takes no lock and cannot delay the lane.
+          # The seed only reads the host cache and is best-effort, so it takes
+          # no lock and cannot delay the lane.
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
-          # Maven's resolver rewrites its bookkeeping in place through the
-          # seed's hardlinks; unlink those names so only the locked write-back
-          # mutates the host cache (issue #15281).
-          find "${RUNNER_TEMP}/m2-repo" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' \) -delete 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-local.xml' \) \
+            -delete 2>/dev/null || true
+          # Both in-house coordinates are fixed release versions this job
+          # builds locally, so a seeded copy is only a hardlink the unlocked
+          # Maven runs would rewrite through into the host cache. Drop them
+          # so the install writes fresh inodes.
+          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
@@ -834,19 +893,66 @@ jobs:
           # lose its place in the host queue between installing and verifying.
           # The ticketed queue in sdk-java-lock.sh orders that one wait (fast
           # PR legs overtake it until it parks or is promoted) instead of a
-          # wake-up race against sibling holds (qwen-code#14743).
+          # wake-up race against sibling holds (qwen-code#14743). The gate
+          # result is final before this runs, so an expired wait warns and
+          # skips the copy instead of reddening a green suite.
+          # A host fault takes the same warn-and-skip path as an expired wait.
+          lock_setup_fault() {
+            echo "::warning::Maven cache write-back skipped: $1; the gate result above is unaffected"
+            exit 0
+          }
+          cache_dir="${HOME}/.cache/qwen-code-ci"
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            sdk_java_lock_acquire 5400
+            # The helper runs on the left of `||`, where bash suppresses
+            # errexit for its whole body, so probe the setup it depends on
+            # before it can spin out the whole wait budget.
+            command -v flock >/dev/null 2>&1 ||
+              lock_setup_fault 'flock is unavailable'
+            queue_dir="${cache_dir}/sdk-java-tests.lock.queue"
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${queue_dir}" ||
+              lock_setup_fault 'the write-back queue directory cannot be created'
+            [ -w "${cache_dir}" ] ||
+              lock_setup_fault "${cache_dir} is not writable"
+            [ -w "${queue_dir}" ] ||
+              lock_setup_fault "${queue_dir} is not writable"
+            # The rerun classifiers match `lock not acquired within` in the
+            # annotations of a failed run; rewrite the helper's timeout line
+            # so this tolerated path cannot misattribute a later genuine
+            # failure in the same job to infrastructure.
+            exec 7> >(sed -u -e 's/^::error::/::warning::/' -e 's/lock not acquired within/lock wait exhausted/I')
+            lock_filter=$!
+            lock_rc=0
+            sdk_java_lock_acquire 5400 >&7 2>&1 || lock_rc=$?
+            exec 7>&-
+            wait "${lock_filter}" 2>/dev/null || true
+            if [ "${lock_rc}" -ne 0 ]; then
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
+              exit 0
+            fi
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
             # back to the bare lock this queue replaced rather than dying
             # before the write-back and wedging the release.
-            mkdir -p "${HOME}/.cache/qwen-code-ci"
-            exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-            if ! flock --wait 5400 9; then
-              echo "::error::sdk-java host lock not acquired within 90 minutes"
+            command -v flock >/dev/null 2>&1 ||
+              lock_setup_fault 'flock is unavailable'
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${cache_dir}" ||
+              lock_setup_fault "${cache_dir} cannot be created"
+            [ -w "${cache_dir}" ] ||
+              lock_setup_fault "${cache_dir} is not writable"
+            exec 9>"${cache_dir}/sdk-java-tests.lock"
+            lock_rc=0
+            flock --wait 5400 9 || lock_rc=$?
+            if [ "${lock_rc}" -eq 1 ]; then
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
+              exit 0
+            elif [ "${lock_rc}" -ne 0 ]; then
+              echo "::error::Maven cache write-back setup failed: flock exited ${lock_rc}"
               exit 1
             fi
           fi
@@ -1545,10 +1651,18 @@ jobs:
           # Seed from the host-shared repo (cache-restored on hosted runners).
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
-          # Maven's resolver rewrites its bookkeeping in place through the
-          # seed's hardlinks; unlink those names so only the locked write-back
-          # mutates the host cache (issue #15281).
-          find "${RUNNER_TEMP}/m2-repo" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' \) -delete 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-local.xml' \) \
+            -delete 2>/dev/null || true
+          # Both in-house coordinates are fixed release versions this job
+          # builds locally, so a seeded copy is only a hardlink the unlocked
+          # Maven runs would rewrite through into the host cache. Drop them
+          # so the install writes fresh inodes.
+          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Cache the RocketMQ distribution'
         uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
@@ -1788,10 +1902,18 @@ jobs:
           # Seed from the host-shared repo (cache-restored on hosted runners).
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
-          # Maven's resolver rewrites its bookkeeping in place through the
-          # seed's hardlinks; unlink those names so only the locked write-back
-          # mutates the host cache (issue #15281).
-          find "${RUNNER_TEMP}/m2-repo" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' \) -delete 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-local.xml' \) \
+            -delete 2>/dev/null || true
+          # Both in-house coordinates are fixed release versions this job
+          # builds locally, so a seeded copy is only a hardlink the unlocked
+          # Maven runs would rewrite through into the host cache. Drop them
+          # so the install writes fresh inodes.
+          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host
