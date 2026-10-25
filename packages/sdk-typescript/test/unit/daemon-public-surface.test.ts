@@ -753,6 +753,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(kind).toBe('readdir_failed');
     expect(Public.DAEMON_ERROR_KINDS).toContain('readdir_failed');
     expect(Public.DAEMON_ERROR_KINDS).toContain('stat_failed');
+    expect(Public.DAEMON_ERROR_KINDS).toContain('symlinked_root');
   });
 });
 

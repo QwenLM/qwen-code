@@ -2274,10 +2274,12 @@ export const DAEMON_ERROR_KINDS = [
   'model_stream_interrupted',
   // Tool-call loop protection stopped the current turn.
   'loop_detected',
-  // A workspace auto-memory root could not be listed or stat'ed
-  // (reported per root in the auto-memory status `errors` cells).
+  // A workspace auto-memory root could not be listed or stat'ed, or a
+  // project root was refused because it is (or resolves through) a
+  // symlink (reported per root in the auto-memory status `errors` cells).
   'readdir_failed',
   'stat_failed',
+  'symlinked_root',
 ] as const;
 
 export type DaemonErrorKind = (typeof DAEMON_ERROR_KINDS)[number];
