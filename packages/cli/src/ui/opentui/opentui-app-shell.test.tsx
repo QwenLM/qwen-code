@@ -40,7 +40,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { act, render, renderHook, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
 import {
@@ -67,10 +69,17 @@ import type { StatusLineState } from '../hooks/useStatusLine.js';
 import { StreamingState } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import type { LiveHistoryItem } from './live-session-model.js';
-import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
+  markApiHistoryPrompt,
+  getApiHistoryPromptId,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { Content } from '@google/genai';
 import { historyCommand } from '../commands/historyCommand.js';
-
+import { restoreCommand } from '../commands/restoreCommand.js';
+import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
+import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
+import { livePromptEvents } from './live-session.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
 import {
   applyCollapsePolicyAndSummary,
@@ -457,6 +466,279 @@ describe('OpenTuiApp shell wiring', () => {
   afterEach(() => {
     mocks.state.executeUserShell.mockImplementation(() => Promise.resolve());
   });
+
+  it.each(['control', 'retry', 'image'] as const)(
+    'restores once without admitting a competing %s request',
+    async (kind) => {
+      const originalLive =
+        await vi.importActual<typeof import('./live-session.js')>(
+          './live-session.js',
+        );
+      const scratch = mkdtempSync(join(tmpdir(), 'restore-admission-'));
+      try {
+        let releaseRestore!: () => void;
+        const heldRestore = new Promise<void>((resolve) => {
+          releaseRestore = resolve;
+        });
+        let releaseFirst: (() => void) | undefined;
+        let owner!: ReturnType<typeof useOpenTuiLiveTurn>;
+        let coreHistory: Content[] = [];
+        let turnCount = 0;
+        const completed: number[] = [];
+        const replay = vi.fn(() => true);
+        const rewind = vi.fn(async () => {
+          await heldRestore;
+          return { filesChanged: [], filesFailed: [] };
+        });
+        const config = makeFakeConfig({});
+        config.getFileCheckpointingEnabled = () => true;
+        config.getShellExecutionSandbox = () => undefined;
+        config.getContextFilePaths = () => [];
+        config.storage.getProjectTempCheckpointsDir = () => scratch;
+        config.getChatRecordingService = () =>
+          ({ recordSlashCommand: vi.fn() }) as unknown as ReturnType<
+            Config['getChatRecordingService']
+          >;
+        config.getFileHistoryService = () =>
+          ({ rewind }) as unknown as ReturnType<
+            Config['getFileHistoryService']
+          >;
+        config.getFileReadCache = () =>
+          ({ clear: vi.fn() }) as unknown as ReturnType<
+            Config['getFileReadCache']
+          >;
+        config.getMemoryManager = () =>
+          ({
+            restoreMemoryBodiesPresentInHistory: vi.fn(),
+          }) as unknown as ReturnType<Config['getMemoryManager']>;
+        config.clearActiveTodoReminders = vi.fn();
+        const client = new LlmClient(config);
+        const chat = {
+          setHistory(history: Content[]) {
+            coreHistory = history;
+          },
+          getHistory: () => coreHistory,
+          getHistoryShallow: () => coreHistory,
+        };
+        const getChat = vi
+          .spyOn(client, 'getChat')
+          .mockReturnValue(chat as ReturnType<LlmClient['getChat']>);
+        const setHistory = vi.spyOn(client, 'setHistory');
+        config.getLlmClient = () => client;
+        let view: ReturnType<typeof render> | undefined;
+        let pendingRestore: Promise<boolean> | undefined;
+        try {
+          const checkpointApi: Content[] = [
+            { role: 'user', parts: [{ text: 'checkpoint-model' }] },
+          ];
+          const checkpointUi: HistoryItem[] = [
+            { id: 800, type: 'user', text: 'checkpoint-ui', sentToModel: true },
+          ];
+          const toolArgs = { absolute_path: join(scratch, 'owned.txt') };
+          writeFileSync(
+            join(scratch, 'owned.json'),
+            JSON.stringify({
+              promptId: 'checkpoint-prompt',
+              history: checkpointUi,
+              clientHistory: checkpointApi,
+              promptIds: ['checkpoint-prompt'],
+              toolCall: { name: 'read_file', args: toolArgs },
+            }),
+          );
+          const imagePath = join(scratch, 'image.png');
+          writeFileSync(
+            imagePath,
+            Buffer.from(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF0cAAAAASUVORK5CYII=',
+              'base64',
+            ),
+          );
+          vi.mocked(livePromptEvents).mockImplementation(
+            async function* (
+              _config,
+              prompt,
+              signal,
+              options,
+            ): AsyncGenerator<OpenTuiStreamEvent> {
+              const turn = ++turnCount;
+              options?.onPreparedRequest?.({
+                content: prompt,
+                inlineModelOverride: false,
+              });
+              if (kind === 'image' && turn === 1) {
+                await new Promise<void>((resolve) => {
+                  releaseFirst = resolve;
+                  signal?.addEventListener('abort', () => resolve(), {
+                    once: true,
+                  });
+                });
+              }
+              if (signal?.aborted) return;
+              if (kind === 'retry' && turn === 1) {
+                yield { type: 'error', text: 'failed seed request' };
+              } else {
+                coreHistory.push({
+                  role: 'model',
+                  parts: [{ text: `answer-${turn}` }],
+                });
+                yield { type: 'text', delta: `answer-${turn}` };
+                yield { type: 'done' };
+              }
+              completed.push(turn);
+            },
+          );
+          mocks.state.useRealDispatcher = true;
+          const commands = [restoreCommand(config)!];
+          function Harness() {
+            owner = useOpenTuiLiveTurn({ config });
+            return (
+              <OpenTuiApp
+                config={config}
+                settings={SETTINGS}
+                logger={null}
+                commands={commands}
+                getSessionStats={getSessionStats}
+                historyItems={owner.items}
+                streaming={owner.streaming}
+                onTranscriptEvent={owner.applyEvent}
+                onTranscriptReset={owner.resetTranscript}
+                onInputProcessed={owner.notifyInputProcessed}
+                onRetryPrompt={owner.retryLastPrompt}
+                onSubmitPrompt={owner.submit}
+                onScheduleTool={replay}
+                isCurrentHistory={owner.isCurrentHistory}
+                onInterrupt={owner.interrupt}
+                messageQueue={owner.messageQueue}
+                onPopQueue={owner.popQueue}
+              />
+            );
+          }
+          const input = () =>
+            mocks.state.inputProps!['onSubmit'] as (
+              text: string,
+              images?: string[],
+              options?: OpenTuiSubmitOptions,
+            ) => Promise<boolean>;
+          view = render(<Harness />);
+          await settle();
+          if (kind !== 'control') {
+            await act(async () => {
+              expect(await input()('seed-request')).toBe(true);
+            });
+            await vi.waitFor(() => expect(turnCount).toBe(1));
+            if (kind === 'retry') {
+              await vi.waitFor(() => expect(owner.streaming).toBe(false));
+              expect(owner.items.at(-1)).toMatchObject({
+                kind: 'error',
+                text: 'failed seed request',
+              });
+            } else expect(owner.streaming).toBe(true);
+          }
+          if (kind === 'image') {
+            await act(async () => {
+              expect(await input()('/restore owned')).toBe(true);
+            });
+            expect(rewind).not.toHaveBeenCalled();
+            await act(async () => {
+              releaseFirst!();
+            });
+          } else {
+            act(() => {
+              pendingRestore = input()('/restore owned');
+            });
+          }
+          await vi.waitFor(() =>
+            expect(rewind).toHaveBeenCalledExactlyOnceWith(
+              'checkpoint-prompt',
+              true,
+            ),
+          );
+          const host = mocks.state.host as OpenTuiAppHost;
+          expect(host.isIdle()).toBe(false);
+          expect(owner.streaming).toBe(false);
+          const expectedTurns = kind === 'control' ? 0 : 1;
+          await act(async () => {
+            expect(await input()('ordinary-while-restoring')).toBe(false);
+          });
+          expect(turnCount).toBe(expectedTurns);
+          if (kind === 'retry') {
+            await act(async () => {
+              expect(
+                (mocks.state.inputProps!['onRetry'] as () => void)(),
+              ).toBeUndefined();
+            });
+          } else if (kind === 'image') {
+            await act(async () => {
+              expect(await input()('image-while-restoring', [imagePath])).toBe(
+                false,
+              );
+            });
+          }
+          expect(turnCount).toBe(expectedTurns);
+          expect(owner.streaming).toBe(false);
+          expect(owner.messageQueue).toEqual([]);
+          expect(setHistory).not.toHaveBeenCalled();
+          expect(replay).not.toHaveBeenCalled();
+          await act(async () => {
+            releaseRestore();
+            await pendingRestore;
+          });
+          await vi.waitFor(() =>
+            expect(replay).toHaveBeenCalledExactlyOnceWith(
+              'read_file',
+              toolArgs,
+            ),
+          );
+          expect(host.isIdle()).toBe(true);
+          expect(structuredClone(coreHistory)).toEqual(checkpointApi);
+          expect(getApiHistoryPromptId(coreHistory[0])).toBe(
+            'checkpoint-prompt',
+          );
+          expect(
+            owner.items
+              .filter((item) => item.kind === 'user')
+              .map((item) => item.text),
+          ).toEqual(['checkpoint-ui']);
+          expect(setHistory).toHaveBeenCalledOnce();
+          expect(setHistory.mock.calls[0][0]).toBe(coreHistory);
+          expect(setHistory.mock.results[0].value).toBeUndefined();
+          expect(turnCount).toBe(expectedTurns);
+          expect(completed).toEqual(kind === 'control' ? [] : [1]);
+          expect(owner.messageQueue).toEqual([]);
+          if (kind === 'retry') {
+            await act(async () => {
+              (mocks.state.inputProps!['onRetry'] as () => void)();
+            });
+            expect(turnCount).toBe(1);
+            expect(owner.items.at(-1)).toMatchObject({
+              kind: 'info',
+              text: 'No failed request to retry.',
+            });
+            expect(setHistory).toHaveBeenCalledOnce();
+            expect(replay).toHaveBeenCalledOnce();
+          }
+        } finally {
+          releaseRestore();
+          releaseFirst?.();
+          try {
+            await act(async () => {
+              await pendingRestore;
+            });
+          } finally {
+            view?.unmount();
+            getChat.mockRestore();
+            setHistory.mockRestore();
+            vi.mocked(livePromptEvents).mockImplementation(
+              originalLive.livePromptEvents,
+            );
+            mocks.state.useRealDispatcher = false;
+          }
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('renders the composer inside the error boundary by default', async () => {
     renderApp();
@@ -2063,6 +2345,125 @@ describe('OpenTuiApp shell wiring', () => {
       );
     });
     await expect(actionPending).resolves.toBe(true);
+  });
+
+  it.each(['abort', 'current loss'] as const)(
+    'removes only owned A on %s and rejects stale callbacks',
+    async (mode) => {
+      const view = renderApp();
+      await settle();
+      const host = mocks.state.host as OpenTuiAppHost;
+      const controller = new AbortController();
+      let current = true;
+      const a = vi.fn();
+      const b = vi.fn();
+      await act(async () => {
+        host.addConfirmUpdateExtensionRequest({
+          prompt: 'owned A',
+          signal: controller.signal,
+          isCurrent: () => current,
+          onConfirm: a,
+        });
+        host.addConfirmUpdateExtensionRequest({
+          prompt: 'owned B',
+          onConfirm: b,
+        });
+      });
+      expect(screen.getByText('owned A')).toBeTruthy();
+      const lateA = mocks.state.actionConfirmProps!['onResolve'] as (
+        value: boolean,
+      ) => void;
+      if (mode === 'abort') {
+        await act(async () => controller.abort());
+      } else {
+        current = false;
+        view.rerender(
+          <OpenTuiApp
+            config={CONFIG}
+            settings={SETTINGS}
+            logger={null}
+            commands={[]}
+            getSessionStats={getSessionStats}
+          />,
+        );
+        await settle();
+      }
+      expect(a.mock.calls).toEqual([[false]]);
+      expect(screen.queryByText('owned A')).toBeNull();
+      expect(screen.getByText('owned B')).toBeTruthy();
+      await act(async () => {
+        lateA(true);
+        lateA(false);
+      });
+      expect(a.mock.calls).toEqual([[false]]);
+      expect(b).not.toHaveBeenCalled();
+      expect(screen.getByText('owned B')).toBeTruthy();
+      await act(async () =>
+        (
+          mocks.state.actionConfirmProps!['onResolve'] as (
+            value: boolean,
+          ) => void
+        )(true),
+      );
+      expect(b.mock.calls).toEqual([[true]]);
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    },
+  );
+
+  it('denies an owned late yes even before current loss has rendered', async () => {
+    renderApp();
+    await settle();
+    let current = true;
+    const onConfirm = vi.fn();
+    await act(async () =>
+      (mocks.state.host as OpenTuiAppHost).addConfirmUpdateExtensionRequest({
+        prompt: 'owned',
+        isCurrent: () => current,
+        onConfirm,
+      }),
+    );
+    const late = mocks.state.actionConfirmProps!['onResolve'] as (
+      value: boolean,
+    ) => void;
+    current = false;
+    await act(async () => late(true));
+    expect(onConfirm.mock.calls).toEqual([[false]]);
+    expect(screen.queryByText('owned')).toBeNull();
+  });
+
+  it('does not render pre-aborted consent and denies owned consent once on unmount', async () => {
+    const view = renderApp();
+    await settle();
+    const host = mocks.state.host as OpenTuiAppHost;
+    const dead = new AbortController();
+    dead.abort();
+    const live = new AbortController();
+    const a = vi.fn();
+    const b = vi.fn();
+    await act(async () => {
+      host.addConfirmUpdateExtensionRequest({
+        prompt: 'dead',
+        signal: dead.signal,
+        onConfirm: a,
+      });
+      host.addConfirmUpdateExtensionRequest({
+        prompt: 'live',
+        signal: live.signal,
+        onConfirm: b,
+      });
+    });
+    expect(a.mock.calls).toEqual([[false]]);
+    expect(screen.queryByText('dead')).toBeNull();
+    expect(screen.getByText('live')).toBeTruthy();
+    const late = mocks.state.actionConfirmProps!['onResolve'] as (
+      value: boolean,
+    ) => void;
+    view.unmount();
+    await act(async () => {
+      live.abort();
+      late(true);
+    });
+    expect(b.mock.calls).toEqual([[false]]);
   });
 
   it('gives a waiting tool call priority over the composer and settles it', async () => {

@@ -30,6 +30,7 @@
  * OpenTUI widgets are prop-driven and read keys through `@opentui/react`.
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import {
   useCallback,
   useEffect,
@@ -61,6 +62,7 @@ import {
   MessageType,
   StreamingState,
   type HistoryItem,
+  type ConfirmationRequest,
   type HistoryItemWithoutId,
 } from '../types.js';
 import {
@@ -178,6 +180,11 @@ export interface OpenTuiAppProps {
     imagePaths?: readonly string[],
     options?: OpenTuiSubmitOptions,
   ) => boolean;
+  onScheduleTool?: (
+    name: string,
+    args: Record<string, unknown>,
+    restoreResponseBinding?: RestoreToolResponseBinding,
+  ) => boolean;
   onRetryPrompt?: () => void;
   onInputProcessed?: () => void;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
@@ -282,6 +289,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onInputProcessed,
     onRewindTranscript,
     isCurrentHistory,
+    onScheduleTool,
     onStartNewSession,
     onToggleVim,
     updateNotice,
@@ -510,6 +518,24 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // a sequence ref, never per-render state.
   const [modals, setModals] = useState<readonly ConfirmationModal[]>([]);
   const modalSeq = useRef(0);
+  const ownedActionModals = useRef(
+    new Set<{
+      cancel: () => void;
+      dispose: () => void;
+      isCurrent?: () => boolean;
+    }>(),
+  );
+  useEffect(() => {
+    for (const owned of [...ownedActionModals.current]) {
+      if (owned.isCurrent?.() === false) owned.cancel();
+    }
+  });
+  useEffect(
+    () => () => {
+      for (const owned of [...ownedActionModals.current]) owned.dispose();
+    },
+    [],
+  );
   const confirmations = useMemo(
     () => ({
       presentShell: (commandsToRun: readonly string[]) =>
@@ -525,12 +551,45 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             },
           ]);
         }),
-      presentAction: (prompt: ReactNode) =>
+      presentAction: (
+        prompt: ReactNode,
+        options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent'>,
+      ) =>
         new Promise<boolean>((resolve) => {
-          modalSeq.current += 1;
+          const signal = options?.signal;
+          const isCurrent = options?.isCurrent;
+          if (signal?.aborted || isCurrent?.() === false) {
+            resolve(false);
+            return;
+          }
+          const id = ++modalSeq.current;
+          let settled = false;
+          const finish = (confirmed: boolean, remove = true) => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener('abort', abort);
+            ownedActionModals.current.delete(lifetime);
+            if (remove) setModals((prev) => prev.filter((m) => m.id !== id));
+            resolve(confirmed && !signal?.aborted && isCurrent?.() !== false);
+          };
+          const abort = () => finish(false);
+          const lifetime = {
+            cancel: abort,
+            dispose: () => finish(false, false),
+            isCurrent,
+          };
+          if (signal || isCurrent) {
+            signal?.addEventListener('abort', abort, { once: true });
+            ownedActionModals.current.add(lifetime);
+          }
           setModals((prev) => [
             ...prev,
-            { kind: 'action', id: modalSeq.current, prompt, resolve },
+            {
+              kind: 'action',
+              id,
+              prompt,
+              resolve: (confirmed) => finish(confirmed),
+            },
           ]);
         }),
     }),
@@ -547,7 +606,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
   const closeActionModal = useCallback(
     (modal: ActionModal, confirmed: boolean) => {
-      setModals((prev) => prev.filter((m) => m.id !== modal.id));
       modal.resolve(confirmed);
     },
     [],
@@ -964,8 +1022,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           notify('The live prompt turn is not wired in this shell.');
           return false;
         case 'schedule_tool':
-          notify(`Tool scheduling (${outcome.toolName}) is not wired.`);
-          return false;
+          return outcome.restoreResponseBinding
+            ? (onScheduleTool?.(
+                outcome.toolName,
+                outcome.toolArgs,
+                outcome.restoreResponseBinding,
+              ) ?? false)
+            : (onScheduleTool?.(outcome.toolName, outcome.toolArgs) ?? false);
         case 'quit':
           // Clear both queues before interrupt creates the shell's idle edge.
           // The live turn also suppresses late restored steering after abort.
@@ -995,6 +1058,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       onInterrupt,
       onPopQueue,
       notify,
+      onScheduleTool,
       props.historyItems,
       streaming,
       config,

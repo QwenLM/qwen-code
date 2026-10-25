@@ -219,6 +219,7 @@ import {
   registerWorkspaceSettingsRoutes,
   withSessionWorkflowWriteLock,
 } from './routes/workspace-settings.js';
+import { registerWorkspaceDirectoriesRoutes } from './routes/workspace-directories.js';
 import { registerUserLanguageRoutes } from './routes/user-language.js';
 import {
   getActiveSseCount,
@@ -313,6 +314,8 @@ import {
   type WorkspaceRuntimeRemovalController,
 } from './routes/workspace-management.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import { isGitAvailable } from './git-availability.js';
+import { createWorkspaceGitCloner } from './workspace-git-clone.js';
 import {
   isLocalPathOpenAvailable,
   isLocalTerminalAvailable,
@@ -1237,6 +1240,8 @@ export function createServeApp(
               deps.managedScratchRoot!.canonicalRoot,
             ),
           ),
+      gitWorkspaceCloneAvailable:
+        deps.createWorkspaceRuntime !== undefined && isGitAvailable(),
       // `realtime_voice` keeps meaning "a native Host can attach": shipped
       // clients answer it with a macOS install prompt.
       realtimeVoiceEnabled: () =>
@@ -1250,6 +1255,9 @@ export function createServeApp(
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
+      workspaceDirectoriesAvailable:
+        deps.persistSetting !== undefined &&
+        opts.experimentalPairedEngines !== true,
       nativeDirectoryPickerAvailable:
         deps.nativeDirectoryPickerAvailable ??
         isNativeDirectoryPickerAvailable(),
@@ -3241,6 +3249,10 @@ export function createServeApp(
   });
 
   // Dynamic workspace registration.
+  const workspaceGitCloner =
+    deps.createWorkspaceRuntime !== undefined && isGitAvailable()
+      ? createWorkspaceGitCloner()
+      : undefined;
   const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
     maxRegisteredWorkspaces,
     workspaceRegistry,
@@ -3248,6 +3260,7 @@ export function createServeApp(
     safeBody,
     createWorkspaceRuntime: deps.createWorkspaceRuntime,
     managedScratchRoot: deps.managedScratchRoot,
+    workspaceGitCloner,
     validateWorkspaceRuntimeForPublication:
       deps.validateWorkspaceRuntimeForPublication,
     runWorkspaceTrustOperation: deps.runWorkspaceTrustOperation,
@@ -3372,6 +3385,16 @@ export function createServeApp(
       },
       invalidateServeFeaturesCache,
     });
+    // Experimental paired engines put managed sessions on a second ACP child
+    // this workspace-scoped mutation cannot reach; omit the route (and the
+    // capability below) rather than apply it to one engine only.
+    if (!opts.experimentalPairedEngines) {
+      registerWorkspaceDirectoriesRoutes(app, {
+        workspaceRegistry,
+        mutate,
+        sendBridgeError,
+      });
+    }
     // Process-global user-level language sync (issue #10234). Registered
     // under the same `persistSetting` availability gate as the workspace
     // settings routes and advertised as the conditional

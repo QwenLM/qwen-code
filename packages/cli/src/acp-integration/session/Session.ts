@@ -44,12 +44,17 @@ import {
 } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   getStartupContextLength,
+  isWrappedSystemReminderPart,
   markCompressedHistory,
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { realpathSync, statSync } from 'node:fs';
@@ -164,7 +169,6 @@ import {
   NotificationType,
   persistPermissionOutcome,
   createHookOutput,
-  wrapUserPromptSubmitContext,
   generateToolUseId,
   isValidCronTaskRoutingId,
   MessageBusType,
@@ -175,7 +179,6 @@ import {
   getOptInToolNotFoundMessage,
   resolveMainSessionOutputStyle,
   wrapSystemReminder,
-  isSystemReminderContent,
   findApiRewindCutPoint,
   countApiUserPrompts,
   buildSessionRecoveryPlanFromApiHistory,
@@ -7066,6 +7069,7 @@ export class Session implements SessionContext {
             }
 
             let parts: Part[] | null;
+            let suppressedHookContext: string | undefined;
             let fullTurnModelOverride: string | undefined;
             const onFullTurnModel = (model: string) => {
               if (fullTurnModelOverride === model) {
@@ -7259,13 +7263,31 @@ export class Session implements SessionContext {
 
               // Add additional context from hooks to the request, wrapped in
               // the reserved tag so it stays distinguishable from
-              // user-authored text (same shape as the interactive path).
+              // user-authored text (same shape as the interactive path). An
+              // unchanged payload already in session history is skipped for
+              // the same reason as there — but never when the prompt resolved
+              // to no parts, where the append is the only thing keeping the
+              // request non-empty (`toParts` rejects an empty array).
               const additionalContext = hookOutput?.getAdditionalContext();
               if (additionalContext) {
-                parts = [
-                  ...parts,
-                  { text: wrapUserPromptSubmitContext(additionalContext) },
-                ];
+                const alreadyDelivered =
+                  parts.length > 0 &&
+                  this.#getCurrentChat().findLastHistoryEntry((entry) =>
+                    hasUserPromptSubmitContext(entry, additionalContext),
+                  ) !== undefined;
+                if (alreadyDelivered) {
+                  // A compaction inside this send replaces the history entry
+                  // holding the block's only copy; the send re-appends it then.
+                  suppressedHookContext = additionalContext;
+                  debugLogger.debug(
+                    'UserPromptSubmit context already delivered; not appending it again',
+                  );
+                } else {
+                  parts = [
+                    ...parts,
+                    createUserPromptSubmitContextPart(additionalContext),
+                  ];
+                }
               }
             }
 
@@ -7395,10 +7417,7 @@ export class Session implements SessionContext {
               // skip when one is already present — mirrors the
               // `hasSystemReminderPart` guard in nonInteractiveCli.ts.
               const alreadyHasReminder =
-                isContinue &&
-                parts.some((part) =>
-                  isSystemReminderContent({ role: 'user', parts: [part] }),
-                );
+                isContinue && parts.some(isWrappedSystemReminderPart);
               if (!alreadyHasReminder) {
                 // Insert after any leading functionResponse parts so a
                 // tool-result continuation (interrupted_turn) keeps tool_result
@@ -7690,6 +7709,7 @@ export class Session implements SessionContext {
                       responseInterrupt.signal,
                       {
                         modelOverride: fullTurnModelOverride,
+                        suppressedHookContext,
                         historyPromptId:
                           turnCount === 1 &&
                           goalTurn?.origin !== 'runtime' &&
@@ -9656,6 +9676,7 @@ export class Session implements SessionContext {
       historyPromptId?: string;
       modelOverride?: string;
       getModelOverride?: () => string | undefined;
+      suppressedHookContext?: string;
       prepareBeforeCompression?: () => Promise<BeforeModelSendDecision>;
       beforeSend?: (
         context: BeforeModelSendContext,
@@ -9682,6 +9703,12 @@ export class Session implements SessionContext {
     let compressionDiagnostic: string | null = null;
     let compressionInfo: ChatCompressionInfo | null = null;
     let compressionFailed = false;
+    // Exactly one owner re-appends a suppressed hook block per send: this
+    // method when the compaction it runs itself consumes the copy, otherwise
+    // LlmChat when a compaction inside the send does. LlmChat's hard-tier
+    // rescue skips the append when the request already carries the block, so
+    // appending here and still forwarding cannot yield a second copy — and a
+    // later compaction inside the same send keeps an owner.
     if (
       !options.skipCompression &&
       !(options.getModelOverride?.() ?? options.modelOverride)
@@ -9701,6 +9728,14 @@ export class Session implements SessionContext {
           // task block (a short reminder refers back to a message that is no
           // longer in context).
           this.loopTickResolver?.resetCache();
+          if (options.suppressedHookContext) {
+            // The compaction replaced the history entry holding the block's
+            // only copy, so the request must carry it on this send.
+            message = [
+              ...message,
+              createUserPromptSubmitContextPart(options.suppressedHookContext),
+            ];
+          }
           const reasonClause =
             compressed.triggerReason === 'image_overflow'
               ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
@@ -9838,9 +9873,20 @@ export class Session implements SessionContext {
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
       sourceStream =
-        options.historyPromptId !== undefined
+        options.historyPromptId !== undefined || options.suppressedHookContext
           ? await chat.sendMessageStream(model, request, promptId, goalPermit, {
-              promptId: options.historyPromptId,
+              ...(options.historyPromptId !== undefined
+                ? { promptId: options.historyPromptId }
+                : {}),
+              // A compaction inside this send (LlmChat's hard-tier rescue or
+              // reactive overflow) replaces the history entry holding the
+              // block's only copy — including one this method's own rescue
+              // just appended — so LlmChat must keep the token to re-append
+              // it. Its hard-tier site skips an already-present block, which
+              // is what keeps this to one owner per send.
+              ...(options.suppressedHookContext
+                ? { suppressedHookContext: options.suppressedHookContext }
+                : {}),
             })
           : goalPermit
             ? await chat.sendMessageStream(model, request, promptId, goalPermit)

@@ -27,7 +27,9 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt } from '../review/lib/git.js';
 import { liveDestination, withLiveBase } from './push.js';
 import {
-  assertOwnedBySession,
+  assertWatching,
+  TASK_OPTION,
+  taskArg,
   autofixPrPaths,
   repoRoot,
   requireState,
@@ -61,11 +63,19 @@ export interface SyncOutcome {
   unpushed?: number;
 }
 
-export function runSync(prNumber: number, discard = false): SyncOutcome {
+/**
+ * `task` is the scheduled task that woke the round: a round starts with
+ * `sync`, so one a replaced task's queued fire began goes no further.
+ */
+export function runSync(
+  prNumber: number,
+  discard = false,
+  task?: string,
+): SyncOutcome {
   const root = repoRoot();
   const paths = autofixPrPaths(root, prNumber);
   return withWatchLock(paths, prNumber, () =>
-    syncLocked(paths, prNumber, discard, root),
+    syncLocked(paths, prNumber, discard, root, task),
   );
 }
 
@@ -74,9 +84,10 @@ function syncLocked(
   prNumber: number,
   discard: boolean,
   root: string,
+  task: string | undefined,
 ): SyncOutcome {
   const state = requireState(paths.statePath, prNumber);
-  assertOwnedBySession(state);
+  assertWatching(state, task);
   const worktree = paths.worktreePath;
   requireWorktree(paths, prNumber, root, discard);
 
@@ -435,10 +446,13 @@ export const syncCommand: CommandModule = {
         default: false,
         describe:
           "Return the worktree to the PR head, dropping a round's unpushed commits and uncommitted changes",
-      }),
+      })
+      .option('task', TASK_OPTION),
   handler: (argv) => {
     writeStdoutLine(
-      JSON.stringify(runSync(Number(argv['pr']), Boolean(argv['discard']))),
+      JSON.stringify(
+        runSync(Number(argv['pr']), Boolean(argv['discard']), taskArg(argv)),
+      ),
     );
   },
 };

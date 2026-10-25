@@ -80,7 +80,10 @@ export interface OpenTuiConfirmationBridge {
   presentShell(
     commands: readonly string[],
   ): Promise<ShellConfirmationResolution>;
-  presentAction(prompt: ReactNode): Promise<boolean>;
+  presentAction(
+    prompt: ReactNode,
+    options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent'>,
+  ): Promise<boolean>;
 }
 
 export interface OpenTuiAppHostDeps {
@@ -400,8 +403,14 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
    * a denial too.
    */
   addConfirmUpdateExtensionRequest(value: ConfirmationRequest): void {
-    void this.deps.confirmations
-      .presentAction(value.prompt)
+    const pending =
+      value.signal || value.isCurrent
+        ? this.deps.confirmations.presentAction(value.prompt, {
+            signal: value.signal,
+            isCurrent: value.isCurrent,
+          })
+        : this.deps.confirmations.presentAction(value.prompt);
+    void pending
       .catch(() => false)
       .then((confirmed) => value.onConfirm(confirmed));
   }
