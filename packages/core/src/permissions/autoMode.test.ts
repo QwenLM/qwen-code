@@ -277,6 +277,17 @@ describe('isAutoModeProtectedWritePath', () => {
     });
   });
 
+  it('expands a leading ~ in QWEN_HOME the way the global dir does', () => {
+    restoringQwenHome(() => {
+      process.env['QWEN_HOME'] = '~/custom-qwen';
+      const home = os.homedir();
+      expectProtected([
+        path.join(home, 'custom-qwen', 'settings.json'),
+        path.join(home, 'custom-qwen', 'hooks', 'pre-tool-use.json'),
+      ]);
+    });
+  });
+
   it('matches self-modification surfaces in a default global dir outside .qwen', () => {
     restoringQwenHome(() => {
       delete process.env['QWEN_HOME'];

@@ -203,9 +203,9 @@ let qwenHomePrefixesCacheKey: string | undefined;
 let qwenHomePrefixesCache: string[] | undefined;
 
 function getNormalizedQwenHomePrefixes(): string[] {
-  // Without QWEN_HOME the global dir can still sit outside a `.qwen` directory
-  // (the XDG config directory on Linux), which the patterns above miss.
-  const qwenHome = process.env['QWEN_HOME'] || Storage.getGlobalQwenDir();
+  // The global dir can sit outside a `.qwen` directory (QWEN_HOME, or the XDG
+  // config directory on Linux), which the patterns above miss.
+  const qwenHome = Storage.getGlobalQwenDir();
   if (
     qwenHomePrefixesCacheKey === qwenHome &&
     qwenHomePrefixesCache !== undefined
