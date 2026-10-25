@@ -118,7 +118,9 @@ loop runs at most N rounds and then stops touching the PR.
 ## Files affected
 
 - `.github/workflows/qwen-autofix.yml` — parser, route output wire, engage/re-arm
-  ack markers, scan budget read and cap override, cap-branch release.
+  ack markers, scan and prepare budget reads, cap override, cap-branch release.
+- `.github/scripts/autofix-push-and-report.sh` — the growth-audit marker helper
+  (budget carry across an automatic re-arm) and the release note.
 - `.github/workflows/qwen-autofix-round-seed.md` — operator guide for both
   parameterized forms.
 - `.github/workflows/qwen-autofix.md` — rationale record.
@@ -151,6 +153,11 @@ prose move only — no constant, default, or behaviour changes.
 - A budget below `CRITICAL_ONLY_AFTER_ROUND` keeps every budgeted round
   suggestion-capable. That is intended: the point of a budget is to shorten the
   engagement, not to narrow it.
+- The budget is read only while `autofix/takeover` is present, so `stop` and a
+  hand-removed label both end it; without that gate a spent marker outlived the
+  label and re-parked a bot-authored PR at N/N on every scan.
+- The release note posts before the DELETE, so a failed note still releases the
+  PR and the warning's "retry next scan" cannot be kept once the label is gone.
 - The budget rides on the engage ack, so an ack that never lands loses it and the
   engagement degrades to unbounded takeover. This is the seed marker's existing
   exposure rather than a new failure mode: the command job retries the ack once
