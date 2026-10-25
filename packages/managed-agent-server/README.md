@@ -318,15 +318,23 @@ mvn spring-boot:run
 ```
 
 Instead of the token and digest, `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`
-can name the Harness's own environment file. The server then reads
-`QWEN_SERVER_TOKEN` and `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it into its
-configuration, never into its process environment, and refuses to start when
-either direct value is also set. Write each credential as `KEY=value` on one
-line, with no whitespace around the `=` and only letters, digits and `._:/+=-`
-in the value, and start comments with `#`. The server refuses, by file and
-line, any line it might read differently from systemd or a shell, such as a
-continuation, a carriage return from CRLF line endings, a `;` comment, an
-unterminated quote or text after a closing quote.
+can name the Harness's own environment file. While the Harness is enabled,
+the server then reads `QWEN_SERVER_TOKEN` and
+`QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it, and
+`QWEN_MANAGED_RUNTIME_BROKER_TOKEN` when the file sets it, into its
+configuration, never into its process environment. It refuses to start when a
+direct `QWEN_MANAGED_AGENT_HARNESS_TOKEN` or
+`QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` is also set, or a direct
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` beside a file Broker token. The file
+sets the Harness's `QWEN_MANAGED_RUNTIME_BROKER_URL` and
+`QWEN_MANAGED_RUNTIME_BROKER_TOKEN` together or neither; a file with only one
+of them, or with either one empty, refuses startup. Write each of these keys as `KEY=value` on one line,
+with no whitespace around the `=` and only letters, digits and `._:/+=-` in the
+value (the Broker URL may also use `[` and `]` to bracket an IPv6 literal, as
+in `http://[::1]:4182`), and start comments with `#`. The server
+refuses, by file and line, any line it might read differently from systemd or
+a shell, such as a continuation, a carriage return from CRLF line endings, a
+`;` comment, an unterminated quote or text after a closing quote.
 
 Create a Session:
 
@@ -732,10 +740,11 @@ It is read once at JVM startup, so if `mvn spring-boot:run` is already up
 on the 4170 value exported in Prerequisites, restart it with the override in
 place.
 
-`--port` is a request, not a guarantee: `qwen serve` moves to the next free
+The ordinary daemon treats `--port` as a request and moves to the next free
 port on a collision, and 4171 is exactly where a daemon displaced from 4170
-lands. Confirm each server's bound port in its startup line before exporting
-the base URL above.
+lands. The Hosted Harness profile never moves: it fails to start when its
+port is taken, naming the port. Start the Harness first, or confirm the
+daemon's bound port in its startup line.
 
 With both up, run from the repository root:
 
@@ -917,7 +926,14 @@ Session Store uses the persisted Workspace ID; public callers cannot choose the
 profile. W1c offline migration remains files/1-only and refuses persisted Shell
 definitions with `migration_profile_unsupported`. Configure the
 Harness's deployment-owned `--managed-runtime-broker-url` and
-`--managed-runtime-broker-token` options to reach this Broker. A repeated creation key returns
+`--managed-runtime-broker-token` options, or the `QWEN_MANAGED_RUNTIME_BROKER_URL`
+and `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` variables they fall back to, to reach
+this Broker. The variables keep the token off the command line, and `qwen
+serve` removes them from its environment once read, so no process the Harness
+starts inherits the token. When
+`QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` names that environment file
+and it sets the token, the control plane takes its Broker token from it and
+refuses a second, direct `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`. A repeated creation key returns
 the original Session/Turn; changed input conflicts. Disabling the Workspace files
 opt-in refuses creation with input, including replays, while empty bound creation
 remains available. The Shell opt-in selects the persisted profile; it does not
@@ -1054,6 +1070,8 @@ For the single-node local-process provisioner, also set:
 
 ```bash
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
+# Omit when QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE names a file that sets
+# QWEN_MANAGED_RUNTIME_BROKER_TOKEN; setting both refuses startup.
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN='replace-me'
 export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID='local-dev-v1'
 export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY='replace-with-base64-encoded-32-byte-key'
@@ -1103,7 +1121,8 @@ but the model receives no tools until the Workspace extension lands. See the
 
 Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
-`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
+`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `QWEN_MANAGED_RUNTIME_BROKER_`,
+`SPRING_` or `OSS_`. Every other
 variable of the server process still reaches the worker and its tools. Keep
 unrelated secrets out of the service environment. A worker that uses the
 artifact tool's `oss` publisher therefore needs its credentials under the
@@ -1564,6 +1583,55 @@ still stop all contexts and child processes. State is preserved between methods,
 nested classes, and context restarts inside one class. See the
 [isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
 ([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
+
+## Managed extension packages
+
+Complete package distribution and the seven-component Managed profile are opt-in.
+Set `QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED=true`,
+`QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY` to a durable private directory,
+and `QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS` to the permitted operator actor
+keys. The configured Workspace OPERATOR grant is also required. See the
+[configuration example](distribution/config/application.example.yml) for the
+separate Runtime execution profile: Linux LOCAL and SSH require delegated cgroup
+v2; native macOS requires the explicit `developer-process-group` mode. Existing
+Runtime bindings do not acquire the new execution contract automatically.
+Replicas must share the authoritative artifact directory. A Runtime cache is
+reconstructible and cannot replace that directory. Published versions and encrypted
+settings revisions are retained; this increment does not implement garbage
+collection.
+
+In WebShell, select the Managed Workspace and Session, open Extensions, prepare an
+original Git/npm/directory/archive source for its target platform, then publish it.
+An update explicitly selects the catalog extension ID. Select package versions and
+an exact saved settings revision before applying to an idle Session. Saving settings
+creates a complete immutable revision; values never appear in read responses.
+Upgrading a package preserves its selected settings revision. An unfinished apply
+has separate Continue original operation and Restore previous version controls;
+unknown outcomes continue to block inference until the original owner reconciles.
+
+Public clients use `/v1/agents/workspaces/{workspaceId}/extensions` for bounded
+binary publication and catalog queries and `/v1/agents/sessions/{sessionId}/extensions`
+for configuration queries and application. The OpenAPI contract documents the
+settings and operation subresources. The Java SDK exposes `ManagedExtensionsClient`;
+the TypeScript daemon SDK can prepare and stream an original package. Creation's
+optional `extensionPins` freezes the initial selection before the first model call.
+Omitting it retains the existing Session path.
+
+Package assets use an explicit read-only extension source. Model tool schemas list
+the selected public pins; `read_file` and `glob` accept package-relative paths or
+`extension://<extensionId>/<path>`. Shell selects `extension_context` and receives
+`QWEN_EXTENSION_ROOT`, while its working directory remains the Session directory.
+Ordinary Workspace tools retain their existing containment rules. Executable
+preflight checks target interpreters and directly resolvable commands without
+running Hooks or connecting MCP; complex authored Shell expressions are checked
+when their approved invocation executes. Argument placeholders inside nested Shell
+substitution, backticks or heredocs are rejected explicitly.
+
+See the linked [English design](../../docs/design/2026-10-24-managed-extension-packages.md)
+and [Chinese design](../../docs/design/2026-10-24-managed-extension-packages.zh-CN.md).
+Local focused tests, macOS developer receipts and the existing Linux static-extension
+gate below establish different boundaries. Complete package Linux/SSH cleanup,
+fault injection and real-provider qualification remain separate acceptance gates.
 
 ## Linux extension process acceptance
 

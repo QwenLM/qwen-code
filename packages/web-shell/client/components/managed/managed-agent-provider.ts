@@ -1,3 +1,12 @@
+import type {
+  ManagedExtensionManifest,
+  ManagedExtensionPin,
+  ManagedExtensionCatalog,
+  ManagedExtensionPackageOperation,
+  ManagedExtensionSettings,
+  ManagedExtensionSnapshot,
+  ManagedExtensionSelection,
+} from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type {
   ManagedMcpManagementCommand,
@@ -306,6 +315,22 @@ export interface ManagedAgentPendingAction {
 }
 
 export interface ManagedAgentProvider {
+  readonly userMessages?: {
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >;
+    command(
+      sessionId: string,
+      command: import('./use-managed-user-messages').ManagedUserMessageCommand,
+      options: { idempotencyKey: string; signal?: AbortSignal },
+    ): Promise<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >;
+  };
+
   readonly lifecycle?: {
     submit(
       kind: ManagedLifecycleKind,
@@ -357,6 +382,58 @@ export interface ManagedAgentProvider {
       sessionId: string,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedSessionMcp>;
+  };
+  readonly extensions?: {
+    readonly storageScope?: string;
+    list(
+      workspaceId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionCatalog>;
+    publish(
+      workspaceId: string,
+      extensionId: string | undefined,
+      packageDigest: string,
+      manifest: ManagedExtensionManifest,
+      archive: Blob,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    settings(
+      workspaceId: string,
+      extensionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSettings>;
+    saveSettings(
+      workspaceId: string,
+      extensionId: string,
+      expectedRevision: number,
+      values: Record<string, string>,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSnapshot>;
+    apply(
+      sessionId: string,
+      selection: ManagedExtensionSelection,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionSnapshot>;
+    operation(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSnapshot>;
+    resume(
+      sessionId: string,
+      operationId: string,
+      recoverPrevious: boolean,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSnapshot>;
+    package(
+      workspaceId: string,
+      pin: ManagedExtensionPin,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionCatalog['extensions'][number]>;
   };
   readonly mcpManagement?: {
     /** Explicit tenant/actor namespace for pending commands saved in this tab. */
@@ -535,6 +612,7 @@ export interface ManagedAgentProvider {
         approvalMode?: ManagedApprovalMode;
         planMode?: boolean;
         skills?: ManagedSessionSkill[];
+        extensionPins?: ManagedExtensionPin[];
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
@@ -549,6 +627,7 @@ export interface ManagedAgentProvider {
         approvalMode?: ManagedApprovalMode;
         planMode?: boolean;
         skills?: ManagedSessionSkill[];
+        extensionPins?: ManagedExtensionPin[];
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;

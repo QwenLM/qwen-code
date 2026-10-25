@@ -6,6 +6,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  writeFileSync,
+  symlinkSync,
+  lstatSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -32,6 +35,7 @@ vi.mock('./state.js', async (importOriginal) => ({
   repoRoot: () => mocks.root,
   requireState: () => ({ host: 'github.com', owner: 'o', repo: 'r' }),
   assertOwnedBySession: () => {},
+  assertWatching: () => {},
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -139,6 +143,22 @@ describe('runCiLog', () => {
     expect(readFileSync(path, 'utf8')).toBe(
       'Test\terror in job 2\nE2E\terror in job 3\n',
     );
+  });
+
+  it('replaces a link planted at its log path instead of writing through it', () => {
+    mocks.gh.mockImplementation((...args: string[]) =>
+      args.includes('--paginate')
+        ? '{"id":2,"name":"Test","conclusion":"failure"}'
+        : 'boom',
+    );
+    const outside = join(mocks.root, 'outside.txt');
+    writeFileSync(outside, 'keep me');
+    const log = join(mocks.root, '.qwen', 'tmp', 'autofix-pr-7-ci-456.log');
+    symlinkSync(outside, log);
+    runCiLog(7, 456, 200);
+    expect(readFileSync(outside, 'utf8')).toBe('keep me');
+    expect(lstatSync(log).isFile()).toBe(true);
+    expect(readFileSync(log, 'utf8')).toBe('Test\tboom\n');
   });
 
   it('falls back for a gh without --allow-escape-sequences', () => {

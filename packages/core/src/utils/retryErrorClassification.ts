@@ -38,6 +38,97 @@ export interface RetryErrorClassification {
 }
 
 /**
+ * Allowlisted scalar subset of a classification that is safe to show to users
+ * and CI logs. `kind` and `reason` are fixed identifier strings, `transportCode`
+ * comes from a vetted code set, and `statusCode` is numeric. `providerCode`,
+ * `requestId`, and `providerMessage` are arbitrary upstream strings and must
+ * never be displayed verbatim, so they are intentionally absent here.
+ */
+export interface RetryDiagnostics {
+  kind: RetryErrorKind;
+  reason: string;
+  transportCode?: string;
+  statusCode?: number;
+}
+
+/**
+ * Closed allowlist of every `reason` literal classifyRetryError can produce.
+ * Displayed values must be fixed identifiers, so the public exporter below
+ * fails closed on anything else: a branch that ever passed interpolated or
+ * upstream text degrades to 'unclassified' instead of reaching stderr. Adding
+ * a new reason literal requires adding it here (and in the unit corpus).
+ */
+export const RETRY_DIAGNOSTIC_REASONS: ReadonlySet<string> = new Set([
+  'aborted',
+  'allocated-quota-exceeded',
+  'auth-error',
+  'capacity-overload',
+  'client-error',
+  'http-status',
+  'network-error',
+  'permanent-provider-code',
+  'qwen-oauth-free-tier-quota',
+  'rate-limit',
+  'responses-http-retry-policy',
+  'server-error',
+  'transport-error',
+  'unclassified',
+  'upstream-error-without-status',
+]);
+
+const RETRY_ERROR_KINDS: ReadonlySet<string> = new Set([
+  'http',
+  'sse-provider',
+  'provider',
+  'transport',
+  'abort',
+  'provider-business',
+  'unknown',
+]);
+
+function isHttpStatusCode(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 100 &&
+    value <= 599
+  );
+}
+
+/**
+ * Allowlisted display projection of a classification, enforced at the export
+ * boundary rather than trusted from producers: `reason` must be a known fixed
+ * identifier, `transportCode` a vetted transport code, and `statusCode` a real
+ * HTTP status. Anything else degrades to 'unclassified' or is omitted, so
+ * provider-controlled or interpolated strings cannot reach user-visible output
+ * even if a future classification branch stops using literals.
+ */
+export function toRetryDiagnostics(
+  classification: RetryErrorClassification,
+): RetryDiagnostics {
+  const kind: RetryErrorKind = RETRY_ERROR_KINDS.has(classification.kind)
+    ? classification.kind
+    : 'unknown';
+  const reason = RETRY_DIAGNOSTIC_REASONS.has(classification.reason)
+    ? classification.reason
+    : 'unclassified';
+  const transportCode =
+    classification.transportCode !== undefined &&
+    TRANSPORT_ERROR_CODES.has(classification.transportCode)
+      ? classification.transportCode
+      : undefined;
+  const statusCode = isHttpStatusCode(classification.statusCode)
+    ? classification.statusCode
+    : undefined;
+  return {
+    kind,
+    reason,
+    ...(transportCode !== undefined ? { transportCode } : {}),
+    ...(statusCode !== undefined ? { statusCode } : {}),
+  };
+}
+
+/**
  * Classifies retry-related failures.
  *
  * The result is primarily diagnostic — it labels the observed error shape for
