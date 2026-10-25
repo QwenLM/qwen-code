@@ -74,6 +74,7 @@ import { ICON } from '../constants.js';
 import { formatClockTime, formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import type { ArenaAgentCardData } from '../types.js';
+import { isHistoryItemVisibleAfterRestore } from '../types.js';
 import { t } from '../../i18n/index.js';
 
 /** ink HistoryItemDisplay picks between two hints by whether the card is
@@ -211,7 +212,7 @@ function sameWindow(a: TranscriptWindow, b: TranscriptWindow): boolean {
  *  call mints a tool card and a task card from one call id, so `id` alone is
  *  not unique among live items and two of them would share one height slot. */
 function itemKey(item: LiveHistoryItem): string {
-  return `${item.kind}:${item.id}`;
+  return `${item.kind}:${item.id}${item.kind === 'tool' && item.renderId ? `:${item.renderId}` : ''}`;
 }
 
 interface MountedNode {
@@ -466,16 +467,23 @@ export function OpenTuiTranscriptView({
   awaitingCallId,
   initialAnchor = 'bottom',
 }: TranscriptViewProps) {
+  const visibleItems = useMemo(
+    () =>
+      items.filter(
+        (item) => !item.canonicalOnly && isHistoryItemVisibleAfterRestore(item),
+      ),
+    [items],
+  );
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
-  const awaitingId = items.find(
+  const awaitingItem = visibleItems.findLast(
     (item) =>
       item.kind === 'tool' &&
       item.confirm === 'pending' &&
       !item.done &&
       item.id === awaitingCallId,
-  )?.id;
+  );
   const { rootRef, nodesRef, win } = useTranscriptWindow(
-    items,
+    visibleItems,
     availableTerminalHeight,
     initialAnchor,
   );
@@ -489,7 +497,7 @@ export function OpenTuiTranscriptView({
       }}
     >
       <box height={win.topPad} flexShrink={0} />
-      {items.slice(win.start, win.end).map((item) => {
+      {visibleItems.slice(win.start, win.end).map((item) => {
         const key = itemKey(item);
         return (
           <box
@@ -518,7 +526,7 @@ export function OpenTuiTranscriptView({
                 showTimestamps={showTimestamps}
                 showToolCallDetails={showToolCallDetails}
                 mouseTracking={mouseTracking}
-                awaitingApproval={item.id === awaitingId}
+                awaitingApproval={item === awaitingItem}
               />
             </OpenTuiErrorBoundary>
           </box>
@@ -888,7 +896,22 @@ function ToolCard({
               </text>
             </box>
           ) : null}
-          <ToolCardBody item={item} maxRows={maxRows} width={width} />
+          <ToolCardBody
+            item={
+              fullDetail && item.detailedDisplay
+                ? {
+                    ...item,
+                    output: sanitizeTerminalText(item.detailedDisplay),
+                    diff: undefined,
+                    todos: undefined,
+                    ansi: undefined,
+                    subagentSummary: undefined,
+                  }
+                : item
+            }
+            maxRows={maxRows}
+            width={width}
+          />
         </>
       )}
     </box>
