@@ -9962,9 +9962,13 @@ export class Session implements SessionContext {
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
       const historyPromptId = options.historyPromptId ?? options.promptId;
-      sourceStream =
+      sourceStream = await chat.sendMessageStream(
+        model,
+        request,
+        promptId,
+        goalPermit,
         historyPromptId !== undefined || options.suppressedHookContext
-          ? await chat.sendMessageStream(model, request, promptId, goalPermit, {
+          ? {
               ...(historyPromptId !== undefined
                 ? { promptId: historyPromptId }
                 : {}),
@@ -9977,10 +9981,9 @@ export class Session implements SessionContext {
               ...(options.suppressedHookContext
                 ? { suppressedHookContext: options.suppressedHookContext }
                 : {}),
-            })
-          : goalPermit
-            ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-            : await chat.sendMessageStream(model, request, promptId);
+            }
+          : undefined,
+      );
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;
