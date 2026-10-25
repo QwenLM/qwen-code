@@ -38,9 +38,15 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsLiveApprovalSelection() { return false; }
 
+    default boolean supportsAutoApproval() { return false; }
+
+    default boolean supportsPermissionRules() { return false; }
+
     default boolean supportsAgentDefinitionApprovalSelection() { return false; }
 
     default boolean supportsModelSelection() { return false; }
+
+    default boolean supportsUserMessageQueue() { return false; }
 
     default boolean supportsContextCompression() { return false; }
 

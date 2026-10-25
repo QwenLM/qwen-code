@@ -512,7 +512,7 @@ describe('createJavaManagedAgentProvider', () => {
     {
       approvalMode: 'yolo',
       approvalRevision: 0,
-      availableApprovalModes: ['yolo', 'auto'],
+      availableApprovalModes: ['yolo', 'unknown'],
       supported: true,
     },
   ])('refuses invalid approval options (%j)', async (selection) => {
@@ -524,6 +524,51 @@ describe('createJavaManagedAgentProvider', () => {
     await expect(
       provider.approvalChange!.queryOptions('s', { clientId: 'client' }),
     ).rejects.toThrow('Invalid Session approval options');
+  });
+
+  it('round-trips Auto and Session rules through the existing approval contract', async () => {
+    const permissionRules = {
+      allow: ['Read'],
+      ask: ['Bash(git push*)'],
+      deny: ['Bash(rm *)'],
+    };
+    const selection = {
+      approvalMode: 'auto',
+      approvalRevision: 2,
+      availableApprovalModes: ['auto', 'default'],
+      supported: true,
+      permissionRulesSupported: true,
+      permissionRules,
+    };
+    const receipt = {
+      sessionId: 's',
+      approvalMode: 'auto',
+      approvalRevision: 3,
+      replayed: false,
+      permissionRules,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(selection))
+      .mockResolvedValueOnce(jsonResponse(receipt));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.approvalChange!.queryOptions('s', { clientId: 'c' }),
+    ).toEqual(selection);
+    expect(
+      await provider.approvalChange!.submit(
+        's',
+        { approvalMode: 'auto', expectedRevision: 2, permissionRules },
+        { clientId: 'c', requestId: 'request', idempotencyKey: 'key' },
+      ),
+    ).toEqual(receipt);
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toMatchObject({
+      permissionRules,
+    });
   });
 
   it('uses only server model choices and preserves the frozen change key and revision', async () => {
@@ -1221,7 +1266,9 @@ describe('createJavaManagedAgentProvider', () => {
         ),
       });
       const summary = await provider.getSession('s', { clientId: 'client' });
-      if (['default', 'auto-edit', 'yolo'].includes(String(approvalMode)))
+      if (
+        ['default', 'auto-edit', 'auto', 'yolo'].includes(String(approvalMode))
+      )
         expect(summary.approvalMode).toBe(approvalMode);
       else expect(summary).not.toHaveProperty('approvalMode');
     },
