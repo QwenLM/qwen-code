@@ -1389,7 +1389,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String sessionId) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         requireShellApproval(session);
-        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        AttachmentKey key = attachmentKey(tenantId, sessionId);
         HarnessSessionRef attachment = attachments.get(key);
         if (attachment == null || attachment.isRecoveryCleanupOnly()) {
             boolean bound = session.harnessBootId() != null;

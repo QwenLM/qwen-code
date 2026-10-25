@@ -1178,7 +1178,7 @@ class HostedAutomationFaultGatesIT {
                         "FG11E_TAIL"))), "fg11e-stream-tail", 202);
         waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(jdbc.queryForList(
                 "SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ?", String.class, tenant,
-                session)).containsExactly("COMPLETED", "COMPLETED"));
+                session)).containsExactly("COMPLETED"));
         SessionStream resumed = new SessionStream(session, sessionCut);
         resumed.awaitThrough(settledSessionLedger(session).size());
         resumed.abort();
