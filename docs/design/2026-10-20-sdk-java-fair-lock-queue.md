@@ -30,7 +30,7 @@ hold at a time — no constant budget bounds the queue.
   error text (`lock not acquired within`) stays so the rerun classifier in
   `qwen-autofix.yml` is untouched.
 - Goal: keep a failed suite or gate red while still publishing the cache
-  delta its downloads produced, and record a failed seed copy, a skipped
+  delta its downloads produced, and record a failed seed copy, a lock-timeout
   write-back or a failed/timed-out write-back in the step summary instead
   of only in the job log. A failed copy is never allowed to turn a green
   lane red.
@@ -159,7 +159,7 @@ status is tolerated; any other status is an unknown setup failure and stays
 fatal. Both jobs capture their Maven result instead of letting errexit skip
 the lock, so a failed suite or gate still publishes the delta its downloads
 produced and still exits red; a skipped write-back exits with that same
-result rather than masking it. Every cache-skip and write-back failure arm
+result rather than masking it. Every lock-timeout and write-back failure arm
 appends a host-attributed step-summary line with the seed's own exit status
 and host-cache presence, so a permanently unwritable or cross-filesystem
 host cache accumulates evidence instead of repeating an identical warning
@@ -312,7 +312,8 @@ order this section exists to prevent.
   the write-back running after a failed suite while the step stays red, the
   H2 suite skipped after a failed install, a write-back that cannot create
   the host cache staying green with a summary line, a timed-out write-back's
-  124 status, resolver temporaries excluded from the write-back, and a
+  124 status, resolver temporaries excluded from the write-back, a lock-timeout skip's
+  summary line, a setup fault preserving a failed suite's red status, and a
   failed suite staying red when the lock is skipped. The `.size-baseline`
   entry is re-measured to the workflow's size after the last edit.
 - Real-host soak is CI itself: the first pool runs after merge either

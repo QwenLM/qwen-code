@@ -1724,6 +1724,177 @@ describe('SDK Java self-hosted workflow guards', () => {
       }
     },
   );
+
+  it.skipIf(process.platform !== 'linux').each(['helper', 'fallback'])(
+    'records a %s lock skip in the step summary',
+    (arm) => {
+      const run = parse(workflow).jobs.test.steps.find((candidate) =>
+        candidate.run?.includes('sdk-java-tests.lock'),
+      ).run;
+      const start = run.indexOf('lock_setup_fault() {');
+      expect(start).toBeGreaterThan(-1);
+      const dir = mkdtempSync(join(tmpdir(), `sdk-java-lock-summary-${arm}-`));
+      const workspace = join(dir, 'workspace');
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const shims = join(dir, 'bin');
+      const summary = join(dir, 'summary.md');
+      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+      mkdirSync(join(home, '.cache', 'qwen-code-ci'), { recursive: true });
+      mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+      if (arm === 'helper') {
+        writeFileSync(
+          join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+          'sdk_java_lock_acquire() { return 1; }\n',
+        );
+      } else {
+        // A resumed release tag predates the helper: the bare lock's timeout
+        // must record the same postmortem line.
+        mkdirSync(shims);
+        writeFileSync(join(shims, 'flock'), '#!/bin/sh\nexit 1\n', {
+          mode: 0o755,
+        });
+      }
+      try {
+        const result = spawnSync(
+          '/bin/bash',
+          ['-e', '-c', `result_status=0\n${run.slice(start)}`],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              ...(arm === 'fallback'
+                ? { PATH: `${shims}:${process.env.PATH}` }
+                : {}),
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: workspace,
+              GITHUB_STEP_SUMMARY: summary,
+              RUNNER_NAME: 'ecs-runner-7',
+              SDK_JAVA_M2_SEED_EXISTED: '1',
+              SDK_JAVA_M2_SEED_STATUS: '0',
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back skipped',
+        );
+        expect(readFileSync(summary, 'utf8')).toContain(
+          arm === 'helper'
+            ? 'sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted; host cache present at seed: 1; seed status: 0'
+            : 'sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted in the bare-flock fallback; host cache present at seed: 1; seed status: 0',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux').each(['test', 'mysql-integration'])(
+    'keeps a failed %s step red when the write-back setup faults',
+    (name) => {
+      const run = parse(workflow).jobs[name].steps.find((candidate) =>
+        candidate.run?.includes('sdk-java-tests.lock'),
+      ).run;
+      const start = run.indexOf('lock_setup_fault() {');
+      expect(start).toBeGreaterThan(-1);
+      const dir = mkdtempSync(join(tmpdir(), `sdk-java-setup-red-${name}-`));
+      const shims = join(dir, 'bin');
+      const home = join(dir, 'home');
+      const workspace = join(dir, 'workspace');
+      mkdirSync(shims);
+      mkdirSync(home);
+      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+      // Keep mkdir and sed available; flock is the fault this arm injects.
+      for (const command of ['mkdir', 'sed']) {
+        writeFileSync(
+          join(shims, command),
+          `#!/bin/sh\nexec /bin/${command} "$@"\n`,
+          { mode: 0o755 },
+        );
+      }
+      writeFileSync(
+        join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+        'sdk_java_lock_acquire() { return 0; }\n',
+      );
+      try {
+        const result = spawnSync(
+          '/bin/bash',
+          ['-e', '-c', `result_status=1\n${run.slice(start)}`],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              PATH: shims,
+              HOME: home,
+              RUNNER_TEMP: dir,
+              GITHUB_WORKSPACE: workspace,
+              TIER: 'fast',
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        // A host fault on the optional write-back must not mask the suite.
+        expect(result.status, result.stderr).toBe(1);
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back skipped: flock is unavailable',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'keeps a passed suite green when the job-local repository is missing',
+    () => {
+      const run = parse(workflow).jobs.test.steps.find((candidate) =>
+        candidate.run?.includes('sdk-java-tests.lock'),
+      ).run;
+      const start = run.indexOf('write_back=0');
+      expect(start).toBeGreaterThan(-1);
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-write-back-missing-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const summary = join(dir, 'summary.md');
+      mkdirSync(home);
+      mkdirSync(runnerTemp);
+      try {
+        const result = spawnSync(
+          'bash',
+          ['-e', '-c', `result_status=0\n${run.slice(start)}`],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_STEP_SUMMARY: summary,
+              RUNNER_NAME: 'ecs-runner-7',
+              SDK_JAVA_M2_SEED_EXISTED: '0',
+              SDK_JAVA_M2_SEED_STATUS: '0',
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        // The missing job-local copy is a skipped write-back, not a red step.
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back failed; the result above is unaffected',
+        );
+        expect(readFileSync(summary, 'utf8')).toContain(
+          'sdk-java cache write-back failed on ecs-runner-7: status 1; host cache present at seed: 0; seed status: 0',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 // #12940: the duplicate-version guard is the fast lane for a collision two
