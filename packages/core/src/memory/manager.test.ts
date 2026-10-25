@@ -2081,7 +2081,7 @@ describe('MemoryManager', () => {
           extractParams(tmp.projectRoot, 'sess-1', 'first'),
         );
         const queued = await mgr.scheduleExtract(
-          extractParams(tmp.projectRoot, 'sess-1', 'second'),
+          extractParams(tmp.projectRoot, 'sess-1', 'second', makeMockConfig()),
         );
         expect(queued.skippedReason).toBe('queued');
 
@@ -2092,12 +2092,20 @@ describe('MemoryManager', () => {
         await new Promise<void>((resolve) => setImmediate(resolve));
 
         expect(unhandled).not.toHaveBeenCalled();
-        expect(
-          mgr
-            .listTasksByType('extract', tmp.projectRoot)
-            .map((task) => task.status)
-            .sort(),
-        ).toEqual(['completed', 'failed']);
+        const tasks = mgr.listTasksByType('extract', tmp.projectRoot);
+        expect(tasks.map((task) => task.status).sort()).toEqual([
+          'completed',
+          'failed',
+        ]);
+        // The record and the telemetry event are the whole trace a failed
+        // queued run leaves: it has no caller to observe its rejection.
+        expect(tasks.find((task) => task.status === 'failed')?.error).toBe(
+          'queued extract failed',
+        );
+        expect(telemetryMocks.logMemoryExtract).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ status: 'failed' }),
+        );
       } finally {
         process.off('unhandledRejection', unhandled);
       }
