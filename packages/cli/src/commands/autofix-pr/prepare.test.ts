@@ -25,6 +25,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  utimesSync,
   writeFileSync,
   symlinkSync,
 } from 'node:fs';
@@ -959,6 +960,33 @@ describe('runPrepare (real git)', () => {
     expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
       /watched by another session \(session-a\)/,
     );
+  });
+
+  it('takes over a watch whose background fix its session left behind, and never one whose fix still runs', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    writeFileSync(
+      paths.fixPath,
+      JSON.stringify({
+        version: 1,
+        attempt: '0123456789ab',
+        task: 't',
+        head: 'a'.repeat(40),
+        startedAt: new Date().toISOString(),
+      }),
+    );
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    expect(() => runPrepare({ pr: 7, repo: 'o/r', takeOver: true })).toThrow(
+      /a fix agent is working in PR #7's worktree/,
+    );
+    expect(readState(paths.statePath)).toMatchObject({
+      sessionId: 'session-a',
+    });
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(paths.fixPath, old, old);
+    runPrepare({ pr: 7, repo: 'o/r', takeOver: true });
+    expect(lastReport()).toMatchObject({ tookOver: true });
+    expect(existsSync(paths.fixPath)).toBe(false);
   });
 
   it('hands a watch to this session with --take-over, keeping what it recorded', () => {

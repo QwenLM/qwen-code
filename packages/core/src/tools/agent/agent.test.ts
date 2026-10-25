@@ -2733,6 +2733,7 @@ describe('AgentTool', () => {
               emitterCore() as never,
             );
             Object.assign(mockAgent, messagingHooks());
+            const writeMeta = vi.spyOn(transcript, 'writeAgentMeta');
             // How its registry entry ends, read once the body settles.
             vi.mocked(config.getBackgroundTaskRegistry().get).mockReturnValue({
               status: 'completed',
@@ -2743,6 +2744,17 @@ describe('AgentTool', () => {
             expect(childConfig().getApprovalMode()).toBe(YOLO);
             const entry = registered()!;
             expect(entry.resumeBlockedReason).toMatch(/never continued/);
+            // Its saved record: never resumed, and the mode it would have
+            // had without the grant, should anything read it back.
+            const meta = writeMeta.mock.calls[0]?.[1];
+            writeMeta.mockRestore();
+            expect(meta).toMatchObject({
+              resumeBlockedReason: entry.resumeBlockedReason,
+              resolvedApprovalMode: AUTO_EDIT,
+              persistedCliFlags: expect.objectContaining({
+                approvalMode: AUTO_EDIT,
+              }),
+            });
             const live = backgroundFixAt(wt)!;
             expect(live.attempt).toBe(open.mock.calls[0]![0]);
             expect(live.agentId).toBe(entry.agentId);
