@@ -929,6 +929,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return warm(harnessSessionId, null);
     }
 
+    public CompletionStage<RuntimeScope> capabilities(
+            String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        requireOpen();
+        String harnessId = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                "harnessSessionId");
+        return resolveScope(harnessId, true, authority);
+    }
+
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId) {
         requireOpen();
         String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
@@ -1537,6 +1546,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
                                 && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
                             throw invalid("runtime_payload_invalid", "The private CSI profile requires a file Tool v2 payload");
+                        }
+                        if (ResidentWorkspaceProfile.selects(context.binding().getRequest().getScope())
+                                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
+                            Map<String, Object> refusal = new LinkedHashMap<>();
+                            refusal.put("executionStatus", "not_started");
+                            refusal.put("responseParts", List.of());
+                            refusal.put("capture", null);
+                            refusal.put("error", Map.of("type", "resident_tool_unsupported",
+                                    "message", "Resident Workspace supports only read_file, write_file and edit."));
+                            ToolExecutionRecord settled = executionRepository.settlePrepared(record, refusal, clock.instant());
+                            return CompletableFuture.completedFuture(settled == null
+                                    ? requireExecution(context, executionId) : settled);
                         }
                         if (v3) {
                             if (!"run_shell_command".equals(payload.get("toolName"))
