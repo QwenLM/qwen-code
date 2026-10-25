@@ -62,18 +62,19 @@ class HarnessBrokerUrlTest {
     }
 
     // The two exceptions HarnessBrokerUrl documents, and only those: a
-    // scheme or path read before the host, or an xn-- host read without
-    // IDNA, may name another refusal for a URL the Harness finds invalid,
-    // and an https xn-- host stays unclassified whatever the Harness says.
+    // scheme or path read before the host may name another refusal for a
+    // URL the Harness finds invalid, and an https xn-- host stays
+    // unclassified, since IDNA alone decides whether the Harness takes it.
+    // For an xn-- host the fixture records the verdict where the URL parser
+    // keeps the label, which is how preflight reads it without IDNA.
     private static boolean declaredApproximation(String expected,
             HarnessBrokerUrl.Verdict verdict, String url) {
         boolean idna = url.toLowerCase(Locale.ROOT).contains("xn--");
         return switch (verdict) {
             case NOT_ORIGIN -> expected.equals("invalid");
-            case PLAIN_OUTSIDE_LOOPBACK -> idna && expected.equals("invalid");
             case UNCLASSIFIED -> idna && url.regionMatches(true, 0, "https:", 0, 6)
-                    && (expected.equals("accepted") || expected.equals("invalid"));
-            case ACCEPTED, INVALID -> false;
+                    && expected.equals("accepted");
+            case ACCEPTED, INVALID, PLAIN_OUTSIDE_LOOPBACK -> false;
         };
     }
 
