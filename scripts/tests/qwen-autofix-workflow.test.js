@@ -3572,7 +3572,7 @@ describe('qwen-autofix workflow', () => {
       /(BUDGET_FLOOR="\$\(jq[\s\S]*?\n {12}fi)/,
     )?.[1];
     expect(budgetRead).toBeTruthy();
-    const budget = (comments, key) => {
+    const budget = (comments, key, hasLabel = 'true') => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-budget-read-'));
       try {
         writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
@@ -3580,7 +3580,7 @@ describe('qwen-autofix workflow', () => {
           'bash',
           [
             '-c',
-            `AUTOFIX_BOT='qwen-code-dev-bot'\nREARM_KEY='${key}'\nWORKDIR='${dir}'\nHAS_TAKEOVER='true'\nEFF_MAX_ROUNDS='100'\n${budgetRead.replace(/\n {12}/g, '\n')}\nprintf '%s' "$EFF_MAX_ROUNDS"`,
+            `AUTOFIX_BOT='qwen-code-dev-bot'\nREARM_KEY='${key}'\nWORKDIR='${dir}'\nHAS_TAKEOVER='${hasLabel}'\nEFF_MAX_ROUNDS='100'\n${budgetRead.replace(/\n {12}/g, '\n')}\nprintf '%s' "$EFF_MAX_ROUNDS"`,
           ],
           { encoding: 'utf8' },
         ).trim();
@@ -3643,6 +3643,16 @@ describe('qwen-autofix workflow', () => {
       budget(
         [anchor('2026-07-18T10:00:00Z', '<!-- autofix-round-budget 100 -->')],
         '2026-07-18T10:00:00Z',
+      ),
+    ).toBe('100');
+    // The budget dies with the label: `stop` posts a `takeover-ack released`
+    // ack that never moves the window anchor, so without this gate a
+    // bot-authored PR would sit at N/N and re-apply needs-human forever.
+    expect(
+      budget(
+        [anchor('2026-07-18T10:00:00Z', '<!-- autofix-round-budget 2 -->')],
+        '2026-07-18T10:00:00Z',
+        'false',
       ),
     ).toBe('100');
 
