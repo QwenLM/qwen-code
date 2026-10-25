@@ -10,6 +10,7 @@ import {
   CheckCircle2Icon,
   CircleIcon,
   ListTodoIcon,
+  MessagesSquareIcon,
   RefreshCwIcon,
 } from 'lucide-react';
 import { useWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -230,6 +231,17 @@ export function TodosDialog() {
     </button>
   );
 
+  /**
+   * Opens the session's conversation in a new browser tab at the Web Shell's
+   * `/session/<id>` route. The current search params (token, workspace
+   * context) carry over untouched so the new tab connects to the same daemon.
+   */
+  const openConversation = (sessionId: string) => {
+    const url = new URL(window.location.href);
+    url.pathname = `/session/${encodeURIComponent(sessionId)}`;
+    window.open(url.toString(), '_blank', 'noopener');
+  };
+
   const card = (todo: FlatTodo) => {
     const isSel = selected.has(todo.key);
     const overdue =
@@ -311,6 +323,15 @@ export function TodosDialog() {
             onClick={() => setDateKey(dateKey === todo.key ? null : todo.key)}
           >
             <CalendarIcon size={11} />
+          </button>
+          <button
+            type="button"
+            className={styles.miniButton}
+            title={t('todos.viewConversation')}
+            aria-label={t('todos.viewConversation')}
+            onClick={() => openConversation(todo.sessionId)}
+          >
+            <MessagesSquareIcon size={11} />
           </button>
         </div>
         {dateKey === todo.key && (
