@@ -517,6 +517,52 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'X-DashScope-OssResourceResolve',
       );
     });
+
+    it.each([
+      [undefined, 'qwen-code-cli'],
+      ['CLI', 'qwen-code-cli'],
+      ['desktop', 'qwen-code-desktop'],
+    ])(
+      'attributes channel %s over a conflicting custom header',
+      (channel, t1) => {
+        const headers = gen(
+          {
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+            customHeaders: {
+              'x-dashscope-source-config': 'user',
+              'X-Custom': '1',
+            },
+          },
+          { ...mockCliConfig, getChannel: () => channel } as Config,
+        ).buildHeaders();
+
+        expect(headers['X-DashScope-Source-Config']).toBe(
+          JSON.stringify({
+            channel: 'qwencloud-inner-agents',
+            source: 'model',
+            tags: { t1, t2: 'payg' },
+          }),
+        );
+        expect(headers).not.toHaveProperty('x-dashscope-source-config');
+        expect(headers['X-Custom']).toBe('1');
+      },
+    );
+
+    it.each([
+      [
+        'Bailian',
+        AuthType.USE_OPENAI,
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      ],
+      // The registry's Qwen OAuth baseUrl; the real endpoint is swapped in at
+      // runtime from the OAuth credentials and is never a QwenCloud host.
+      ['Qwen OAuth', AuthType.QWEN_OAUTH, 'DYNAMIC_QWEN_OAUTH_BASE_URL'],
+    ])('should not attribute %s requests', (_name, authType, baseUrl) => {
+      expect(gen({ authType, baseUrl }).buildHeaders()).not.toHaveProperty(
+        'X-DashScope-Source-Config',
+      );
+    });
   });
 
   describe('buildClient', () => {
