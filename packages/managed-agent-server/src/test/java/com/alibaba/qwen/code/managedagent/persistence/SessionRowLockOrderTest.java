@@ -225,6 +225,9 @@ class SessionRowLockOrderTest {
                     Map.entry("ManagedToolResultStore.java",
                             Set.of("ManagedToolResultStore.artifact/2",
                                     "Source.sessionKey/0")),
+                    // URLDecoder.decode shares the pure JSON helper's name/arity.
+                    Map.entry("ManagedUserMessageStore.java",
+                            Set.of("ManagedUserMessageStore.decode/2")),
                     Map.entry("ManagedWorkspaceRegistry.java",
                             Set.of("ManagedWorkspaceRegistry.findReadable/3")),
                     // Builder/API receiver calls share local names; retirement
