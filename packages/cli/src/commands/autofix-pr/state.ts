@@ -80,7 +80,37 @@ export interface AutofixPrState {
   /** Replies `reply` is about to post, written before each POST: one whose
    * answer is lost is recognized on the PR by these, never by a new plan. */
   pendingPosts?: PendingPost[];
+  /** The watch's scheduled task, recorded by `schedule`: a later session
+   * starts the same task again from it (`/autofix-pr resume`). Absent for
+   * `--once`, which schedules nothing. */
+  watch?: AutofixPrWatchOptions;
+  /** What rounds left for a person, newest last, for `status`. */
+  needsHuman?: NeedsHumanItem[];
 }
+
+export interface AutofixPrWatchOptions {
+  /** Minutes between fires, one of `WATCH_INTERVALS`. */
+  every: number;
+  /** False with `--no-reply`: rounds record what they handled, posting nothing. */
+  reply: boolean;
+  /** The user's instructions for every round, on one line; '' for none. */
+  instructions: string;
+}
+
+export interface NeedsHumanItem {
+  /** The head the round answered it on. */
+  sha: string;
+  /** When `reply` recorded it (ISO 8601). */
+  at: string;
+  /** One line: what it is and what a person has to decide. */
+  text: string;
+}
+
+/** The fire intervals a watch may use, in minutes (`--every`). */
+export const WATCH_INTERVALS: readonly number[] = [1, 2, 5, 10, 15, 30, 60];
+
+/** Items `needsHuman` keeps: the newest, as `status` lists them. */
+export const MAX_NEEDS_HUMAN = 20;
 
 export interface PendingPost {
   /** A review thread's `replyTo`, or `summary` for the PR comment. */
@@ -185,6 +215,9 @@ export interface AutofixPrPaths {
   repliesPath: string;
   /** Held while a helper reads and writes the state file. */
   lockPath: string;
+  /** The user's instructions for every round, written by the skill for
+   * `schedule` to read. */
+  instructionsPath: string;
   branch: string;
 }
 
@@ -215,6 +248,7 @@ export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
     // Not `autofix-pr-<n>-…`: cleanup's sweep of the watch's files must not
     // take a lock another helper holds.
     lockPath: join(tmp, `autofix-pr-${prNumber}.lock`),
+    instructionsPath: join(tmp, `autofix-pr-${prNumber}-instructions.txt`),
     branch: `qwen-autofix/pr-${prNumber}`,
   };
 }
@@ -399,7 +433,43 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'pushCount';
   }
+  // `schedule` puts these into the scheduled task's prompt.
+  if (state.watch !== undefined && !isWatchOptions(state.watch)) {
+    return 'watch';
+  }
+  if (
+    state.needsHuman !== undefined &&
+    !(
+      Array.isArray(state.needsHuman) &&
+      state.needsHuman.every(isNeedsHumanItem)
+    )
+  ) {
+    return 'needsHuman';
+  }
   return null;
+}
+
+function isWatchOptions(value: unknown): value is AutofixPrWatchOptions {
+  const watch = value as AutofixPrWatchOptions | null;
+  return (
+    typeof watch === 'object' &&
+    watch !== null &&
+    WATCH_INTERVALS.includes(watch.every) &&
+    typeof watch.reply === 'boolean' &&
+    typeof watch.instructions === 'string' &&
+    !/[\r\n]/.test(watch.instructions)
+  );
+}
+
+function isNeedsHumanItem(value: unknown): value is NeedsHumanItem {
+  const item = value as NeedsHumanItem | null;
+  return (
+    typeof item === 'object' &&
+    item !== null &&
+    typeof item.sha === 'string' &&
+    typeof item.at === 'string' &&
+    typeof item.text === 'string'
+  );
 }
 
 export function readState(statePath: string): AutofixPrState | null {

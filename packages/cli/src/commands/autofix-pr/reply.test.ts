@@ -543,6 +543,42 @@ describe('runReply', () => {
     });
   });
 
+  it('lists what the round left for a person on its head, once, newest last', () => {
+    const plan: ReplyPlan = {
+      handledChecks: [`Test@${HEAD}@#5`],
+      needsHuman: [
+        'Test:   fails again\n after its re-run',
+        `${'x'.repeat(400)}`,
+      ],
+    };
+    reply(plan);
+    const first = state().needsHuman!;
+    expect(first.map(({ sha, text }) => ({ sha, text }))).toEqual([
+      { sha: HEAD, text: 'Test: fails again after its re-run' },
+      { sha: HEAD, text: `${'x'.repeat(299)}…` },
+    ]);
+    expect(Date.parse(first[0].at)).not.toBeNaN();
+    // The same plan run again lists nothing twice.
+    reply(plan);
+    expect(state().needsHuman).toEqual(first);
+    reply({ needsHuman: ['IC_9: a design call'] }, false);
+    expect(state().needsHuman!.map(({ text }) => text)).toEqual([
+      'Test: fails again after its re-run',
+      `${'x'.repeat(299)}…`,
+      'IC_9: a design call',
+    ]);
+  });
+
+  it('keeps only the newest items a person has to look at', () => {
+    reply({
+      needsHuman: Array.from({ length: 25 }, (_, i) => `item ${i}`),
+    });
+    const texts = state().needsHuman!.map(({ text }) => text);
+    expect(texts).toHaveLength(20);
+    expect(texts[0]).toBe('item 5');
+    expect(texts.at(-1)).toBe('item 24');
+  });
+
   it('after a failed post, a retry of the same plan posts only what is missing', () => {
     mocks.fetchPrData.mockImplementation(() => ({
       pr: prData({
@@ -836,12 +872,16 @@ describe('parsePlan', () => {
         summary: { body: 'y', handled: ['a'] },
       }),
     ).toThrow(/handled more than once in the plan: a/);
+    expect(() => parsePlan({ needsHuman: ['ok', 3] })).toThrow(
+      /needsHuman must be an array of non-empty strings/,
+    );
     expect(parsePlan({})).toEqual({
       replies: [],
       summary: null,
       handled: [],
       handledChecks: [],
       handledConflict: false,
+      needsHuman: [],
     });
   });
 });

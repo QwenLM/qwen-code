@@ -17,7 +17,7 @@
 //   so the session is woken only for them.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, utimesSync } from 'node:fs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -1887,6 +1887,14 @@ function runGate(args: SnapshotArgs): void {
   if (JSON.stringify(result.cursor) !== JSON.stringify(existing)) {
     mkdirSync(dirname(paths.gatePath), { recursive: true });
     writeGateCursor(paths.gatePath, result.cursor);
+  } else {
+    // `status` reads the last check from the cursor's time.
+    try {
+      const now = new Date();
+      utimesSync(paths.gatePath, now, now);
+    } catch {
+      // A check that ran is not undone by a time that did not move.
+    }
   }
   if (result.snapshot) writeStdoutLine(JSON.stringify(result.snapshot));
 }

@@ -9,9 +9,10 @@ scheduled task, and this command's probes — `snapshot --gate` for the author
 and `review watch-repo` for a reviewer — are implemented, together with the
 `prepare`, `ci-log` and `cleanup` helpers. Delivery step 3 (2026-10-24) adds
 the reaction layer: the `push`, `sync`, `reply` and `rerun` helpers and the
-bundled `/autofix-pr` skill, with `--once` and watch mode. The reviewer
-watch, the loop state of step 4 and the follow-ups of step 5 are still
-proposals. The four product decisions in
+bundled `/autofix-pr` skill, with `--once` and watch mode. Step 4 has begun
+(2026-10-25) with the `status` and `schedule` helpers and
+`/autofix-pr resume`. The reviewer watch, the rest of step 4 and the
+follow-ups of step 5 are still proposals. The four product decisions in
 [Resolved decisions](#11-resolved-decisions) were made on 2026-10-21; the
 fourth is revised there.
 
@@ -77,6 +78,7 @@ Non-goals (first version):
 ```text
 /autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions...]
 /autofix-pr status
+/autofix-pr resume [<pr-number>]
 /autofix-pr stop [<pr-number>]
 ```
 
@@ -100,8 +102,15 @@ that cannot show the confirmation needs `--yes`.
 
 After start, the user sees one line per check only when something happened, for
 example `autofix-pr owner/repo#123: fixed "Test ubuntu" and 2 review comments,
-pushed 3f2a1c0`. `status` lists watched PRs with last check time, head SHA,
-pushes used and comments waiting for a human.
+pushed 3f2a1c0`. `status` lists every watch of the clone, whichever session
+owns it, with its last check and round, head SHA, pushes used, the items
+waiting for a human, and whether this session runs it.
+
+A watch's scheduled task ends with the session that ran it, and expires after
+7 days. `resume` starts it again in the current session, with the interval,
+`--no-reply` and instructions it was started with, its pushes, history and
+budgets kept. It confirms once for every watch it resumes, then runs one round
+of each and schedules it.
 
 ## 5. Architecture
 
@@ -118,6 +127,8 @@ with unit tests; judgment stays in the skill.
   ├─ qwen autofix-pr sync      adopt a head someone else pushed
   ├─ qwen autofix-pr reply     post replies with a marker, record what a round handled
   ├─ qwen autofix-pr rerun     re-run an infrastructure failure, once per check and head
+  ├─ qwen autofix-pr schedule  record the watch's task, print its cron, gate and prompt
+  ├─ qwen autofix-pr status    every watch of the clone, read from its files
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
   └─ cron_create               session-only, recurring, gate:
                                "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>";
@@ -140,6 +151,7 @@ worktree included:
 - latest prepared snapshot: `.qwen/tmp/autofix-pr-<n>-snapshot.json`
 - what GitHub said of bot comments: `.qwen/tmp/autofix-pr-<n>-replies.json`
 - logs, briefs and reply plans: `.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
+- the user's instructions for every round: `.qwen/tmp/autofix-pr-<n>-instructions.txt`
 - reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
 
 ## 6. Helper contracts
@@ -561,7 +573,8 @@ round handled. The plan:
   "summary": { "body": "...", "handled": ["IC_y"] },
   "handled": ["PRR_z"],
   "handledChecks": ["Test ubuntu@<head>@#789"],
-  "handledConflict": false
+  "handledConflict": false,
+  "needsHuman": ["PRRC_x: rename the public option, or keep it?"]
 }
 ```
 
@@ -617,6 +630,11 @@ The helper decides what may be posted, against one fresh read of the PR
   round did not fix with a push, so prepared snapshots stop reporting them:
   a failure by its attempt (a re-run that fails again is new), a conflict by
   its head.
+- `needsHuman` is one line per item the round left for a person. The helper
+  keeps each in the state file with the head it was answered on and the
+  time, newest last and at most 20, for `status`. Whitespace is folded, a
+  line over 300 characters is cut, and the same line on the same head is
+  kept once, so running a plan again adds nothing.
 - `--no-post` (the skill's `--no-reply`) records the same, the summary's
   `summarizedSha` included, and posts nothing.
 
@@ -843,6 +861,55 @@ holds the stale token there is replaced by the breaker's own token in one
 rename, so the lock path never stands empty for another helper to slip
 into, and a fresh lock is never touched.
 
+### 6.10 `status [<pr>]`
+
+Lists the watches of the clone, read from their files under the main
+worktree's `.qwen/tmp`: no lock is taken and GitHub is not asked, so it
+answers while a helper runs and whichever session owns a watch. Output:
+`{ "watches": [...] }`, and `unreadable` with the PR and the reason for a
+state file that could not be read. Each watch carries:
+
+- the PR, its repository, host and URL; `headRefName`, `pushTarget` and the
+  head the watch knows (`headSha`);
+- `pushes` and `maxPushes`;
+- `session`, the session that owns it, and `thisSession`;
+- `lastCheck`, the last gate run that read the PR — the gate touches its
+  cursor on every such run, changed or not — and `lastRound`, the time of
+  the last prepared snapshot; both null before the first;
+- `stopped`, `merged` or `closed` when the gate saw the PR end and the watch
+  was not cleaned up;
+- `watch`, the task `schedule` recorded, or null for `--once`;
+- `needsHuman` (Section 6.5);
+- the worktree's path and whether it exists.
+
+A scheduled task lives in the session that created it, which the helper
+cannot see: the skill joins the list with `cron_list` to say which watches
+this session runs.
+
+### 6.11 `schedule <pr> [--every <minutes>] [--no-reply] [--instructions] | --again`
+
+Records the watch's scheduled task in the state file
+(`watch: { every, reply, instructions }`) and prints it as `cron_create`
+takes it: `cron`, `recurring`, `gate` and `prompt`, with the options. The
+skill creates the task from these exactly as printed, so the gate and the
+prompt are not composed in a prompt, and step 7's comparison with a task
+already listed is a comparison with this output.
+
+- `--every` is one of `1, 2, 5, 10, 15, 30, 60` (default 2); 60 is
+  `0 * * * *`.
+- `--instructions` reads the user's instructions from
+  `.qwen/tmp/autofix-pr-<n>-instructions.txt`, which the skill writes as the
+  user gave them. A prompt is one line, so whitespace is folded; more than
+  2,000 characters is refused.
+- The gate names the session that owns the watch; one prepared outside a
+  session, or a session id that a command cannot carry as it is, is refused.
+- `--again` prints the task recorded before, for the session the watch
+  was just taken over by, and takes no other option. A watch with no task
+  recorded (a `--once` start) is refused: it is started again with
+  `/autofix-pr <n>`.
+- Only the owning session may run it; nothing is recorded when a task cannot
+  be made.
+
 ## 7. One check (`tick`)
 
 The gate already ran `snapshot --gate`; a fire that reaches the model carries
@@ -899,9 +966,9 @@ anyway; that attempt ends as above.
 A tick never asks the user a question. Anything that needs a human (a design
 disagreement, contradictory comments, a request outside the PR's scope) is
 replied to as "needs a human decision" and recorded in `needsHuman`. The loop
-keeps watching other events. (Delivery step 3 answers such items on the PR
-and reports them in the round's message; the `needsHuman` list arrives with
-`status` in step 4.)
+keeps watching other events. The round answers such items on the PR, reports
+them in its message and names them in the reply plan's `needsHuman`, which
+`status` lists (Sections 6.5, 6.10).
 
 ## 8. Trust model
 
@@ -977,12 +1044,12 @@ Replies are on by default; `--no-reply` turns them off.
 - Start runs the first check immediately — `snapshot <n>` in prepared mode,
   which reads the state file and not the gate cursor, so a new watch sees
   everything outstanding whatever an older gate reported — then calls
-  `cron_create` with a
+  `cron_create` with the task `schedule` printed (Section 6.11): a
   session-only recurring job, cron `*/<every> * * * *` (default `*/2`), the
   gate `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>`
-  (the host it passed to `prepare`, the session `prepare` reported), and a
+  (the host it passed to `prepare`, the session that owns the watch), and a
   prompt that tells the model how to handle the events in the gate output
-  (`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`). The gate
+  (`Run /autofix-pr tick <owner>/<repo>#<n>`). The gate
   is confirmed once, like a Monitor command, when the task is created.
 - Fires that arrive while the session is busy wait in the notification queue;
   the probe runs once when the session is idle and prints everything new
@@ -991,6 +1058,11 @@ Replies are on by default; `--no-reply` turns them off.
   that wrote it, and a new session's `prepare` refuses it (Section 6.1).
   A later session takes the watch over, its pushes and budgets kept, with
   `prepare --take-over` once the user agrees (Section 6.1, step 5).
+  `/autofix-pr resume` does that for every watch whose task this session
+  does not run, after one confirmation, and creates the task `schedule`
+  recorded at the start (`schedule --again`), so the watch goes on with the
+  same interval, `--no-reply` and instructions. A task that expired is
+  resumed the same way.
   What the watch posted and handled survives in the PR's history file
   (Section 6.6), so the new watch does not answer the same comments again.
   A watch that stopped ran `cleanup` already.
@@ -1104,6 +1176,12 @@ Delivery plan:
    call — the push included — therefore asks first.
 4. The loop state: `status`, `stop`, budgets, and a later session taking
    over the state file.
+   Begun (2026-10-25): `status` (Section 6.10) lists every watch from its
+   files, the items left for a human included (`needsHuman` in the reply
+   plan, Section 6.5); `schedule` (Section 6.11) records the watch's task;
+   `/autofix-pr resume` takes watches over and schedules that task again.
+   Still to come: the fix agent in the background with an `inFlight`
+   record, and the budgets of Section 10 not enforced yet.
 5. Follow-ups: durable watching in daemon sessions (`durable` with
    `sessionMode: "current"`, once the gate supports it), and a configurable
    bot allowlist.

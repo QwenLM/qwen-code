@@ -77,7 +77,7 @@ describe('bundled autofix-pr skill', () => {
     }
   });
 
-  it('may write its brief and plan only, and leaves the dialogs alone', async () => {
+  it('may write its brief, plan and instructions only, and leaves the dialogs alone', async () => {
     const pm = grantedManager();
     const write = (file: string) =>
       decide(pm, 'write_file', { file_path: `${PROJECT}/${file}` });
@@ -87,11 +87,15 @@ describe('bundled autofix-pr skill', () => {
     await expect(write('.qwen/tmp/autofix-pr-7-brief.md')).resolves.toBe(
       'allow',
     );
+    await expect(
+      write('.qwen/tmp/autofix-pr-7-instructions.txt'),
+    ).resolves.toBe('allow');
     // The helpers' own files decide where a push goes and what was handled.
     for (const file of [
       '.qwen/tmp/autofix-pr-7-state.json',
       '.qwen/tmp/autofix-pr-7-gate.json',
       '.qwen/tmp/autofix-pr-7/src/a.ts',
+      '.qwen/tmp/autofix-pr-7/src/x-instructions.txt',
       '.qwen/tmp/autofix-pr-7/../../settings.json',
       'src/a.ts',
     ]) {
@@ -128,6 +132,8 @@ describe('bundled autofix-pr skill', () => {
       'sync',
       'reply',
       'rerun',
+      'schedule',
+      'status',
       'cleanup',
     ]) {
       expect(body).toContain(`"\${QWEN_CODE_CLI:-qwen}" autofix-pr ${helper}`);
@@ -139,12 +145,13 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('Never list an `untrusted_comment` id');
     // A task kept from before a take-over would name the other session.
     expect(body).toContain('keep it if its schedule, gate and prompt are');
-    // The scheduled task runs the probe as its gate, outside the model.
+    // The scheduled task — its gate the probe, run outside the model — is
+    // the one `schedule` prints and records, so `resume` makes it again.
     expect(body).toContain(
-      '`gate`: `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>`',
+      'create the task with `cron_create` from those four exactly as printed',
     );
     expect(body).toContain(
-      '`prompt`: `Run /autofix-pr tick <owner>/<repo>#<n>`',
+      '`"${QWEN_CODE_CLI:-qwen}" autofix-pr schedule <pr> --again`',
     );
   });
 

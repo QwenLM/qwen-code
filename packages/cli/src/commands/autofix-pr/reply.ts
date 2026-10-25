@@ -31,6 +31,7 @@ import {
   type Snapshot,
 } from './snapshot.js';
 import {
+  MAX_NEEDS_HUMAN,
   REPLY_MARKER,
   assertOwnedBySession,
   autofixPrPaths,
@@ -46,6 +47,9 @@ import {
 /** GitHub refuses a comment body longer than this. */
 const MAX_BODY_CHARS = 65_536;
 
+/** Longest `needsHuman` line kept; a longer one is cut. */
+const MAX_NEEDS_HUMAN_CHARS = 300;
+
 export interface ReplyPlan {
   /** Replies to review threads, by the thread's first comment. */
   replies?: Array<{ replyTo: number; body: string; handled: string[] }>;
@@ -57,6 +61,8 @@ export interface ReplyPlan {
   handledChecks?: string[];
   /** The head's merge conflict was left for a human. */
   handledConflict?: boolean;
+  /** One line per item the round left for a person, for `status`. */
+  needsHuman?: string[];
 }
 
 export interface ReplyOutcome {
@@ -115,6 +121,7 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
     'handled',
     'handledChecks',
     'handledConflict',
+    'needsHuman',
   ]);
   const unknown = Object.keys(plan).filter((key) => !known.has(key));
   if (unknown.length > 0) {
@@ -188,6 +195,13 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
     handled,
     handledChecks: stringList(plan['handledChecks'], 'handledChecks'),
     handledConflict: conflict === true,
+    // Shown in a list, one line each.
+    needsHuman: stringList(plan['needsHuman'], 'needsHuman').map((text) => {
+      const line = text.replace(/\s+/g, ' ').trim();
+      return line.length > MAX_NEEDS_HUMAN_CHARS
+        ? `${line.slice(0, MAX_NEEDS_HUMAN_CHARS - 1)}…`
+        : line;
+    }),
   };
 }
 
@@ -560,7 +574,23 @@ function replyLocked(
   }
 
   outcome.handledChecks = currentChecks.length;
+  // Kept per head, newest last: a later round answers new events only, so
+  // what an earlier one left stays listed until the watch ends.
+  const now = new Date().toISOString();
+  const needsHuman = [
+    ...(state.needsHuman ?? []),
+    ...[...new Set(plan.needsHuman)]
+      .filter(
+        (text) =>
+          text !== '' &&
+          !(state.needsHuman ?? []).some(
+            (item) => item.sha === head && item.text === text,
+          ),
+      )
+      .map((text) => ({ sha: head, at: now, text })),
+  ].slice(-MAX_NEEDS_HUMAN);
   record({
+    ...(needsHuman.length > 0 ? { needsHuman } : {}),
     handledCommentIds: [
       ...state.handledCommentIds,
       ...addHandled(otherHandled),

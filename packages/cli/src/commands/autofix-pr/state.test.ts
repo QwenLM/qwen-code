@@ -115,6 +115,10 @@ describe('stateDefect', () => {
       ['deferredRuns', ['50']],
       ['pendingPosts', [{ where: 1 }]],
       ['pushCount', '0'],
+      ['watch', { every: 3, reply: true, instructions: '' }],
+      ['watch', { every: 2, reply: 'yes', instructions: '' }],
+      ['watch', { every: 2, reply: true, instructions: 'a\nb' }],
+      ['needsHuman', [{ sha: 'a', at: 'b' }]],
     ] as const) {
       expect(stateDefect({ ...valid, [field]: value } as AutofixPrState)).toBe(
         field,

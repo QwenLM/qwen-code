@@ -11,6 +11,8 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
+  utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -1905,6 +1907,18 @@ describe('runSnapshot --gate', () => {
     respond(withComments('I1', 'I2'));
     runSnapshot({ pr: 7, gate: true });
     expect(printedIds()).toEqual([['I1'], ['I2']]);
+  });
+
+  it('marks the time of a quiet run on the cursor, for `status`', () => {
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    const written = readFileSync(gatePath(), 'utf8');
+    const old = new Date('2026-10-01T00:00:00.000Z');
+    utimesSync(gatePath(), old, old);
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, gate: true });
+    expect(readFileSync(gatePath(), 'utf8')).toBe(written);
+    expect(statSync(gatePath()).mtimeMs).toBeGreaterThan(old.getTime());
   });
 
   it('stores the cursor before printing, so a failed print is not repeated', () => {
