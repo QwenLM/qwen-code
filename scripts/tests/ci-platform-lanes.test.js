@@ -643,6 +643,25 @@ describe('post-merge push lane', () => {
     expect(lintStep('Fetch incremental lint history')).toBeLessThan(
       lintStep('Install linters'),
     );
+    // Blobless is load-bearing, not an optimization: the job may already hold
+    // a blobless merge base from `Report test growth`, and a plain fetch then
+    // dies with `fatal: missing blob object` — silently, because this step is
+    // continue-on-error — leaving every lane on the full scan.
+    const fetchStep = (ci.jobs.lint_and_static.steps ?? []).find(
+      (s) => s.name === 'Fetch incremental lint history',
+    );
+    // Comments stripped: the rationale above the command names the flag too,
+    // and a pin satisfied by prose would go green with the flag deleted.
+    const fetchCode = String(fetchStep?.run)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(fetchCode).toContain(
+      'fetch --no-tags --depth=100 --filter=blob:none',
+    );
+    expect(fetchCode).toContain(
+      'git config --unset remote.origin.partialclonefilter',
+    );
   });
 
   it("pins the disk-pressure collector's upload-artifact revision", () => {
@@ -908,37 +927,73 @@ describe('post-merge push lane', () => {
   });
 
   it('scopes the concurrency group and keeps main uncancellable', () => {
-    // All three components, the way e2e-workflow.test.js pins its own.
-    //
-    // Event: unscoped, the group collapses onto `Qwen Code CI-refs/heads/main`
-    // and the post-merge run shares it with the nightly (60-minute lanes, no
-    // cancellation on main) and with any PR from a fork branch named literally
-    // `refs/heads/main` — a legal ref name.
-    //
-    // Repo + ref: `head_ref` alone is not unique. Two PRs with the same head
-    // branch name — including from different forks, which evaluate groups in
-    // the base repo's namespace — share a group, and PR runs DO cancel in
-    // progress, so they cancel each other. A fork's default branch is `main`,
-    // the most common head_ref there is. Dropping the ref half entirely would
-    // collapse every PR into one group and leave this suite green.
-    //
-    // cancel-in-progress: `main` stays out of cancellation on purpose, not by
-    // accident. A shared group holds at most one running plus one pending run,
-    // and a newer pending run REPLACES the older one even while this reads
-    // `false`, so back-to-back merges still coalesce onto the newest tree —
-    // but the in-flight run always finishes and reports, which matters
-    // because with no merge queue this lane is the only fast witness of a
-    // merged tree and its coverage upload is `always()`-gated. The history of
-    // flipping it the other way is recorded once already: 67 of 100 push runs
-    // cancelled and only 25 ever reported (#5859). Pinning the literal keeps
-    // a later "make main cancellable" change from landing unnoticed.
-    expect(String(ci.concurrency.group)).toBe(
-      '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}',
+    expect(String(ci.concurrency.group).trim()).toBe(
+      "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref }}",
     );
     expect(String(ci.concurrency['cancel-in-progress']).trim()).toBe(
       "${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}",
     );
   });
+
+  it.each([
+    ['push', 'refs/heads/main', '', true],
+    ['push', 'refs/heads/feat/e2e/example', '', false],
+    ['push', 'refs/heads/release/example', '', false],
+    ['schedule', 'refs/heads/main', '', false],
+    ['workflow_dispatch', 'refs/heads/main', '', false],
+    ['workflow_dispatch', 'refs/heads/release/example', '', false],
+    ['pull_request', 'refs/pull/1/merge', 'feature', false],
+    ['merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', '', false],
+  ])(
+    'groups %s on %s without changing other events',
+    (event, ref, headRef, perSha) => {
+      const workflows = [ci];
+      if (['push', 'schedule', 'workflow_dispatch'].includes(event)) {
+        workflows.push(
+          parse(readFileSync('.github/workflows/e2e.yml', 'utf8')),
+        );
+      }
+      for (const workflow of workflows) {
+        for (const sourceRepo of event === 'pull_request'
+          ? ['one/fork', 'two/fork']
+          : ['']) {
+          for (const sha of ['a'.repeat(40), 'b'.repeat(40)]) {
+            for (const attempt of [1, 2]) {
+              const github = {
+                workflow: workflow.name,
+                repository: 'QwenLM/qwen-code',
+                event_name: event,
+                event: {
+                  pull_request: { head: { repo: { full_name: sourceRepo } } },
+                },
+                ref,
+                ref_name: ref.replace('refs/heads/', ''),
+                head_ref: headRef,
+                sha,
+                run_id: attempt,
+                run_attempt: attempt,
+              };
+              // Evaluate the actual YAML's string/boolean expressions. Exact
+              // expression pins above and in e2e-workflow constrain this subset.
+              const group = workflow.concurrency.group
+                .trim()
+                .replace(/\$\{\{(.*?)\}\}/g, (_, expression) =>
+                  new Function('github', `return (${expression});`)(github),
+                );
+              const isCi = workflow === ci;
+              const repoPart = isCi
+                ? `${sourceRepo || github.repository}-`
+                : '';
+              const refPart = headRef || (isCi ? ref : github.ref_name);
+              expect(group).toBe(
+                `${workflow.name}-${event}-${repoPart}${perSha ? sha : refPart}`,
+              );
+            }
+          }
+        }
+      }
+    },
+  );
 });
 
 describe('platform lanes — the retired sensitivity classifier', () => {
