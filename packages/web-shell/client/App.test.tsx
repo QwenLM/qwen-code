@@ -27117,6 +27117,9 @@ describe('App session callbacks', () => {
           source: 'mcp-app',
         }),
       );
+      const options = mockSessionActions.sendPrompt.mock.calls[0][1];
+      expect(options).not.toHaveProperty('submittedPrompt');
+      expect(options).not.toHaveProperty('humanInput');
       expect(testState.prompt).toBe('hello');
       expect(editorClear).not.toHaveBeenCalled();
       expect(editorCommit).not.toHaveBeenCalled();
@@ -27135,6 +27138,7 @@ describe('App session callbacks', () => {
       'recovery',
       'client',
       'session',
+      'workspace',
       'write-block',
     ] as const)(
       'does not dispatch after %s invalidates an asynchronous preparation',
@@ -27160,6 +27164,8 @@ describe('App session callbacks', () => {
           if (change === 'recovery') testState.recoveryVersion += 1;
           if (change === 'client') mockConnection.clientId = 'client-2';
           if (change === 'session') mockConnection.sessionId = 'session-2';
+          if (change === 'workspace')
+            mockConnection.workspaceCwd = '/tmp/other';
           if (change === 'write-block') mockConnection.loadingTranscript = true;
           rerender({ prepareSubmit, onSubmitBefore });
         });
@@ -27338,12 +27344,14 @@ describe('App session callbacks', () => {
       });
     });
 
-    it.each(['streaming', 'active', 'goal'] as const)(
+    it.each(['streaming', 'active', 'goal', 'queued'] as const)(
       'refuses a known %s session without enqueuing the App text',
       async (busy) => {
         if (busy === 'streaming') testState.streamingState = 'responding';
         if (busy === 'active') testState.sessionHasActivePrompt = true;
         if (busy === 'goal') mockConnection.goalState = activeGoalSnapshot();
+        if (busy === 'queued')
+          testState.queuedPrompts = [{ id: 1, text: 'follow up' }];
         const prepareSubmit = vi.fn();
         renderApp({ prepareSubmit });
         await flush();
@@ -27356,6 +27364,40 @@ describe('App session callbacks', () => {
         expect(testState.prompt).toBe('hello');
       },
     );
+
+    it('refuses App text while shell commands are draining', async () => {
+      const running = deferred<void>();
+      mockSessionActions.sendShellCommand.mockReturnValueOnce(running.promise);
+      const { rerender } = renderApp();
+      await flush();
+      act(() => {
+        testState.streamingState = 'responding';
+        rerender();
+      });
+      await act(async () => {
+        testState.latestChatEditorProps!.onSubmit('!first');
+        testState.latestChatEditorProps!.onSubmit('!second');
+      });
+      act(() => {
+        testState.streamingState = 'idle';
+        rerender();
+      });
+      await flush();
+      expect(mockSessionActions.sendShellCommand).toHaveBeenCalledOnce();
+      await expect(
+        mcpAppMessageHost.current!.submit('App parameters', submission()),
+      ).rejects.toThrow();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        running.resolve();
+      });
+      await flush();
+      expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+        2,
+        'second',
+      );
+    });
 
     it('leaves dispatch without a receipt distinguishable from admission', async () => {
       mockSessionActions.sendPrompt.mockImplementationOnce(

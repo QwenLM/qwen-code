@@ -1126,6 +1126,8 @@ class ManagedAgentPropertiesTest {
                     + ".max-slots-per-tick")).isTrue();
             assertThat(source.containsProperty("qwen.managed-agent.automation"
                     + ".concurrency")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".scanner-threads")).isTrue();
         });
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
@@ -1157,6 +1159,7 @@ class ManagedAgentPropertiesTest {
                             .isEqualTo(java.time.Duration.ofHours(24));
                     assertThat(automation.getMaxSlotsPerTick()).isEqualTo(1000);
                     assertThat(automation.getConcurrency()).isEqualTo(4);
+                    assertThat(automation.getScannerThreads()).isEqualTo(4);
                 });
     }
 
@@ -1165,6 +1168,7 @@ class ManagedAgentPropertiesTest {
         List<Consumer<ManagedAgentProperties>> invalid = List.of(
                 p -> p.getAutomation().setMaxSlotsPerTick(0),
                 p -> p.getAutomation().setConcurrency(0),
+                p -> p.getAutomation().setScannerThreads(0),
                 p -> p.getAutomation().setScanDelay(
                         java.time.Duration.ZERO),
                 p -> p.getAutomation().setLease(java.time.Duration.ZERO),

@@ -38,6 +38,8 @@ claim to fix or fully align cancellation and exit keys.
 
 ## Integration with main input provenance
 
+The [clipboard/source lifecycle batch](2026-10-24-opentui-clipboard-source-lifetime.md) extends this existing ownership transaction with shared Ink model framing, raw human text, Linux offered-text fallback and source-aware joined queue restoration. A pending text paste keeps the claimed draft's captured map while the successor receives a distinct map. The batch remains under implementation and has separate candidate verification; earlier results below are historical.
+
 The normal merge with fixed main `8545558a25db342683cb84a6814e591c6fcf6c67`
 retains #14876's workflow opt-out, human-input descriptor, display/recall split
 and paste expansion snapshots. Metadata travels with the existing structured
