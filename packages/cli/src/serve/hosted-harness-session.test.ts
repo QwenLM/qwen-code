@@ -1691,13 +1691,19 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    // 15 s, not the 1 s default: this suite shares a 64-core host with ~100
+    // concurrent vite processes, and this poll flipped at load 130 on #15528's
+    // post-merge run while the recovery-blocked state was still on its way.
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 15_000 },
+    );
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .set('X-Qwen-Client-Id', created.body.clientId)
       .expect(204);
@@ -1707,14 +1713,19 @@ describe('Hosted Harness no-tool session', () => {
     )
       .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
       .expect(200);
-    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(2));
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(replacement).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(2), {
+      timeout: 15_000,
     });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 15_000 },
+    );
     expect(
       state.model.mock.calls.map(([input]) => input.modelSelection),
     ).toEqual([modelSelection, modelSelection]);
