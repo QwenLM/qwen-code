@@ -34,6 +34,7 @@ import {
   removeDaemonTokenFromUrl,
   waitForDaemonTokenMessage,
 } from './config/daemon';
+import { hydrateShellState } from './config/shell-state';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
@@ -505,6 +506,10 @@ async function main() {
     document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
   )
     return;
+  // The desktop shell persists the saved-connection and workspace-host
+  // catalogs outside this page's ephemeral loopback origin. Hydrate them
+  // before mounting so the first render already sees them.
+  await hydrateShellState();
   const pairing = MANAGED_APP
     ? undefined
     : await exchangePairingCode(INVALID_DAEMON_TARGET ? '' : baseUrl);

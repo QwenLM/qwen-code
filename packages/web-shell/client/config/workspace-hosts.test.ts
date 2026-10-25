@@ -8,6 +8,14 @@ describe('workspace host catalog', () => {
     sessionStorage.clear();
   });
 
+  it('does not persist the page origin as a saved host', () => {
+    rememberWorkspaceHost(window.location.origin, [
+      { id: 'local', cwd: '/repo' },
+    ]);
+
+    expect(readWorkspaceHosts()).toEqual([]);
+  });
+
   it('does not notify or reorder hosts on an unchanged refresh', () => {
     rememberWorkspaceHost('https://first.example', []);
     rememberWorkspaceHost('https://second.example', []);

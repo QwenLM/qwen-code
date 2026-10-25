@@ -1,0 +1,102 @@
+# 桌面客户端的已保存连接与工作区主机状态
+
+[English](2026-10-25-desktop-shell-state.md) | [简体中文](2026-10-25-desktop-shell-state.zh-CN.md)
+
+- 状态：本次改动中已实现
+- 相关 issue：[#14947](https://github.com/QwenLM/qwen-code/issues/14947) 第一部分
+- 第二部分（记住 daemon 凭据）另作处理，本次未实现
+
+## 目标
+
+让 Web Shell 的已保存 daemon 连接和工作区主机目录在桌面客户端重启后仍然存在，同时不持久化任何凭据。
+
+## 当前行为
+
+桌面外壳会在临时回环端口上启动内置的 `qwen serve`（`serve --port 0 --hostname 127.0.0.1 --require-auth`），并把窗口导航到 `http://127.0.0.1:<port>/#token=<每次启动生成的令牌>`。
+
+WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启动都是一个全新的存储区。保存在 `localStorage` 中的 `qwen-remote-connections` 与 `qwen-workspace-hosts` 在会话内写入成功，但下一次启动时无法读取。`desktop-state.json` 只持久化了工作区、窗口几何和缩放。
+
+当目录开始持久化后，第二个问题浮现出来：`rememberWorkspaceHost` 会为当前连接的主机调用，其中也包括页面自身的 origin。在桌面客户端中，该 origin 就是临时运行时 origin，因此朴素的持久化实现会在每次启动时追加一个过期主机，并把它们带入 fan-out 集合。
+
+## 决定
+
+通过一层小而带白名单的 Tauri IPC，把两个目录持久化到 `desktop-state.json`。不把桌面页面 origin 变为稳定 origin，也不存储凭据。浏览器 Web Shell 继续使用 `localStorage`，行为不变。
+
+## 设计
+
+### 持久化设置
+
+`DesktopSettings` 增加 `shell_state: BTreeMap<String, String>`（JSON 中为 `shellState`）。每个值就是 Web Shell 原本写入的 JSON 字符串：
+
+- `qwen-remote-connections`：规范化 daemon origin 的数组。
+- `qwen-workspace-hosts`：`{ origin, workspaces }` 的数组，每个工作区保留 `id`、`cwd` 和可选的 `displayName`。
+
+`SHELL_STATE_KEYS` 是白名单。`validate_shell_state` 拒绝其他键以及超过 256 KiB 的值。写入复用既有的 `SettingsStore::update` 与 `write_atomic`，因此目录更新会与窗口、缩放写入串行化，不会交错。
+
+### IPC 边界
+
+新增两个命令：`shell_state_read(key)` 和 `shell_state_write(key, value)`。
+
+两者都会调用 `require_runtime_origin`，把调用方 webview 的 URL origin 与本次启动记录的运行时 origin 比较。bootstrap 页面和其他 origin 都会被拒绝。命令在 `build.rs` 中注册，并且只授予 daemon 提供的 `web-shell-external-url` capability；其 `remote.urls` 已经是 `http://127.0.0.1:*`。
+
+`shell_state_read` 对缺失的键返回 `null`。`shell_state_write` 不返回负载。
+
+### Web Shell 适配器
+
+`packages/web-shell/client/config/shell-state.ts` 负责桌面分支：
+
+- `hydrateShellState()` 在首次渲染前运行。它通过 IPC 读取两个键，缓存到内存，并且只在读取或写入成功后删除对应的 `localStorage` 副本。
+- 迁移只取当前 origin 的 `localStorage` 条目。更早的启动写入的是已无法解析的端口，无法恢复。
+- `readShellState` 在桌面外壳中优先使用已水合的缓存，在其他环境中退回 `localStorage`。
+- `writeShellState` 同时写入 `localStorage`（浏览器路径与会话内回退）和 IPC。IPC 写入是 fire-and-forget：失败时当前会话仍可用，但重启后会丢失该值。
+- `remote-connections.ts` 与 `workspace-hosts.ts` 调用该适配器；它们的校验和变更事件行为保持不变。
+
+### 工作区主机目录规则
+
+`rememberWorkspaceHost` 不持久化页面自身的 origin。在桌面外壳中，该 origin 是临时运行时 origin；在浏览器中，只要页面本身可访问，它就可访问。`useOtherOrigins` 已经会在会话内加入页面 origin，因此侧边栏仍能对本地与远程项目分组。这样可避免每次启动产生一个过期主机。
+
+## 安全与信任边界
+
+- 持久化的值是地址和工作区标识，绝不是令牌或其他秘密。
+- 白名单与 256 KiB 上限使该接口不会变成通用的文件存储。
+- 运行时 origin 检查把 bootstrap 页面和其他 origin 挡在外面；capability 只作用于 daemon 提供的页面。
+- Web Shell 内的恶意脚本可以修改目录，例如把已保存连接指向攻击者主机，但无法从该存储读取凭据，因为其中不保存凭据。凭据持久化属于第二部分，需要单独决策。
+- `desktop-state.json` 仍是明文；现在其中不含秘密。
+
+## 失败模式
+
+- `QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE=1` 会让 `update()` 变成空操作。会话可用，但重启会丢失目录。
+- 水合失败时该键不进入缓存，读取退回当前 origin 的 `localStorage`。
+- 原生写入失败时，内存副本和 `localStorage` 镜像仍然存在；下一次启动可能丢失该变更。
+- 畸形的目录 JSON 会被既有目录读取器过滤。损坏的设置文件仍像以前一样回退到默认值。
+
+## 验收标准
+
+1. 已保存连接及其工作区主机条目在桌面客户端重启后仍然存在，包括页面 origin 变为新端口。
+2. 重启后 Settings → Connections 会列出已保存主机，删除后该条目从 `desktop-state.json` 中消失。
+3. 反复重启不会向 `qwen-workspace-hosts` 添加每次启动对应的 `127.0.0.1:<port>` 条目。
+4. 浏览器 Web Shell 保持既有的 `localStorage` 行为。
+5. 未知键、超过上限的值，以及来自 bootstrap 或其他 origin 的调用都会被拒绝。
+6. `desktop-state.json` 中不出现令牌或其他秘密。
+
+## 验证
+
+- `packages/desktop/src-tauri` 中的 `cargo test`：39 个测试。其中包括一个设置重载测试：写入目录、丢弃存储、重新加载并读回该值，以及白名单和大小上限测试。
+- `cargo clippy --all-targets -- -D warnings`：干净。
+- `npm run typecheck --workspace=@qwen-code/web-shell`：干净。
+- 对改动文件运行 ESLint 与 Prettier：干净。
+- `vitest run client/config --no-file-parallelism`：134 个测试，覆盖桌面水合、迁移、写穿以及工作区主机的页面 origin 规则。
+- 在 Windows 上使用隔离的应用 identifier 进行手动实跑：通过 IPC 写入目录，重启进程，确认页面 origin 已变化，读回目录，打开 Settings → Connections 并看到已保存主机。同一次实跑先复现了每次启动累积工作区主机的问题，随后验证了修复。
+
+## 限制与后续
+
+- 凭据不被持久化。在第二部分落地前，已保存连接在每个新会话中仍需要其 bearer 令牌。
+- 目录不在多个桌面实例之间同步；外壳是单实例的。
+- 迁移只覆盖当前 origin。本次改动之前启动写入的目录无法恢复。
+- 重启检查是手动的；目前还没有自动化的桌面端到端测试。
+- 第二部分的「记住令牌」应基于 daemon 签发的设备凭据，而不是 `QWEN_SERVER_TOKEN`。
+
+## 参考
+
+- [#14947](https://github.com/QwenLM/qwen-code/issues/14947)
+- [Desktop Web Shell release](./2026-07-31-desktop-web-shell-release.md)

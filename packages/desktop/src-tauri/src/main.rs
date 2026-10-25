@@ -4,7 +4,10 @@ mod desktop_state;
 mod runtime;
 
 use command_group::GroupChild;
-use desktop_state::{default_window_size, restore_window, zoom_after, SettingsStore, DEFAULT_ZOOM};
+use desktop_state::{
+    default_window_size, is_shell_state_key_allowed, restore_window, zoom_after, SettingsStore,
+    DEFAULT_ZOOM,
+};
 use runtime::{resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -174,6 +177,8 @@ fn main() {
             choose_workspace,
             open_logs,
             restart_runtime,
+            shell_state_read,
+            shell_state_write,
             install_update,
         ])
         .setup(setup_app);
@@ -423,6 +428,36 @@ fn change_zoom(
     state.settings.stage_zoom(zoom);
     state.window_dirty.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+// Reachable from the daemon-served Web Shell, which owns the saved-connection
+// and workspace-host catalogs. That page's origin changes every launch because
+// the runtime binds an ephemeral loopback port, so browser storage cannot carry
+// the catalogs across restarts. The capability already restricts this command
+// to `http://127.0.0.1:*`; `require_runtime_origin` then pins it to the origin
+// this launch actually recorded.
+#[tauri::command]
+fn shell_state_read(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+    key: String,
+) -> Result<Option<String>, String> {
+    require_runtime_origin(&webview, state.inner())?;
+    if !is_shell_state_key_allowed(&key) {
+        return Err(format!("Unsupported desktop shell state key: {key}"));
+    }
+    Ok(state.settings.shell_state(&key))
+}
+
+#[tauri::command]
+fn shell_state_write(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    require_runtime_origin(&webview, state.inner())?;
+    state.settings.set_shell_state(&key, &value)
 }
 
 #[tauri::command]
@@ -796,6 +831,22 @@ fn require_bootstrap_origin(webview: &WebviewWindow) -> Result<(), String> {
     }
 }
 
+fn require_runtime_origin(webview: &WebviewWindow, state: &ApplicationState) -> Result<(), String> {
+    let url = webview
+        .url()
+        .map_err(|error| format!("Failed to read calling webview URL: {error}"))?;
+    let runtime_origin = lock(&state.origin).clone();
+    if is_runtime_origin(&url, runtime_origin.as_ref()) {
+        Ok(())
+    } else {
+        Err("This command is only available from the Qwen Code Web Shell.".to_string())
+    }
+}
+
+fn is_runtime_origin(url: &Url, runtime_origin: Option<&Url>) -> bool {
+    runtime_origin.is_some_and(|origin| is_same_origin(url, origin))
+}
+
 fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
     is_bootstrap_url(url)
         || lock(origin)
@@ -919,8 +970,8 @@ mod tests {
     };
     use super::{
         bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
-        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
-        is_same_origin, origin_of, updates_disabled_value, BOOTSTRAP_URL,
+        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_runtime_origin,
+        is_safe_external_url, is_same_origin, origin_of, updates_disabled_value, BOOTSTRAP_URL,
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -1001,6 +1052,27 @@ mod tests {
         assert!(!is_same_origin(
             &Url::parse("https://example.com/").expect("external"),
             &origin,
+        ));
+    }
+
+    #[test]
+    fn shell_state_commands_accept_only_the_runtime_origin() {
+        let origin = Url::parse("http://127.0.0.1:49152/").expect("origin");
+        assert!(is_runtime_origin(
+            &Url::parse("http://127.0.0.1:49152/session/123").expect("same origin"),
+            Some(&origin),
+        ));
+        assert!(!is_runtime_origin(
+            &Url::parse("http://127.0.0.1:49153/").expect("different port"),
+            Some(&origin),
+        ));
+        assert!(!is_runtime_origin(
+            &Url::parse(BOOTSTRAP_URL).expect("bootstrap"),
+            Some(&origin),
+        ));
+        assert!(!is_runtime_origin(
+            &Url::parse("http://127.0.0.1:49152/").expect("runtime"),
+            None,
         ));
     }
 
