@@ -207,10 +207,15 @@ class SessionRowLockOrderTest {
                     // rows or accesses Turn rows.
                     Map.entry("ManagedHostedRecoveryRecords.java",
                             Set.of("HistoricalResources.checkpointHistory/1")),
+                    // Package configuration delegates to a same-named JSON-only validator.
+                    Map.entry("ManagedMcpSettings.java",
+                            Set.of("ManagedMcpSettings.require/1")),
                     Map.entry("ManagedSchemaJdbcTemplate.java",
                             Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
+                    // Both publisher overloads avoid Session and Turn rows.
                     Map.entry("ManagedSessionStore.java",
-                            Set.of("ManagedSessionStore.sha256/1",
+                            Set.of("ManagedSessionStore.publishAgentResource/6",
+                                    "ManagedSessionStore.sha256/1",
                                     "ManagedSessionStore.storedTransaction/1",
                                     "ManagedSessionStore.usesDataSource/1")),
                     Map.entry("ManagedSnapshotStore.java",
