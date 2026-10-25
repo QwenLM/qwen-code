@@ -16,6 +16,11 @@ import type {
 } from './chatRecordingService.js';
 import { restoreUserPromptSubmitContextReceipt } from '../hooks/user-prompt-submit-context.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
+import {
+  appendAutoMemorySnapshot,
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  findLatestAutoMemorySnapshot,
+} from '../memory/request-context.js';
 import { markCompressedHistory } from '../core/environmentContext.js';
 import {
   clearApiHistoryDirectoryContext,
@@ -345,6 +350,25 @@ export class SessionApiHistoryAccumulator {
       return;
     }
     if (record.type === 'system') {
+      if (record.subtype === 'memory_catalog_snapshot') {
+        const snapshot = record.message?.parts?.[0];
+        if (
+          snapshot?.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true &&
+          typeof snapshot.text === 'string'
+        ) {
+          if (
+            findLatestAutoMemorySnapshot(this.history)?.text === snapshot.text
+          ) {
+            return;
+          }
+          const length = this.history.length;
+          appendAutoMemorySnapshot(this.history, { ...snapshot });
+          if (this.history.length > length) {
+            this.systemNotificationFlags.push(false);
+          }
+        }
+        return;
+      }
       if (record.subtype === 'slash_command') {
         const payload = record.systemPayload as
           | SlashCommandRecordPayload

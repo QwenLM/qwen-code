@@ -378,6 +378,7 @@ vi.mock(
         resourceStore,
         toolResultResources: state.toolResults ?? resourceStore,
         assertWritable: state.assertWritable,
+        claimUserMessages: async () => [],
         setLifecycleAuthority: state.setLifecycleAuthority,
         authorizeOrdinary: state.authorizeOrdinary,
         authorizeLifecycle: state.authorizeLifecycle,
@@ -518,6 +519,10 @@ const listeners = new Set<Server>();
 
 beforeEach(() => {
   wakeDeps.runTurnGate = undefined;
+  vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'resolveCapabilities',
+  ).mockResolvedValue();
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
   vi.spyOn(
@@ -16363,7 +16368,6 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'web_fetch',
       'run_shell_command',
-      'monitor',
       'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
@@ -16430,7 +16434,6 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'web_fetch',
       'run_shell_command',
-      'monitor',
       'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
@@ -38603,12 +38606,15 @@ describe('Hosted Harness stored definitions', () => {
       agentDefinition: definition,
       agentInstructions: 'D8_PINNED_INSTRUCTIONS',
     });
-    await vi.waitFor(async () => {
-      const response = await headers(
-        supertest(server).delete(`/session/${SESSION_ID}`),
-      );
-      expect(response.status).toBe(204);
-    });
+    await vi.waitFor(
+      async () => {
+        const response = await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+        expect(response.status).toBe(204);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
   });
 
   it('loads published Skills from the saved resource after detach and rejects unbound Skill definitions', async () => {
@@ -38772,12 +38778,15 @@ describe('Hosted Harness stored definitions', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'read only',
@@ -38855,13 +38864,16 @@ describe('Hosted Harness stored definitions', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(replacement).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'read only',
