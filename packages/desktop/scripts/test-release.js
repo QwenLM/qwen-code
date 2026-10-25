@@ -1490,6 +1490,15 @@ function testUpdaterMirrorConfiguration() {
     main,
     /app\.updater_builder\(\)\s*\.timeout\(UPDATE_CHECK_TIMEOUT\)/,
   );
+  // The runtime must be stopped before the Windows installer is spawned, and
+  // the plugin's default cleanup hook must survive: on_before_exit replaces
+  // rather than appends, so dropping either half re-opens #15276 or skips
+  // Tauri's cleanup. Nothing else pins this closure.
+  assert.match(
+    main,
+    /async fn check_for_update[\s\S]*?\.on_before_exit\(move \|\| \{[\s\S]*?stop_runtime\(&exit_handle\);[\s\S]*?exit_handle\.cleanup_before_exit\(\);[\s\S]*?\}\)/,
+    'check_for_update must stop the bundled runtime and keep the default cleanup hook before the installer exits the app.',
+  );
   assert.match(main, /"QWEN_DESKTOP_DISABLE_UPDATES"/);
   // The adapter must actually read the env var: without this pin, rewiring
   // updates_disabled() to any other source keeps every other gate green.

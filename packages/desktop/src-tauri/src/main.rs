@@ -896,8 +896,12 @@ async fn check_for_update(app: &AppHandle) -> Result<Option<Update>, String> {
         // Windows cannot overwrite a mapped executable, and the bundled
         // runtime keeps runtime\qwen-code\node\node.exe mapped. The plugin runs
         // this hook once the download succeeded, right before it launches the
-        // installer and exits.
-        .on_before_exit(move || stop_runtime(&exit_handle))
+        // installer and exits. on_before_exit replaces the plugin's default
+        // cleanup_before_exit hook rather than appending, so chain it here.
+        .on_before_exit(move || {
+            stop_runtime(&exit_handle);
+            exit_handle.cleanup_before_exit();
+        })
         .build()
         .map_err(|error| format!("Failed to initialize updater: {error}"))?
         .check()
