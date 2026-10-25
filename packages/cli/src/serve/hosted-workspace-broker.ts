@@ -129,6 +129,7 @@ export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
   private leaseAcquired = false;
   private capability?: string;
+  private capabilityResolution?: Promise<void>;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -209,6 +210,19 @@ export class HostedWorkspaceBroker {
   async warm(): Promise<void> {
     const response = await this.harnessRequest('/runtimes:warm', {});
     if (response['runtime'] !== undefined) this.readRuntime(response);
+  }
+
+  async resolveCapabilities(): Promise<void> {
+    if (this.capability !== undefined) return;
+    await (this.capabilityResolution ??= this.harnessRequest(
+      '/runtimes:capabilities',
+      {},
+    )
+      .then((response) => this.readRuntime(response))
+      .catch((cause: unknown) => {
+        this.capabilityResolution = undefined;
+        throw cause;
+      }));
   }
 
   async mcpDefinitions(
