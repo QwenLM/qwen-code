@@ -1035,6 +1035,10 @@ export class AgentCore {
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
     let stickyMaxOutputTokens: number | undefined;
+    // Whether THIS round's stream produced a chunk (model acceptance). The
+    // round finally uses it to tell a pre-acceptance failure apart from the
+    // round that just took a reminder for the NEXT round.
+    let roundSawModelChunk = false;
     const loopDetector = new LoopDetectionService(this.runtimeContext);
     loopDetector.reset(
       `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
@@ -1053,18 +1057,21 @@ export class AgentCore {
       // Check abort before starting a new round — prevents unnecessary API
       // calls after processFunctionCalls was unblocked by an abort signal.
       if (abortController.signal.aborted) {
+        loopDetector.abandonLoopReminderDelivery();
         terminateMode = AgentTerminateMode.CANCELLED;
         break;
       }
 
       // Check termination conditions.
       if (options?.maxTurns && turnCounter >= options.maxTurns) {
+        loopDetector.abandonLoopReminderDelivery();
         terminateMode = AgentTerminateMode.MAX_TURNS;
         break;
       }
 
       let durationMin = (Date.now() - startTime) / (1000 * 60);
       if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
+        loopDetector.abandonLoopReminderDelivery();
         terminateMode = AgentTerminateMode.TIMEOUT;
         break;
       }
@@ -1079,6 +1086,7 @@ export class AgentCore {
       try {
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
         turnCounter += 1;
+        roundSawModelChunk = false;
         retryWaitScope = this.createRetryWaitScope(
           turnCounter,
           promptId,
@@ -1208,6 +1216,13 @@ export class AgentCore {
 
           // Handle chunk events
           if (streamEvent.type === 'chunk') {
+            // First chunk of the round: the model accepted the request. If
+            // it carries a prepared loop-protection reminder, its delivery
+            // accounting settles here — the same model-acceptance boundary
+            // the core client commits at. Later chunks no-op once the
+            // prepared receipt is consumed.
+            roundSawModelChunk = true;
+            loopDetector.commitLoopReminderDelivery();
             const resp = streamEvent.value;
             // Track the response ID for tool call correlation
             if (resp.responseId) {
@@ -1417,12 +1432,15 @@ export class AgentCore {
               0,
               { text: loopReminder },
             );
-            // This loop continues straight into the next round's model call
-            // with no consumer-visible suspension after the take, so the
-            // delivery commits here; the core client instead defers the
-            // commit to its model-acceptance boundary and rolls the take
-            // back when a send is abandoned before acceptance.
-            loopDetector.commitLoopReminderDelivery();
+            // The reminder text rides in currentMessages toward the next
+            // round's model call, but that round can still exit at the
+            // abort/maxTurns/time checks or fail in prepareTools() before
+            // any request is attempted. Like the core client, the delivery
+            // stays prepared here and only settles when that round crosses
+            // the model-acceptance boundary (first chunk above); every
+            // earlier exit abandons it (round finally + the pre-round
+            // checks), so `reminded` telemetry credits a warning the model
+            // actually saw.
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);
@@ -1516,6 +1534,16 @@ export class AgentCore {
         }
         throw error;
       } finally {
+        // The round exited without a chunk proving model acceptance
+        // (prepareTools/send rejection, zero-chunk break, abort before the
+        // first chunk): put the prepared reminder delivery back so
+        // `reminded` stays un-credited and the streak's warning stays
+        // eligible for a later round. The round that just TOOK a reminder
+        // for the next one saw its own chunks and skips this; a committed
+        // delivery makes the abandon a no-op.
+        if (!roundSawModelChunk) {
+          loopDetector.abandonLoopReminderDelivery();
+        }
         retryWaitScope?.close();
         // Reverse-cleanup fires whether the iteration ended normally, broke,
         // returned, or threw — preventing parent-listener accumulation on
