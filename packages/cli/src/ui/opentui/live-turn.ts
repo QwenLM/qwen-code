@@ -351,6 +351,8 @@ export function useOpenTuiLiveTurn(
       const mods = getInteractiveModSession(config);
       let modTurn: ModTurn | undefined;
       let modEnded = false;
+      // Declining every tool ends the turn as a cancel, as it does in ink.
+      let toolsCancelled = false;
       // A runTurn is a new user query, so the counter restarts; tool-result
       // continuations happen inside this same loop and keep accumulating.
       streamingCharsRef.current = 0;
@@ -428,6 +430,9 @@ export function useOpenTuiLiveTurn(
               );
             },
             onStreamEvent: (event: ServerLlmStreamEvent) => modTurn?.saw(event),
+            onToolsCancelled: () => {
+              toolsCancelled = true;
+            },
           }),
           drainSteering: () => (seq === turnSeqRef.current ? drainQueue() : []),
           restoreSteering: (submissions) => {
@@ -512,7 +517,11 @@ export function useOpenTuiLiveTurn(
         }
       } finally {
         void modTurn?.complete(
-          abort.signal.aborted ? 'aborted' : failed ? 'error' : undefined,
+          abort.signal.aborted || toolsCancelled
+            ? 'aborted'
+            : failed
+              ? 'error'
+              : undefined,
         );
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;

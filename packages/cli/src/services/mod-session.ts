@@ -868,6 +868,14 @@ export class ModSession implements ICommandLoader {
   }
 }
 
+// A provider's count as the Mods take it: a whole number, or 0 when it is
+// missing or not a count at all.
+function tokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : 0;
+}
+
 // The API's four counts. Cache writes are known only where the provider
 // reports them apart, as Anthropic's does.
 function addTurnUsage(
@@ -876,17 +884,18 @@ function addTurnUsage(
   authType: string | undefined,
 ): RunningTurn['usage'] {
   if (!metadata) return usage;
-  const prompt = metadata.promptTokenCount ?? 0;
-  const read = metadata.cachedContentTokenCount ?? 0;
-  const written =
-    getGenAiUsageProvenance(metadata)?.cacheCreationInputTokens ?? 0;
+  const prompt = tokenCount(metadata.promptTokenCount);
+  const read = tokenCount(metadata.cachedContentTokenCount);
+  const written = tokenCount(
+    getGenAiUsageProvenance(metadata)?.cacheCreationInputTokens,
+  );
   // Counted as the session's billable output counts it.
   const output = outputTokenCount(
     {
       input: prompt,
-      output: metadata.candidatesTokenCount ?? 0,
-      thoughts: metadata.thoughtsTokenCount ?? 0,
-      total: metadata.totalTokenCount ?? 0,
+      output: tokenCount(metadata.candidatesTokenCount),
+      thoughts: tokenCount(metadata.thoughtsTokenCount),
+      total: tokenCount(metadata.totalTokenCount),
     },
     authType,
   );

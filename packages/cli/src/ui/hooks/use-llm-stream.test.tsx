@@ -14152,6 +14152,56 @@ describe('useLlmStream', () => {
           return events();
         });
 
+      it('leaves the work an Esc spared when a Mod aborts the cancelled turn', async () => {
+        const { startTurn } = installModTurn();
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const signals: AbortSignal[] = [];
+        admitted(async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Working' };
+          await held;
+        });
+        const admit = mockSendMessageStream.getMockImplementation()!;
+        mockSendMessageStream.mockImplementation((...args: unknown[]) => {
+          signals.push(args[1] as AbortSignal);
+          return admit(...args);
+        });
+        const { result } = renderTestHook();
+        let main!: Promise<void>;
+        let side!: Promise<void>;
+        await act(async () => {
+          main = result.current.submitQuery('Fix it');
+        });
+        try {
+          await waitFor(() => expect(startTurn).toHaveBeenCalledOnce());
+          await act(async () => {
+            side = result.current.submitQuery(
+              '?btw side question',
+              SendMessageType.UserQuery,
+              undefined,
+              { submittedPrompt: '?btw side question' },
+            );
+          });
+          await waitFor(() => expect(signals).toHaveLength(2));
+
+          act(() => {
+            result.current.cancelOngoingRequest();
+          });
+          expect(signals[0].aborted).toBe(true);
+          expect(signals[1].aborted).toBe(false);
+          act(() => expect(startTurn.mock.calls[0][2]()).toBe(false));
+          // Only a second Esc ends the side question.
+          expect(signals[1].aborted).toBe(false);
+        } finally {
+          release();
+          await act(async () => {
+            await Promise.all([main, side]);
+          });
+        }
+      });
+
       it('hears a submitted prompt from its admission until the stream goes idle', async () => {
         const { turn, startTurn } = installModTurn();
         admitted(async function* () {

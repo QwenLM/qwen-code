@@ -26,6 +26,7 @@ import {
   type UiEvent,
 } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
 import { setGenAiUsageProvenance } from '@qwen-code/qwen-code-core/telemetry/gen-ai-usage.js';
+import { validateResult } from '@qwen-code/qwen-code-core/mods/dispatch.js';
 import {
   LlmEventType,
   type ServerLlmStreamEvent,
@@ -891,6 +892,33 @@ describe('Mod session ownership', () => {
       });
     },
   );
+
+  it('takes a count that is not one as the Mods can carry it', async () => {
+    const { session, ended } = await loadTurns();
+    const turn = session.startTurn('', turnSignal, abortHost)!;
+    turn.saw(
+      finished({
+        promptTokenCount: NaN,
+        cachedContentTokenCount: -3,
+        candidatesTokenCount: 7.6,
+        thoughtsTokenCount: Infinity,
+        totalTokenCount: '9' as unknown as number,
+      }),
+    );
+    await turn.complete();
+    const usage = ended().usage!;
+    expect(usage).toEqual({
+      input_tokens: 0,
+      output_tokens: 7,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      model: expect.any(String),
+    });
+    // The engine hands the usage back, and its own check must pass it.
+    expect(() =>
+      validateResult('turn.complete', { text: '', usage }),
+    ).not.toThrow();
+  });
 
   it('names the model of the turn’s own prompt, not a concurrent one', async () => {
     const { session, ended } = await loadTurns();

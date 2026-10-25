@@ -2079,6 +2079,18 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     expect(turn.complete).toHaveBeenLastCalledWith('error');
   });
 
+  it('ends the turn as aborted when every tool was declined', async () => {
+    const { turn } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('first'));
+    options(1).onPromptAdmitted?.();
+    options(1).onToolsCancelled?.();
+    await settle(result);
+    expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted');
+  });
+
   it('lets a Mod end the turn and still runs the queued prompt', async () => {
     const { turn, startTurn } = installMods();
     const { result } = renderHook(() =>
@@ -2167,6 +2179,7 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     act(() => result.current.submit('plain'));
     expect(options(1).onPromptAdmitted).toBeUndefined();
     expect(options(1).onStreamEvent).toBeUndefined();
+    expect(options(1).onToolsCancelled).toBeUndefined();
   });
 });
 

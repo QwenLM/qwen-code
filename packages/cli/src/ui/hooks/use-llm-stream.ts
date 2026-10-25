@@ -1620,6 +1620,9 @@ export const useLlmStream = (
   // `$.turn.abort` arrives from the Mod worker, outside any render.
   useLayoutEffect(() => {
     cancelForModRef.current = () => {
+      // A turn already cancelled is not the Mod's to end; a second cancel
+      // would also abort the detached work the first one spared.
+      if (turnCancelledRef.current) return false;
       quietCancelRef.current = true;
       return cancelOngoingRequest();
     };

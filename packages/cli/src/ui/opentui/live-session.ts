@@ -179,6 +179,8 @@ export interface LivePromptOptions {
   onPromptAdmitted?: () => void;
   /** Sees every event of the turn's model streams, as the client sent it. */
   onStreamEvent?: (event: ServerLlmStreamEvent) => void;
+  /** Called when every tool of a round was cancelled, which ends the turn. */
+  onToolsCancelled?: () => void;
 }
 
 /**
@@ -1393,6 +1395,7 @@ export async function* livePromptEvents(
       if (responseParts.length > 0) {
         await client.addHistory({ role: 'user', parts: responseParts });
       }
+      options?.onToolsCancelled?.();
       return;
     }
     if (!turnModel.inline && !turnModel.current?.endsWith('\0')) {

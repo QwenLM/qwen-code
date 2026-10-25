@@ -122,7 +122,7 @@ These go into the user guide:
   - cancelling the turn ends its `turn.start` hooks, not its `turn.complete` hooks;
   - the answer through retries and cancels;
   - the reasons;
-  - the usage sums, with reasoning counted once for each provider and a consistent total deciding, and the model of the turn's own prompt;
+  - the usage sums, with reasoning counted once for each provider and a consistent total deciding, counts that are not whole counts, and the model of the turn's own prompt;
   - a prompt and an answer too long for a Mod payload;
   - the note, cut without splitting a character, kept to 4,096 characters in a terminal, and written beneath the answer in text mode;
   - the rules of `$.turn.abort`;
@@ -131,8 +131,8 @@ These go into the user guide:
   - a turn still running when the session closes, an end the close overtook, an end already running at the close, every queued end in order, and the budget that bounds them.
 - Host tests:
   - headless, on the current and the shared agent loop: an answer, a structured-output answer, a blocked prompt, the continuation of an interrupted turn, a Mod abort in JSON and text and from a `tool.call` hook, a Goal turn that a tool ends before a continuation, and a failed request;
-  - Ink: a turn from admission to idle, a Mod abort compared with Esc, a cancel without an Esc, a cancel in a later round that ends the `turn.start` hooks, a turn whose tools were cancelled or could not go on, a failed continuation, a slash command that waits for the Mods to start, and no hook without Mods;
-  - OpenTUI: admission and a single end, interrupt and error, a Mod abort that lets the queue run, an Esc before or after a Mod abort, a retry with no typed prompt, and no hooks without Mods.
+  - Ink: a turn from admission to idle, a Mod abort compared with Esc, a Mod abort after an Esc that leaves a running side question (`?btw`) alone, a cancel without an Esc, a cancel in a later round that ends the `turn.start` hooks, a turn whose tools were cancelled or could not go on, a failed continuation, a slash command that waits for the Mods to start, and no hook without Mods;
+  - OpenTUI: admission and a single end, interrupt and error, a Mod abort that lets the queue run, an Esc before or after a Mod abort, a turn whose tools were all declined, a retry with no typed prompt, and no hooks without Mods.
 - The built CLI against a fixture server, in headless JSON and text and in the Ink and OpenTUI terminals:
   - the `turn.start` text;
   - the `turn.complete` answer, and usage that matches the fixture's counts;

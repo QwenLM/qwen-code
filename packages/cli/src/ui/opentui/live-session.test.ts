@@ -3321,6 +3321,38 @@ describe('livePromptEvents', () => {
     ]);
   });
 
+  it('tells the turn when every tool of a round was declined', async () => {
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      yield {
+        type: 'tool_call_request',
+        value: {
+          callId: 'c9',
+          name: 'run_shell_command',
+          args: { __cancelApproval: true },
+        },
+      };
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        addHistory: vi.fn(),
+        isInitialized: () => true,
+        getChat: () => ({ getGenerationConfig: () => ({ tools: [] }) }),
+      }),
+    } as unknown as Config;
+    const onToolsCancelled = vi.fn();
+
+    await drain(livePromptEvents(config, 'q', undefined, { onToolsCancelled }));
+
+    expect(onToolsCancelled).toHaveBeenCalledOnce();
+    expect(sendMessageStream).toHaveBeenCalledOnce();
+  });
+
   it('records the No/Esc cancellation as a rejected resolution (R1-18)', async () => {
     const sendMessageStream = vi.fn(function* (): Generator<{
       type: string;
