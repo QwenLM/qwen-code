@@ -39,6 +39,15 @@ import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import type { TextFileIo } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import {
+  canonicalWorktreePath,
+  grantUnattendedFixes,
+  openBackgroundFix,
+  recordConfirmedWatch,
+  recordWatchTask,
+  resetUnattendedFixGrantsForTests,
+} from './autofix-pr-grants.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 // A unique per-run root: a fixed path under os.tmpdir() breaks whenever a
 // previous run by another user (e.g. a sandboxed root run on a shared CI
@@ -370,6 +379,35 @@ describe('WriteFileTool', () => {
       );
       return confirmation;
     }
+
+    it("asks the user for a write into a background fix's worktree, but for its own agent", async () => {
+      const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-pr-wt-'));
+      try {
+        await openFixAt(worktree, 'fix-agent');
+        const file = path.join(worktree, 'src', 'a.ts');
+        expect(
+          tool
+            .build({ file_path: file, content: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(true);
+        expect(
+          await runWithAgentContext('fix-agent', async () =>
+            tool
+              .build({ file_path: file, content: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        const outside = path.join(path.dirname(worktree), 'elsewhere.ts');
+        expect(
+          tool
+            .build({ file_path: outside, content: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(false);
+      } finally {
+        resetUnattendedFixGrantsForTests();
+        fs.rmSync(worktree, { recursive: true, force: true });
+      }
+    });
 
     it('should always return ask from getDefaultPermission', async () => {
       const params = {
@@ -1385,3 +1423,30 @@ describe('workspace artifact metadata guard', () => {
     expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
   });
 });
+
+async function openFixAt(worktree: string, agentId: string) {
+  grantUnattendedFixes('s-write', {
+    pr: 3,
+    worktree: canonicalWorktreePath(worktree),
+    check: async () => true,
+    open: async () => ({ task: 't' }),
+    close: async () => {},
+  });
+  recordConfirmedWatch('s-write', {
+    pr: 3,
+    repo: 'o/r',
+    host: null,
+    targetDir: path.dirname(worktree),
+    preparedAt: null,
+    worktree: canonicalWorktreePath(worktree),
+    authorCanPush: true,
+  });
+  recordWatchTask('s-write', 3, { task: 't', reply: true, instructions: '' });
+  const fix = await openBackgroundFix(
+    's-write',
+    worktree,
+    new AbortController().signal,
+  );
+  fix.attach(agentId, () => {});
+  return fix;
+}

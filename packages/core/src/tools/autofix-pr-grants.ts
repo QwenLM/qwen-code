@@ -520,6 +520,39 @@ export function backgroundFixAt(worktree: string): BackgroundFix | undefined {
   return live(fixes.get(canonicalWorktreePath(worktree)));
 }
 
+/** A path's real form, through its nearest ancestor that exists. */
+function canonicalPathOf(file: string): string {
+  const absolute = path.resolve(file);
+  const rest: string[] = [];
+  for (let dir = absolute; ; dir = path.dirname(dir)) {
+    try {
+      return path.join(realpathSync.native(dir), ...rest.reverse());
+    } catch {
+      if (path.dirname(dir) === dir) return absolute;
+      rest.push(path.basename(dir));
+    }
+  }
+}
+
+/**
+ * The attempt whose worktree holds `file` (the worktree itself, or a path
+ * in it), for a caller other than its own agent: what such a caller writes
+ * there, the YOLO agent goes on building and running without asking.
+ */
+export function backgroundFixHolding(
+  file: string,
+  callerAgentId: string | null,
+): BackgroundFix | undefined {
+  const target = canonicalPathOf(file);
+  for (const fix of fixes.values()) {
+    const rel = path.relative(fix.worktree, target);
+    const inside =
+      rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    if (inside && fix.agentId !== callerAgentId) return live(fix);
+  }
+  return undefined;
+}
+
 export function backgroundFixOf(
   sessionId: string,
   pr: number,
@@ -574,9 +607,15 @@ export async function openBackgroundFix(
     await fix.abandon();
     throw err;
   }
+  // Ended while the helper ran: the grant went (the fix asks again), or
+  // the session.
+  if (fix.done) {
+    await fix.abandon();
+    throw new Error(`no fix of ${worktree} runs without asking`);
+  }
   // The task the state file names is the one this session scheduled, or
   // the watch is no longer the one its rounds run.
-  if (opened.task !== task.task || fix.done) {
+  if (opened.task !== task.task) {
     await fix.abandon();
     throw new Error(
       `PR #${grant.pr}'s watch is no longer driven by the task this session scheduled`,

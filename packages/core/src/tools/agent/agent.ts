@@ -113,6 +113,7 @@ import { PermissionMode } from '../../hooks/types.js';
 import { approvalModeToPermissionMode } from '../../hooks/permission-mode.js';
 import {
   backgroundFixAt,
+  backgroundFixHolding,
   hasUnattendedFixGrant,
   isUnattendedFixConfig,
   markUnattendedFixConfig,
@@ -3412,6 +3413,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
       };
 
+      // An agent in the session's own directory, after a `/cd` into the
+      // worktree of a background fix, would work beside it too.
+      if (
+        this.params.working_dir === undefined &&
+        this.params.isolation !== 'worktree' &&
+        backgroundFixHolding(this.config.getTargetDir(), getCurrentAgentId())
+      ) {
+        return failWorktreeProvisioning(
+          `Error: a background fix agent of /autofix-pr is working in ${this.config.getTargetDir()}; its round goes on when it ends.`,
+        );
+      }
       if (this.params.working_dir !== undefined) {
         // Pin the sub-agent to a caller-owned, pre-existing worktree
         // instead of provisioning a fresh one. The rebind block below

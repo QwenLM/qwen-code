@@ -1237,7 +1237,11 @@ grant no longer holds or no round has a fix to start; any other refusal (a
 fix in flight, one left behind, a watch no longer the round's) ends the
 round. So every background agent at a worktree has an attempt tied to the
 round that prepared it, and while one lives no other agent, teammate or
-workflow agent launches there, in the foreground or the background. Only this process
+workflow agent launches there, in the foreground or the background. The session's own `edit` and
+`write_file` into the worktree ask the user whatever the approval mode, as
+the fix agent builds and runs what is there without asking; an agent the
+session starts in its own directory after a `/cd` into the worktree is
+refused. Only this process
 knows of the attempt: an agent another process pins to the worktree is not
 refused, and the launch does not see one pinned there before it — as two
 sessions' foreground fixes of one watch before this step.
@@ -1319,8 +1323,9 @@ next), and the round discards what the
 worktree holds, as for any round that never finished, and handles the
 attempt's items again with its fix in the foreground — a session whose
 notifications do not reach the model would otherwise abandon one background
-attempt after another. `cleanup` and `prepare --take-over` remove such a
-marker too.
+attempt after another. A `cleanup` that removes the watch and a
+`prepare --take-over` remove such a marker too (a `cleanup` that keeps the
+worktree leaves it to the next `sync`).
 
 **The continuation.** The round launches the agent with
 `run_in_background: true` and `description` = `autofix-pr <owner>/<repo>#<n>
