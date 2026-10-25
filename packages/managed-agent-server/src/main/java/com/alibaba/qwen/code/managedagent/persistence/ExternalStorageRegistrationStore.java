@@ -45,9 +45,10 @@ public final class ExternalStorageRegistrationStore {
         String aliasKey = JdbcRuntimeBindingRepository.storageAliasKey(tenant, workspace);
         String physical = registration.identity().ownerKey();
         return transaction.execute(status -> {
-            WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
-            // Operator registration is infrequent. Serialize its cross-tenant alias check.
-            WorkspaceStorageKindGuard.lockDomain(jdbc, "external-storage-registration/1");
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenant, 10);
+            // Operator registration is infrequent. Serialize its cross-tenant alias check with a
+            // deliberate GLOBAL lock row (not a tenant) in tenant-keyed ma_tenant_guard.
+            WorkspaceStorageKindGuard.lockDomain(jdbc, "external-storage-registration/1", 10);
             var prior = ManagedReceipts.find(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT,
                     tenant, idempotencyKey, true);
             if (prior != null) {

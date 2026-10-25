@@ -16,8 +16,14 @@ final class WorkspaceStorageKindGuard {
     }
 
     static void lockDomain(JdbcTemplate jdbc, String tenantId) {
+        lockDomain(jdbc, tenantId, 0);
+    }
+
+    // Bounded variant: caps each lock acquisition statement at timeoutSeconds
+    // so a caller cannot be frozen behind a long holder of the guard row.
+    static void lockDomain(JdbcTemplate jdbc, String tenantId, int timeoutSeconds) {
         jdbc.execute((ConnectionCallback<Void>) connection -> {
-            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenantId);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenantId, timeoutSeconds);
             return null;
         });
     }
