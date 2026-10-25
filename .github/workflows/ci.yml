@@ -60,19 +60,12 @@ concurrency:
   # repo's namespace and PR runs DO cancel in progress, so a fork whose
   # default branch is `main` cancels a victim PR's run on every push.
   # Supersede within a PR is kept: one branch backs one open PR per fork.
-  # `main` never cancels in progress, and that is intended rather than
-  # accidental: a shared group holds at most one running plus one pending
-  # run, and a newer pending run REPLACES the older one even with
-  # cancel-in-progress: false, so back-to-back merges still coalesce onto the
-  # newest tree — but the in-flight run always finishes and reports. Merges
-  # land every ~18min (median) against this ~30min lane, and with no merge
-  # queue this run is the only fast witness of a merged tree; cancelling it
-  # starved the suite once already — e2e.yml measured 67 of 100 push runs
-  # cancelled and only 25 ever reported (#5859). The coverage upload is
-  # `always()`-gated, so a cancelled run would also publish partial coverage
-  # under the complete run's artifact name. Release branches are treated the
-  # same way.
-  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
+  # A ref-only group replaces older pending main pushes even when cancellation
+  # is disabled. Give each push-tip SHA its own group so every merged tree can
+  # report independently. Repeated pushes/reruns of one SHA still share a group.
+  # Keep running main and release validations uncancellable.
+  group: |-
+    ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref }}
   cancel-in-progress: |-
     ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}
 
@@ -645,11 +638,12 @@ jobs:
           echo "Using persistent npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
-      # test:scripts runs the standalone runtime regression against pinned
-      # Node and Bun archives. Keep them on the persistent host so only the
-      # first run per host downloads them: the download cost minutes per run,
-      # and a 502 from npm once reddened an otherwise green run. Exported here
-      # because the test step overrides HOME.
+      # The test step's side lane (.github/scripts/ci/run-unit-test-lanes.sh)
+      # runs the standalone runtime regression against pinned Node and Bun
+      # archives. Keep them on the persistent host so only the first run per
+      # host downloads them: the download cost minutes per run, and a 502 from
+      # npm once reddened an otherwise green run. Exported here because the
+      # test step overrides HOME.
       - name: 'Configure persistent standalone runtime cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
@@ -833,12 +827,11 @@ jobs:
             retry_arg=(--retry="${VITEST_RETRY}")
           fi
           set +e
-          "${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"
+          # Every workspace suite, the standalone regression and scripts/tests,
+          # in two concurrent lanes; the script says why. Each command it runs
+          # inherits the capabilities test_runner drops.
+          "${test_runner[@]}" .github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"
           RC=$?
-          if [ "$RC" -eq 0 ]; then
-            "${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"
-            RC=$?
-          fi
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
           kill "$SAMPLER_PID" 2>/dev/null || true
@@ -945,7 +938,10 @@ jobs:
     # contention is why test runs 120/60 and no_ak 60/30; a flat 45 priced
     # only the warm half of that reality. Hosted runners keep the tighter
     # ceiling so a genuine hang there does not burn the ECS allowance.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''90'' || ''45'') }}'
+    # Keyed on `self-hosted`, not on the x64 fleet's `ecs-qwen` label: the
+    # ARM64 fleet renders ["self-hosted", "linux", "arm64"], so a
+    # fleet-specific substring priced those reserved machines as hosted.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''90'' || ''45'') }}'
     env:
       LINT_BASE_SHA: "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}"
     permissions:
@@ -1226,9 +1222,27 @@ jobs:
         env:
           LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
-          # Bound transfer on the shared runners. lint-scope falls back to full
-          # checks when this history cannot prove the PR's merge base.
-          git fetch --no-tags --depth=100 origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
+          # Blobless: `Report test growth` may already have fetched the merge
+          # base with --filter=blob:none, and a plain fetch then dies resolving
+          # thin-pack deltas against blobs this checkout lacks. lint-scope
+          # reads only commits and trees.
+          partial=(-c extensions.partialClone=origin -c remote.origin.promisor=true)
+          git "${partial[@]}" fetch --no-tags --depth=100 --filter=blob:none \
+            origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
+          # Deepen until Git can prove the merge base. A fixed 100-commit
+          # window expires in about a day at this merge rate, after which every
+          # longer-lived PR silently paid for a full scan; each deepen is
+          # blobless, so the extra transfer is trees, not the whole pack.
+          for _attempt in 1 2 3; do
+            if git merge-base --all "${LINT_BASE_SHA}" HEAD >/dev/null 2>&1; then
+              break
+            fi
+            git "${partial[@]}" fetch --no-tags --deepen=300 --filter=blob:none \
+              origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}" || break
+          done
+          # Recorded on the remote by the filtered fetch; later fetches in this
+          # checkout must stay ordinary.
+          git config --unset remote.origin.partialclonefilter || true
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
@@ -2126,9 +2140,10 @@ jobs:
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    # Same ECS-only scoping as the `test` job: hosted fallback routing keeps
-    # the pre-contention ceiling.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''60'' || ''30'') }}'
+    # Same self-hosted scoping as `lint_and_static`: hosted fallback routing
+    # keeps the pre-contention ceiling, and the ARM64 fleet — which carries
+    # no `ecs-qwen` label — gets the contended-pool allowance it runs under.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
     permissions:
       contents: 'read'
     steps:
