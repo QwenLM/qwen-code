@@ -6,7 +6,10 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
+  restoreUserPromptSubmitContextReceipt,
   stripTrailingUserPromptSubmitContextPart,
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG,
@@ -52,6 +55,129 @@ describe('stripTrailingUserPromptSubmitContextPart', () => {
       { text: `quote: ${wrapUserPromptSubmitContext('ctx')}` },
     ];
     expect(stripTrailingUserPromptSubmitContextPart(parts)).toBe(parts);
+  });
+});
+
+describe('createUserPromptSubmitContextPart', () => {
+  it('produces a part whose text is the wrapped block', () => {
+    expect(createUserPromptSubmitContextPart('ctx').text).toBe(
+      wrapUserPromptSubmitContext('ctx'),
+    );
+  });
+
+  it('produces a part that satisfies hasUserPromptSubmitContext', () => {
+    const part = createUserPromptSubmitContextPart('ctx');
+    expect(
+      hasUserPromptSubmitContext(
+        { role: 'user', parts: [{ text: 'my prompt' }, part] },
+        'ctx',
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('restoreUserPromptSubmitContextReceipt', () => {
+  it('re-stamps a trailing matching tagged part', () => {
+    const entry = {
+      role: 'user',
+      parts: [
+        { text: 'my prompt' },
+        { text: wrapUserPromptSubmitContext('ctx') },
+      ],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+    restoreUserPromptSubmitContextReceipt(entry, 'ctx');
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(true);
+  });
+
+  it('leaves a non-matching or malformed entry untouched', () => {
+    const entry = {
+      role: 'user',
+      parts: [
+        { text: 'my prompt' },
+        { text: wrapUserPromptSubmitContext('other ctx') },
+      ],
+    };
+    restoreUserPromptSubmitContextReceipt(entry, 'ctx');
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+
+    const sole = {
+      role: 'user',
+      parts: [{ text: wrapUserPromptSubmitContext('ctx') }],
+    };
+    restoreUserPromptSubmitContextReceipt(sole, 'ctx');
+    expect(hasUserPromptSubmitContext(sole, 'ctx')).toBe(false);
+  });
+});
+
+describe('hasUserPromptSubmitContext', () => {
+  it('matches a receipt-stamped trailing block in a user entry', () => {
+    const entry = {
+      role: 'user',
+      parts: [{ text: 'my prompt' }, createUserPromptSubmitContextPart('ctx')],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(true);
+  });
+
+  it('does not match when the payload bytes differ', () => {
+    const entry = {
+      role: 'user',
+      parts: [
+        { text: 'my prompt' },
+        createUserPromptSubmitContextPart('older ctx'),
+      ],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'new ctx')).toBe(false);
+  });
+
+  it('does not match caller-authored tagged text, byte-for-byte identical', () => {
+    // The injection shape reproduced by a caller: multi-part user text
+    // ending in the wrapped block. No receipt means no suppression.
+    const entry = {
+      role: 'user',
+      parts: [
+        { text: 'my prompt' },
+        { text: wrapUserPromptSubmitContext('ctx') },
+      ],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+  });
+
+  it('does not match a receipt-stamped block in a model entry', () => {
+    const entry = {
+      role: 'model',
+      parts: [{ text: 'my answer' }, createUserPromptSubmitContextPart('ctx')],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+  });
+
+  it('does not match a sole tagged part, which is treated as user-authored', () => {
+    const entry = {
+      role: 'user',
+      parts: [createUserPromptSubmitContextPart('ctx')],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+  });
+
+  it('does not match a stamped part that is not the trailing one', () => {
+    const entry = {
+      role: 'user',
+      parts: [createUserPromptSubmitContextPart('ctx'), { text: 'my prompt' }],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+  });
+
+  it('returns false for an empty or malformed entry', () => {
+    expect(hasUserPromptSubmitContext(undefined, 'ctx')).toBe(false);
+    expect(hasUserPromptSubmitContext(null, 'ctx')).toBe(false);
+    expect(hasUserPromptSubmitContext({}, 'ctx')).toBe(false);
+    expect(hasUserPromptSubmitContext({ parts: 'not-an-array' }, 'ctx')).toBe(
+      false,
+    );
+    expect(hasUserPromptSubmitContext({ role: 'user' }, 'ctx')).toBe(false);
+    expect(hasUserPromptSubmitContext({ role: 'user', parts: [] }, 'ctx')).toBe(
+      false,
+    );
   });
 });
 

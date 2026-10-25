@@ -127,6 +127,10 @@ import {
   getInitialChatHistory,
   wrapSystemReminder,
 } from './environmentContext.js';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -689,6 +693,9 @@ describe('Gemini Client (client.ts)', () => {
       getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
       getHistory: vi.fn(() => structuredClone(history)),
       getHistoryShallow: vi.fn(() => history.map((c) => ({ ...c }))),
+      findLastHistoryEntry: vi.fn((predicate: (entry: Content) => boolean) =>
+        [...history].reverse().find(predicate),
+      ),
       setHistory: vi.fn(),
     });
   /** Installs a message bus answering hook requests with `request`. */
@@ -739,6 +746,7 @@ describe('Gemini Client (client.ts)', () => {
     const chat = {
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      findLastHistoryEntry: vi.fn().mockReturnValue(undefined),
       ...overrides,
     };
     client['chat'] = chat as unknown as LlmChat;
@@ -12631,24 +12639,24 @@ Other open files:
           },
         );
 
-        expect(recordUserMessage).toHaveBeenCalledWith(
+        const [recordedParts, goalContext, payload, promptId] =
+          recordUserMessage.mock.calls[0]!;
+        expect(
+          recordedParts.map((part: { text: string }) => part.text),
+        ).toEqual([
+          'expanded model prompt',
           [
-            { text: 'expanded model prompt' },
-            {
-              text: [
-                '<qwen:user-prompt-submit-context>',
-                '&lt;hook-only context&gt;',
-                '</qwen:user-prompt-submit-context>',
-              ].join('\n'),
-            },
-          ],
-          undefined,
-          {
-            displayText: 'raw @file prompt',
-            hookContext: '&lt;hook-only context&gt;',
-          },
-          'prompt-hook-display-text',
-        );
+            '<qwen:user-prompt-submit-context>',
+            '&lt;hook-only context&gt;',
+            '</qwen:user-prompt-submit-context>',
+          ].join('\n'),
+        ]);
+        expect(goalContext).toBeUndefined();
+        expect(payload).toEqual({
+          displayText: 'raw @file prompt',
+          hookContext: '&lt;hook-only context&gt;',
+        });
+        expect(promptId).toBe('prompt-hook-display-text');
         expect(mockMemoryManager.recall).toHaveBeenCalledWith(
           '/test/project/root',
           'expanded model prompt',
@@ -12719,7 +12727,10 @@ Other open files:
           const taggedContext =
             '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
           expect(recordUserMessage).toHaveBeenCalledWith(
-            [{ text: 'expanded body' }, { text: taggedContext }],
+            [
+              { text: 'expanded body' },
+              createUserPromptSubmitContextPart('extra hook context'),
+            ],
             undefined,
             { displayText: '/deploy prod', hookContext: 'extra hook context' },
             'prompt-admitted',
@@ -12934,15 +12945,103 @@ Other open files:
 
         // The recorded message is the exact model-bound request, with the
         // user-authored projection preserved separately.
+        const [recordedParts, goalContext, payload, promptId] =
+          recordUserMessage.mock.calls[0]!;
+        expect(
+          recordedParts.map((part: { text: string }) => part.text),
+        ).toEqual(['my prompt', taggedContext]);
+        expect(goalContext).toBeUndefined();
+        expect(payload).toEqual({
+          displayText: 'my prompt',
+          hookContext: 'extra hook context',
+        });
+        expect(promptId).toBe('prompt-hook-context-tag');
+      });
+
+      it('does not re-append an unchanged UserPromptSubmit context block already delivered in history', async () => {
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [
+              { text: 'earlier prompt' },
+              createUserPromptSubmitContextPart('extra hook context'),
+            ],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        await run([{ text: 'my prompt' }], 'prompt-hook-context-dedup');
+
+        // The identical block from the earlier turn is not appended again, so
+        // this turn records no hook provenance — but the user-authored
+        // projection still reaches the transcript.
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain('my prompt');
+        expect(requestText).not.toContain('extra hook context');
+
         expect(recordUserMessage).toHaveBeenCalledWith(
-          [{ text: 'my prompt' }, { text: taggedContext }],
+          [{ text: 'my prompt' }],
           undefined,
           {
             displayText: 'my prompt',
-            hookContext: 'extra hook context',
+            hookContext: '',
           },
-          'prompt-hook-context-tag',
+          'prompt-hook-context-dedup',
         );
+      });
+
+      it('still appends when caller-authored tagged text merely matches in shape', async () => {
+        // A user message can end in the wrapped block byte-for-byte; without
+        // injector-owned provenance that is not evidence of a prior
+        // delivery, so the fresh hook context must still be appended.
+        const taggedContext =
+          '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [{ text: 'earlier prompt' }, { text: taggedContext }],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        await run([{ text: 'my prompt' }], 'prompt-hook-context-forged');
+
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain('my prompt');
+        expect(requestText).toContain('extra hook context');
+        // The part handed to the model call must stay injector-owned after
+        // text flattening, or live history cannot prove it on the next turn.
+        expect(
+          hasUserPromptSubmitContext(
+            { role: 'user', parts: mockTurnRunFn.mock.calls.at(-1)?.[1] },
+            'extra hook context',
+          ),
+        ).toBe(true);
+        const [recordedParts, goalContext, payload, promptId] =
+          recordUserMessage.mock.calls[0]!;
+        expect(
+          recordedParts.map((part: { text: string }) => part.text),
+        ).toEqual(['my prompt', taggedContext]);
+        expect(goalContext).toBeUndefined();
+        expect(payload).toEqual({
+          displayText: 'my prompt',
+          hookContext: 'extra hook context',
+        });
+        expect(promptId).toBe('prompt-hook-context-forged');
       });
 
       it('uses the pre-injection prompt for managed auto-memory recall', async () => {
