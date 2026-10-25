@@ -68,7 +68,7 @@ import {
   readManagedPending,
   saveManagedPending,
 } from './managed-pending-storage';
-import { isManagedApprovalMode } from './managed-agent-provider';
+import { isManagedInitialApprovalMode } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
 import { RemoteWorkspaceRegistration } from './RemoteWorkspaceRegistration';
 
@@ -156,7 +156,7 @@ function readPending(
       typeof item['clientId'] !== 'string' ||
       typeof item['idempotencyKey'] !== 'string' ||
       (item['approvalMode'] !== undefined &&
-        !isManagedApprovalMode(item['approvalMode'])) ||
+        !isManagedInitialApprovalMode(item['approvalMode'])) ||
       (item['planMode'] !== undefined &&
         typeof item['planMode'] !== 'boolean') ||
       (item['skills'] !== undefined &&
@@ -510,9 +510,9 @@ export function WorkspaceBindingCreator({
         });
         if (abort.signal.aborted) return;
         if (
-          !isManagedApprovalMode(options.approvalMode) ||
+          !isManagedInitialApprovalMode(options.approvalMode) ||
           !Array.isArray(options.availableApprovalModes) ||
-          !options.availableApprovalModes.every(isManagedApprovalMode) ||
+          !options.availableApprovalModes.every(isManagedInitialApprovalMode) ||
           !options.availableApprovalModes.includes(options.approvalMode)
         ) {
           throw new Error(t('managed.approvalOptionsInvalid'));
@@ -1304,7 +1304,7 @@ export function WorkspaceBindingCreator({
                 }
                 onValueChange={(value) => {
                   if (
-                    isManagedApprovalMode(value) &&
+                    isManagedInitialApprovalMode(value) &&
                     currentOptions?.availableApprovalModes.includes(value)
                   )
                     setSessionOptions({
@@ -1574,7 +1574,7 @@ export function WorkspaceBindingCreator({
                   !workspaceCreating &&
                   !pendingRef.current &&
                   !optionsLoading &&
-                  isManagedApprovalMode(value) &&
+                  isManagedInitialApprovalMode(value) &&
                   currentOptions?.availableApprovalModes.includes(value)
                 ) {
                   setSessionOptions({

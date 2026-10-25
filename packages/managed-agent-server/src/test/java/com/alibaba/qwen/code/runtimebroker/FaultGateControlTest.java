@@ -58,6 +58,11 @@ class FaultGateControlTest {
         assertEquals("deferred", settled.getReference().get("dispatchMode"));
         assertEquals(List.of("ran"), rig.marker("control"));
         assertEquals(1, proxy.count("execute"));
+        // A failed wait would name that execute and the worker it reached.
+        String diagnostics = rig.diagnostics();
+        assertTrue(diagnostics.contains("execute=1"), diagnostics);
+        assertTrue(diagnostics.contains("live workers: ["
+                + broker.workers().get(0).pid() + "]"), diagnostics);
 
         // The Runtime answers a lookup by the original identity with the
         // same result the Broker recorded.
