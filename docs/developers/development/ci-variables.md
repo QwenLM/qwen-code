@@ -77,6 +77,12 @@ The web-shell E2E smoke is pinned to `ubuntu-latest`, so the cap cannot apply
 to it. On GitHub-hosted runners
 the variable is ignored and Vitest uses its own defaults.
 
+Each Vitest run applies the cap on its own. The main CI workspace-test step
+runs two lanes at once (`.github/scripts/ci/run-unit-test-lanes.sh`): the cap
+bounds each Vitest run in the main lane, and web-shell's suite in the side lane
+runs at half the cap, at least 1, so at its peak the step runs the cap plus that
+half. On GitHub-hosted runners that side-lane suite runs at 2 workers.
+
 ### Related variables outside test execution
 
 `release.yml` also exposes `QWEN_RELEASE_STATIC_TIMEOUT_MINUTES` (default `60`,

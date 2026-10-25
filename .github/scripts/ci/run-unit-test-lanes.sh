@@ -17,6 +17,12 @@
 # main-failure-signature.mjs, which titles and searches by the first failures
 # in the log, names main-lane tests.
 #
+# Each Vitest run applies the worker cap (VITEST_MAX_FORKS / VITEST_MAX_THREADS)
+# on its own, so two lanes would run twice the cap. Web-shell, whose suite
+# waits on one file, runs at half of it, at least 1, beside the main lane's
+# full cap. Where no cap is set, as on the 4-CPU hosted runners, it runs at 2
+# rather than at Vitest's default of all CPUs but one.
+#
 # Usage: run-unit-test-lanes.sh [vitest args...]
 # The args (ci.yml passes --retry) reach every Vitest run. Exits with the main
 # lane's status, or with the side lane's when the main lane passed.
@@ -30,8 +36,20 @@ if ! side_log="$(mktemp "${TMPDIR:-/tmp}/side-lane-tests.XXXXXX")"; then
   exit 1
 fi
 
+# Half a Vitest worker cap, at least 1; 2 where the cap is unset or not a count.
+half_cap() {
+  case "$1" in
+    '' | *[!0-9]*) echo 2 ;;
+    *) echo $((10#$1 > 1 ? 10#$1 / 2 : 1)) ;;
+  esac
+}
+side_forks="$(half_cap "${VITEST_MAX_FORKS:-}")"
+side_threads="$(half_cap "${VITEST_MAX_THREADS:-}")"
+
 (
-  NODE_OPTIONS="$workspace_node_options" npm run test:ci --workspace="$side_workspace" -- "$@"
+  NODE_OPTIONS="$workspace_node_options" VITEST_MAX_FORKS="$side_forks" \
+    VITEST_MAX_THREADS="$side_threads" \
+    npm run test:ci --workspace="$side_workspace" -- "$@"
   web_shell_rc=$?
   npm run test:standalone:runtimes:ci
   standalone_rc=$?
@@ -47,9 +65,15 @@ if ! workspace_scripts="$(npm pkg get scripts.test:ci --workspaces --json)" ||
       SIDE_WORKSPACE="$side_workspace" node -e "
         const scripts = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
         for (const [name, script] of Object.entries(scripts)) {
-          if (typeof script === 'string' && name !== process.env.SIDE_WORKSPACE) {
-            console.log('--workspace=' + name);
+          if (typeof script !== 'string' || name === process.env.SIDE_WORKSPACE) {
+            continue;
           }
+          // mapfile reads one argument per line below.
+          if (/[\s\p{Cc}]/u.test(name)) {
+            console.error('A workspace name holds whitespace: ' + JSON.stringify(name));
+            process.exit(1);
+          }
+          console.log('--workspace=' + name);
         }
       "
   )"; then
