@@ -34,10 +34,10 @@ import {
   hasUnattendedFixGrant,
   isUnattendedFixConfig,
   markUnattendedFixConfig,
+  BackgroundFix,
   openBackgroundFix,
   resetUnattendedFixGrantsForTests,
   watchTask,
-  type BackgroundFix,
 } from './autofix-pr-grants.js';
 import { ToolConfirmationOutcome } from './tools.js';
 
@@ -1232,7 +1232,10 @@ describe('background fixes', () => {
       (await run({ ...claim, attempt: 'ba9876543210' })).error?.message,
     ).toMatch(/not this session's to claim/);
     fix.end({ status: 'completed', report: 'fixed "Test"' });
-    const claimed = await run({ ...claim, task: 'feedc0ffee12' });
+    // The claim waits for the body to settle, at most 15 seconds.
+    const claiming = run({ ...claim, task: 'feedc0ffee12' });
+    await vi.advanceTimersByTimeAsync(15_000);
+    const claimed = await claiming;
     expect(JSON.parse(String(claimed.llmContent))).toEqual({
       attempt: fix.attempt,
       snapshot: 'snap.json',
@@ -1253,6 +1256,7 @@ describe('background fixes', () => {
     await granted();
     const fix = await launched();
     fix.end({ status: 'completed', report: '' });
+    fix.bodySettled();
     const plan = registryConfig({ getApprovalMode: () => ApprovalMode.PLAN });
     expect(
       (await run({ command: 'fix-end', pr: 12, attempt: fix.attempt }, plan))
@@ -1264,9 +1268,10 @@ describe('background fixes', () => {
   it('stops the agent quietly before a cleanup, ending the attempt first', async () => {
     await granted();
     const fix = await launched();
-    cancel.mockImplementation(() =>
-      fix.end({ status: 'cancelled', report: '' }),
-    );
+    cancel.mockImplementation(() => {
+      fix.end({ status: 'cancelled', report: '' });
+      fix.bodySettled();
+    });
     const registry = {
       cancel: vi.fn((id: string, options: unknown) => {
         expect(options).toEqual({ notify: false });
@@ -1286,14 +1291,46 @@ describe('background fixes', () => {
     expect(backgroundFixOf('session-a', 12)).toBeUndefined();
   });
 
-  it('refuses the cleanup while the stopped agent has not ended', async () => {
+  it("goes on with the cleanup once a stopped agent's grace ran out", async () => {
     await granted();
     const fix = await launched();
     const pending = run({ command: 'cleanup', pr: 12 });
     await vi.advanceTimersByTimeAsync(15_000);
-    expect((await pending).error?.message).toMatch(/has not stopped yet/);
-    expect(log().at(-1)).not.toMatch(/^cleanup/);
-    expect(backgroundFixOf('session-a', 12)).toBe(fix);
+    expect((await pending).error).toBeUndefined();
+    expect(fix.ended).toEqual({ status: 'cancelled', report: '' });
+    expect(log().slice(-2)).toEqual([
+      `fix-end 12 --attempt=${fix.attempt}`,
+      'cleanup 12',
+    ]);
+  });
+
+  it('stops an agent as it launches when a stop or a drop came first', async () => {
+    await granted();
+    const first = await openBackgroundFix('session-a', worktree, signal());
+    first.stop();
+    first.attach('agent-1', () => cancel('agent-1'));
+    expect(cancel).toHaveBeenCalledWith('agent-1');
+    // Still the round's to claim, as an agent that was stopped.
+    expect(first.done).toBe(false);
+    first.drop();
+    const second = await openBackgroundFix('session-a', worktree, signal());
+    forgetAutofixPrSession('session-a');
+    second.attach('agent-2', () => cancel('agent-2'));
+    expect(cancel).toHaveBeenCalledWith('agent-2');
+  });
+
+  it('ends an attempt whose opening failed, its marker with it', async () => {
+    await granted();
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
+    await expect(
+      openBackgroundFix('session-a', worktree, signal()),
+    ).rejects.toThrow(/fix-start refused/);
+    vi.stubEnv('FAKE_AUTOFIX_MODE', '');
+    expect(log().slice(-2)).toEqual([
+      expect.stringMatching(/^fix-start 12 --attempt=/),
+      expect.stringMatching(/^fix-end 12 --attempt=/),
+    ]);
+    expect(backgroundFixOf('session-a', 12)).toBeUndefined();
   });
 
   it("stops the agent when the fixes ask again, its attempt still the round's to claim", async () => {
@@ -1363,6 +1400,43 @@ describe('background fixes', () => {
       }
     });
 
+    it('never blocks on a FIFO planted at the marker', async () => {
+      fs.rmSync(marker());
+      execFileSync('mkfifo', [marker()]);
+      await vi.advanceTimersByTimeAsync(FIX_HEARTBEAT_MS);
+      expect(fix.done).toBe(true);
+      expect(cancel).toHaveBeenCalledWith('agent-1');
+    });
+
+    it('counts the first refresh from when the attempt opened', async () => {
+      const grant = {
+        pr: 12,
+        worktree,
+        check: async () => true,
+        open: async () => ({ task: 't' }),
+        close: async () => {},
+      };
+      const waited = new BackgroundFix(
+        'session-a',
+        12,
+        'o/r',
+        worktree,
+        { task: 't', reply: true, instructions: '' },
+        grant,
+      );
+      // Its helper waited its turn, long, before the heartbeat started.
+      vi.setSystemTime(Date.now() + 5 * 60_000);
+      waited.startHeartbeat();
+      const json = JSON.parse(fs.readFileSync(marker(), 'utf8'));
+      fs.writeFileSync(
+        marker(),
+        JSON.stringify({ ...json, attempt: waited.attempt }),
+      );
+      await vi.advanceTimersByTimeAsync(FIX_HEARTBEAT_MS);
+      expect(waited.done).toBe(false);
+      waited.drop();
+    });
+
     it('lets go when a refresh comes late: the process was suspended', () => {
       vi.setSystemTime(Date.now() + FIX_HEARTBEAT_MS + 61_000);
       fix.beat();
@@ -1384,7 +1458,6 @@ describe('background fixes', () => {
       // Once: a later end changes nothing.
       fix.end({ status: 'failed', report: 'late' });
       expect(fix.ended).toEqual({ status: 'completed', report: 'done' });
-      await fix.settled;
       writeMarker(fix.attempt);
       await vi.advanceTimersByTimeAsync(FIX_CLAIM_WINDOW_MS - 1000);
       expect(fix.done).toBe(false);

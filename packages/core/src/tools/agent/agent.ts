@@ -3907,11 +3907,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               // resolves the parent's display name from parentAgentId.
               parentAgentId: backgroundOwnerId,
               depth: launchDepth,
-              resumeBlockedReason:
-                bgSubagent.continuationBlockedReason ??
-                (backgroundFix
-                  ? BACKGROUND_FIX_CONTINUATION_BLOCKED
-                  : undefined),
+              // A background fix's block is its saved record's, read by every
+              // revival and resume: the entry's would refuse its own inputs
+              // (a Monitor it starts) while it runs.
+              resumeBlockedReason: bgSubagent.continuationBlockedReason,
               ...(backgroundFix
                 ? {
                     notificationFollowUp: endBackgroundFixFollowUp(
@@ -4652,7 +4651,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const fixAgentId = hookOpts.agentId;
           void currentTurnPromise
             .catch(() => {})
-            .finally(() => fix.end(backgroundFixEnd(registry, fixAgentId)));
+            .finally(() => {
+              fix.end(backgroundFixEnd(registry, fixAgentId));
+              fix.bodySettled();
+            });
         }
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);

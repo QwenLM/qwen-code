@@ -2083,12 +2083,18 @@ describe('runSnapshot --gate', () => {
         startedAt,
       }),
     );
-    // Fresh: GitHub is not asked, nothing prints, the cursor stays.
+    // Fresh: GitHub is not asked, nothing prints, the cursor stays; the
+    // check is marked all the same, for `status`.
     mockGh.mockClear();
+    const before = new Date('2026-10-01T00:00:00.000Z');
+    utimesSync(paths.checkedPath, before, before);
     own();
     expect(mockGh).not.toHaveBeenCalled();
     expect(mocks.stdout).toHaveBeenCalledTimes(1);
     expect(readFileSync(gatePath(), 'utf8')).toBe(written);
+    expect(statSync(paths.checkedPath).mtimeMs).toBeGreaterThan(
+      before.getTime(),
+    );
     // Its session stopped refreshing it: one round, though nothing changed.
     const old = new Date(Date.now() - 5 * 60_000);
     utimesSync(paths.fixPath, old, old);

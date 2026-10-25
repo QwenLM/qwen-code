@@ -1195,7 +1195,8 @@ A watch whose fixes run unattended (Section 6.13) runs its fix agent in the
 background, so the session stays usable while it works. Any other fix keeps
 the foreground agent of Section 7 — a background agent cannot ask, and
 every command of such a fix asks — and so do the merge agent of a round,
-every `--once` round (which has no grant), a round restarted within its
+every `--once` round (even on a PR whose watch runs unattended: the grant
+and the attempt are the watch's, with its options), a round restarted within its
 turn, and the fix of a round whose previous attempt was abandoned (below).
 `status`, run through the tool, says which watches this session runs
 unattended (`unattended`).
@@ -1211,18 +1212,23 @@ foreground fix and fails the launch, rather than run in the background
 without it, when any part fails. The launch itself, not the skill, then opens the fix's
 attempt: the grant runs `fix-start <n> --attempt <id>` (a helper only the
 session runs). It refuses unless this session owns the watch, the watch has
-not ended, no other attempt is fresh, and the round prepared a snapshot at
-the watch's head in the last 30 minutes that no attempt took yet; it takes
-that snapshot (`autofix-pr-<n>-fix-snapshot.json`) and writes the attempt
+not ended, no marker of an attempt is there (a fresh one runs; a stale one
+is the round's `sync` to remove), and the round prepared a snapshot to fix
+at the watch's head in the last 30 minutes; and it writes the attempt
 marker `autofix-pr-<n>-fix.json` beside the state file: the attempt id, the
-watch's task, the head and when. A refusal refuses the launch, and a launch
+watch's task, the head and when. The claim (`fix-end`) moves the round's
+snapshot to `autofix-pr-<n>-fix-snapshot.json`, which `reply` reads until
+a round prepares another, and a `sync` that removes an abandoned attempt
+removes its snapshot: no later attempt starts from it. A refusal refuses the launch, and a launch
 that fails after it ends the attempt. So every background agent at a
 worktree has an attempt tied to the round that prepared it, and while one
 lives no other agent launches there, in the foreground or the background.
 
 A background fix agent is never continued: once it ends, `send_message` to
 it, a revival of its transcript and a resume after a restart are refused,
-the last through the reason its saved record carries, so no later turn
+through the reason its saved record carries (its registry entry does not
+carry it while it runs, which would refuse the events of a Monitor it
+starts), and it never stays resident, so no later turn
 gives the agent work outside an attempt — or in the session's own
 directory, where a revived agent would run. Its saved record keeps the
 approval mode it would have had without the grant.
@@ -1233,10 +1239,13 @@ with the watch's `--no-reply` and instructions as the session's own
 agent runs, the `autofix_pr` tool refuses every helper of the PR but
 `status`, and `fix-end` until the agent has ended — its registry entry
 reached a terminal state, which a stopped agent does once its tools settle
-or its cancellation's grace runs out. The marker is for the gate and for
+or its cancellation's grace runs out; a claim then waits up to 15 seconds
+more for the agent's body to settle. A stop asked for while the agent
+launches stops it as it registers. The marker is for the gate and for
 other sessions and processes: every 30 seconds the session refreshes the
-modification time of the marker (never following a link) while it still
-names the attempt, and stops the agent when it does not, or when a refresh
+modification time of the marker (opened without following a link or
+blocking, and only when it is a regular file) while it still names the
+attempt, and stops the agent when it does not, or when a refresh
 comes more than a minute late (the process was suspended, and another
 session may have taken the worktree meanwhile). A helper takes the marker as
 fresh when it was refreshed within the last 90 seconds and its attempt
@@ -1249,7 +1258,8 @@ is fresh:
   or a removal now would act on work half made;
 - the gate prints nothing, asks GitHub nothing and keeps its cursor, so a
   fire costs no turn and what changed meanwhile reaches the round after
-  the attempt;
+  the attempt; it still marks its check, so `status` does not read the watch
+  as left behind;
 - `status` shows it (`fix`), with whether it is fresh; a scheduled round
   whose `status` shows a fresh one ends without a message.
 
@@ -1258,16 +1268,17 @@ The session stops the agent when it runs past the attempt time limit
 a failed launch check); such an attempt stays the round's to claim, as an
 agent that was stopped. `/autofix-pr stop` in this session — `cleanup`
 through the tool — stops the agent without a notification, waits up to 15
-seconds for it to end (outside the helpers' queue; it refuses when the
-agent has not ended by then), ends the attempt and then cleans up. The session drops the
+seconds for its body to settle (outside the helpers' queue), ends the
+attempt and then cleans up. The session drops the
 attempt, and with it the marker's refreshes, when no claim came within 10
 minutes of the agent's end, and when the session or its process ends.
 Another session cannot stop the agent: its `cleanup`, `prepare --take-over`
 and `resume` refuse while the marker is fresh, saying that a fix of the
 session that owns the watch is running there. A marker no longer fresh is
 one its session left behind: the gate prints an `abandoned_fix` event once
-for it, so a round runs even when nothing else changed; that round's `sync`
-removes it and reports `abandonedFix`, and the round discards what the
+for it, so a round runs even when nothing else changed; that round's `sync`, once it answered,
+removes it and reports `abandonedFix` (a `sync` that fails leaves it to the
+next), and the round discards what the
 worktree holds, as for any round that never finished, and handles the
 attempt's items again with its fix in the foreground — a session whose
 notifications do not reach the model would otherwise abandon one background

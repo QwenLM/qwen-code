@@ -1159,6 +1159,9 @@ class AutofixPrInvocation extends BaseToolInvocation<
         `The fix agent of PR #${pr} is still working; its round goes on from its completion notification.`,
       );
     }
+    // A stopped agent ends when its grace runs out; what its tools were
+    // doing gets a little longer to settle before the round acts.
+    await fix.waitSettled(FIX_STOP_WAIT_MS);
     const ended = fix.ended;
     // Claimed whatever the helper answers: a marker it keeps goes stale, and
     // the next round discards the attempt.
@@ -1182,7 +1185,8 @@ class AutofixPrInvocation extends BaseToolInvocation<
   /**
    * `cleanup` of a PR whose fix runs in the background here: its agent is
    * stopped, with no notification, and its attempt ended before anything is
-   * removed. A refusal when the agent does not end.
+   * removed — once its body settled, or at most `FIX_STOP_WAIT_MS` after the
+   * stop, as a stopped agent's grace runs out.
    */
   private async stopFix(
     fix: BackgroundFix,
@@ -1195,6 +1199,8 @@ class AutofixPrInvocation extends BaseToolInvocation<
     });
     if (!fix.ended) {
       if (fix.agentId === null) {
+        // Stopped as it launches.
+        fix.stop();
         return refuse(
           `The fix agent of PR #${this.params.pr} is starting; run cleanup again once it runs.`,
         );
@@ -1202,20 +1208,8 @@ class AutofixPrInvocation extends BaseToolInvocation<
       this.config
         .getBackgroundTaskRegistry()
         .cancel(fix.agentId, { notify: false });
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([
-        fix.settled,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, FIX_STOP_WAIT_MS);
-          timer.unref?.();
-        }),
-      ]);
-      clearTimeout(timer);
-      if (!fix.ended) {
-        return refuse(
-          `The fix agent of PR #${this.params.pr} has not stopped yet; run cleanup again.`,
-        );
-      }
+      await fix.waitSettled(FIX_STOP_WAIT_MS);
+      fix.end({ status: 'cancelled', report: '' });
     }
     fix.claim();
     // The marker goes before the watch: `cleanup` refuses a fresh one.

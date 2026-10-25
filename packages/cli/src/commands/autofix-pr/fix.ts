@@ -130,7 +130,7 @@ export function assertNoFixInFlight(
     `a fix agent is working in PR #${prNumber}'s worktree (attempt ` +
       `${attempt.attempt}, started ${attempt.startedAt}); its round goes on ` +
       `when it ends. In the session that runs it, /autofix-pr stop ` +
-      `${prNumber} stops it; it stops by itself within 30 minutes.`,
+      `${prNumber} stops it; it ends by itself within 40 minutes.`,
   );
 }
 
@@ -223,6 +223,13 @@ export function runFixStart(args: FixStartArgs): AutofixPrFixAttempt & {
     if (running) {
       throw new Error(
         `attempt ${running.attempt} of PR #${args.pr}'s fix is still in flight (started ${running.startedAt}).`,
+      );
+    }
+    // Only a round's sync (or a take-over, or cleanup) removes one its
+    // session left behind, and the round then discards what it made.
+    if (readFixMarker(paths)) {
+      throw new Error(
+        `an earlier attempt of PR #${args.pr}'s fix was left behind; the round's sync removes it first.`,
       );
     }
     assertRoundToFix(paths, args.pr, state.lastKnownHeadSha);

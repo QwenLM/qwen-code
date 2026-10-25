@@ -2743,13 +2743,14 @@ describe('AgentTool', () => {
             expect(open).toHaveBeenCalledOnce();
             expect(childConfig().getApprovalMode()).toBe(YOLO);
             const entry = registered()!;
-            expect(entry.resumeBlockedReason).toMatch(/never continued/);
+            // Its inputs (a Monitor it starts) reach it while it runs.
+            expect(entry.resumeBlockedReason).toBeUndefined();
             // Its saved record: never resumed, and the mode it would have
             // had without the grant, should anything read it back.
             const meta = writeMeta.mock.calls[0]?.[1];
             writeMeta.mockRestore();
             expect(meta).toMatchObject({
-              resumeBlockedReason: entry.resumeBlockedReason,
+              resumeBlockedReason: expect.stringMatching(/never continued/),
               resolvedApprovalMode: AUTO_EDIT,
               persistedCliFlags: expect.objectContaining({
                 approvalMode: AUTO_EDIT,

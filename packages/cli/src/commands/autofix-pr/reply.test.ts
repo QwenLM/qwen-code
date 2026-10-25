@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { PrData } from './snapshot.js';
 
 const mocks = vi.hoisted(() => ({
@@ -386,6 +386,40 @@ describe('runReply', () => {
     expect(() => reply({ handledChecks: [`Test@${HEAD}@#3`] })).toThrow(
       /not a failure snapshot reports/,
     );
+  });
+
+  it("reads the round's snapshot a background fix claimed, until a round prepares another", () => {
+    const gate = `Gate@${HEAD}@#on:9:pull_request_review`;
+    const claimed = join(
+      dirname(paths.statePath),
+      'autofix-pr-7-fix-snapshot.json',
+    );
+    writeFileSync(
+      claimed,
+      JSON.stringify({
+        events: [{ type: 'ci_failed', check: 'Gate', key: gate, runId: 90 }],
+      }),
+    );
+    // Started again while the fix ran: the head no longer reports it.
+    const moved = prData();
+    moved.commits.nodes[0]!.commit.statusCheckRollup!.contexts.nodes.push({
+      __typename: 'CheckRun',
+      databaseId: 9,
+      name: 'Gate',
+      status: 'QUEUED',
+      conclusion: null,
+      detailsUrl: 'https://github.com/o/r/actions/runs/90/job/9',
+    });
+    mocks.fetchPrData.mockImplementation(() => ({ pr: moved, viewer: 'me' }));
+    // A round prepared its own snapshot since: the claimed one says nothing.
+    writeFileSync(paths.snapshotPath, JSON.stringify({ events: [] }));
+    expect(() => reply({ handledChecks: [gate] })).toThrow(
+      /not a failure snapshot reports/,
+    );
+    rmSync(paths.snapshotPath);
+    expect(reply({ handledChecks: [gate] })).toMatchObject({
+      handledChecks: 1,
+    });
   });
 
   it("checks bot threads opened since the snapshot leniently: they are not the plan's", () => {

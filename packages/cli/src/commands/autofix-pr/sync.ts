@@ -84,8 +84,10 @@ export function runSync(
     // its session left behind (Section 6.14).
     assertWatching(requireState(paths.statePath, prNumber), task);
     assertNoFixInFlight(paths, prNumber);
-    const abandonedFix = clearAbandonedFix(paths);
+    // Removed once the sync answered: one that fails keeps it for the
+    // next, which then reports it.
     const outcome = syncLocked(paths, prNumber, discard, root, task);
+    const abandonedFix = clearAbandonedFix(paths);
     return abandonedFix ? { ...outcome, abandonedFix } : outcome;
   });
 }

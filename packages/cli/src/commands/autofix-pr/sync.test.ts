@@ -219,6 +219,15 @@ describe('runSync (real git, bare remote)', () => {
     expect(runSync(7)).not.toHaveProperty('abandonedFix');
   });
 
+  it('keeps a marker its session left behind for the next sync when this one fails', () => {
+    writeFileSync(paths.fixPath, '{}');
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(paths.fixPath, old, old);
+    mocks.live = { ...mocks.live!, state: 'CLOSED' };
+    expect(() => runSync(7)).toThrow(/closed/);
+    expect(existsSync(paths.fixPath)).toBe(true);
+  });
+
   it("leaves the marker alone for another session's sync", () => {
     writeFileSync(paths.fixPath, '{}');
     const old = new Date(Date.now() - 5 * 60_000);

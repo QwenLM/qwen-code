@@ -1897,7 +1897,11 @@ function runGate(args: SnapshotArgs): void {
   // attempt ends, so a fire costs no turn, and the cursor keeps what changed
   // meanwhile for the round after it (Section 6.14).
   const ownFix = state !== null && sameRepository(state, target);
-  if (ownFix && fixInFlight(paths)) return;
+  if (ownFix && fixInFlight(paths)) {
+    // The watch is running: `status` must not read it as left behind.
+    if (session !== '') markChecked(paths.checkedPath);
+    return;
+  }
 
   setGhHost(target.host);
   ensureAuthenticated();

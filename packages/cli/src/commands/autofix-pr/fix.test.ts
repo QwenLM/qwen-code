@@ -143,12 +143,18 @@ describe('fix-start and fix-end', () => {
     );
   });
 
-  it('refuses a second attempt while one is fresh, and replaces a stale one', () => {
+  it('refuses a second attempt while one is fresh, and while one its session left behind is there', () => {
     runFixStart({ pr: 7, attempt: ATTEMPT });
     expect(() => runFixStart({ pr: 7, attempt: 'ba9876543210' })).toThrow(
       /attempt 0123456789ab of PR #7's fix is still in flight/,
     );
     age(FIX_FRESH_MS + 1000);
+    // The round's sync removes it first, and the round discards its work.
+    expect(() => runFixStart({ pr: 7, attempt: 'ba9876543210' })).toThrow(
+      /an earlier attempt of PR #7's fix was left behind/,
+    );
+    expect(clearAbandonedFix(paths)).not.toBeNull();
+    round();
     expect(runFixStart({ pr: 7, attempt: 'ba9876543210' }).attempt).toBe(
       'ba9876543210',
     );

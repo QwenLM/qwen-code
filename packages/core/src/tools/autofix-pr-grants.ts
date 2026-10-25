@@ -16,7 +16,15 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { lstatSync, lutimesSync, readFileSync, realpathSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  futimesSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+} from 'node:fs';
 import path from 'node:path';
 
 /** A watch as the `prepare` this session ran reported it. */
@@ -245,9 +253,13 @@ export class BackgroundFix {
   ended: BackgroundFixEnd | null = null;
   /** Claimed by its round, or dropped: nothing more happens to it. */
   done = false;
+  /** Settles once the agent's body did, its tools with it — later than
+   * `ended` when a stopped agent's grace ran out first. */
   readonly settled: Promise<void>;
   private settle!: () => void;
   private cancelAgent: (() => void) | null = null;
+  /** A stop asked for before the agent launched: done as it launches. */
+  private stopRequested = false;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private lastBeat = Date.now();
@@ -280,42 +292,80 @@ export class BackgroundFix {
     // Suspended past the marker's freshness, the worktree may be another
     // session's now: its agent must not go on in it.
     if (late) return this.drop();
+    let fd: number | undefined;
     try {
-      // Never through a link: a refresh would touch whatever it names.
-      if (!lstatSync(this.marker).isFile()) return this.drop();
-      const marker = JSON.parse(readFileSync(this.marker, 'utf8')) as {
+      // Never through a link, and never blocking on what is no file: the
+      // agent can put anything at this path, and the session's own thread
+      // reads it.
+      fd = openSync(
+        this.marker,
+        constants.O_RDONLY |
+          (constants.O_NOFOLLOW ?? 0) |
+          (constants.O_NONBLOCK ?? 0),
+      );
+      if (!fstatSync(fd).isFile()) return this.drop();
+      const marker = JSON.parse(readFileSync(fd, 'utf8')) as {
         attempt?: unknown;
       } | null;
       if (marker?.attempt !== this.attempt) return this.drop();
-      lutimesSync(this.marker, now / 1000, now / 1000);
+      futimesSync(fd, now / 1000, now / 1000);
     } catch {
       this.drop();
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
   }
 
   startHeartbeat(): void {
+    // From now: the helper that opened the attempt may have waited its turn.
+    this.lastBeat = Date.now();
+    if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = setInterval(() => this.beat(), FIX_HEARTBEAT_MS);
     this.heartbeat.unref?.();
   }
 
-  /** The agent launched: the attempt time limit runs from now. */
+  /** The agent launched: the attempt time limit runs from now. A stop or a
+   * drop asked for while it launched stops it now. */
   attach(agentId: string, cancel: () => void): void {
     this.agentId = agentId;
     this.cancelAgent = cancel;
+    if (this.done || this.stopRequested) {
+      cancel();
+      return;
+    }
     this.restartTimer(FIX_TIME_LIMIT_MS, () => this.stop());
   }
 
   /** Stops the agent; its attempt stays the round's to claim. */
   stop(): void {
-    if (!this.ended) this.cancelAgent?.();
+    if (this.ended) return;
+    if (this.cancelAgent) this.cancelAgent();
+    else this.stopRequested = true;
   }
 
   /** The agent ended: its round has the claim window to go on. Once. */
   end(end: BackgroundFixEnd): void {
     if (this.ended) return;
     this.ended = end;
-    this.settle();
     if (!this.done) this.restartTimer(FIX_CLAIM_WINDOW_MS, () => this.drop());
+  }
+
+  /** The agent's body settled. */
+  bodySettled(): void {
+    this.settle();
+  }
+
+  /** Waits, at most `ms`, for the agent's body to settle. */
+  async waitSettled(ms: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.settled,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+        timer.unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
   }
 
   /**
@@ -353,9 +403,10 @@ export class BackgroundFix {
     this.finish();
   }
 
-  /** A launch that failed after the attempt opened: no round claims it. */
+  /** A launch that failed after the attempt opened, or while it opened:
+   * no round claims it, and its marker goes now. */
   async abandon(): Promise<void> {
-    if (this.done) return;
+    this.stop();
     this.finish();
     await this.grant.close(this.attempt).catch(() => {});
   }
@@ -434,7 +485,8 @@ export async function openBackgroundFix(
   try {
     opened = await grant.open(fix.attempt, signal);
   } catch (err) {
-    fix.drop();
+    // The helper may have written the marker before it failed.
+    await fix.abandon();
     throw err;
   }
   // The task the state file names is the one this session scheduled, or
