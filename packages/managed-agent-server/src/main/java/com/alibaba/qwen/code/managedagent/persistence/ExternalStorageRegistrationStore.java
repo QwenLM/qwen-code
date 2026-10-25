@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -60,7 +61,7 @@ public final class ExternalStorageRegistrationStore {
             if (!jdbc.queryForList("SELECT alias_key FROM ma_storage WHERE alias_key = ?", aliasKey).isEmpty()
                     || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ? AND (storage_id = ? OR workspace_id = ?)", tenant, workspace, workspace).isEmpty()
                     || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE storage_alias_key = ?", aliasKey).isEmpty()
-                    || !jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?", physical).isEmpty()) {
+                    || !jdbc.queryForList("SELECT physical_key FROM ma_storage_owner WHERE physical_key = ?", physical).isEmpty()) {
                 throw conflict("alias_conflict");
             }
             for (String saved : jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE storage_kind = 'EXTERNAL'", String.class)) {
@@ -69,16 +70,23 @@ public final class ExternalStorageRegistrationStore {
                     throw conflict("alias_conflict");
                 }
             }
-            jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, tenant_id, storage_id,"
-                    + " storage_kind, mount_root, mount_revision) VALUES (?, ?, ?, ?, 'EXTERNAL', ?, ?)",
-                    physical, physical, tenant, workspace, registration.alias().mountRoot(),
-                    registration.identity().registrationRevision());
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
-                    + " storage_kind, registration_state, registration_revision, registration_json, gmt_create, gmt_modified)"
-                    + " VALUES (?, ?, ?, ?, ?, ?, 'EXTERNAL', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW
-                    + ", " + ManagedSchemaTime.SQL_NOW + ")", aliasKey,
-                    JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey(workspace),
-                    tenant, workspace, physical, registration.identity().registrationRevision(), encoded);
+            try {
+                jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, tenant_id, storage_id,"
+                        + " storage_kind, mount_root, mount_revision) VALUES (?, ?, ?, ?, 'EXTERNAL', ?, ?)",
+                        physical, physical, tenant, workspace, registration.alias().mountRoot(),
+                        registration.identity().registrationRevision());
+                jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+                        + " storage_kind, registration_state, registration_revision, registration_json, gmt_create, gmt_modified)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, 'EXTERNAL', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW
+                        + ", " + ManagedSchemaTime.SQL_NOW + ")", aliasKey,
+                        JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey(workspace),
+                        tenant, workspace, physical, registration.identity().registrationRevision(), encoded);
+            } catch (DuplicateKeyException duplicate) {
+                // The global lock serializes registration, so the pre-checks above
+                // win first; translate any residual duplicate-key race (or a lock
+                // bypass) into the contract 409 instead of leaking a 500.
+                throw conflict("alias_conflict");
+            }
             long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
             String receiptKey = ManagedSchemaKeys.receiptKey(NAMESPACE, tenant, ReceiptScope.TENANT, tenant, idempotencyKey);
             Receipt receipt = new Receipt(receiptKey, "EXTERNAL", registration, now);
