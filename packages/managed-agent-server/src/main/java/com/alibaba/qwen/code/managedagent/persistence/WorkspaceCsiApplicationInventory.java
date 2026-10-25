@@ -294,6 +294,16 @@ final class WorkspaceCsiApplicationInventory {
                     + "retry_count:INT,consecutive_failures:INT,budget_exempt_failures:INT,retry_after:BIGINT,"
                     + "model_id:VARBINARY,model_revision:BIGINT,approval_mode:VARCHAR,approval_revision:BIGINT,"
                     + "plan_enabled:BOOLEAN,permission_rules_json:LONGTEXT"),
+            declaration("ma_user_message", "tenant_id,session_id,message_id",
+                    "tenant_id:VARBINARY,session_id:VARBINARY,message_id:VARBINARY,sequence_number:BIGINT,"
+                    + "revision:BIGINT,actor_id:VARBINARY,input_json:LONGTEXT,state:VARCHAR,context_revision:BIGINT,"
+                    + "turn_id:VARBINARY,prompt_id:VARBINARY,consumed_sequence:BIGINT"),
+            declaration("ma_user_message_command", "tenant_id,session_id,command_key",
+                    "tenant_id:VARBINARY,session_id:VARBINARY,command_key:CHAR,actor_id:VARBINARY,"
+                    + "request_digest:VARCHAR,result_json:LONGTEXT"),
+            declaration("ma_user_message_queue", "tenant_id,session_id",
+                    "tenant_id:VARBINARY,session_id:VARBINARY,paused:BOOLEAN,resumed_turn_id:VARBINARY,"
+                    + "next_sequence:BIGINT,last_dispatch_at:BIGINT"),
             declaration("ma_workspace", "tenant_id,workspace_id",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:BIGINT,storage_id:VARBINARY,"
                     + "display_name:VARCHAR,config_ref:VARBINARY,policy_ref:VARBINARY,state:VARCHAR,workspace_kind:VARCHAR,"
@@ -2329,7 +2339,8 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_session" -> query(table, "tenant_id=T&session_id=sessions", "runtime_request_key=requests",
                         "tenant_id=T&parent_session_id=sessions", "tenant_id=T&root_session_id=sessions");
                 case "ma_session_head" -> query(table, "tenant_key=BT&harness_key=BS", "tenant_id=T&session_id=sessions");
-                case "ma_public_event", "ma_turn", "ma_session_record" ->
+                case "ma_public_event", "ma_turn", "ma_session_record", "ma_user_message",
+                        "ma_user_message_command", "ma_user_message_queue" ->
                         query(table, "tenant_id=T&session_id=sessions");
                 case "ma_event_stream" -> query(table, "tenant_id=T&session_id=sessions", "artifact_refs_resource_key=resourceKeys");
                 case "ma_message" -> query(table, "tenant_id=T&session_id=sessions", "body_resource_key=resourceKeys");

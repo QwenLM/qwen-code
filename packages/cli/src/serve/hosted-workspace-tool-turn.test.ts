@@ -36,6 +36,7 @@ import {
   type HostedFileHistorySettleBlocker,
 } from './hosted-file-history.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
+import type { HostedExtensionToolConfig } from './hosted-extension-tool-context.js';
 import {
   HOSTED_TOOL_INPUT_ORDER,
   HostedHookSession,
@@ -9809,6 +9810,7 @@ function backgroundTurnRig(
     fitsInline?: (type: string) => boolean;
     publicationMissing?: boolean;
     foregroundOnly?: boolean;
+    extensionConfig?: HostedExtensionToolConfig;
     closeResults?: ReadonlyArray<'NOT_STARTED' | 'MISSING'>;
     executionCallIds?: readonly string[];
     hooks?: HostedHookSession;
@@ -9966,6 +9968,7 @@ function backgroundTurnRig(
       childRuns: orchestrator as never,
       backgroundLane: options.lane,
       foregroundOnly: options.foregroundOnly,
+      extensionConfig: options.extensionConfig,
     },
   );
   return {
@@ -10722,6 +10725,59 @@ it.each([true, false])(
       expect(shell?.parametersJsonSchema).not.toHaveProperty(
         'properties.is_background',
       );
+    expect(declarations.map((tool) => tool.name)).not.toContain('monitor');
+  },
+);
+
+it.each([true, false])(
+  'preserves extension Shell pins with background admission enabled (%s)',
+  async (enabled) => {
+    const pin = {
+      extensionId: 'ext_11111111-1111-4111-8111-111111111111',
+      packageRevision: 1,
+      packageDigest: 'a'.repeat(64),
+    };
+    const rig = backgroundTurnRig(
+      { executionStatus: 'not_started', responseParts: [], capture: null },
+      {
+        extensionConfig: {
+          revision: 1,
+          packages: [{ pin, assetRoot: path.join(root, 'extension-assets') }],
+        },
+      },
+    );
+    turn = rig.turn;
+    enablement.childRun = enabled;
+    const declarations = await turn.declarations(new AbortController().signal);
+    const shell = declarations.find(
+      (tool) => tool.name === 'run_shell_command',
+    );
+    expect(shell?.parametersJsonSchema).toHaveProperty(
+      'properties.extension_context.oneOf',
+      [
+        {
+          properties: Object.fromEntries(
+            Object.entries(pin).map(([key, value]) => [key, { const: value }]),
+          ),
+        },
+      ],
+    );
+    expect(shell?.description).toContain('$QWEN_EXTENSION_ROOT');
+    expect(shell?.description).toContain(
+      'cwd stays the Session working directory',
+    );
+    if (enabled)
+      expect(shell?.parametersJsonSchema).toHaveProperty(
+        'properties.is_background',
+      );
+    else {
+      expect(shell?.parametersJsonSchema).not.toHaveProperty(
+        'properties.is_background',
+      );
+      expect(shell?.description).toContain(
+        'Shell file mutations are not backed up',
+      );
+    }
     expect(declarations.map((tool) => tool.name)).not.toContain('monitor');
   },
 );

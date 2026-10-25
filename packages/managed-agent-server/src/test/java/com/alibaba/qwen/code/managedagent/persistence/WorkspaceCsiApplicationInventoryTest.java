@@ -770,7 +770,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(783);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(807);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -782,6 +782,32 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(snapshot.table("ma_tenant_guard").rows()).hasSize(2);
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_head")
                 && blocker.code().equals("missing_or_extra_original"));
+    }
+
+    @Test
+    void originalUserMessageRowsRemainOutsideTheNativeFirstLane() throws Exception {
+        jdbc.update("INSERT INTO ma_user_message_queue (tenant_id, session_id) VALUES ('tenant', ?)", session);
+        jdbc.update("INSERT INTO ma_user_message (tenant_id, session_id, message_id, sequence_number, revision,"
+                        + " actor_id, input_json, state) VALUES ('tenant', ?, 'message', 1, 1, 'actor', '[]', 'queued')",
+                session);
+        jdbc.update("INSERT INTO ma_user_message_command (tenant_id, session_id, command_key, actor_id,"
+                        + " request_digest, result_json) VALUES ('tenant', ?, ?, 'actor', ?, '{}')",
+                session, "a".repeat(64), "sha256:" + "b".repeat(64));
+        var before = List.of(
+                jdbc.queryForList("SELECT * FROM ma_user_message_queue"),
+                jdbc.queryForList("SELECT * FROM ma_user_message"),
+                jdbc.queryForList("SELECT * FROM ma_user_message_command"));
+        var snapshot = inspect();
+        for (String table : List.of("ma_user_message_queue", "ma_user_message", "ma_user_message_command")) {
+            assertThat(snapshot.table(table).rows()).hasSize(1)
+                    .allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL);
+            assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals(table)
+                    && blocker.code().equals("unsupported_first_lane"));
+        }
+        assertThat(List.of(
+                jdbc.queryForList("SELECT * FROM ma_user_message_queue"),
+                jdbc.queryForList("SELECT * FROM ma_user_message"),
+                jdbc.queryForList("SELECT * FROM ma_user_message_command"))).usingRecursiveComparison().isEqualTo(before);
     }
 
     @Test
