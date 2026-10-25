@@ -481,7 +481,7 @@ fi
         },
         { mainTip: 'new-head' },
       );
-      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('::warning::');
       expect(resolved.stdout).not.toContain('main is now');
       expect(resolved.calls).not.toContain('commits/main');
@@ -512,22 +512,22 @@ fi
       );
     });
     it('reports the attempt that is still the latest', () => {
-      expect(detect('1').output).toBe('superseded=false\n');
+      expect(detect('1').output).toBe('superseded=false\nprovisional=false\n');
       expect(detect('2', { RUN_ATTEMPT: '2' }).output).toBe(
-        'superseded=false\n',
+        'superseded=false\nprovisional=false\n',
       );
       // Stale-attempt supersession is independent of the tip comparison:
       // a bare event never reaches the push arm, and the nightly schedule
       // arm is exempt from it. Folding the attempt check inside that arm
       // would file an issue for an already-green rerun (#14768's shape).
-      expect(detect('2').output).toBe('superseded=true\n');
+      expect(detect('2').output).toBe('superseded=true\nprovisional=false\n');
       expect(
         detect('2', {
           EVENT_NAME: 'schedule',
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         }).output,
-      ).toBe('superseded=true\n');
+      ).toBe('superseded=true\nprovisional=false\n');
     });
     it('skips a push run when main has advanced past its head', () => {
       // Run 39777472391's push run tested 06e59666, main moved on to
@@ -544,7 +544,7 @@ fi
         },
         { mainTip: '3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e' },
       );
-      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain(
         'main is now 3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e',
       );
@@ -571,7 +571,7 @@ fi
         },
         { mainTip: 'new-head', successor: 'none' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('no newer push run');
       expect(resolved.calls).toContain(
         'actions/workflows/12345/runs?event=push&branch=main&head_sha=new-head&per_page=1',
@@ -590,25 +590,43 @@ fi
         },
         { mainTip: 'new-head', successor: 'completed cancelled' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('completed cancelled');
       expect(resolved.stdout).toContain('does not report');
       expect(resolved.summary).toBe('');
     });
-    it('skips a push run while its successor is still queued', () => {
-      // A queued or in-progress successor is a genuine deferral: its own
-      // completion event reports the result if it fails.
-      const resolved = detect(
-        '1',
-        {
-          EVENT_NAME: 'push',
-          HEAD_BRANCH: 'main',
-          HEAD_SHA: 'old-head',
-        },
-        { mainTip: 'new-head', successor: 'in_progress' },
-      );
-      expect(resolved.output).toBe('superseded=true\n');
-      expect(resolved.stdout).toContain('the newer push run owns its result');
+    it('reports a push run whose successor has not settled, flagged provisional', () => {
+      // A running successor proves nothing yet, and this job cannot wait for
+      // it: the hosted pool queued the reporter for 20-100 minutes, so the
+      // tip's run is usually young. The successor's own re-entry covers only
+      // the failure conclusion, so discarding here loses a real regression
+      // whenever that run ends cancelled (#15470). The report is filed with
+      // the caveat instead, and the per-signature route hands it to a human
+      // rather than autofix, so a stale one costs a close.
+      // Every not-yet-final status counts, matching the vocabulary
+      // qwen-autofix.yml uses for the same question.
+      for (const successor of [
+        'in_progress',
+        'queued',
+        'waiting',
+        'requested',
+        'pending',
+      ]) {
+        const resolved = detect(
+          '1',
+          {
+            EVENT_NAME: 'push',
+            HEAD_BRANCH: 'main',
+            HEAD_SHA: 'old-head',
+          },
+          { mainTip: 'new-head', successor },
+        );
+        expect(resolved.output).toBe('superseded=false\nprovisional=true\n');
+        expect(resolved.stdout).toContain(
+          `${successor}, so this report is provisional`,
+        );
+        expect(resolved.summary).toBe('');
+      }
     });
     it('fails open when the newer-run lookup cannot be read', () => {
       const resolved = detect(
@@ -620,7 +638,7 @@ fi
         },
         { mainTip: 'new-head', failCall: 'newer-runs' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain(
         'Could not list the newer runs of workflow 12345',
       );
@@ -639,7 +657,7 @@ fi
         },
         { mainTip: 'new-head', successor: 'completed failure' },
       );
-      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('main is now new-head');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -657,7 +675,7 @@ fi
         },
         { mainTip: 'new-head', successor: 'none' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('no newer push run');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -671,7 +689,7 @@ fi
         },
         { mainTip: 'tested-head' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).not.toContain('::warning::');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -687,7 +705,7 @@ fi
         },
         { mainTip: '' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
     });
     it('does not compare a scheduled run with the tip of main', () => {
       // A schedule runs at its own head and is the only signal macOS and
@@ -702,7 +720,7 @@ fi
         },
         { mainTip: 'new-head' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.calls).not.toContain('commits/main');
     });
     it.each([['pull_request'], ['pull_request_review'], ['workflow_dispatch']])(
@@ -721,7 +739,7 @@ fi
           },
           { mainTip: 'new-head' },
         );
-        expect(resolved.output).toBe('superseded=false\n');
+        expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
         expect(resolved.calls).not.toContain('commits/main');
       },
     );
@@ -735,7 +753,7 @@ fi
         },
         { mainTip: 'new-head', failCall: 'tip' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('Could not read the tip of main');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -751,7 +769,7 @@ fi
         },
         { mainTip: 'new-head' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.calls).not.toContain('commits/main');
     });
     it('fails open when the live run cannot be read', () => {
@@ -759,7 +777,7 @@ fi
       // for a real failure beats silently dropping it.
       const gh = `#!/usr/bin/env bash\nprintf '%s' '{"message":"Bad credentials"}'\nexit 1\n`;
       const resolved = detect('', {}, { ghScript: gh });
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('::warning::');
       expect(resolved.stdout).toContain('Could not read run 39237270547');
     });
@@ -767,7 +785,7 @@ fi
       // -gt coerces an empty operand to 0, so a field-less event would read
       // as superseded and suppress every report.
       expect(detect('2', { RUN_ATTEMPT: '' }).output).toBe(
-        'superseded=false\n',
+        'superseded=false\nprovisional=false\n',
       );
     });
     it('gates every failure reader on the supersession check', () => {
@@ -835,6 +853,7 @@ fi
         runAt = '2026-10-24T01:02:03Z',
         markerIssues = [],
         closedIssues = [],
+        provisional = false,
       } = opts;
       const tmp = mkdtempSync(join(tmpdir(), 'ci-issue-reuse-'));
       try {
@@ -932,6 +951,7 @@ fi
               RUN_ATTEMPT: '2',
               SIGNATURE_TITLE: signatureTitle,
               TEST_MARKERS: testMarkers,
+              PROVISIONAL: provisional ? 'true' : 'false',
               RUN_AT: runAt,
               LOOKUP_FAILURES: String(lookupFailures),
               FAIL_COMMENT_ONCE: failCommentOnce ? '1' : '0',
@@ -988,6 +1008,19 @@ fi
         expect(result.body).toContain('Run attempt: 2');
       },
     );
+
+    it('heads a provisional aggregate occurrence with the caveat', () => {
+      // The caveat is prepended once, ahead of the route split, so the
+      // aggregate's own body file is a third write site: a prepend narrowed to
+      // the per-signature branch would silently drop it here.
+      const result = run([botIssue(42)], { provisional: true });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.body).toMatch(
+        /^> \*\*Provisional\.\*\* Main advanced past this head/,
+      );
+      expect(result.body).toContain('Run 123 failed at commit abcdef123456');
+    });
 
     it('retires the autofix route when adopting a legacy issue without the workflow marker', () => {
       const result = run([botIssue(42, ' on abc123')], {
@@ -1470,6 +1503,18 @@ fi
         'jq -r \'.searchMarkers[]?\' "${RUNNER_TEMP}/analysis.json"',
       );
     });
+
+    it('wires the provisional flag from the live step through to the writer', () => {
+      // Same chain shape, same failure mode: a retyped binding leaves
+      // PROVISIONAL empty, so every provisional filing silently loses its
+      // caveat; a dropped one is unbound and kills the writer outright.
+      expect(jobs.analyze.outputs.provisional).toBe(
+        '${{ steps.live.outputs.provisional }}',
+      );
+      expect(writer.env.PROVISIONAL).toBe(
+        '${{ needs.analyze.outputs.provisional }}',
+      );
+    });
     describe('per-signature routing', () => {
       const signatureTitle =
         'Main CI failed: SDK Java — src/Foo.test > Suite … > case bar';
@@ -1502,6 +1547,37 @@ fi
         expect(result.body).toContain('<!-- main-ci-failure-scope:1234 -->');
         expect(result.body).not.toContain('main-ci-failure-aggregate');
         expect(result.calls).not.toMatch(/ready-for-agent|autofix|assignee/);
+      });
+
+      it('leads a provisional filing with the caveat and still files it', () => {
+        // The successor had not settled when the report was prepared, so the
+        // issue is filed anyway; the caveat is what lets a reader close it
+        // when the newer run turns out to cover the failure.
+        const result = run([botIssue(42)], {
+          signatureTitle,
+          testMarkers: markerA,
+          provisional: true,
+        });
+        expect(result.status).toBe(0);
+        expect(result.body).toMatch(
+          /^> \*\*Provisional\.\*\* Main advanced past this head/,
+        );
+        expect(result.body).toContain('Run 123 failed at commit abcdef123456');
+        expect(result.body).toContain(`<!-- ${markerA} -->`);
+        // A provisional issue is still a human-triage unit, never autofix
+        // work — the whole reason reporting it is affordable.
+        expect(result.calls).toContain(
+          'issue edit 999 --repo QwenLM/qwen-code --add-label type/bug --add-label status/needs-triage',
+        );
+        expect(result.calls).not.toMatch(/ready-for-agent|autofix|assignee/);
+      });
+
+      it('omits the caveat when the tip was settled', () => {
+        const result = run([botIssue(42)], {
+          signatureTitle,
+          testMarkers: markerA,
+        });
+        expect(result.body).not.toContain('Provisional.');
       });
 
       it('comments on the issue whose body carries the test marker and accretes new ones', () => {
@@ -1548,6 +1624,27 @@ fi
         expect(result.status).toBe(0);
         expect(result.calls).toContain('issue comment 7');
         expect(result.calls).not.toContain('issue edit');
+      });
+
+      it('heads a provisional recurrence comment with the caveat', () => {
+        // A recurrence is written from a separate file than the certified-miss
+        // create, so it is its own write site: scoping the prepend to the
+        // filing paths would leave a provisional recurrence unmarked.
+        const tracked = `<!-- ${markerA} -->\n<!-- main-ci-failure-scope:1234 -->\n`;
+        const result = run([botIssue(7, ' — Foo.test')], {
+          signatureTitle,
+          testMarkers: markerA,
+          issueBodies: { 7: tracked },
+          provisional: true,
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 7');
+        expect(result.commentBody).toMatch(
+          /^> \*\*Provisional\.\*\* Main advanced past this head/,
+        );
+        expect(result.commentBody).toContain(
+          'Run 123 failed at commit abcdef123456',
+        );
       });
 
       it('keeps the recorded recurrence when the accretion edit fails', () => {
@@ -2087,6 +2184,11 @@ printf '%s\\n' '{"jobs":[]}'
       // run.
       expect(String(rerunJob.if)).toContain(
         "needs.analyze.outputs.file_issue == 'true'",
+      );
+      // A provisional report is for a head main already replaced: the rerun
+      // would spend pool capacity on it and could not re-enter here.
+      expect(String(rerunJob.if)).toContain(
+        "needs.analyze.outputs.provisional != 'true'",
       );
     });
 
