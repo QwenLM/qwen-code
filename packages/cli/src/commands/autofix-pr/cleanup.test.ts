@@ -240,10 +240,13 @@ describe('runCleanup (real git)', () => {
       watch: { every: 2, reply: true, instructions: '' },
     });
     writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
+    writeFileSync(paths.checkedPath, '');
     runCleanup(7, false);
     expect(lastReport()).toMatchObject({ removed: false });
     const kept = readState(paths.statePath)!;
     expect(kept.watch).toBeUndefined();
+    // No check of its gate looks recent: the gate answers watch_ended now.
+    expect(existsSync(paths.checkedPath)).toBe(false);
     // The rounds' helpers refuse it until a start resumes it.
     expect(kept.ended).toEqual({
       at: expect.any(String),

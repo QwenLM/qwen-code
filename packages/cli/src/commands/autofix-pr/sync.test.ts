@@ -200,7 +200,8 @@ describe('runSync (real git, bare remote)', () => {
     expect(runSync(7, false, 'aaaaaaaaaaaa')).toMatchObject({ synced: true });
     // A fire its task queued before a later schedule replaced it.
     expect(() => runSync(7, false, 'bbbbbbbbbbbb')).toThrow(
-      /task bbbbbbbbbbbb no longer drives PR #7's watch \(task aaaaaaaaaaaa does\)/,
+      // The refusal names which task to delete, and which one to keep.
+      /task bbbbbbbbbbbb no longer drives PR #7's watch; delete the task whose gate has --task bbbbbbbbbbbb, not the one with --task aaaaaaaaaaaa/,
     );
     // Its kept work is not discarded by a round still under way.
     writeState(paths.statePath, {

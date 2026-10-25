@@ -148,16 +148,17 @@ describe('bundled autofix-pr skill', () => {
     // One task drives a watch: each schedule mints its id, every other task
     // of the PR — from before a take-over, a /clear or a later start — is
     // deleted before the new one is made, and a round woken by one deletes it.
-    expect(body).toContain(
-      '`"${QWEN_CODE_CLI:-qwen}" autofix-pr schedule <n> --again`',
-    );
     expect(body).toContain('`--task <gateTask>`');
-    // Resume stops every other task of the watch before its round.
+    // Resume stops every other task of the watch before its round, and the
+    // round is that task's.
     expect(body).toContain(
-      'autofix-pr schedule <pr> --again` before the round',
+      'autofix-pr schedule <pr> --again` and keep what it prints',
     );
-    // A round starts by checking that its task still drives the watch.
-    expect(body).toContain('adding `--task <id>` when the tick has one');
+    expect(body).toContain('with `--task <task>`');
+    // Every helper of a round checks that its task still drives the watch.
+    expect(body).toContain(
+      'as to every helper call of the round (`sync`, `snapshot`, `ci-log`, `push`, `reply`, `rerun`)',
+    );
     // Only the user's own stop takes a watch from another session.
     expect(body).toContain(
       "adding `--take-over` for a PR the user's `stop` named",
@@ -165,12 +166,13 @@ describe('bundled autofix-pr skill', () => {
     // Whether another session still runs a watch is the helper's to say.
     expect(body).toContain('`checkedRecently` true and no task of the PR');
     // The scheduled task — its gate the probe, run outside the model — is
-    // the one `schedule` prints and records, so `resume` makes it again.
+    // made from what schedule printed before the round, which nothing the
+    // round's fix agent did can change.
     expect(body).toContain(
-      'create the task with `cron_create` from the printed `cron`, `recurring`, `gate` and `prompt`, exactly as printed',
+      "They were printed before the round, so nothing the round's fix agent did can change them.",
     );
     expect(body).toContain(
-      '`"${QWEN_CODE_CLI:-qwen}" autofix-pr schedule <pr> --again`',
+      "create the task with `cron_create` from step 6's `cron`, `recurring`, `gate` and `prompt`, exactly as printed",
     );
   });
 

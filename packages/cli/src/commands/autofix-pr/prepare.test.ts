@@ -795,6 +795,21 @@ describe('runPrepare (real git)', () => {
     expect(readState(paths.statePath)!.ended).toBeUndefined();
   });
 
+  it('says it resumed a watch stop ended, though its worktree was removed since', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    const ended = { at: '2026-10-25T00:00:00.000Z', reason: 'kept' };
+    writeState(paths.statePath, { ...readState(paths.statePath)!, ended });
+    run(clone, 'worktree', 'remove', '--force', paths.worktreePath);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      resumed: false,
+      recreated: true,
+      wasEnded: ended,
+    });
+    expect(readState(paths.statePath)!.ended).toBeUndefined();
+  });
+
   it('takes over a watch whose worktree was removed only once the PR passed its checks', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const paths = autofixPrPaths(clone, 7);

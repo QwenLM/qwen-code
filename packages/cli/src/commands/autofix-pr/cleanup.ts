@@ -179,6 +179,9 @@ export function runCleanup(
             ...rest,
             ended: { at: new Date().toISOString(), reason },
           });
+          // Its gate answers `watch_ended` from now on and checks nothing,
+          // so no check of it may look recent.
+          rmSync(paths.checkedPath, { force: true });
         });
       }
       writeStdoutLine(

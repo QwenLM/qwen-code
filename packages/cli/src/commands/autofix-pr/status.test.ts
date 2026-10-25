@@ -95,8 +95,8 @@ describe('runStatus', () => {
     });
     write(12, { sessionId: 'session-b' });
     mkdirSync(seven.worktreePath, { recursive: true });
-    // The last check is the gate cursor's time, the last round the
-    // prepared snapshot's.
+    // The last check is when the watch's own gate marked one, the last
+    // round the prepared snapshot's time.
     writeGateCursor(seven.gatePath, {
       version: 1,
       host: 'github.com',

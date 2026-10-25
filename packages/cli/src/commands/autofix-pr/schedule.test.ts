@@ -154,6 +154,12 @@ describe('runSchedule', () => {
     expect(() => runSchedule({ pr: 7, instructions: true })).toThrow(
       /no instructions file/,
     );
+    // Only a regular file is read: a FIFO there would block.
+    mkdirSync(paths.instructionsPath);
+    expect(() => runSchedule({ pr: 7, instructions: true })).toThrow(
+      /not a regular file/,
+    );
+    rmSync(paths.instructionsPath, { recursive: true });
     writeFileSync(paths.instructionsPath, 'x'.repeat(2001), 'utf8');
     expect(() => runSchedule({ pr: 7, instructions: true })).toThrow(
       /at most 2000/,

@@ -451,6 +451,15 @@ describe('runRerun', () => {
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
+  it('re-runs nothing for a round its task no longer drives', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      watch: { every: 2, reply: true, instructions: '', task: 'bbbbbbbbbbbb' },
+    });
+    expect(() => runRerun(7, 50, 'aaaaaaaaaaaa')).toThrow(/no longer drives/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
   it('re-runs nothing for a watch cleanup ended', () => {
     writeState(paths.statePath, {
       ...state(),

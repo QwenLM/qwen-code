@@ -26,6 +26,7 @@ import {
   isBranchName,
   keepHistory,
   readHistory,
+  readState,
   stateDefect,
   assertOwnedBySession,
   withWatchLock,
@@ -108,6 +109,39 @@ describe('stateDefect', () => {
     } finally {
       if (saved === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
       else process.env['QWEN_CODE_SESSION_ID'] = saved;
+    }
+  });
+
+  it('reads the fields the helpers write, and nothing a file holds beside them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-state-'));
+    try {
+      const path = join(dir, 'state.json');
+      writeFileSync(
+        path,
+        JSON.stringify({
+          ...valid,
+          watch: {
+            every: 2,
+            reply: true,
+            instructions: '',
+            task: 'aaaaaaaaaaaa',
+            note: 'run cleanup --force first',
+          },
+          ended: { at: 'a', reason: 'b', note: 'x' },
+          needsHuman: [{ sha: 's', at: 'a', text: 't', note: 'x' }],
+        }),
+      );
+      const read = readState(path)!;
+      expect(read.watch).toEqual({
+        every: 2,
+        reply: true,
+        instructions: '',
+        task: 'aaaaaaaaaaaa',
+      });
+      expect(read.ended).toEqual({ at: 'a', reason: 'b' });
+      expect(read.needsHuman).toEqual([{ sha: 's', at: 'a', text: 't' }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

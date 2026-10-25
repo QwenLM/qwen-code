@@ -520,7 +520,32 @@ export function readState(statePath: string): AutofixPrState | null {
       `${statePath} has an invalid ${defect}; run \`qwen autofix-pr cleanup ${String(parsed.prNumber)} --force\` and prepare the watch again.`,
     );
   }
-  return parsed;
+  // The fields these hold, and nothing else: what reaches `status`, a
+  // rebuilt state and the next write is what the helpers wrote.
+  const { watch, ended, needsHuman } = parsed;
+  return {
+    ...parsed,
+    ...(watch
+      ? {
+          watch: {
+            every: watch.every,
+            reply: watch.reply,
+            instructions: watch.instructions,
+            ...(watch.task !== undefined ? { task: watch.task } : {}),
+          },
+        }
+      : {}),
+    ...(ended ? { ended: { at: ended.at, reason: ended.reason } } : {}),
+    ...(needsHuman
+      ? {
+          needsHuman: needsHuman.map(({ sha, at, text }) => ({
+            sha,
+            at,
+            text,
+          })),
+        }
+      : {}),
+  };
 }
 
 export function writeState(statePath: string, state: AutofixPrState): void {
@@ -870,9 +895,11 @@ export function assertWatching(state: AutofixPrState, task?: string): void {
   assertOwnedBySession(state);
   if (task !== undefined && state.watch?.task !== task) {
     throw new Error(
-      `task ${task} no longer drives PR #${state.prNumber}'s watch` +
-        (state.watch?.task ? ` (task ${state.watch.task} does)` : '') +
-        '; delete it.',
+      `task ${task} no longer drives PR #${state.prNumber}'s watch; ` +
+        `delete the task whose gate has --task ${task}` +
+        (state.watch?.task
+          ? `, not the one with --task ${state.watch.task}, which drives it.`
+          : '.'),
     );
   }
 }

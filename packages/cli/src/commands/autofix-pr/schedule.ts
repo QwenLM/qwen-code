@@ -11,7 +11,7 @@
 // arguments.
 
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
@@ -79,6 +79,10 @@ export function readInstructions(path: string): string {
   if (!existsSync(path)) {
     throw new Error(`no instructions file at ${path}`);
   }
+  // A FIFO planted under the name would block, with the watch's lock held.
+  if (!lstatSync(path).isFile()) {
+    throw new Error(`${path} is not a regular file`);
+  }
   // Format characters (bidi controls, zero-width ones) would make the
   // prompt say other than it shows.
   const text = readFileSync(path, 'utf8')
@@ -122,6 +126,10 @@ export function runSchedule(
       `--every must be one of ${WATCH_INTERVALS.join(', ')} minutes, got ${every}`,
     );
   }
+  // Read before the lock is taken.
+  const instructions = args.instructions
+    ? readInstructions(paths.instructionsPath)
+    : '';
   return withWatchLock(paths, args.pr, () => {
     const state = requireState(paths.statePath, args.pr);
     // A watch `cleanup` ended is started again by a start, not here.
@@ -150,9 +158,7 @@ export function runSchedule(
       options = {
         every,
         reply: !args.noReply,
-        instructions: args.instructions
-          ? readInstructions(paths.instructionsPath)
-          : '',
+        instructions,
       };
     }
     // A new id each time: the task made from this output is the watch's

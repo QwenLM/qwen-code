@@ -191,7 +191,8 @@ worktree included:
    `handledCommentIds` and `postedCommentIds` are kept, with the budgets,
    the recorded task (`watch`) and `needsHuman`, and the report says
    `recreated: true`: a start that is then cancelled must not clean up a
-   watch it did not make. With `--take-over`, the
+   watch it did not make. A watch `stop` had ended is resumed the same way
+   (`wasEnded`, as on the path that keeps the worktree). With `--take-over`, the
    watch moves to this session only once the PR has passed step 2, so a
    refusal leaves it with the session that has it. A state file for
    another repository's PR of the same number is a refusal. Repositories
@@ -935,8 +936,9 @@ this session runs.
 ### 6.11 `schedule <pr> [--every <minutes>] [--no-reply] [--instructions] | --again`
 
 Records the watch's scheduled task in the state file
-(`watch: { every, reply, instructions, task }`, and nothing else: the state
-check refuses any other field) and prints it as `cron_create` takes it:
+(`watch: { every, reply, instructions, task }`; the state is read with
+these fields only, so anything else a file holds there is dropped) and
+prints it as `cron_create` takes it:
 `cron`, `recurring`, `gate` and `prompt`, with the options. Both the gate
 and the prompt carry the task id (`tick <owner>/<repo>#<n> --task <id>`),
 so a round woken by a replaced task stops at its first `sync`. The skill creates the task from these exactly as printed, so the
@@ -962,8 +964,8 @@ gate and the prompt are not composed in a prompt.
   state file's own check holds a recorded task to one line of at most 2,000
   characters, so `--again` prints nothing longer.
 - `--again` schedules the task recorded before again, with its options
-  under a new id, and takes no other option: the start runs it after its
-  round, and `resume` after a take-over. A watch with no task recorded (a
+  under a new id, and takes no other option: `resume` runs it after a
+  take-over, before its round. A watch with no task recorded (a
   `--once` start, or one `cleanup` ended keeping its worktree) is refused,
   and so is one the round ended: it is started again with `/autofix-pr <n>`.
 - A PR whose author cannot push (`authorCanPush: false`) is refused: its
@@ -1106,12 +1108,16 @@ Replies are on by default; `--no-reply` turns them off.
 - Start runs the first check immediately — `snapshot <n>` in prepared mode,
   which reads the state file and not the gate cursor, so a new watch sees
   everything outstanding whatever an older gate reported — then calls
-  `cron_create` with the task `schedule` printed (Section 6.11): a
+  `cron_create` with the task `schedule` printed before that round
+  (Section 6.11), once `status` shows the watch still records it — what the
+  round's fix agent could have written to the state file never reaches the
+  task: a
   session-only recurring job, cron `*/<every> * * * *` (default `*/2`), the
   gate `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId> --task <task>`
   (the host it passed to `prepare`, the session that owns the watch), and a
   prompt that tells the model how to handle the events in the gate output
-  (`Run /autofix-pr tick <owner>/<repo>#<n>`). The gate
+  (`Run /autofix-pr tick <owner>/<repo>#<n> --task <task>`). The first
+  round runs under that task too. The gate
   is confirmed once, like a Monitor command, when the task is created.
 - Fires that arrive while the session is busy wait in the notification queue;
   the probe runs once when the session is idle and prints everything new
