@@ -25,7 +25,8 @@ import {
 
 const HEAD = 'a'.repeat(40);
 const GATE =
-  '"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot 7 --gate --repo o/r --host github.com --session session-a';
+  '"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot 7 --gate --repo o/r --host github.com --session session-a --task ';
+const TASK = /^[0-9a-f]{12}$/;
 
 describe('runSchedule', () => {
   let repo: string;
@@ -77,22 +78,29 @@ describe('runSchedule', () => {
   });
 
   it('records the task and prints it as cron_create takes it', () => {
-    expect(runSchedule({ pr: 7 })).toEqual({
+    const task = runSchedule({ pr: 7 });
+    expect(task).toEqual({
       cron: '*/2 * * * *',
       recurring: true,
-      gate: GATE,
+      gate: `${GATE}${task.task}`,
       prompt: 'Run /autofix-pr tick o/r#7',
       every: 2,
       reply: true,
       instructions: '',
+      task: expect.stringMatching(TASK),
     });
-    expect(state().watch).toEqual({ every: 2, reply: true, instructions: '' });
+    expect(state().watch).toEqual({
+      every: 2,
+      reply: true,
+      instructions: '',
+      task: task.task,
+    });
   });
 
   it("puts --no-reply and the user's instructions, on one line, into the prompt", () => {
     writeFileSync(
       paths.instructionsPath,
-      'do not touch\n  the public\u0085API\u2028\n',
+      'do not touch\n  the public\u0085API\u2028\u202e\n',
       'utf8',
     );
     const task = runSchedule({
@@ -106,24 +114,30 @@ describe('runSchedule', () => {
       prompt:
         'Run /autofix-pr tick o/r#7 --no-reply -- do not touch the public API',
     });
-    expect(state().watch).toEqual({
+    expect(state().watch).toMatchObject({
       every: 60,
       reply: false,
       instructions: 'do not touch the public API',
     });
   });
 
-  it('prints the recorded task again for the session that took the watch over', () => {
-    runSchedule({ pr: 7, every: 5, noReply: true });
-    write({
-      sessionId: 'session-b',
-      watch: { every: 5, reply: false, instructions: '' },
-    });
+  it('schedules the recorded task again, under a new id, for the session that took the watch over', () => {
+    const first = runSchedule({ pr: 7, every: 5, noReply: true });
+    write({ sessionId: 'session-b', watch: state().watch });
     process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
-    expect(runSchedule({ pr: 7, again: true })).toMatchObject({
+    const again = runSchedule({ pr: 7, again: true });
+    expect(again).toMatchObject({
       cron: '*/5 * * * *',
-      gate: GATE.replace('session-a', 'session-b'),
+      gate: `${GATE.replace('session-a', 'session-b')}${again.task}`,
       prompt: 'Run /autofix-pr tick o/r#7 --no-reply',
+    });
+    // The task made from the first output answers stop from now on.
+    expect(again.task).not.toBe(first.task);
+    expect(state().watch).toEqual({
+      every: 5,
+      reply: false,
+      instructions: '',
+      task: again.task,
     });
   });
 
@@ -135,7 +149,7 @@ describe('runSchedule', () => {
       /no scheduled task recorded/,
     );
     expect(() => runSchedule({ pr: 7, again: true, every: 5 })).toThrow(
-      /--again prints the task recorded already/,
+      /--again schedules the task recorded already/,
     );
     expect(() => runSchedule({ pr: 7, instructions: true })).toThrow(
       /no instructions file/,
@@ -154,6 +168,12 @@ describe('runSchedule', () => {
     write({ sessionId: '' });
     process.env['QWEN_CODE_SESSION_ID'] = '';
     expect(() => runSchedule({ pr: 7 })).toThrow(/outside a Qwen Code session/);
+    expect(state().watch).toBeUndefined();
+  });
+
+  it('refuses a watch of a PR whose author cannot push, which is --once only', () => {
+    write({ authorCanPush: false });
+    expect(() => runSchedule({ pr: 7 })).toThrow(/only --once/);
     expect(state().watch).toBeUndefined();
   });
 

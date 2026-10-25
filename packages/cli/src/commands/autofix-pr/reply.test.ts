@@ -547,14 +547,15 @@ describe('runReply', () => {
     const plan: ReplyPlan = {
       handledChecks: [`Test@${HEAD}@#5`],
       needsHuman: [
-        'Test:   fails again\n after its re-run',
+        'Test:   fails\u202e again\n after\u001b[2J its re-run',
         `${'😀'.repeat(400)}`,
       ],
     };
     reply(plan);
     const first = state().needsHuman!;
     expect(first.map(({ sha, text }) => ({ sha, text }))).toEqual([
-      { sha: HEAD, text: 'Test: fails again after its re-run' },
+      // Control and format characters do not reach the list.
+      { sha: HEAD, text: 'Test: fails again after [2J its re-run' },
       // Cut by code point: no half of a surrogate pair is kept.
       { sha: HEAD, text: `${'😀'.repeat(299)}…` },
     ]);
@@ -564,7 +565,7 @@ describe('runReply', () => {
     expect(state().needsHuman).toEqual(first);
     reply({ needsHuman: ['IC_9: a design call'] }, false);
     expect(state().needsHuman!.map(({ text }) => text)).toEqual([
-      'Test: fails again after its re-run',
+      'Test: fails again after [2J its re-run',
       `${'😀'.repeat(299)}…`,
       'IC_9: a design call',
     ]);

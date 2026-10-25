@@ -76,7 +76,10 @@ describe('runStatus', () => {
   });
 
   it('lists nothing in a clone that never watched a PR', () => {
-    expect(runStatus({})).toEqual({ watches: [] });
+    expect(runStatus({})).toEqual({
+      now: expect.any(String),
+      watches: [],
+    });
   });
 
   it('lists every watch from its files, whichever session owns it', () => {
@@ -109,10 +112,10 @@ describe('runStatus', () => {
       stopped: null,
       reportedTruncated: [],
     });
-    const checked = new Date('2026-10-25T02:00:00.000Z');
+    const checked = new Date('2026-10-01T02:00:00.000Z');
     utimesSync(seven.gatePath, checked, checked);
     writeFileSync(seven.snapshotPath, '{}\n');
-    const round = new Date('2026-10-25T01:30:00.000Z');
+    const round = new Date('2026-10-01T01:30:00.000Z');
     utimesSync(seven.snapshotPath, round, round);
 
     const { watches } = runStatus({});
@@ -130,12 +133,15 @@ describe('runStatus', () => {
         session: 'session-a',
         thisSession: true,
         lastCheck: checked.toISOString(),
+        checkedRecently: false,
         lastRound: round.toISOString(),
         stopped: null,
         watch: { every: 5, reply: false, instructions: 'keep the API' },
         needsHuman: [item],
         worktreePath: seven.worktreePath,
         worktreeExists: true,
+        // A plain directory: git cannot tell what it holds.
+        worktreeWork: expect.stringMatching(/not a git worktree/),
       },
       expect.objectContaining({
         pr: 12,
@@ -147,9 +153,53 @@ describe('runStatus', () => {
         watch: null,
         needsHuman: [],
         worktreeExists: false,
+        worktreeWork: null,
       }),
     ]);
     expect(runStatus({ pr: 12 }).watches.map(({ pr }) => pr)).toEqual([12]);
+  });
+
+  it("says whether a gate checked within two of the watch's intervals", () => {
+    const paths = write(7, {
+      watch: { every: 5, reply: true, instructions: '' },
+    });
+    writeGateCursor(paths.gatePath, {
+      version: 1,
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      viewer: 'me',
+      prAuthor: 'me',
+      headSha: HEAD,
+      reportedCommentIds: [],
+      reportedChecks: [],
+      conflictSha: null,
+      stopped: null,
+      reportedTruncated: [],
+    });
+    const at = (minutesAgo: number) => {
+      const time = new Date(Date.now() - minutesAgo * 60_000);
+      utimesSync(paths.gatePath, time, time);
+      return runStatus({}).watches[0]!.checkedRecently;
+    };
+    expect(at(9)).toBe(true);
+    expect(at(11)).toBe(false);
+  });
+
+  it('never blocks on a state file or cursor that is not a regular file', () => {
+    const paths = write(7);
+    rmSync(paths.gatePath, { force: true });
+    execFileSync('mkfifo', [paths.gatePath]);
+    const eight = autofixPrPaths(repo, 8).statePath;
+    execFileSync('mkfifo', [eight]);
+    const outcome = runStatus({});
+    expect(
+      outcome.watches.map(({ pr, lastCheck }) => ({ pr, lastCheck })),
+    ).toEqual([{ pr: 7, lastCheck: null }]);
+    expect(outcome.unreadable).toEqual([
+      { pr: 8, error: expect.stringMatching(/not a regular file/) },
+    ]);
   });
 
   it('says a watch the gate saw end was not cleaned up', () => {

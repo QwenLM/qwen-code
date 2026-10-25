@@ -248,29 +248,36 @@ export function runPrepare(args: PrepareArgs): void {
   };
   let existing = readState(paths.statePath);
   let tookOver = false;
+  const takesOver = (state: AutofixPrState) =>
+    args.takeOver === true && state.sessionId !== currentSessionId();
   if (existing) {
     sameWatch(existing);
-    // A /clear or /resume gives the session a new id while its scheduled
-    // task goes on: the user hands the watch, history and budgets kept, to
-    // the session that asks. The other session's helpers refuse from then on.
-    if (args.takeOver && existing.sessionId !== currentSessionId()) {
-      existing = withWatchLock(paths, args.pr, () => {
-        const current = requireState(paths.statePath, args.pr);
-        const moved = { ...current, sessionId: currentSessionId() };
-        writeState(paths.statePath, moved);
-        return moved;
-      });
-      tookOver = true;
-    }
-    assertOwnedBySession(existing);
     // The recorded path goes stale when the clone moves; this one does not.
     if (existsSync(paths.worktreePath)) {
+      // A /clear or /resume gives the session a new id while its scheduled
+      // task goes on: the user hands the watch, history and budgets kept,
+      // to the session that asks. The other session's helpers refuse from
+      // then on.
+      if (takesOver(existing)) {
+        existing = withWatchLock(paths, args.pr, () => {
+          const current = requireState(paths.statePath, args.pr);
+          const moved = { ...current, sessionId: currentSessionId() };
+          writeState(paths.statePath, moved);
+          return moved;
+        });
+        tookOver = true;
+      }
+      assertOwnedBySession(existing);
       report(
         { ...existing, worktreePath: paths.worktreePath },
         { resumed: true, ...(tookOver ? { tookOver } : {}) },
       );
       return;
     }
+    // A removed worktree is made again below, once the PR has been checked:
+    // a take-over moves the watch only then, so a refusal leaves it with the
+    // session that has it.
+    if (!args.takeOver) assertOwnedBySession(existing);
   }
 
   ensureAuthenticated();
@@ -324,7 +331,9 @@ export function runPrepare(args: PrepareArgs): void {
     existing = readState(paths.statePath);
     if (existing) {
       sameWatch(existing);
-      assertOwnedBySession(existing);
+      // The state written below names this session.
+      if (takesOver(existing)) tookOver = true;
+      else assertOwnedBySession(existing);
     }
     // Never discard what an earlier watch left: only `cleanup` knows when that
     // is safe. The one exception is a branch whose worktree was removed and

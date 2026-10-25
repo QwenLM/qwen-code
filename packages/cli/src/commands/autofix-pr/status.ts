@@ -8,10 +8,12 @@
 // its files alone — no lock and no GitHub call — so `/autofix-pr status` and
 // `/autofix-pr resume` see every watch, whichever session owns it.
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { unsavedWork } from './cleanup.js';
+import { DEFAULT_EVERY } from './schedule.js';
 import {
   assertPositiveInteger,
   autofixPrPaths,
@@ -41,6 +43,9 @@ export interface WatchStatus {
   thisSession: boolean;
   /** The last gate run that read the PR, or null before the first. */
   lastCheck: string | null;
+  /** `lastCheck` is within two of the watch's intervals: a gate, of this
+   * session or another, is likely still running. */
+  checkedRecently: boolean;
   /** The last round's prepared snapshot, or null before the first. */
   lastRound: string | null;
   /** The PR was merged or closed when the gate last read it, and the watch
@@ -51,9 +56,15 @@ export interface WatchStatus {
   needsHuman: NeedsHumanItem[];
   worktreePath: string;
   worktreeExists: boolean;
+  /** What the worktree (or its branch) holds that the PR does not, as
+   * `cleanup` judges it without asking the remote, or null. A round that
+   * starts on it discards it. */
+  worktreeWork: string | null;
 }
 
 export interface StatusOutcome {
+  /** When this was read, for comparing `lastCheck` with. */
+  now: string;
   watches: WatchStatus[];
   /** State files that could not be read, with the reason. */
   unreadable?: Array<{ pr: number; error: string }>;
@@ -70,10 +81,19 @@ function cursorOf(
   state: { host: string; owner: string; repo: string },
 ): AutofixPrGateCursor | null {
   try {
-    const cursor = existsSync(path) ? readGateCursor(path) : null;
+    const cursor = isPlainFile(path) ? readGateCursor(path) : null;
     return cursor && sameRepository(cursor, state) ? cursor : null;
   } catch {
     return null;
+  }
+}
+
+/** A regular file: a FIFO planted under that name would block the read. */
+function isPlainFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
   }
 }
 
@@ -97,10 +117,17 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
     .filter((n) => args.pr === undefined || n === args.pr)
     .sort((a, b) => a - b);
   const session = currentSessionId();
-  const outcome: StatusOutcome = { watches: [] };
+  const now = Date.now();
+  const outcome: StatusOutcome = {
+    now: new Date(now).toISOString(),
+    watches: [],
+  };
   for (const pr of numbers) {
     const paths = autofixPrPaths(root, pr);
     try {
+      if (!isPlainFile(paths.statePath)) {
+        throw new Error(`${paths.statePath} is not a regular file`);
+      }
       const state = readState(paths.statePath);
       if (!state) continue;
       // Every helper finds a watch by its file's number.
@@ -110,6 +137,8 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         );
       }
       const cursor = cursorOf(paths.gatePath, state);
+      const lastCheck = cursor ? modifiedAt(paths.gatePath) : null;
+      const every = state.watch?.every ?? DEFAULT_EVERY;
       outcome.watches.push({
         pr,
         repo: `${state.owner}/${state.repo}`,
@@ -123,7 +152,10 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         session: state.sessionId,
         thisSession: state.sessionId === session,
         // The gate touches its cursor on every run that read the PR.
-        lastCheck: cursor ? modifiedAt(paths.gatePath) : null,
+        lastCheck,
+        checkedRecently:
+          lastCheck !== null &&
+          now - Date.parse(lastCheck) < 2 * every * 60_000,
         lastRound: modifiedAt(paths.snapshotPath),
         stopped: cursor?.stopped ?? null,
         watch: state.watch ?? null,
@@ -131,6 +163,10 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         // The recorded path goes stale when the clone moves; this one does not.
         worktreePath: paths.worktreePath,
         worktreeExists: existsSync(paths.worktreePath),
+        worktreeWork: unsavedWork(paths, [
+          state.lastKnownHeadSha,
+          ...state.pushedShas,
+        ]),
       });
     } catch (err) {
       (outcome.unreadable ??= []).push({

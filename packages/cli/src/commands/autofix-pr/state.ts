@@ -95,6 +95,10 @@ export interface AutofixPrWatchOptions {
   reply: boolean;
   /** The user's instructions for every round, on one line; '' for none. */
   instructions: string;
+  /** The task that drives the watch, minted by every `schedule`: the gate of
+   * any other task of the watch — a copy in a second process of the same
+   * session, one a later start replaced — answers stop. */
+  task?: string;
 }
 
 export interface NeedsHumanItem {
@@ -461,8 +465,10 @@ function isWatchOptions(value: unknown): value is AutofixPrWatchOptions {
     typeof watch.reply === 'boolean' &&
     typeof watch.instructions === 'string' &&
     watch.instructions.length <= MAX_INSTRUCTIONS_CHARS &&
-    // A prompt is one line.
-    !/[\p{Cc}\u2028\u2029]/u.test(watch.instructions)
+    // A prompt is one line, and says what it shows.
+    !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(watch.instructions) &&
+    // It goes into the gate command.
+    (watch.task === undefined || /^[0-9a-f]{12}$/.test(watch.task))
   );
 }
 
@@ -816,8 +822,11 @@ export function assertOwnedBySession(state: AutofixPrState): void {
   if (state.sessionId !== sessionId) {
     throw new Error(
       `PR #${state.prNumber} is watched by another session ` +
-        `(${state.sessionId || 'no session'}). Stop it there, or run ` +
-        `\`qwen autofix-pr cleanup ${state.prNumber} --force\` to discard that watch.`,
+        `(${state.sessionId || 'no session'}). Take it over with ` +
+        `\`/autofix-pr resume ${state.prNumber}\`, end it keeping its work with ` +
+        `\`qwen autofix-pr cleanup ${state.prNumber} --take-over\` (what ` +
+        `\`/autofix-pr stop ${state.prNumber}\` runs), or discard it with ` +
+        `\`cleanup ${state.prNumber} --force\`.`,
     );
   }
 }

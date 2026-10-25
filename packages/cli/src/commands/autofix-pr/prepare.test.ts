@@ -782,6 +782,29 @@ describe('runPrepare (real git)', () => {
     );
   });
 
+  it('takes over a watch whose worktree was removed only once the PR passed its checks', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    run(clone, 'worktree', 'remove', '--force', paths.worktreePath);
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    const answer = mocks.gh.getMockImplementation()!;
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') return JSON.stringify(prView({ state: 'MERGED' }));
+      return answer(...args);
+    });
+    // A refusal leaves the watch with the session that has it, whose gate
+    // goes on as before.
+    expect(() => runPrepare({ pr: 7, repo: 'o/r', takeOver: true })).toThrow(
+      /is merged/,
+    );
+    expect(readState(paths.statePath)!.sessionId).toBe('session-a');
+    mocks.gh.mockImplementation(answer);
+    runPrepare({ pr: 7, repo: 'o/r', takeOver: true });
+    expect(lastReport()).toMatchObject({ resumed: false, tookOver: true });
+    expect(readState(paths.statePath)!.sessionId).toBe('session-b');
+    expect(existsSync(paths.worktreePath)).toBe(true);
+  });
+
   it('reads the watch again under its lock, so a take-over meanwhile stands', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const paths = autofixPrPaths(clone, 7);

@@ -2144,6 +2144,79 @@ describe('runSnapshot --gate', () => {
     expect(existsSync(gatePath())).toBe(false);
   });
 
+  it('stops a task a later schedule replaced, and one whose watch ended, moving no cursor', () => {
+    const statePath = autofixPrPaths(mocks.root, 7).statePath;
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeState(statePath, {
+      version: 1,
+      sessionId: 'session-a',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: 'qwen-autofix/pr-7',
+      worktreePath: join(dirname(statePath), 'autofix-pr-7'),
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+      watch: { every: 2, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    const gate = (task: string) =>
+      runSnapshot({
+        pr: 7,
+        repo: 'o/r',
+        gate: true,
+        session: 'session-a',
+        task,
+      });
+    // The watch's own task reads the PR.
+    respond(pr());
+    gate('aaaaaaaaaaaa');
+    expect(mockGh).toHaveBeenCalledTimes(1);
+    const old = new Date('2026-10-01T00:00:00.000Z');
+    utimesSync(gatePath(), old, old);
+    // A task the watch's latest schedule replaced — one in a second
+    // process of the same session, say — stops without asking GitHub, and
+    // leaves the cursor's time to the gate that drives the watch.
+    mocks.stdout.mockClear();
+    gate('bbbbbbbbbbbb');
+    expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toEqual({
+      action: 'stop',
+      events: [
+        {
+          type: 'watched_elsewhere',
+          session: 'session-a',
+          gateSession: 'session-a',
+          gateTask: 'bbbbbbbbbbbb',
+        },
+      ],
+    });
+    expect(mockGh).toHaveBeenCalledTimes(1);
+    expect(statSync(gatePath()).mtimeMs).toBe(old.getTime());
+    // Once cleanup removed the watch, its task stops too.
+    rmSync(statePath);
+    mocks.stdout.mockClear();
+    gate('aaaaaaaaaaaa');
+    expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toEqual({
+      action: 'stop',
+      events: [
+        {
+          type: 'watch_ended',
+          gateSession: 'session-a',
+          gateTask: 'aaaaaaaaaaaa',
+        },
+      ],
+    });
+    expect(mockGh).toHaveBeenCalledTimes(1);
+  });
+
   it('leaves out what a prepared watch handled: failures, a conflict, and a deferred run until it ends', () => {
     const statePath = autofixPrPaths(mocks.root, 7).statePath;
     mkdirSync(dirname(statePath), { recursive: true });

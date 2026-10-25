@@ -17,7 +17,7 @@
 //   so the session is woken only for them.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, utimesSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, utimesSync } from 'node:fs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -1744,6 +1744,35 @@ export interface SnapshotArgs {
   /** With `--gate`: the session whose scheduled task runs this gate, as
    * `prepare` reported it. */
   session?: string;
+  /** With `--gate`: the task, as `schedule` minted it. */
+  task?: string;
+}
+
+/**
+ * Why a CLI watch's task no longer drives the watch, or null. Its gate names
+ * the session and the task it was made for. A take-over moves the watch to
+ * another session; a later `schedule` replaces the task, a copy of it in a
+ * second process of the same session included; `cleanup` ends the watch.
+ * Such a gate must move no cursor: what it reported would reach a session
+ * that no longer acts on it. It wakes that session once per fire instead, and
+ * the round deletes the task. A gate with no session — a Managed automation,
+ * or a probe run by hand — is no watch's task.
+ */
+function staleTask(
+  state: AutofixPrState | null,
+  target: { host: string; owner: string; repo: string },
+  session: string,
+  task: string | undefined,
+): Record<string, string> | null {
+  if (session === '') return null;
+  const named = { gateSession: session, ...(task ? { gateTask: task } : {}) };
+  if (!state || !sameRepository(state, target)) {
+    return { type: 'watch_ended', ...named };
+  }
+  if (state.sessionId !== session || (task && state.watch?.task !== task)) {
+    return { type: 'watched_elsewhere', session: state.sessionId, ...named };
+  }
+  return null;
 }
 
 function runGate(args: SnapshotArgs): void {
@@ -1814,25 +1843,9 @@ function runGate(args: SnapshotArgs): void {
   // task names its session: the environment cannot, as a Managed
   // automation runs its gate as a session of its own.
   const session = args.session ?? '';
-  if (
-    state &&
-    sameRepository(state, target) &&
-    session !== '' &&
-    state.sessionId !== session
-  ) {
-    writeStdoutLine(
-      JSON.stringify({
-        action: 'stop',
-        events: [
-          {
-            type: 'watched_elsewhere',
-            session: state.sessionId,
-            // The task to delete is the one whose gate names this session.
-            gateSession: session,
-          },
-        ],
-      }),
-    );
+  const stale = staleTask(state, target, session, args.task);
+  if (stale) {
+    writeStdoutLine(JSON.stringify({ action: 'stop', events: [stale] }));
     return;
   }
 
@@ -1874,25 +1887,14 @@ function runGate(args: SnapshotArgs): void {
   });
   // A take-over while GitHub was asked: what this gate saw is the new
   // owner's to report.
-  const owner = readState(paths.statePath);
-  if (
-    owner &&
-    sameRepository(owner, target) &&
-    session !== '' &&
-    owner.sessionId !== session
-  ) {
-    writeStdoutLine(
-      JSON.stringify({
-        action: 'stop',
-        events: [
-          {
-            type: 'watched_elsewhere',
-            session: owner.sessionId,
-            gateSession: session,
-          },
-        ],
-      }),
-    );
+  const restale = staleTask(
+    readState(paths.statePath),
+    target,
+    session,
+    args.task,
+  );
+  if (restale) {
+    writeStdoutLine(JSON.stringify({ action: 'stop', events: [restale] }));
     return;
   }
   // The cursor lands before the output: a probe that prints and then dies
@@ -1901,10 +1903,13 @@ function runGate(args: SnapshotArgs): void {
     mkdirSync(dirname(paths.gatePath), { recursive: true });
     writeGateCursor(paths.gatePath, result.cursor);
   } else {
-    // `status` reads the last check from the cursor's time.
+    // `status` reads the last check from the cursor's time; a link is not
+    // followed to touch whatever it points at.
     try {
-      const now = new Date();
-      utimesSync(paths.gatePath, now, now);
+      if (lstatSync(paths.gatePath).isFile()) {
+        const now = new Date();
+        utimesSync(paths.gatePath, now, now);
+      }
     } catch {
       // A check that ran is not undone by a time that did not move.
     }
@@ -2023,6 +2028,11 @@ export const snapshotCommand: CommandModule = {
         type: 'string',
         describe:
           "With --gate: the session whose scheduled task runs the gate (prepare's sessionId); a watch another session took over answers stop",
+      })
+      .option('task', {
+        type: 'string',
+        describe:
+          "With --gate: the scheduled task's id (schedule's task); a watch another task drives answers stop",
       }),
   handler: (argv) => {
     runSnapshot({
@@ -2031,6 +2041,7 @@ export const snapshotCommand: CommandModule = {
       host: argv['host'] as string | undefined,
       gate: Boolean(argv['gate']),
       session: argv['session'] as string | undefined,
+      task: argv['task'] as string | undefined,
     });
   },
 };

@@ -145,16 +145,22 @@ describe('bundled autofix-pr skill', () => {
     );
     expect(body).toContain('merge, never rebase');
     expect(body).toContain('Never list an `untrusted_comment` id');
-    // A task kept from before a take-over would name the other session, and
-    // wake this one at every fire: it goes before a new one is made, and a
-    // round woken by one deletes it.
-    expect(body).toContain('but not `--session <sessionId>`');
-    expect(body).toContain('`--session <gateSession>`');
+    // One task drives a watch: each schedule mints its id, every other task
+    // of the PR — from before a take-over, a /clear or a later start — is
+    // deleted before the new one is made, and a round woken by one deletes it.
     expect(body).toContain(
-      'Then delete (`cron_delete`) every task of the PR in `cron_list`',
+      '`"${QWEN_CODE_CLI:-qwen}" autofix-pr schedule <n> --again`',
+    );
+    expect(body).toContain('`--task <gateTask>`');
+    expect(body).toContain(
+      'delete (`cron_delete`) every task of the PR in `cron_list`, and create the task',
     );
     // Stopping a watch another session left behind keeps its work.
-    expect(body).toContain('adding `--take-over` when `stop` named the PR');
+    expect(body).toContain(
+      '`"${QWEN_CODE_CLI:-qwen}" autofix-pr cleanup <n> --take-over` for each PR',
+    );
+    // Whether another session still runs a watch is the helper's to say.
+    expect(body).toContain('`checkedRecently` true and no task of the PR');
     // The scheduled task — its gate the probe, run outside the model — is
     // the one `schedule` prints and records, so `resume` makes it again.
     expect(body).toContain(

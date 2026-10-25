@@ -198,7 +198,12 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
     // Shown in a list, one line each.
     needsHuman: stringList(plan['needsHuman'], 'needsHuman').map((text) => {
       // By code point, so a cut never splits a surrogate pair.
-      const line = [...text.replace(/\s+/g, ' ').trim()];
+      const line = [
+        ...text
+          .replace(/\p{Cf}/gu, '')
+          .replace(/[\s\p{Cc}]+/gu, ' ')
+          .trim(),
+      ];
       return line.length > MAX_NEEDS_HUMAN_CHARS
         ? `${line.slice(0, MAX_NEEDS_HUMAN_CHARS - 1).join('')}…`
         : line.join('');

@@ -10,6 +10,7 @@
 // again (`/autofix-pr resume`) instead of rebuilding it from the user's
 // arguments.
 
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -61,7 +62,8 @@ export function scheduledTask(
     recurring: true,
     gate:
       `"\${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot ${state.prNumber} --gate ` +
-      `--repo ${repo} --host ${state.host} --session ${state.sessionId}`,
+      `--repo ${repo} --host ${state.host} --session ${state.sessionId}` +
+      (watch.task ? ` --task ${watch.task}` : ''),
     prompt:
       `Run /autofix-pr tick ${repo}#${state.prNumber}` +
       (watch.reply ? '' : ' --no-reply') +
@@ -74,7 +76,10 @@ export function readInstructions(path: string): string {
   if (!existsSync(path)) {
     throw new Error(`no instructions file at ${path}`);
   }
+  // Format characters (bidi controls, zero-width ones) would make the
+  // prompt say other than it shows.
   const text = readFileSync(path, 'utf8')
+    .replace(/\p{Cf}/gu, '')
     .replace(/[\s\p{Cc}]+/gu, ' ')
     .trim();
   if (text.length > MAX_INSTRUCTIONS_CHARS) {
@@ -91,7 +96,8 @@ export interface ScheduleArgs {
   noReply?: boolean;
   /** Read the instructions from the watch's instructions file. */
   instructions?: boolean;
-  /** Print the task recorded already, for a session that took the watch over. */
+  /** Schedule the task recorded already again, for a session that took the
+   * watch over: its options, under a new task id. */
   again?: boolean;
 }
 
@@ -104,7 +110,7 @@ export function runSchedule(
     (args.every !== undefined || args.noReply || args.instructions)
   ) {
     throw new TypeError(
-      '--again prints the task recorded already; it takes no other option.',
+      '--again schedules the task recorded already; it takes no other option.',
     );
   }
   const every = args.every ?? DEFAULT_EVERY;
@@ -116,16 +122,24 @@ export function runSchedule(
   return withWatchLock(paths, args.pr, () => {
     const state = requireState(paths.statePath, args.pr);
     assertOwnedBySession(state);
-    let watch: AutofixPrWatchOptions;
+    // Running someone else's code with the user's credentials in reach is
+    // confirmed for one round at a time (`--once`), never for a watch.
+    if (state.authorCanPush === false) {
+      throw new Error(
+        `PR #${args.pr}'s author cannot push to the repository; only --once is available for it.`,
+      );
+    }
+    let options: Omit<AutofixPrWatchOptions, 'task'>;
     if (args.again) {
       if (!state.watch) {
         throw new Error(
           `PR #${args.pr} has no scheduled task recorded; start the watch again with /autofix-pr ${args.pr}.`,
         );
       }
-      watch = state.watch;
+      const { task: _replaced, ...recorded } = state.watch;
+      options = recorded;
     } else {
-      watch = {
+      options = {
         every,
         reply: !args.noReply,
         instructions: args.instructions
@@ -133,10 +147,13 @@ export function runSchedule(
           : '',
       };
     }
+    // A new id each time: the task made from this output is the watch's
+    // only one, and any other's gate answers stop.
+    const watch = { ...options, task: randomBytes(6).toString('hex') };
     // Checked before anything is recorded: a task that cannot be made is
     // not one to start again.
     const task = scheduledTask(state, watch);
-    if (!args.again) writeState(paths.statePath, { ...state, watch });
+    writeState(paths.statePath, { ...state, watch });
     return { ...task, ...watch };
   });
 }
@@ -172,7 +189,8 @@ export const scheduleCommand: CommandModule = {
       .option('again', {
         type: 'boolean',
         default: false,
-        describe: 'Print the task recorded already (after a take-over)',
+        describe:
+          'Schedule the task recorded already again, under a new id (after a take-over)',
       }),
   handler: (argv) => {
     writeStdoutLine(

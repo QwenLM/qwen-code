@@ -131,7 +131,7 @@ with unit tests; judgment stays in the skill.
   ├─ qwen autofix-pr status    every watch of the clone, read from its files
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
   └─ cron_create               session-only, recurring, gate:
-                               "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>";
+                               "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId> --task <task>";
                                the prompt says how to handle the events the gate printed
 
 qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marked
@@ -178,7 +178,7 @@ worktree included:
    scheduled task goes on, so `prepare --take-over` moves the watch — its
    history and budgets kept — to the session that asks, when the user says
    so; the helpers of the session it was taken from refuse from then on,
-   and its scheduled task stops at its next fire: its gate names the session that made it (`--session`, the `sessionId` `prepare` reports), and until then moves no cursor — it asks again whose the watch is before it writes one — and only wakes it (`watched_elsewhere`, with the owner as `session` and the gate's own session as `gateSession`, so the round deletes exactly that task; one left in the same process after a `/clear`, where the helpers would accept the round, is deleted the same way).
+   and its scheduled task stops at its next fire: its gate names the session that made it (`--session`, the `sessionId` `prepare` reports), and until then moves no cursor — it asks again whose the watch is before it writes one — and only wakes it (`watched_elsewhere`, with the owner as `session`). Each task also names the id `schedule` minted for it (`--task`, Section 6.11): a gate whose id is not the one the state file records — a task a later start or resume replaced, or a copy in a second process of the same session (`qwen --continue`), where the helpers would accept its rounds — answers the same, and one whose watch `cleanup` removed answers `watch_ended`. Either event names the gate's own session and task (`gateSession`, `gateTask`), so the round deletes exactly that task.
 6. Fetch `refs/pull/<n>/head` into local branch `qwen-autofix/pr-<n>` and
    create the worktree on it. `prepare` never discards earlier work: a
    leftover worktree, or a leftover branch that may hold commits beyond the
@@ -187,7 +187,10 @@ worktree included:
    the existing state with `resumed: true` and calls nothing else. If the
    worktree was removed (also with `rm -rf`, which `git worktree prune`
    clears), it is recreated and the recorded `pushedShas`,
-   `handledCommentIds` and `postedCommentIds` are kept. A state file for
+   `handledCommentIds` and `postedCommentIds` are kept, with the budgets,
+   the recorded task (`watch`) and `needsHuman`. With `--take-over`, the
+   watch moves to this session only once the PR has passed step 2, so a
+   refusal leaves it with the session that has it. A state file for
    another repository's PR of the same number is a refusal. Repositories
    compare as on GitHub: owner and name without case, and the host without
    case or the default port, but with any other port, which may name another
@@ -199,7 +202,7 @@ worktree included:
    local branch whose upstream is the head branch on the push remote counts as
    that copy, so a fork's `main` is never compared with the user's `main`.
 
-### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>]`
+### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>] [--task <id>]`
 
 One GraphQL call, plus one per further page of check contexts, check suites
 or review threads (and a REST call for a bot's comment that opens a thread,
@@ -872,8 +875,8 @@ into, and a fresh lock is never touched.
 Lists the watches of the clone, read from their files under the main
 worktree's `.qwen/tmp`: no lock is taken and GitHub is not asked, so it
 answers while a helper runs and whichever session owns a watch. Output:
-`{ "watches": [...] }`, and `unreadable` with the PR and the reason for a
-state file that could not be read. Each watch carries:
+`{ "now": "<time>", "watches": [...] }`, and `unreadable` with the PR and
+the reason for a state file that could not be read. Each watch carries:
 
 - the PR, its repository, host and URL; `headRefName`, `pushTarget` and the
   head the watch knows (`headSha`);
@@ -882,18 +885,25 @@ state file that could not be read. Each watch carries:
 - `lastCheck`, the last gate run that read the PR — the gate touches its
   cursor on every such run, changed or not — and `lastRound`, the time of
   the last prepared snapshot; both null before the first;
+- `checkedRecently`, whether `lastCheck` is within two of the watch's
+  intervals: a gate, of this session or another, is likely still running.
+  The helper says it, not the model, which knows the date but not the time;
 - `stopped`, `merged` or `closed` when the gate saw the PR end and the watch
   was not cleaned up — as of `lastCheck`: the PR may have been reopened
   since, so the skill acts on it only through a round, which reads GitHub;
 - `watch`, the task `schedule` recorded, or null for `--once`;
 - `needsHuman` (Section 6.5);
-- the worktree's path and whether it exists.
+- the worktree's path and whether it exists, and `worktreeWork`: what the
+  worktree or its branch holds that the PR does not, judged as `cleanup`
+  judges it without asking the remote, or null. A round that starts on it
+  discards it, so a take-over or a resume says so before it asks.
 
 The gate cursor outlives a watch (Section 6.6), so it is read only when it
 names the watch's repository, and one that cannot be read leaves
 `lastCheck` and `stopped` null instead of hiding the watch. A state file is
 read under the name the helpers give it (no leading zero) and must name its
-own PR; anything else is `unreadable`.
+own PR, and neither it nor the cursor is read unless it is a regular file
+(a FIFO under that name would block); anything else is `unreadable`.
 
 A scheduled task lives in the session that created it, which the helper
 cannot see: the skill joins the list with `cron_list` to say which watches
@@ -902,28 +912,38 @@ this session runs.
 ### 6.11 `schedule <pr> [--every <minutes>] [--no-reply] [--instructions] | --again`
 
 Records the watch's scheduled task in the state file
-(`watch: { every, reply, instructions }`) and prints it as `cron_create`
-takes it: `cron`, `recurring`, `gate` and `prompt`, with the options. The
-skill creates the task from these exactly as printed, so the gate and the
-prompt are not composed in a prompt, and the start's comparison with a task
-already listed is a comparison with this output.
+(`watch: { every, reply, instructions, task }`) and prints it as
+`cron_create` takes it: `cron`, `recurring`, `gate` and `prompt`, with the
+options. The skill creates the task from these exactly as printed, so the
+gate and the prompt are not composed in a prompt.
+
+- Every run mints a new task id, which the gate carries (`--task`). The task
+  made from this output is the watch's only one: the gate of any other —
+  from an earlier start, from before a take-over, or a copy in a second
+  process of the same session — answers stop (Section 6.1, step 5), and the
+  skill deletes the PR's other tasks before it creates this one.
 
 - `--every` is one of `1, 2, 5, 10, 15, 30, 60` (default 2), and takes a
   value; 60 is `0 * * * *`.
 - `--instructions` reads the user's instructions from
   `.qwen/tmp/autofix-pr-<n>-instructions.txt`, which the skill writes as the
-  user gave them. A prompt is one line, so whitespace is folded; more than
-  2,000 characters is refused.
+  user gave them. A prompt is one line, so whitespace is folded and format
+  characters (bidi controls, zero-width ones) dropped; more than 2,000
+  characters is refused.
 - The gate names the session that owns the watch; one prepared outside a
   session, or a session id that a command cannot carry as it is (it must
   start with a letter or digit, so it never reads as an option), is refused.
 - Control characters in the instructions are folded like whitespace, and the
   state file's own check holds a recorded task to one line of at most 2,000
   characters, so `--again` prints nothing longer.
-- `--again` prints the task recorded before, for the session the watch
-  was just taken over by, and takes no other option. A watch with no task
-  recorded (a `--once` start) is refused: it is started again with
-  `/autofix-pr <n>`.
+- `--again` schedules the task recorded before again, with its options
+  under a new id, and takes no other option: the start runs it after its
+  round, and `resume` after a take-over. A watch with no task recorded (a
+  `--once` start, or one `cleanup` ended keeping its worktree) is refused,
+  and so is one the round ended: it is started again with `/autofix-pr <n>`.
+- A PR whose author cannot push (`authorCanPush: false`) is refused: its
+  code runs with the user's credentials in reach, which is confirmed for one
+  `--once` round at a time, never for a watch.
 - Only the owning session may run it; nothing is recorded when a task cannot
   be made.
 
@@ -1030,7 +1050,7 @@ Never actionable:
 - the tool's own replies: an id in `postedCommentIds`, or a comment by the
   viewer that ends with the reply marker. The viewer is often the PR author
   and therefore trusted, so without this rule the tool would answer itself.
-- comments from anyone else. They are listed in `status` and the final report,
+- comments from anyone else. They are listed in the round's snapshot and report,
   but never acted on or replied to.
 
 Even for actionable comments, the brief forbids: revealing secrets or tokens;
@@ -1063,7 +1083,7 @@ Replies are on by default; `--no-reply` turns them off.
   everything outstanding whatever an older gate reported — then calls
   `cron_create` with the task `schedule` printed (Section 6.11): a
   session-only recurring job, cron `*/<every> * * * *` (default `*/2`), the
-  gate `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId>`
+  gate `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId> --task <task>`
   (the host it passed to `prepare`, the session that owns the watch), and a
   prompt that tells the model how to handle the events in the gate output
   (`Run /autofix-pr tick <owner>/<repo>#<n>`). The gate
