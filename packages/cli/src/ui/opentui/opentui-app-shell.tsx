@@ -61,6 +61,7 @@ import {
   MessageType,
   StreamingState,
   type HistoryItem,
+  type ConfirmationRequest,
   type HistoryItemWithoutId,
 } from '../types.js';
 import {
@@ -510,6 +511,24 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // a sequence ref, never per-render state.
   const [modals, setModals] = useState<readonly ConfirmationModal[]>([]);
   const modalSeq = useRef(0);
+  const ownedActionModals = useRef(
+    new Set<{
+      cancel: () => void;
+      dispose: () => void;
+      isCurrent?: () => boolean;
+    }>(),
+  );
+  useEffect(() => {
+    for (const owned of [...ownedActionModals.current]) {
+      if (owned.isCurrent?.() === false) owned.cancel();
+    }
+  });
+  useEffect(
+    () => () => {
+      for (const owned of [...ownedActionModals.current]) owned.dispose();
+    },
+    [],
+  );
   const confirmations = useMemo(
     () => ({
       presentShell: (commandsToRun: readonly string[]) =>
@@ -525,12 +544,45 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             },
           ]);
         }),
-      presentAction: (prompt: ReactNode) =>
+      presentAction: (
+        prompt: ReactNode,
+        options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent'>,
+      ) =>
         new Promise<boolean>((resolve) => {
-          modalSeq.current += 1;
+          const signal = options?.signal;
+          const isCurrent = options?.isCurrent;
+          if (signal?.aborted || isCurrent?.() === false) {
+            resolve(false);
+            return;
+          }
+          const id = ++modalSeq.current;
+          let settled = false;
+          const finish = (confirmed: boolean, remove = true) => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener('abort', abort);
+            ownedActionModals.current.delete(lifetime);
+            if (remove) setModals((prev) => prev.filter((m) => m.id !== id));
+            resolve(confirmed && !signal?.aborted && isCurrent?.() !== false);
+          };
+          const abort = () => finish(false);
+          const lifetime = {
+            cancel: abort,
+            dispose: () => finish(false, false),
+            isCurrent,
+          };
+          if (signal || isCurrent) {
+            signal?.addEventListener('abort', abort, { once: true });
+            ownedActionModals.current.add(lifetime);
+          }
           setModals((prev) => [
             ...prev,
-            { kind: 'action', id: modalSeq.current, prompt, resolve },
+            {
+              kind: 'action',
+              id,
+              prompt,
+              resolve: (confirmed) => finish(confirmed),
+            },
           ]);
         }),
     }),
@@ -547,7 +599,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
   const closeActionModal = useCallback(
     (modal: ActionModal, confirmed: boolean) => {
-      setModals((prev) => prev.filter((m) => m.id !== modal.id));
       modal.resolve(confirmed);
     },
     [],
