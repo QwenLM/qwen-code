@@ -1516,6 +1516,15 @@ describe('background fixes', () => {
       expect(backgroundFixOf('session-a', 12)).toBeUndefined();
     });
 
+    it('keeps an attempt whose agent ended early claimable while its notification waits', async () => {
+      writeMarker(fix.attempt);
+      fix.end({ status: 'completed', report: 'done' });
+      // A long turn of the user's holds the notification back.
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(fix.done).toBe(false);
+      expect(fix.followUp()).toContain(`--attempt ${fix.attempt}`);
+    });
+
     it('lets go of a marker too large to be one', async () => {
       fs.writeFileSync(
         marker(),
