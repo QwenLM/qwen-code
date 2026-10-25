@@ -6,7 +6,6 @@
 
 import { randomUUID } from 'node:crypto';
 import {
-  existsSync,
   linkSync,
   lstatSync,
   readFileSync,
@@ -269,8 +268,22 @@ export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
   };
 }
 
+/**
+ * Whether `path` is a regular file. The files of a watch sit beside its
+ * worktree, in reach of the code a round runs: a FIFO planted under one of
+ * their names would block whatever reads it, the lock held.
+ */
+export function isRegularFile(path: string): boolean {
+  return lstatSync(path, { throwIfNoEntry: false })?.isFile() === true;
+}
+
 export function readGateCursor(gatePath: string): AutofixPrGateCursor | null {
-  if (!existsSync(gatePath)) return null;
+  if (lstatSync(gatePath, { throwIfNoEntry: false }) === undefined) {
+    return null;
+  }
+  if (!isRegularFile(gatePath)) {
+    throw new Error(`${gatePath} is not a regular file`);
+  }
   const parsed = JSON.parse(
     readFileSync(gatePath, 'utf8'),
   ) as AutofixPrGateCursor;
@@ -507,9 +520,11 @@ function isNeedsHumanItem(value: unknown): value is NeedsHumanItem {
 }
 
 export function readState(statePath: string): AutofixPrState | null {
-  if (!existsSync(statePath)) return null;
-  // A FIFO planted under the name would block every helper.
-  if (!lstatSync(statePath).isFile()) {
+  // A FIFO planted under the name would block every helper; a link, even
+  // one to nothing, is no state the helpers wrote.
+  const entry = lstatSync(statePath, { throwIfNoEntry: false });
+  if (entry === undefined) return null;
+  if (!entry.isFile()) {
     throw new Error(`${statePath} is not a regular file`);
   }
   const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as AutofixPrState;
@@ -587,7 +602,9 @@ export function historyPrefix(paths: AutofixPrPaths): string {
 }
 
 export function readHistory(path: string): AutofixPrHistory | null {
-  if (!existsSync(path)) return null;
+  if (lstatSync(path, { throwIfNoEntry: false }) === undefined) return null;
+  // Its callers replace an unreadable history.
+  if (!isRegularFile(path)) throw new Error(`${path} is not a regular file`);
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as AutofixPrHistory;
   if (parsed.version !== 1) {
     throw new Error(

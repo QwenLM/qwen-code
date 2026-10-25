@@ -449,15 +449,91 @@ describe('runPrepare (real git)', () => {
   it('resumes in the owning session without touching the worktree', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const answer = mocks.gh.getMockImplementation()!;
-    // A resume asks GitHub only who the author is.
+    // A resume asks GitHub only about the PR's author and head repository.
     mocks.gh.mockImplementation((...args: string[]) => {
-      if (args[0] !== 'pr' || !args.includes('author')) {
+      if (
+        args[0] !== 'pr' ||
+        args.at(-1) !== 'author,headRepository,headRepositoryOwner'
+      ) {
         throw new Error(`a resume must not call gh ${args.join(' ')}`);
       }
       return answer(...args);
     });
     runPrepare({ pr: 7, repo: 'o/r' });
     expect(lastReport()).toMatchObject({ resumed: true, headSha });
+  });
+
+  it("derives a resumed watch's remotes from the clone, not from its state file", () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    const state = readState(paths.statePath)!;
+    // The PR's own code wrote the file beside its worktree.
+    writeState(paths.statePath, {
+      ...state,
+      remote: 'evil',
+      pushTarget: 'https://github.com/evil/x.git',
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(paths.statePath)).toMatchObject({
+      remote: state.remote,
+      pushTarget: state.pushTarget,
+    });
+    // A repository this clone does not serve is no watch to resume.
+    writeState(paths.statePath, { ...state, owner: 'evil', repo: 'x' });
+    mocks.matched.mockImplementation((owner) => (owner === 'evil' ? [] : null));
+    expect(() => runPrepare({ pr: 7, repo: 'evil/x' })).toThrow(
+      /no single git remote here serves github.com\/evil\/x/,
+    );
+  });
+
+  it('ends no watch over a failure to ask GitHub, and moves none', () => {
+    const paths = autofixPrPaths(clone, 7);
+    let permission: () => string = () => 'write';
+    const answer = (...args: string[]) => {
+      if (args[0] === 'pr') {
+        return JSON.stringify(
+          prView({ headRefOid: headSha, author: { login: 'collab' } }),
+        );
+      }
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      if (args[0] === 'api') return permission();
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    };
+    mocks.gh.mockImplementation(answer);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(paths.statePath)!.authorCanPush).toBe(true);
+    // A rate limit says nothing of the author: the resume is refused, and
+    // the watch keeps what it recorded.
+    permission = () => {
+      throw Object.assign(new Error('Command failed: gh api'), {
+        stderr: 'gh: API rate limit exceeded (HTTP 403)',
+      });
+    };
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      /could not ask GitHub whether collab can push/,
+    );
+    expect(readState(paths.statePath)!.authorCanPush).toBe(true);
+    // A take-over that cannot ask GitHub leaves the watch where it was.
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') throw new Error('connection reset');
+      return answer(...args);
+    });
+    expect(() => runPrepare({ pr: 7, repo: 'o/r', takeOver: true })).toThrow(
+      /connection reset/,
+    );
+    expect(readState(paths.statePath)!.sessionId).toBe('session-a');
+    // A 404 is the answer for someone who is not a collaborator.
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    mocks.gh.mockImplementation(answer);
+    permission = () => {
+      throw Object.assign(new Error('Command failed: gh api'), {
+        stderr: 'gh: Not Found (HTTP 404)',
+      });
+    };
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ resumed: true, authorCanPush: false });
   });
 
   it('asks GitHub again whether the author can push, whatever the state file says', () => {

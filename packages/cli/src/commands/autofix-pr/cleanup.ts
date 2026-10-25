@@ -196,6 +196,15 @@ export function runCleanup(
     }
   }
 
+  // Taken over while the checks above asked the remote: the watch is the
+  // new owner's, and what it recorded since goes into the history too.
+  if (state && !force) {
+    state = withWatchLock(paths, prNumber, () => {
+      const current = requireState(paths.statePath, prNumber);
+      assertOwnedBySession(current);
+      return current;
+    });
+  }
   const released = releaseWorktree(paths.worktreePath);
   if (released.existed && !released.freed) {
     throw new Error(
@@ -227,7 +236,9 @@ export function runCleanup(
       path !== paths.gatePath &&
       !name.startsWith(historyPrefix(paths))
     ) {
-      rmSync(path, { force: true });
+      // Recursive: a directory planted under one of these names would
+      // otherwise outlive the --force meant to discard it.
+      rmSync(path, { force: true, recursive: true });
     }
   }
   // Named, so a later watch of another repository's PR of this number

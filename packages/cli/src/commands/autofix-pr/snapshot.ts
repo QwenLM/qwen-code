@@ -44,6 +44,7 @@ import {
   assertWatching,
   autofixPrPaths,
   checkAttemptKey,
+  isRegularFile,
   readGateCursor,
   readState,
   repoRoot,
@@ -1484,6 +1485,8 @@ export interface ReplyCheck {
 }
 
 function readReplyCache(path: string): Record<string, string | null> {
+  // A cache is asked again when missing: a FIFO in its place would block.
+  if (!isRegularFile(path)) return {};
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)

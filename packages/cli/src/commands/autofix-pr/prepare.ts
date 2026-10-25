@@ -194,9 +194,15 @@ function authorCanPush(slug: string, author: string, viewer: string): boolean {
       '.permission',
     );
     return permission === 'admin' || permission === 'write';
-  } catch {
-    // Not a collaborator (404), or an account GitHub will not describe.
-    return false;
+  } catch (err) {
+    // Not a collaborator: GitHub answers 404. Anything else — a rate
+    // limit, the network — says nothing of the author, and must not pass
+    // for a no: a resume would end a watch over it.
+    const text = `${(err as Error).message}\n${String((err as { stderr?: unknown }).stderr ?? '')}`;
+    if (/\bHTTP 404\b/.test(text)) return false;
+    throw new Error(
+      `could not ask GitHub whether ${author} can push to ${slug}; try again: ${text.trim().split('\n').at(-1) ?? ''}`,
+    );
   }
 }
 
@@ -216,6 +222,37 @@ function report(state: AutofixPrState, extra: Record<string, unknown>): void {
       ...extra,
     }),
   );
+}
+
+/**
+ * The clone's remote for the PR's repository and the target its head is
+ * pushed to, from `git remote -v` — never from a state file, which the code
+ * a round runs can reach.
+ */
+function remotesFor(
+  host: string,
+  owner: string,
+  repo: string,
+  headOwner: string,
+  headName: string,
+): { remote: string; pushTarget: string } {
+  const remoteV = git('remote', '-v');
+  const remote = onlyRemote(remoteV, owner, repo, host);
+  if (!remote) {
+    throw new Error(
+      `no single git remote here serves ${host}/${owner}/${repo}; autofix needs a clone of the PR's repository.`,
+    );
+  }
+  // The brief names it in the fix agent's merge command.
+  if (!isBranchName(remote) || !isCommandSafeName(remote)) {
+    throw new Error(
+      `the remote ${JSON.stringify(remote)} cannot be named in a command as it is; rename it (\`git remote rename\`) to watch this PR.`,
+    );
+  }
+  return {
+    remote,
+    pushTarget: pushTargetFor(remoteV, host, headOwner, headName),
+  };
 }
 
 export interface PrepareArgs {
@@ -260,40 +297,60 @@ export function runPrepare(args: PrepareArgs): void {
       // task goes on: the user hands the watch, history and budgets kept,
       // to the session that asks. The other session's helpers refuse from
       // then on.
-      if (takesOver(existing)) {
-        existing = withWatchLock(paths, args.pr, () => {
-          const current = requireState(paths.statePath, args.pr);
-          const moved = { ...current, sessionId: currentSessionId() };
-          writeState(paths.statePath, moved);
-          return moved;
-        });
-        tookOver = true;
-      }
-      assertOwnedBySession(existing);
+      if (!takesOver(existing)) assertOwnedBySession(existing);
       // The state file sits beside the worktree, in reach of the code a
       // round runs: whether the PR's author can push — which decides
       // whether the PR may be watched at all — is asked of GitHub again,
-      // not read back from it.
+      // not read back from it. Asked first: a failure leaves the watch with
+      // the session that has it.
       ensureAuthenticated();
-      const { author } = JSON.parse(
-        gh('pr', 'view', String(args.pr), '-R', args.repo, '--json', 'author'),
-      ) as { author: { login: string } | null };
+      const live = JSON.parse(
+        gh(
+          'pr',
+          'view',
+          String(args.pr),
+          '-R',
+          args.repo,
+          '--json',
+          'author,headRepository,headRepositoryOwner',
+        ),
+      ) as Pick<PrView, 'author' | 'headRepository' | 'headRepositoryOwner'>;
       const canPush = authorCanPush(
         args.repo,
-        author?.login ?? '',
+        live.author?.login ?? '',
         currentUser(),
+      );
+      // So are the remote a round merges from and the push target: this
+      // clone must serve the repository the file names.
+      const remotes = remotesFor(
+        host,
+        owner,
+        repoName,
+        live.headRepositoryOwner?.login ?? '',
+        live.headRepository?.name ?? '',
       );
       // A start resumes a watch `cleanup` ended keeping its worktree: the
       // user asked for it, and the start's confirmation said what the
       // worktree holds.
       wasEnded = existing.ended;
-      if (wasEnded || canPush !== existing.authorCanPush) {
+      if (
+        takesOver(existing) ||
+        wasEnded ||
+        canPush !== existing.authorCanPush ||
+        remotes.remote !== existing.remote ||
+        remotes.pushTarget !== existing.pushTarget
+      ) {
         existing = withWatchLock(paths, args.pr, () => {
           const current = requireState(paths.statePath, args.pr);
-          // Taken over meanwhile: not this start's to resume.
-          assertOwnedBySession(current);
+          if (takesOver(current)) tookOver = true;
+          else assertOwnedBySession(current);
           const { ended: _resumed, ...rest } = current;
-          const next = { ...rest, authorCanPush: canPush };
+          const next = {
+            ...rest,
+            sessionId: currentSessionId(),
+            authorCanPush: canPush,
+            ...remotes,
+          };
           writeState(paths.statePath, next);
           return next;
         });
@@ -333,20 +390,13 @@ export function runPrepare(args: PrepareArgs): void {
   const headOwner = pr.headRepositoryOwner!.login;
   const headName = pr.headRepository!.name;
 
-  const remoteV = git('remote', '-v');
-  const remote = onlyRemote(remoteV, owner, repoName, host);
-  if (!remote) {
-    throw new Error(
-      `no single git remote here serves ${host}/${args.repo}; autofix needs a clone of the PR's repository.`,
-    );
-  }
-  // The brief names it in the fix agent's merge command.
-  if (!isBranchName(remote) || !isCommandSafeName(remote)) {
-    throw new Error(
-      `the remote ${JSON.stringify(remote)} cannot be named in a command as it is; rename it (\`git remote rename\`) to watch this PR.`,
-    );
-  }
-  const pushTarget = pushTargetFor(remoteV, host, headOwner, headName);
+  const { remote, pushTarget } = remotesFor(
+    host,
+    owner,
+    repoName,
+    headOwner,
+    headName,
+  );
 
   // One start at a time: two sessions starting the same PR would both pass
   // the leftover checks, and the one whose `worktree add` failed would roll

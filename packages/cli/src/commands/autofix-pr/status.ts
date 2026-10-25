@@ -8,7 +8,7 @@
 // its files alone — no lock and no GitHub call — so `/autofix-pr status` and
 // `/autofix-pr resume` see every watch, whichever session owns it.
 
-import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -18,6 +18,7 @@ import {
   assertPositiveInteger,
   autofixPrPaths,
   currentSessionId,
+  isRegularFile,
   MAX_PUSHES,
   readGateCursor,
   readState,
@@ -86,7 +87,7 @@ function cursorOf(
   state: { host: string; owner: string; repo: string; preparedAt?: string },
 ): AutofixPrGateCursor | null {
   try {
-    const cursor = isPlainFile(path) ? readGateCursor(path) : null;
+    const cursor = isRegularFile(path) ? readGateCursor(path) : null;
     if (!cursor || !sameRepository(cursor, state)) return null;
     if (
       state.preparedAt !== undefined &&
@@ -97,15 +98,6 @@ function cursorOf(
     return cursor;
   } catch {
     return null;
-  }
-}
-
-/** A regular file: a FIFO planted under that name would block the read. */
-function isPlainFile(path: string): boolean {
-  try {
-    return lstatSync(path).isFile();
-  } catch {
-    return false;
   }
 }
 
@@ -137,7 +129,7 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
   for (const pr of numbers) {
     const paths = autofixPrPaths(root, pr);
     try {
-      if (!isPlainFile(paths.statePath)) {
+      if (!isRegularFile(paths.statePath)) {
         throw new Error(`${paths.statePath} is not a regular file`);
       }
       const state = readState(paths.statePath);
@@ -149,7 +141,7 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         );
       }
       const cursor = cursorOf(paths.gatePath, state);
-      const lastCheck = isPlainFile(paths.checkedPath)
+      const lastCheck = isRegularFile(paths.checkedPath)
         ? modifiedAt(paths.checkedPath)
         : null;
       const every = state.watch?.every ?? DEFAULT_EVERY;

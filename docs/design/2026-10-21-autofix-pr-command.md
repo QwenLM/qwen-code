@@ -186,9 +186,16 @@ worktree included:
    recorded head, is a refusal that points to `cleanup`.
 7. Re-running `prepare` in the owning session while the worktree exists reports
    the existing state with `resumed: true`, asking GitHub only who the
-   PR's author is and whether they can push: the state file sits beside the
-   worktree, in reach of the code a round runs, so `authorCanPush` is never
-   read back from it. If the
+   PR's author is and whether they can push, and deriving the remote and
+   the push target from this clone's remotes again: the state file sits
+   beside the worktree, in reach of the code a round runs, so none of these
+   is read back from it, and a repository this clone does not serve is a
+   refusal. Only a 404 from the permission API means the author cannot
+   push; any other failure (a rate limit, the network) is a refusal that
+   changes nothing, and a take-over is written only once these answers are
+   in. Every file of a watch — state, cursor, history, reply cache — is read
+   only when it is a regular file, so a FIFO planted under its name cannot
+   block a helper or the gate. If the
    worktree was removed (also with `rm -rf`, which `git worktree prune`
    clears), it is recreated and the recorded `pushedShas`,
    `handledCommentIds` and `postedCommentIds` are kept, with the budgets,

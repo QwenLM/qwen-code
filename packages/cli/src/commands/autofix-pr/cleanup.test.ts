@@ -13,6 +13,8 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  lstatSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -432,6 +434,25 @@ describe('runCleanup (real git)', () => {
     expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
     runCleanup(7, true);
     expect(existsSync(paths.statePath)).toBe(false);
+    // A directory or a link to nothing in its place goes the same way.
+    mkdirSync(paths.statePath);
+    expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
+    runCleanup(7, true);
+    expect(existsSync(paths.statePath)).toBe(false);
+    symlinkSync(join(repo, 'nowhere'), paths.statePath);
+    expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
+    runCleanup(7, true);
+    expect(
+      lstatSync(paths.statePath, { throwIfNoEntry: false }),
+    ).toBeUndefined();
+  });
+
+  it('never blocks on a history that is not a regular file, and replaces it', () => {
+    const history = historyPath(paths, readState(paths.statePath)!);
+    execFileSync('mkfifo', [history]);
+    runCleanup(7, true);
+    expect(lastReport()).toMatchObject({ removed: true });
+    expect(readHistory(history)).toMatchObject({ prNumber: 7 });
   });
 
   it('discards an unreadable state file only with --force', () => {
