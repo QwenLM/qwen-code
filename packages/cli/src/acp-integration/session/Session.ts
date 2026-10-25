@@ -39,6 +39,7 @@ import {
   type StructuredError,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
+import { buildSyntheticToolResponseParts } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
@@ -946,6 +947,8 @@ export const LOOP_DETECTED_TURN_ERROR_MESSAGE =
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
+const USER_PROMPT_BLOCKED_TOOL_RESULT =
+  'A UserPromptSubmit hook blocked this tool result from reaching the model. Do not rerun the tool to get it.';
 
 type ManagedConversationBinding = {
   expectation: BridgeConversationDirectoryExpectation;
@@ -7802,6 +7805,10 @@ export class Session implements SessionContext {
                           ...(roundType === SendMessageType.UserQuery && {
                             userTurnRecordedByHost: true,
                             promptAdmission,
+                            // Recall searches the user's words, as the
+                            // current path does, not the resolved files and
+                            // notices `parts` carries.
+                            memoryRecallQuery: promptText,
                             ...(workflowHumanInput && {
                               humanInput: workflowHumanInput,
                             }),
@@ -7980,6 +7987,29 @@ export class Session implements SessionContext {
                   }
                   if (roundStop === 'user_prompt_blocked') {
                     this.todoStopGuard.suspend();
+                    // A tool-result round the hook blocked closes its calls
+                    // with the block, not with the results it withheld from
+                    // the model, nor with the repair's "retry if needed".
+                    const blockedCalls = (message.parts ?? []).flatMap(
+                      ({ functionResponse }) =>
+                        functionResponse?.id
+                          ? [
+                              {
+                                callId: functionResponse.id,
+                                name: functionResponse.name ?? '',
+                              },
+                            ]
+                          : [],
+                    );
+                    if (!pushed && blockedCalls.length > 0) {
+                      this.#getCurrentChat().addHistory({
+                        role: 'user',
+                        parts: buildSyntheticToolResponseParts(
+                          blockedCalls,
+                          USER_PROMPT_BLOCKED_TOOL_RESULT,
+                        ),
+                      });
+                    }
                     return { stopReason: 'end_turn' };
                   }
                   if (
@@ -10393,6 +10423,9 @@ export class Session implements SessionContext {
       const llmClient = this.config.getLlmClient();
       llmClient.captureCacheSafeParams();
       llmClient.runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery);
+      // ACP reports no memory updates, so take the tasks the client queued for
+      // that report instead of leaving them to pile up over the session.
+      void llmClient.consumePendingMemoryTaskPromises();
       return;
     }
     if (!this.config.getManagedAutoMemoryEnabled()) {

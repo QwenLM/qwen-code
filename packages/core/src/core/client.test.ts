@@ -7253,6 +7253,30 @@ Other open files:
       );
     });
 
+    it('recalls with the memoryRecallQuery a host gives instead of the expanded request', async () => {
+      mockMemoryManager.recall.mockResolvedValue(noRecall());
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      installChat();
+
+      await run(
+        [
+          { text: 'fix the bug' },
+          { text: '--- src/big.ts ---\nexport const big = 1;' },
+        ],
+        'prompt-id-recall-query',
+        {
+          type: SendMessageType.UserQuery,
+          memoryRecallQuery: 'fix the bug',
+        },
+      );
+
+      expect(mockMemoryManager.recall).toHaveBeenCalledWith(
+        '/test/project/root',
+        'fix the bug',
+        expect.anything(),
+      );
+    });
+
     it('should not exclude memories that were only surfaced as metadata', async () => {
       mockMemoryManager.recall
         .mockResolvedValueOnce({

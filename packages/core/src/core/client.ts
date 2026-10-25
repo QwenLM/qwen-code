@@ -269,6 +269,11 @@ export interface SendMessageOptions {
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
+  /**
+   * What a UserQuery's memory recall searches for, in place of the request,
+   * whose expansion can carry attached file contents and host notices.
+   */
+  memoryRecallQuery?: string;
   humanInput?: HumanPromptInput;
   onWorkflowIntentApplied?: (trigger: WorkflowIntentTrigger) => void;
   /**
@@ -4493,7 +4498,9 @@ export class LlmClient {
         }
         this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
         this.beginManagedAutoMemoryRecall(
-          preHookUserPromptText ?? partToString(request),
+          options?.memoryRecallQuery ??
+            preHookUserPromptText ??
+            partToString(request),
           signal,
         );
 

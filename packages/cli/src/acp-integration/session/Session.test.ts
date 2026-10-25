@@ -649,6 +649,7 @@ describe('Session', () => {
     discardManagedAutoMemoryRecallDelivery: ReturnType<typeof vi.fn>;
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     runManagedAutoMemoryBackgroundTasks: ReturnType<typeof vi.fn>;
+    consumePendingMemoryTaskPromises: ReturnType<typeof vi.fn>;
     captureCacheSafeParams: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
     resetManagedAutoMemoryAfterCompression: ReturnType<typeof vi.fn>;
@@ -920,6 +921,7 @@ describe('Session', () => {
       discardManagedAutoMemoryRecallDelivery: vi.fn(),
       finishManagedAutoMemoryRecall: vi.fn(),
       runManagedAutoMemoryBackgroundTasks: vi.fn(),
+      consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
       resetManagedAutoMemoryAfterCompression: vi.fn(),
@@ -4489,6 +4491,8 @@ describe('Session', () => {
         interactionSpanByHost: true,
         toolLoopGuardsByHost: true,
         promptAdmission: { blocked: false },
+        // Recall searches the prompt text, not the resolved request.
+        memoryRecallQuery: 'hello',
       });
       expect(agentText()).toContain('Hello');
       // The session snapshots its user turn; the option keeps the client's off.
@@ -4497,6 +4501,17 @@ describe('Session', () => {
       expect(
         mockLlmClient.runManagedAutoMemoryBackgroundTasks,
       ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
+      // ACP reports no memory updates, so the queued tasks are taken at once.
+      expect(
+        mockLlmClient.consumePendingMemoryTaskPromises,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.consumePendingMemoryTaskPromises.mock
+          .invocationCallOrder[0],
+      ).toBeGreaterThan(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks.mock
+          .invocationCallOrder[0]!,
+      );
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
     });
 
@@ -4614,6 +4629,24 @@ describe('Session', () => {
       expect(agentText()).toContain(
         '✗ **UserPromptSubmit blocked**: secret in output',
       );
+      // The calls close with the block, not with the withheld output.
+      expect(mockChat.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-read',
+              name: 'read_file',
+              response: {
+                error: expect.stringContaining('UserPromptSubmit hook blocked'),
+              },
+            },
+          },
+        ],
+      });
+      expect(
+        JSON.stringify(vi.mocked(mockChat.addHistory).mock.calls),
+      ).not.toContain('done');
       expect(
         mockLlmClient.runManagedAutoMemoryBackgroundTasks,
       ).not.toHaveBeenCalled();
