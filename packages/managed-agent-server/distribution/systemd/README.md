@@ -36,9 +36,13 @@ The control plane reads `application.yml` and `harness.env` as
 `0600`. The preflight warns, in its `config` and `credentials` rows, when a
 secret file is group- or world-readable; a WARN does not fail `--check`, so
 apply the `chmod 600` it prints. A `root`-owned `0600` `harness.env` would be
-unreadable to the service, which the `credentials` row reports as FAIL. `systemd`
-reads environment files as root, so `0640 root:qwen-managed-agent` is enough
-for `server.env`.
+unreadable to the service, which the `credentials` row reports as FAIL.
+`server.env` sets `QWEN_MANAGED_AGENT_SERVICE_USER=qwen-managed-agent`, so both
+rows check access as that account, including every directory on the file's
+path and along any symbolic link's target, even when `--check` runs as root;
+the `service-user` row shows the account and its groups. `systemd` reads
+environment files as root, so `0640 root:qwen-managed-agent` is enough for
+`server.env`.
 
 The Harness token and capability digest live only in `harness.env`:
 `server.env` points `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` at it, and
@@ -66,9 +70,18 @@ URL from its own listener, which does not follow the Harness port, and its
 workspace ID from `QWEN_MANAGED_AGENT_WORKSPACE_CWD`, the directory created
 above.
 
-Alternatively, `../bin/qwen-managed-agent-bootstrap --directory
-/etc/qwen-managed-agent` generates all three files; adjust their ownership and
-mode for the service account afterwards.
+Alternatively, generate all three files with these owners and modes, as root:
+
+```bash
+../bin/qwen-managed-agent-bootstrap --directory /etc/qwen-managed-agent \
+  --service-user qwen-managed-agent
+mysql -u root < /etc/qwen-managed-agent/mysql-setup.sql
+rm /etc/qwen-managed-agent/mysql-setup.sql
+```
+
+The bootstrap also generates the database password into `server.env` and writes
+`mysql-setup.sql`, readable by root only, which creates the database and its
+account.
 
 4. Install and start:
 

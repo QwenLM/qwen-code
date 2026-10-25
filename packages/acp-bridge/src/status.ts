@@ -210,6 +210,14 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceGenerationStart: 'qwen/control/workspace/generation/start',
   workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
   workspaceSessionWorkflow: 'qwen/control/workspace/session-workflow',
+  /**
+   * Add or remove one extra directory in the workspace context. Applies to
+   * every live session of the runtime and persists the resulting list to the
+   * workspace setting `context.includeDirectories`. Params:
+   * `{ action: 'add' | 'remove', path }`; result:
+   * `{ primaryDirectory, directories, changed, warnings }`.
+   */
+  workspaceDirectories: 'qwen/control/workspace/directories',
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
