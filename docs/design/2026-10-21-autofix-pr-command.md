@@ -10,8 +10,8 @@ and `review watch-repo` for a reviewer — are implemented, together with the
 `prepare`, `ci-log` and `cleanup` helpers. Delivery step 3 (2026-10-24) adds
 the reaction layer: the `push`, `sync`, `reply` and `rerun` helpers and the
 bundled `/autofix-pr` skill, with `--once` and watch mode. Step 4 has begun
-(2026-10-25) with the `status` and `schedule` helpers and
-`/autofix-pr resume`. The reviewer watch, the rest of step 4 and the
+(2026-10-25) with the `status` and `schedule` helpers,
+`/autofix-pr resume`, and the `autofix_pr` tool that runs the helpers. The reviewer watch, the rest of step 4 and the
 follow-ups of step 5 are still proposals. The four product decisions in
 [Resolved decisions](#11-resolved-decisions) were made on 2026-10-21; the
 fourth is revised there.
@@ -139,7 +139,8 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 ```
 
 Helpers live under `packages/cli/src/commands/autofix-pr.ts` and
-`packages/cli/src/commands/autofix-pr/`; the reviewer probe lives with the
+`packages/cli/src/commands/autofix-pr/`, and the skill runs them through the
+`autofix_pr` core tool (Section 6.12); the reviewer probe lives with the
 other `qwen review` helpers. Per-PR state lives next to the worktree, outside
 it, under the clone's main worktree. Branches are shared by every worktree of
 a clone, so each helper finds the same watch from any of them, the autofix
@@ -995,6 +996,119 @@ gate and the prompt are not composed in a prompt.
 - Only the owning session may run it; nothing is recorded when a task cannot
   be made.
 
+### 6.12 The `autofix_pr` tool
+
+A core tool runs the helpers, so that a rule can name them. One call runs
+one helper: `command` names it (`prepare`, `snapshot`, `ci-log`, `push`,
+`sync`, `reply`, `rerun`, `schedule`, `status`, `cleanup`), and typed
+parameters carry its options (`pr`, `repo`, `host`, `take_over`, `task`,
+`run_id`, `lines`, `plan`, `no_post`, `discard`, `every`, `no_reply`,
+`instructions`, `again`). The tool builds the arguments itself, options as
+`--name=value`, and starts the CLI without a shell, so nothing in a
+parameter is read as shell syntax or as an option; a parameter the command
+does not take is a refusal before anything runs. `reply`'s plan must be the
+one the skill writes, `.qwen/tmp/autofix-pr-<n>-plan.json`, and not a file
+inside the worktree: a file the PR's own tree carries must not speak on the
+PR.
+
+- It runs the CLI of the session: `QWEN_CODE_CLI` when it names a usable
+  entry — a script through the JavaScript interpreter, an executable
+  directly, a Windows `.cmd` or `.bat` shim skipped, since only a shell can
+  start one — otherwise the interpreter with the entry this process was
+  started from. The environment is the one the shell gives its children,
+  under the calling session's id, and the working directory is the
+  session's, so the daemon check of Section 6.1, step 7 sees what a shell
+  call would.
+- A call may take ten minutes, the longest a helper needs (`push` gives
+  pre-push hooks nine), and is stopped when the turn is cancelled. Calls in
+  one working directory run one at a time; the helpers' lock covers other
+  processes.
+- The result is the helper's JSON line. A non-zero exit is the helper's
+  refusal, returned with its message.
+- `snapshot --gate` and `cleanup --force` are not offered: the gate runs
+  outside the model, and only the user discards a worktree's work.
+- Only the main session has it: subagents, forks, teammates and workspace
+  agents do not, and code mode's `exec` cannot call it.
+
+`status` only reads and needs no approval. Every other call asks, as a shell
+command does — in auto mode the classifier decides — and rules match on
+`command`: `autofix_pr(command:push)`. Three things change what is matched:
+
+- **A watch this session prepared.** When `prepare` succeeds through the
+  tool, the session records, in memory, the watch it reported: the PR, its
+  repository and host, the worktree, and whether GitHub said just then that
+  the author can push. A helper of any other watch is matched as
+  `unconfirmed <command>`, so a rule for `push` covers only the watches the
+  user started or resumed in this session. The state file sits in reach of
+  the code a round runs; none of this is read back from it. The record ends
+  with `cleanup` of the PR through the tool and with the session.
+- **A take-over** is matched as `take-over prepare` or `take-over cleanup`,
+  so no rule for `prepare` or `cleanup` covers taking a watch from another
+  session.
+- **A start, a take-over and a helper of an unconfirmed watch** offer no
+  "always allow": a saved rule would let every later one through. The
+  `prepare` dialog says that the watch's rounds then push and reply without
+  asking.
+
+The skill's `allowedTools` grant the commands a round runs — `snapshot`,
+`ci-log`, `sync`, `push`, `reply`, `rerun`, `status` and `cleanup` — and not
+`prepare`, which starts or resumes a watch, nor `schedule`, which a round
+never runs and which would replace the watch's task and options. What these
+rules let through is bounded by the helpers as well: each refuses a watch
+that another task drives (Section 6.1, step 5; Section 6.8), `push` checks
+where it pushes and counts the pushes, and `reply` answers only threads with
+a new comment from a trusted author.
+
+Where the tool is not registered — a tool allowlist in the settings, or the
+per-command execution sandbox — the skill runs the same helper through the
+shell tool, as before. Under that sandbox the fix agent cannot start anyway:
+an `agent` with `working_dir` is refused there. The daemon's shell guard
+checks shell calls only; it never saw the git commands a helper runs, and
+the tool's working directory is the session's own.
+
+### 6.13 Fix commands without asking: `autofix_pr` `unattended`
+
+The fix agent asks before each command in the default, auto-edit and auto
+modes, so until now a watch ran unattended only when the whole session
+lets commands run. `command: "unattended"` with `pr` asks whether the fix
+agent of this watch may run its commands without asking, and records the
+answer for this session.
+
+- It always asks, in a dialog with no "always allow", and the grant is made
+  only from that dialog's answer: no saved rule, hook, auto-edit approval or
+  auto-mode classifier stands in for it. Without anyone to answer — a
+  headless run, a background agent — it is refused, and so is the answer of
+  a stream-json host, a program that would run in YOLO mode if it wanted
+  this. In YOLO mode nothing is needed, and it records nothing.
+- It grants only a watch this session prepared through the tool
+  (Section 6.12) whose author GitHub then said can push, and only while
+  `status <pr>` lists it as this session's, not ended, of that repository,
+  with that worktree. `status` reads the state file, so it can only take the
+  grant away. A PR by anyone else is never watched (Section 8), and a
+  `--once` round of one asks for each command. An untrusted folder, or a
+  session-agents session, is refused: their subagents get no privileged
+  mode.
+- The grant lives in the CLI process, keyed by the session id and the
+  worktree's real path. Nothing is written to disk.
+- It reaches one agent: a `general-purpose` agent that the session itself
+  — not a subagent of it — launches with `working_dir` at the granted
+  worktree. Before the launch it checks again: the folder still trusted, the
+  watch still as above. Then the agent runs in YOLO mode, and so do the
+  agents it starts. Plan mode stays plan mode; an agent of another executor
+  (Codex), a teammate and a workflow agent are not affected.
+- The grant ends with `cleanup` of the PR through the tool, with the next
+  `prepare` of the PR (a start or a resume asks again), with a check at
+  launch that fails, and with the session: `/clear`, `/new` and `/resume`
+  drop what the session confirmed and granted, the session left and the one
+  entered alike.
+
+It does not contain the agent. The agent runs as an agent of a YOLO session
+would: with the user's credentials, able to reach files outside the
+worktree, past the user's ask rules; deny rules still apply. The dialog
+says so, and the trust rule of Section 8 is what keeps someone else's code
+out of it. A watch whose task expired or was deleted keeps the grant until
+one of the above ends it.
+
 ## 7. One check (`tick`)
 
 The gate already ran `snapshot --gate`; a fire that reaches the model carries
@@ -1272,14 +1386,18 @@ Delivery plan:
    helpers alone, and an allow rule for even a read-only command such as
    `gh pr view *` also admits command substitution, redirections and
    environment prefixes behind it. In the default approval mode each helper
-   call — the push included — therefore asks first.
+   call — the push included — therefore asks first; step 4's `autofix_pr`
+   tool changes that (Section 6.12).
 4. The loop state: `status`, `stop`, budgets, and a later session taking
    over the state file.
    Begun (2026-10-25): `status` (Section 6.10) lists every watch from its
    files, the items left for a human included (`needsHuman` in the reply
    plan, Section 6.5); `schedule` (Section 6.11) records the watch's task;
    `/autofix-pr resume` takes watches over and schedules that task again.
-   Still to come: the fix agent in the background with an `inFlight`
+   The `autofix_pr` tool (Section 6.12) runs the helpers, so the skill's
+   `allowedTools` name a round's helpers and those run without asking;
+   `unattended` (Section 6.13) lets the fix agent of a confirmed watch run
+   its commands without asking too. Still to come: the fix agent in the background with an `inFlight`
    record, and the budgets of Section 10 not enforced yet.
 5. Follow-ups: durable watching in daemon sessions (`durable` with
    `sessionMode: "current"`, once the gate supports it), and a configurable

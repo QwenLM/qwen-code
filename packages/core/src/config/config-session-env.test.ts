@@ -215,6 +215,26 @@ describe('Config sessionEnvClaimed guard', () => {
     expect(process.env['QWEN_CODE_SESSION_ID']).toBe('new-session-uuid-123');
     expect(process.env['QWEN_CODE_SESSION_ID']).not.toBe(originalSessionId);
   });
+
+  it('startNewSession forgets the autofix-pr watches the sessions confirmed, so a resumed one asks again', async () => {
+    const { Config } = await import('./config.js');
+    const grants = await import('../tools/autofix-pr-grants.js');
+    const config = new Config({ ...baseParams });
+    const first = config.getSessionId();
+    const watch = {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      worktree: '/w',
+      authorCanPush: true,
+    };
+    grants.recordConfirmedWatch(first, watch);
+    // `/resume` of a session left earlier comes back under its old id.
+    grants.recordConfirmedWatch('resumed-session', watch);
+    config.startNewSession('resumed-session');
+    expect(grants.confirmedWatch(first, 7)).toBeUndefined();
+    expect(grants.confirmedWatch('resumed-session', 7)).toBeUndefined();
+  });
 });
 
 describe('Config modelEnvClaimed guard', () => {

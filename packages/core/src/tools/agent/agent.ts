@@ -110,6 +110,7 @@ import {
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { approvalModeToPermissionMode } from '../../hooks/permission-mode.js';
+import { hasUnattendedFixGrant } from '../autofix-pr-grants.js';
 import type { StopHookOutput } from '../../hooks/types.js';
 import {
   appendStopHookBlockingCapWarning,
@@ -3457,16 +3458,34 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const parentApprovalMode = isCodex
         ? this.config.getSessionApprovalMode()
         : this.config.getApprovalMode();
+      // The fix agent of a watch whose user let its commands run without
+      // asking (`autofix_pr` `unattended`), its watch checked again now: a
+      // general-purpose agent the session itself starts in that worktree,
+      // never one a subagent starts. Plan mode stays plan mode.
+      const unattendedFixes =
+        !isCodex &&
+        worktreeIsolation?.externallyManaged === true &&
+        this.params.subagent_type === 'general-purpose' &&
+        getCurrentAgentId() === null &&
+        parentApprovalMode !== ApprovalMode.PLAN &&
+        this.config.isTrustedFolder() &&
+        (await hasUnattendedFixGrant(
+          this.config.getSessionId(),
+          worktreeIsolation.path,
+          signal ?? new AbortController().signal,
+        ));
       // Codex has no Qwen classifier: native writes need an explicit grant,
       // not an intermediate subagent's implicit auto-edit or fork yolo mode.
-      const resolvedMode = resolveSubagentApprovalMode(
-        isCodex && parentApprovalMode === ApprovalMode.AUTO
-          ? ApprovalMode.DEFAULT
-          : parentApprovalMode,
-        subagentConfig.approvalMode ??
-          (isCodex ? parentApprovalMode : undefined),
-        this.config.isTrustedFolder(),
-      );
+      const resolvedMode = unattendedFixes
+        ? PermissionMode.Yolo
+        : resolveSubagentApprovalMode(
+            isCodex && parentApprovalMode === ApprovalMode.AUTO
+              ? ApprovalMode.DEFAULT
+              : parentApprovalMode,
+            subagentConfig.approvalMode ??
+              (isCodex ? parentApprovalMode : undefined),
+            this.config.isTrustedFolder(),
+          );
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
       // ALWAYS produce a child Config via an overlay, even when the
       // approval mode is identical to the parent. Subagents must run
