@@ -270,7 +270,8 @@ order this section exists to prevent.
   test lane's `sdk_java_lock_acquire 9600` budget, the MariaDB write-back's
   5400 s budget, both job ceilings, both jobs' Maven runs above their
   acquisition, their write-back children's fd 9 close, and the
-  `.size-baseline` records the workflow's new size.- Real-host soak is CI itself: the first pool runs after merge either
+  `.size-baseline` records the workflow's new size.
+- Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
 ## Acceptance criteria
@@ -279,7 +280,8 @@ order this section exists to prevent.
   with a 200-minute ceiling; the MariaDB write-back site keeps 5400 s under
   its 310-minute ceiling. Both sites run their Maven suites from a job-local
   repository before the acquisition. The test job passes its tier and the
-  MariaDB site defaults to normal.- `npx vitest run scripts/tests/sdk-java-lock.test.js
+  MariaDB site defaults to normal.
+- `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
 - The error text still contains the substring `lock not acquired within`,

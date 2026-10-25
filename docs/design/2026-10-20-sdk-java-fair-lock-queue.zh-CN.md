@@ -226,7 +226,8 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   pin 的是 source 该辅助脚本、test 通道的 `sdk_java_lock_acquire 9600`
   预算、MariaDB 写回的 5400 秒预算、两个 job 上限、两个 job 的 Maven
   运行都在取锁之前、写回子进程关闭 fd 9，以及 `.size-baseline` 记录的
-  工作流新尺寸。- 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
+  工作流新尺寸。
+- 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 
 ## 验收标准
@@ -234,7 +235,8 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
 - `sdk-java.yml` 的 test 站点以 9600 秒通过该辅助脚本获取，job 上限为
   200 分钟；MariaDB 写回站点保留 5400 秒和 310 分钟上限。两处都先让
   Maven 套件从 job 本地仓库跑完，再取锁。test job 传入自己的 tier，
-  MariaDB 站点默认 normal。- `npx vitest run scripts/tests/sdk-java-lock.test.js
+  MariaDB 站点默认 normal。
+- `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。
 - 错误文案仍包含子串 `lock not acquired within`，因此
