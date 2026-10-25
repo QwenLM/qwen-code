@@ -63,6 +63,22 @@ public class HarnessEventProjector {
                     true, "FAILED", code, message);
         }
         Map<String, Object> data = object(event.data());
+        if ("user_message_consumed".equals(event.type())) {
+            String id = string(data.get("messageId"));
+            if (id == null || !id.startsWith("umsg_")) {
+                return null;
+            }
+            java.util.List<Map<String, Object>> input = new java.util.ArrayList<>();
+            if (data.get("parts") instanceof java.util.List<?> parts) {
+                for (Object part : parts) {
+                    String text = string(object(part).get("text"));
+                    if (text != null) {
+                        input.add(Map.of("type", "text", "text", text));
+                    }
+                }
+            }
+            return new ProjectedEvent("item.input.added", Map.of("itemId", id, "input", input), false, null, null, null);
+        }
         Map<String, Object> update = object(data.get("update"));
         String kind = string(update.get("sessionUpdate"));
         if (!"session_update".equals(event.type())

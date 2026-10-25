@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
@@ -64,7 +65,6 @@ import {
   ToolConfirmationOutcome,
   createDuplicateProviderToolCallResponse,
   findPlanModeEntryBatchBoundaryIndex,
-  isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
   getCachedToolCallFingerprint,
@@ -1212,8 +1212,8 @@ export async function runNonInteractive(
         const reminderParts = buildInitialSystemReminders(config);
         if (reminderParts.length > 0 && initialPartList) {
           const continuationParts = normalizePartList(initialPartList);
-          const hasSystemReminderPart = continuationParts.some((part) =>
-            isSystemReminderContent({ role: 'user', parts: [part] }),
+          const hasSystemReminderPart = continuationParts.some(
+            isWrappedSystemReminderPart,
           );
           if (!hasSystemReminderPart) {
             initialPartList = insertAfterFunctionResponses(

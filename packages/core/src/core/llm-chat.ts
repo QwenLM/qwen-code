@@ -85,7 +85,13 @@ import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
-import { appendAutoMemoryContext } from '../memory/request-context.js';
+import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  appendAutoMemoryContext,
+  appendAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+  withoutAutoMemorySnapshots,
+} from '../memory/request-context.js';
 import {
   completedToolCallBoundary,
   recoveryHistoryBoundary,
@@ -2372,6 +2378,8 @@ export class LlmChat {
    * (which intentionally don't write to the global telemetry singleton) can
    * still make compaction decisions based on their *own* context size.
    */
+  private memorySnapshotsVisible: boolean | undefined;
+  private unaccountedMemorySnapshots = new WeakSet<Part>();
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountIsEstimated = false;
   /** Provenances already reported at dispatch, so a retry is not recounted. */
@@ -2670,6 +2678,34 @@ export class LlmChat {
    * route-aware chat getters above.
    */
   private adoptTokenCountsForRoute(targetRouteKey?: string): void {
+    const memorySnapshotsVisible = Boolean(
+      this.config.getAutoMemoryContext?.(),
+    );
+    if (
+      this.memorySnapshotsVisible !== true &&
+      memorySnapshotsVisible &&
+      this.history.some((entry) =>
+        entry.parts?.some(
+          (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
+        ),
+      )
+    ) {
+      // A suppressed request cannot account for catalogs that are visible
+      // again. Invalidate every route before adoption. The opposite flip
+      // (visible -> suppressed) deliberately keeps the authoritative count:
+      // it over-states by the retained snapshots the next request strips, but
+      // that is the conservative direction for the output clamp and is
+      // replaced by the next usage report, whereas discarding the anchor falls
+      // back to a walk that under-counts by the full system/tool overhead.
+      this.lastPromptTokenCount = 0;
+      this.lastPromptTokenCountIsEstimated = false;
+      this.lastOutputTokenCount = 0;
+      this.lastCachedContentTokenCount = 0;
+      this.tokenCountsByRouteKey.clear();
+      this.telemetryService?.setLastPromptTokenCount(0);
+      this.telemetryService?.setLastCachedContentTokenCount(0);
+    }
+    this.memorySnapshotsVisible = memorySnapshotsVisible;
     if (
       this.lastPromptTokenCount === 0 &&
       this.lastOutputTokenCount === 0 &&
@@ -2791,8 +2827,15 @@ export class LlmChat {
    * Public history readers still use {@link getHistory}, which returns a
    * defensive deep copy for caller mutation safety.
    */
-  private getRequestHistory(currentUserContent?: Content): Content[] {
-    const curatedHistory = extractCuratedHistory(this.history);
+  private getRequestHistory(
+    currentUserContent?: Content,
+    history = this.history,
+  ): Content[] {
+    const curatedHistory = extractCuratedHistory(
+      this.config.getAutoMemoryContext?.()
+        ? history
+        : withoutAutoMemorySnapshots(history),
+    );
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
@@ -2827,20 +2870,38 @@ export class LlmChat {
         requestHistory.push({ role: 'user', parts: reattachParts });
       }
     }
-    return appendAutoMemoryContext(
-      requestHistory,
-      this.config.getAutoMemoryContext?.() ?? '',
-    );
+    return requestHistory;
   }
 
   private getRequestHistoryForRoute(
     currentUserContent: Content | undefined,
     supportedModalities: InputModalities,
+    retainMemorySnapshot = true,
   ): Content[] {
-    return slimCompactionInput(
-      this.getRequestHistory(currentUserContent),
+    const catalog = this.config.getAutoMemoryContext?.() ?? '';
+    const snapshot = getAutoMemorySnapshot(this.history, catalog);
+    // A request-only recovery catalog replaces, rather than follows, stale snapshots.
+    const history = !snapshot
+      ? this.history
+      : retainMemorySnapshot
+        ? [...this.history]
+        : withoutAutoMemorySnapshots(this.history);
+    if (snapshot && retainMemorySnapshot) {
+      appendAutoMemorySnapshot(history, snapshot);
+    }
+    const request = slimCompactionInput(
+      this.getRequestHistory(currentUserContent, history),
       supportedModalities,
     ).slimmedHistory;
+    if (snapshot && retainMemorySnapshot) {
+      this.history = history;
+      this.chatRecordingService?.recordMemoryCatalogSnapshot(snapshot);
+      this.unaccountedMemorySnapshots.add(snapshot);
+    }
+    // Recovery controls are removed after continuation and cannot own a durable snapshot.
+    return snapshot && !retainMemorySnapshot
+      ? appendAutoMemoryContext(request, catalog)
+      : request;
   }
 
   /**
@@ -2854,6 +2915,8 @@ export class LlmChat {
    * inherit this chat's last response metadata.
    */
   setLastPromptTokenCount(count: number, isEstimated = false): void {
+    this.unaccountedMemorySnapshots = new WeakSet<Part>();
+    this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
     this.lastPromptTokenCount = count;
     this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
@@ -2889,6 +2952,10 @@ export class LlmChat {
     outputTokenCount: number,
     isEstimated = false,
   ): void {
+    this.unaccountedMemorySnapshots = new WeakSet<Part>();
+    // Usage saved with legacy memory on already counts visible snapshots. The
+    // rare suppressed-at-save resume relies on the pad and reactive recovery.
+    this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
     this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
       ? Math.max(0, promptTokenCount)
       : 0;
@@ -3465,7 +3532,8 @@ export class LlmChat {
         ).imageTokenEstimate;
         // When lastPromptTokenCount > 0, estimatePromptTokens uses the
         // API-authoritative previous prompt count + the previous response's
-        // output token count + a tiny estimate of just the new user message.
+        // output token count + an estimate of the new user message and any
+        // pending memory snapshot.
         // It does NOT touch the history at all in that branch, so skip the
         // costly `getHistory(true)` clone on the steady-state path.
         // The lastPromptTokenCount=0 branch (first send after --continue
@@ -3475,13 +3543,45 @@ export class LlmChat {
         // `getContextLengthExceededInfo` → `tryCompress` → RETRY branch)
         // is the documented safety net when this under-count causes
         // hard-rescue to miss.
-        const effectiveTokens = estimatePromptTokens(
-          this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
-          userContent,
-          this.lastPromptTokenCount,
-          this.lastOutputTokenCount,
-          imageTokenEstimate,
-        );
+        const estimatePendingPromptTokens = (conservative = false): number => {
+          const catalog = this.config.getAutoMemoryContext?.() ?? '';
+          const snapshot = getAutoMemorySnapshot(
+            [...this.history, userContent],
+            catalog,
+          );
+          const pendingContent = snapshot
+            ? {
+                ...userContent,
+                parts: [...(userContent.parts ?? []), snapshot],
+              }
+            : userContent;
+          const visiblePendingContent = catalog
+            ? pendingContent
+            : (withoutAutoMemorySnapshots([pendingContent])[0] ?? {
+                ...pendingContent,
+                parts: [],
+              });
+          const unaccountedSnapshots =
+            catalog && this.lastPromptTokenCount > 0
+              ? this.history.flatMap((entry) =>
+                  (entry.parts ?? []).filter((part) =>
+                    this.unaccountedMemorySnapshots.has(part),
+                  ),
+                )
+              : [];
+          return estimatePromptTokens(
+            this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
+            visiblePendingContent,
+            this.lastPromptTokenCount +
+              estimateContentTokens([
+                { role: 'user', parts: unaccountedSnapshots },
+              ]),
+            this.lastOutputTokenCount,
+            imageTokenEstimate,
+            conservative,
+          );
+        };
+        const effectiveTokens = estimatePendingPromptTokens();
         const isHardTier = effectiveTokens >= hard;
         const shouldForceFromHard =
           !exactRoute &&
@@ -3491,6 +3591,16 @@ export class LlmChat {
           ? this.getHistoryShallow()
           : undefined;
         const completedToolCallIdsBeforeHardRescue = this.completedToolCallIds;
+        // The rollback history copies Part objects; preserve ownership on those copies.
+        const unaccountedMemorySnapshotsBeforeHardRescue = new WeakSet<Part>(
+          historyBeforeHardRescue?.flatMap((entry, index) =>
+            (entry.parts ?? []).filter((_, partIndex) =>
+              this.unaccountedMemorySnapshots.has(
+                this.history[index].parts![partIndex],
+              ),
+            ),
+          ) ?? [],
+        );
         const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
         const lastPromptTokenCountWasEstimatedBeforeHardRescue =
           this.lastPromptTokenCountIsEstimated;
@@ -3556,13 +3666,7 @@ export class LlmChat {
           );
         }
         const localPromptTokensAfterCompression = shouldForceFromHard
-          ? estimatePromptTokens(
-              this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
-              userContent,
-              this.lastPromptTokenCount,
-              this.lastOutputTokenCount,
-              imageTokenEstimate,
-            )
+          ? estimatePendingPromptTokens()
           : 0;
         if (
           shouldStopAfterHardRescue(
@@ -3597,6 +3701,8 @@ export class LlmChat {
             );
             // setHistory conservatively cleared loaded-skill tracking; the
             // restored bodies re-arm it on their next invoke.
+            this.unaccountedMemorySnapshots =
+              unaccountedMemorySnapshotsBeforeHardRescue;
             this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
             this.lastPromptTokenCountIsEstimated =
               lastPromptTokenCountWasEstimatedBeforeHardRescue;
@@ -3671,6 +3777,15 @@ export class LlmChat {
           }
         }
 
+        // Zero-count fallback ignores the conservative flag, so when nothing
+        // changed since the gate estimate (no manual-plan-exit notice), reuse
+        // it instead of paying a second full shallow-history walk.
+        promptTokensForClamp =
+          this.lastPromptTokenCount === 0 &&
+          manualPlanExitNoticeVersion === undefined
+            ? effectiveTokens
+            : estimatePendingPromptTokens(true);
+
         // Publish the acceptance snapshot for a caller-side settlement
         // carrier (see `userContentPushSnapshotKey`) immediately before the
         // push — no await between the snapshot and this push, so no
@@ -3686,6 +3801,12 @@ export class LlmChat {
         // Add user content to history ONCE before any attempts. Later object
         // spreads preserve the identity marked before compression.
         this.history.push(userContent);
+        // Interrupted-prompt replay can carry detached snapshot parts itself.
+        for (const part of userContent.parts ?? []) {
+          if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true) {
+            this.unaccountedMemorySnapshots.add(part);
+          }
+        }
         this.syncReviewedSchemasForContent(userContent);
         currentUserContent = userContent;
         userContentAdded = true;
@@ -3722,11 +3843,6 @@ export class LlmChat {
                 .join(', '),
           );
         }
-        requestContents = this.getRequestHistoryForRoute(
-          currentUserContent,
-          requestModalities,
-        );
-
         // Window-clamp the output request AFTER compression has settled the
         // history: max_tokens = min(ceiling, window − prompt − margin), floored
         // at MIN_CLAMPED_OUTPUT_TOKENS. Computed here in the send path — not in
@@ -3736,11 +3852,9 @@ export class LlmChat {
         // construction. This makes `prompt + max_tokens ≤ window` an invariant
         // on every main-turn request (issue #5950).
         //
-        // When lastPromptTokenCount > 0 (steady state, or refreshed to
-        // newTokenCount by compression/resume), re-estimate from the counts —
-        // cheap, no history walk. When it is still 0, reuse the pre-push gate
-        // estimate: userContent is already in history here, so a fresh history
-        // walk would double-count it. Estimate-derived counts can omit the
+        // The estimate above uses the surviving history and pending snapshot
+        // before pushing userContent, avoiding double-counting on a history walk.
+        // Estimate-derived counts can omit the
         // system prompt, tool definitions, and skill content (see
         // estimatePromptTokens — "typically ~15-20K of under-estimate"). Some
         // counts based on prior API usage already preserve part of that
@@ -3748,17 +3862,6 @@ export class LlmChat {
         // self-corrects when provider usage arrives. An under-count is the ONE
         // way `prompt + max_tokens` can still overflow the window, so keep the
         // pad until provider usage replaces the estimate.
-        promptTokensForClamp =
-          this.lastPromptTokenCount > 0
-            ? estimatePromptTokens(
-                [],
-                userContent,
-                this.lastPromptTokenCount,
-                this.lastOutputTokenCount,
-                imageTokenEstimate,
-                /* conservative= */ true,
-              )
-            : effectiveTokens;
         if (this.promptCountIsEstimateDerived()) {
           promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
           debugLogger.debug(
@@ -3780,6 +3883,10 @@ export class LlmChat {
             maxOutputTokens: clampedMaxOutputTokens,
           },
         };
+        requestContents = this.getRequestHistoryForRoute(
+          currentUserContent,
+          requestModalities,
+        );
       }
     } catch (error) {
       if (userContentAdded) {
@@ -5135,6 +5242,7 @@ export class LlmChat {
             const recoveryContents = self.getRequestHistoryForRoute(
               currentUserContent,
               requestModalities,
+              false,
             );
             self.history.pop();
             const walkRecoveryEstimate =
@@ -5172,6 +5280,7 @@ export class LlmChat {
                     requestContents: self.getRequestHistoryForRoute(
                       currentUserContent,
                       requestModalities,
+                      false,
                     ),
                     params: iterationParams,
                     rollback: rollbackRecoveryAttempt,
@@ -5812,9 +5921,13 @@ export class LlmChat {
    * chat session.
    */
   getHistory(curated: boolean = false): Content[] {
+    const visibleHistory =
+      curated && !this.config.getAutoMemoryContext?.()
+        ? withoutAutoMemorySnapshots(this.history)
+        : this.history;
     const history = curated
-      ? extractCuratedHistory(this.history)
-      : this.history;
+      ? extractCuratedHistory(visibleHistory)
+      : visibleHistory;
     // Deep copy the history to avoid mutating the history outside of the
     // chat session.
     return cloneApiHistory(history);
@@ -5826,9 +5939,13 @@ export class LlmChat {
    */
   getHistoryTail(count: number, curated: boolean = false): Content[] {
     if (count <= 0) return [];
+    const visibleHistory =
+      curated && !this.config.getAutoMemoryContext?.()
+        ? withoutAutoMemorySnapshots(this.history)
+        : this.history;
     const history = curated
-      ? extractCuratedHistory(this.history)
-      : this.history;
+      ? extractCuratedHistory(visibleHistory)
+      : visibleHistory;
     return cloneApiHistory(history.slice(-count));
   }
 
@@ -5838,10 +5955,23 @@ export class LlmChat {
    * payload objects.
    */
   getHistoryShallow(curated: boolean = false): Content[] {
+    const visibleHistory =
+      curated && !this.config.getAutoMemoryContext?.()
+        ? withoutAutoMemorySnapshots(this.history)
+        : this.history;
     const history = curated
-      ? extractCuratedHistory(this.history)
-      : this.history;
-    return history.map(copyContentContainer);
+      ? extractCuratedHistory(visibleHistory)
+      : visibleHistory;
+    return history.map((content) => {
+      const copied = copyContentContainer(content);
+      // Startup restoration and microcompaction reinstall these defensive copies.
+      content.parts?.forEach((part, index) => {
+        if (this.unaccountedMemorySnapshots.has(part)) {
+          this.unaccountedMemorySnapshots.add(copied.parts![index]);
+        }
+      });
+      return copied;
+    });
   }
 
   getHistoryForForkWindow(): Content[] {
@@ -5860,9 +5990,13 @@ export class LlmChat {
    */
   getHistoryTailShallow(count: number, curated: boolean = false): Content[] {
     if (count <= 0) return [];
+    const visibleHistory =
+      curated && !this.config.getAutoMemoryContext?.()
+        ? withoutAutoMemorySnapshots(this.history)
+        : this.history;
     const history = curated
-      ? extractCuratedHistory(this.history)
-      : this.history;
+      ? extractCuratedHistory(visibleHistory)
+      : visibleHistory;
     return history.slice(-count).map(copyContentContainer);
   }
 
@@ -6665,6 +6799,7 @@ export class LlmChat {
             ) {
               this.retainCurrentTokenCounts();
             }
+            this.unaccountedMemorySnapshots = new WeakSet<Part>();
             this.lastPromptTokenCount = lastPromptTokenCount;
             this.lastPromptTokenCountIsEstimated = false;
             this.lastOutputTokenCount = hasUsablePromptTokenCount
@@ -7297,6 +7432,24 @@ export class LlmChat {
       throw streamError;
     }
 
+    // Charge newly retained catalogs only when the turn survives rollback.
+    // A provider usage report already covers them and clears this ownership.
+    if (this.config.getAutoMemoryContext?.() && this.lastPromptTokenCount > 0) {
+      const snapshots = this.history.flatMap((entry) =>
+        (entry.parts ?? []).filter((part) =>
+          this.unaccountedMemorySnapshots.has(part),
+        ),
+      );
+      if (snapshots.length > 0) {
+        this.lastPromptTokenCount += estimateContentTokens([
+          { role: 'user', parts: snapshots },
+        ]);
+        this.telemetryService?.setLastPromptTokenCount(
+          this.lastPromptTokenCount,
+        );
+      }
+    }
+    this.unaccountedMemorySnapshots = new WeakSet<Part>();
     this.history.push({
       role: 'model',
       parts: acceptedTurnParts,

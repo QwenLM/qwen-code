@@ -193,6 +193,26 @@ export interface DaemonWorkspaceUpdate {
   displayName: string | null;
 }
 
+export type DaemonGitCloneJobStatus =
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+export interface DaemonGitCloneJob {
+  jobId: string;
+  status: DaemonGitCloneJobStatus;
+  startedAt: number;
+  finishedAt?: number;
+  /** Latest reported completion percentage, when the clone reports one. */
+  percent?: number;
+  /** Latest sanitized progress or failure line. */
+  message?: string;
+  /** Canonical clone directory, present when `status` is `succeeded`. */
+  cwd?: string;
+  error?: { code: string; message: string };
+}
+
 export interface DaemonWorkspaceRemovalActivity {
   sessions: number;
   activePrompts: number;
