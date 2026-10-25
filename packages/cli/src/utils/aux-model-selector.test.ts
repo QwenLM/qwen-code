@@ -18,7 +18,11 @@ describe('findUnregisteredAllowlistDrop (issue #12805)', () => {
   const OFF = 'https://external-llm.example/v1';
   const ON = 'https://corp.example/v1';
   const models = (
-    registered: Array<{ id: string; registryBaseUrl?: string }>,
+    registered: Array<{
+      id: string;
+      registryBaseUrl?: string;
+      isRuntimeModel?: boolean;
+    }>,
   ) => ({
     getAllConfiguredModels: () =>
       registered.map((model) => ({
@@ -63,6 +67,17 @@ describe('findUnregisteredAllowlistDrop (issue #12805)', () => {
     expect(
       findUnregisteredAllowlistDrop(registered, `gpt-4o\0${OFF}`),
     ).toBeDefined();
+  });
+
+  it('does not let a runtime snapshot of a dropped id count as registered', () => {
+    // A runtime model is not a registry route: counting it would re-admit
+    // the dropped model the predicate exists to refuse.
+    expect(
+      findUnregisteredAllowlistDrop(
+        models([{ id: 'gpt-4o', isRuntimeModel: true }]),
+        'gpt-4o',
+      ),
+    ).toMatchObject({ id: 'gpt-4o' });
   });
 });
 
