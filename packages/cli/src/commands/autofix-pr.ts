@@ -15,12 +15,14 @@ import { cleanupCommand } from './autofix-pr/cleanup.js';
 import { pushCommand } from './autofix-pr/push.js';
 import { replyCommand } from './autofix-pr/reply.js';
 import { rerunCommand } from './autofix-pr/rerun.js';
+import { scheduleCommand } from './autofix-pr/schedule.js';
+import { statusCommand } from './autofix-pr/status.js';
 import { syncCommand } from './autofix-pr/sync.js';
 
 export const autofixPrCommand: CommandModule = {
   command: 'autofix-pr',
   describe:
-    'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, guarded push, replies, re-runs, cleanup)',
+    'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, guarded push, replies, re-runs, the scheduled task, status, cleanup)',
   builder: (yargs: Argv) =>
     yargs
       .command(prepareCommand)
@@ -30,10 +32,12 @@ export const autofixPrCommand: CommandModule = {
       .command(syncCommand)
       .command(replyCommand)
       .command(rerunCommand)
+      .command(scheduleCommand)
+      .command(statusCommand)
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: prepare, snapshot, ci-log, push, sync, reply, rerun, or cleanup.',
+        'Specify a subcommand: prepare, snapshot, ci-log, push, sync, reply, rerun, schedule, status, or cleanup.',
       )
       .version(false),
   handler: () => {

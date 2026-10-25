@@ -132,7 +132,11 @@ function createFakeHost(): FakeHost {
       push('clearItems');
       items.length = 0;
     },
-    loadHistory: () => push('loadHistory'),
+    loadHistory: (history) => {
+      items.splice(0, items.length, ...history);
+      push('loadHistory');
+    },
+    resetTranscript: () => push('resetTranscript'),
     refreshStatic: () => push('refreshStatic'),
     clearPendingState: () => push('clearPendingState'),
     cancelBtw: () => push('cancelBtw'),
@@ -238,6 +242,70 @@ async function dispatch(
 }
 
 describe('guards (ink handleSlashCommand parity)', () => {
+  it.each(['unchanged', 'changed'] as const)(
+    'keeps command history current across an await when history is %s',
+    async (kind) => {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let before: readonly HistoryItem[] | undefined;
+      let after: readonly HistoryItem[] = [];
+      const recordSlashCommand = vi.fn();
+      const config = makeFakeConfig({});
+      config.getChatRecordingService = () =>
+        ({ recordSlashCommand }) as unknown as ReturnType<
+          Config['getChatRecordingService']
+        >;
+      const host = createFakeHost();
+      host.addItem({ type: 'info', text: 'before-await' }, 1);
+      const command = stub({
+        name: 'history-getter',
+        action: async (context) => {
+          before = context.ui.history;
+          await held;
+          after = context.ui.history;
+          context.ui.addItem({ type: 'info', text: 'own-result' }, 3);
+        },
+      });
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [command],
+      );
+      const pending = dispatcher.handle('/history-getter');
+      try {
+        await vi.waitFor(() => expect(before).toBeDefined());
+        expect(before).toEqual(host.getHistory());
+        if (kind === 'changed')
+          host.addItem({ type: 'info', text: 'after-await' }, 2);
+        const expected = [...host.getHistory()];
+        release();
+        expect(await pending).toEqual({ kind: 'handled' });
+        expect(after).toEqual(expected);
+        expect(after.every((item, index) => item === expected[index])).toBe(
+          true,
+        );
+        expect(
+          host.items.filter(
+            (item) => 'text' in item && item.text === 'own-result',
+          ),
+        ).toHaveLength(1);
+        expect(
+          recordSlashCommand.mock.calls.find(
+            ([value]) => value.phase === 'result',
+          )?.[0].outputHistoryItems,
+        ).toEqual([{ type: 'info', text: 'own-result' }]);
+      } finally {
+        release();
+        try {
+          await pending;
+        } finally {
+          dispatcher.dispose();
+        }
+      }
+    },
+  );
   it.each([
     ['startup', 'Error'],
     ['startup', 'string'],
@@ -1088,7 +1156,8 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
   it('load_history applies client history, clears, then re-adds items', async () => {
     const setHistory = vi.fn();
     const config = {
-      getGeminiClient: () => ({ setHistory }),
+      getSessionId: () => 'load-history-session',
+      getLlmClient: () => ({ setHistory }),
     } as unknown as Config;
     const commands = [
       stub({
@@ -2159,6 +2228,84 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
 });
 
 describe('durable slash recall admission', () => {
+  it('load_history applies client history and replaces the canonical replay batch', async () => {
+    const setHistory = vi.fn();
+    const config = {
+      getSessionId: () => 'original',
+      getLlmClient: () => ({ setHistory }),
+    } as unknown as Config;
+    const commands = [
+      stub({
+        name: 'restore',
+        action: () => ({
+          type: 'load_history',
+          history: [{ type: 'info', text: 'restored' }],
+          clientHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        }),
+      }),
+    ];
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      { ...services, config },
+      commands,
+    );
+    const outcome = await dispatcher.handle('/restore');
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(setHistory).toHaveBeenCalledWith([
+      { role: 'user', parts: [{ text: 'hi' }] },
+    ]);
+    expect(host.calls).toEqual(
+      expect.arrayContaining(['clearItems', 'loadHistory', 'resetTranscript']),
+    );
+    expect(host.items.at(-1)).toMatchObject({ type: 'info', text: 'restored' });
+  });
+
+  it.each(['session', 'same-session-history'] as const)(
+    'does not publish delayed load_history over %s',
+    async (change) => {
+      let release!: () => void;
+      let sessionId = 'original';
+      const setHistory = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+      const config = {
+        getSessionId: () => sessionId,
+        getLlmClient: () => ({ setHistory }),
+      } as unknown as Config;
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [
+          stub({
+            name: 'restore',
+            action: () => ({
+              type: 'load_history',
+              history: [{ type: 'info', text: 'old' }],
+              clientHistory: [],
+            }),
+          }),
+        ],
+      );
+      const pending = dispatcher.handle('/restore');
+      await vi.waitFor(() => expect(setHistory).toHaveBeenCalledOnce());
+      if (change === 'session') sessionId = 'new';
+      host.loadHistory([{ id: 900, type: 'user', text: 'successor' }]);
+      host.calls.length = 0;
+      release();
+      expect(await pending).toEqual({ kind: 'handled' });
+      expect(host.items).toEqual([
+        { id: 900, type: 'user', text: 'successor' },
+      ]);
+      expect(host.calls).not.toContain('clearItems');
+      expect(host.calls).not.toContain('resetTranscript');
+    },
+  );
+
   it.each(['/quit', '/exit', 'exit', 'quit', ':q', ':q!', ':wq', ':wq!'])(
     'keeps the latest real prompt after bare quit token %s',
     async (token) => {
