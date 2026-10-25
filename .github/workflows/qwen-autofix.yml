@@ -2864,21 +2864,19 @@ jobs:
                 | ((.body // "") | [ scan("<!-- autofix-round-start ([0-9]{1,2}) -->") ] | .[] | .[0]) ]
               | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
             [[ "${ROUND_START}" =~ ^[0-9]{1,2}$ ]] || ROUND_START=0
-            # Round budget: the seed's window anchor and equality read, lowering
-            # this window's cap to N before the seed clamp. → af-159
-            ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${REARM_KEY}" '
-              [ .[] | select((.user.login // "") == $ab)
-                | select((.created_at // "") == $key)
-                | ((.body // "") | [ scan("<!-- autofix-round-budget ([0-9]{1,2}) -->") ] | .[] | .[0]) ]
-              | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
+            # Per ENGAGEMENT, not per window: a command opens one, an automatic
+            # growth-audit re-arm does not (its comment carries an eval marker).
+            BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
+            ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg f "${BUDGET_FLOOR}" '[ .[] | select((.user.login // "") == $ab) | select((.created_at // "") >= $f) | ((.body // "") | [ scan("<!-- autofix-round-budget ([1-9][0-9]?) -->") ] | .[] | .[0]) ] | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
             [[ "${ROUND_BUDGET}" =~ ^[0-9]{1,2}$ ]] || ROUND_BUDGET=0
             if [[ "${ROUND_BUDGET}" -gt 0 && "${ROUND_BUDGET}" -lt "${EFF_MAX_ROUNDS}" ]]; then
               EFF_MAX_ROUNDS="${ROUND_BUDGET}"
             fi
-            # The budget counts ATTEMPTS (eval markers), not ROUND: a no-op
-            # writes one with its round unchanged; a breaker sentinel adds none.
-            BUDGET_USED="$(jq -r --arg key "${REARM_KEY}" '[.[] | select(.win == $key)] | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
+            BUDGET_USED="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.at >= $f) | "\(.ts)|\(.round)" ] | unique | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
             [[ "${BUDGET_USED}" =~ ^[0-9]+$ ]] || BUDGET_USED=0
+            # A trailing failure streak is a breaker stop, not a spent budget.
+            BUDGET_STREAK="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.at >= $f) ] | reverse | [ .[] | .ts == "9999-12-31T23:59:59Z" ] | (index(false) // length)' <<< "${MARKERS}" 2> /dev/null || echo 0)"
+            [[ "${BUDGET_STREAK}" =~ ^[0-9]+$ ]] || BUDGET_STREAK=0
             BUDGET_SPENT=false
             [[ "${ROUND_BUDGET}" -gt 0 && "${BUDGET_USED}" -ge "${ROUND_BUDGET}" ]] && BUDGET_SPENT=true
             # Clamp strictly below the effective cap. The seed must be able to
@@ -2916,7 +2914,7 @@ jobs:
             if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" || "${BUDGET_SPENT}" == 'true' ]]; then
               IS_BOT_AUTHOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '((.author.login // "") == $ab)' <<< "${PR_META}")"
               # '<cmd> for N' spent its BUDGET: a human PR is RELEASED, a bot PR keeps the paused path. → af-159
-              if [[ "${BUDGET_SPENT}" == 'true' && "${IS_BOT_AUTHOR}" != 'true' ]]; then
+              if [[ "${BUDGET_SPENT}" == 'true' && "${IS_BOT_AUTHOR}" != 'true' && "${BUDGET_STREAK}" -lt "${TIMEOUT_WINDOW_CAP}" && -z "${FORCED_PR}" ]]; then
                 fleet_row "${PR}" 'budget-spent' "budget ${BUDGET_USED}/${ROUND_BUDGET} spent - releasing takeover"
                 BUDGET_RT="${REARM_KEY}"
                 [[ "${BUDGET_RT}" == "none" ]] && BUDGET_RT=''
@@ -4386,7 +4384,7 @@ jobs:
           LIVE_ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '[ .[] | select((.user.login // "") == $ab) | select((.created_at // "") == $key) | ((.body // "") | [ scan("<!-- autofix-round-budget ([0-9]{1,2}) -->") ] | .[] | .[0]) ] | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
           [[ "${LIVE_ROUND_BUDGET}" =~ ^[0-9]{1,2}$ ]] || LIVE_ROUND_BUDGET=0
           # Scan's census: one eval marker per attempt; a spent sibling leaves ROUND at 0.
-          LIVE_ATTEMPTS="$(jq -r --arg key "${LIVE_REARM_KEY}" '[.[] | select(.win == $key)] | length' <<< "${LIVE_MARKS}" 2> /dev/null || echo 0)"
+          LIVE_ATTEMPTS="$(jq -r --arg key "${LIVE_REARM_KEY}" '[.[] | select(.win == $key) | "\(.ts)|\(.round)"] | unique | length' <<< "${LIVE_MARKS}" 2> /dev/null || echo 0)"
           [[ "${LIVE_ATTEMPTS}" =~ ^[0-9]+$ ]] || LIVE_ATTEMPTS=0
           # The head a sibling last judged, mirrored from the scan's RED_HEAD
           # parse. A no-op sibling records this marker while leaving BOTH ts and
@@ -6095,14 +6093,7 @@ jobs:
             esac
             echo "<!-- autofix-growth-audit verdict=${AUDIT_VERDICT} win=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
             if [[ "${AUDIT_VERDICT}" == 'sound' && "${allow_rearm}" == 'true' ]]; then
-              # af-159: never rebase a bounded engagement — the new window carries no budget.
-              local budgeted='false'
-              if jq -r --arg ab "${AUTOFIX_BOT}" --arg k "${WINDOW:-none}" 'any(.[]; (.user.login // "") == $ab and (.created_at // "") == $k and ((.body // "") | test("autofix-round-budget [1-9]")))' "${WORKDIR}/ic.json" 2> /dev/null | grep -qx true; then
-                budgeted='true'
-              fi
-              # An `if`, not `[[ ... ]] && echo`: the script runs under `-e`, and a
-              # false test as the LAST command would return 1 and abort the report.
-              if [[ "${budgeted}" != 'true' ]]; then echo "<!-- autofix-rearm -->"; fi
+              echo "<!-- autofix-rearm -->"
             fi
           }
           SUFFIX=''

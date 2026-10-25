@@ -99,13 +99,15 @@ loop runs at most N rounds and then stops touching the PR.
    budget discards it too and the next scan re-selects the conflict under the
    new window.
 
-7. **An automatic re-arm never rebases a bounded engagement.** The growth audit
-   appends `<!-- autofix-rearm -->` to open a fresh window for its own round
-   accounting. A window opened that way carries no budget marker, so rebasing a
-   `for N` engagement would silently restore the 100-round cap without any
-   maintainer asking for it. The report script therefore skips the automatic
-   re-arm while the current window carries a budget; the audit round simply
-   stays inside the budget it was given.
+7. **An automatic re-arm rebases the growth window, and the budget rides
+   along.** The growth audit appends `<!-- autofix-rearm -->` to open a fresh
+   window for its own round accounting — that marker is also the only automatic
+   mover of the growth baseline, so suppressing it would pin the baseline after
+   the first over-budget round and make every later round Critical-only.
+   Budget and spend are therefore read per ENGAGEMENT rather than per window: a
+   maintainer command opens one, an automatic re-arm (its comment also carries
+   that round's eval marker) does not, so the audit rebases the baseline while
+   the remaining budget and the attempts already spent continue to apply.
 
 8. **Prepare mirrors the scan's attempt census.** A queued round can outlive the
    sibling that spent the window's last attempt: a no-op leaves `ROUND` at 0 and

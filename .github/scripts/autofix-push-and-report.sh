@@ -123,14 +123,7 @@ emit_growth_audit_marker() {
   esac
   echo "<!-- autofix-growth-audit verdict=${AUDIT_VERDICT} win=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
   if [[ "${AUDIT_VERDICT}" == 'sound' && "${allow_rearm}" == 'true' ]]; then
-    # af-159: never rebase a bounded engagement — the new window carries no budget.
-    local budgeted='false'
-    if jq -r --arg ab "${AUTOFIX_BOT}" --arg k "${WINDOW:-none}" 'any(.[]; (.user.login // "") == $ab and (.created_at // "") == $k and ((.body // "") | test("autofix-round-budget [1-9]")))' "${WORKDIR}/ic.json" 2> /dev/null | grep -qx true; then
-      budgeted='true'
-    fi
-    # An `if`, not `[[ ... ]] && echo`: the script runs under `-e`, and a
-    # false test as the LAST command would return 1 and abort the report.
-    if [[ "${budgeted}" != 'true' ]]; then echo "<!-- autofix-rearm -->"; fi
+    echo "<!-- autofix-rearm -->"
   fi
 }
 if [[ -z "${GITHUB_TOKEN}" ]]; then

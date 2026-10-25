@@ -3569,7 +3569,7 @@ describe('qwen-autofix workflow', () => {
     // scoping is the property that keeps a spent budget from leaking into the
     // next window, so it is worth a behavioral test rather than a substring.
     const budgetRead = reviewScanJob.match(
-      /(ROUND_BUDGET="\$\(jq[\s\S]*?\n {12}fi)/,
+      /(BUDGET_FLOOR="\$\(jq[\s\S]*?\n {12}fi)/,
     )?.[1];
     expect(budgetRead).toBeTruthy();
     const budget = (comments, key) => {
@@ -3650,7 +3650,7 @@ describe('qwen-autofix workflow', () => {
     // (note + label DELETE, no escalation) and never promotes the PR to
     // autofix/needs-human. Replay with a PATH-stubbed gh.
     const release = reviewScanJob.match(
-      /(if \[\[ "\$\{BUDGET_SPENT\}" == 'true' && "\$\{IS_BOT_AUTHOR\}" != 'true' \]\]; then[\s\S]*?\n {14}fi)/,
+      /(if \[\[ "\$\{BUDGET_SPENT\}" == 'true'[\s\S]*?\n {14}fi)/,
     )?.[1];
     expect(release).toBeTruthy();
     const runRelease = ({
@@ -3698,6 +3698,9 @@ describe('qwen-autofix workflow', () => {
               ROUND_BUDGET: '2',
               ROUND: '2',
               BUDGET_USED: '2',
+              BUDGET_STREAK: '0',
+              FORCED_PR: '',
+              TIMEOUT_WINDOW_CAP: '3',
               BUDGET_SPENT: 'true',
               DRY_RUN: dryRun,
               IS_BOT_AUTHOR: 'false',
@@ -3768,7 +3771,7 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `REARM_KEY='K1'\nROUND_BUDGET='${budget}'\nMARKERS='${JSON.stringify(markers)}'\n${used.replace(/\n {12}/g, '\n')}\nprintf '%s %s' "$BUDGET_USED" "$BUDGET_SPENT"`,
+          `REARM_KEY='K1'\nROUND_BUDGET='${budget}'\nBUDGET_FLOOR=''\nMARKERS='${JSON.stringify(markers)}'\n${used.replace(/\n {12}/g, '\n')}\nprintf '%s %s' "$BUDGET_USED" "$BUDGET_SPENT"`,
         ],
         { encoding: 'utf8' },
       ).trim();
@@ -3790,8 +3793,10 @@ describe('qwen-autofix workflow', () => {
         '20',
       ),
     ).toBe('5 false');
-    // A previous window's markers never count toward this one.
-    expect(spent([mk('OLD', 1)], '1')).toBe('0 false');
+    // Per engagement: with no command floor every marker counts, and a
+    // re-posted round (same ts + round) charges once.
+    expect(spent([mk('OLD', 1)], '1')).toBe('1 true');
+    expect(spent([mk('K1', 1), mk('K1', 1), mk('K1', 2)], '5')).toBe('2 false');
     // A PR without a budget never spends one.
     expect(spent([mk('K1', 1)], '0')).toBe('1 false');
   });
@@ -3824,10 +3829,11 @@ describe('qwen-autofix workflow', () => {
     expect(run('false', '0')).toBe('true');
   });
 
-  it('keeps a bounded engagement bounded across an automatic growth-audit re-arm', () => {
-    // The audit's automatic re-arm exists to rebase the round window, but a
-    // window opened that way carries no budget marker — so rebasing a `for N`
-    // engagement would silently restore the 100-round cap (P1).
+  it('inherits the budget across an automatic growth-audit re-arm', () => {
+    // The audit's re-arm is what rebases the growth baseline, so it must stay
+    // unconditional. The budget survives it because the scan reads budget and
+    // spend per ENGAGEMENT: a command anchor opens one, an automatic re-arm
+    // (that comment also carries an eval marker) does not.
     const script = readFileSync(
       resolve(
         dirname(fileURLToPath(import.meta.url)),
@@ -3839,49 +3845,87 @@ describe('qwen-autofix workflow', () => {
       /(emit_growth_audit_marker\(\) \{[\s\S]*?\n\})/,
     )?.[1];
     expect(fn).toBeTruthy();
-    const run = (ic, verdict = 'sound') => {
-      const dir = mkdtempSync(join(tmpdir(), 'autofix-audit-rearm-'));
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-audit-rearm-'));
+    try {
+      writeFileSync(
+        join(dir, 'ic.json'),
+        JSON.stringify([
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: 'W1',
+            body: '<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->',
+          },
+        ]),
+      );
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `KISS_AUDIT=true\nAUDIT_VERDICT='sound'\nGROWTH_BASE_WIN='W1'\nWINDOW='W1'\nWORKDIR='${dir}'\nAUTOFIX_BOT='qwen-code-dev-bot'\n${fn}\nemit_growth_audit_marker true`,
+        ],
+        { encoding: 'utf8' },
+      );
+      // A budgeted window still rebases: the carry is the scan's job.
+      expect(out).toContain('<!-- autofix-rearm -->');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    // The scan's floor read: an automatic re-arm leaves it, a command moves it.
+    const reads = reviewScanJob.match(
+      /(BUDGET_FLOOR="\$\(jq[\s\S]*?ROUND_BUDGET="\$\(jq[\s\S]*?\)")/,
+    )?.[1];
+    expect(reads).toBeTruthy();
+    const budgetAt = (comments) => {
+      const d = mkdtempSync(join(tmpdir(), 'autofix-floor-'));
       try {
-        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        writeFileSync(join(d, 'ic.json'), JSON.stringify(comments));
         return execFileSync(
           'bash',
           [
             '-c',
-            `KISS_AUDIT=true\nAUDIT_VERDICT='${verdict}'\nGROWTH_BASE_WIN='W1'\nWINDOW='W1'\nWORKDIR='${dir}'\nAUTOFIX_BOT='qwen-code-dev-bot'\n${fn}\nemit_growth_audit_marker true`,
+            `AUTOFIX_BOT='qwen-code-dev-bot'\nWORKDIR='${d}'\n${reads.replace(/\n {12}/g, '\n')}\nprintf '%s' "$ROUND_BUDGET"`,
           ],
           { encoding: 'utf8' },
-        );
+        )
+          .trim()
+          .split('\n')
+          .at(-1);
       } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmSync(d, { recursive: true, force: true });
       }
     };
-    const ack = (body) => [
-      { user: { login: 'qwen-code-dev-bot' }, created_at: 'W1', body },
-    ];
-    // Unbudgeted: the audit still rebases the window.
-    expect(run(ack('<!-- takeover-ack engaged -->'))).toContain(
-      '<!-- autofix-rearm -->',
-    );
-    // Budgeted: no re-arm, so the remaining budget survives the audit.
-    const budgeted = run(
-      ack('<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->'),
-    );
-    expect(budgeted).toContain('autofix-growth-audit');
-    expect(budgeted).not.toContain('autofix-rearm');
-    // A marker on another window never suppresses the re-arm.
+    const bot = (at, body) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: at,
+      body,
+    });
+    // Budget anchored by a command; an audit report re-arms after it.
     expect(
-      run([
-        {
-          user: { login: 'qwen-code-dev-bot' },
-          created_at: 'OLD',
-          body: '<!-- autofix-round-budget 2 -->',
-        },
+      budgetAt([
+        bot(
+          'T1',
+          '<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->',
+        ),
+        bot(
+          'T2',
+          '<!-- autofix-eval ts=x acted=false round=1 win=T1 -->\n<!-- autofix-rearm -->',
+        ),
       ]),
-    ).toContain('<!-- autofix-rearm -->');
-    // Only a `sound` audit re-arms at all.
-    expect(run(ack('<!-- takeover-ack engaged -->'), 'drift')).not.toContain(
-      'autofix-rearm',
-    );
+    ).toBe('2');
+    // A command re-arm AFTER it opens a fresh, unbudgeted engagement.
+    expect(
+      budgetAt([
+        bot(
+          'T1',
+          '<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->',
+        ),
+        bot(
+          'T2',
+          '<!-- autofix-eval ts=x acted=false round=1 win=T1 -->\n<!-- autofix-rearm -->',
+        ),
+        bot('T3', '<!-- autofix-rearm -->'),
+      ]),
+    ).toBe('0');
   });
 
   it('discards a same-window queued round once the attempt budget is spent', () => {

@@ -154,10 +154,12 @@ far past the real attempts and posts no extra marker — so the window is not
 "spent" and the PR lands on the normal paused path with `autofix/needs-human`. A
 breaker asks for a human; the release note would be wrong.
 
-**An automatic re-arm never rebases a bounded engagement.** A growth-audit round
-normally appends `autofix-rearm` to open a fresh window for its own round
-accounting; while the window carries a budget the loop skips that marker, so the
-audit stays inside the budget instead of silently restoring the 100-round cap.
+**An automatic re-arm rebases the growth window, and the budget rides along.**
+A growth-audit round appends `autofix-rearm` for its own round accounting — the
+only automatic mover of the growth baseline — so suppressing it would pin the
+baseline and make every later round Critical-only. The budget and the attempts
+spent are therefore counted per engagement: a command opens one, that automatic
+re-arm does not, so the audit rebases while the remaining budget still applies.
 
 **A queued round from the same window is discarded once the budget is spent.** A
 no-op leaves the round number at 0 and the window key unchanged, so neither the
