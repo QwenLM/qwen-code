@@ -16,6 +16,7 @@ import { ToolMode } from '../tools/code-mode.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import type { ExecutionEnvironment } from '../services/execution-environment.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
 
 let root: string;
 let projectDir: string;
@@ -79,6 +80,58 @@ async function modeRecords(config: Config): Promise<ChatRecord[]> {
 }
 
 describe('Config durable workflow mode', () => {
+  it.each([false, true])(
+    'rejects a daemon-denied mode write %s before persistence or publication',
+    async (enabled) => {
+      const config = createConfig({ trustedFolder: true });
+      await config.initialize();
+      const listener = vi.fn();
+      config.onWorkflowModeChange(listener);
+      const context = {
+        version: 1 as const,
+        sessionId: config.getSessionId(),
+        promptId: 'untrusted-owner',
+        workflowModeWriteAllowed: false,
+      };
+
+      await expect(
+        runWithInvocationContext(context, () =>
+          config.setWorkflowMode(enabled),
+        ),
+      ).rejects.toThrow('Workspace is not trusted');
+      expect(await modeRecords(config)).toEqual([]);
+      expect(listener).not.toHaveBeenCalled();
+      expect(config.getWorkflowMode().requested).toBe(false);
+      expect(config.prepareWorkflowMode(null).reminder).toBeUndefined();
+    },
+  );
+
+  it.each([undefined, true])(
+    'preserves status/off with unavailable tools when daemon permission is %s',
+    async (workflowModeWriteAllowed) => {
+      const config = createConfig({ workflowsEnabled: false });
+      await config.initialize();
+      const context = {
+        version: 1 as const,
+        sessionId: config.getSessionId(),
+        promptId: 'allowed-owner',
+        ...(workflowModeWriteAllowed !== undefined
+          ? { workflowModeWriteAllowed }
+          : {}),
+      };
+      await runWithInvocationContext(context, async () => {
+        expect(config.getWorkflowMode().available).toBe(false);
+        await expect(config.setWorkflowMode(false)).resolves.toMatchObject({
+          requested: false,
+          available: false,
+        });
+      });
+      expect(
+        (await modeRecords(config)).map((record) => record.systemPayload),
+      ).toEqual([{ enabled: false }]);
+    },
+  );
+
   it('writes the first explicit false and coalesces committed identical writes', async () => {
     const config = createConfig();
     await config.initialize();

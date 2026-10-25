@@ -29,6 +29,7 @@ import {
   vi,
 } from 'vitest';
 import supertest from 'supertest';
+import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import { SessionAttachmentStore } from '@qwen-code/acp-bridge/sessionAttachments';
 import { WebSocket } from 'ws';
 import { trace, type Span } from '@opentelemetry/api';
@@ -41545,6 +41546,66 @@ describe('runQwenServe SIGINT handler', () => {
 });
 
 describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
+  it.each([true, false, undefined])(
+    'authorizes default bridge workflow mode writes from its live owner (trusted=%s)',
+    (trusted) => {
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => {
+          if (sessionId !== 'owned-session') {
+            throw new SessionNotFoundError(sessionId);
+          }
+          return {
+            sessionId,
+            workspaceCwd: process.cwd(),
+            createdAt: '2026-10-25T00:00:00Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          };
+        },
+      });
+      const createBridge = vi
+        .spyOn(acpBridge, 'createAcpSessionBridge')
+        .mockReturnValue(bridge);
+      try {
+        const app = createServeApp(baseOpts, undefined, {
+          ...(trusted !== undefined
+            ? { primaryWorkspaceTrusted: trusted }
+            : {}),
+        });
+        const registry = app.locals['workspaceRegistry'] as WorkspaceRegistry;
+        const options = createBridge.mock.calls[0]![0];
+        expect(options.isWorkflowModeWriteAllowed).toBeTypeOf('function');
+        expect(options.isWorkflowModeWriteAllowed!('missing-session')).toBe(
+          false,
+        );
+        options.sessionLifecycle!({
+          type: 'registered',
+          sessionId: 'owned-session',
+          workspaceCwd: registry.primary.workspaceCwd,
+          reason: 'spawn',
+        });
+        expect(options.isWorkflowModeWriteAllowed!('owned-session')).toBe(
+          trusted === true,
+        );
+        const resolveOwner = vi.spyOn(registry, 'resolveLiveSessionOwner');
+        resolveOwner.mockReturnValue({
+          kind: 'found',
+          runtime: { ...registry.primary, bridge: fakeBridge(), trusted: true },
+        });
+        expect(options.isWorkflowModeWriteAllowed!('owned-session')).toBe(
+          false,
+        );
+        resolveOwner.mockRestore();
+        registry.primaryEntry.current!.guard.close();
+        expect(options.isWorkflowModeWriteAllowed!('owned-session')).toBe(
+          false,
+        );
+      } finally {
+        createBridge.mockRestore();
+      }
+    },
+  );
+
   function makeInjectedWorkspaceRuntime() {
     const bridge = fakeBridge();
     const fsFactory = {

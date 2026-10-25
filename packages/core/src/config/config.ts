@@ -11,6 +11,7 @@ import {
 } from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
 import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
@@ -10788,6 +10789,9 @@ export class Config {
     }
     if (!this.isWorkflowModeSupported()) {
       throw new Error('Workflow mode is unsupported for this session');
+    }
+    if (getInvocationContext()?.workflowModeWriteAllowed === false) {
+      throw new Error('Workspace is not trusted.');
     }
     if (!this.workflowModeReady) {
       throw new Error('Workflow mode is not initialized');

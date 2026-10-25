@@ -11703,7 +11703,14 @@ export function createSessionControlPlane(
                       meta[CHANNEL_OUTPUT_MODE_META_KEY] = channelOutputMode;
                     }
                   }
-                  meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
+                  meta[INVOCATION_CONTEXT_META_KEY] =
+                    opts.isWorkflowModeWriteAllowed
+                      ? {
+                          ...invocationContext,
+                          workflowModeWriteAllowed:
+                            opts.isWorkflowModeWriteAllowed(sessionId) === true,
+                        }
+                      : invocationContext;
                   if (Object.keys(meta).length > 0) {
                     copy._meta = meta;
                   } else {
