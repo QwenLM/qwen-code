@@ -144,8 +144,10 @@ import {
   PromptSuggestionEvent,
   getErrorStatus,
   UserPromptEvent,
+  getStructuredErrorCause,
   LlmEventType,
   SendMessageType,
+  type StructuredError,
   type UserPromptAdmission,
   readManyFiles,
   getSpecificMimeType,
@@ -1141,6 +1143,8 @@ function formatCompressionDiagnostic(
       ? `accumulated enough tool screenshots to trigger compaction for ${model}`
       : `approached the input token limit for ${model}`;
   const warningSuffix = info.warning ? `\n⚠️ ${info.warning}` : '';
+  // Estimated counts (#9309) get a '~' prefix so the notice doesn't read as an
+  // API-reported figure on a different scale than a later banner.
   const formatCount = (count?: number, isEstimated?: boolean) =>
     count === undefined ? 'unknown' : isEstimated ? `~${count}` : String(count);
   return (
@@ -1153,8 +1157,14 @@ function formatCompressionDiagnostic(
 }
 
 /** The error a model stream reported, thrown as a failed send throws it. */
-function modelStreamError(error: { message: string; status?: number }): Error {
-  return Object.assign(new Error(error.message), { status: error.status });
+function modelStreamError(error: StructuredError): unknown {
+  return (
+    getStructuredErrorCause(error) ??
+    Object.assign(new Error(error.message), {
+      status: error.status,
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+    })
+  );
 }
 
 function createLoopDetectedTurnError(
@@ -7217,7 +7227,8 @@ export class Session implements SessionContext {
             // the shared agent loop's round. `LlmClient` then does the steps
             // the current path does here itself: UserPromptSubmit on the
             // admitted verdict, memory recall, the file-history snapshot,
-            // system reminders, workflow intent and the Stop hook.
+            // system reminders and workflow intent. The Stop hook stays with
+            // ACP's Stop loop, which also runs ACP's own continuations.
             const sharedModelRound =
               this.config.isUnifiedAgentLoopEnabled?.() === true &&
               isFreshUserTurn &&
@@ -7744,25 +7755,6 @@ export class Session implements SessionContext {
                   const cutForInput = () =>
                     responseInterrupt.signal.aborted &&
                     !pendingSend.signal.aborted;
-                  // The Stop hook runs inside the round, after its request
-                  // finished: report that request's usage before the hook's
-                  // output, as the current path reports each request's.
-                  const reportFinishedRequestUsage = async () => {
-                    if (!usageMetadata) return;
-                    this.#recordPromptTokenCount(
-                      usageMetadata,
-                      requestRouteKey,
-                    );
-                    if (this.messageRewriter) {
-                      this.messageRewriter.flushTurn(pendingSend.signal);
-                    }
-                    await this.messageEmitter.emitUsageMetadata(
-                      usageMetadata,
-                      '',
-                      Date.now() - streamStartTime,
-                    );
-                    usageMetadata = null;
-                  };
                   try {
                     ({ stop: roundStop } = await runModelRound(
                       this.config.getLlmClient(),
@@ -7775,6 +7767,7 @@ export class Session implements SessionContext {
                                 type: SendMessageType.UserQuery,
                                 modelOverride: fullTurnModelOverride,
                                 userTurnRecordedByHost: true,
+                                stopHookRunByHost: true,
                                 toolCallPreparations: true,
                                 promptAdmission,
                                 ...(workflowHumanInput && {
@@ -7793,6 +7786,7 @@ export class Session implements SessionContext {
                                   ? SendMessageType.ToolResult
                                   : SendMessageType.Steer,
                                 modelOverride: fullTurnModelOverride,
+                                stopHookRunByHost: true,
                                 toolCallPreparations: true,
                               },
                       },
@@ -7800,7 +7794,12 @@ export class Session implements SessionContext {
                       {
                         onModelEvent: async (event) => {
                           if (pendingSend.signal.aborted) return;
-                          if (!responseOpened) {
+                          // Open while a response streams, as `watch` keeps
+                          // the window around the current path's stream.
+                          if (event.type === LlmEventType.Finished) {
+                            responseOpened = false;
+                            responseInterrupt.end();
+                          } else if (!responseOpened) {
                             responseOpened = true;
                             responseInterrupt.begin();
                           }
@@ -7904,26 +7903,6 @@ export class Session implements SessionContext {
                                 `Failed to emit token limit diagnostic for prompt ${promptId}`,
                               );
                               break;
-                            case LlmEventType.HookSystemMessage:
-                              // The Stop hook's continuation, like the current
-                              // path's, is not cut short by queued input.
-                              responseInterrupt.end();
-                              await reportFinishedRequestUsage();
-                              await this.messageEmitter.emitAgentMessage(
-                                event.value,
-                              );
-                              break;
-                            case LlmEventType.StopHookLoop:
-                              responseInterrupt.end();
-                              await reportFinishedRequestUsage();
-                              if (event.value.iterationCount > 1) {
-                                await this.messageEmitter.emitStopHookLoop(
-                                  event.value.iterationCount,
-                                  event.value.reasons,
-                                  event.value.stopHookCount,
-                                );
-                              }
-                              break;
                             case LlmEventType.LoopDetected:
                               loopStop = event.value;
                               break;
@@ -7938,53 +7917,20 @@ export class Session implements SessionContext {
                   } catch (error) {
                     streamFailed = true;
                     if (!cutForInput()) {
-                      const isControlledCancellation =
-                        pendingSend.signal.aborted &&
-                        (pendingSend.signal.reason ===
-                          USER_CANCEL_ABORT_REASON ||
-                          pendingSend.signal.reason ===
-                            SESSION_DISPOSE_ABORT_REASON ||
-                          pendingSend.signal.reason ===
-                            INTERRUPTED_PROMPT_ABORT_REASON);
-                      if (isControlledCancellation) {
-                        this.todoStopGuard.suspend();
-                        return { stopReason: 'cancelled' };
-                      }
-                      this.todoStopGuard.pauseForTrustedRetry();
-                      const errorStatus = getErrorStatus(error);
-                      const errorMessage =
-                        error instanceof Error ? error.message : String(error);
-                      const hookSystem = this.config.getHookSystem?.();
-                      if (
-                        !this.config.getDisableAllHooks?.() &&
-                        hookSystem &&
-                        this.config.hasHooksForEvent?.('StopFailure')
-                      ) {
-                        hookSystem
-                          .fireStopFailureEvent(
-                            classifyApiError({
-                              message: errorMessage,
-                              status: errorStatus,
-                            }),
-                            errorMessage,
-                          )
-                          .catch((err) => {
-                            debugLogger.warn(`StopFailure hook failed: ${err}`);
-                          });
-                      }
-                      if (errorStatus === 429) {
-                        throw new RequestError(
-                          429,
-                          'Rate limit exceeded. Try again later.',
-                        );
-                      }
-                      throw error;
+                      return this.#endFailedModelRound(
+                        error,
+                        pendingSend.signal,
+                      );
                     }
                   } finally {
                     responseInterrupt.end();
+                    // A round that stopped, such as on the client's loop
+                    // guard, runs none of the calls it already yielded.
                     await finalizeToolCallPreparations(
                       preparationTracker,
-                      streamFailed || pendingSend.signal.aborted,
+                      streamFailed ||
+                        pendingSend.signal.aborted ||
+                        roundStop !== undefined,
                       'main prompt',
                     );
                   }
@@ -8223,62 +8169,11 @@ export class Session implements SessionContext {
                       strippedOrphanEntries = null;
                     }
 
-                    // Explicit user cancellation and session disposal are
-                    // controlled aborts, and so is the bridge's forwarded
-                    // interruption token. Other AbortErrors still surface so
-                    // infrastructure failures are not hidden as cancellations.
                     // A response cut short by queued input gets here only when
                     // the turn itself is stopped meanwhile, and the turn's
                     // abort reason then decides; otherwise `watch` absorbs
                     // whatever it throws once cut.
-                    const isControlledCancellation =
-                      pendingSend.signal.aborted &&
-                      (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-                        pendingSend.signal.reason ===
-                          SESSION_DISPOSE_ABORT_REASON ||
-                        pendingSend.signal.reason ===
-                          INTERRUPTED_PROMPT_ABORT_REASON);
-                    if (isControlledCancellation) {
-                      this.todoStopGuard.suspend();
-                      return { stopReason: 'cancelled' };
-                    }
-
-                    this.todoStopGuard.pauseForTrustedRetry();
-
-                    // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-                    // Aligned with use-llm-stream.ts handleFinishedWithErrorEvent
-                    const errorStatus = getErrorStatus(error);
-                    const errorMessage =
-                      error instanceof Error ? error.message : String(error);
-                    const errorType = classifyApiError({
-                      message: errorMessage,
-                      status: errorStatus,
-                    });
-
-                    const hookSystem = this.config.getHookSystem?.();
-                    const hooksEnabledForStopFailure =
-                      !this.config.getDisableAllHooks?.();
-                    if (
-                      hooksEnabledForStopFailure &&
-                      hookSystem &&
-                      this.config.hasHooksForEvent?.('StopFailure')
-                    ) {
-                      // Fire-and-forget: don't wait for hook to complete
-                      hookSystem
-                        .fireStopFailureEvent(errorType, errorMessage)
-                        .catch((err) => {
-                          debugLogger.warn(`StopFailure hook failed: ${err}`);
-                        });
-                    }
-
-                    if (errorStatus === 429) {
-                      throw new RequestError(
-                        429,
-                        'Rate limit exceeded. Try again later.',
-                      );
-                    }
-
-                    throw error;
+                    return this.#endFailedModelRound(error, pendingSend.signal);
                   } finally {
                     // Deliver is_final (skipped on abort) and drain before the
                     // turn proceeds, on every exit: normal end-of-stream,
@@ -8412,7 +8307,7 @@ export class Session implements SessionContext {
                 promptId,
                 hooksEnabled,
                 messageBus,
-                !sharedModelRound,
+                true,
                 fullTurnModelOverride,
                 responseCapture,
                 rejectOnLoopDetected,
@@ -8458,6 +8353,55 @@ export class Session implements SessionContext {
         this.config.getLlmClient().finishManagedAutoMemoryRecall();
       }
     });
+  }
+
+  /**
+   * Ends a turn whose model round threw. Explicit user cancellation and
+   * session disposal are controlled aborts, and so is the bridge's forwarded
+   * interruption token; other AbortErrors still surface so infrastructure
+   * failures are not hidden as cancellations. A failure fires StopFailure
+   * (fire-and-forget, in place of Stop, as `use-llm-stream.ts`
+   * handleFinishedWithErrorEvent does) and is thrown.
+   */
+  #endFailedModelRound(
+    error: unknown,
+    turnSignal: AbortSignal,
+  ): { stopReason: 'cancelled' } {
+    if (
+      turnSignal.aborted &&
+      (turnSignal.reason === USER_CANCEL_ABORT_REASON ||
+        turnSignal.reason === SESSION_DISPOSE_ABORT_REASON ||
+        turnSignal.reason === INTERRUPTED_PROMPT_ABORT_REASON)
+    ) {
+      this.todoStopGuard.suspend();
+      return { stopReason: 'cancelled' };
+    }
+
+    this.todoStopGuard.pauseForTrustedRetry();
+
+    const errorStatus = getErrorStatus(error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const hookSystem = this.config.getHookSystem?.();
+    if (
+      !this.config.getDisableAllHooks?.() &&
+      hookSystem &&
+      this.config.hasHooksForEvent?.('StopFailure')
+    ) {
+      hookSystem
+        .fireStopFailureEvent(
+          classifyApiError({ message: errorMessage, status: errorStatus }),
+          errorMessage,
+        )
+        .catch((err) => {
+          debugLogger.warn(`StopFailure hook failed: ${err}`);
+        });
+    }
+
+    if (errorStatus === 429) {
+      throw new RequestError(429, 'Rate limit exceeded. Try again later.');
+    }
+
+    throw error;
   }
 
   async #handleStopHookLoop(
@@ -10071,28 +10015,10 @@ export class Session implements SessionContext {
           // task block (a short reminder refers back to a message that is no
           // longer in context).
           this.loopTickResolver?.resetCache();
-          const reasonClause =
-            compressed.triggerReason === 'image_overflow'
-              ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
-              : `approached the input token limit for ${this.config.getModel()}`;
-          const warningSuffix = compressed.warning
-            ? `\n⚠️ ${compressed.warning}`
-            : '';
-          // Estimated counts (#9309) get a '~' prefix so the notice doesn't
-          // read as an API-reported figure on a different scale than a later
-          // banner.
-          const formatCount = (count?: number, isEstimated?: boolean) =>
-            count === undefined
-              ? 'unknown'
-              : isEstimated
-                ? `~${count}`
-                : String(count);
-          compressionDiagnostic =
-            `IMPORTANT: This conversation ${reasonClause}. ` +
-            `A compressed context will be sent for future messages (compressed from: ` +
-            `${formatCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} to ` +
-            `${formatCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)} tokens).` +
-            warningSuffix;
+          compressionDiagnostic = formatCompressionDiagnostic(
+            compressed,
+            this.config.getModel(),
+          );
         }
       } catch (compressionError) {
         if (abortSignal.aborted) {

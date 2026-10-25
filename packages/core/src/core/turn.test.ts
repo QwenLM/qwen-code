@@ -17,6 +17,7 @@ import {
   Turn,
   LlmEventType,
   createDuplicateProviderToolCallResponse,
+  getStructuredErrorCause,
   findRepeatedDuplicateProviderToolCall,
 } from './turn.js';
 import type {
@@ -594,6 +595,7 @@ describe('Turn', () => {
       expect(errorEvent.value).toEqual({
         error: { message: 'API Error', status: undefined },
       });
+      expect(getStructuredErrorCause(errorEvent.value.error)).toBe(error);
       expectReported(error, {
         rawLength: 1,
         tail: [summary(1, 'Previous history', { role: 'model' })],

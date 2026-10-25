@@ -11858,6 +11858,28 @@ Other open files:
         );
       });
 
+      it('leaves the Stop hook to a host that runs it after the round', async () => {
+        const request = blockStopOnce();
+        installMessageBus(request, 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-by-host', {
+          type: SendMessageType.UserQuery,
+          stopHookRunByHost: true,
+        });
+
+        expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        expect(request).not.toHaveBeenCalledWith(
+          expect.objectContaining({ eventName: 'Stop' }),
+          expect.anything(),
+        );
+      });
+
       it('gives a blocking Stop hook continuation a fresh exploration phase', async () => {
         // The nested restart is submitted with `type: SendMessageType.Hook`,
         // which is not an interaction-starting type, so the reset beside the

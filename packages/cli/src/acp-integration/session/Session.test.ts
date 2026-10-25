@@ -141,6 +141,7 @@ const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
+const structuredErrorCauses = vi.hoisted(() => new WeakMap<object, unknown>());
 
 // Session imports logLoopProtection from the loggers module, not the barrel.
 vi.mock(
@@ -180,6 +181,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
     refreshMemoryInstruction: refreshMemoryInstructionSpy,
     getActiveInteractionSpan: agentTelemetry.getActiveInteractionSpan,
+    getStructuredErrorCause: (error: core.StructuredError) =>
+      structuredErrorCauses.get(error) ?? actual.getStructuredErrorCause(error),
     addAgentInputMessageAttributes:
       agentTelemetry.addAgentInputMessageAttributes,
     AgentOutputMessageCapture: class {
@@ -4583,54 +4586,94 @@ describe('Session', () => {
       });
     });
 
-    it('reports the usage of a request a Stop hook continued before the hook output', async () => {
-      useSharedRounds([
-        text('one'),
-        finished(FinishReason.STOP, {
-          promptTokenCount: 8,
-          totalTokenCount: 10,
-        }),
-        { type: core.LlmEventType.HookSystemMessage, value: 'noted' },
-        {
-          type: core.LlmEventType.StopHookLoop,
-          value: { iterationCount: 1, reasons: ['more'], stopHookCount: 1 },
-        },
-        text('two'),
-        finished(FinishReason.STOP, {
-          promptTokenCount: 18,
-          totalTokenCount: 20,
-        }),
-      ]);
-
-      await prompt();
-
-      const order = updates()
-        .map((update) =>
-          update._meta?.['usage'] !== undefined
-            ? 'usage'
-            : update.content?.type === 'text'
-              ? update.content.text
-              : '',
-        )
-        .filter((entry) => ['one', 'two', 'noted', 'usage'].includes(entry));
-      expect(order).toEqual(['one', 'usage', 'noted', 'two', 'usage']);
-    });
-
-    it('leaves the Stop hook to the client', async () => {
-      useSharedRounds([text('done'), finished()]);
-      const request = vi.fn().mockResolvedValue({ success: true, output: {} });
+    function useStopHook(decisions: Array<Record<string, unknown>>) {
+      const request = vi.fn().mockImplementation(async (message) => ({
+        success: true,
+        output:
+          message.eventName === 'Stop' ? (decisions.shift() ?? {}) : undefined,
+      }));
       mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.hasHooksForEvent = vi
         .fn()
         .mockImplementation((eventName: string) => eventName === 'Stop');
+      return request;
+    }
+    const stopRequests = (request: ReturnType<typeof vi.fn>) =>
+      request.mock.calls.filter(([message]) => message.eventName === 'Stop');
+
+    it("fires the Stop hook in the session's Stop loop, not in the client", async () => {
+      const send = useSharedRounds([text('done'), finished()]);
+      const request = useStopHook([]);
 
       await prompt();
 
-      expect(request).not.toHaveBeenCalledWith(
-        expect.objectContaining({ eventName: 'Stop' }),
-        expect.anything(),
+      expect(send.mock.calls[0][3]).toMatchObject({ stopHookRunByHost: true });
+      expect(stopRequests(request)).toHaveLength(1);
+      expect(stopRequests(request)[0][0].input).toMatchObject({
+        stop_hook_active: false,
+      });
+    });
+
+    it("judges the session's own continuation with the Stop hook again", async () => {
+      useSharedRounds([text('first'), finished()]);
+      const request = useStopHook([
+        { decision: 'block', reason: 'run the tests' },
+      ]);
+      const continuation = vi.fn().mockResolvedValue(createEmptyStream());
+      mockChat.sendMessageStream = continuation;
+
+      await prompt();
+
+      expect(continuation).toHaveBeenCalledOnce();
+      expect(continuation.mock.calls[0][2]).toBe(
+        'test-session-id########1_stop_hook_1',
       );
+      expect(stopRequests(request)).toHaveLength(2);
+      expect(stopRequests(request)[1][0].input).toMatchObject({
+        stop_hook_active: true,
+      });
+    });
+
+    it('discards the tool cards of a round the loop guard stopped', async () => {
+      const execute = useTool(core.Kind.Read, 'read_file');
+      useSharedRounds([
+        {
+          type: core.LlmEventType.ToolCallPreparation,
+          value: { callId: 'call-read', toolName: 'read_file' },
+        },
+        toolCall({ id: 'call-read', name: 'read_file', args: {} }),
+        { type: core.LlmEventType.LoopDetected },
+      ]);
+
+      await expect(prompt()).rejects.toMatchObject({ code: -32603 });
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(updates()).toContainEqual(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-read',
+          status: 'failed',
+          _meta: expect.objectContaining({ preparationDiscarded: true }),
+        }),
+      );
+    });
+
+    it('throws the error the provider threw', async () => {
+      const providerError = Object.assign(new Error('upstream exploded'), {
+        status: 500,
+        code: 'upstream_failure',
+      });
+      const structured: core.StructuredError = {
+        message: 'friendly text',
+        status: 500,
+      };
+      structuredErrorCauses.set(structured, providerError);
+      useSharedRounds([
+        { type: core.LlmEventType.Error, value: { error: structured } },
+      ]);
+
+      await expect(prompt()).rejects.toBe(providerError);
     });
 
     it('keeps a retry on the current path', async () => {
@@ -27726,6 +27769,55 @@ describe('Session', () => {
               });
             },
           );
+
+          it('leaves a finished response alone while the round goes on', async () => {
+            mockClient.extMethod = vi
+              .fn()
+              .mockResolvedValueOnce({ messages: ['use plan B instead'] })
+              .mockResolvedValue({ messages: [] });
+            let markFinished!: () => void;
+            const finished = new Promise<void>((resolve) => {
+              markFinished = resolve;
+            });
+            let release!: () => void;
+            const released = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            const signals: AbortSignal[] = [];
+            mockConfig.isUnifiedAgentLoopEnabled = vi
+              .fn()
+              .mockReturnValue(true);
+            Object.assign(mockLlmClient, {
+              admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
+              sendMessageStream: vi.fn(
+                (_parts: Part[], signal: AbortSignal) => {
+                  signals.push(signal);
+                  if (signals.length > 1) return createEmptyStream();
+                  return (async function* () {
+                    yield { type: core.LlmEventType.Content, value: 'plan A' };
+                    yield {
+                      type: core.LlmEventType.Finished,
+                      value: { reason: FinishReason.STOP },
+                    };
+                    markFinished();
+                    // The client's own work after the response, such as a
+                    // next-speaker check.
+                    await released;
+                  })();
+                },
+              ),
+            });
+
+            const done = startPrompt();
+            await finished;
+            session.sendMidTurnInputNow();
+            await new Promise((resolve) => setImmediate(resolve));
+            release();
+
+            await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+            expect(signals[0].aborted).toBe(false);
+            expect(signals).toHaveLength(1);
+          });
         });
 
         it('cuts a response that has not streamed anything yet', async () => {

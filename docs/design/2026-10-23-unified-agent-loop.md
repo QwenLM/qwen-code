@@ -213,23 +213,24 @@ The current loop stays as the `else` branch and is not refactored while the sett
 
 PR 2 moves ACP in three steps. PR 2a moves the model round of a fresh user prompt: one that is not a retry, a continue or a restore, and not a Goal, channel or goal-proposal approval turn. The round is the loop's own `runModelRound`: one `LlmClient.sendMessageStream` call whose events go to ACP and whose terminal events become stop reasons. ACP keeps its tool step (`runToolCalls`, the next message after tools, the daemon tool-loop guards) and everything around the turn. PR 2b moves the other turns, and PR 2c moves the tool batch onto the scheduler.
 
-| ACP today                                                                                                         | With the setting on                                                                                                                                                              |
-| ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `chat.sendMessageStream` behind `#sendMessageStreamWithAutoCompression`                                           | `LlmClient.sendMessageStream` through `runModelRound`: the first round is `UserQuery`, a round after tools is `ToolResult`, and input taken while a response streamed is `Steer` |
-| raw chunks: text, thought, usage, function calls, tool-call preparations                                          | the client's events: `Content`, `Thought` with its raw `text`, the usage on `Finished`, `ToolCallRequest` with the `functionCall` it came from, `ToolCallPreparation`            |
-| UserPromptSubmit through the message bus                                                                          | `admitUserPrompt`, with the same input at the same point; the first round applies the verdict, and a blocked prompt is reported by that round without a request                  |
-| the user message record and the todo work chain                                                                   | ACP's, as today; the first round says so with `userTurnRecordedByHost`                                                                                                           |
-| memory recall, the file-history snapshot, plan, arena and output-style reminders, workflow intent, MessageDisplay | the client                                                                                                                                                                       |
-| compaction before the send and its notice; the session token gate                                                 | the client's compaction inside the send, with the same notice on `ChatCompressed`; the client's gate, reported as today (`max_tokens`)                                           |
-| the external Stop hook, its cap and its continuation                                                              | the client; ACP's Stop loop keeps the Todo Stop Guard and the current turn's background results                                                                                  |
-| the StopFailure hook and the 429 mapping when a request fails                                                     | ACP, as today, also for a stream `Error` event                                                                                                                                   |
-| the managed memory tasks after the turn                                                                           | the client, after the turn's last model round; ACP's when a `terminateTurn` result ends the turn                                                                                 |
-| no content loop detection, no session turn cap                                                                    | the client's `LoopDetected` rejects the prompt as a loop (`LOOP_DETECTED`); `MaxSessionTurns` ends it with `max_turn_requests`                                                   |
+| ACP today                                                                                                         | With the setting on                                                                                                                                                                                             |
+| ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chat.sendMessageStream` behind `#sendMessageStreamWithAutoCompression`                                           | `LlmClient.sendMessageStream` through `runModelRound`: the first round is `UserQuery`, a round after tools is `ToolResult`, and input taken while a response streamed is `Steer`                                |
+| raw chunks: text, thought, usage, function calls, tool-call preparations                                          | the client's events: `Content`, `Thought` with its raw `text`, the usage on `Finished`, `ToolCallRequest` with the `functionCall` it came from, `ToolCallPreparation`                                           |
+| UserPromptSubmit through the message bus                                                                          | `admitUserPrompt`, with the same input at the same point; the first round applies the verdict, and a blocked prompt is reported by that round without a request                                                 |
+| the user message record and the todo work chain                                                                   | ACP's, as today; the first round says so with `userTurnRecordedByHost`                                                                                                                                          |
+| memory recall, the file-history snapshot, plan, arena and output-style reminders, workflow intent, MessageDisplay | the client                                                                                                                                                                                                      |
+| compaction before the send and its notice; the session token gate                                                 | the client's compaction inside the send, with the same notice on `ChatCompressed`; the client's gate, reported as today (`max_tokens`)                                                                          |
+| the external Stop hook, its cap and its continuation                                                              | ACP's Stop loop, as today, which also runs the Todo Stop Guard and the current turn's background results; the round tells the client with `stopHookRunByHost`. The hook moves with those continuations in PR 2b |
+| the StopFailure hook and the 429 mapping when a request fails                                                     | ACP, as today, also for a stream `Error` event, with the error the provider threw                                                                                                                               |
+| the managed memory tasks after the turn                                                                           | the client, after the turn's last model round; ACP's when a `terminateTurn` result ends the turn                                                                                                                |
+| no content loop detection, no session turn cap                                                                    | the client's `LoopDetected` rejects the prompt as a loop (`LOOP_DETECTED`); `MaxSessionTurns` ends it with `max_turn_requests`                                                                                  |
 
 The core changes of this step are additive and change nothing for a caller that does not use them:
 
 - `Turn` gives `Thought` the chunk's raw `text` and `ToolCallRequest` the `functionCall` it was built from, and yields `ToolCallPreparation` for a call the model started streaming when the send asks for it with `toolCallPreparations`;
-- `SendMessageOptions.userTurnRecordedByHost`;
+- `SendMessageOptions.userTurnRecordedByHost` and `stopHookRunByHost`;
+- `getStructuredErrorCause` returns the error a `Turn` `Error` event was built from;
 - `admitUserPrompt` takes the hook's `submitted_prompt` and a signal;
 - `runModelRound` is exported.
 
@@ -291,7 +292,7 @@ A difference fails the scenario unless it is listed with a linked issue.
 - two prompts in one session;
 - a model error;
 - a UserPromptSubmit hook that blocks;
-- a Stop hook that blocks once.
+- a Stop hook that blocks once, and one that blocks up to the cap.
 
 The suite runs in the integration job. A scheduled job also runs the whole headless integration suite with the setting on.
 
@@ -313,7 +314,6 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
 
 - With the setting on, an ACP prompt turn differs from today in these intended ways. Most follow from the client doing for ACP what it does for the other surfaces:
   - a prompt carries the client's date reminder when the date changed since the last one, and its system reminders are the client's, the advisor and paused-Goal reminders included; they come before ACP's one-shot notices instead of after them;
-  - a blocking Stop hook's continuation is requested under the prompt's id instead of `<id>_stop_hook_<n>`, and at the cap the client's warning replaces ACP's;
   - UserPromptSubmit also runs for the turn's tool-result requests, with their text, as on the other surfaces (#9511);
   - the session token limit is checked before the client compacts the history instead of after;
   - the client's loop detection and session turn cap apply to ACP prompts, and so does the next-speaker check when it is enabled (#14114);
@@ -321,7 +321,7 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
   - every compaction shows the compaction notice, also one inside a send;
   - with telemetry on, the client's interaction span exists beside ACP's.
 
-  The ACP parity suite covers the common cases unchanged and asserts the date reminder, the continuation's id and UserPromptSubmit on tool results.
+  The ACP parity suite covers the common cases unchanged and asserts the date reminder and UserPromptSubmit on tool results.
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 

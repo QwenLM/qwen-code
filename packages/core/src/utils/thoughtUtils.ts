@@ -124,32 +124,17 @@ export function getThoughtText(response: GenerateContentResponse): string {
 export function getThoughtSummary(
   response: GenerateContentResponse,
 ): ThoughtSummary | null {
-  if (response.candidates && response.candidates.length > 0) {
-    const candidate = response.candidates[0];
-
-    if (
-      candidate.content &&
-      candidate.content.parts &&
-      candidate.content.parts.length > 0
-    ) {
-      const thoughtParts = candidate.content.parts.filter(
-        (part) => part.thought,
-      );
-      if (thoughtParts.length === 0) {
-        return null;
-      }
-
-      const thoughtText = thoughtParts.map((part) => part.text ?? '').join('');
-      if (!thoughtText) {
-        return null;
-      }
-
-      if (thoughtParts.some(isOpenAIReasoningThoughtPart)) {
-        return { subject: '', description: thoughtText };
-      }
-
-      return parseThought(thoughtText);
-    }
+  const thoughtText = getThoughtText(response);
+  if (!thoughtText) {
+    return null;
   }
-  return null;
+
+  const parts = response.candidates?.[0]?.content?.parts ?? [];
+  if (
+    parts.some((part) => part.thought && isOpenAIReasoningThoughtPart(part))
+  ) {
+    return { subject: '', description: thoughtText };
+  }
+
+  return parseThought(thoughtText);
 }

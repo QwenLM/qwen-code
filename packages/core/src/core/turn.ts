@@ -135,6 +135,16 @@ export interface LlmErrorEventValue {
   error: StructuredError;
 }
 
+const structuredErrorCauses = new WeakMap<StructuredError, unknown>();
+
+/**
+ * The error a `Turn`'s `Error` event was built from, as the provider threw
+ * it, for a host that reports it the way a direct `LlmChat` send does.
+ */
+export function getStructuredErrorCause(error: StructuredError): unknown {
+  return structuredErrorCauses.get(error);
+}
+
 export interface SessionTokenLimitExceededValue {
   currentTokens: number;
   limit: number;
@@ -969,6 +979,7 @@ export class Turn {
         ...(requestId ? { requestId } : {}),
       };
       await this.chat.maybeIncludeSchemaDepthContext(structuredError);
+      structuredErrorCauses.set(structuredError, e);
       yield { type: LlmEventType.Error, value: { error: structuredError } };
       return;
     }

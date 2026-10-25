@@ -289,6 +289,8 @@ export interface SendMessageOptions {
   userTurnRecordedByHost?: boolean;
   /** Also yield `ToolCallPreparation` for calls the model starts streaming. */
   toolCallPreparations?: boolean;
+  /** The host fires the Stop hook after the round, so this send does not. */
+  stopHookRunByHost?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -5510,6 +5512,7 @@ export class LlmClient {
       if (
         hooksEnabled &&
         messageBus &&
+        !options?.stopHookRunByHost &&
         !turn.pendingToolCalls.length &&
         signal &&
         !signal.aborted &&

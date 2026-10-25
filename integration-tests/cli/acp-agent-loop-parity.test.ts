@@ -513,28 +513,41 @@ const allowOnce = () => ({
           ),
         reply: () => ({ content: 'Should not be asked.' }),
       },
+      {
+        name: 'a Stop hook that blocks once',
+        prompts: ['Answer, then keep going once.'],
+        settings: { hooks: hooks('Stop', 'stop-once.mjs') },
+        prepare: (r) =>
+          r.createFile(
+            'stop-once.mjs',
+            [
+              "import { existsSync, writeFileSync } from 'node:fs';",
+              "const marker = 'stop-hook-fired';",
+              'if (existsSync(marker)) process.stdout.write("{}");',
+              'else {',
+              "  writeFileSync(marker, '');",
+              "  process.stdout.write(JSON.stringify({ decision: 'block', reason: 'Add a closing line.' }));",
+              '}',
+              '',
+            ].join('\n'),
+          ),
+        reply: (messages) => ({ content: `Reply ${userTurns(messages)}.` }),
+      },
+      {
+        name: 'a Stop hook that blocks up to the cap',
+        prompts: ['Answer, then keep going.'],
+        settings: {
+          hooks: hooks('Stop', 'stop-always.mjs'),
+          stopHookBlockingCap: 2,
+        },
+        prepare: (r) =>
+          r.createFile(
+            'stop-always.mjs',
+            "process.stdout.write(JSON.stringify({ decision: 'block', reason: 'Keep going.' }));\n",
+          ),
+        reply: (messages) => ({ content: `Reply ${userTurns(messages)}.` }),
+      },
     ];
-
-    const stopHookOnce: Scenario = {
-      name: 'a Stop hook that blocks once',
-      prompts: ['Answer, then keep going once.'],
-      settings: { hooks: hooks('Stop', 'stop-once.mjs') },
-      prepare: (r) =>
-        r.createFile(
-          'stop-once.mjs',
-          [
-            "import { existsSync, writeFileSync } from 'node:fs';",
-            "const marker = 'stop-hook-fired';",
-            'if (existsSync(marker)) process.stdout.write("{}");',
-            'else {',
-            "  writeFileSync(marker, '');",
-            "  process.stdout.write(JSON.stringify({ decision: 'block', reason: 'Add a closing line.' }));",
-            '}',
-            '',
-          ].join('\n'),
-        ),
-      reply: (messages) => ({ content: `Reply ${userTurns(messages)}.` }),
-    };
 
     it.each(scenarios.map((scenario) => [scenario.name, scenario] as const))(
       '%s: same requests, updates and stop reasons',
@@ -548,27 +561,6 @@ const allowOnce = () => ({
       },
       120_000,
     );
-
-    it("requests a blocking Stop hook's continuation under the prompt's id", async () => {
-      const { current, shared } = await both(stopHookOnce);
-      const continuationId = (updates: unknown[]) =>
-        JSON.stringify(updates).includes('<SESSION>########1_stop_hook_1');
-
-      expect(shared.stopReasons).toEqual(current.stopReasons);
-      expect(shared.requests).toEqual(current.requests);
-      // The current path asks for the continuation as a request of its own;
-      // the client continues the prompt's request instead.
-      expect(continuationId(current.updates)).toBe(true);
-      expect(continuationId(shared.updates)).toBe(false);
-      expect(shared.updates).toEqual(
-        JSON.parse(
-          JSON.stringify(current.updates).replaceAll(
-            '<SESSION>########1_stop_hook_1',
-            '<SESSION>########1',
-          ),
-        ),
-      );
-    }, 120_000);
 
     it('runs UserPromptSubmit on tool-result requests too, as other surfaces do', async () => {
       const hookCalls: number[] = [];
