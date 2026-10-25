@@ -192,6 +192,43 @@ describe('Managed standalone application', () => {
     expect(gateway.props.at(-1)?.sessionId).toBe('session-kept');
   });
 
+  it('adds history only when the selected gateway Session changes', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=session-kept&view=history#fragment',
+    );
+    fetch.mockResolvedValue(Response.json({ ...BOOT, managedOnly: true }));
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token">
+          {renderShell}
+        </ManagedStandaloneApp>,
+      ),
+    );
+    const initialLength = window.history.length;
+    await act(async () =>
+      gateway.props.at(-1)?.onSessionChange?.('session-kept'),
+    );
+    expect(window.history.length).toBe(initialLength);
+    await act(async () =>
+      gateway.props.at(-1)?.onSessionChange?.('session-new'),
+    );
+    expect(window.history.length).toBe(initialLength + 1);
+    await act(async () =>
+      gateway.props.at(-1)?.onSessionChange?.('session-new'),
+    );
+    expect(window.history.length).toBe(initialLength + 1);
+    expect(gateway.props.at(-1)?.sessionId).toBe('session-new');
+    expect(window.location.search).toContain('view=history');
+    expect(window.location.hash).toBe('#fragment');
+    await act(async () => gateway.props.at(-1)?.onSessionChange?.(undefined));
+    expect(window.history.length).toBe(initialLength + 2);
+    await act(async () => gateway.props.at(-1)?.onSessionChange?.(undefined));
+    expect(window.history.length).toBe(initialLength + 2);
+    expect(gateway.props.at(-1)?.sessionId).toBeUndefined();
+  });
+
   it('supplies admitted local model presets to the new-task picker', async () => {
     const modelPresets = [{ agentId: 'agent_model_b', label: 'Model B' }];
     fetch.mockResolvedValue(Response.json({ ...BOOT, modelPresets }));

@@ -13,7 +13,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout } from 'node:timers/promises';
-import { pathToFileURL, URL } from 'node:url';
+import { pathToFileURL, URL, URLSearchParams } from 'node:url';
 import { parseArgs } from 'node:util';
 
 export function signedHeaders(
@@ -105,6 +105,17 @@ export async function runSmoke({
       await setTimeout(Math.min(1000, Math.max(0, deadline - Date.now())));
     }
   };
+  const historyContains = async (path, predicate) => {
+    let cursor;
+    do {
+      const query = new URLSearchParams({ limit: '100' });
+      if (cursor) query.set('cursor', cursor);
+      const items = await request('GET', `${path}/items?${query}`);
+      if (items.data.some(predicate)) return true;
+      cursor = items.has_more ? items.next_cursor : undefined;
+    } while (cursor);
+    return false;
+  };
 
   const unsigned = await fetch(new URL('/v1/agents/sessions', base), {
     headers: { 'X-Qwen-Tenant-Id': tenant },
@@ -116,12 +127,11 @@ export async function runSmoke({
 
   try {
     if (sessionId) {
-      const previous = await request(
-        'GET',
-        `/v1/agents/sessions/${sessionId}/items`,
-      );
       assert(
-        previous.data.some((item) => item.role === 'assistant'),
+        await historyContains(
+          `/v1/agents/sessions/${sessionId}`,
+          (item) => item.role === 'assistant',
+        ),
         'Previous assistant history is missing.',
       );
     } else {
@@ -139,9 +149,9 @@ export async function runSmoke({
     });
     assert(input.turn_id, 'Input admission returned no Turn ID.');
     await wait(`${path}/turns/${input.turn_id}`);
-    const items = await request('GET', `${path}/items?limit=100`);
     assert(
-      items.data.some(
+      await historyContains(
+        path,
         (item) =>
           item.role === 'assistant' &&
           item.content?.some(

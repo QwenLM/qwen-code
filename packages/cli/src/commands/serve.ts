@@ -90,7 +90,7 @@ export function validateManagedWebFlags(args: readonly string[]): void {
     '--require-auth',
   ]);
   const unsupported = args.find(
-    (arg) => arg.startsWith('-') && !supported.has(arg.split('=')[0]!),
+    (arg) => arg.startsWith('--') && !supported.has(arg.split('=')[0]!),
   );
   if (unsupported) {
     throw new Error(

@@ -187,7 +187,9 @@ function ManagedGatewaySurface({
         url.searchParams.set('managed', '1');
         if (next) url.searchParams.set('managedSession', next);
         else url.searchParams.delete('managedSession');
-        window.history.pushState(null, '', url);
+        if (url.href !== window.location.href) {
+          window.history.pushState(null, '', url);
+        }
       }}
       style={{ height: '100dvh' }}
     />

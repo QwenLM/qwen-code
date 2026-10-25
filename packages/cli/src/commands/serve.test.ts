@@ -118,6 +118,13 @@ describe('serve command args', () => {
     expect(mockRunQwenServe).not.toHaveBeenCalled();
   });
 
+  it('keeps a dash-leading numeric gateway token as an option value', () => {
+    const token = '-1234567890123456789012345678901234567890';
+    const args = ['--managed-web-config=x', '--token', token];
+    expect(buildParser().parseSync(args)['token']).toBe(token);
+    expect(() => validateManagedWebFlags(args)).not.toThrow();
+  });
+
   it('refuses flags whose ordinary-daemon behavior is unavailable in Managed mode', () => {
     expect(() =>
       validateManagedLocalFlags(['--managed', '--port=0', '--no-open']),

@@ -35,12 +35,12 @@ const inputs = [
   '--set',
   'model.apiKey=fixture-key',
 ];
-const render = async (args = []) => {
+const render = async (args = [], baseInputs = inputs) => {
   const { stdout } = await execute(helm, [
     'template',
     'fixture',
     chart,
-    ...inputs,
+    ...baseInputs,
     ...args,
   ]);
   return parseAllDocuments(stdout).map((document) => {
@@ -348,6 +348,67 @@ test('WebShell keeps its fixed identity and signing key server-side', async () =
     service.spec.ports.map((port) => port.port),
     [8080, 4171],
   );
+});
+
+test('numeric browser identities and model keys render as strings', async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), 'qwen-helm-values-'));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const valuesFile = join(temporary, 'values.yaml');
+  for (const value of [0, 123]) {
+    await writeFile(
+      valuesFile,
+      `web:\n  enabled: true\n  tenantId: ${value}\n  actorId: ${value}\nmodel:\n  apiKey: ${value}\n`,
+    );
+    for (const args of [
+      ['--values', valuesFile],
+      [
+        '--set',
+        'web.enabled=true',
+        '--set',
+        `web.tenantId=${value}`,
+        '--set',
+        `web.actorId=${value}`,
+        '--set',
+        `model.apiKey=${value}`,
+      ],
+    ]) {
+      const objects = await render(args, inputs.slice(0, -2));
+      const config = JSON.parse(
+        find(objects, 'ConfigMap').data['managed-web.json'],
+      );
+      assert.equal(config.tenantId, String(value));
+      assert.equal(config.actorId, String(value));
+      assert.equal(
+        Buffer.from(
+          find(objects, 'Secret').data['model-api-key'],
+          'base64',
+        ).toString(),
+        String(value),
+      );
+    }
+  }
+});
+
+test('missing, null or whitespace browser identities and keys fail closed', async () => {
+  const web = [
+    '--set',
+    'web.enabled=true',
+    '--set',
+    'web.tenantId=tenant-a',
+    '--set',
+    'web.actorId=actor-a',
+  ];
+  for (const key of ['web.tenantId', 'web.actorId', 'model.apiKey']) {
+    for (const [flag, value] of [
+      ['--set', ''],
+      ['--set', 'null'],
+      ['--set-string', '  '],
+    ]) {
+      await assert.rejects(render([...web, flag, `${key}=${value}`]), (error) =>
+        error.message.includes(`Set ${key}`),
+      );
+    }
+  }
 });
 
 test('missing installation inputs or missing upgrade credentials fail closed', async () => {

@@ -27,9 +27,17 @@ async function apiPeer(
     turnStatus = 'completed',
     unsignedStatus = 401,
     key = signingKey,
+    paginated = false,
+    retainedOnNextPage = false,
   } = {},
 ) {
-  const state = { inputs: 0, closed: false, signatureErrors: 0, marker: '' };
+  const state = {
+    inputs: 0,
+    closed: false,
+    signatureErrors: 0,
+    marker: '',
+    itemCursors: [],
+  };
   const peer = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -71,6 +79,19 @@ async function apiPeer(
       return send(200, { status: turnStatus, error_code: 'fixture_failure' });
     }
     if (url.pathname === `${root}/session-1/items`) {
+      const cursor = url.searchParams.get('cursor');
+      state.itemCursors.push(cursor);
+      if (paginated && !cursor) {
+        return send(200, {
+          data: Array.from({ length: 100 }, () => ({
+            role: retainedOnNextPage ? 'user' : 'assistant',
+            content: [{ type: 'output_text', text: 'old response' }],
+          })),
+          has_more: true,
+          next_cursor: 'snapshot/+first=',
+        });
+      }
+      if (paginated) assert.equal(cursor, 'snapshot/+first=');
       return send(200, {
         data: [
           {
@@ -83,6 +104,7 @@ async function apiPeer(
             ],
           },
         ],
+        has_more: false,
       });
     }
     if (
@@ -190,6 +212,43 @@ test('a completed Turn with missing model output cannot pass', async (t) => {
     /Session session-1.*does not contain/,
   );
   assert.equal(fixture.state.closed, false);
+});
+
+test('a reused long Session follows signed history cursors to the new output', async (t) => {
+  const fixture = await apiPeer(t, { paginated: true });
+  const result = await runSmoke({ ...fixture, sessionId: 'session-1' });
+  assert.equal(result.closed, true);
+  assert.deepEqual(fixture.state.itemCursors, [null, null, 'snapshot/+first=']);
+  assert.equal(fixture.state.inputs, 1);
+  assert.equal(fixture.state.signatureErrors, 0);
+});
+
+test('exhausted history pages without the new marker still fail', async (t) => {
+  const fixture = await apiPeer(t, { paginated: true, output: false });
+  await assert.rejects(
+    runSmoke({ ...fixture, sessionId: 'session-1' }),
+    /does not contain the smoke response/,
+  );
+  assert.equal(fixture.state.inputs, 1);
+  assert.equal(fixture.state.closed, false);
+  assert.equal(fixture.state.signatureErrors, 0);
+});
+
+test('reused history can start with a full page without an assistant', async (t) => {
+  const fixture = await apiPeer(t, {
+    paginated: true,
+    retainedOnNextPage: true,
+  });
+  const result = await runSmoke({ ...fixture, sessionId: 'session-1' });
+  assert.equal(result.closed, true);
+  assert.deepEqual(fixture.state.itemCursors, [
+    null,
+    'snapshot/+first=',
+    null,
+    'snapshot/+first=',
+  ]);
+  assert.equal(fixture.state.inputs, 1);
+  assert.equal(fixture.state.signatureErrors, 0);
 });
 
 test('uncertain execution fails without replaying input or closing the Session', async (t) => {
