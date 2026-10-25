@@ -15,6 +15,8 @@
  * services regardless of renderer.
  */
 
+import type { OpenTuiStreamEvent } from './event-adapter.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
 import type { ReactNode } from 'react';
 import type {
   Config,
@@ -53,7 +55,8 @@ export interface OpenTuiCommandHost {
   addItem: UseHistoryManagerReturn['addItem'];
   updateItem: UseHistoryManagerReturn['updateItem'];
   clearItems: UseHistoryManagerReturn['clearItems'];
-  loadHistory: UseHistoryManagerReturn['loadHistory'];
+  loadHistory: CommandContext['ui']['loadHistory'];
+  resetTranscript(events: OpenTuiStreamEvent[]): void;
   refreshStatic(): void;
   clearPendingState(): void;
   cancelBtw(): void;
@@ -67,8 +70,10 @@ export interface OpenTuiCommandHost {
   setMemoryFileCount(count: number): void;
   reloadCommands(): void | Promise<void>;
   setSessionName(name: string | null): void;
-  /** Parity of `isIdleRef.current` — no model turn in flight. */
+  /** No command dispatch or model turn in flight; sampled before dispatch. */
   isIdle(): boolean;
+  /** A model turn is streaming; ignores slash-command processing. */
+  isStreaming(): boolean;
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
   dispatchExtensionStateUpdate(action: ExtensionUpdateAction): void;
   addConfirmUpdateExtensionRequest(value: ConfirmationRequest): void;
@@ -95,7 +100,17 @@ export interface OpenTuiCommandServices {
   config: Config | null;
   settings: LoadedSettings;
   logger: Logger | null;
+  onInputProcessed?: () => void;
   extensionRefreshState?: ExtensionRefreshState;
+}
+
+/** State the dispatcher samples before it runs the command. */
+export interface OpenTuiCommandDispatchState {
+  /**
+   * `host.isIdle()` read before `setIsProcessing(true)`. Read after it, the
+   * command's own dispatch always counts as busy.
+   */
+  wasIdleBeforeDispatch: boolean;
 }
 
 /**
@@ -107,11 +122,13 @@ export interface OpenTuiCommandServices {
  *    `clearItems` already performs the renderer-level clear (writing raw
  *    ANSI here would fight the cell-diff painter — audit 01 G-20).
  *  - a live `history` getter backed by the host
+ *  - a live `isIdleRef` from the pre-dispatch idle state plus streaming
  *  - a fallback `ExtensionRefreshState` when the backend has none
  */
 export function createOpenTuiCommandContext(
   host: OpenTuiCommandHost,
   services: OpenTuiCommandServices,
+  dispatch: OpenTuiCommandDispatchState,
 ): CommandContext {
   const extensionRefreshState =
     services.extensionRefreshState ?? new ExtensionRefreshState();
@@ -136,7 +153,14 @@ export function createOpenTuiCommandContext(
         host.setSessionName(null);
       },
       clearPendingState: () => host.clearPendingState(),
-      loadHistory: (history) => host.loadHistory(history),
+      loadHistory: (history, mode) => {
+        host.loadHistory(history, mode);
+        if (mode !== 'expand') {
+          host.resetTranscript(
+            projectHistoryToStreamEvents(history, { config: services.config }),
+          );
+        }
+      },
       refreshStatic: () => host.refreshStatic(),
       setDebugMessage: (message) => host.setDebugMessage(message),
       pendingItem: host.pendingItem,
@@ -145,9 +169,11 @@ export function createOpenTuiCommandContext(
       setBtwItem: (item) => host.setBtwItem(item),
       cancelBtw: () => host.cancelBtw(),
       btwAbortControllerRef: host.btwAbortControllerRef,
+      // host.isIdle() would read the command's own dispatch as busy.
+      // Streaming stays live, so a turn that starts mid-command reads busy.
       isIdleRef: {
         get current() {
-          return host.isIdle();
+          return dispatch.wasIdleBeforeDispatch && !host.isStreaming();
         },
       },
       toggleVimEnabled: () => host.toggleVimEnabled(),

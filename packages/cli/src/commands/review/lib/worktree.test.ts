@@ -56,6 +56,7 @@ import {
   worktreeCreateFailureDetail,
   worktreeResidue,
 } from './worktree.js';
+import { arePermissionBitsEnforced } from '../../../test-utils/permission-bits.js';
 
 // On Windows `mountRootFor` refuses every absolute path (a drive letter is a
 // colon), so containment cannot exist there and the gates stay silent by
@@ -1251,7 +1252,7 @@ describe('worktreeResidue — the blind sets', () => {
     gitIsolation.dispose();
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'reports UNMEASURED for a gitlink it cannot read, not clean',
     () => {
       // The filter that decides "nothing to hide there" used to answer the same
@@ -2439,6 +2440,7 @@ describe('sanitizedGitEnv', () => {
         expect(env[key]).toBeUndefined();
       }
       expect(env['GIT_NO_REPLACE_OBJECTS']).toBe('1');
+      expect(env['GIT_GRAFT_FILE']).toBe('/dev/null/grafts');
     } finally {
       process.env = saved;
     }

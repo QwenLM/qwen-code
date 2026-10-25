@@ -281,6 +281,7 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   recording: {
     lastCompletedUuid: string;
     turnParentUuids: Array<string | null>;
+    turnPromptIds?: Array<string | undefined>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
@@ -346,7 +347,17 @@ function buildManagedSessionRestoreProjection(
     }
     turnState.addHint(getSessionTurnRecordHint(record, input.sessionId));
     apiHistory.add(record);
-    fileHistory.add(record);
+    try {
+      fileHistory.add(record);
+    } catch (error) {
+      // The sink admits any file_history_snapshot carrying a systemPayload
+      // and publishes it unvalidated, so a malformed batch does reach here;
+      // skip it as the Legacy dispatch path does rather than failing the
+      // whole restore.
+      debugLogger.warn(
+        `restore projection: skipping malformed file_history_snapshot: ${error}`,
+      );
+    }
     if (isResumeTokenCountsCandidate(record)) lastTokenCountsRecord = record;
     if (isGoalRecoveryCandidate(record)) {
       const normalized = normalizeGoalRecoveryRecord(record);
@@ -356,7 +367,11 @@ function buildManagedSessionRestoreProjection(
       const uiEvent = (
         record.systemPayload as UiTelemetryRecordPayload | undefined
       )?.uiEvent;
-      if (uiEvent && uiEvent['event.name'] !== 'request_lifecycle') {
+      if (
+        uiEvent &&
+        uiEvent['event.name'] !== 'request_lifecycle' &&
+        uiEvent['event.name'] !== 'tool_lifecycle'
+      ) {
         uiTelemetryEvents.push(uiEvent as UiEvent);
       }
     }
@@ -396,6 +411,7 @@ function buildManagedSessionRestoreProjection(
       lastCompletedUuid:
         records[records.length - 1]?.uuid ?? input.fallbackLastCompletedUuid,
       turnParentUuids: turnStateValue.turnParentUuids,
+      turnPromptIds: turnStateValue.turnPromptIds,
       ...(input.customTitle !== undefined
         ? { customTitle: input.customTitle }
         : {}),
@@ -1794,6 +1810,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.turnResultPromptId) +
       estimateStringBytes(entry.daemonPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
+      estimateStringBytes(entry.turnHint.turnPromptId) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
@@ -2737,6 +2754,9 @@ function managedNavigationTurns(
         turnId: record.uuid,
         replayPosition: position,
         kind: navigationKind,
+        ...(typeof record.daemonPromptId === 'string' && record.daemonPromptId
+          ? { promptId: record.daemonPromptId }
+          : {}),
       };
       turns.push(turn);
       if (navigationKind === 'realtime') {
@@ -2759,7 +2779,7 @@ function managedNavigationTurns(
       isTurnResultRecordPayload(record.systemPayload) &&
       currentPromptTurn
     ) {
-      currentPromptTurn.promptId = record.systemPayload.promptId;
+      currentPromptTurn.promptId ??= record.systemPayload.promptId;
       currentPromptTurn = undefined;
     }
   }
@@ -3131,6 +3151,7 @@ export class SessionTranscriptReader {
       if (
         position === compressionPosition ||
         ((entry?.type !== 'system' ||
+          entry?.subtype === 'memory_catalog_snapshot' ||
           entry?.subtype === 'goal_turn_end' ||
           entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
@@ -3259,7 +3280,11 @@ export class SessionTranscriptReader {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;
-        if (uiEvent && uiEvent['event.name'] !== 'request_lifecycle') {
+        if (
+          uiEvent &&
+          uiEvent['event.name'] !== 'request_lifecycle' &&
+          uiEvent['event.name'] !== 'tool_lifecycle'
+        ) {
           uiTelemetryEvents.push(uiEvent as UiEvent);
         }
       }
@@ -3500,6 +3525,7 @@ export class SessionTranscriptReader {
       recording: {
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
+        turnPromptIds: turnStateValue.turnPromptIds,
         ...(customTitle !== undefined ? { customTitle } : {}),
         ...(titleSource !== undefined ? { titleSource } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),

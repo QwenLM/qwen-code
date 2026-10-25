@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -19,7 +20,7 @@ import {
   childLaunchBody,
   childSettleCompletedBody,
 } from './managed-child-operations.js';
-import { type ChildAgentRun } from './managed-child-run-record.js';
+import { type ChildSessionRun } from './managed-child-run-record.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
   type ManagedSessionDomain,
@@ -27,10 +28,11 @@ import {
 } from './managed-session-records.js';
 import { type TeamMember } from './managed-team-record.js';
 
-// H4e-a: the four team domains are registered and checked but not enabled
-// for submission. The flags below lift the domain gate for them (and the
-// shell kind gate for one planting), so the suite runs the commit and
-// rebuild paths ahead of enablement.
+// H4e-a registered and checked the four team domains; H4e-b1 enabled
+// team_state and team_task, while team_message and team_plan stay disabled
+// for submission. The flags below lift the domain gate for those two (and
+// the shell kind gate for one planting), so the suite runs the commit and
+// rebuild paths ahead of their enablement.
 const enablement = vi.hoisted(() => ({ teams: true, shellKind: false }));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -39,7 +41,12 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
   return {
     ...actual,
     assertManagedSessionDomainEnabled: (domain: string) => {
-      if (!(domain.startsWith('team_') && enablement.teams)) {
+      if (
+        !(
+          (domain === 'team_message' || domain === 'team_plan') &&
+          enablement.teams
+        )
+      ) {
         actual.assertManagedSessionDomainEnabled(
           domain as Parameters<
             typeof actual.assertManagedSessionDomainEnabled
@@ -130,7 +137,10 @@ async function withAuthority<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -179,13 +189,14 @@ function childLife(
   refs: Refs,
   childRunId: string,
   childSessionId = `session-${childRunId}`,
-): ChildAgentRun[] {
+): ChildSessionRun[] {
   const launched = childLaunchBody({
     childRunId,
     ownerScopeId: 'scope-main',
     rootSessionId: sessionId,
     completion: 'sent',
     inputRef: refs.input,
+    workspaceMode: 'shared',
     workingDirectory: '.',
     executionCallId: `call-${childRunId}`,
     definition: {
@@ -229,7 +240,7 @@ function commit(
 async function commitChild(
   harness: Harness,
   authority: LocalManagedSessionAuthority,
-  life: readonly ChildAgentRun[],
+  life: readonly ChildSessionRun[],
   count: number,
 ): Promise<void> {
   for (const record of life.slice(0, count)) {
@@ -372,7 +383,7 @@ async function publishedBodies(
 }
 
 describe('managed session authority team records (H4e)', () => {
-  it('refuses every team domain while it is disabled, publishing nothing', async () => {
+  it('commits the enabled team domains and refuses the disabled ones without publishing them', async () => {
     enablement.teams = false;
     const harness = await createHarness();
     const refs = await publishRefs(harness);
@@ -384,6 +395,11 @@ describe('managed session authority team records (H4e)', () => {
     };
     await withAuthority(harness, async (authority) => {
       for (const domain of TEAM_DOMAINS) {
+        if (domain === 'team_state' || domain === 'team_task') {
+          await commit(harness, authority, domain, records[domain]);
+          expect(await publishedBodies(harness, domain)).toBe(1);
+          continue;
+        }
         await expect(
           commit(harness, authority, domain, records[domain]),
         ).rejects.toThrow(

@@ -52,4 +52,15 @@ describe('WorkspaceLocation', () => {
     );
     expect(chip?.getAttribute('title')).toContain('/srv/repo');
   });
+
+  it('names the session host over the page daemon on fan-out pages', () => {
+    window.history.replaceState(null, '', '/?daemon=https://a.example:4170');
+    const container = renderChip(
+      <WorkspaceLocation cwd="/srv/repo" hostOrigin="https://b.example:4170" />,
+    );
+    const chip = container.querySelector('[data-testid="workspace-location"]');
+    expect(chip?.textContent).toBe('Remote · b.example:4170');
+    expect(chip?.getAttribute('title')).toContain('https://b.example:4170');
+    expect(chip?.getAttribute('title')).toContain('/srv/repo');
+  });
 });

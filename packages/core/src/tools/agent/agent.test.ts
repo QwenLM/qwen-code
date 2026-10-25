@@ -215,6 +215,7 @@ function mockHeadless(finalText: string, summary: object, extra: object = {}) {
     getFinalText: vi.fn().mockReturnValue(finalText),
     getExecutionSummary: vi.fn().mockReturnValue(summary),
     getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+    getLastError: vi.fn().mockReturnValue(undefined),
     ...extra,
   } as unknown as AgentHeadless;
 }
@@ -675,6 +676,28 @@ describe('AgentTool', () => {
       expect(mockAgent.execute).toHaveBeenCalledOnce();
       expect(config.getExecutionEnvironmentFactory()).not.toHaveBeenCalled();
       expect(childConfig().getExecutionEnvironment?.()).toBeUndefined();
+    });
+
+    it('bounds the composition when a cleanup failure reports a long message', async () => {
+      // `formatExecutionCleanupFailure` interpolates the child-process message
+      // verbatim into `suffix`, which is the one operand the composition does
+      // not otherwise size. Unbounded it pushes the body past the tool budget
+      // while the `outputBudgetApplied` mark stands the persistence gate down,
+      // and the tail-keeping per-tool pass then deletes the reason line at the
+      // head — the whole payload of #13597.
+      vi.mocked(environment.dispose).mockRejectedValue(
+        new ExecutionCleanupError(`cleanup failed: ${'e'.repeat(40_000)}`),
+      );
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      const text = textOf(await run());
+      expect(text.length).toBeLessThanOrEqual(agentTool.maxOutputChars);
+      expect(
+        text.startsWith('Subagent did not complete (terminate mode: ERROR).'),
+      ).toBe(true);
     });
 
     it.each([undefined, 'local', 'container'])(
@@ -2440,7 +2463,14 @@ describe('AgentTool', () => {
       vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
         AgentTerminateMode.ERROR,
       );
-      expect(await llm()).toBe(raw);
+      // The reason line now rides ahead of the raw text (#13597), same shape as
+      // the CANCELLED branch. What this test pins is unchanged: the raw text
+      // survives verbatim, because `toModelVisibleSubagentResult` strips
+      // `<analysis>`/`<summary>` only on GOAL and the parent needs those
+      // diagnostics to debug a failed run.
+      const text = await llm();
+      expect(text).toContain(raw);
+      expectText(text, ['terminate mode: ERROR']);
     });
 
     it('explains successful subagents with no model-visible output', async () => {
@@ -3928,6 +3958,68 @@ describe('AgentTool', () => {
       expect(textOf(result)).toContain(
         'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
       );
+    });
+
+    it('omits the partial-result header when the cap warning is the only text', async () => {
+      // A run that produced no model-visible text of its own (tool-only turns)
+      // and then hit the blocking cap reaches the framing return with nothing
+      // but framework text. Announcing 'Partial result follows:' in front of it
+      // hands the parent a sentence it can quote as the subagent's finding, so
+      // the header has to be decided off the agent's own text before the
+      // warning is appended — the warning itself must still arrive (#13597).
+      vi.mocked(config.getStopHookBlockingCap).mockReturnValue(2);
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        stopOutput('Keep working'),
+      );
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.MAX_TURNS,
+      );
+      const text = textOf(await runFg());
+      expect(text).toContain(
+        'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
+      expect(text).not.toContain('Partial result follows:');
+    });
+
+    it('omits the captured-output header on ERROR when the cap warning is the only text', async () => {
+      // Same shape on the ERROR return, which shares the `finalText` local: a
+      // non-throwing ERROR still runs the hook loop, so its 'Output captured
+      // before the failure follows:' header can also front pure framework text.
+      vi.mocked(config.getStopHookBlockingCap).mockReturnValue(2);
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        stopOutput('Keep working'),
+      );
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue('subagent exploded');
+      const text = textOf(await runFg());
+      expect(text).toContain(
+        'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
+      expect(text).not.toContain('Output captured before the failure follows:');
+    });
+
+    it('omits the partial-result header on CANCELLED when the cap warning is the only text', async () => {
+      // CANCELLED was the one incomplete-run return still deciding its header
+      // off framework-appended text, so a cancelled run whose only text is the
+      // cap warning handed the parent a framework sentence under a header
+      // promising the subagent's own output.
+      vi.mocked(config.getStopHookBlockingCap).mockReturnValue(2);
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        stopOutput('Keep working'),
+      );
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.CANCELLED,
+      );
+      const text = textOf(await runFg());
+      expect(text).toContain(
+        'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
+      expect(text).not.toContain('Partial result follows:');
     });
 
     it('should allow stop when SubagentStop hook fails', async () => {
@@ -5522,27 +5614,333 @@ describe('AgentTool', () => {
     });
 
     it.each([
-      [AgentTerminateMode.CANCELLED, 'cancelled'],
-      [AgentTerminateMode.ERROR, 'failed'],
-      [AgentTerminateMode.MAX_TURNS, 'failed'],
-      [AgentTerminateMode.TIMEOUT, 'failed'],
+      // `has`/`lacks` pin what the PARENT model reads. CANCELLED keeps its own
+      // wording (regression guard); every other non-GOAL terminal must name the
+      // mode, because the foreground path has no `<status>` envelope to ride —
+      // without it a timed-out run is indistinguishable from a short answer and
+      // the parent just retries the same call (#13597). TIMEOUT/MAX_TURNS also
+      // have to say which budget to raise, or the retry is verbatim.
+      [
+        AgentTerminateMode.CANCELLED,
+        'cancelled',
+        ['Agent was cancelled by the user.', 'halfway through'],
+        ['terminate mode'],
+      ],
+      [
+        AgentTerminateMode.ERROR,
+        'failed',
+        [
+          'terminate mode: ERROR',
+          'model provider refused the request',
+          'halfway through',
+        ],
+        ['Subagent execution failed.'],
+      ],
+      [
+        AgentTerminateMode.MAX_TURNS,
+        'failed',
+        [
+          'terminate mode: MAX_TURNS',
+          '`maxTurns` (or `runConfig.max_turns`)',
+          'halfway through',
+        ],
+        ['Subagent execution failed.'],
+      ],
+      [
+        AgentTerminateMode.TIMEOUT,
+        'failed',
+        [
+          'terminate mode: TIMEOUT',
+          '`runConfig.max_time_minutes`',
+          'halfway through',
+        ],
+        ['Subagent execution failed.'],
+      ],
+      // The fall-through's own comment names these two as incomplete runs as
+      // well; without rows for them a later change could route them to the
+      // unfixed GOAL return and the suite would stay green (#13597).
+      [
+        AgentTerminateMode.LOOP_DETECTED,
+        'failed',
+        ['terminate mode: LOOP_DETECTED', 'halfway through'],
+        ['Subagent execution failed.'],
+      ],
+      [
+        AgentTerminateMode.SHUTDOWN,
+        'failed',
+        ['terminate mode: SHUTDOWN', 'halfway through'],
+        ['Subagent execution failed.'],
+      ],
     ] as const)(
-      'foreground %s terminate mode patches meta as %s',
-      async (mode, expectedStatus) => {
+      'foreground %s terminate mode patches meta as %s and tells the parent why',
+      async (mode, expectedStatus, has, lacks) => {
         // fgTerminalStatus: GOAL → completed (see "reserves a JSONL+meta
         // path"), CANCELLED → cancelled, else failed; a 'completed' fallback
         // was a shipped bug (fixed in d67db4c50).
         loadForeground();
+        vi.mocked(mockAgent.getFinalText).mockReturnValue('halfway through');
         vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+        vi.mocked(mockAgent.getLastError).mockReturnValue(
+          mode === AgentTerminateMode.ERROR
+            ? 'model provider refused the request'
+            : undefined,
+        );
         const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
-        await invoke(fg()).execute();
+        const result = await invoke(fg()).execute();
         expect(patchMetaSpy).toHaveBeenCalledWith(
           expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
           expect.objectContaining({ status: expectedStatus }),
         );
+        expectText(textOf(result), [...has], [...lacks]);
         patchMetaSpy.mockRestore();
       },
     );
+
+    it('foreground MAX_TURNS on an external executor names no knob the launch would reject', async () => {
+      // subagent-manager refuses to start an external agent whose definition
+      // sets `maxTurns` / `runConfig.max_turns`, and on ACP the peer owns the
+      // turn cap, so the built-in advice would turn a recoverable short run
+      // into an agent that cannot start at all (#13597). 'External executor'
+      // proves the definition really was external, not silently downgraded.
+      loadAs({
+        name: 'file-search',
+        background: undefined,
+        executor: { kind: 'codex', command: 'codex' },
+      });
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('halfway through');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.MAX_TURNS,
+      );
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['terminate mode: MAX_TURNS', 'halfway through', 'External executor'],
+        ['max_turns', 'maxTurns', 'Subagent execution failed.'],
+      );
+    });
+
+    it('foreground MAX_TURNS on an external ACP executor names no knob the launch would reject', async () => {
+      // ACP is the external executor that actually reaches MAX_TURNS
+      // (acp-subagent-executor.ts maps the peer's `max_turn_requests` stop to
+      // it), and `AcpSubagentExecutor.create()` throws 'External ACP agents
+      // cannot enforce max_turns.' on any definition that follows the built-in
+      // advice — so the carve-out has to be pinned on this kind too. Codex
+      // rejects every turn cap at create() and only ever writes
+      // CANCELLED/GOAL/ERROR/TIMEOUT, so the case above cannot regress on its
+      // own (#13597).
+      loadAs({
+        name: 'file-search',
+        background: undefined,
+        executor: { kind: 'acp', command: 'acp-agent' },
+      });
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('halfway through');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.MAX_TURNS,
+      );
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['terminate mode: MAX_TURNS', 'halfway through', 'External executor'],
+        ['max_turns', 'maxTurns', 'Subagent execution failed.'],
+      );
+    });
+
+    it('foreground ERROR with no retained message still names the mode', async () => {
+      // getLastError() is optional on SubagentExecutor (external executors do
+      // not implement it), so the reason line must not leak 'undefined'.
+      loadForeground();
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['terminate mode: ERROR'],
+        ['undefined', 'Subagent execution failed.'],
+      );
+    });
+
+    it('foreground ERROR on Codex does not call its failure diagnostic a partial result', async () => {
+      // CodexSubagentExecutor writes the error message into finalText, so the
+      // ERROR header must not claim it is work product; the raw text still has
+      // to reach the parent verbatim (#13597).
+      loadAs({
+        name: 'file-search',
+        background: undefined,
+        executor: { kind: 'codex', command: 'codex' },
+      });
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        'codex exited with code 1',
+      );
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['terminate mode: ERROR', 'codex exited with code 1'],
+        ['Partial result follows'],
+      );
+    });
+
+    it.each([
+      // CANCELLED is the third foreground incomplete-run return. It keeps its own
+      // marker verbatim and must NOT be routed through `subagentTerminalReason`
+      // — the terminate-mode table above pins `lacks: ['terminate mode']` for it.
+      [
+        AgentTerminateMode.MAX_TURNS,
+        `Subagent did not complete (terminate mode: ${AgentTerminateMode.MAX_TURNS}).`,
+      ],
+      [
+        AgentTerminateMode.ERROR,
+        `Subagent did not complete (terminate mode: ${AgentTerminateMode.ERROR}).`,
+      ],
+      [AgentTerminateMode.CANCELLED, 'Agent was cancelled by the user.'],
+    ])(
+      'foreground %s keeps its reason line inside the tool budget for a long partial',
+      async (mode, expectedHead) => {
+        // AgentTool truncates tail-first at maxOutputChars, which deletes the
+        // head — the reason line — of an oversized result. The composition
+        // has to fit the budget itself and keep the partial's tail (#13597).
+        loadForeground();
+        const partial = 'x'.repeat(60_000) + 'TAIL-MARKER';
+        vi.mocked(mockAgent.getFinalText).mockReturnValue(partial);
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+        vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+        const result = await invoke(fg()).execute();
+        const text = textOf(result);
+        expect(text.length).toBeLessThanOrEqual(agentTool.maxOutputChars);
+        expect(text.startsWith(expectedHead)).toBe(true);
+        expectText(text, ['[earlier output omitted]', 'TAIL-MARKER']);
+        // A composition can only fit `maxOutputChars` and stay whole if the
+        // producer marks it: the scheduler's generic single-result gate runs
+        // first at a LOWER ceiling (the configured threshold plus headroom) and
+        // otherwise replaces the whole body with a `<persisted-output>` stub,
+        // dropping the tail this composition exists to keep.
+        expect(result.outputBudgetApplied).toBe(true);
+        // The marker has to carry the one recovery path that is left: the
+        // subagent's JSONL transcript.
+        expect(text).toMatch(
+          /subagents[\\/]test-session-id[\\/]agent-[A-Za-z0-9_-]+\.jsonl/,
+        );
+      },
+    );
+
+    it('foreground TIMEOUT snaps the preserved tail off a split astral character', async () => {
+      // The tail starts at a length-derived index, so an astral character can
+      // straddle it and leave an unpaired surrogate as the first code unit of
+      // the text this composition exists to hand over. This cut index is odd,
+      // so it lands between the two halves of a pair and it is the `safeStart`
+      // adjustment that has to move it; deleting that adjustment reddens this
+      // case. There is no second parity to pin: an even index starts on a fresh
+      // pair, where the adjustment is a no-op and no lone surrogate can appear.
+      loadForeground();
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '\u{1f600}'.repeat(20_000),
+      );
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.TIMEOUT,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      const text = textOf(await invoke(fg()).execute());
+      expect(text).toBe(text.replace(/\p{Surrogate}/gu, ''));
+    });
+
+    it('foreground TIMEOUT reserves room for a non-empty suffix in the budget', async () => {
+      // The case above runs without an executor and without worktree isolation,
+      // so `wtSuffix` is '' and the `- suffix.length` reservation is unpinned:
+      // dropping it composes past maxOutputChars and the tail-first truncator
+      // deletes exactly the reason line the composition exists to keep
+      // (#13597). An external executor is the reachable non-empty suffix.
+      loadAs({
+        name: 'file-search',
+        background: undefined,
+        executor: { kind: 'codex', command: 'codex' },
+      });
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        'x'.repeat(60_000) + 'TAIL-MARKER',
+      );
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.TIMEOUT,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      const text = textOf(await invoke(fg()).execute());
+      expect(text.length).toBeLessThanOrEqual(agentTool.maxOutputChars);
+      expect(
+        text.startsWith('Subagent did not complete (terminate mode: TIMEOUT).'),
+      ).toBe(true);
+      expect(
+        text.endsWith(
+          '[External executor token usage and cost are unavailable.]',
+        ),
+      ).toBe(true);
+    });
+
+    it('foreground TIMEOUT with nothing captured announces no partial result', async () => {
+      // A run that stops during its first turn has getFinalText() === '', so the
+      // GOAL-only placeholder would be announced as the subagent's partial
+      // output — a framework string the parent can quote as a finding. The
+      // ERROR branch omits the section on the same empty input (#13597).
+      loadForeground();
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.TIMEOUT,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['terminate mode: TIMEOUT', 'max_time_minutes'],
+        [
+          'Partial result follows',
+          '(subagent produced no model-visible output)',
+        ],
+      );
+    });
+
+    it('foreground ERROR keeps its framing when the executor rejects (swallow seam)', async () => {
+      // The framing above is reachable only *because* `runSubagentWithHooks`
+      // catches the executor's throw and returns undefined: the dominant
+      // producer of terminateMode ERROR is that throw, and it never reaches the
+      // outer catch. Every other rejecting-executor case here asserts billing or
+      // span metadata, so nothing composed a rejecting executor with a
+      // populated mode and cause — "cleaning up" that surprising swallow into a
+      // rethrow left the suite green while a real provider failure started
+      // landing in the outer catch, where the parent reads `Failed to run
+      // subagent: <msg>` with `error` set, losing both the mode framing and the
+      // retained cause (the exact #13597 shape). The swallow is load-bearing —
+      // its own docs warn that a rejection escaping the `void` boundary becomes
+      // an unhandled-promise event — so what this pins is that the invocation
+      // *resolves* with the framed text.
+      loadForeground();
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('halfway through');
+      vi.mocked(mockAgent.execute).mockRejectedValue(
+        new Error('provider failed'),
+      );
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue('provider failed');
+      const result = await invoke(fg()).execute();
+      expectText(
+        textOf(result),
+        ['terminate mode: ERROR', 'provider failed', 'halfway through'],
+        ['Failed to run subagent'],
+      );
+      expect(result.error).toBeUndefined();
+    });
+
+    it('foreground GOAL result carries no terminate-mode framing', async () => {
+      // Protection test: the success path must stay byte-identical.
+      loadForeground();
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('all done');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.GOAL,
+      );
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['all done'],
+        ['terminate mode', 'did not complete'],
+      );
+    });
 
     it('foreground CANCELLED prefixes the partial result so the parent sees the cancel', async () => {
       // Unprefixed it looks like a success; foreground has no registry

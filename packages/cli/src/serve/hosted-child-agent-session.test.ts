@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -15,18 +16,26 @@ import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-run
 import {
   CHILD_NOTIFICATION_INLINE_LIMIT,
   childResultNotificationText,
+  childRunEndedText,
+  childWorkspaceOutcomeText,
   HostedChildAgentSession,
+  parseChildWorkspaceReceipt,
   type ChildAgentLaunchParams,
+  type WorkflowLaunchParams,
 } from './hosted-child-agent-session.js';
+import {
+  decodeWorkflowLaunchEnvelope,
+  MANAGED_CHILD_LIMITS,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 
 // The H4b gates are real: the kind gate admits `child_agent` and
-// `child_acceptance` sits in the plain enabled list, so this suite drives
-// the hosted orchestrator with no enablement mock. One H4c case plants a
-// `workflow` record ahead of that kind's enablement and one plants an H3
-// background Shell; each flag lifts the kind gate for its planting only.
+// `workflow` (the workflow runtime slice, #13803) and `child_acceptance`
+// sits in the plain enabled list, so this suite drives the hosted
+// orchestrator with no enablement mock for those. One case plants an H3
+// background Shell record; the flag lifts the kind gate for its planting
+// only.
 const enablement = vi.hoisted(() => ({
-  workflowKind: false,
   shellKind: false,
 }));
 
@@ -40,10 +49,7 @@ vi.mock(
     return {
       ...actual,
       assertManagedSessionChildRunKindEnabled: (kind: string) => {
-        if (
-          !(kind === 'workflow' && enablement.workflowKind) &&
-          !(kind === 'shell' && enablement.shellKind)
-        ) {
+        if (!(kind === 'shell' && enablement.shellKind)) {
           actual.assertManagedSessionChildRunKindEnabled(kind);
         }
       },
@@ -71,7 +77,6 @@ const BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
-  enablement.workflowKind = false;
   enablement.shellKind = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
@@ -132,7 +137,10 @@ async function withAuthority<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -157,6 +165,7 @@ function launchParams(
     description: 'audit the diff',
     prompt: 'review the change',
     definition: DEFINITION,
+    workspaceMode: 'shared',
     workingDirectory: '.',
     executionCallId: 'call-1',
     ...overrides,
@@ -175,9 +184,29 @@ async function settleThroughAttach(
 }
 
 describe('childResultNotificationText', () => {
+  it('keeps the escaped plan ahead of a truncated result', () => {
+    const text = childResultNotificationText({
+      taskId: 'task-1',
+      kind: 'child_agent',
+      description: 'plan',
+      text: 'x'.repeat(100000),
+      plan: { requestId: 'request-1', revision: 2, text: '<read> & wait' },
+    });
+    expect(text).toContain(
+      '<plan-approval-request request="request-1" revision="2">\n&lt;read&gt; &amp; wait',
+    );
+    expect(text.indexOf('</plan-approval-request>')).toBeLessThan(
+      text.indexOf('<result>'),
+    );
+    expect(text).toContain('truncated');
+    expect(Buffer.byteLength(JSON.stringify({ text }))).toBeLessThanOrEqual(
+      CHILD_NOTIFICATION_INLINE_LIMIT,
+    );
+  });
   it('round-trips a result far below the inline cap untouched', () => {
     const notification = childResultNotificationText({
       taskId: TASK_ID,
+      kind: 'child_agent',
       description: 'audit the diff',
       text: '审阅通过,生成文件两份。',
     });
@@ -185,6 +214,9 @@ describe('childResultNotificationText', () => {
     expect(notification).toContain('<result>审阅通过,生成文件两份。</result>');
     expect(notification).not.toContain('truncated');
     expect(notification).not.toContain('prompt:callId');
+    // R1-14: the kind element names the record's own kind — a child agent
+    // completion never reads as a workflow one to the waiting parent turn.
+    expect(notification).toContain('<kind>child_agent</kind>');
     expect(Buffer.byteLength(notification, 'utf8')).toBeLessThan(
       CHILD_NOTIFICATION_INLINE_LIMIT,
     );
@@ -196,6 +228,7 @@ describe('childResultNotificationText', () => {
     // own managed-message — the bound is serialized bytes, not the XML.
     const notification = childResultNotificationText({
       taskId: TASK_ID,
+      kind: 'child_agent',
       description: 'audit',
       text: '<'.repeat(20 * 1024),
     });
@@ -210,12 +243,285 @@ describe('childResultNotificationText', () => {
   it('keeps the result newlines while stripping display controls', () => {
     const notification = childResultNotificationText({
       taskId: TASK_ID,
+      kind: 'child_agent',
       description: 'audit',
       text: 'first line\u202a\nsecond line\u202e\n- item A',
     });
     expect(notification).toContain(
       '<result>first line\nsecond line\n- item A</result>',
     );
+  });
+});
+
+const CHILD_WORKSPACE_ID = 'a'.repeat(32);
+const RESULT_PIN = `refs/qwen/child-workspaces/${CHILD_WORKSPACE_ID}/result`;
+
+function receipt(workspace?: Record<string, unknown>): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      childSessionId: 'session-child',
+      turnId: 'turn-c1',
+      status: 'completed',
+      completedAt: 1,
+      ...(workspace === undefined ? {} : { workspace }),
+    }),
+    'utf8',
+  );
+}
+
+describe('child Workspace receipt (#13753 I2)', () => {
+  it('reads each outcome the relay reports', () => {
+    expect(
+      parseChildWorkspaceReceipt(
+        receipt({
+          mode: 'worktree',
+          childWorkspaceId: CHILD_WORKSPACE_ID,
+          outcome: 'merged',
+          code: 'merged',
+        }),
+      ),
+    ).toEqual({
+      outcome: 'merged',
+      code: 'merged',
+      conflictPaths: [],
+      omittedConflictPaths: 0,
+    });
+    expect(
+      parseChildWorkspaceReceipt(
+        receipt({
+          mode: 'worktree',
+          childWorkspaceId: CHILD_WORKSPACE_ID,
+          outcome: 'conflicted',
+          code: 'conflicted',
+          conflictPaths: ['src/a.ts', 'b.md'],
+          omittedConflictPaths: 3,
+          resultRef: RESULT_PIN,
+        }),
+      ),
+    ).toEqual({
+      outcome: 'conflicted',
+      code: 'conflicted',
+      conflictPaths: ['src/a.ts', 'b.md'],
+      omittedConflictPaths: 3,
+      resultRef: RESULT_PIN,
+    });
+    expect(
+      parseChildWorkspaceReceipt(
+        receipt({
+          mode: 'worktree',
+          childWorkspaceId: CHILD_WORKSPACE_ID,
+          outcome: 'blocked',
+          code: 'child_workspace_diverged',
+        }),
+      ),
+    ).toMatchObject({ outcome: 'blocked', code: 'child_workspace_diverged' });
+  });
+
+  it('answers nothing for a receipt off the shape', () => {
+    const valid = {
+      mode: 'worktree',
+      childWorkspaceId: CHILD_WORKSPACE_ID,
+      outcome: 'merged',
+      code: 'merged',
+    };
+    for (const bytes of [
+      Buffer.from('not json', 'utf8'),
+      Buffer.from('null', 'utf8'),
+      receipt(),
+      receipt({ ...valid, mode: 'shared' }),
+      receipt({ ...valid, outcome: 'landed' }),
+      receipt({ ...valid, code: 'Merged; rm -rf' }),
+      receipt({ ...valid, conflictPaths: 'src/a.ts' }),
+      receipt({ ...valid, conflictPaths: [1] }),
+      receipt({ ...valid, resultRef: 'refs/heads/main' }),
+      receipt({ ...valid, omittedConflictPaths: -1 }),
+      receipt({ ...valid, omittedConflictPaths: 1.5 }),
+      receipt({ ...valid, omittedConflictPaths: '2' }),
+      Buffer.from('{"workspace":[]}', 'utf8'),
+    ]) {
+      expect(parseChildWorkspaceReceipt(bytes)).toBeUndefined();
+    }
+  });
+
+  it('renders the outcome for the model, quoting and bounding the paths', () => {
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'merged',
+        code: 'merged',
+        conflictPaths: [],
+        omittedConflictPaths: 0,
+      }),
+    ).toBe('merged into this Workspace as uncommitted changes.');
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'blocked',
+        code: 'child_workspace_diverged',
+        conflictPaths: [],
+        omittedConflictPaths: 0,
+        resultRef: RESULT_PIN,
+      }),
+    ).toBe(
+      `merge blocked (child_workspace_diverged); the child's changes did not land; the child's work is kept at ${RESULT_PIN}.`,
+    );
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'discarded',
+        code: 'discarded',
+        conflictPaths: [],
+        omittedConflictPaths: 0,
+      }),
+    ).toBe("discarded; the child's changes did not land.");
+    // A child chose these names: display controls are stripped and each
+    // name is quoted, so a newline cannot forge a line of its own.
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'conflicted',
+        code: 'conflicted',
+        conflictPaths: [
+          'src/a.ts',
+          'evil\u202e\nname',
+          'line\u2028para\u2029end',
+        ],
+        omittedConflictPaths: 0,
+        resultRef: RESULT_PIN,
+      }),
+    ).toBe(
+      `merge conflicted at "src/a.ts", "evil\\nname", "line\\u2028para\\u2029end"; the child's changes did not land; the child's work is kept at ${RESULT_PIN}.`,
+    );
+    // The receipt's own omissions count toward the paths left unnamed.
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'conflicted',
+        code: 'conflicted',
+        conflictPaths: ['a.ts'],
+        omittedConflictPaths: 4,
+      }),
+    ).toBe(
+      `merge conflicted at "a.ts", and 4 more; the child's changes did not land.`,
+    );
+    const many = childWorkspaceOutcomeText({
+      outcome: 'conflicted',
+      code: 'conflicted',
+      conflictPaths: Array.from(
+        { length: 100 },
+        (_, index) => `${'d'.repeat(200)}/${index}`,
+      ),
+      omittedConflictPaths: 0,
+    });
+    expect(Buffer.byteLength(many, 'utf8')).toBeLessThan(5 * 1024);
+    expect(many).toMatch(/, and \d+ more; /);
+    expect(childWorkspaceOutcomeText(undefined)).toContain(
+      'the merge outcome is unavailable',
+    );
+  });
+
+  it('puts the outcome beside the status in the notification', () => {
+    const notification = childResultNotificationText({
+      taskId: TASK_ID,
+      kind: 'child_agent',
+      description: 'audit',
+      text: 'done',
+      workspace: 'merge conflicted at "<a>"; kept.',
+    });
+    expect(notification).toContain(
+      '<status>completed</status>\n<workspace>merge conflicted at &quot;&lt;a&gt;&quot;; kept.</workspace>\n<summary>',
+    );
+    expect(
+      childResultNotificationText({
+        taskId: TASK_ID,
+        kind: 'child_agent',
+        description: 'audit',
+        text: 'done',
+      }),
+    ).not.toContain('<workspace>');
+  });
+
+  it("carries a worktree child's outcome into its wake notification", async () => {
+    for (const workspaceMode of ['worktree', 'shared', 'snapshot'] as const) {
+      const harness = await createHarness();
+      await withAuthority(harness, async (authority) => {
+        const children = new HostedChildAgentSession(
+          { authority, resources: harness.store },
+          sessionKey,
+        );
+        await children.admit(launchParams({ workspaceMode }));
+        expect(children.record('run-1')!.workspaceMode).toBe(workspaceMode);
+        await children.dispatchStarted('run-1', {
+          dispatchId: 'dispatch-1',
+          runtime: BINDING,
+        });
+        await children.attach('run-1', 'session-child');
+        await children.settleCompleted('run-1', {
+          result: Buffer.from('done', 'utf8'),
+          receipt: receipt({
+            mode: 'worktree',
+            childWorkspaceId: CHILD_WORKSPACE_ID,
+            outcome: 'merged',
+            code: 'merged',
+          }),
+        });
+        await children.accept('run-1', {
+          notification: { description: 'audit the diff' },
+        });
+        const input = authority
+          .readEvents({ afterSequence: 0, limit: 64 })
+          .find((event) => event.kind === 'input.accepted')!;
+        const contentRef = (input.payload as Record<string, unknown>)[
+          'contentRef'
+        ] as Parameters<typeof harness.store.read>[0];
+        const text = JSON.parse(
+          (await harness.store.read(contentRef)).toString('utf8'),
+        ).text as string;
+        // Only the record's own mode decides: a shared child's receipt
+        // never speaks for a Workspace it did not have, and a snapshot's
+        // copy is always discarded (#13753 I3).
+        if (workspaceMode === 'worktree') {
+          expect(text).toContain(
+            '<workspace>merged into this Workspace as uncommitted changes.</workspace>',
+          );
+        } else {
+          expect(text).not.toContain('<workspace>');
+        }
+      });
+    }
+  });
+
+  // #13858 R3-4: a re-driven launch whose member preamble grew past the
+  // envelope bound since the commit still names its committed record — the
+  // encode belongs to the fresh launch alone, never to the replay.
+  it('replays a launch whose restatement no longer fits the envelope bound', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      const committed = await children.admit(launchParams());
+      const sent = launchParams().prompt;
+      const restated = await children.admit({
+        ...launchParams(),
+        prompt: `${'p'.repeat(MANAGED_CHILD_LIMITS.maxEnvelopeBytes)}\n\n${sent}`,
+        sentPrompt: sent,
+      });
+      expect(restated.inputRef).toEqual(committed.inputRef);
+      expect(restated.envelope.prompt).toBe(sent);
+    });
+  });
+
+  it('refuses a replayed launch that names another isolation', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admit(launchParams({ workspaceMode: 'worktree' }));
+      await children.admit(launchParams({ workspaceMode: 'worktree' }));
+      await expect(
+        children.admit(launchParams({ workspaceMode: 'shared' })),
+      ).rejects.toThrow('different evidence');
+      expect(children.record('run-1')!.workspaceMode).toBe('worktree');
+    });
   });
 });
 
@@ -543,11 +849,10 @@ describe('hosted child agent session (H4b)', () => {
     });
   });
 
-  // H4c: the quotas count child Sessions, so a workflow child spends the
-  // same concurrency and launch budget a child agent does, while the
-  // child agent funnel itself never reads it as one of its own.
+  // H4c/#13803: the quotas count child Sessions, so a workflow child
+  // spends the same concurrency and launch budget a child agent does —
+  // and the kind-parametric funnel reads it back as its own kind.
   it('counts a workflow child against the scope quotas', async () => {
-    enablement.workflowKind = true;
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
       const children = new HostedChildAgentSession(
@@ -582,7 +887,10 @@ describe('hosted child agent session (H4b)', () => {
         ['workflow', 'workflow-1'],
       ]);
       expect(children.activeChildRunsOf('scope-main')).toHaveLength(2);
-      expect(children.record('workflow-1')).toBeUndefined();
+      expect(children.record('workflow-1')).toMatchObject({
+        kind: 'workflow',
+        childRunId: 'workflow-1',
+      });
     });
   });
 
@@ -607,6 +915,90 @@ describe('hosted child agent session (H4b)', () => {
         children.launchedChildRunsOf('scope-main').map((run) => run.childRunId),
       ).toEqual(['run-1']);
       expect(children.activeChildRunsOf('scope-main')).toHaveLength(1);
+    });
+  });
+
+  // #14387: a recovery-blocked run is parked — evidence of an unwitnessed
+  // execution, never live work — so it holds no launch-admission slot:
+  // a full scope of blocked children must not refuse the next launch.
+  it('does not count a recovery-blocked run against the scope concurrency cap', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      // Four children each dispatch, then block on a lost generation.
+      for (let i = 1; i <= MANAGED_CHILD_LIMITS.maxActivePerScope; i++) {
+        await children.admit(
+          launchParams({
+            childRunId: `run-${i}`,
+            executionCallId: `call-${i}`,
+          }),
+        );
+        await children.dispatchStarted(`run-${i}`, {
+          dispatchId: `dispatch-${i}`,
+          runtime: BINDING,
+        });
+        await children.settleRecoveryBlocked(`run-${i}`, {
+          reason: 'runtime_lost',
+        });
+      }
+      // The parked runs are evidence, not live work — the scope's slots
+      // are all free.
+      expect(children.activeChildRunsOf('scope-main')).toHaveLength(0);
+      // ...so the next launch is admitted, past the count the blocked
+      // runs would have held without the exclusion.
+      await children.admit(
+        launchParams({
+          childRunId: 'run-next',
+          executionCallId: 'call-next',
+        }),
+      );
+      expect(
+        children.activeChildRunsOf('scope-main').map((run) => run.childRunId),
+      ).toEqual(['run-next']);
+    });
+  });
+
+  // #14165 FG10d: a background child's blocked line rides the blocked
+  // commit and must describe that revision — never the running one it
+  // replaces ("run running (unknown)" under `<status>blocked</status>`).
+  it("tells a background child's parent the run is blocked, not running", async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admit(launchParams());
+      await children.dispatchStarted('run-1', {
+        dispatchId: 'dispatch-1',
+        runtime: BINDING,
+      });
+      await children.attach('run-1', 'session-child');
+      await children.settleRecoveryBlocked('run-1', {
+        reason: 'runtime_lost',
+      });
+      const input = authority
+        .readEvents({ afterSequence: 0, limit: 64 })
+        .findLast((event) => event.kind === 'input.accepted');
+      expect(input?.payload['turnId']).toBe('run-1:blocked:notify');
+      const text = JSON.parse(
+        (
+          await harness.store.read(
+            input!.payload['contentRef'] as unknown as Parameters<
+              typeof harness.store.read
+            >[0],
+          )
+        ).toString('utf8'),
+      ).text as string;
+      expect(text).toContain('<status>blocked</status>');
+      expect(text).toContain(
+        `<result>\n${childRunEndedText(children.record('run-1')!)}\n</result>`,
+      );
+      expect(text).toContain('recovery blocked (outcome unknown).');
+      expect(text).not.toContain('running');
     });
   });
 
@@ -687,5 +1079,341 @@ describe('hosted child agent session (H4b)', () => {
       );
       expect(children.record('run-1')!.run.state).toBe('settled');
     });
+  });
+});
+
+describe('hosted workflow child session (#13803)', () => {
+  const WORKFLOW_DEFINITION = {
+    definitionId: 'workflow/audit',
+    definitionRevision: 1,
+    definitionDigest: 'a'.repeat(64),
+  };
+  const SCRIPT = 'return args.x + 1;';
+
+  function workflowParams(
+    overrides: Partial<WorkflowLaunchParams> = {},
+  ): WorkflowLaunchParams {
+    return {
+      childRunId: 'run-1',
+      ownerScopeId: 'scope-main',
+      rootSessionId: sessionId,
+      completion: 'sent',
+      script: SCRIPT,
+      args: { x: 1 },
+      definition: WORKFLOW_DEFINITION,
+      workingDirectory: '.',
+      executionCallId: 'call-1',
+      ...overrides,
+    };
+  }
+
+  it('chains a workflow launch through delivery and consumption', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      const { envelope, inputRef } =
+        await children.admitWorkflow(workflowParams());
+      expect(envelope.script).toBe(SCRIPT);
+      expect(inputRef.kind).toBe('managed-input');
+      const taskId = `task_${managedExtensionRecordKey(sessionId, 'child_run', 'run-1')}`;
+      expect(authority.taskViews()).toEqual([
+        {
+          taskId,
+          sessionId,
+          kind: 'workflow',
+          state: 'pending',
+          runtimeState: 'unbound',
+          definitionRevision: 1,
+          createdAt: 1_000,
+          startedAt: null,
+          settledAt: null,
+        },
+      ]);
+      expect(
+        decodeWorkflowLaunchEnvelope(await harness.store.read(inputRef)),
+      ).toEqual({
+        definition: WORKFLOW_DEFINITION,
+        script: SCRIPT,
+        args: { x: 1 },
+      });
+      await children.dispatchStarted('run-1', {
+        dispatchId: 'dispatch-1',
+        runtime: BINDING,
+      });
+      await children.attach('run-1', 'session-child');
+      const resultRef = await children.settleCompleted('run-1', {
+        result: Buffer.from('{"answer":2}', 'utf8'),
+        receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+      });
+      await children.accept('run-1', {
+        notification: { description: 'workflow/audit' },
+      });
+      const acceptance = children.acceptance('run-1');
+      expect(acceptance).toBeDefined();
+      // The notification names the record's own kind, so the wake and
+      // consumption predicates see a workflow-sourced input.
+      const input = authority
+        .readEvents({ afterSequence: 0, limit: 64 })
+        .findLast((event) => event.kind === 'input.accepted');
+      expect(input?.payload['source']).toBe('workflow');
+      expect(input?.payload['turnId']).toBe('run-1:accept:notify');
+      // The funnel feeds the renderer the record's kind — the pure
+      // renderer's own test cannot see this wiring (#13858 R2-8).
+      const notified = JSON.parse(
+        (
+          await harness.store.read(
+            input!.payload['contentRef'] as unknown as Parameters<
+              typeof harness.store.read
+            >[0],
+          )
+        ).toString('utf8'),
+      ).text as string;
+      expect(notified).toContain('<kind>workflow</kind>');
+      expect(notified).toContain('Workflow child "workflow/audit" finished.');
+      await children.markAccepted('run-1');
+      await children.markConsumed('run-1');
+      expect(children.record('run-1')!.run.delivery).toEqual({
+        target: 'session',
+        state: 'consumed',
+      });
+      expect(resultRef.kind).toBe('managed-child-result');
+    });
+  });
+
+  it('replays a workflow launch identically and conflicts a divergent one', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      const first = await children.admitWorkflow(workflowParams());
+      const replayed = await children.admitWorkflow(workflowParams());
+      expect(replayed.inputRef).toEqual(first.inputRef);
+      expect(children.record('run-1')!.run.definition).toEqual(
+        WORKFLOW_DEFINITION,
+      );
+      await expect(
+        children.admitWorkflow(
+          workflowParams({ script: 'return args.x + 2;' }),
+        ),
+      ).rejects.toThrow('was launched with different evidence');
+      // A same-id launch of the other kind conflicts on its kind, never
+      // mingles the chains.
+      await expect(children.admit(launchParams())).rejects.toThrow(
+        'was launched with different evidence',
+      );
+    });
+  });
+
+  it('settles a workflow chain cancelled through the same funnel verbs', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admitWorkflow(workflowParams());
+      await children.dispatchStarted('run-1', {
+        dispatchId: 'dispatch-1',
+        runtime: BINDING,
+      });
+      await children.requestStop('run-1');
+      await children.settleCancelled('run-1', { started: false });
+      expect(children.record('run-1')).toMatchObject({
+        kind: 'workflow',
+        stopReason: 'stop_requested',
+        stopRequested: true,
+      });
+      expect(children.record('run-1')!.run.delivery).toEqual({
+        target: 'session',
+        state: 'cancelled',
+      });
+    });
+  });
+
+  // #13858 R3-7: the ended sentence names the kind its record carries —
+  // no caller can hand it a label that contradicts the record.
+  it('names an ended run by the kind its record carries', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admit(launchParams());
+      await children.admitWorkflow(workflowParams({ childRunId: 'run-2' }));
+      for (const runId of ['run-1', 'run-2']) {
+        await children.settleFailed(runId, {
+          stopReason: 'quota_exceeded',
+          reason: 'byte_limit',
+          started: false,
+        });
+      }
+      expect(childRunEndedText(children.record('run-1')!)).toMatch(
+        /^Child agent run failed \(/,
+      );
+      expect(childRunEndedText(children.record('run-2')!)).toMatch(
+        /^Workflow child run failed \(/,
+      );
+    });
+  });
+
+  // #13858 R2-10: a workflow task is real — a message to it is refused for
+  // what it is, never as an unknown task.
+  it('refuses a message to a workflow child as a workflow task', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admitWorkflow(workflowParams({ childRunId: 'run-2' }));
+      const refused = await children.sendToChild({
+        taskId: children.taskIdOf('run-2'),
+        text: 'hello',
+        messageId: 'msg_call-9',
+        continuationRunId: 'prompt:call-9',
+        executionCallId: 'prompt:call-9',
+        closing: false,
+      });
+      expect(refused).toMatchObject({ kind: 'refused' });
+      expect(JSON.stringify(refused)).toContain(
+        'is a workflow child, which takes no messages',
+      );
+    });
+  });
+
+  it('renders the workflow kind in the notification', () => {
+    const notification = childResultNotificationText({
+      taskId: TASK_ID,
+      kind: 'workflow',
+      description: 'workflow/audit',
+      text: '{"answer":2}',
+    });
+    expect(notification).toContain('<kind>workflow</kind>');
+    expect(notification).toContain('Workflow child "workflow/audit" finished.');
+  });
+});
+
+describe('public child launches', () => {
+  const snapshot = {
+    version: 1 as const,
+    sourcePromptId: 'source-1',
+    approvalMode: 'auto-edit' as const,
+    approvalRevision: 3,
+    modelId: 'model-1',
+    modelRevision: 2,
+    modelRoute: {
+      authType: 'openai',
+      endpointDigest: 'a'.repeat(64),
+      providerPin: 'b'.repeat(64),
+    },
+    skillsRef: null,
+  };
+
+  it('replays the admitted snapshot after policy changes and disabling new launches', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      let enabled = true;
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+        () => false,
+        () => enabled,
+      );
+      await children.admit(launchParams({ publicLaunch: snapshot }));
+      enabled = false;
+      const replay = await children.admit(
+        launchParams({
+          publicLaunch: {
+            ...snapshot,
+            approvalMode: 'yolo',
+            approvalRevision: 4,
+          },
+        }),
+      );
+      expect(replay.envelope.publicLaunch).toEqual(snapshot);
+      await expect(
+        children.admit(
+          launchParams({ childRunId: 'run-2', publicLaunch: snapshot }),
+        ),
+      ).rejects.toThrow('disabled');
+      expect(children.record('run-2')).toBeUndefined();
+    });
+  });
+
+  it('persists prompt-scoped stops, fences new launches, and retains late results without waking', async () => {
+    const harness = await createHarness();
+    const cancelled = new Set<string>();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+        (id) => cancelled.has(id),
+      );
+      await children.admit(launchParams({ publicLaunch: snapshot }));
+      await children.admit(
+        launchParams({
+          childRunId: 'run-2',
+          executionCallId: 'call-2',
+          publicLaunch: { ...snapshot, sourcePromptId: 'source-2' },
+        }),
+      );
+      await children.dispatchStarted('run-1', {
+        dispatchId: 'dispatch-1',
+        runtime: BINDING,
+      });
+      await children.attach('run-1', 'session-child');
+      await children.cancelSourcePrompt('source-1', async () => {
+        cancelled.add('source-1');
+      });
+      await children.cancelSourcePrompt('source-1');
+      expect(children.record('run-1')!.stopRequested).toBe(true);
+      expect(children.record('run-2')!.stopRequested).toBe(false);
+      await expect(
+        children.admit(
+          launchParams({ childRunId: 'run-3', publicLaunch: snapshot }),
+        ),
+      ).rejects.toThrow('cancelled');
+      await children.settleCompleted('run-1', {
+        result: Buffer.from('{"ok":true}'),
+        receipt: Buffer.from('{"outcome":"settled"}'),
+      });
+      await children.accept('run-1', {
+        notification: { description: 'late result' },
+      });
+      expect(children.record('run-1')!.resultRef).toBeDefined();
+      expect(
+        authority
+          .eventsInSequenceRange(1, authority.committedSequence)
+          .filter(
+            (event) =>
+              event.kind === 'input.accepted' &&
+              event.payload['turnId'] === 'run-1:accept:notify',
+          ),
+      ).toEqual([]);
+      expect(await children.cancelledNotification('run-1:accept:notify')).toBe(
+        true,
+      );
+    });
+    await withAuthority(
+      harness,
+      async (authority) => {
+        const restored = new HostedChildAgentSession(
+          { authority, resources: harness.store },
+          sessionKey,
+          (id) => cancelled.has(id),
+        );
+        await restored.stopCancelledSources();
+        expect(restored.record('run-1')!.stopRequested).toBe(true);
+        expect(await restored.publicLaunchSnapshot('run-1')).toEqual(snapshot);
+        expect(restored.record('run-2')!.stopRequested).toBe(false);
+      },
+      { create: false },
+    );
   });
 });

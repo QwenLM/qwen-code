@@ -122,6 +122,7 @@ const NON_CONVERSATION_RECORD_SUBTYPES = new Set([
 
 const KNOWN_RECORD_SUBTYPES = new Set([
   'chat_compression',
+  'memory_catalog_snapshot',
   'slash_command',
   'ui_telemetry',
   'at_command',
@@ -151,6 +152,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'goal_turn_end',
   'code_mode_tool_result',
   'turn_result',
+  'turn_attempt',
   'user_text_elements',
   'agent_mention',
   'agent_message',

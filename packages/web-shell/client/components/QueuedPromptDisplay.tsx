@@ -12,6 +12,7 @@ import deleteIconUrl from '../assets/icons/delete.svg';
 import editIconUrl from '../assets/icons/edit.svg';
 import insertIconUrl from '../assets/icons/insert.svg';
 import queueIconUrl from '../assets/icons/queue.svg';
+import sendNowIconUrl from '../assets/icons/send-now.svg';
 import type { getTranslator } from '../i18n';
 import { isCommandPrompt } from '../utils/localCommandQueue';
 import {
@@ -165,8 +166,10 @@ export function QueuedPromptDisplay({
   t,
   canMutateMidTurn = false,
   canInsertMidTurn = true,
+  canSendMidTurnNow = false,
   onDelete,
   onInsert,
+  onSendNow,
   onEdit,
   onImagePreview,
   onAttachmentPreview,
@@ -175,8 +178,11 @@ export function QueuedPromptDisplay({
   t: ReturnType<typeof getTranslator>;
   canMutateMidTurn?: boolean;
   canInsertMidTurn?: boolean;
+  /** The daemon can deliver queued mid-turn messages on request. */
+  canSendMidTurnNow?: boolean;
   onDelete: (id: number) => void;
   onInsert: (id: number) => void;
+  onSendNow?: (id: number) => void;
   onEdit: (id: number) => void;
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
@@ -238,6 +244,11 @@ export function QueuedPromptDisplay({
           imageCount === 0 &&
           fileCount === 0 &&
           (prompt.inputAnnotations?.length ?? 0) === 0;
+        const canSendNow =
+          canSendMidTurnNow &&
+          onSendNow !== undefined &&
+          prompt.midTurnState === 'queued' &&
+          prompt.midTurnMessageId !== undefined;
         const hasStateSpinner =
           isSubmitting ||
           prompt.midTurnState === 'submitting' ||
@@ -427,6 +438,27 @@ export function QueuedPromptDisplay({
                         aria-hidden="true"
                       />
                       {t('queue.insert')}
+                    </button>
+                  )}
+                  {canSendNow && (
+                    <button
+                      type="button"
+                      className={styles.queuedPromptAction}
+                      onClick={() => onSendNow?.(prompt.id)}
+                      disabled={isBusy}
+                      aria-label={t('queue.sendNow')}
+                      title={
+                        isBusy
+                          ? t('queue.submittingDisabled')
+                          : t('queue.sendNowTip')
+                      }
+                    >
+                      <span
+                        className={styles.queuedPromptActionIcon}
+                        style={cssUrlVar('--queued-icon-url', sendNowIconUrl)}
+                        aria-hidden="true"
+                      />
+                      {t('queue.sendNow')}
                     </button>
                   )}
                   <button

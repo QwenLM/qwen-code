@@ -55,7 +55,14 @@ import {
   WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CONTEXT_CONFIG_REF,
   WORKSPACE_EXECUTION_PROFILE,
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  RESIDENT_WORKSPACE_PROFILE,
 } from './managed-workspace-activation.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
+import {
+  MANAGED_RUNTIME_PROVIDER_ROUTE,
+  MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+} from './managed-runtime-provider-protocol.js';
 
 const globWorkerAssets = vi.hoisted(() => ({ directory: '' }));
 vi.mock(
@@ -868,7 +875,7 @@ describe('Managed context installation', () => {
     expect(repaired.status).toBe(200);
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses a directory the worker cannot read',
     async () => {
       const root = workspace();
@@ -2642,6 +2649,152 @@ describe('Managed Workspace execution activation', () => {
     workspaceInstallation(sessionId, cwd);
   const activation = workspaceActivation;
 
+  it('hands a resident Workspace to a new Session without reopening the old context', async () => {
+    const root = workspace([]);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const first = fixedInstallation('550e8400-e29b-41d4-a716-446655440101');
+    const second = fixedInstallation('550e8400-e29b-41d4-a716-446655440102');
+    const residentActivation = (
+      request: typeof first,
+      operation = 'activate',
+    ) => ({
+      ...activation(request, operation),
+      profile: RESIDENT_WORKSPACE_PROFILE,
+    });
+    for (const request of [first, second]) {
+      expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    }
+    expect((await post(origin, ACTIVATION, activation(first))).status).toBe(
+      409,
+    );
+    expect(
+      (await post(origin, ACTIVATION, residentActivation(first))).status,
+    ).toBe(200);
+    expect(
+      (await post(origin, ACTIVATION, residentActivation(second))).status,
+    ).toBe(409);
+    const write = {
+      ...shell(first.sessionId, 'resident-write', ''),
+      toolName: 'write_file',
+      input: {
+        file_path: path.join(realDirectory(root, '.'), 'retained.txt'),
+        content: 'retained bytes',
+      },
+    };
+    expect(
+      (await (await post(origin, EXECUTE, write)).json()).result
+        .executionStatus,
+    ).toBe('success');
+    expect(
+      (
+        await post(
+          origin,
+          EXECUTE,
+          shell(first.sessionId, 'no-shell', 'touch forbidden.txt'),
+        )
+      ).status,
+    ).toBe(409);
+    expect(fs.existsSync(path.join(root, 'forbidden.txt'))).toBe(false);
+    expect(
+      (await post(origin, ACTIVATION, residentActivation(first, 'release')))
+        .status,
+    ).toBe(200);
+    expect(
+      (await post(origin, ACTIVATION, residentActivation(second))).status,
+    ).toBe(200);
+    expect(
+      (await post(origin, ACTIVATION, residentActivation(first))).status,
+    ).toBe(409);
+    expect(
+      (
+        await post(origin, EXECUTE, {
+          ...shell(first.sessionId, 'late-write', ''),
+          toolName: write.toolName,
+          input: write.input,
+        })
+      ).status,
+    ).toBe(409);
+    const read = {
+      ...shell(second.sessionId, 'resident-read', ''),
+      toolName: 'read_file',
+      input: { file_path: path.join(realDirectory(root, '.'), 'retained.txt') },
+    };
+    const result = (await (await post(origin, EXECUTE, read)).json()).result;
+    expect(result.executionStatus).toBe('success');
+    expect(JSON.stringify(result)).toContain('retained bytes');
+    expect(fs.readFileSync(path.join(root, 'retained.txt'), 'utf8')).toBe(
+      'retained bytes',
+    );
+  });
+
+  it('admits one winner when resident contexts activate concurrently', async () => {
+    const root = workspace([]);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const requests = [
+      fixedInstallation('resident-race-a'),
+      fixedInstallation('resident-race-b'),
+    ];
+    for (const request of requests)
+      expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    const statuses = await Promise.all(
+      requests.map(
+        async (request) =>
+          (
+            await post(origin, ACTIVATION, {
+              ...activation(request),
+              profile: RESIDENT_WORKSPACE_PROFILE,
+            })
+          ).status,
+      ),
+    );
+    expect(statuses.sort()).toEqual([200, 409]);
+  });
+
+  it('exposes only Read, Write and Edit in a resident provider manifest', async () => {
+    const root = workspace([]);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('550e8400-e29b-41d4-a716-446655440103');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect(
+      (
+        await post(origin, ACTIVATION, {
+          ...activation(request),
+          profile: RESIDENT_WORKSPACE_PROFILE,
+        })
+      ).status,
+    ).toBe(200);
+    const provider = async (kind: 'acquire' | 'manifest') =>
+      post(origin, MANAGED_RUNTIME_PROVIDER_ROUTE.path, {
+        protocolVersion: 1,
+        providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+        session: {
+          harnessSessionId: '550e8400-e29b-41d4-a716-446655440201',
+          runtimeSessionId: request.sessionId,
+          turnKind: 'bootstrap',
+        },
+        operation: { kind },
+      });
+    expect((await provider('acquire')).status).toBe(200);
+    const manifest = (await (await provider('manifest')).json()).result;
+    expect(manifest.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+    ]);
+  });
+
   it('pins the explicit frozen configuration and capability digests', () => {
     const refs = 'managed-runtime-tools/1\0preapproved-workspace-tools/1';
     const digest = (text: string) =>
@@ -2649,6 +2802,9 @@ describe('Managed Workspace execution activation', () => {
     expect(digest(refs)).toBe(WORKSPACE_CONTEXT_CONFIG_REF);
     expect(digest(`${WORKSPACE_EXECUTION_PROFILE}\0${refs}`)).toBe(
       WORKSPACE_CAPABILITY_DIGEST,
+    );
+    expect(digest(`${RESIDENT_WORKSPACE_PROFILE}\0${refs}`)).toBe(
+      RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
     );
   });
 
@@ -2686,6 +2842,82 @@ describe('Managed Workspace execution activation', () => {
     expect((await post(origin, CONTEXT, request)).status).toBe(200);
     expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
       409,
+    );
+  });
+
+  it.each([
+    { name: 'protocolVersion 2', change: { protocolVersion: 2 } },
+    { name: 'protocolVersion "1"', change: { protocolVersion: '1' } },
+    {
+      name: 'a forged contextConfigRef with a valid digest',
+      change: { contextConfigRef: `sha256:${'f'.repeat(64)}` },
+    },
+  ])('refuses activation with $name', async ({ change }) => {
+    const root = workspace([]);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('refused-activation');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    const activate = activation(request);
+    const refused = await post(origin, ACTIVATION, { ...activate, ...change });
+
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({
+      code: 'managed_activation_conflict',
+    });
+    const call = shell(
+      request.sessionId,
+      'write',
+      'echo activated > proof.txt',
+    );
+    expect((await post(origin, EXECUTE, call)).status).toBe(409);
+    expect(fs.existsSync(path.join(root, 'proof.txt'))).toBe(false);
+
+    const accepted = await post(origin, ACTIVATION, activate);
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({ ...activate, active: true });
+    expect(
+      (await (await post(origin, EXECUTE, call)).json()).result.executionStatus,
+    ).toBe('success');
+    expect(fs.readFileSync(path.join(root, 'proof.txt'), 'utf8').trim()).toBe(
+      'activated',
+    );
+  });
+
+  it('refuses activation before a Session is installed', async () => {
+    const root = workspace([]);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('never-installed');
+    const refused = await post(origin, ACTIVATION, activation(request));
+
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({
+      code: 'managed_activation_conflict',
+    });
+    const call = shell(
+      request.sessionId,
+      'write',
+      'echo installed > proof.txt',
+    );
+    expect((await post(origin, EXECUTE, call)).status).toBe(409);
+    expect(fs.existsSync(path.join(root, 'proof.txt'))).toBe(false);
+
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      200,
+    );
+    expect(
+      (await (await post(origin, EXECUTE, call)).json()).result.executionStatus,
+    ).toBe('success');
+    expect(fs.readFileSync(path.join(root, 'proof.txt'), 'utf8').trim()).toBe(
+      'installed',
     );
   });
 

@@ -19,10 +19,16 @@ import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import type {
+  FileReadRequest,
+  FileReadSource,
+} from '../utils/file-read-source.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { ToolResult } from './tools.js';
 import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
+import { normalizeParts } from '../services/visionBridge/image-part-utils.js';
+import { createHash } from 'node:crypto';
 
 const visionBridgeMocks = vi.hoisted(() => ({
   runVisionBridge: vi.fn(),
@@ -99,6 +105,7 @@ describe('ReadFileTool', () => {
       getFileService: () => new FileDiscoveryService(tempRootDir),
       getFileSystemService: () => new StandardFileSystemService(),
       getTargetDir: () => tempRootDir,
+      getModel: () => 'test-model',
       getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
       storage: {
         getProjectTempDir: () => path.join(tempRootDir, '.temp'),
@@ -193,7 +200,745 @@ describe('ReadFileTool', () => {
     await fsp.rm(tempRootDir, { recursive: true, force: true });
   });
 
+  describe('trusted media limits', () => {
+    const limits = {
+      maxInlineMediaBase64Bytes: 768 * 1024,
+      maxMediaResultBytes: 896 * 1024,
+    };
+    const boundedTool = (overrides = {}) =>
+      new ReadFileTool(
+        makeConfig({ getFileReadCacheDisabled: () => true, ...overrides }),
+        limits,
+      );
+
+    it.skipIf(!['linux', 'darwin'].includes(process.platform)).each([0, 1])(
+      'applies the media ceiling to the borrowed PDF extent with %i extra bytes',
+      async (extra) => {
+        const bytes = Buffer.alloc(
+          (limits.maxInlineMediaBase64Bytes / 4) * 3 + extra,
+        );
+        bytes.write('%PDF-1.7');
+        const file = await put('borrowed.pdf', bytes);
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        let borrowed: fsp.FileHandle | undefined;
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) =>
+          producer(request, async (source) => {
+            if (source.kind !== 'descriptor')
+              throw new Error('expected descriptor');
+            borrowed = source.fileHandle;
+            await fsp.rename(file, `${file}.original`);
+            await fsp.writeFile(file, '%PDF-1.7\nreplacement');
+            const reading = vi.spyOn(source.fileHandle, 'read');
+            const result = await operation(source);
+            if (extra) expect(reading).not.toHaveBeenCalled();
+            return result;
+          });
+        const result = await read(
+          file,
+          boundedTool({
+            getFileSystemService: () => service,
+            getEffectiveInputModalities: () => ({ pdf: true }),
+          }),
+        );
+        if (extra) {
+          expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+          expect(result.llmContent).toContain('inline media byte limit');
+          expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        } else {
+          expect(result.error).toBeUndefined();
+          const inline = normalizeParts(result.llmContent)[0]?.inlineData;
+          expect(inline?.data).toBe(bytes.toString('base64'));
+        }
+        await expect(borrowed!.stat()).rejects.toMatchObject({ code: 'EBADF' });
+      },
+    );
+
+    it('accepts native PDF bytes at the exact base64 ceiling and refuses one decoded byte over', async () => {
+      const bytes = Buffer.alloc((limits.maxInlineMediaBase64Bytes / 4) * 3);
+      bytes.write('%PDF-1.7');
+      const file = await put('native.pdf', bytes);
+      const result = await read(file, boundedTool());
+      expect(result.error).toBeUndefined();
+      const inline = normalizeParts(result.llmContent)[0]?.inlineData;
+      expect(inline?.mimeType).toBe('application/pdf');
+      expect(inline?.displayName).toBe('native.pdf');
+      expect(typeof inline?.data).toBe('string');
+      expect(inline!.data!.length).toBe(limits.maxInlineMediaBase64Bytes);
+      expect(
+        createHash('sha256')
+          .update(Buffer.from(inline!.data!, 'base64'))
+          .digest('hex'),
+      ).toBe(createHash('sha256').update(bytes).digest('hex'));
+      await fsp.appendFile(file, 'x');
+      const refused = await read(file, boundedTool());
+      expect(refused.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(refused.llmContent).toContain('inline media byte limit');
+      expect(refused.llmContent).not.toContain(
+        'inline media result byte limit',
+      );
+      expect(JSON.stringify(refused)).not.toContain('inlineData');
+      expect(
+        (await read(file, new ReadFileTool(makeConfig()))).error,
+      ).toBeUndefined();
+    });
+
+    it('applies the tool-level aggregate limit to audio from a trusted config', async () => {
+      const file = await put('clip.mp3', Buffer.alloc(589825));
+      const result = await read(
+        file,
+        boundedTool({ getEffectiveInputModalities: () => ({ audio: true }) }),
+      );
+      expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain('inline media result byte limit');
+    });
+
+    it('measures complete JSON UTF-8 bytes, including escaped and multibyte metadata', async () => {
+      const file = await put('文档.pdf', '%PDF-1.7');
+      pdfMocks.getPDFPageCount.mockResolvedValue(2);
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: true,
+        images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+        bytesTruncated: true,
+      });
+      const overrides = {
+        getEffectiveInputModalities: () => ({ image: true }),
+        getFileReadCacheDisabled: () => true,
+      };
+      const baseline = await read(file, boundedTool(overrides));
+      expect(baseline.error).toBeUndefined();
+      expect(JSON.stringify(baseline)).toContain('inlineData');
+      expect(JSON.stringify(baseline)).toContain('\\"');
+      const bytes = Buffer.byteLength(JSON.stringify(baseline), 'utf8');
+      expect(bytes).toBeGreaterThan(JSON.stringify(baseline).length);
+      const config = makeConfig(overrides);
+      const exact = new ReadFileTool(config, {
+        ...limits,
+        maxMediaResultBytes: bytes,
+      });
+      expect(await read(file, exact)).toEqual(baseline);
+      const under = new ReadFileTool(config, {
+        ...limits,
+        maxMediaResultBytes: bytes - 1,
+      });
+      const refused = await read(file, under);
+      expect(refused.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(JSON.stringify(refused)).not.toContain('inlineData');
+    });
+
+    it.each(['png', 'jpeg', 'webp', 'gif'] as const)(
+      'delivers actual %s bytes and refuses an oversized rendered/raw result',
+      async (format) => {
+        const source = await sharp({
+          create: { width: 2, height: 3, channels: 3, background: '#246080' },
+        })
+          .toFormat(format)
+          .toBuffer();
+        const file = await put(`tiny.${format}`, source);
+        const result = await read(file, boundedTool());
+        const inline = normalizeParts(result.llmContent).find(
+          (part) => part.inlineData,
+        )?.inlineData;
+        expect(inline?.data).toBeTruthy();
+        const decoded = Buffer.from(inline!.data!, 'base64');
+        expect(await sharp(decoded).metadata()).toMatchObject({
+          width: 2,
+          height: 3,
+        });
+        if (format === 'gif') expect(decoded).toEqual(source);
+        const refused = await read(
+          file,
+          new ReadFileTool(makeConfig(), {
+            ...limits,
+            maxInlineMediaBase64Bytes: inline!.data!.length - 1,
+          }),
+        );
+        expect(refused.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+        expect(JSON.stringify(refused)).not.toContain('inlineData');
+      },
+    );
+
+    it.each(['text.txt', 'shape.svg', 'cells.ipynb', 'text.pdf'])(
+      'does not apply media-result limits to %s',
+      async (name) => {
+        const contents = name.endsWith('ipynb')
+          ? notebookJson([codeCell('x'.repeat(1024), 1, 'output')])
+          : name.endsWith('pdf')
+            ? '%PDF-1.7'
+            : 'x'.repeat(1024);
+        const file = await put(name, contents);
+        pdfMocks.getPDFPageCount.mockResolvedValue(1);
+        pdfMocks.extractPDFText.mockResolvedValue({
+          success: true,
+          text: 'x'.repeat(1024),
+        });
+        const result = await read(
+          file,
+          new ReadFileTool(
+            makeConfig({ getEffectiveInputModalities: () => ({}) }),
+            { maxInlineMediaBase64Bytes: 1, maxMediaResultBytes: 1 },
+          ),
+        );
+        expect(result.error).toBeUndefined();
+        expect(Buffer.byteLength(JSON.stringify(result))).toBeGreaterThan(1);
+        expect(JSON.stringify(result)).not.toContain('inlineData');
+      },
+    );
+
+    it.each([2, null])(
+      'handles a rendered range beyond the document with page count %s',
+      async (pageCount) => {
+        const file = await put('scan.pdf', '%PDF-1.7');
+        pdfMocks.getPDFPageCount.mockResolvedValue(pageCount);
+        pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+          success: true,
+          images: [
+            { data: 'YWJj', mimeType: 'image/jpeg' },
+            { data: 'YWJj', mimeType: 'image/jpeg' },
+          ],
+          bytesTruncated: false,
+        });
+        const result = await read(
+          { file_path: file, pages: '1-10' },
+          boundedTool({ getEffectiveInputModalities: () => ({ image: true }) }),
+        );
+        if (pageCount === null) {
+          expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        } else {
+          expect(result.error).toBeUndefined();
+          expect(
+            normalizeParts(result.llmContent).filter((part) => part.inlineData),
+          ).toHaveLength(2);
+          expect(JSON.stringify(result.llmContent)).toContain(
+            'The document has 2 pages; rendered pages 1-2.',
+          );
+        }
+      },
+    );
+
+    it('does not probe the page count or add a notice for a complete range', async () => {
+      const file = await put('scan.pdf', '%PDF-1.7');
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: true,
+        images: [
+          { data: 'YWJj', mimeType: 'image/jpeg' },
+          { data: 'YWJj', mimeType: 'image/jpeg' },
+        ],
+        bytesTruncated: false,
+      });
+      const result = await read(
+        { file_path: file, pages: '1-2' },
+        boundedTool({ getEffectiveInputModalities: () => ({ image: true }) }),
+      );
+      expect(result.error).toBeUndefined();
+      expect(normalizeParts(result.llmContent)).toHaveLength(2);
+      expect(JSON.stringify(result.llmContent)).not.toContain(
+        'The document has',
+      );
+      expect(pdfMocks.getPDFPageCount).not.toHaveBeenCalled();
+    });
+
+    it('rejects an explicit incomplete rendered range but announces an implicit whole-page prefix', async () => {
+      const file = await put('scan.pdf', '%PDF-1.7');
+      pdfMocks.getPDFPageCount.mockResolvedValue(2);
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: true,
+        images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+        bytesTruncated: true,
+      });
+      const mediaTool = boundedTool({
+        getEffectiveInputModalities: () => ({ image: true }),
+      });
+      const prefix = await read(file, mediaTool);
+      expect(prefix.error).toBeUndefined();
+      expect(JSON.stringify(prefix.llmContent)).toContain(
+        'later pages were omitted',
+      );
+      const explicit = await read({ file_path: file, pages: '1-2' }, mediaTool);
+      expect(explicit.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(pdfMocks.renderPDFPagesToImages).toHaveBeenLastCalledWith(
+        ['linux', 'darwin'].includes(process.platform)
+          ? expect.objectContaining({ read: expect.any(Function) })
+          : file,
+        {
+          firstPage: 1,
+          lastPage: 2,
+          signal: abortSignal,
+          maxTotalBase64Bytes: limits.maxInlineMediaBase64Bytes,
+        },
+      );
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: true,
+        images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+        bytesTruncated: false,
+      });
+      const shortRange = await read(
+        { file_path: file, pages: '1-2' },
+        mediaTool,
+      );
+      expect(shortRange.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+      expect(JSON.stringify(shortRange)).not.toContain('inlineData');
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: false,
+        error: 'first page too large',
+        tooLarge: true,
+      });
+      const tooLarge = await read(file, mediaTool);
+      expect(tooLarge.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(tooLarge.llmContent).toBe('first page too large');
+    });
+
+    it.each(['page-count', 'text', 'render'])(
+      'propagates abort after %s without another fallback',
+      async (stage) => {
+        const file = await put('scan.pdf', '%PDF-1.7');
+        const controller = new AbortController();
+        pdfMocks.getPDFPageCount.mockResolvedValue(1);
+        const target =
+          stage === 'page-count'
+            ? pdfMocks.getPDFPageCount
+            : stage === 'text'
+              ? pdfMocks.extractPDFText
+              : pdfMocks.renderPDFPagesToImages;
+        target.mockImplementation(async () => {
+          controller.abort();
+          return stage === 'page-count'
+            ? null
+            : { success: false, error: 'cancelled' };
+        });
+        await expect(
+          read(
+            file,
+            boundedTool({
+              getEffectiveInputModalities: () => ({ image: true }),
+            }),
+            controller.signal,
+          ),
+        ).rejects.toThrow(/abort/i);
+        expect(pdfMocks.getPDFPageCount).toHaveBeenCalledWith(
+          ['linux', 'darwin'].includes(process.platform)
+            ? expect.objectContaining({ read: expect.any(Function) })
+            : file,
+          controller.signal,
+        );
+        if (stage !== 'page-count')
+          expect(pdfMocks.extractPDFText).toHaveBeenCalledWith(
+            pdfMocks.getPDFPageCount.mock.calls[0]![0],
+            {
+              signal: controller.signal,
+            },
+          );
+        if (stage !== 'render')
+          expect(pdfMocks.renderPDFPagesToImages).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   describe('build', () => {
+    it.skipIf(!['linux', 'darwin'].includes(process.platform)).each([
+      ['source.txt', 'ORIGINAL', 'REPLACEMENT', 'ORIGINAL'],
+      [
+        'source.svg',
+        '<svg>ORIGINAL</svg>',
+        '<svg>REPLACEMENT</svg>',
+        'ORIGINAL',
+      ],
+      [
+        'source.ipynb',
+        notebookJson([
+          { cell_type: 'markdown', source: ['ORIGINAL'], metadata: {} },
+        ]),
+        notebookJson([
+          { cell_type: 'markdown', source: ['REPLACEMENT'], metadata: {} },
+        ]),
+        'ORIGINAL',
+      ],
+      [
+        'source.pdf',
+        '%PDF-1.7\nORIGINAL',
+        '%PDF-1.7\nREPLACEMENT',
+        Buffer.from('%PDF-1.7\nORIGINAL').toString('base64'),
+      ],
+      [
+        'source.mp3',
+        'ORIGINAL-AUDIO',
+        'REPLACEMENT-AUDIO',
+        Buffer.from('ORIGINAL-AUDIO').toString('base64'),
+      ],
+      [
+        'source.mp4',
+        'ORIGINAL-VIDEO',
+        'REPLACEMENT-VIDEO',
+        Buffer.from('ORIGINAL-VIDEO').toString('base64'),
+      ],
+    ])(
+      'keeps the actual Standard source through %s processing',
+      async (name, original, replacement, expected) => {
+        const filePath = path.join(tempRootDir, name);
+        await fsp.writeFile(filePath, original);
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        let borrowed: fsp.FileHandle | undefined;
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) =>
+          producer(request, async (source) => {
+            if (source.kind !== 'descriptor')
+              throw new Error('expected ordinary descriptor producer');
+            borrowed = source.fileHandle;
+            await fsp.rename(filePath, `${filePath}.original`);
+            await fsp.writeFile(filePath, replacement);
+            return operation(source);
+          });
+        const boundTool = new ReadFileTool(
+          makeConfig({
+            getFileSystemService: () => service,
+            getContentGeneratorConfig: () => ({ modalities: allModalities }),
+          }),
+        );
+        const result = await boundTool
+          .build({ file_path: filePath, ...nullPagination })
+          .execute(abortSignal);
+        expect(JSON.stringify(result.llmContent)).toContain(expected);
+        expect(result.error).toBeUndefined();
+        await expect(borrowed!.stat()).rejects.toMatchObject({ code: 'EBADF' });
+      },
+    );
+
+    it.skipIf(!['linux', 'darwin'].includes(process.platform))(
+      'uses the original PNG for the actual overview renderer',
+      async () => {
+        const filePath = path.join(tempRootDir, 'source.png');
+        await sharp({
+          create: { width: 11, height: 7, channels: 3, background: '#ff0000' },
+        })
+          .png()
+          .toFile(filePath);
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) =>
+          producer(request, async (source) => {
+            await fsp.rename(filePath, `${filePath}.original`);
+            await sharp({
+              create: {
+                width: 3,
+                height: 2,
+                channels: 3,
+                background: '#0000ff',
+              },
+            })
+              .png()
+              .toFile(filePath);
+            return operation(source);
+          });
+        const boundTool = new ReadFileTool(
+          makeConfig({
+            getFileSystemService: () => service,
+            getContentGeneratorConfig: () => ({ modalities: allModalities }),
+          }),
+        );
+        const result = await boundTool
+          .build({ file_path: filePath, ...nullPagination })
+          .execute(abortSignal);
+        expect(JSON.stringify(result.llmContent)).toContain(
+          'oriented source: 11x7',
+        );
+        expect(result.error).toBeUndefined();
+      },
+    );
+
+    it('enters the installed producer even when Omni selects pathname delivery', async () => {
+      const filePath = path.join(tempRootDir, 'omni.txt');
+      await fsp.writeFile(filePath, 'ordinary text');
+      const service = new StandardFileSystemService();
+      const producer = vi.spyOn(service, 'withReadFile');
+      const boundTool = new ReadFileTool(
+        makeConfig({
+          getFileSystemService: () => service,
+          isOmniEnabled: () => true,
+        }),
+      );
+      const result = await boundTool
+        .build({ file_path: filePath, ...nullPagination })
+        .execute(abortSignal);
+      expect(producer).toHaveBeenCalledWith(
+        expect.objectContaining({ mediaDelivery: 'omni' }),
+        expect.any(Function),
+      );
+      expect(result.llmContent).toBe('ordinary text');
+    });
+
+    it
+      .skipIf(!['linux', 'darwin'].includes(process.platform))
+      .each(['owner failure', 'late cancellation'])(
+      'invalidates an unreturned read after %s',
+      async (cause) => {
+        const filePath = path.join(tempRootDir, 'owner-result.txt');
+        await fsp.writeFile(filePath, 'content');
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        const controller = new AbortController();
+        const failure = new Error(cause);
+        let borrowed: fsp.FileHandle | undefined;
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) => {
+          const result = await producer(request, (source) => {
+            if (source.kind !== 'descriptor') throw new Error('expected fd');
+            borrowed = source.fileHandle;
+            return operation(source);
+          });
+          expect(fileReadCache.check(await fsp.stat(filePath)).state).toBe(
+            'fresh',
+          );
+          if (cause === 'owner failure') throw failure;
+          controller.abort(failure);
+          return result;
+        };
+        const boundTool = new ReadFileTool(
+          makeConfig({ getFileSystemService: () => service }),
+        );
+        await expect(
+          boundTool
+            .build({ file_path: filePath, ...nullPagination })
+            .execute(controller.signal),
+        ).rejects.toBe(failure);
+        expect(fileReadCache.check(await fsp.stat(filePath)).state).toBe(
+          'unknown',
+        );
+        await expect(borrowed!.stat()).rejects.toMatchObject({ code: 'EBADF' });
+      },
+    );
+
+    it.skipIf(!['linux', 'darwin'].includes(process.platform)).each([
+      ['other file', false],
+      ['same file', false],
+      ['same file', true],
+    ] as const)(
+      'keeps replacement-history read authority when an old read settles: %s, failure=%s',
+      async (target, ownerFailure) => {
+        const oldPath = await put('old-generation.txt', 'old owner bytes');
+        const healthyPath =
+          target === 'same file'
+            ? oldPath
+            : await put('healthy-generation.txt', 'healthy owner bytes');
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        let entered!: () => void;
+        let release!: () => void;
+        const started = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const failure = new Error('old read owner failed after replacement');
+        let first = true;
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) => {
+          const isOld = first;
+          first = false;
+          const result = await producer(request, async (source) => {
+            if (isOld) {
+              if (source.kind !== 'descriptor')
+                throw new Error('expected ordinary descriptor');
+              const actualRead = source.fileHandle.read.bind(source.fileHandle);
+              let paused = false;
+              Object.assign(source.fileHandle, {
+                read: async (
+                  buffer: Buffer,
+                  offset: number,
+                  length: number,
+                  position: number,
+                ) => {
+                  const result = await actualRead(
+                    buffer,
+                    offset,
+                    length,
+                    position,
+                  );
+                  if (!paused) {
+                    paused = true;
+                    entered();
+                    await held;
+                  }
+                  return result;
+                },
+              });
+            }
+            return operation(source);
+          });
+          if (isOld && ownerFailure) throw failure;
+          return result;
+        };
+        const boundTool = new ReadFileTool(
+          makeConfig({ getFileSystemService: () => service }),
+        );
+        const writes = vi.spyOn(fileReadCache, 'recordRead');
+        // Attach the rejection observer before any intentionally failing owner settles.
+        const old = read(oldPath, boundTool).then(
+          (result) => ({ result, error: undefined }),
+          (error: unknown) => ({ result: undefined, error }),
+        );
+        try {
+          await started;
+          const oldGeneration = fileReadCache.getClearGeneration();
+          fileReadCache.clear();
+          expect(fileReadCache.getClearGeneration()).toBeGreaterThan(
+            oldGeneration,
+          );
+          expect(fileReadCache.check(await fsp.stat(oldPath)).state).toBe(
+            'unknown',
+          );
+          const healthy = await read(healthyPath, boundTool);
+          expect(healthy.error).toBeUndefined();
+          expect(healthy.llmContent).toBe(
+            target === 'same file' ? 'old owner bytes' : 'healthy owner bytes',
+          );
+          const current = fileReadCache.check(await fsp.stat(healthyPath));
+          expect(current.state).toBe('fresh');
+          if (current.state !== 'fresh')
+            throw new Error('healthy read did not establish authority');
+          const entry = { ...current.entry };
+          expect(writes).toHaveBeenCalledTimes(1);
+          release();
+          const settled = await old;
+          if (ownerFailure) expect(settled.error).toBe(failure);
+          else expect(settled.result?.error).toBeUndefined();
+          // Neither late recording nor late error cleanup may alter successor authority.
+          expect(writes).toHaveBeenCalledTimes(1);
+          expect(fileReadCache.check(await fsp.stat(healthyPath))).toEqual({
+            state: 'fresh',
+            entry,
+          });
+          if (target === 'other file')
+            expect(fileReadCache.check(await fsp.stat(oldPath)).state).toBe(
+              'unknown',
+            );
+        } finally {
+          release();
+          await old;
+          writes.mockRestore();
+        }
+      },
+    );
+
+    it('does not invalidate a healthy same-file read when an old recorded owner fails after history clear', async () => {
+      const filePath = await put(
+        'recorded-before-clear.txt',
+        'same file bytes',
+      );
+      const service = new StandardFileSystemService();
+      const producer = service.withReadFile.bind(service);
+      let entered!: () => void;
+      let release!: () => void;
+      const recorded = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const failure = new Error(
+        'old owner rejected its already-recorded result',
+      );
+      let first = true;
+      service.withReadFile = async <T>(
+        request: FileReadRequest,
+        operation: (source: FileReadSource) => Promise<T>,
+      ) => {
+        const isOld = first;
+        first = false;
+        const result = await producer(request, operation);
+        if (isOld) {
+          // The real Read operation has already assigned recordedStats here.
+          expect(fileReadCache.check(await fsp.stat(filePath)).state).toBe(
+            'fresh',
+          );
+          entered();
+          await held;
+          throw failure;
+        }
+        return result;
+      };
+      const boundTool = new ReadFileTool(
+        makeConfig({ getFileSystemService: () => service }),
+      );
+      const writes = vi.spyOn(fileReadCache, 'recordRead');
+      const invalidations = vi.spyOn(fileReadCache, 'invalidate');
+      const old = read(filePath, boundTool).then(
+        (result) => ({ result, error: undefined }),
+        (error: unknown) => ({ result: undefined, error }),
+      );
+      try {
+        await recorded;
+        expect(writes).toHaveBeenCalledTimes(1);
+        const generation = fileReadCache.getClearGeneration();
+        fileReadCache.clear();
+        expect(fileReadCache.getClearGeneration()).toBeGreaterThan(generation);
+        const healthy = await read(filePath, boundTool);
+        expect(healthy.error).toBeUndefined();
+        expect(healthy.llmContent).toBe('same file bytes');
+        const current = fileReadCache.check(await fsp.stat(filePath));
+        expect(current.state).toBe('fresh');
+        if (current.state !== 'fresh')
+          throw new Error('healthy read did not record');
+        const entry = { ...current.entry };
+        expect(writes).toHaveBeenCalledTimes(2);
+        release();
+        expect((await old).error).toBe(failure);
+        expect(invalidations).not.toHaveBeenCalled();
+        expect(fileReadCache.check(await fsp.stat(filePath))).toEqual({
+          state: 'fresh',
+          entry,
+        });
+      } finally {
+        release();
+        await old;
+        writes.mockRestore();
+        invalidations.mockRestore();
+      }
+    });
+
+    it.skipIf(!['linux', 'darwin'].includes(process.platform))(
+      'keeps a prior full read when a later read fails before recording',
+      async () => {
+        const filePath = path.join(tempRootDir, 'prior-read.txt');
+        await fsp.writeFile(filePath, 'line1\nline2\n');
+        const service = new StandardFileSystemService();
+        const boundTool = new ReadFileTool(
+          makeConfig({ getFileSystemService: () => service }),
+        );
+        await boundTool
+          .build({ file_path: filePath, ...nullPagination })
+          .execute(abortSignal);
+        const recorded = fileReadCache.check(await fsp.stat(filePath));
+        expect(recorded.state).toBe('fresh');
+        service.withReadFile = async () => {
+          throw new Error('cancelled before record');
+        };
+        await expect(
+          boundTool
+            .build({ file_path: filePath, offset: 1, limit: 1 })
+            .execute(abortSignal),
+        ).rejects.toThrow('cancelled before record');
+        const after = fileReadCache.check(await fsp.stat(filePath));
+        expect(after.state).toBe('fresh');
+        if (after.state === 'fresh') {
+          expect(after.entry.lastReadWasFull).toBe(true);
+        }
+      },
+    );
+
     it('advertises audio and video support to the model', () => {
       expect(tool.description).toContain('audio, video');
       expect(tool.description).toContain(
@@ -518,19 +1263,25 @@ describe('ReadFileTool', () => {
       );
     });
 
-    it('does not cache a read that returns after cancellation', async () => {
-      const filePath = path.join(tempRootDir, 'late-read.txt');
+    it('does not cache a delegated read that returns after cancellation', async () => {
+      const filePath = path.join(tempRootDir, 'delegated-late-read.txt');
       await fsp.writeFile(filePath, 'content', 'utf-8');
       let release!: (result: { content: string }) => void;
       const response = new Promise<{ content: string }>((resolve) => {
         release = resolve;
       });
+      const service = Object.assign(new StandardFileSystemService(), {
+        withReadFile: undefined,
+      });
       const read = vi
-        .spyOn(StandardFileSystemService.prototype, 'readTextFile')
+        .spyOn(service, 'readTextFile')
         .mockReturnValueOnce(response);
       const recordRead = vi.spyOn(fileReadCache, 'recordRead');
       const controller = new AbortController();
-      const running = tool
+      const delegatedTool = new ReadFileTool(
+        makeConfig({ getFileSystemService: () => service }),
+      );
+      const running = delegatedTool
         .build({ file_path: filePath, offset: 0, limit: 20 })
         .execute(controller.signal)
         .then(
@@ -550,6 +1301,76 @@ describe('ReadFileTool', () => {
       }
     });
 
+    it.skipIf(!['linux', 'darwin'].includes(process.platform))(
+      'does not cache a read that returns after cancellation',
+      async () => {
+        const filePath = path.join(tempRootDir, 'late-read.txt');
+        await fsp.writeFile(filePath, 'content', 'utf-8');
+        let release!: () => void;
+        const response = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        let started = false;
+        let borrowed: fsp.FileHandle | undefined;
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) =>
+          producer(request, async (source) => {
+            if (source.kind !== 'descriptor')
+              throw new Error('expected descriptor producer');
+            borrowed = source.fileHandle;
+            const originalRead = source.fileHandle.read.bind(source.fileHandle);
+            Object.assign(source.fileHandle, {
+              read: async (
+                buffer: Buffer,
+                offset: number,
+                length: number,
+                position: number,
+              ) => {
+                const result = await originalRead(
+                  buffer,
+                  offset,
+                  length,
+                  position,
+                );
+                started = true;
+                await response;
+                return result;
+              },
+            });
+            return operation(source);
+          });
+        const boundTool = new ReadFileTool(
+          makeConfig({ getFileSystemService: () => service }),
+        );
+        const recordRead = vi.spyOn(fileReadCache, 'recordRead');
+        const controller = new AbortController();
+        const running = boundTool
+          .build({ file_path: filePath, offset: 0, limit: 20 })
+          .execute(controller.signal)
+          .then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error }),
+          );
+        try {
+          await vi.waitFor(() => expect(started).toBe(true));
+          controller.abort();
+          release();
+          expect(await running).toEqual({ error: controller.signal.reason });
+          expect(recordRead).not.toHaveBeenCalled();
+          await expect(borrowed!.stat()).rejects.toMatchObject({
+            code: 'EBADF',
+          });
+        } finally {
+          release();
+          await running;
+        }
+      },
+    );
+
     it('should handle text file with lines exceeding maximum length', async () => {
       const longLine = 'a'.repeat(2500); // Exceeds MAX_LINE_LENGTH_TEXT_FILE (2000)
       const filePath = await put(
@@ -560,6 +1381,19 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toContain(
         'Read lines 1-2 of 3 from longlines.txt (truncated)',
       );
+    });
+
+    it('declares its raw size unknown once its own paging capped the body', async () => {
+      // Self-managed paging bounds read_file under its own line/char limits;
+      // the scheduler must not measure the capped body and certify it as the
+      // pre-reduction raw size (#13652 R5-1).
+      const whole = await read(await put('small.txt', 'short file'));
+      expect(whole.rawOutputSize).toBeUndefined();
+
+      const capped = await read(await put('big.txt', numberedLines(2000)));
+      expect(capped.rawOutputSize).toBeNull();
+      expect(capped.truncatedByProducer).toBe(true);
+      expect(whole.truncatedByProducer).toBeUndefined();
     });
 
     it('returns image content without tool guidance before the registry is available', async () => {

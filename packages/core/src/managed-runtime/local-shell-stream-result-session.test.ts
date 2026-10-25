@@ -7,37 +7,14 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import { LocalToolResultSegmentStore } from './local-managed-tool-result-store.js';
 import { LocalShellStreamResultSession } from './local-shell-stream-result-session.js';
 
-// monitor_run stays disabled for submission on main; this suite admits
-// captures ahead of the H3 enablement flip, like the sibling suites do.
-// child_run's gate is per kind since H4b, so the mock lifts the kind gate
-// while the flag stands.
-const enablement = vi.hoisted(() => ({ childRun: true, monitorRun: true }));
-
-vi.mock('./managed-session-records.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('./managed-session-records.js')>();
-  return {
-    ...actual,
-    assertManagedSessionDomainEnabled: (
-      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-    ) => {
-      if (domain === 'monitor_run' && enablement.monitorRun) return;
-      actual.assertManagedSessionDomainEnabled(domain);
-    },
-    assertManagedSessionChildRunKindEnabled: (kind: string) => {
-      if (!enablement.childRun) {
-        actual.assertManagedSessionChildRunKindEnabled(kind);
-      }
-    },
-  };
-});
-
+// monitor_run and the shell kind are enabled by the H3 enablement slice
+// (#13856): this suite admits captures through the real gates, no lift.
 const roots = new Set<string>();
 
 afterAll(async () => {

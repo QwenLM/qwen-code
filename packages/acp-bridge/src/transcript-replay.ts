@@ -88,6 +88,7 @@ export interface PendingTranscriptToolCall {
    * entry because a page can split between a call and its telemetry.
    */
   readonly timingMatched?: true;
+  readonly toolLifecycleExecutionId?: string;
 }
 
 export interface TranscriptReplayStateV1 {
@@ -605,6 +606,135 @@ export function createTranscriptTimingUpdate(
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: '' },
     _meta: meta,
+  } as SessionUpdate;
+}
+
+export type TranscriptToolLifecycle = {
+  readonly v: 1;
+  readonly kind: 'tool';
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly callId: string;
+  readonly toolName: string;
+  readonly subagentId?: string;
+} & (
+  | {
+      readonly phase: 'started';
+      readonly executionStatus: 'running';
+      readonly startedAt: number;
+    }
+  | {
+      readonly phase: 'ended';
+      readonly executionStatus: 'not_started';
+      readonly endedAt: number;
+      readonly outcome: 'success' | 'error' | 'cancelled';
+    }
+  | {
+      readonly phase: 'ended';
+      readonly executionStatus: 'success' | 'error' | 'cancelled';
+      readonly startedAt: number;
+      readonly endedAt: number;
+      readonly executionDurationMs: number;
+      readonly outcome: 'success' | 'error' | 'cancelled';
+    }
+);
+
+export function parseToolLifecycle(
+  value: unknown,
+): TranscriptToolLifecycle | undefined {
+  if (!isObjectRecord(value) || value['v'] !== 1 || value['kind'] !== 'tool')
+    return undefined;
+  const strings: Record<string, string> = {};
+  for (const key of ['executionId', 'sessionId', 'callId', 'toolName']) {
+    const entry = value[key];
+    if (typeof entry !== 'string' || !entry.trim()) return undefined;
+    strings[key] = entry;
+  }
+  const subagentId = value['subagentId'];
+  if (
+    subagentId !== undefined &&
+    (typeof subagentId !== 'string' || !subagentId.trim())
+  )
+    return undefined;
+  const shared = {
+    v: 1 as const,
+    kind: 'tool' as const,
+    executionId: strings['executionId']!,
+    sessionId: strings['sessionId']!,
+    callId: strings['callId']!,
+    toolName: strings['toolName']!,
+    ...(typeof subagentId === 'string' ? { subagentId } : {}),
+  };
+  const startedAt = finiteNumber(value['startedAt']);
+  if (value['phase'] === 'started') {
+    if (
+      value['executionStatus'] !== 'running' ||
+      startedAt === undefined ||
+      startedAt < 0 ||
+      value['endedAt'] !== undefined ||
+      value['outcome'] !== undefined ||
+      value['executionDurationMs'] !== undefined
+    )
+      return undefined;
+    return {
+      ...shared,
+      phase: 'started',
+      executionStatus: 'running',
+      startedAt,
+    };
+  }
+  if (value['phase'] !== 'ended') return undefined;
+  const endedAt = finiteNumber(value['endedAt']);
+  const outcome = value['outcome'];
+  if (
+    endedAt === undefined ||
+    endedAt < 0 ||
+    (outcome !== 'success' && outcome !== 'error' && outcome !== 'cancelled')
+  )
+    return undefined;
+  const executionStatus = value['executionStatus'];
+  if (executionStatus === 'not_started') {
+    if (
+      value['startedAt'] !== undefined ||
+      value['executionDurationMs'] !== undefined
+    )
+      return undefined;
+    return { ...shared, phase: 'ended', executionStatus, endedAt, outcome };
+  }
+  const executionDurationMs = finiteNumber(value['executionDurationMs']);
+  if (
+    (executionStatus !== 'success' &&
+      executionStatus !== 'error' &&
+      executionStatus !== 'cancelled') ||
+    startedAt === undefined ||
+    startedAt < 0 ||
+    endedAt < startedAt ||
+    executionDurationMs === undefined ||
+    executionDurationMs < 0
+  )
+    return undefined;
+  return {
+    ...shared,
+    phase: 'ended',
+    executionStatus,
+    startedAt,
+    endedAt,
+    executionDurationMs,
+    outcome,
+  };
+}
+
+export function createTranscriptToolLifecycleUpdate(
+  toolLifecycle: TranscriptToolLifecycle,
+  options: UpdateMetaOptions = {},
+): SessionUpdate {
+  return {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: toolLifecycle.callId,
+    _meta: buildUpdateMeta({
+      ...options,
+      extra: { ...(options.extra ?? {}), toolLifecycle },
+    }),
   } as SessionUpdate;
 }
 
@@ -1581,6 +1711,43 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           yield emit(createTranscriptExecutionLifecycleUpdate(lifecycle, meta));
         return;
       }
+      if (
+        isObjectRecord(uiEvent) &&
+        uiEvent['event.name'] === 'tool_lifecycle'
+      ) {
+        const lifecycle = parseToolLifecycle(uiEvent);
+        if (lifecycle) {
+          let callId = lifecycle.callId;
+          if (!lifecycle.subagentId) {
+            const candidates = [...this.pendingToolCalls.values()].filter(
+              (pending) =>
+                (pending.rawCallId ?? pending.callId) === lifecycle.callId &&
+                (pending.toolName === lifecycle.toolName ||
+                  pending.resolvedToolName === lifecycle.toolName),
+            );
+            const pending =
+              candidates.find(
+                (item) =>
+                  item.toolLifecycleExecutionId === lifecycle.executionId,
+              ) ??
+              candidates.find(
+                (item) => item.toolLifecycleExecutionId === undefined,
+              );
+            if (pending) {
+              callId = pending.callId;
+              this.pendingToolCalls.set(callId, {
+                ...pending,
+                toolLifecycleExecutionId: lifecycle.executionId,
+              });
+            }
+          }
+          yield emit({
+            ...createTranscriptToolLifecycleUpdate(lifecycle, meta),
+            toolCallId: callId,
+          } as SessionUpdate);
+        }
+        return;
+      }
       const timing = parseTelemetryTiming(record.systemPayload);
       if (!timing) return;
       yield emit(
@@ -2186,6 +2353,10 @@ function parseInitialState(
           // page resolve against the recorded id instead of the allocated one.
           ...(typeof pending['rawCallId'] === 'string'
             ? { rawCallId: pending['rawCallId'] }
+            : {}),
+          ...(typeof pending['toolLifecycleExecutionId'] === 'string' &&
+          pending['toolLifecycleExecutionId'].length > 0
+            ? { toolLifecycleExecutionId: pending['toolLifecycleExecutionId'] }
             : {}),
           ...(pending['timingMatched'] === true
             ? { timingMatched: true as const }

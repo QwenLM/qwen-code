@@ -57,6 +57,10 @@ export function countAllInlineImages(contents: Content[]): number {
   return count;
 }
 
+export function hasImagePayloadReferences(contents: Content[]): boolean {
+  return collectReferencedImageIds(contents).size > 0;
+}
+
 /**
  * Replace image payloads in-place with text references, storing the
  * originals in the provided store. This mutates the history so that

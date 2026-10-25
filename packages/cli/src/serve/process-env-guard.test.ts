@@ -38,11 +38,49 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
+    'packages/cli/src/serve/memory-import.ts',
+    {
+      reason:
+        'Import refuses process-global legacy memory path overrides because native memory readers still consume them, even if a runtime overlay clears them. Project scope uses the selected runtime snapshot; only parent-process runtimes without a snapshot use the process environment.',
+      accesses: {
+        'computed:key': 1,
+        'key:QWEN_CODE_MEMORY_PROJECT_SCOPE': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/hosted-harness-contract.ts',
+    {
+      reason:
+        'The Hosted lifecycle v2 profile advertisement and pool instance identity are process-scoped deployment contracts fixed when the daemon contract is created.',
+      accesses: {
+        'computed:HOSTED_LIFECYCLE_V2_PROFILES_ENV': 1,
+        'key:QWEN_HOSTED_HARNESS_INSTANCE_ID': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/hosted-harness-profile.ts',
+    {
+      reason:
+        'Hosted profile validation refuses private CSI roots when the process-scoped pool instance identity is configured.',
+      accesses: { 'key:QWEN_HOSTED_HARNESS_INSTANCE_ID': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/workspace-recovery-worker.ts',
     {
       reason:
         'The private offline migration worker pins deployment-owned QWEN_HOME and its retained file-history volume before validating recovery evidence.',
       accesses: { 'key:QWEN_HOME': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/workspace-git-clone.ts',
+    {
+      reason:
+        'Git clone spawning strips repository-locating and host-configuration variables from a copy of the process environment and resolves the Windows taskkill path from the process-scoped OS root.',
+      accesses: { whole: 1, 'key:SystemRoot': 1 },
     },
   ],
   [
@@ -111,6 +149,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_DAEMON_LOG_FILE': 1,
         'key:QWEN_RUNTIME_DIR': 1,
       },
+    },
+  ],
+  [
+    'packages/cli/src/serve/daemon-discovery.ts',
+    {
+      reason:
+        'Embedded callers may omit the daemon-level environment argument.',
+      accesses: { whole: 1 },
     },
   ],
   [
@@ -184,6 +230,18 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-csi-file-worker.ts',
+    {
+      reason:
+        'The Kubernetes Downward API supplies Pod identity for the dedicated file worker process; startup freezes that identity for its one immutable Session, independently of workspace environment overlays.',
+      accesses: {
+        'key:QWEN_NODE_NAME': 1,
+        'key:QWEN_POD_NAMESPACE': 1,
+        'key:QWEN_POD_UID': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-csi-worker.ts',
     {
       reason:
@@ -208,11 +266,47 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-local-runtime.ts',
+    {
+      reason:
+        'The foreground Managed launcher resolves its version-matched runtime and Java from deployment-owned process settings before any Workspace exists.',
+      accesses: {
+        'key:JAVA_HOME': 1,
+        'key:PATH': 1,
+        'key:QWEN_MANAGED_LOCAL_RUNTIME_DIR': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-local-serve.ts',
+    {
+      reason:
+        'The foreground Managed launcher starts its private Java and Hosted Harness processes from its own deployment environment, before any Workspace environment is resolved.',
+      accesses: { whole: 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-mcp-runtime.ts',
     {
       reason:
         'MCP stdio children use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup; their remaining environment comes from the verified workspace directory and deployment-owned definition.',
       accesses: { 'key:PATH': 1, 'key:SystemRoot': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-bootstrap.ts',
+    {
+      reason:
+        'The one-shot SSH bootstrap copies a fixed allowlist from its host process into a detached worker without forwarding credentials or Node loader overrides.',
+      accesses: { 'computed:key': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-ssh-worker.ts',
+    {
+      reason:
+        'The dedicated SSH worker removes launch-only QWEN_MANAGED variables and Node loader overrides before executing workspace tools.',
+      accesses: { 'computed:key': 1, whole: 1 },
     },
   ],
   [
@@ -314,10 +408,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
         'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
-        'The Hosted Harness capability digest is a process-scoped contract fixed at daemon bootstrap.',
+        'The Hosted Harness capability digest, Broker URL/token and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
+        'computed:HOSTED_CSI_SESSION_STORE_URL_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
@@ -327,6 +422,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:NODE_EXTRA_CA_CERTS': 1,
         'key:NODE_TLS_REJECT_UNAUTHORIZED': 1,
         'key:QWEN_CODE_IDE_WORKSPACE_PATH': 1,
+        'key:QWEN_HOSTED_HARNESS_BROKER_URL': 1,
+        'key:QWEN_HOSTED_HARNESS_BROKER_TOKEN': 1,
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
@@ -453,8 +550,13 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'Embedded server construction keeps a process-environment compatibility fallback. ' +
         'The collaboration opt-in is read once at daemon startup and is process-scoped ' +
         'by design: it governs work no session owns (the dispatch timer and Host ' +
-        'transport routes), so it cannot be a per-session setting.',
-      accesses: { whole: 1, 'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1 },
+        'transport routes), so it cannot be a per-session setting. ' +
+        'The Hosted pool instance setting is captured once when the server installs its process-scoped private routes.',
+      accesses: {
+        whole: 1,
+        'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1,
+        'key:QWEN_HOSTED_HARNESS_INSTANCE_ID': 1,
+      },
     },
   ],
   [

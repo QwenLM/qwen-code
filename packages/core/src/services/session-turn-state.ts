@@ -5,10 +5,13 @@
  */
 
 import type { ChatRecord } from './chatRecordingService.js';
+import { getRecordRewindId } from './session-api-history.js';
+import { readFileHistorySnapshotPayload } from './session-file-history-state.js';
 
 export interface SessionTurnState {
   initialTurn: number;
   turnParentUuids: Array<string | null>;
+  turnPromptIds: Array<string | undefined>;
   backgroundNotificationTaskIds: string[];
 }
 
@@ -16,6 +19,7 @@ export interface SessionTurnRecordHint {
   promptTurn?: number;
   countsAsUserPrompt: boolean;
   turnParentUuid?: string | null;
+  turnPromptId?: string;
   backgroundNotificationTaskId?: string;
 }
 
@@ -23,6 +27,7 @@ export class SessionTurnStateAccumulator {
   private maxPromptTurn = 0;
   private userMessageCount = 0;
   private readonly turnParentUuids: Array<string | null> = [];
+  private readonly turnPromptIds: Array<string | undefined> = [];
   private readonly backgroundNotificationTaskIds = new Set<string>();
 
   constructor(private readonly sessionId: string) {}
@@ -40,6 +45,7 @@ export class SessionTurnStateAccumulator {
     }
     if (hint.turnParentUuid !== undefined) {
       this.turnParentUuids.push(hint.turnParentUuid);
+      this.turnPromptIds.push(hint.turnPromptId);
     }
     if (hint.backgroundNotificationTaskId !== undefined) {
       this.backgroundNotificationTaskIds.add(hint.backgroundNotificationTaskId);
@@ -51,6 +57,7 @@ export class SessionTurnStateAccumulator {
       initialTurn:
         this.maxPromptTurn > 0 ? this.maxPromptTurn : this.userMessageCount,
       turnParentUuids: [...this.turnParentUuids],
+      turnPromptIds: [...this.turnPromptIds],
       backgroundNotificationTaskIds: [...this.backgroundNotificationTaskIds],
     };
   }
@@ -90,7 +97,12 @@ export function getSessionTurnRecordHint(
     ...(promptTurn !== undefined ? { promptTurn } : {}),
     countsAsUserPrompt:
       record.sessionId === sessionId && isUserPromptRecord(record),
-    ...(turnParentUuid !== undefined ? { turnParentUuid } : {}),
+    ...(turnParentUuid !== undefined
+      ? {
+          turnParentUuid,
+          turnPromptId: getRecordRewindId(record),
+        }
+      : {}),
     ...(typeof backgroundTask?.taskId === 'string'
       ? { backgroundNotificationTaskId: backgroundTask.taskId }
       : {}),
@@ -119,6 +131,14 @@ function getRecordPromptIds(record: ChatRecord): string[] {
   if (typeof recordPromptId === 'string') promptIds.push(recordPromptId);
   const telemetryPromptId = readTelemetryPromptId(record.systemPayload);
   if (telemetryPromptId) promptIds.push(telemetryPromptId);
+  const snapshotPayload = readFileHistorySnapshotPayload(record);
+  if (snapshotPayload) {
+    for (const snapshot of snapshotPayload.snapshots) {
+      if (typeof snapshot?.promptId === 'string') {
+        promptIds.push(snapshot.promptId);
+      }
+    }
+  }
   return promptIds;
 }
 
@@ -141,7 +161,9 @@ function parseSessionPromptTurn(
   const promptIdPrefix = `${sessionId}########`;
   if (!promptId.startsWith(promptIdPrefix)) return undefined;
   const suffix = promptId.slice(promptIdPrefix.length);
-  return /^\d+$/.test(suffix) ? Number(suffix) : undefined;
+  if (!/^\d+$/.test(suffix)) return undefined;
+  const turn = Number(suffix);
+  return Number.isSafeInteger(turn + 1) ? turn : undefined;
 }
 
 function isUserPromptRecord(record: ChatRecord): boolean {

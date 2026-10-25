@@ -9,6 +9,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -146,6 +147,67 @@ esac
     });
     return {
       output: readFileSync(output, 'utf8').trim().split('\n').at(-1),
+      stdout,
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+const feedUpdateStep = releaseYaml.jobs.publish.steps.find(
+  ({ name }) => name === 'Update stable updater feed',
+);
+
+// Replays the feed step against a gh stub that records every call, so the
+// order and arguments of upload/edit/create are checked, not the script text.
+function runFeedUpdate(overrides) {
+  const directory = mkdtempSync(join(tmpdir(), 'desktop-feed-update-'));
+  const bin = join(directory, 'bin');
+  const calls = join(directory, 'calls');
+  mkdirSync(bin);
+  mkdirSync(calls);
+  writeFileSync(
+    join(bin, 'gh'),
+    `#!/usr/bin/env bash
+set -euo pipefail
+count="$(find "$GH_CALLS" -type f | wc -l | tr -d ' ')"
+printf '%s\\0' "$@" > "$GH_CALLS/$count"
+case "$1 $2" in
+  'release view') [ "$FEED_VERSION" != 'missing' ] ;;
+  'release download')
+    while [ "$1" != '--dir' ]; do shift; done
+    printf '{"version":"%s"}\\n' "$FEED_VERSION" > "$2/desktop-latest.json"
+    ;;
+  'release edit') [ "$EDIT_FAILS" != 'true' ] ;;
+esac
+`,
+  );
+  chmodSync(join(bin, 'gh'), 0o755);
+
+  try {
+    const stdout = execFileSync('bash', ['-c', feedUpdateStep.run], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        EDIT_FAILS: 'false',
+        ELECTRON_BRIDGE: 'false',
+        FEED_TAG: 'desktop-latest',
+        GH_CALLS: calls,
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        PATH: `${bin}:${process.env.PATH}`,
+        RELEASE_TAG: 'desktop-v1.2.3',
+        RELEASE_VERSION: '1.2.3',
+        ...overrides,
+      },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    return {
+      calls: readdirSync(calls)
+        .sort((left, right) => Number(left) - Number(right))
+        .map((file) =>
+          readFileSync(join(calls, file), 'utf8').split('\0').slice(0, -1),
+        ),
       stdout,
     };
   } finally {
@@ -410,6 +472,11 @@ describe('Desktop OSS mirror workflow', () => {
     expect(updateFeed).toContain(
       'Desktop $RELEASE_VERSION will not replace newer stable feed $current',
     );
+    // The page notes link to the versioned release; the replay below sets the
+    // tag itself, so only this pin notices the binding going missing.
+    expect(feedUpdateStep.env.RELEASE_TAG).toBe(
+      '${{ needs.prepare.outputs.tag }}',
+    );
 
     const sync = getWorkflowJob(syncWorkflow, 'sync');
     const check = getWorkflowStep(
@@ -439,6 +506,90 @@ describe('Desktop OSS mirror workflow', () => {
       getWorkflowStep(sync, 'Verify latest manifest on Aliyun OSS'),
     ).toContain('if: "${{ steps.latest.outputs.matches == \'true\' }}"');
   });
+
+  const feedPageTitle = 'Qwen Code Desktop latest (v1.2.3)';
+  const feedPageNotes = expect.stringContaining(
+    'https://github.com/QwenLM/qwen-code/releases/tag/desktop-v1.2.3',
+  );
+  const advanceCalls = [
+    ['release', 'view', 'desktop-latest'],
+    [
+      'release',
+      'download',
+      'desktop-latest',
+      '--dir',
+      expect.any(String),
+      '--pattern',
+      'desktop-latest.json',
+    ],
+    [
+      'release',
+      'upload',
+      'desktop-latest',
+      'release-assets/desktop-latest.json',
+      '--clobber',
+    ],
+    [
+      'release',
+      'edit',
+      'desktop-latest',
+      '--title',
+      feedPageTitle,
+      '--notes',
+      feedPageNotes,
+      '--latest=false',
+    ],
+  ];
+
+  it.skipIf(!replayable).each([
+    ['an older feed', '1.2.2'],
+    ['a same-version rerun', '1.2.3'],
+  ])('rewrites the feed page text after advancing %s', (_name, feedVersion) => {
+    expect(runFeedUpdate({ FEED_VERSION: feedVersion }).calls).toEqual(
+      advanceCalls,
+    );
+  });
+
+  it.skipIf(!replayable)(
+    'leaves a newer feed and its page text untouched',
+    () => {
+      const { calls, stdout } = runFeedUpdate({ FEED_VERSION: '1.2.4' });
+      expect(calls).toEqual(advanceCalls.slice(0, 2));
+      expect(stdout).toContain('will not replace newer stable feed 1.2.4');
+    },
+  );
+
+  it.skipIf(!replayable)(
+    'warns instead of failing when only the page text update fails',
+    () => {
+      const { calls, stdout } = runFeedUpdate({
+        EDIT_FAILS: 'true',
+        FEED_VERSION: '1.2.2',
+      });
+      expect(calls).toEqual(advanceCalls);
+      expect(stdout).toContain('::warning::');
+    },
+  );
+
+  it.skipIf(!replayable)(
+    'creates a missing feed with the same page text',
+    () => {
+      expect(runFeedUpdate({ FEED_VERSION: 'missing' }).calls).toEqual([
+        ['release', 'view', 'desktop-latest'],
+        [
+          'release',
+          'create',
+          'desktop-latest',
+          'release-assets/desktop-latest.json',
+          '--title',
+          feedPageTitle,
+          '--notes',
+          feedPageNotes,
+          '--latest=false',
+        ],
+      ]);
+    },
+  );
 
   it('sync workflow validates stable-only releases in the reusable job', () => {
     expect(syncWorkflow).not.toContain('pull_request:');
