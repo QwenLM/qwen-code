@@ -234,16 +234,23 @@ describe('existing-node deployment rendering', () => {
     });
   });
   it('lets the local Broker derive its canonical default Workspace identity', () => {
-    const settings = readFileSync(
-      path.join(
-        root,
-        'packages/managed-agent-server/distribution/kubernetes/qualification/server.example.yaml',
+    const settings = parse(
+      readFileSync(
+        path.join(
+          root,
+          'packages/managed-agent-server/distribution/kubernetes/qualification/server.example.yaml',
+        ),
+        'utf8',
       ),
-      'utf8',
+    ).qwen['managed-agent'];
+    expect(settings['session-store']).not.toHaveProperty('workspace-id');
+    expect(settings['runtime-broker']).not.toHaveProperty('workspace-id');
+    expect(settings['runtime-broker']['workspace-cwd']).toBe(
+      '/data/default-workspace',
     );
-    expect(settings).not.toMatch(/workspace-id:/u);
-    expect(settings).toContain('workspace-cwd: /data/default-workspace');
-    expect(settings).toContain('workspace-creation-root: /data/workspaces');
+    expect(settings['runtime-broker']['workspace-creation-root']).toBe(
+      '/data/workspaces',
+    );
   });
   it('fills actual templates without Secrets, HPA or infrastructure resources', () => {
     const resources = renderQualification(config, nodes);
