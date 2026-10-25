@@ -9,7 +9,7 @@ rationale behind each gate, see the design record:
 
 ## Round seed — `@qwen-code /takeover from N`
 
-## The problem it solves
+### The problem it solves
 
 The autofix loop stops implementing non-Critical feedback once a PR has
 completed `CRITICAL_ONLY_AFTER_ROUND` (5) change-producing rounds. From there
@@ -26,7 +26,7 @@ diff on nice-to-haves at exactly the point it should have been converging.
 `from N` lets you state what the loop cannot infer: how much review this PR has
 already been through.
 
-## Usage
+### Usage
 
 ```
 @qwen-code /takeover from 4
@@ -53,7 +53,7 @@ The same refusals apply — a non-`main` base, `autofix/skip`, a fork without
 maintainer-edit access, and a fork whose author lacks write+ on this repository
 are all declined out loud.
 
-### Picking N
+#### Picking N (seed)
 
 N is "how many review rounds has this PR already had", counted the way the loop
 counts: **rounds that produced changes**, not individual comments or reviews. A
@@ -74,7 +74,7 @@ seed.
 | `from 4` | 4                 | 1                                              |
 | `from 5` | 5                 | 0 — Critical-only from the first managed round |
 
-## Semantics
+### Semantics
 
 **The seed is a floor for an empty window, not an offset added to every round.**
 The counter is `max(this window's round markers)`, falling back to the seed when
@@ -100,7 +100,7 @@ the loop instead of starting it — so it is clamped to `cap - 1`. When that
 happens, the Critical-only audit record cites the number you **typed**, plus a
 note naming the clamp, so it never quotes a command nobody sent.
 
-## What it does not do
+### What it does not do
 
 **It does not seed the growth brake.** `CRITICAL_ONLY_AFTER_ROUND` is only one
 of two brakes; the other trips when the diff grows past
@@ -229,7 +229,7 @@ the router never started, not even a log line.
 | blank line, then the command         | **nothing** — leading newline                   |
 | `@qwen-code /takeover from 4 please` | **nothing** — must end the comment              |
 
-## Reading the result
+### Reading the result
 
 Once the brake engages, the round report carries a `Deferred non-Critical
 feedback` section whose preamble names the seed explicitly, for example:
