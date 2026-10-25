@@ -112,7 +112,7 @@ A prepared-request replay installs history with `structuredClone`
 re-arms.
 
 Recording a compression checkpoint copies each `Content` container and its
-parts array at capture time, before the in-send rescue. Spread copies preserve
+parts array at capture time. Spread copies preserve
 symbol metadata used to derive prompt identities and context markers; they do
 not recursively freeze part data. A later rescue cannot add its block to that
 checkpoint. Resume from a checkpoint without the block may therefore inject one
