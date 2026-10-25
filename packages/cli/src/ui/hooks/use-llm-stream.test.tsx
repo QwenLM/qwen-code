@@ -677,6 +677,55 @@ describe('useLlmStream', () => {
         }
       },
     );
+
+    it.each([
+      ['start', true],
+      ['fail to start', false],
+    ])(
+      'holds a slash command bound for the model until the Mods %s',
+      async (_, started) => {
+        let settle: () => void = () => {};
+        const ready = new Promise<void>((resolve, reject) => {
+          settle = () =>
+            started ? resolve() : reject(new Error('Mod startup failed'));
+        });
+        void ready.catch(() => {});
+        const owner = vi
+          .spyOn(interactiveMods, 'getInteractiveModSession')
+          .mockReturnValue({
+            ready,
+            startTurn: vi.fn(),
+          } as unknown as interactiveMods.InteractiveModSession);
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'review it' }],
+        });
+        mockSendMessageStream.mockReturnValue((async function* () {})());
+        try {
+          const { result } = renderTestHook();
+          let submitted: Promise<void> = Promise.resolve();
+          await act(async () => {
+            submitted = result.current.submitQuery('/review');
+          });
+          expect(mockHandleSlashCommand).toHaveBeenCalledOnce();
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          await act(async () => {
+            settle();
+            await submitted;
+          });
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(started ? 1 : 0);
+          expect(
+            mockAddItem.mock.calls.some(
+              ([item]) =>
+                item.type === MessageType.ERROR &&
+                String(item.text).includes('Mods failed to initialize'),
+            ),
+          ).toBe(!started);
+        } finally {
+          owner.mockRestore();
+        }
+      },
+    );
   });
 
   it('sends a hidden Goal turn without user admission side effects', async () => {
@@ -14138,6 +14187,10 @@ describe('useLlmStream', () => {
         'ends the turn as aborted for %s, with a notice only for a person',
         async (_, byMod) => {
           const { turn, startTurn } = installModTurn();
+          const cancelAllWakeups = vi.fn().mockReturnValue(1);
+          (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue({
+            cancelAllWakeups,
+          });
           admitted(async function* () {
             yield { type: ServerLlmEventType.Content, value: 'Part 1' };
             await new Promise(() => {});
@@ -14175,6 +14228,8 @@ describe('useLlmStream', () => {
           const notice = expect.objectContaining({
             text: 'Request cancelled.',
           });
+          // A Mod's end leaves the person's self-paced loop running.
+          expect(cancelAllWakeups).toHaveBeenCalledTimes(byMod ? 0 : 1);
           if (byMod) {
             expect(mockAddItem).not.toHaveBeenCalledWith(
               notice,
@@ -14204,6 +14259,144 @@ describe('useLlmStream', () => {
         await waitFor(() =>
           expect(turn.complete).toHaveBeenCalledExactlyOnceWith('error'),
         );
+      });
+
+      it('ends the turn as aborted when it is cancelled without an Esc', async () => {
+        const { turn } = installModTurn();
+        // A Goal preemption aborts the turn's controller directly.
+        admitted(async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Part' };
+          yield { type: ServerLlmEventType.UserCancelled };
+        });
+        const { result } = renderTestHook();
+        await act(async () => {
+          await result.current.submitQuery('Fix it');
+        });
+        await waitFor(() =>
+          expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted'),
+        );
+      });
+
+      describe('with a tool call', () => {
+        const promptId = 'prompt-mod-tool';
+        const request = {
+          callId: 'call-1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: promptId,
+        };
+        const tool = (
+          status: 'executing' | 'cancelled' | 'success',
+          overrides: Record<string, unknown> = {},
+        ) =>
+          ({
+            request,
+            status,
+            responseSubmittedToLlm: false,
+            ...(status === 'executing'
+              ? { startTime: Date.now() }
+              : {
+                  response: {
+                    callId: request.callId,
+                    responseParts: [{ text: `${status} result` }],
+                    errorType: undefined,
+                  },
+                }),
+            tool: {
+              name: 'testTool',
+              displayName: 'MockTool',
+              description: 'mock',
+              build: vi.fn(),
+            },
+            invocation: { getDescription: () => request.callId },
+            ...overrides,
+          }) as unknown as TrackedToolCall;
+        // The turn's first response asks for a tool, which then runs as the
+        // scheduler holds it; the continuation streams `after`.
+        const runToolTurn = async (
+          ended: TrackedToolCall,
+          after: unknown[] = [],
+        ) => {
+          const { turn } = installModTurn();
+          let sends = 0;
+          admitted(async function* () {
+            if (sends++ > 0) {
+              for (const event of after) yield event;
+              return;
+            }
+            yield { type: ServerLlmEventType.ToolCallRequest, value: request };
+          });
+          const { result, rerenderWithToolCalls, completeToolRound } =
+            renderTestHook();
+          mockScheduleToolCalls.mockImplementation(() =>
+            rerenderWithToolCalls([tool('executing')]),
+          );
+          await act(async () => {
+            await result.current.submitQuery(
+              'Fix it',
+              SendMessageType.UserQuery,
+              promptId,
+            );
+          });
+          expect(mockScheduleToolCalls).toHaveBeenCalledOnce();
+          expect(turn.complete).not.toHaveBeenCalled();
+          await completeToolRound([ended]);
+          rerenderWithToolCalls([]);
+          return turn;
+        };
+
+        it('ends the turn as aborted when its tools were cancelled', async () => {
+          const turn = await runToolTurn(tool('cancelled'));
+          await waitFor(() =>
+            expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted'),
+          );
+        });
+
+        it('ends the turn as an error when its tools cannot go on', async () => {
+          mockConfig.getBackgroundTaskRegistry = vi.fn(() => ({
+            canStartBackgroundAgent: vi.fn(() => false),
+            getMaxConcurrentBackgroundAgents: vi.fn(() => 1),
+            setNotificationCallback: vi.fn(),
+          })) as Config['getBackgroundTaskRegistry'];
+          const turn = await runToolTurn(
+            tool('success', {
+              request: { ...request, name: 'agent' },
+              response: {
+                callId: request.callId,
+                responseParts: [{ text: 'launched' }],
+                errorType: undefined,
+                resultDisplay: {
+                  type: 'task_execution',
+                  subagentName: 'researcher',
+                  taskDescription: 'Research',
+                  taskPrompt: 'Inspect the code',
+                  status: 'background',
+                },
+              },
+            }),
+          );
+          await waitFor(() =>
+            expect(turn.complete).toHaveBeenCalledExactlyOnceWith('error'),
+          );
+        });
+
+        it('leaves a failed continuation to the events the turn heard', async () => {
+          // Delivery failure is also read from a flag a concurrent /btw can
+          // set, so only the failure the turn heard marks it.
+          mockConfig.getHookSystem = vi.fn(() => undefined);
+          const turn = await runToolTurn(tool('success'), [
+            {
+              type: ServerLlmEventType.Error,
+              value: { error: { message: 'provider failed' } },
+            },
+          ]);
+          await waitFor(() => expect(turn.complete).toHaveBeenCalledOnce());
+          expect(turn.complete).toHaveBeenCalledWith(undefined);
+          expect(turn.saw.mock.calls.map(([event]) => event.type)).toContain(
+            ServerLlmEventType.Error,
+          );
+        });
       });
 
       it('offers no admission hook without Mods', async () => {

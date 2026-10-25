@@ -4115,6 +4115,25 @@ export const useLlmStream = (
           metadata?.onDeliveryFailed?.();
           return;
         }
+        // A slash command that reaches the model waits for the Mods as a
+        // typed prompt does.
+        if (mods && dispatchesSlashCommand) {
+          try {
+            await mods.ready;
+          } catch {
+            addItem(
+              {
+                type: MessageType.ERROR,
+                text: 'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.',
+              },
+              Date.now(),
+            );
+            await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+            releaseSubmissionLease();
+            metadata?.onDeliveryFailed?.();
+            return;
+          }
+        }
 
         await goalQueueRef?.current?.waitForReservationSettlement?.();
 
@@ -4429,6 +4448,9 @@ export const useLlmStream = (
           ) {
             cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
+            // A Goal preemption cancels the turn without an Esc.
+            if (modTurnRef.current?.promptId === prompt_id)
+              modTurnRef.current.ending ??= 'aborted';
             metadata?.onDeliveryFailed?.();
             return;
           }
@@ -4581,7 +4603,7 @@ export const useLlmStream = (
           }
         } catch (error: unknown) {
           cleanupReviewLease = true;
-          metadata?.onDeliveryFailed?.();
+          // Before the delivery callback, which can record an error.
           if (
             !allowConcurrentBtwDuringResponse &&
             modTurnRef.current?.promptId === prompt_id
@@ -4590,6 +4612,7 @@ export const useLlmStream = (
               isNodeError(error) && error.name === 'AbortError'
                 ? 'aborted'
                 : 'error';
+          metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -5610,9 +5633,15 @@ export const useLlmStream = (
         status: 'ok' | 'error' | 'cancelled',
         errorMessage?: string,
         errorType?: string,
+        endsModTurn = true,
       ) => {
         const modTurn = modTurnRef.current;
-        if (status !== 'ok' && modTurn && modTurn.promptId === promptId)
+        if (
+          endsModTurn &&
+          status !== 'ok' &&
+          modTurn &&
+          modTurn.promptId === promptId
+        )
           modTurn.ending ??= status === 'cancelled' ? 'aborted' : 'error';
         if (continuationOwner?.detachedAbortController) {
           detachedToolContinuationAbortControllersRef.current.delete(
@@ -6515,10 +6544,13 @@ export const useLlmStream = (
         },
         onDeliveryFailed: () => {
           submissionSettlement?.restore();
+          // The continuation's own failure already marks the Mod turn; a
+          // stale flag from a concurrent /btw must not.
           endToolInteraction(
             'error',
             'tool continuation delivery failed',
             'continuation_delivery_failed',
+            false,
           );
         },
         goalBinding: toolGoalBinding,
