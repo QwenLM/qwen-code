@@ -39,6 +39,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
+import {
+  appendAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+} from '../memory/request-context.js';
 import { Storage } from '../config/storage.js';
 import type { Config } from '../config/config.js';
 import { CompressionStatus } from '../core/turn.js';
@@ -759,6 +763,88 @@ describe('SessionTranscriptReader', () => {
       });
     },
   );
+
+  it('round-trips memory snapshot positions and markers through recording and compression', async () => {
+    const config = {
+      storage: new Storage(workspaceDir),
+      getSessionId: () => sessionId,
+      getProjectRoot: () => workspaceDir,
+      getCliVersion: () => 'test',
+      getModel: () => 'test',
+      getAuthType: () => undefined,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getResumedSessionData: () => undefined,
+    } as unknown as Config;
+    const recorder = new ChatRecordingService(config, undefined, false);
+    const snapshot = getAutoMemorySnapshot([], 'catalog A')!;
+    const user = userText(snapshot.text!);
+    user.parts![0].partMetadata = { source: 'quoted-user-text' };
+    const history = [user];
+    recorder.recordUserMessage(user.parts!);
+    appendAutoMemorySnapshot(history, snapshot);
+    recorder.recordMemoryCatalogSnapshot(snapshot);
+    // Retry records the snapshot again without another user record.
+    recorder.recordMemoryCatalogSnapshot(snapshot);
+    recorder.recordAssistantTurn({
+      model: 'test',
+      message: [{ text: 'answer' }],
+    });
+    history.push(modelText('answer'));
+    await recorder.flush();
+    const service = svc();
+    const assertRestore = async () => {
+      const loaded = await service.loadSession(sessionId);
+      const restored = buildApiHistoryFromConversation(loaded!.conversation);
+      expect(restored.map(({ role, parts }) => ({ role, parts }))).toEqual(
+        history,
+      );
+      expect(
+        (
+          await service.readRestoreProjection(sessionId, NONE)
+        )?.runtime.apiHistory.map(({ role, parts }) => ({ role, parts })),
+      ).toEqual(history);
+      expect(getAutoMemorySnapshot(restored, 'catalog A')).toBeUndefined();
+      const userRecords = loaded!.conversation.messages.filter(
+        (record) => record.type === 'user',
+      );
+      expect(userRecords).toHaveLength(1);
+      expect(userRecords[0].message).toEqual(user);
+    };
+    await assertRestore();
+    for (const catalog of ['catalog B', 'catalog A']) {
+      const changed = getAutoMemorySnapshot(history, catalog)!;
+      appendAutoMemorySnapshot(history, changed);
+      recorder.recordMemoryCatalogSnapshot(changed);
+    }
+    await recorder.flush();
+    await assertRestore();
+    recorder.recordChatCompression({
+      info: {
+        originalTokenCount: 100,
+        newTokenCount: 50,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      },
+      compressedHistory: history,
+    });
+    recorder.recordMemoryCatalogSnapshot(snapshot);
+    await recorder.flush();
+    await assertRestore();
+    history.splice(0, history.length, userText('summary'), modelText('ack'));
+    recorder.recordChatCompression({
+      info: {
+        originalTokenCount: 100,
+        newTokenCount: 50,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      },
+      compressedHistory: history,
+    });
+    const reseeded = getAutoMemorySnapshot(history, 'catalog A')!;
+    expect(reseeded).toEqual(snapshot);
+    appendAutoMemorySnapshot(history, reseeded);
+    recorder.recordMemoryCatalogSnapshot(reseeded);
+    await recorder.flush();
+    await assertRestore();
+  });
 
   it('round-trips a recorded Goal turn end through selective restore, fork, and rewind', async () => {
     const config = {
