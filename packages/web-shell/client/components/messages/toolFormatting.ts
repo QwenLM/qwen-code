@@ -44,6 +44,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   cron_create: 'CronCreate',
   cron_list: 'CronList',
   cron_delete: 'CronDelete',
+  autofix_pr: 'AutofixPr',
   loop_wakeup: 'LoopWakeup',
   create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
