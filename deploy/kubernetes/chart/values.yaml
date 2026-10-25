@@ -2,27 +2,27 @@ server:
   image: ''
   resources:
     requests:
-      cpu: 250m
-      memory: 512Mi
+      cpu: '250m'
+      memory: '512Mi'
     limits:
-      memory: 2Gi
+      memory: '2Gi'
 
 harness:
   image: ''
   resources:
     requests:
-      cpu: 250m
-      memory: 512Mi
+      cpu: '250m'
+      memory: '512Mi'
     limits:
-      memory: 2Gi
+      memory: '2Gi'
 
 runtime:
   enabled: false
   # Required when enabled: the exact trusted Kubernetes Node name.
   nodeName: ''
   storage:
-    workspaceSize: 10Gi
-    stateSize: 1Gi
+    workspaceSize: '10Gi'
+    stateSize: '1Gi'
     className: ''
 
 web:
@@ -34,10 +34,10 @@ web:
   allowOrigins: []
   resources:
     requests:
-      cpu: 100m
-      memory: 128Mi
+      cpu: '100m'
+      memory: '128Mi'
     limits:
-      memory: 512Mi
+      memory: '512Mi'
 
 model:
   id: ''
@@ -50,17 +50,17 @@ credentials:
   existingSecret: ''
 
 mysql:
-  image: mysql:8.4
+  image: 'mysql:8.4'
   storage:
-    size: 10Gi
+    size: '10Gi'
     # Empty uses the cluster's default StorageClass.
     className: ''
   resources:
     requests:
-      cpu: 250m
-      memory: 512Mi
+      cpu: '250m'
+      memory: '512Mi'
     limits:
-      memory: 2Gi
+      memory: '2Gi'
 
-imagePullPolicy: IfNotPresent
+imagePullPolicy: 'IfNotPresent'
 imagePullSecrets: []
