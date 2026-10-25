@@ -2072,7 +2072,13 @@ describe('runSnapshot --gate', () => {
     runSnapshot({ pr: 7, repo: 'o/r', gate: true, session: 'session-a' });
     expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toEqual({
       action: 'stop',
-      events: [{ type: 'watched_elsewhere', session: 'session-b' }],
+      events: [
+        {
+          type: 'watched_elsewhere',
+          session: 'session-b',
+          gateSession: 'session-a',
+        },
+      ],
     });
     expect(mockGh).not.toHaveBeenCalled();
     expect(existsSync(gatePath())).toBe(false);
@@ -2127,7 +2133,13 @@ describe('runSnapshot --gate', () => {
     });
     runSnapshot({ pr: 7, repo: 'o/r', gate: true, session: 'session-a' });
     expect(JSON.parse(mocks.stdout.mock.calls[0]![0])).toMatchObject({
-      events: [{ type: 'watched_elsewhere', session: 'session-b' }],
+      events: [
+        {
+          type: 'watched_elsewhere',
+          session: 'session-b',
+          gateSession: 'session-a',
+        },
+      ],
     });
     expect(existsSync(gatePath())).toBe(false);
   });

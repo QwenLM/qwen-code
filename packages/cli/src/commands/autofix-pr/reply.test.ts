@@ -548,14 +548,15 @@ describe('runReply', () => {
       handledChecks: [`Test@${HEAD}@#5`],
       needsHuman: [
         'Test:   fails again\n after its re-run',
-        `${'x'.repeat(400)}`,
+        `${'😀'.repeat(400)}`,
       ],
     };
     reply(plan);
     const first = state().needsHuman!;
     expect(first.map(({ sha, text }) => ({ sha, text }))).toEqual([
       { sha: HEAD, text: 'Test: fails again after its re-run' },
-      { sha: HEAD, text: `${'x'.repeat(299)}…` },
+      // Cut by code point: no half of a surrogate pair is kept.
+      { sha: HEAD, text: `${'😀'.repeat(299)}…` },
     ]);
     expect(Date.parse(first[0].at)).not.toBeNaN();
     // The same plan run again lists nothing twice.
@@ -564,7 +565,7 @@ describe('runReply', () => {
     reply({ needsHuman: ['IC_9: a design call'] }, false);
     expect(state().needsHuman!.map(({ text }) => text)).toEqual([
       'Test: fails again after its re-run',
-      `${'x'.repeat(299)}…`,
+      `${'😀'.repeat(299)}…`,
       'IC_9: a design call',
     ]);
   });

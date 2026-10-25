@@ -510,6 +510,9 @@ describe('runPrepare (real git)', () => {
       handledConflictSha: headSha,
       pushCount: 4,
       summarizedSha: headSha,
+      // `resume` starts this task again after the rebuild.
+      watch: { every: 5, reply: false, instructions: 'keep the API' },
+      needsHuman: [{ sha: headSha, at: '2026-10-25T00:00:00.000Z', text: 'x' }],
     };
     writeState(paths.statePath, {
       ...state,

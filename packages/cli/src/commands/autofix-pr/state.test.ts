@@ -118,6 +118,8 @@ describe('stateDefect', () => {
       ['watch', { every: 3, reply: true, instructions: '' }],
       ['watch', { every: 2, reply: 'yes', instructions: '' }],
       ['watch', { every: 2, reply: true, instructions: 'a\nb' }],
+      ['watch', { every: 2, reply: true, instructions: 'a\u0085b' }],
+      ['watch', { every: 2, reply: true, instructions: 'x'.repeat(2001) }],
       ['needsHuman', [{ sha: 'a', at: 'b' }]],
     ] as const) {
       expect(stateDefect({ ...valid, [field]: value } as AutofixPrState)).toBe(

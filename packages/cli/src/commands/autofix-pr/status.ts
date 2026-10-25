@@ -20,6 +20,8 @@ import {
   readGateCursor,
   readState,
   repoRoot,
+  sameRepository,
+  type AutofixPrGateCursor,
   type AutofixPrWatchOptions,
   type NeedsHumanItem,
 } from './state.js';
@@ -41,7 +43,8 @@ export interface WatchStatus {
   lastCheck: string | null;
   /** The last round's prepared snapshot, or null before the first. */
   lastRound: string | null;
-  /** The gate saw the PR merged or closed; the watch was not cleaned up. */
+  /** The PR was merged or closed when the gate last read it, and the watch
+   * was not cleaned up. As of `lastCheck`: the PR may have been reopened. */
   stopped: 'merged' | 'closed' | null;
   /** The scheduled task `schedule` recorded; null for `--once`. */
   watch: AutofixPrWatchOptions | null;
@@ -56,7 +59,23 @@ export interface StatusOutcome {
   unreadable?: Array<{ pr: number; error: string }>;
 }
 
-const STATE_FILE_RE = /^autofix-pr-(\d+)-state\.json$/;
+// The name `autofixPrPaths` gives it: no leading zero.
+const STATE_FILE_RE = /^autofix-pr-([1-9]\d*)-state\.json$/;
+
+/** The gate cursor of this watch's repository, or null. The cursor outlives
+ * a watch (`cleanup` keeps it), so it may be another repository's PR of the
+ * same number; one that cannot be read says nothing about the watch. */
+function cursorOf(
+  path: string,
+  state: { host: string; owner: string; repo: string },
+): AutofixPrGateCursor | null {
+  try {
+    const cursor = existsSync(path) ? readGateCursor(path) : null;
+    return cursor && sameRepository(cursor, state) ? cursor : null;
+  } catch {
+    return null;
+  }
+}
 
 function modifiedAt(path: string): string | null {
   try {
@@ -84,9 +103,13 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
     try {
       const state = readState(paths.statePath);
       if (!state) continue;
-      const cursor = existsSync(paths.gatePath)
-        ? readGateCursor(paths.gatePath)
-        : null;
+      // Every helper finds a watch by its file's number.
+      if (state.prNumber !== pr) {
+        throw new Error(
+          `${paths.statePath} is the state of PR #${state.prNumber}`,
+        );
+      }
+      const cursor = cursorOf(paths.gatePath, state);
       outcome.watches.push({
         pr,
         repo: `${state.owner}/${state.repo}`,

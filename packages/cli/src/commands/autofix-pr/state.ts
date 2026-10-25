@@ -112,6 +112,9 @@ export const WATCH_INTERVALS: readonly number[] = [1, 2, 5, 10, 15, 30, 60];
 /** Items `needsHuman` keeps: the newest, as `status` lists them. */
 export const MAX_NEEDS_HUMAN = 20;
 
+/** Longest instructions a watch's task carries in its prompt. */
+export const MAX_INSTRUCTIONS_CHARS = 2000;
+
 export interface PendingPost {
   /** A review thread's `replyTo`, or `summary` for the PR comment. */
   where: number | 'summary';
@@ -457,7 +460,9 @@ function isWatchOptions(value: unknown): value is AutofixPrWatchOptions {
     WATCH_INTERVALS.includes(watch.every) &&
     typeof watch.reply === 'boolean' &&
     typeof watch.instructions === 'string' &&
-    !/[\r\n]/.test(watch.instructions)
+    watch.instructions.length <= MAX_INSTRUCTIONS_CHARS &&
+    // A prompt is one line.
+    !/[\p{Cc}\u2028\u2029]/u.test(watch.instructions)
   );
 }
 

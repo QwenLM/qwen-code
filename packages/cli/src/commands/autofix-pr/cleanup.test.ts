@@ -234,6 +234,19 @@ describe('runCleanup (real git)', () => {
     });
   });
 
+  it('ends the watch it keeps, so resume does not start it again over the kept work', () => {
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      watch: { every: 2, reply: true, instructions: '' },
+    });
+    writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
+    runCleanup(7, false);
+    expect(lastReport()).toMatchObject({ removed: false });
+    const kept = readState(paths.statePath)!;
+    expect(kept.watch).toBeUndefined();
+    expect(kept.lastKnownHeadSha).toBe(headSha);
+  });
+
   it('keeps everything when the worktree has unpushed commits', () => {
     run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
     runCleanup(7, false);
@@ -334,6 +347,19 @@ describe('runCleanup (real git)', () => {
     expect(() => runCleanup(7, false)).toThrow(/watched by another session/);
     expect(existsSync(paths.worktreePath)).toBe(true);
     runCleanup(7, true);
+    expect(existsSync(paths.statePath)).toBe(false);
+  });
+
+  it("takes another session's watch over to end it, still keeping its work", () => {
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
+    runCleanup(7, false, true);
+    expect(lastReport()).toMatchObject({ removed: false });
+    expect(readState(paths.statePath)!.sessionId).toBe('session-b');
+    rmSync(join(paths.worktreePath, 'wip.txt'));
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-c';
+    runCleanup(7, false, true);
+    expect(lastReport()).toMatchObject({ removed: true });
     expect(existsSync(paths.statePath)).toBe(false);
   });
 

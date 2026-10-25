@@ -16,6 +16,7 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   assertOwnedBySession,
   autofixPrPaths,
+  MAX_INSTRUCTIONS_CHARS,
   repoRoot,
   requireState,
   WATCH_INTERVALS,
@@ -28,11 +29,9 @@ import {
 /** The interval a watch uses when the user gives none (Section 10). */
 export const DEFAULT_EVERY = 2;
 
-/** Longest instructions a task's prompt carries. */
-export const MAX_INSTRUCTIONS_CHARS = 2000;
-
-// The session id goes into the gate command as it is.
-const SESSION_ID_RE = /^[A-Za-z0-9._-]+$/;
+// The session id goes into the gate command as it is, and as a value: it
+// must not read as an option.
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export interface ScheduledTask {
   cron: string;
@@ -75,7 +74,9 @@ export function readInstructions(path: string): string {
   if (!existsSync(path)) {
     throw new Error(`no instructions file at ${path}`);
   }
-  const text = readFileSync(path, 'utf8').replace(/\s+/g, ' ').trim();
+  const text = readFileSync(path, 'utf8')
+    .replace(/[\s\p{Cc}]+/gu, ' ')
+    .trim();
   if (text.length > MAX_INSTRUCTIONS_CHARS) {
     throw new Error(
       `the instructions are ${text.length} characters; a watch takes at most ${MAX_INSTRUCTIONS_CHARS}.`,
@@ -153,6 +154,7 @@ export const scheduleCommand: CommandModule = {
       })
       .option('every', {
         type: 'number',
+        requiresArg: true,
         describe: `Minutes between checks (${WATCH_INTERVALS.join(', ')}; default ${DEFAULT_EVERY})`,
       })
       .option('reply', {

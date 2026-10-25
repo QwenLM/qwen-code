@@ -17,10 +17,14 @@ import { git, gitOpt, refExists, releaseWorktree } from '../review/lib/git.js';
 import {
   assertOwnedBySession,
   autofixPrPaths,
+  currentSessionId,
   historyPrefix,
   keepHistory,
   readState,
   repoRoot,
+  requireState,
+  withWatchLock,
+  writeState,
   type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
@@ -115,7 +119,11 @@ export function unsavedWork(
   return null;
 }
 
-export function runCleanup(prNumber: number, force: boolean): void {
+export function runCleanup(
+  prNumber: number,
+  force: boolean,
+  takeOver = false,
+): void {
   const root = repoRoot();
   const paths = autofixPrPaths(root, prNumber);
   if (
@@ -134,6 +142,17 @@ export function runCleanup(prNumber: number, force: boolean): void {
     if (!force) throw err;
     state = null;
   }
+  // Stopping a watch another session left behind — one whose session
+  // ended, or whose PR the gate saw end — needs the watch first; unlike
+  // --force, the work its worktree holds is still kept.
+  if (state && !force && takeOver && state.sessionId !== currentSessionId()) {
+    state = withWatchLock(paths, prNumber, () => {
+      const current = requireState(paths.statePath, prNumber);
+      const moved = { ...current, sessionId: currentSessionId() };
+      writeState(paths.statePath, moved);
+      return moved;
+    });
+  }
   if (state && !force) assertOwnedBySession(state);
 
   if (!force) {
@@ -143,6 +162,16 @@ export function runCleanup(prNumber: number, force: boolean): void {
       () => (state ? livePrHead(state, prNumber) : null),
     );
     if (reason) {
+      // The watch has ended all the same: `resume` must not start its task
+      // again, or its first round would discard what is kept.
+      if (state?.watch) {
+        withWatchLock(paths, prNumber, () => {
+          const current = readState(paths.statePath);
+          if (!current?.watch) return;
+          const { watch: _ended, ...rest } = current;
+          writeState(paths.statePath, rest);
+        });
+      }
       writeStdoutLine(
         JSON.stringify({
           removed: false,
@@ -219,8 +248,18 @@ export const cleanupCommand: CommandModule = {
         default: false,
         describe:
           'Remove even when the worktree holds unpushed work or another session owns the watch',
+      })
+      .option('take-over', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Take the watch from the session that owns it first; unpushed work is still kept',
       }),
   handler: (argv) => {
-    runCleanup(Number(argv['pr']), Boolean(argv['force']));
+    runCleanup(
+      Number(argv['pr']),
+      Boolean(argv['force']),
+      Boolean(argv['takeOver']),
+    );
   },
 };

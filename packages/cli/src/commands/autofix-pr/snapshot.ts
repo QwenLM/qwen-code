@@ -1823,7 +1823,14 @@ function runGate(args: SnapshotArgs): void {
     writeStdoutLine(
       JSON.stringify({
         action: 'stop',
-        events: [{ type: 'watched_elsewhere', session: state.sessionId }],
+        events: [
+          {
+            type: 'watched_elsewhere',
+            session: state.sessionId,
+            // The task to delete is the one whose gate names this session.
+            gateSession: session,
+          },
+        ],
       }),
     );
     return;
@@ -1877,7 +1884,13 @@ function runGate(args: SnapshotArgs): void {
     writeStdoutLine(
       JSON.stringify({
         action: 'stop',
-        events: [{ type: 'watched_elsewhere', session: owner.sessionId }],
+        events: [
+          {
+            type: 'watched_elsewhere',
+            session: owner.sessionId,
+            gateSession: session,
+          },
+        ],
       }),
     );
     return;

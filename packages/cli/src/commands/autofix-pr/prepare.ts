@@ -445,6 +445,9 @@ export function runPrepare(args: PrepareArgs): void {
             pendingPosts: existing.pendingPosts,
             deferredRuns: existing.deferredRuns,
             heldChecks: existing.heldChecks,
+            // The task `resume` starts again, and what is left for a person.
+            watch: existing.watch,
+            needsHuman: existing.needsHuman,
           }
         : {}),
     };

@@ -92,7 +92,7 @@ describe('runSchedule', () => {
   it("puts --no-reply and the user's instructions, on one line, into the prompt", () => {
     writeFileSync(
       paths.instructionsPath,
-      'do not touch\n  the public API\n',
+      'do not touch\n  the public\u0085API\u2028\n',
       'utf8',
     );
     const task = runSchedule({
@@ -144,11 +144,13 @@ describe('runSchedule', () => {
     expect(() => runSchedule({ pr: 7, instructions: true })).toThrow(
       /at most 2000/,
     );
-    write({ sessionId: 'a b' });
-    process.env['QWEN_CODE_SESSION_ID'] = 'a b';
-    expect(() => runSchedule({ pr: 7 })).toThrow(
-      /cannot be named in a command/,
-    );
+    for (const id of ['a b', '--help']) {
+      write({ sessionId: id });
+      process.env['QWEN_CODE_SESSION_ID'] = id;
+      expect(() => runSchedule({ pr: 7 })).toThrow(
+        /cannot be named in a command/,
+      );
+    }
     write({ sessionId: '' });
     process.env['QWEN_CODE_SESSION_ID'] = '';
     expect(() => runSchedule({ pr: 7 })).toThrow(/outside a Qwen Code session/);

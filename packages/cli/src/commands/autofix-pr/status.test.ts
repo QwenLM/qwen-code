@@ -9,6 +9,7 @@ import { execFileSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   utimesSync,
@@ -169,6 +170,46 @@ describe('runStatus', () => {
       reportedTruncated: [],
     });
     expect(runStatus({}).watches[0]).toMatchObject({ stopped: 'merged' });
+  });
+
+  it("takes nothing from a cursor of another repository's PR of that number, or one it cannot read", () => {
+    const paths = write(7);
+    writeGateCursor(paths.gatePath, {
+      version: 1,
+      host: 'github.com',
+      owner: 'fork',
+      repo: 'r',
+      prNumber: 7,
+      viewer: 'me',
+      prAuthor: 'me',
+      headSha: HEAD,
+      reportedCommentIds: [],
+      reportedChecks: [],
+      conflictSha: null,
+      stopped: 'merged',
+      reportedTruncated: [],
+    });
+    expect(runStatus({}).watches[0]).toMatchObject({
+      stopped: null,
+      lastCheck: null,
+    });
+    writeFileSync(paths.gatePath, '{"version":2}');
+    expect(runStatus({}).watches[0]).toMatchObject({ pr: 7, stopped: null });
+  });
+
+  it('reads only the files the helpers name, each of its own PR', () => {
+    write(7);
+    const eight = write(8);
+    const zero = join(dirname(eight.statePath), 'autofix-pr-007-state.json');
+    writeFileSync(zero, '{}');
+    writeState(eight.statePath, {
+      ...JSON.parse(readFileSync(autofixPrPaths(repo, 7).statePath, 'utf8')),
+    });
+    const outcome = runStatus({});
+    expect(outcome.watches.map(({ pr }) => pr)).toEqual([7]);
+    expect(outcome.unreadable).toEqual([
+      { pr: 8, error: expect.stringMatching(/is the state of PR #7/) },
+    ]);
   });
 
   it('reports a state file it cannot read and lists the others', () => {

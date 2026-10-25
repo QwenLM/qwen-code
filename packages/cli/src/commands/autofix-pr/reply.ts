@@ -197,10 +197,11 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
     handledConflict: conflict === true,
     // Shown in a list, one line each.
     needsHuman: stringList(plan['needsHuman'], 'needsHuman').map((text) => {
-      const line = text.replace(/\s+/g, ' ').trim();
+      // By code point, so a cut never splits a surrogate pair.
+      const line = [...text.replace(/\s+/g, ' ').trim()];
       return line.length > MAX_NEEDS_HUMAN_CHARS
-        ? `${line.slice(0, MAX_NEEDS_HUMAN_CHARS - 1)}…`
-        : line;
+        ? `${line.slice(0, MAX_NEEDS_HUMAN_CHARS - 1).join('')}…`
+        : line.join('');
     }),
   };
 }
