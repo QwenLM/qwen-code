@@ -259,6 +259,79 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(tails[1]).toBe(tails[0]);
   });
 
+  it('keeps the seeded coordinate drops and write-back prunes in step', () => {
+    // The in-house coordinate set is spelled by hand at every seed site and
+    // at both write-back prunes. A set that drifts on one side leaves a
+    // seeded hardlink alive, so the unlocked Maven run rewrites the host
+    // cache through it; compare every spelling instead of one pinned pair.
+    const parsed = parse(workflow);
+    const drops = [];
+    const prunes = [];
+    for (const [jobName, job] of Object.entries(parsed.jobs)) {
+      for (const candidate of job.steps ?? []) {
+        const run = candidate.run;
+        if (typeof run !== 'string') continue;
+        const seedAt = run.indexOf('cp -aln "${HOME}/.m2/repository"');
+        if (seedAt !== -1) {
+          const seedEnd = run.indexOf('\nmvn --batch-mode', seedAt);
+          expect(seedEnd, jobName).toBeGreaterThan(seedAt);
+          drops.push([
+            jobName,
+            [
+              ...run
+                .slice(seedAt, seedEnd)
+                .matchAll(
+                  /"\$\{RUNNER_TEMP\}\/m2-repo\/com\/alibaba\/([^"]+)"/g,
+                ),
+            ]
+              .map((match) => match[1])
+              .sort(),
+          ]);
+        }
+        const pruneAt = run.indexOf('timeout 300 find .');
+        if (pruneAt === -1) continue;
+        const prune = run.slice(pruneAt, run.indexOf('\n', pruneAt));
+        prunes.push([
+          jobName,
+          [...prune.matchAll(/-path \.\/com\/alibaba\/([^\s)]+)/g)]
+            .map((match) => match[1])
+            .sort(),
+        ]);
+      }
+    }
+    const expected = ['qwen-managed-agent-server', 'qwencode-sdk'];
+    expect(drops.length).toBeGreaterThan(0);
+    expect(prunes.length).toBeGreaterThan(0);
+    for (const [jobName, set] of [...drops, ...prunes]) {
+      expect(set, jobName).toEqual(expected);
+    }
+  });
+
+  it('binds the lock and queue probes to the helper paths', () => {
+    // Both call sites spell the helper's lock/queue paths by hand. Read
+    // them from the helper so a rename cannot leave a probe watching a
+    // path the helper never creates.
+    const helper = readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8');
+    const lockPath = helper.match(/local lock="\$\{HOME\}\/([^"]+)"/)?.[1];
+    expect(lockPath).toBeDefined();
+    expect(helper).toContain('local queue="${lock}.queue"');
+    const separator = lockPath.lastIndexOf('/');
+    const cacheDir = lockPath.slice(0, separator);
+    const lockName = lockPath.slice(separator + 1);
+    const runs = Object.values(parse(workflow).jobs)
+      .flatMap((job) => (job.steps ?? []).map((step) => step.run))
+      .filter(
+        (run) => typeof run === 'string' && run.includes('sdk-java-tests.lock'),
+      );
+    expect(runs).toHaveLength(2);
+    for (const run of runs) {
+      expect(run).toContain(`cache_dir="\${HOME}/${cacheDir}"`);
+      expect(run).toContain(`queue_dir="\${cache_dir}/${lockName}.queue"`);
+      expect(run).toContain(`[ ! -d "\${cache_dir}/${lockName}" ]`);
+      expect(run).toContain(`exec 9>"\${cache_dir}/${lockName}"`);
+    }
+  });
+
   it.skipIf(process.platform !== 'linux')(
     'runs the Maven suite before taking the host lock',
     () => {
@@ -311,16 +384,15 @@ describe('SDK Java self-hosted workflow guards', () => {
     'drops seeded in-house coordinates so Maven writes fresh inodes',
     () => {
       const jobs = parse(workflow).jobs;
-      for (const name of [
-        'test',
-        'mysql-integration',
-        'event-transport-broker',
-        'event-transport-multi-node',
-      ]) {
-        const seedRun = jobs[name].steps.find((candidate) =>
-          candidate.run?.includes('cp -aln "${HOME}/.m2/repository"'),
-        )?.run;
-        expect(seedRun, name).toBeDefined();
+      const seeds = Object.entries(jobs).flatMap(([name, job]) =>
+        (job.steps ?? [])
+          .filter((candidate) =>
+            candidate.run?.includes('cp -aln "${HOME}/.m2/repository"'),
+          )
+          .map((candidate) => [name, candidate.run]),
+      );
+      expect(seeds.length).toBeGreaterThan(0);
+      for (const [name, seedRun] of seeds) {
         const start = seedRun.indexOf('cp -aln "${HOME}/.m2/repository"');
         const end = seedRun.indexOf('\nmvn --batch-mode', start);
         expect(start, name).toBeGreaterThan(-1);
@@ -351,6 +423,18 @@ describe('SDK Java self-hosted workflow guards', () => {
         for (const jar of hostJars) {
           mkdirSync(dirname(jar), { recursive: true });
           writeFileSync(jar, 'host');
+        }
+        // Maven rewrites these tracking files in place, so a seeded hardlink
+        // would let the unlocked run mutate the host cache through it.
+        const hostMarkers = [
+          ['resolver-status.properties'],
+          ['_remote.repositories'],
+          ['third-party-1.0.pom.lastUpdated'],
+        ].map((parts) =>
+          join(hostRepo, 'org', 'example', 'third-party', '1.0', ...parts),
+        );
+        for (const marker of hostMarkers) {
+          writeFileSync(marker, 'host');
         }
         try {
           const result = spawnSync('bash', ['-e', '-c', seed], {
@@ -394,6 +478,16 @@ describe('SDK Java self-hosted workflow guards', () => {
             // The job-local copy held the only extra link; dropping it must
             // leave the host file exactly as seeded.
             expect(statSync(jar).nlink, name).toBe(1);
+          }
+          for (const marker of hostMarkers) {
+            expect(
+              existsSync(
+                join(runnerTemp, 'm2-repo', marker.slice(hostRepo.length + 1)),
+              ),
+              `${name}/${marker}`,
+            ).toBe(false);
+            expect(readFileSync(marker, 'utf8'), name).toBe('host');
+            expect(statSync(marker).nlink, name).toBe(1);
           }
         } finally {
           rmSync(dir, { recursive: true, force: true });
@@ -530,6 +624,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           'fallback-no-flock',
           'setup-fault',
           'queue-fault',
+          'lock-fault',
           'fallback-setup-fault',
           'fallback-fault',
         ]) {
@@ -575,10 +670,14 @@ describe('SDK Java self-hosted workflow guards', () => {
               join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
               helperSource,
             );
-          } else if (arm === 'setup-fault' || arm === 'queue-fault') {
-            // The real helper with a broken setup: a mkdir fault and a stray
-            // file at the queue path are the two shapes the parent-directory
-            // probe could not see.
+          } else if (
+            arm === 'setup-fault' ||
+            arm === 'queue-fault' ||
+            arm === 'lock-fault'
+          ) {
+            // The real helper with a broken setup: a mkdir fault, a stray
+            // file at the queue path, and a directory at the lock path are
+            // the shapes the parent-directory probe could not see.
             writeFileSync(
               join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
               helperSource,
@@ -587,7 +686,7 @@ describe('SDK Java self-hosted workflow guards', () => {
               writeFileSync(join(shims, 'mkdir'), '#!/bin/sh\nexit 1\n', {
                 mode: 0o755,
               });
-            } else {
+            } else if (arm === 'queue-fault') {
               mkdirSync(join(home, '.cache', 'qwen-code-ci'), {
                 recursive: true,
               });
@@ -599,6 +698,11 @@ describe('SDK Java self-hosted workflow guards', () => {
                   'sdk-java-tests.lock.queue',
                 ),
                 'stray',
+              );
+            } else {
+              mkdirSync(
+                join(home, '.cache', 'qwen-code-ci', 'sdk-java-tests.lock'),
+                { recursive: true },
               );
             }
           } else if (arm === 'fallback-setup-fault') {
@@ -663,6 +767,21 @@ describe('SDK Java self-hosted workflow guards', () => {
             // (rewritten at the call site) may carry a rerun-classifier
             // signature onto this now-green step.
             expect(result.stdout, `${name}/${arm}`).not.toMatch(signatures);
+            const reasons = {
+              'setup-fault':
+                '::warning::Maven cache write-back skipped: the write-back queue directory cannot be created',
+              'queue-fault':
+                '::warning::Maven cache write-back skipped: the write-back queue directory cannot be created',
+              'lock-fault':
+                '::warning::Maven cache write-back skipped: the write-back lock path is a directory',
+              'fallback-setup-fault':
+                '::warning::Maven cache write-back skipped: ' +
+                join(home, '.cache', 'qwen-code-ci') +
+                ' cannot be created',
+            };
+            if (reasons[arm]) {
+              expect(result.stdout, `${name}/${arm}`).toContain(reasons[arm]);
+            }
             // The skip must not fall through into an unlocked write-back.
             expect(
               existsSync(join(home, '.m2', 'repository', 'delta.marker')),
@@ -1643,9 +1762,10 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + writeBackBound + 30 * 60);
     // The sibling test job carries the longer, now-conservative 9600 s
-    // budget; its ceiling must cover that full wait, its measured unlocked
-    // suite (925 s), the bounded write-back it guards and ~11 minutes of
-    // setup.
+    // budget; its ceiling must cover that full wait, its worst measured
+    // whole-step suite at this head (1205 s; the 925 s suite-alone figure
+    // from #14801 is a lower bound), the bounded write-back it guards and
+    // ~11 minutes of setup.
     const testBudget = Number(
       parsed.jobs.test.steps
         .map(
@@ -1656,7 +1776,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(testBudget).toBe(9600);
     expect(testBudget).toBeGreaterThan(seconds);
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      testBudget + 925 + writeBackBound + 11 * 60,
+      testBudget + 1205 + writeBackBound + 11 * 60,
     );
   });
 

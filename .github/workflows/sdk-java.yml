@@ -54,9 +54,11 @@ jobs:
     # younger than SDK_JAVA_LOCK_PROMOTE_AFTER (under a longer hold the
     # queue is plain sequence order), while a full-tier leg (the default)
     # keeps its FIFO position among the other rank-1 tickets.
-    # The ceiling is that wait plus the measured suite, the write-back and
-    # ~11 minutes of setup and margin: 200. Hosted lanes never take the lock
-    # and inherit this ceiling as a bound, not as an expected duration.
+    # The ceiling is that wait plus the worst measured whole-step suite
+    # (1205 s; the 925 s suite-alone figure from #14801 is a lower bound),
+    # the write-back and ~11 minutes of setup and margin: 200. Hosted lanes
+    # never take the lock and inherit this ceiling as a bound, not as an
+    # expected duration.
     timeout-minutes: 200
     strategy:
       fail-fast: false
@@ -249,6 +251,12 @@ jobs:
           # The seed only reads the host cache and is best-effort, so it takes
           # no lock and cannot delay the lane.
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) \
+            -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
@@ -256,10 +264,13 @@ jobs:
           rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
           # The suite resolves from the job-local copy above, so it does not
-          # touch host-shared state and must not hold the per-host lock: a
-          # full-tier Java 21 leg (run 39754414693) ran 89 minutes on one
-          # host while run 39771949573's fast tier waited out its 5400 s
-          # budget and failed five seconds after that leg ended.
+          # touch host-shared state and must not hold the per-host lock.
+          # On 2026-10-22 run 39771949573's fast tier failed at its
+          # 5400-second budget on two hosts; the full-tier Java 21 leg of
+          # run 39754414693 ran 89 minutes on a third, itself mostly one
+          # lock wait after its own attempt 1 starved at 5400 seconds. A
+          # suite hold measures in tens of minutes to hours; the write-back
+          # is bounded at 300 seconds, whoever holds it.
           mvn --batch-mode --no-transfer-progress clean test
           if [ "${MATRIX_JAVA}" = "21" ]; then
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
@@ -291,9 +302,14 @@ jobs:
             command -v flock >/dev/null 2>&1 ||
               lock_setup_fault 'flock is unavailable'
             queue_dir="${cache_dir}/sdk-java-tests.lock.queue"
-            mkdir -p "${queue_dir}" &&
-              [ -w "${cache_dir}" ] && [ -w "${queue_dir}" ] ||
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${queue_dir}" ||
+              lock_setup_fault 'the write-back queue directory cannot be created'
+            [ -w "${cache_dir}" ] ||
               lock_setup_fault "${cache_dir} is not writable"
+            [ -w "${queue_dir}" ] ||
+              lock_setup_fault "${queue_dir} is not writable"
             # The rerun classifiers match `lock not acquired within` in the
             # annotations of a failed run; rewrite the helper's timeout line
             # so this tolerated path cannot misattribute a later genuine
@@ -315,7 +331,11 @@ jobs:
             # before the write-back and wedging the release.
             command -v flock >/dev/null 2>&1 ||
               lock_setup_fault 'flock is unavailable'
-            mkdir -p "${cache_dir}" && [ -w "${cache_dir}" ] ||
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${cache_dir}" ||
+              lock_setup_fault "${cache_dir} cannot be created"
+            [ -w "${cache_dir}" ] ||
               lock_setup_fault "${cache_dir} is not writable"
             exec 9>"${cache_dir}/sdk-java-tests.lock"
             lock_rc=0
@@ -812,6 +832,12 @@ jobs:
           # The seed only reads the host cache and is best-effort, so it takes
           # no lock and cannot delay the lane.
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) \
+            -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
@@ -857,9 +883,14 @@ jobs:
             command -v flock >/dev/null 2>&1 ||
               lock_setup_fault 'flock is unavailable'
             queue_dir="${cache_dir}/sdk-java-tests.lock.queue"
-            mkdir -p "${queue_dir}" &&
-              [ -w "${cache_dir}" ] && [ -w "${queue_dir}" ] ||
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${queue_dir}" ||
+              lock_setup_fault 'the write-back queue directory cannot be created'
+            [ -w "${cache_dir}" ] ||
               lock_setup_fault "${cache_dir} is not writable"
+            [ -w "${queue_dir}" ] ||
+              lock_setup_fault "${queue_dir} is not writable"
             # The rerun classifiers match `lock not acquired within` in the
             # annotations of a failed run; rewrite the helper's timeout line
             # so this tolerated path cannot misattribute a later genuine
@@ -881,7 +912,11 @@ jobs:
             # before the write-back and wedging the release.
             command -v flock >/dev/null 2>&1 ||
               lock_setup_fault 'flock is unavailable'
-            mkdir -p "${cache_dir}" && [ -w "${cache_dir}" ] ||
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${cache_dir}" ||
+              lock_setup_fault "${cache_dir} cannot be created"
+            [ -w "${cache_dir}" ] ||
               lock_setup_fault "${cache_dir} is not writable"
             exec 9>"${cache_dir}/sdk-java-tests.lock"
             lock_rc=0
@@ -1570,6 +1605,12 @@ jobs:
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) \
+            -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
@@ -1814,6 +1855,12 @@ jobs:
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) \
+            -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
