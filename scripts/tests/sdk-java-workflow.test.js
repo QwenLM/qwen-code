@@ -1353,9 +1353,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository"');
     const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
     const verifyAt = step.run.indexOf('-Pmysql-integration');
-    const lockAt = step.run.indexOf(
-      'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
-    );
+    // `source` only defines the helper; the acquisition call is the
+    // position that keeps the lock off the two Maven runs.
+    const lockAt = step.run.search(/sdk_java_lock_acquire \d+/);
     const writeBackAt = step.run.indexOf('cd "${RUNNER_TEMP}/m2-repo"');
     expect(seedAt).toBeGreaterThan(-1);
     expect(installAt).toBeGreaterThan(seedAt);
